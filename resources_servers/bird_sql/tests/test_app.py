@@ -17,13 +17,11 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import ServerClient
 from resources_servers.bird_sql.app import (
-    _NO_ANSWER_FILLER,
     BirdSqlResourcesServer,
     BirdSqlResourcesServerConfig,
     BirdSqlVerifyRequest,
     FailureCode,
     extract_sql_from_response,
-    has_sql_codeblock,
 )
 from resources_servers.bird_sql.eval_utils import (
     execute_and_compare,
@@ -119,14 +117,13 @@ def server_with_mocked_dbs(tmp_path, monkeypatch):
 
 
 class TestExtractSqlFromResponse:
-    def test_empty_returns_filler(self):
-        # "SELECT 1" no-op filler whenever extraction fails.
-        assert extract_sql_from_response("") == _NO_ANSWER_FILLER
-        assert extract_sql_from_response(None) == _NO_ANSWER_FILLER
+    def test_empty_returns_none(self):
+        assert extract_sql_from_response("") is None
+        assert extract_sql_from_response(None) is None
 
-    def test_no_codeblock_returns_filler(self):
+    def test_no_codeblock_returns_none(self):
         # Raw SQL without ```sql fences is NOT extracted — CODEBLOCK mode only.
-        assert extract_sql_from_response("SELECT * FROM t;") == _NO_ANSWER_FILLER
+        assert extract_sql_from_response("SELECT * FROM t;") is None
 
     def test_single_codeblock(self):
         text = "Let me think...\n```sql\nSELECT * FROM t\n```"
@@ -162,20 +159,7 @@ class TestExtractSqlFromResponse:
     def test_requires_alpha_inside_block(self):
         # The extraction regex requires at least one a-z letter inside the fenced block.
         text = "```sql\n12345\n```"
-        assert extract_sql_from_response(text) == _NO_ANSWER_FILLER
-
-
-class TestHasSqlCodeblock:
-    def test_present(self):
-        assert has_sql_codeblock("```sql\nSELECT 1\n```") is True
-
-    def test_absent(self):
-        assert has_sql_codeblock("just prose") is False
-        assert has_sql_codeblock("") is False
-        assert has_sql_codeblock(None) is False
-
-    def test_requires_letter(self):
-        assert has_sql_codeblock("```sql\n12345\n```") is False
+        assert extract_sql_from_response(text) is None
 
 
 # ---------------------------------------------------------------------------
@@ -314,37 +298,35 @@ async def test_execute_and_compare_gold_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_verify_no_codeblock_filler_runs(server_with_mocked_dbs, monkeypatch):
-    """No ```sql``` block → "SELECT 1" filler, which executes and mismatches
-    almost any GT. NO_SQL_EXTRACTED is still recorded as a diagnostic flag."""
+async def test_verify_no_codeblock_skips_execution(server_with_mocked_dbs, monkeypatch):
+    """No ```sql``` block -> hard 0, no execution attempted (no query to run)."""
 
-    async def fake(*, pred_sql, gold_sql, **_kw):
-        assert pred_sql == _NO_ANSWER_FILLER
-        return False, [(42,)], [(1,)], None
+    async def fail_if_called(**_kw):
+        raise AssertionError("execute_and_compare should not be called when no SQL was extracted")
 
-    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
+    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fail_if_called)
 
     body = _make_verify_request("the model produced only prose, no SQL fence")
     resp = await server_with_mocked_dbs.verify(body)
     assert resp.reward == 0.0
     assert resp.execution_match is False
     assert resp.had_codeblock is False
-    assert resp.extracted_sql == _NO_ANSWER_FILLER
+    assert resp.extracted_sql is None
     assert resp.failure_reason == FailureCode.NO_SQL_EXTRACTED
 
 
 @pytest.mark.asyncio
-async def test_verify_empty_response_filler_runs(server_with_mocked_dbs, monkeypatch):
-    async def fake(*, pred_sql, **_kw):
-        assert pred_sql == _NO_ANSWER_FILLER
-        return False, [(42,)], [(1,)], None
+async def test_verify_empty_response_skips_execution(server_with_mocked_dbs, monkeypatch):
+    async def fail_if_called(**_kw):
+        raise AssertionError("execute_and_compare should not be called when no SQL was extracted")
 
-    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fake)
+    monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fail_if_called)
 
     body = _make_verify_request("")
     resp = await server_with_mocked_dbs.verify(body)
     assert resp.reward == 0.0
     assert resp.had_codeblock is False
+    assert resp.extracted_sql is None
     assert resp.failure_reason == FailureCode.NO_SQL_EXTRACTED
 
 

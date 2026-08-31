@@ -44,22 +44,12 @@ class FailureCode(str, Enum):
     UNKNOWN_ERROR = "unknown_error"
 
 
-_NO_ANSWER_FILLER = "SELECT 1"
-
-
-def has_sql_codeblock(text: Optional[str]) -> bool:
-    """True iff the response contains a ` ```sql ... ``` ` block with at least one letter."""
-    if not text:
-        return False
-    return bool(re.search(r"(?:```sql)(.*?[a-zA-Z].*?)(?:```)", text, flags=re.DOTALL))
-
-
-def extract_sql_from_response(text: Optional[str]) -> str:
+def extract_sql_from_response(text: Optional[str]) -> Optional[str]:
     """Extract SQL from a model response (CODEBLOCK mode).
 
     Behavior:
-    - No ` ```sql ``` ` block found → return ``"SELECT 1"`` as a no-op filler
-      that executes harmlessly but mismatches almost any BIRD gold query.
+    - No ` ```sql ``` ` block found → return ``None``. The caller scores this
+      as a hard 0 without attempting execution (no query to run).
     - Multiple blocks → use the LAST one.
     - SQL comments (``--...``, ``/*...*/``) are left as-is: SQLite's parser
       ignores them natively, so stripping them before execution is unnecessary.
@@ -69,11 +59,11 @@ def extract_sql_from_response(text: Optional[str]) -> str:
     - Drop a leading ``**bold**`` header that some models emit before the query.
     """
     if not text:
-        return _NO_ANSWER_FILLER
+        return None
 
     matches = re.findall(r"(?:```sql)(.*?[a-zA-Z].*?)(?:```)", text, flags=re.DOTALL)
     if not matches:
-        return _NO_ANSWER_FILLER
+        return None
 
     ans = matches[-1].strip()
     ans = re.sub(r"^\*\*.*\*\*", "", ans).strip()
@@ -155,12 +145,19 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
                 **kwargs,
             )
 
-        # extract_sql_from_response always returns a string: the parsed SQL,
-        # the empty string (if comment stripping ate everything), or the
-        # "SELECT 1" filler when no fenced block was found. Execution below
-        # decides the reward in every case.
         extracted_sql = extract_sql_from_response(generated)
-        had_codeblock = has_sql_codeblock(generated)
+        had_codeblock = extracted_sql is not None
+
+        if extracted_sql is None:
+            # No fenced ```sql``` block at all -- nothing to execute. Scored as a hard 0
+            # rather than running a filler query like "SELECT 1" against the gold query:
+            # that filler always mismatches anyway, so it added execution cost and a
+            # misleading EXECUTION_ERROR-shaped failure without changing the reward.
+            return _response(
+                extracted_sql=None,
+                failure_reason=FailureCode.NO_SQL_EXTRACTED,
+                had_codeblock=False,
+            )
 
         try:
             match, _gold, _pred, err = await execute_and_compare(
@@ -181,13 +178,10 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
         if err == "gold_sql_error":
             failure_reason = FailureCode.GOLD_EXECUTION_ERROR
         elif err == "pred_sql_error":
-            failure_reason = FailureCode.NO_SQL_EXTRACTED if not had_codeblock else FailureCode.EXECUTION_ERROR
+            failure_reason = FailureCode.EXECUTION_ERROR
         else:
             execution_match = match
-            if match:
-                failure_reason = FailureCode.NONE
-            else:
-                failure_reason = FailureCode.NO_SQL_EXTRACTED if not had_codeblock else FailureCode.EXECUTION_ERROR
+            failure_reason = FailureCode.NONE if match else FailureCode.EXECUTION_ERROR
 
         reward = 1.0 if execution_match else 0.0
 
