@@ -680,6 +680,41 @@ async def test_provider_attach_pty_does_not_retry_without_takeover(monkeypatch: 
     assert clients_handed == 1, "without takeover the rejection is definitive"
 
 
+async def test_provider_attach_pty_detaches_own_stale_attachment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A takeover attach must release the provider's own live attachment to
+    that session first: execd then has nothing to evict, so callers need no
+    manual detach() before re-attaching (the terminal_bench verify() path)."""
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    class FakeRaw:
+        async def get_endpoint(self, port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint="server/v1/sandboxes/sb-1/proxy/44772", headers={})
+
+    provider = OpenSandboxProvider(connection={"domain": "server", "api_key": "k", "protocol": "https"})
+    old_ws = FakeWs([CONNECTED])  # parks after the frame: a live attachment
+    old = OpenSandboxPtySession(
+        client=FakeHttpClient(ws=old_ws),  # type: ignore[arg-type]
+        ws=old_ws,  # type: ignore[arg-type]
+        session_id="s-7",
+        session_url="https://server/v1/sandboxes/sb-1/proxy/44772/pty/s-7",
+        headers={},
+        request_timeout_s=5.0,
+        owned=False,
+    )
+    await old._wait_connected(1.0)
+    provider._pty_sessions.add(old)
+
+    monkeypatch.setattr(provider, "_pty_http_client", lambda: FakeHttpClient(ws=FakeWs([CONNECTED])))
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
+    session = await provider.attach_pty(handle, "s-7", takeover=True)
+    assert old._detached, "the stale local attachment must be detached before the takeover dial"
+    assert old_ws.closed
+    await session.close()
+    await old.close()
+
+
 async def test_create_rejected_before_connected_raises_and_cleans_up() -> None:
     # The session we created is torn down when the socket is rejected.
     ws = FakeWs([], close_code=1008)
