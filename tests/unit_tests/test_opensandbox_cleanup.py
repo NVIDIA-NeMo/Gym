@@ -663,6 +663,39 @@ def test_slurm_launcher_submits_one_dependent_cpu_cleanup_job(tmp_path: Path) ->
     assert "attacker" not in batch_command
 
 
+def test_slurm_launcher_finds_the_cleanup_script_from_another_cwd(
+    tmp_path: Path,
+) -> None:
+    """A caller may run this from anywhere; the cleanup script ships beside
+    the launcher, while the log belongs where the caller submitted from."""
+    calls_path, env = install_sbatch_stub(tmp_path)
+    env["OPENSANDBOX_DOMAIN"] = "sandbox.example"
+    env["OPENSANDBOX_API_KEY"] = TEST_ACCESS_KEY
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    result = subprocess.run(
+        ["bash", str(SBATCH_SCRIPT), "--config", "benchmark.yaml"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+        cwd=str(elsewhere),
+    )
+
+    assert result.returncode == 0, result.stderr
+    _main_call, cleanup_call = read_sbatch_calls(calls_path)
+    repo_root = SBATCH_SCRIPT.resolve().parents[2]
+    assert (
+        f"{repo_root}/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py"
+        in cleanup_call
+    )
+    assert (
+        f"--output={elsewhere.resolve()}/slurm-logs/%j-gym-cleanup-7001.log"
+        in cleanup_call
+    )
+
+
 def test_slurm_launcher_skips_cleanup_job_without_eval_args(tmp_path: Path) -> None:
     calls_path, env = install_sbatch_stub(tmp_path)
     result = subprocess.run(
