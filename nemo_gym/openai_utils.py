@@ -149,7 +149,7 @@ from nemo_gym.server_utils import (
     raise_for_status,
     request,
 )
-from nemo_gym.token_metadata_codec import token_envelope_dtype
+from nemo_gym.token_metadata_codec import F64_DTYPE, I32_DTYPE, token_envelope_dtype
 
 
 ########################################
@@ -166,12 +166,12 @@ RoutedExperts: TypeAlias = Union[str, List[List[List[int]]]]
 # Token metadata accepts plain lists and versioned envelopes.
 # Consumers must decode an envelope before reading individual values.
 def _validate_token_id_envelope(value: str) -> str:
-    token_envelope_dtype(value, ("i32",))
+    token_envelope_dtype(value, (I32_DTYPE,))
     return value
 
 
 def _validate_log_prob_envelope(value: str) -> str:
-    token_envelope_dtype(value, ("f64",))
+    token_envelope_dtype(value, (F64_DTYPE,))
     return value
 
 

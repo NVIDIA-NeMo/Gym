@@ -30,6 +30,8 @@ from typing import Any, Dict, Iterable, List, Union
 
 # Change the prefix when the byte layout changes.
 TOKEN_ENVELOPE_PREFIX = "ngtok1:"
+I32_DTYPE = "i32"
+F64_DTYPE = "f64"
 
 
 def is_token_envelope(value: Any) -> bool:
@@ -103,18 +105,18 @@ def encode_output_item_token_fields(item_dict: Dict[str, Any]) -> None:
     for field in ("prompt_token_ids", "generation_token_ids"):
         value = item_dict.get(field)
         if isinstance(value, list):
-            item_dict[field] = encode_token_list(value, "i32")
+            item_dict[field] = encode_token_list(value, I32_DTYPE)
     value = item_dict.get("generation_log_probs")
     if isinstance(value, list):
-        item_dict["generation_log_probs"] = encode_token_list(value, "f64")
+        item_dict["generation_log_probs"] = encode_token_list(value, F64_DTYPE)
 
 
 def decode_output_item_token_fields(item_dict: Dict[str, Any]) -> None:
     """Decode token-metadata envelopes on an output item in place."""
     for field, expected_dtypes in (
-        ("prompt_token_ids", ("i32",)),
-        ("generation_token_ids", ("i32",)),
-        ("generation_log_probs", ("f64",)),
+        ("prompt_token_ids", (I32_DTYPE,)),
+        ("generation_token_ids", (I32_DTYPE,)),
+        ("generation_log_probs", (F64_DTYPE,)),
     ):
         value = item_dict.get(field)
         if isinstance(value, str):
@@ -136,4 +138,4 @@ def _int32_typecode() -> str:
     raise RuntimeError("no 4-byte signed integer array typecode on this platform")  # pragma: no cover
 
 
-_TYPECODES = {"i32": _int32_typecode(), "f64": "d"}
+_TYPECODES = {I32_DTYPE: _int32_typecode(), F64_DTYPE: "d"}

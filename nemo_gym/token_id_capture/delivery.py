@@ -38,7 +38,7 @@ import warnings
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.token_id_capture.consumer import trajectories_from_source
 from nemo_gym.token_id_capture.protocols import TokenSource
-from nemo_gym.token_metadata_codec import decode_token_list
+from nemo_gym.token_metadata_codec import I32_DTYPE, decode_token_list
 
 
 # Attach token-capture health to each rollout record.
@@ -75,7 +75,7 @@ def _carries_generated_tokens(item: dict) -> bool:
     value = item.get("generation_token_ids")
     if isinstance(value, str):
         try:
-            return len(decode_token_list(value, ("i32",))) > 0
+            return len(decode_token_list(value, (I32_DTYPE,))) > 0
         except ValueError:
             return False
     return bool(value)

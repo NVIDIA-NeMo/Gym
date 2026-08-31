@@ -87,7 +87,12 @@ from nemo_gym.token_id_capture import (
 from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.lineage import FileLineageStore
 from nemo_gym.token_id_capture.store import make_token_store
-from nemo_gym.token_metadata_codec import encode_output_item_token_fields, encode_token_list
+from nemo_gym.token_metadata_codec import (
+    F64_DTYPE,
+    I32_DTYPE,
+    encode_output_item_token_fields,
+    encode_token_list,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -200,9 +205,9 @@ def _encode_token_metadata_in_place(response: Any, encoding: str) -> None:
             encode_output_item_token_fields(item)
             continue
         for field, dtype in (
-            ("prompt_token_ids", "i32"),
-            ("generation_token_ids", "i32"),
-            ("generation_log_probs", "f64"),
+            ("prompt_token_ids", I32_DTYPE),
+            ("generation_token_ids", I32_DTYPE),
+            ("generation_log_probs", F64_DTYPE),
         ):
             value = getattr(item, field, None)
             if isinstance(value, list):

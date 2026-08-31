@@ -32,7 +32,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from nemo_gym.token_metadata_codec import decode_token_list
+from nemo_gym.token_metadata_codec import F64_DTYPE, I32_DTYPE, decode_token_list
 
 
 # These fields carry token metadata on a served response.
@@ -317,9 +317,9 @@ def extract_token_fields(response_json: dict) -> dict | None:
     info = {field: source.get(field) for field in TOKEN_FIELDS}
     # Capture records store decoded lists.
     for field, expected_dtypes in (
-        ("prompt_token_ids", ("i32",)),
-        ("generation_token_ids", ("i32",)),
-        ("generation_log_probs", ("f64",)),
+        ("prompt_token_ids", (I32_DTYPE,)),
+        ("generation_token_ids", (I32_DTYPE,)),
+        ("generation_log_probs", (F64_DTYPE,)),
     ):
         if isinstance(info[field], str):
             info[field] = decode_token_list(info[field], expected_dtypes)
