@@ -43,8 +43,10 @@ from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
+    _coverage_report,
     _get_max_rollout_attempts,
     _rollout_for_export,
+    _rollout_request_debug_summary,
 )
 from nemo_gym.server_utils import (
     ServerClient,
@@ -758,6 +760,7 @@ class RolloutReverificationHelper(BaseModel):
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in payloads_to_reverify)
         results_file = output_fpaths.output.open("ab")
         failures_file = output_fpaths.failures.open("ab")
+        failure_counts: Counter = Counter()
         completed = 0  # number of rows re-verified this run (for progress reporting)
         try:
             for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore):
@@ -785,6 +788,14 @@ class RolloutReverificationHelper(BaseModel):
                 elif failure_class is not None:
                     # Non-kill_shaped failure → sidecar. The aggregator only reads
                     # the main jsonl, so this keeps win-rate uncontaminated.
+                    failure_counts[failure_class] += 1
+                    # Every dropped rollout says so as it happens, as in rollout collection.
+                    detail = str(result.get("_ng_failure_message") or result.get("error") or "")[:200]
+                    tqdm.write(
+                        "🚨 [rollout_reverification] rollout dropped from the score: "
+                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "
+                        f"class={failure_class} error={detail}"
+                    )
                     failures_file.write(serialized + b"\n")
                     failures_file.flush()
                 else:
@@ -830,9 +841,20 @@ class RolloutReverificationHelper(BaseModel):
             print("Computing aggregate metrics")
             aggregate_metrics_fpath = await _call_aggregate_metrics(results, agg_rows, output_fpaths.output)
 
+        expected_rollouts = len(results) + sum(failure_counts.values())
+        coverage = _coverage_report(expected_rollouts, len(results), failure_counts, output_fpaths.failures)
+        if get_exporters():  # pragma: no cover
+            export_metrics(
+                {
+                    "coverage/expected": expected_rollouts,
+                    "coverage/scored": len(results),
+                    "coverage/missing": sum(failure_counts.values()),
+                }
+            )
+
         print(f"""Finished rollout collection! View results at:
         Re-verified rollouts: {output_fpaths.output}
-        Aggregate metrics: {aggregate_metrics_fpath}""")
+        Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         if force_warning:
             print(force_warning)
 
