@@ -7,10 +7,21 @@ from unittest.mock import MagicMock
 import pytest
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import (
+    NeMoGymAsyncOpenAIClient,
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInputTokensDetails,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+    NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseUsage,
+)
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.terminus_2_sandboxed_agent import app as app_module
 from responses_api_agents.terminus_2_sandboxed_agent.app import (
+    NeMoGymLLM,
     NeMoGymSandboxEnvironment,
     Terminus2Agent,
     Terminus2AgentConfig,
@@ -67,8 +78,85 @@ def test_agent_implements_required_responses_endpoint():
     assert not getattr(Terminus2Agent, "__abstractmethods__", set())
 
 
+def test_nemo_gym_async_openai_client_alias_is_available():
+    from nemo_gym import NeMoGymAsyncOpenAIClient as exported_client
+
+    assert NeMoGymAsyncOpenAIClient.__name__ == "NeMoGymAsyncOpenAI"
+    assert exported_client is NeMoGymAsyncOpenAIClient
+
+
 @pytest.mark.asyncio
-async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch):
+async def test_nemo_gym_llm_records_every_responses_request_and_output():
+    class Client:
+        def __init__(self):
+            self.requests = []
+
+        async def create_response(self, **kwargs):
+            self.requests.append(kwargs)
+            index = len(self.requests)
+            return NeMoGymResponse(
+                id=f"resp_{index}",
+                created_at=0,
+                model="policy_model",
+                object="response",
+                output=[
+                    NeMoGymResponseOutputMessage(
+                        id=f"msg_{index}",
+                        content=[
+                            NeMoGymResponseOutputText(type="output_text", text=f"answer {index}", annotations=[])
+                        ],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                ],
+                tool_choice="auto",
+                tools=[],
+                parallel_tool_calls=True,
+                usage=NeMoGymResponseUsage(
+                    input_tokens=10,
+                    input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=2),
+                    output_tokens=3,
+                    output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+                    total_tokens=13,
+                ),
+            )
+
+    client = Client()
+    llm = NeMoGymLLM(client=client, model_name="policy_model", model_context_limit=32_000, model_output_limit=4_000)
+
+    first = await llm.call("first")
+    second = await llm.call(
+        "second",
+        message_history=[{"role": "user", "content": "first"}, {"role": "assistant", "content": "answer 1"}],
+        previous_response_id="resp_1",
+    )
+
+    assert first.content == "answer 1"
+    assert first.usage.prompt_tokens == 10
+    assert second.content == "answer 2"
+    assert client.requests == [
+        {"model": "policy_model", "input": [{"content": "first", "role": "user", "type": "message"}]},
+        {
+            "model": "policy_model",
+            "input": [
+                {"content": "first", "role": "user", "type": "message"},
+                {"content": "answer 1", "role": "assistant", "type": "message"},
+                {"content": "second", "role": "user", "type": "message"},
+            ],
+        },
+    ]
+    assert [item.content for item in llm.trajectory if isinstance(item, NeMoGymEasyInputMessage)] == [
+        "first",
+        "first",
+        "answer 1",
+        "second",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dump_trajectory", [False, True])
+async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_trajectory):
     config = Terminus2AgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -79,9 +167,9 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch):
         max_turns=100,
         enable_summarize=True,
         proactive_summarization_threshold=8000,
-        use_responses_api=True,
         tmux_pane_width=160,
         tmux_pane_height=40,
+        dump_trajectory=dump_trajectory,
         sandbox_provider="opensandbox",
         sandbox_timeout=10,
     )
@@ -109,10 +197,19 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch):
 
         async def run(self, instruction, environment, context):
             assert instruction == "solve this"
+            assert self.kwargs["dump_trajectory"] is dump_trajectory
             await environment.exec("tmux run")
             context.n_input_tokens = 4
             context.n_output_tokens = 3
-            context.metadata = {"all_messages": [{"role": "assistant", "content": "done"}]}
+            self.kwargs["llm"].trajectory.append(
+                NeMoGymResponseOutputMessage(
+                    id="msg_done",
+                    content=[NeMoGymResponseOutputText(type="output_text", text="done", annotations=[])],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                )
+            )
 
     class FakeContext:
         n_input_tokens = None
@@ -125,7 +222,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch):
         return SimpleNamespace(stdout="", stderr="", return_code=0)
 
     sandbox.pty.exec = pty_exec
-    monkeypatch.setattr(app_module, "Terminus2", FakeTerminus)
+    monkeypatch.setattr(app_module, "NeMoGymTerminus2", FakeTerminus)
     monkeypatch.setattr(app_module, "AgentContext", FakeContext)
     monkeypatch.setattr(Terminus2Agent, "base_url_for_run", lambda *_args, **_kwargs: "http://model")
     monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://model")
@@ -141,7 +238,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch):
         "seeded-pty",
     )
 
-    assert response.output[0].content[0].text == "done"
+    assert response.output[-1].content[0].text == "done"
     assert response.usage.input_tokens == 4
     assert response.usage.output_tokens == 3
     assert sandbox_calls == [

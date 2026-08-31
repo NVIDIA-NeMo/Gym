@@ -4,7 +4,6 @@
 import asyncio
 import json
 import tempfile
-from os import environ
 from pathlib import Path
 from time import time
 from types import SimpleNamespace
@@ -13,7 +12,9 @@ from uuid import uuid4
 
 from fastapi import Request
 from harbor.agents.terminus_2 import Terminus2
+from harbor.llms.base import BaseLLM, LLMResponse
 from harbor.models.agent.context import AgentContext
+from harbor.models.metric.usage_info import UsageInfo
 from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
@@ -21,12 +22,16 @@ from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Simpl
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import (
+    NeMoGymAsyncOpenAI,
+    NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputTokensDetails,
+    NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
 )
 from nemo_gym.sandbox import AsyncSandbox, create_provider
@@ -48,9 +53,11 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     parser_name: str = "json"
     enable_summarize: bool
     proactive_summarization_threshold: int
-    use_responses_api: bool
     tmux_pane_width: int
     tmux_pane_height: int
+    dump_trajectory: bool = False
+    model_context_limit: int = 1_000_000
+    model_output_limit: int | None = None
     sandbox_provider: str
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_timeout: float
@@ -120,6 +127,101 @@ def _instruction(input_value: Any) -> str:
     return "\n\n".join(messages)
 
 
+class NeMoGymLLM(BaseLLM):
+    """Responses-only Harbor LLM adapter backed by NeMo Gym's aiohttp client."""
+
+    def __init__(
+        self,
+        client: NeMoGymAsyncOpenAI,
+        model_name: str,
+        model_context_limit: int,
+        model_output_limit: int | None,
+    ):
+        super().__init__()
+        self._client = client
+        self._model_name = model_name
+        self._model_context_limit = model_context_limit
+        self._model_output_limit = model_output_limit
+        self.trajectory: list[NeMoGymResponseOutputItem] = []
+
+    @staticmethod
+    def _input_items(message_history: list[dict[str, Any]], prompt: str) -> list[NeMoGymEasyInputMessage]:
+        messages = [*message_history, {"role": "user", "content": prompt}]
+        return [
+            NeMoGymEasyInputMessage(role=message.get("role", "user"), content=message.get("content", ""))
+            for message in messages
+        ]
+
+    @staticmethod
+    def _response_text(response: NeMoGymResponse) -> tuple[str, str | None]:
+        content: list[str] = []
+        reasoning: list[str] = []
+        for item in response.output:
+            if isinstance(item, NeMoGymResponseOutputMessage):
+                content.extend(part.text for part in item.content if isinstance(part, NeMoGymResponseOutputText))
+            elif isinstance(item, NeMoGymResponseReasoningItem):
+                reasoning.extend(summary.text for summary in item.summary)
+        return "".join(content), "\n".join(reasoning) or None
+
+    async def call(self, prompt: str, **kwargs: Any) -> LLMResponse:
+        message_history = kwargs.pop("message_history", [])
+        kwargs.pop("previous_response_id", None)
+        kwargs.pop("logging_path", None)
+        if kwargs:
+            raise NotImplementedError(f"NeMoGymLLM does not support call options: {sorted(kwargs)}")
+
+        input_items = self._input_items(message_history, prompt)
+        response = NeMoGymResponse.model_validate(
+            await self._client.create_response(
+                model=self._model_name,
+                input=[item.model_dump(mode="json", exclude_none=True) for item in input_items],
+            )
+        )
+        self.trajectory.extend([*input_items, *response.output])
+        usage = response.usage
+        usage_info = None
+        if usage is not None:
+            usage_info = UsageInfo(
+                prompt_tokens=usage.input_tokens,
+                completion_tokens=usage.output_tokens,
+                cache_tokens=usage.input_tokens_details.cached_tokens or 0,
+                cost_usd=0.0,
+            )
+        content, reasoning_content = self._response_text(response)
+        return LLMResponse(
+            content=content,
+            reasoning_content=reasoning_content,
+            model_name=response.model,
+            usage=usage_info,
+            response_id=response.id,
+        )
+
+    def get_model_context_limit(self) -> int:
+        return self._model_context_limit
+
+    def get_model_output_limit(self) -> int | None:
+        return self._model_output_limit
+
+
+class NeMoGymTerminus2(Terminus2):
+    """Terminus 2 with NeMo Gym model calls and optional Harbor file trajectories."""
+
+    def __init__(self, *args: Any, llm: NeMoGymLLM, dump_trajectory: bool, **kwargs: Any):
+        self._nemo_gym_llm = llm
+        self._dump_trajectory_enabled = dump_trajectory
+        super().__init__(*args, **kwargs)
+
+    def _init_llm(self, *args: Any, **kwargs: Any) -> BaseLLM:
+        return self._nemo_gym_llm
+
+    def _count_total_tokens(self, chat: Any) -> int:
+        return sum(len(str(message.get("content", ""))) // 4 for message in chat.messages)
+
+    def _dump_trajectory_with_continuation_index(self, continuation_index: int) -> None:
+        if self._dump_trajectory_enabled:
+            super()._dump_trajectory_with_continuation_index(continuation_index)
+
+
 class Terminus2Agent(SimpleResponsesAPIAgent):
     config: Terminus2AgentConfig
 
@@ -146,27 +248,28 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             self.base_url_for_run(base_url=get_server_url(self.config.model_server.name), body=await request.json())
             + "/v1"
         )
-        # Dummy api key for LiteLLM to use
-        environ["OPENAI_API_KEY"] = "dummy"
+        llm = NeMoGymLLM(
+            client=NeMoGymAsyncOpenAI(base_url=model_base_url, api_key="dummy", internal=True),
+            model_name=self.config.model_server.name,
+            model_context_limit=self.config.model_context_limit,
+            model_output_limit=self.config.model_output_limit,
+        )
 
         with tempfile.TemporaryDirectory(prefix="nemo-gym-terminus-2-") as log_dir:
             environment = NeMoGymSandboxEnvironment(sandbox, Path(log_dir), pty_session)
             context = AgentContext()
-            agent = Terminus2(
+            agent = NeMoGymTerminus2(
                 logs_dir=Path(log_dir),
-                model_name=f"openai/{self.config.model_server.name}",
-                api_base=model_base_url,
+                model_name=self.config.model_server.name,
                 max_turns=self.config.max_turns,
                 parser_name=self.config.parser_name,
-                temperature=None,
-                reasoning_effort=None,
                 enable_summarize=self.config.enable_summarize,
                 proactive_summarization_threshold=self.config.proactive_summarization_threshold,
-                use_responses_api=self.config.use_responses_api,
                 tmux_pane_width=self.config.tmux_pane_width,
                 tmux_pane_height=self.config.tmux_pane_height,
                 record_terminal_session=False,
-                store_all_messages=True,
+                llm=llm,
+                dump_trajectory=self.config.dump_trajectory,
             )
 
             await environment.exec("mkdir -p /logs/agent", user="root")
@@ -177,10 +280,6 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
             await agent._session.stop()
 
-        messages = (context.metadata or {}).get("all_messages", [])
-        final_content = ""
-        if messages and isinstance(messages[-1], dict):
-            final_content = str(messages[-1].get("content") or "")
         usage = NeMoGymResponseUsage(
             input_tokens=context.n_input_tokens or 0,
             input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=context.n_cache_tokens or 0),
@@ -193,15 +292,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             created_at=int(time()),
             model=self.config.model_server.name,
             object="response",
-            output=[
-                NeMoGymResponseOutputMessage(
-                    id=f"msg_{uuid4().hex}",
-                    content=[NeMoGymResponseOutputText(type="output_text", text=final_content, annotations=[])],
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                )
-            ],
+            output=llm.trajectory,
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
