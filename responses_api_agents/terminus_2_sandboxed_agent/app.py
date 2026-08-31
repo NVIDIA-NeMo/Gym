@@ -233,7 +233,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         super().model_post_init(context)
         self._session_sandboxes: dict[str, tuple[AsyncSandbox, SandboxPtySession]] = {}
 
-        if self.config.debug:
+        if not self.config.debug:
             harbor_logger.setLevel(logging.WARNING)
 
     async def _connect_sandbox(self, sandbox_id: str, pty_session_id: str) -> tuple[AsyncSandbox, SandboxPtySession]:
