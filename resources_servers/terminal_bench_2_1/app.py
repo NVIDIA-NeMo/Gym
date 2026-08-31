@@ -303,7 +303,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             evaluation_completed = False
             reward = 0.0
 
-        await pty_session.close()
+        if pty_session:
+            await pty_session.close()
         await eval_sandbox.stop()
 
         return TerminalBench21VerifyResponse(
