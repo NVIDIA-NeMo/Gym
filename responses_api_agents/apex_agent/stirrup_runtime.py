@@ -6,13 +6,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
 import shutil
 import zipfile
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, get_args, get_origin
 
 
 FILESYSTEM_ROOT = Path("/filesystem")
@@ -66,6 +67,285 @@ def truncate_tool_text(text: str) -> str:
 def mcp_call_arguments(params: Any) -> dict[str, Any]:
     """Forward only concrete MCP arguments; omitted optional fields must stay omitted."""
     return params.model_dump(exclude_none=True)
+
+
+def _annotation_wants_structured_data(annotation: Any) -> bool:
+    """True when a field annotation expects a container or nested model, through Optional/Union/Annotated."""
+    if annotation in (list, dict, set, tuple):
+        return True
+    origin = get_origin(annotation)
+    if origin in (list, dict, set, frozenset, tuple):
+        return True
+    if origin is not None:
+        return any(_annotation_wants_structured_data(arg) for arg in get_args(annotation) if arg is not type(None))
+    return isinstance(annotation, type) and hasattr(annotation, "model_fields")
+
+
+def _nested_model_class(annotation: Any) -> Any:
+    """Resolve an annotation to a pydantic-model class (duck-typed), or None."""
+    if isinstance(annotation, type) and hasattr(annotation, "model_fields"):
+        return annotation
+    if get_origin(annotation) is not None:
+        for arg in get_args(annotation):
+            if arg is type(None):
+                continue
+            found = _nested_model_class(arg)
+            if found is not None:
+                return found
+    return None
+
+
+def _keys_known_to_model(data: dict[str, Any], model_cls: Any) -> bool:
+    """True when every key in data names a field (or alias) of model_cls.
+
+    MCP-generated models default to extra="ignore", so validation alone would
+    accept arbitrary keys and silently drop them; repairs must not manufacture
+    a "valid" call out of args the tool would never see.
+    """
+    fields = getattr(model_cls, "model_fields", None)
+    if not isinstance(fields, dict):
+        return False
+    known = set(fields)
+    for field in fields.values():
+        for alias in (getattr(field, "alias", None), getattr(field, "validation_alias", None)):
+            if isinstance(alias, str):
+                known.add(alias)
+    return set(data) <= known
+
+
+def coerce_tool_arguments(params_model: Any, arguments: str) -> str | None:
+    """Return a coerced JSON arguments string that validates against params_model, or None.
+
+    Empty/whitespace arguments are normalized to "{}" before evaluation (mirroring
+    stirrup's own normalization in Agent.run_tool). Arguments that already validate
+    return None (no change needed). Two repairs are attempted, and a candidate is
+    accepted only if it validates against params_model:
+    - unwrap top-level string values that JSON-decode to an object/array where the
+      field annotation expects structured data, and
+    - wrap flat arguments into the model's single required nested-model field.
+    Dict payloads destined for a nested model must only use keys that model knows
+    (see _keys_known_to_model). Never raises; any unexpected error returns None.
+    """
+    try:
+        normalized = arguments if arguments and arguments.strip() else "{}"
+        try:
+            params_model.model_validate_json(normalized)
+            return None
+        except Exception:
+            pass
+        try:
+            given = json.loads(normalized)
+        except ValueError:
+            return None
+        if not isinstance(given, dict):
+            return None
+        fields = getattr(params_model, "model_fields", None)
+        if not isinstance(fields, dict):
+            return None
+
+        unwrapped = dict(given)
+        changed = False
+        for key, value in given.items():
+            field = fields.get(key)
+            if field is None or not isinstance(value, str):
+                continue
+            if not _annotation_wants_structured_data(getattr(field, "annotation", None)):
+                continue
+            try:
+                parsed = json.loads(value)
+            except ValueError:
+                continue
+            if not isinstance(parsed, (dict, list)):
+                continue
+            nested = _nested_model_class(getattr(field, "annotation", None))
+            if isinstance(parsed, dict) and nested is not None and not _keys_known_to_model(parsed, nested):
+                continue
+            unwrapped[key] = parsed
+            changed = True
+
+        candidates: list[dict[str, Any]] = []
+        if changed:
+            candidates.append(unwrapped)
+        required = [name for name, field in fields.items() if field.is_required()]
+        if len(required) == 1 and required[0] not in given:
+            wrapper = required[0]
+            wrapper_model = _nested_model_class(getattr(fields[wrapper], "annotation", None))
+            if wrapper_model is not None:
+                if _keys_known_to_model(given, wrapper_model):
+                    candidates.append({wrapper: given})
+                if changed and _keys_known_to_model(unwrapped, wrapper_model):
+                    candidates.append({wrapper: unwrapped})
+
+        for candidate in candidates:
+            encoded = json.dumps(candidate)
+            try:
+                params_model.model_validate_json(encoded)
+            except Exception:
+                continue
+            return encoded
+        return None
+    except Exception:
+        return None
+
+
+def format_tool_argument_validation_error(exc: Any, arguments: str) -> str:
+    """Render pydantic validation detail so the model can self-correct when coercion cannot repair the args."""
+    errors = "; ".join(
+        f"{'.'.join(str(part) for part in error['loc']) or '<root>'}: {error['msg']} (type={error.get('type', '?')})"
+        for error in exc.errors()
+    )
+    preview = (arguments or "")[:500]
+    return f"Tool arguments are not valid: {errors}. Submitted arguments (first 500 chars): {preview!r}"
+
+
+# vLLM's glm47 tool-call parser string-encodes arguments for MCP tools whose
+# JSON schema wraps params in a bare-$ref property with no inline "type"
+# ({"request": "{\"code\": ...}"} or flat {"code": ...}). The typing bug is
+# serving-side, so the model cannot self-correct no matter how the error is
+# phrased; run_tool must repair the arguments instead (cf. vLLM PR #41801).
+# Finish tools are exempt: Agent.step() re-validates the ORIGINAL tool_call
+# for finish tools (stirrup agent.py:1261) outside any try/except, so a
+# coerced copy that only run_tool sees would crash step().
+def install_tool_argument_coercion(agent_cls: Any) -> None:
+    """Patch agent_cls.run_tool to coerce parser-mangled tool arguments and surface validation detail."""
+    original_run_tool = agent_cls.run_tool
+    if getattr(original_run_tool, "_apex_tool_arg_patch", False):
+        return
+
+    async def run_tool_with_argument_coercion(self: Any, tool_call: Any, run_metadata: Any) -> Any:
+        finish_tools = getattr(self, "_finish_tools", None) or {}
+        tool = self._active_tools.get(tool_call.name)
+        if tool is not None and tool_call.name not in finish_tools:
+            coerced = coerce_tool_arguments(tool.parameters, tool_call.arguments or "")
+            if coerced is not None:
+                tool_call = tool_call.model_copy(update={"arguments": coerced})
+        result_msg = await original_run_tool(self, tool_call, run_metadata)
+        if not getattr(result_msg, "args_was_valid", True) and result_msg.content == "Tool arguments are not valid":
+            tool = self._active_tools.get(tool_call.name)
+            if tool is not None:
+                args = tool_call.arguments if tool_call.arguments and tool_call.arguments.strip() else "{}"
+                try:
+                    tool.parameters.model_validate_json(args)
+                except Exception as exc:
+                    if hasattr(exc, "errors"):
+                        with suppress(Exception):
+                            detailed = format_tool_argument_validation_error(exc, tool_call.arguments or "")
+                            result_msg = result_msg.model_copy(update={"content": detailed})
+        return result_msg
+
+    run_tool_with_argument_coercion._apex_tool_arg_patch = True
+    agent_cls.run_tool = run_tool_with_argument_coercion
+
+
+def annotate_schema_ref_types(schema: Any) -> Any:
+    """Return a copy of a JSON schema with each $ref site annotated with its definition's type.
+
+    Local refs ("#/$defs/<name>" or "#/definitions/<name>") are resolved against the
+    schema's own root table of the matching spelling; when the resolved definition
+    carries a "type" (following bare-ref chains, with cycles terminated) and the ref
+    node has no "type" of its own, that type is copied onto the ref node. Nothing else
+    is copied: a type sibling equal to the definition's type is a conjunctive no-op
+    under JSON Schema 2020-12 (and ignored under draft-07), so the schema's semantics
+    are provably unchanged. $refs and the $defs/definitions tables stay intact, and
+    ref sites inside the tables are annotated too. Non-local or unresolvable refs pass
+    through unchanged. Every dict and list in the result is rebuilt, so the input is
+    never mutated and the output shares no mutable state with it. Never raises: any
+    unexpected error returns the original schema.
+    """
+    try:
+        if not isinstance(schema, dict):
+            return schema
+        definition_tables: dict[str, Any] = {}
+        for table_key in ("$defs", "definitions"):
+            table = schema.get(table_key)
+            if isinstance(table, dict):
+                for name, definition in table.items():
+                    # RFC 6901 pointer escaping so a def named "a/b" cannot
+                    # shadow the pointer path $defs -> a -> b.
+                    escaped = name.replace("~", "~0").replace("/", "~1")
+                    definition_tables[f"#/{table_key}/{escaped}"] = definition
+
+        def resolve_ref_type(ref: Any) -> str | list[Any] | None:
+            """Follow a ref (through bare-ref chains) to its definition's "type", or None."""
+            visited: set[str] = set()
+            while isinstance(ref, str) and ref in definition_tables and ref not in visited:
+                visited.add(ref)
+                definition = definition_tables[ref]
+                if not isinstance(definition, dict):
+                    return None
+                if "type" in definition:
+                    def_type = definition["type"]
+                    return copy.deepcopy(def_type) if isinstance(def_type, (str, list)) else None
+                ref = definition.get("$ref")
+            return None
+
+        # Values of these keywords are instance DATA, not schemas; a data dict
+        # that happens to carry a "$ref" key must never gain a "type".
+        data_keywords = {"const", "enum", "default", "examples"}
+
+        def annotate(node: Any) -> Any:
+            if isinstance(node, list):
+                return [annotate(item) for item in node]
+            if not isinstance(node, dict):
+                return node
+            rebuilt = {
+                key: copy.deepcopy(value) if key in data_keywords else annotate(value) for key, value in node.items()
+            }
+            if "type" not in rebuilt:
+                ref_type = resolve_ref_type(node.get("$ref"))
+                if ref_type is not None:
+                    rebuilt["type"] = ref_type
+            return rebuilt
+
+        return annotate(schema)
+    except Exception:
+        return schema
+
+
+# GLM-family vLLM tool-call parsers reconstruct each argument's type from the
+# wire schema's properties[key].type; a property site that is a bare
+# {"$ref": "#/$defs/..."} carries no inline "type", so the parser
+# string-encodes the whole object server-side before the agent ever sees it.
+# Copying only the resolved definition's type onto the ref site removes that
+# trigger without changing what the schema accepts: fully inlining a $ref and
+# merging its sibling keys would alter 2020-12 conjunctive semantics when a
+# sibling conflicts with the definition, while a type sibling equal to the
+# definition's type is a conjunctive no-op (and ignored under draft-07).
+# install_tool_argument_coercion stays as the safety net for parsers that
+# string-encode regardless of schema. ChatCompletionsClient and LiteLLMClient
+# bind to_openai_tools via `from stirrup.clients.utils import ...`, so
+# rebinding stirrup.clients.utils alone is not enough — each client module's
+# own namespace binding must be rebound too.
+def install_tool_schema_type_annotation() -> None:
+    """Patch stirrup's to_openai_tools so $ref sites in wire tool schemas carry an inline type."""
+    import stirrup.clients.utils as stirrup_client_utils
+
+    original_to_openai_tools = stirrup_client_utils.to_openai_tools
+    if getattr(original_to_openai_tools, "_apex_schema_type_patch", False):
+        return
+
+    def to_openai_tools_with_annotated_ref_types(tools: Any) -> list[dict[str, Any]]:
+        entries = original_to_openai_tools(tools)
+        for entry in entries:
+            function = entry.get("function") if isinstance(entry, dict) else None
+            if isinstance(function, dict) and isinstance(function.get("parameters"), dict):
+                function["parameters"] = annotate_schema_ref_types(function["parameters"])
+        return entries
+
+    to_openai_tools_with_annotated_ref_types._apex_schema_type_patch = True
+
+    client_modules: list[Any] = [stirrup_client_utils]
+    with suppress(Exception):
+        import stirrup.clients.chat_completions_client as chat_completions_client_module
+
+        client_modules.append(chat_completions_client_module)
+    with suppress(Exception):
+        import stirrup.clients.litellm_client as litellm_client_module
+
+        client_modules.append(litellm_client_module)
+    for module in client_modules:
+        if hasattr(module, "to_openai_tools"):
+            module.to_openai_tools = to_openai_tools_with_annotated_ref_types
 
 
 def replace_tool_images_for_text_only_model(
@@ -383,6 +663,9 @@ async def run_stirrup_rollout(
     from stirrup.core.models import ImageContentBlock, Tool, ToolProvider, ToolResult, ToolUseCountMetadata
     from stirrup.tools.mcp import MCPConfig, MCPToolProvider, StreamableHttpServerConfig
 
+    install_tool_argument_coercion(Agent)
+    install_tool_schema_type_annotation()
+
     class ToolNameParams(BaseModel):
         name: Annotated[str, Field(description="Exact MCP tool name from list_tools.")]
 
@@ -538,7 +821,7 @@ async def run_stirrup_rollout(
                 detail = {
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": tool.parameters.model_json_schema(),
+                    "parameters": annotate_schema_ref_types(tool.parameters.model_json_schema()),
                     "active": self._active(tool.name),
                 }
                 return ToolResult(
