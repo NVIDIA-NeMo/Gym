@@ -270,7 +270,11 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         else:
             # Re-use the original sandbox
             eval_sandbox, pty_session = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
-            pty_session = await eval_sandbox.pty.attach(session_id=pty_session.session_id, takeover=True)
+            try:
+                pty_session = await eval_sandbox.pty.attach(session_id=pty_session.session_id, takeover=True)
+            except:
+                print(f"Hit an exception re-attaching to PTY session: {format_exc()}", file=stderr)
+                pty_session = None
             golden_patch_output = None
 
         if self.config.debug:
