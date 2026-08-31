@@ -845,6 +845,96 @@ async def test_barren_reconnects_give_up(monkeypatch: pytest.MonkeyPatch) -> Non
     await session.close()
 
 
+async def test_policy_violation_on_reattach_retries_after_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """1008 on a reattach is a race (server hasn't evicted the dead TCP peer yet);
+    the pump must wait out _PTY_TAKEOVER_RETRY_DELAYS and succeed on the next attempt."""
+    monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", ())
+    monkeypatch.setattr(pty_module, "_PTY_TAKEOVER_RETRY_DELAYS", (0,))
+    monkeypatch.setattr(pty_module.OpenSandboxPtySession, "_reattach_socket", _REAL_REATTACH)
+
+    # Initial socket: connected + data, then dies with 1006 (TCP drop, no close frame).
+    first = FakeWs([CONNECTED, _binary(b"\x01ab")], close_code=1006)
+    first.closed = True
+
+    # First reattach: server immediately closes with 1008 (dead peer not yet evicted).
+    race = FakeWs([], close_code=pty_module.WS_CLOSE_POLICY_VIOLATION)
+    race.closed = True
+
+    # Second reattach: server cleaned up; session resumes from offset 2.
+    resume = b"\x03" + (2).to_bytes(8, "big") + b"cd"
+    second = FakeWs([_binary(resume), _text({"type": "exit", "exit_code": 0})])
+    second.closed = True
+
+    client = FakeHttpClient(ws=[first, race, second])
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=await client.ws_connect("ws://server/base/pty/s-1/ws", headers={}),
+        session_id="s-1",
+        session_url="http://server/base/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+    )
+    assert await session.read() == b"ab"
+    assert await session.read() == b"cd", "session must resume after the takeover-race delay"
+    assert await session.wait_exit() == 0
+    assert len(client.ws_calls) == 3, "initial + 1 race reattach + 1 successful reattach"
+    await session.close()
+
+
+async def test_policy_violation_exhausted_gives_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When all _PTY_TAKEOVER_RETRY_DELAYS are consumed the pump gives up."""
+    monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", ())
+    monkeypatch.setattr(pty_module, "_PTY_TAKEOVER_RETRY_DELAYS", (0, 0))
+    monkeypatch.setattr(pty_module.OpenSandboxPtySession, "_reattach_socket", _REAL_REATTACH)
+
+    first = FakeWs([CONNECTED, _binary(b"\x01x")], close_code=1006)
+    first.closed = True
+    # Every reattach returns 1008 — the server never recovers.
+    always_race = FakeWs([], close_code=pty_module.WS_CLOSE_POLICY_VIOLATION)
+    always_race.closed = True
+
+    client = FakeHttpClient(ws=[first, always_race, always_race, always_race])
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=await client.ws_connect("ws://server/base/pty/s-1/ws", headers={}),
+        session_id="s-1",
+        session_url="http://server/base/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+    )
+    await session.read()  # b"x" from first
+    with pytest.raises(SandboxPtyError, match="already has an attached client"):
+        await session.wait_exit(timeout_s=5)
+    # initial + reattach_after_1006 + 2 takeover retries (delays exhausted on 3rd 1008)
+    assert len(client.ws_calls) == 4
+    await session.close()
+
+
+async def test_policy_violation_on_initial_socket_does_not_reattach(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 1008 on the very first socket means another client owns the session;
+    the pump must not retry — this is not a race."""
+    monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", ())
+    monkeypatch.setattr(pty_module, "_PTY_TAKEOVER_RETRY_DELAYS", (0,))
+    monkeypatch.setattr(pty_module.OpenSandboxPtySession, "_reattach_socket", _REAL_REATTACH)
+
+    ws = FakeWs([CONNECTED], close_code=pty_module.WS_CLOSE_POLICY_VIOLATION)
+    ws.closed = True
+    client = FakeHttpClient(ws=[ws])  # a re-dial would pop an empty list and fail
+
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=await client.ws_connect("ws://server/base/pty/s-1/ws", headers={}),
+        session_id="s-1",
+        session_url="http://server/base/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+    )
+    with pytest.raises(SandboxPtyError, match="already has an attached client"):
+        await session.wait_exit(timeout_s=5)
+    assert len(client.ws_calls) == 1, "initial policy violation must not trigger reattach"
+    await session.close()
+
+
 async def test_takeover_close_does_not_reattach(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", (0,))
     monkeypatch.setattr(pty_module.OpenSandboxPtySession, "_reattach_socket", _REAL_REATTACH)

@@ -210,18 +210,37 @@ class OpenSandboxPtySession:
         """
         try:
             barren = 0
+            reattached = False
+            takeover_retries = 0
             while True:
                 received_before = self._received
                 await self._pump_socket()
                 if self._closed or self._exit.done() or self._error is not None:
                     break
-                if self._ws.close_code in (WS_CLOSE_TAKEN_OVER, WS_CLOSE_POLICY_VIOLATION):
+                if self._ws.close_code == WS_CLOSE_TAKEN_OVER:
                     break
+                if self._ws.close_code == WS_CLOSE_POLICY_VIOLATION:
+                    # On reattach, this is a race: execd hasn't torn down the
+                    # dead TCP peer yet. Retry with _PTY_TAKEOVER_RETRY_DELAYS
+                    # to wait out the eviction. On the initial socket this means
+                    # another client owns the session, so break immediately.
+                    if not reattached or takeover_retries >= len(_PTY_TAKEOVER_RETRY_DELAYS):
+                        break
+                    await asyncio.sleep(_PTY_TAKEOVER_RETRY_DELAYS[takeover_retries])
+                    takeover_retries += 1
+                    reattached = await self._reattach_socket()
+                    if not reattached:
+                        break
+                    continue
+                takeover_retries = 0
                 # A socket that reconnects but keeps dying without delivering a
                 # byte would spin forever; three barren rounds mean the session
                 # is gone in a way the close code does not admit.
                 barren = barren + 1 if self._received == received_before else 0
-                if barren >= 3 or not await self._reattach_socket():
+                if barren >= 3:
+                    break
+                reattached = await self._reattach_socket()
+                if not reattached:
                     break
         finally:
             # A detach ends the pump without ending the session: skip the
