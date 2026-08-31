@@ -100,6 +100,16 @@ def test_strip_hosted_only_tool_fields_pops_strict() -> None:
     VLLMModel._strip_hosted_only_tool_fields({})
 
 
+def test_preprocess_chat_completion_create_params_strips_strict(monkeypatch: MonkeyPatch) -> None:
+    server = TestApp()._setup_server(monkeypatch)
+    body_dict = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{"type": "function", "function": {"name": "get_weather", "strict": True}}],
+    }
+    body_dict = server._preprocess_chat_completion_create_params(MagicMock(), body_dict)
+    assert "strict" not in body_dict["tools"][0]["function"]
+
+
 def test_transport_io_writer_keeps_full_payload(monkeypatch: MonkeyPatch, tmp_path) -> None:
     log_path = tmp_path / "model-io-transport.jsonl"
     monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))
@@ -981,6 +991,7 @@ class TestApp:
                     "required": ["order_id"],
                 },
                 "description": "Get the current status for a given order",
+                "strict": True,
             },
             {
                 "name": "get_delivery_date",
@@ -995,6 +1006,7 @@ class TestApp:
                     "required": ["order_id"],
                 },
                 "description": "Get the estimated delivery date for a given order",
+                "strict": True,
             },
         ]
         assert expected_sent_tools == actual_sent_tools
@@ -1451,6 +1463,7 @@ class TestApp:
                     },
                     "required": ["order_id", "date"],
                 },
+                "strict": True,
             }
         ]
         assert expected_sent_tools == actual_sent_tools
