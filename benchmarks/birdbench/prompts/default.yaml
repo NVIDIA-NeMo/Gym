@@ -1,5 +1,8 @@
 # Prompt used for text-to-SQL.
 
+### Part of the prompts are adapted from OmniSQL code: https://github.com/RUCKBReasoning/OmniSQL/blob/main/train_and_evaluate/process_dataset.py#L164
+### which is released under Apache 2.0 license as shown here: https://github.com/RUCKBReasoning/OmniSQL/issues/25
+
 system: You are a data science expert. Below, you are provided with a database schema and a natural 
         language question. Your task is to understand the schema and generate a valid SQL query to answer the question.
 

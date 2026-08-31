@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+### BM25 usage is inspired by OmniSQL code: https://github.com/RUCKBReasoning/OmniSQL/blob/main/train_and_evaluate/process_dataset.py
+### which is released under Apache 2.0 license as shown here: https://github.com/RUCKBReasoning/OmniSQL/issues/25
+
 """Schema introspection, BM25 retrieval, and ``sql_context`` rendering for ``prepare.py``.
 
 BM25 search over each database's distinct column values uses ``bm25s`` (pure-Python,
