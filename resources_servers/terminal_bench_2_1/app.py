@@ -24,7 +24,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxPtySession, SandboxResources, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxPtyError, SandboxPtySession, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -267,8 +267,14 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             if self.config.debug:
                 print(f"Golden patch output for {body.task_name}: {golden_patch_output}", file=stderr)
         else:
-            # Re-use the original sandbox
+            # Re-use the original sandbox.  Detach first so the server marks the
+            # session free before we reattach; otherwise takeover=True races with
+            # execd detecting the abandoned WebSocket (→ repeated 1008 failures).
             eval_sandbox, pty_session = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
+            try:
+                await pty_session.detach()
+            except SandboxPtyError:
+                pass  # already dead; provider's retry loop handles the 1008 race
             pty_session = await eval_sandbox.pty.attach(session_id=pty_session.session_id, takeover=True)
             golden_patch_output = None
 
