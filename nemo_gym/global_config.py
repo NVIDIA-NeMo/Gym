@@ -1027,6 +1027,8 @@ For example, on the command line:
         cli_global_config_dict = (
             DictConfig(dict()) if parse_config.skip_load_from_cli else self.parse_global_config_dict_from_cli()
         )
+        # @bxyu-nvidia: Hydra returns `cli_global_config_dict` as a struct, but this causes problems in downstream swapping/merging.
+        OmegaConf.set_struct(cli_global_config_dict, False)
 
         # Command line overrides function input.
         initial_global_config_dict = OmegaConf.create(parse_config.initial_global_config_dict or dict())
