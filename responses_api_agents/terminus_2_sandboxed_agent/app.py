@@ -103,10 +103,13 @@ class NeMoGymSandboxEnvironment:
         env: dict[str, str] | None = None,
         **_: Any,
     ) -> Any:
-        if cwd is None and env is None:
-            result = await self._sandbox.pty.exec(command, session=self._pty_session, timeout_s=timeout_sec)
+        if env is None:
+            result = await self._sandbox.pty.exec(command, session=self._pty_session, timeout_s=timeout_sec, cwd=cwd)
         else:
             raise NotImplementedError
+
+        if "new-session" in command:
+            print(f"Created new tmux session for {self.session_id}: {result}", file=sys.stderr)
 
         return SimpleNamespace(
             stdout=result.stdout or "",
