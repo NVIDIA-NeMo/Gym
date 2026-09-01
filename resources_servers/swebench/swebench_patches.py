@@ -16,7 +16,7 @@
 This file contains patches copied from https://github.com/SWE-bench/SWE-bench/pull/630
 """
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
 # @bxyu-nvidia: We import wildcard because there are a million imports otherwise...
 from swebench.harness.constants import END_TEST_OUTPUT, MAP_REPO_TO_EXT, START_TEST_OUTPUT
@@ -254,6 +254,16 @@ async def run_instance(
             "completed": eval_completed,
             "resolved": report.get(instance_id, {}).get("resolved", False),
         }
+
+
+########################################
+# START SWE Bench Verified instance patches
+########################################
+
+
+def patch_swebench_verified_env_vars(repo: str, env: Dict[str, Any]) -> None:
+    if MAP_REPO_TO_EXT.get(repo) == "py":
+        pass
 
 
 ########################################

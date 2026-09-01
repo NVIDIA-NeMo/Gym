@@ -46,6 +46,7 @@ from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,
     patch_swebench_multilingual_sandbox,
+    patch_swebench_verified_env_vars,
     run_instance,
 )
 
@@ -260,6 +261,8 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         env = dict(self.config.sandbox_config.get("env", {}))
         if self.config.sandbox_config.get("derive_cpu_env", True):
             env = cpu_cap_env(sandbox_resources.cpu) | env
+
+        patch_swebench_verified_env_vars(test_spec.repo, env)
 
         eval_sandbox_spec = SandboxSpec(
             image=test_spec.instance_image_key,
