@@ -26,7 +26,7 @@ from os import environ, getenv, getpid
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import Any, List, Literal, NamedTuple, Optional, TextIO, Tuple, Type, Union, Unpack
+from typing import Any, ClassVar, List, Literal, NamedTuple, Optional, TextIO, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import orjson
@@ -55,6 +55,12 @@ from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym import WORKING_DIR
+from nemo_gym.checkpoint.control import (
+    ControlCapabilities,
+    ControlFence,
+    install_control_plane,
+    multi_process_capability_from_num_workers,
+)
 from nemo_gym.config_types import (
     ROLLOUT_PATH_PREFIX,
     TOKEN_CAPTURE_PATH_SEGMENT,
@@ -804,6 +810,8 @@ class HttpByteCounterMiddleware:
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
+    _checkpoint_fence: Optional[ControlFence] = PrivateAttr(default=None)
+
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
         pass
@@ -872,6 +880,41 @@ class SimpleServer(BaseServer):
 
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
+
+    # -- checkpoint control plane ---------------------------------------------
+
+    # Set by each server base class to its config-group name. ``None`` means
+    # the server kind does not participate in checkpoint coordination.
+    _CONTROL_COMPONENT: ClassVar[Optional[str]] = None
+
+    def checkpoint_fence(self) -> "ControlFence":
+        """The process-local control fence guarding this server's control routes."""
+        if self._checkpoint_fence is None:
+            self._checkpoint_fence = ControlFence()
+        return self._checkpoint_fence
+
+    def control_capabilities(self) -> "ControlCapabilities":
+        """The declaration served at ``GET /ng-control/v1/capabilities``.
+
+        Override to declare richer support (state export, admission states,
+        concurrency contract). The defaults describe a server with nothing to
+        export and no admission limiter.
+        """
+        assert self._CONTROL_COMPONENT is not None, f"{type(self).__name__} does not declare a control component"
+        return ControlCapabilities(
+            component=self._CONTROL_COMPONENT,
+            name=self.config.name,
+            multi_process=multi_process_capability_from_num_workers(self.config.num_workers),
+        )
+
+    def setup_control_plane(self, app: FastAPI) -> None:
+        """Register ``/ng-control/v1`` on this server's app.
+
+        Servers that build their own FastAPI app instead of calling their
+        base ``setup_webserver`` must call this themselves to be reachable by
+        the checkpoint coordinator.
+        """
+        install_control_plane(app, capabilities=self.control_capabilities(), fence=self.checkpoint_fence())
 
     def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
         @app.middleware("http")
