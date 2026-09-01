@@ -4,20 +4,22 @@ description: "The agent servers NeMo Gym ships — Gym-native implementations, a
 position: 2
 ---
 
-All the agent servers below ship in the NeMo Gym repo. Some are NeMo Gym code; others run a third-party harness and translate its output. If neither fits, you can keep your agent in your own repo and [drive it remotely](/agent-server/remote-agent).
+NeMo Gym ships agent servers implemented in Gym and adapters for third-party harnesses. If neither fits, you can keep your agent in your own repo and [drive it remotely](/agent-server/remote-agent).
 
-Some work with any Resources server; others are built around a single benchmark and are grouped that way below.
+Run `gym list agents` for the complete list available in your checkout, including each agent's configuration variants and whether it is composable with a separate Resources server or self-contained with its environment. Run `gym list agents <name>` to inspect one agent. The sections below explain how the reusable harnesses differ and identify the major benchmark-specific integrations.
 
 ## Agent Servers with a Gym-Native Implementation
 
-These are NeMo Gym code; their only dependency is `nemo_gym` itself. They call the Model server and score against the Resources server, though how differs: `simple_agent`, `non_executing_simple_agent`, and `tool_simulation_agent` call `/verify`, while `gymnasium_agent` sums the per-step rewards returned by `/reset` and `/step`.
+These agent loops are implemented in NeMo Gym. `simple_agent`, `simple_agent_with_compaction`, `non_executing_simple_agent`, `tool_simulation_agent`, and `image_tools_agent` send the completed result to a Resources server for verification. `gymnasium_agent` instead sums the per-step rewards returned by `/reset` and `/step`.
 
 | Agent Server | What it does |
 |---|---|
 | [`simple_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent) | Calls the model, executes any tool calls against the Resources server, appends the results, and repeats until the model returns no tool calls or the step limit is reached. Works with any Resources server. |
+| [`simple_agent_with_compaction`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent_with_compaction) | Runs the `simple_agent` model and tool loop with an opt-in context-compaction policy applied before model calls. |
 | [`non_executing_simple_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/non_executing_simple_agent) | Makes one model call and passes the response to the verifier. Does not execute tool calls. Normalizes a string `input` into a message list and propagates session cookies. |
 | [`tool_simulation_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/tool_simulation_agent) | Makes one model call and passes the response to the verifier. Does not execute tool calls. Used with datasets that supply simulated tool results. |
 | [`gymnasium_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/gymnasium_agent) | Drives the reset/step loop of a `GymnasiumServer` Resources server. |
+| [`image_tools_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/image_tools_agent) | Adds iterative image-inspection tools to another agent workflow, then sends the final response to the selected Resources server for verification. |
 
 ## Agent Servers That Run a Third-Party Harness
 
@@ -25,18 +27,20 @@ In these, the external harness owns the agent loop and keeps its own prompts and
 
 Because verification stays on the NeMo Gym side, an agent harness that brings its own tools can often run in an existing environment by adding a `<benchmark>_<agent>` config, leaving the dataset and verifier unchanged — only the Resources server's task data and `/verify` are used. This is how `hermes_agent` is used with the math, coding, reasoning_gym, MCQA, and instruction-following benchmarks. It does not hold for every harness: agent servers such as `swe_agents`, `osworld_agent`, and `tau2` are tied to specific benchmarks.
 
-### Coding CLIs
+### Command-Line Harnesses
 
-Agent servers that run a coding CLI as a subprocess. The CLI executes its own tools, and its output is parsed back into NeMo Gym format.
+These agent servers run an external agent harness as a subprocess. The harness executes its own tools, and the agent server parses its output back into NeMo Gym format.
 
-| Agent Server | Harness | Notes |
+| Agent Server | Harness | Summary |
 |---|---|---|
 | [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent) | Claude Code (`claude -p`) | Runs against Anthropic, or against any NeMo Gym Model server, since every one serves [Anthropic Messages](/model-server/anthropic-messages) on `POST /v1/messages`. Reference implementation for [Agent Skills](/agent-server/agent-skills). |
+| [`cline_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/cline_agent) | Cline (`cline --json`) | Isolates Cline's settings and session state per rollout and parses its JSON event stream into messages, tool calls, tool outputs, reasoning, and usage. |
 | [`codex_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/codex_agent) | OpenAI Codex CLI (`codex exec`) | Runs against OpenAI, or against any NeMo Gym Model server, which serves the streaming Responses dialect Codex speaks. Also supports Agent Skills. |
 | [`opencode_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/opencode_agent) | OpenCode (`opencode run`) | Reads the run's SQLite session to recover the full trajectory including tool calls. |
 | [`kilocode_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/kilocode_agent) | Kilo Code (`kilo run`) | A fork of OpenCode; mirrors `opencode_agent` but parses the CLI's JSON event stream. |
-| [`openclaw_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/openclaw_agent) | OpenClaw (`openclaw agent --local --json`) | |
-| [`pi_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/pi_agent) | pi (`pi --print --mode json --no-session`) | |
+| [`openclaw_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/openclaw_agent) | OpenClaw (`openclaw agent --local --json`) | Creates an isolated workspace per rollout, runs OpenClaw's tools locally, and parses the JSON result for verification. |
+| [`pi_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/pi_agent) | pi (`pi --print --mode json --no-session`) | Creates an isolated home directory per rollout, writes the model provider configuration there, and converts pi's JSONL `message_end` events into the trajectory. |
+| [`prime_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/prime_agent) | Prime Agent | Runs a one-shot Prime Agent worker in an isolated home directory while reusing a shared IPython environment. |
 
 <Note>
 Every agent server in this table is evaluation-only today: token IDs and log probabilities are not threaded through, so the rollouts are not trainable. All of them accept an optional `model_server` ref that routes generation through NeMo Gym, which makes the model calls capturable and lets one config run against different backends; a configured model server takes precedence over a direct provider URL. See [Evaluation-only vs training-grade](#evaluation-only-vs-training-grade).
@@ -46,14 +50,26 @@ Every agent server in this table is evaluation-only today: token IDs and log pro
 
 Python agent and environment frameworks that the Agent server imports and drives in-process. Several then manage their own execution backends: `harbor_agent` runs trials in Singularity, Docker, Daytona, or a NeMo Gym sandbox depending on `harbor_environment_type`, and `stirrup_agent` executes code through Stirrup's own tool backends.
 
-| Agent Server | Framework | Notes |
+| Agent Server | Framework | Summary |
 |---|---|---|
 | [`langgraph_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/langgraph_agent) | [LangGraph](https://github.com/langchain-ai/langgraph) | Ships reflection, sub-agent orchestrator, parallel-thinking, and ReWOO examples. Patterns that produce non-monotonic trajectories (such as parallel thinking) work for evaluation but not for default NeMo RL training. |
 | [`hermes_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/hermes_agent) | [hermes-agent](https://github.com/NousResearch/hermes-agent) (Nous Research) | Training-capable. Pinned to a fork with token-ID tracking, chat-template, and sampling-parameter patches. Brings its own toolset, so only the Resources server's task data and `verify` are used. |
+| [`nemo_fabric_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/nemo_fabric_agent) | [NeMo Fabric](https://github.com/NVIDIA/NeMo-Fabric) | Runs an installed harness through NeMo Fabric's typed lifecycle. Shipped variants include Claude Code, Codex, Deep Agents, Hermes, and mini-swe-agent adapters. |
+| [`simple_strands_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_strands_agent) | Simple Strands Agent | Runs a tool-using coding agent with shell and file-editing tools while retaining the harness's native system prompt. |
+| [`terminus_2_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/terminus_2_agent) | [Harbor Terminus-2](https://github.com/harbor-framework/harbor/tree/main/src/harbor/agents/terminus_2) | Runs Terminus-2 in a temporary or configured workspace and converts its terminal trajectory into Responses API messages and tool calls. |
 | [`aviary_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/aviary_agent) | [Aviary](https://github.com/Future-House/aviary) (FutureHouse) | Pairs with the `resources_servers/aviary` environments and datasets. |
 | [`verifiers_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/verifiers_agent) | [Verifiers](https://github.com/PrimeIntellect-ai/verifiers) (Prime Intellect) | Runs environments from Prime Intellect's Environments Hub. Token-ID support is upstreamed into the framework's `NeMoRLChatCompletionsClient`. |
 | [`harbor_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/harbor_agent) | [Harbor](https://github.com/laude-institute/harbor) (Laude Institute) | Runs a Harbor agent such as `terminus-2` in a Harbor-managed environment. Trials can execute in a Singularity environment for HPC training, or in any NeMo Gym sandbox provider, selected by config. |
 | [`stirrup_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/stirrup_agent) | [Stirrup](https://github.com/ArtificialAnalysis/Stirrup) (Artificial Analysis) | Ships the GDPVal strategy; new benchmarks can be added in a single file. |
+
+### Harnesses That Run in a Resources Server Sandbox
+
+These adapters run the third-party harness inside the task sandbox supplied by the Resources server, so task state remains isolated there.
+
+| Agent Server | Harness | Summary |
+|---|---|---|
+| [`opencode_sandboxed_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/opencode_sandboxed_agent) | OpenCode | Runs OpenCode in the task sandbox and converts its exported session into a NeMo Gym trajectory. |
+| [`terminus_2_sandboxed_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/terminus_2_sandboxed_agent) | Harbor Terminus-2 | Adapts Terminus-2's terminal interface to the Resources server's `AsyncSandbox` and returns every model request and response. |
 
 ### Benchmark-Native Harnesses
 
@@ -85,11 +101,14 @@ Alongside these, `responses_api_agents/` also holds benchmark-specific custom Ag
 Match the agent server to the interaction pattern the environment needs.
 
 - Tool calling, or no tools: `simple_agent`.
+- Tool calling with context compaction: `simple_agent_with_compaction`.
 - One model call with no tool execution: `non_executing_simple_agent`, or `tool_simulation_agent` if the dataset supplies simulated tool results. The two behave almost identically, so follow whichever the environment's existing configs use.
 - A `reset`/`step` environment: `gymnasium_agent`.
 - SWE-bench-style coding: `swe_agents` for OpenHands or opencode, `mini_swe_agent_2` for mini-swe-agent on the sandbox API, or `anyswe_agent` to put a choice of Gym agent server behind one execution and grading path, one per rollout. `mini_swe_agent` uses the older Docker workflow.
 - Terminal-Bench tasks: `anyterminal_agent`, which runs the agent and the task's tests in the same container.
-- Coding through an external CLI: `claude_code_agent`, `codex_agent`, `kilocode_agent`, `opencode_agent`, `openclaw_agent`, or `pi_agent`. All are evaluation-only; check the README before training on their rollouts.
+- An external command-line harness: `claude_code_agent`, `cline_agent`, `codex_agent`, `kilocode_agent`, `opencode_agent`, `openclaw_agent`, `pi_agent`, or `prime_agent`. These adapters are evaluation-only; check the README before training on their rollouts.
+- A harness that should execute inside the Resources server's task sandbox: `opencode_sandboxed_agent` or `terminus_2_sandboxed_agent`.
+- An interchangeable harness behind one typed lifecycle: `nemo_fabric_agent`.
 - Multi-step tool use for training: `hermes_agent`, pinned to a fork with the token-ID and sampling-parameter patches training requires.
 - LangGraph graphs: `langgraph_agent`. Graphs with non-monotonic trajectories, such as parallel thinking, work for evaluation but need extra handling before NeMo RL training.
 - Environments from an external library: `aviary_agent` for FutureHouse Aviary, `verifiers_agent` for Prime Intellect Verifiers.
@@ -149,7 +168,7 @@ The provider's own config lives in a separate file that defines the named `sandb
 
 When set, they take precedence over the configured `model_server` for that rollout; when absent, the configured model server is used. This is not a general Agent server field — only those two agent servers read it, and the others silently ignore it because their run-request models allow extra keys. Check the agent server's request model before relying on it.
 
-Skills are a run-level input, set with `+skills.path` on `gym eval run`. NeMo Gym records and forwards a `skills_ref`, but the agent server still has to stage the files where its runtime looks for them — `claude_code_agent` and `codex_agent` are the two with native adapters today. Rollout collection accepting `skills.path` does not by itself mean the agent server loads the skills; `remote_agent`, for instance, logs a warning that it cannot stage them. See [Agent Skills](/agent-server/agent-skills).
+Skills are a run-level input, set with `+skills.path` on `gym eval run`. NeMo Gym records and forwards a `skills_ref`, but the agent server still has to stage the files where its runtime looks for them. `claude_code_agent`, `codex_agent`, and `nemo_fabric_agent` handle this input today. Rollout collection accepting `skills.path` does not by itself mean the agent server loads the skills; `remote_agent`, for instance, logs a warning that it cannot stage them. See [Agent Skills](/agent-server/agent-skills).
 
 To run, start the composed servers and then collect rollouts against the top-level agent server name:
 

@@ -57,6 +57,8 @@ There are three options. The first two differ by who implements the agent, not b
 
 Use an agent server with a Gym-native implementation, such as `simple_agent` for multi-step tool calling. Use an agent server that runs a third-party harness — a coding CLI, an agent framework, or a benchmark's own scaffold — where the harness owns the loop and the agent server translates its output. Both take configuration, not code. Third, use `remote_agent`: keep the agent in your own repo, expose an endpoint that follows the OpenAI Responses contract, and NeMo Gym drives the loop against that endpoint.
 
+Run `gym list agents` to list the available harnesses and their configuration variants. Run `gym list agents <name>` to inspect one harness, then use `--agent-type <name>` to compose a compatible environment with it.
+
 <Cards>
 
 <Card title="Integrate Existing Agents" href="/agent-server/integrate-existing-agents">
