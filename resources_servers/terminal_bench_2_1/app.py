@@ -265,8 +265,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if self.config.debug:
             print(f"Running tests for {body.task_name}", file=stderr)
         start_time = time()
-        await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
         try:
+            await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
             eval_result = await eval_sandbox.exec(
                 "bash /tests/test.sh",
                 timeout_s=self.config.evaluation_timeout,
@@ -295,7 +295,10 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 if self.config.debug:
                     print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
 
-        await eval_sandbox.stop()
+        try:
+            await eval_sandbox.stop()
+        except:
+            print(f"Hit an exception stopping sandbox: {format_exc()}", file=stderr)
 
         return TerminalBench21VerifyResponse(
             **body.model_dump(),
