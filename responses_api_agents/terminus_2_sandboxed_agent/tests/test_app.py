@@ -35,28 +35,32 @@ def test_instruction_joins_text_content():
 
 @pytest.mark.asyncio
 async def test_sandbox_environment_adapts_exec_and_is_dir():
-    sandbox = SimpleNamespace()
-    calls = []
+    sandbox = SimpleNamespace(pty=SimpleNamespace())
+    pty_calls = []
+    sandbox_calls = []
 
-    async def exec(command, **kwargs):
-        calls.append((command, kwargs))
+    async def pty_exec(command, **kwargs):
+        pty_calls.append((command, kwargs))
         return SimpleNamespace(stdout="output", stderr=None, return_code=0)
 
-    sandbox.exec = exec
+    async def sandbox_exec(command, **kwargs):
+        sandbox_calls.append((command, kwargs))
+        return SimpleNamespace(stdout="", stderr=None, return_code=0)
+
+    sandbox.pty.exec = pty_exec
+    sandbox.exec = sandbox_exec
     environment = NeMoGymSandboxEnvironment(
-        sandbox, logs_dir=SimpleNamespace(), pty_session=None, session_id="session-1"
+        sandbox, logs_dir=SimpleNamespace(), pty_session="seeded-pty", session_id="session-1"
     )
 
-    result = await environment.exec("pwd", timeout_sec=12, user="root", cwd="/work", env={"A": "B"})
+    result = await environment.exec("pwd", timeout_sec=12, user="root", cwd="/work")
 
     assert result.stdout == "output"
     assert result.stderr == ""
     assert result.return_code == 0
     assert await environment.is_dir("/workspace")
-    assert calls == [
-        ("pwd", {"cwd": "/work", "env": {"A": "B"}, "timeout_s": 12, "user": "root"}),
-        ('test -d "/workspace"', {"user": None}),
-    ]
+    assert pty_calls == [("pwd", {"session": "seeded-pty", "timeout_s": 12, "cwd": "/work"})]
+    assert sandbox_calls == [('test -d "/workspace"', {"user": None})]
 
 
 @pytest.mark.asyncio
@@ -75,7 +79,7 @@ async def test_sandbox_environment_uses_seeded_pty_for_stateful_commands():
 
     await environment.exec("tmux new-session")
 
-    assert calls == [("tmux new-session", {"session": "seeded-pty", "timeout_s": None})]
+    assert calls == [("tmux new-session", {"session": "seeded-pty", "timeout_s": None, "cwd": None})]
 
 
 def test_agent_implements_required_responses_endpoint():
@@ -171,6 +175,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         debug=debug,
         sandbox_provider="opensandbox",
         sandbox_timeout=10,
+        remote_tmux_binary_path=None,
     )
     set_level = MagicMock()
     monkeypatch.setattr(app_module.harbor_logger, "setLevel", set_level)
@@ -248,7 +253,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
     else:
         set_level.assert_not_called()
     assert sandbox_calls == [
-        ("mkdir -p /logs/agent", {"cwd": None, "env": None, "timeout_s": None, "user": "root"}),
-        ("tmux setup", {"session": "seeded-pty", "timeout_s": None}),
-        ("tmux run", {"session": "seeded-pty", "timeout_s": None}),
+        ("mkdir -p /logs/agent", {"session": "seeded-pty", "timeout_s": None, "cwd": None}),
+        ("tmux setup", {"session": "seeded-pty", "timeout_s": None, "cwd": None}),
+        ("tmux run", {"session": "seeded-pty", "timeout_s": None, "cwd": None}),
     ]
