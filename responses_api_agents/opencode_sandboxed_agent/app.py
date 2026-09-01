@@ -733,6 +733,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 command=command,
                 session=pty_session,
                 timeout_s=self.config.sandbox_timeout,
+                detach=True,
             )
         except Exception as exc:
             result = None
