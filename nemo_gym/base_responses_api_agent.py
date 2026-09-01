@@ -42,6 +42,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import (
+    RolloutContextMiddleware,
     execution_identity_from_run_body,
     maybe_rollout_id_from_run_body,
     rollout_context,
@@ -83,6 +84,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         app = FastAPI()
 
         self.setup_session_middleware(app)
+        app.add_middleware(RolloutContextMiddleware)
         self.setup_control_plane(app)
         self.setup_agent_checkpoint(app)
 
