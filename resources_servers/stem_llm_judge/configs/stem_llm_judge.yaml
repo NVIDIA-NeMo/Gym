@@ -1,0 +1,61 @@
+# Broad-STEM (physics + chemistry + biology) LLM-as-judge. The judge sees the
+# problem, the reference answer and the student's post-</think> solution, and
+# answers "Judgement: 'yes' | 'no'". Overrides below are per-run knobs.
+stem_llm_judge:
+  resources_servers:
+    stem_llm_judge:
+      entrypoint: app.py
+
+      # `name` must match a model server in the composed config; point it at a
+      # separately served judge when it is not the model being trained:
+      #   ++env.nemo_gym.stem_llm_judge.resources_servers.stem_llm_judge.judge_model_server.name=judge_model
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      # `input` is overwritten per verify(); set temperature / top_p /
+      # max_output_tokens here or from the launcher.
+      judge_responses_create_params:
+        input: []
+      judge_endpoint_max_concurrency: 64
+      judge_system_message: null
+      judge_prompt_template_fpath: prompt_templates/stem_llm_judge.txt
+
+      # Strip the fixed instruction preamble so the judge sees only the problem.
+      # An explicit question_extract_regex wins over it.
+      question_extract_regex: null
+      extract_problem_from_prompt: true
+
+      # Fallback for rows without a template_metadata.output_regex; training data
+      # ships one ('</think>(.*)') per row.
+      response_extract_regex: '</think>(.*)'
+
+      # Training runs turn this on:
+      #   ++env.nemo_gym.stem_llm_judge.resources_servers.stem_llm_judge.reward_zero_on_truncation=true
+      reward_zero_on_truncation: false
+
+      # Mounted, writable dir (e.g. under /experiments) for one JSONL debug record
+      # per verify(), one file per pid. null disables it.
+      generation_log_dir: null
+      generation_log_filename: stem_llm_judge_generations.jsonl
+
+      domain: knowledge
+      verified: false
+      description: Broad-STEM (physics, chemistry, biology) open-answer grading with LLM-as-a-judge
+      value: Improve STEM RL training reward signal
+
+stem_llm_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: stem_llm_judge
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      # jsonl_fpath is resolved from the Gym repo root, not from this file.
+      - name: example
+        type: example
+        license: Apache 2.0
+        jsonl_fpath: resources_servers/stem_llm_judge/data/example.jsonl
