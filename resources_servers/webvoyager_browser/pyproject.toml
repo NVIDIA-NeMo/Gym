@@ -12,6 +12,9 @@ dependencies = [
   "pillow",
   "playwright==1.55.0",
   "pyautogui",
+  # `gym env test` runs pytest inside this component's isolated venv.
+  "pytest",
+  "pytest-asyncio",
 ]
 
 [tool.setuptools.packages.find]
