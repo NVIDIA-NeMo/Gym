@@ -15,18 +15,20 @@
 
 import json
 from abc import abstractmethod
+from copy import deepcopy
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from nemo_gym._checkpoint import ResourceSnapshot
 from nemo_gym.base_resources_server import BaseVerifyRequest, SimpleResourcesServer
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
 )
-from nemo_gym.rollout_correlation import RolloutContextMiddleware
+from nemo_gym.rollout_correlation import current_attempt_index, current_logical_rollout_id
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
@@ -76,27 +78,68 @@ class GymnasiumServer(SimpleResourcesServer):
     """
 
     session_state: Dict[str, Any] = Field(default_factory=dict)
+    execution_to_session: Dict[tuple[str, int], str] = Field(default_factory=dict)
 
     def setup_webserver(self) -> FastAPI:
-        app = FastAPI()
-        self.setup_session_middleware(app)
-        app.add_middleware(RolloutContextMiddleware)
+        app = super().setup_webserver()
         app.post("/reset")(self._reset_endpoint)
         app.post("/step")(self._step_endpoint)
-        app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
 
     async def _reset_endpoint(self, body: EnvResetRequest, request: Request) -> EnvResetResponse:
         session_id = request.session.get(SESSION_ID_KEY)
+        identity = self._current_identity()
+        if identity is not None and session_id is not None:
+            self.execution_to_session[identity] = session_id
         obs, info = await self.reset(body.model_extra or {}, session_id)
         return EnvResetResponse(observation=obs, info=info)
 
     async def _step_endpoint(self, body: EnvStepRequest, request: Request) -> EnvStepResponse:
-        session_id = request.session.get(SESSION_ID_KEY)
+        identity = self._current_identity()
+        session_id = self.execution_to_session.get(identity) if identity is not None else None
+        if session_id is None:
+            session_id = request.session.get(SESSION_ID_KEY)
         obs, reward, terminated, truncated, info = await self.step(body.response, body.model_extra or {}, session_id)
         if terminated or truncated:
             await self.close_session(session_id)
+            if identity is not None:
+                self.execution_to_session.pop(identity, None)
         return EnvStepResponse(observation=obs, reward=reward, terminated=terminated, truncated=truncated, info=info)
+
+    @staticmethod
+    def _current_identity() -> Optional[tuple[str, int]]:
+        rollout_id = current_logical_rollout_id()
+        attempt_index = current_attempt_index()
+        if rollout_id is None or attempt_index is None:
+            return None
+        return rollout_id, attempt_index
+
+    def checkpoint_state_enabled(self) -> bool:
+        return True
+
+    def serialize_session_state(self, state: Any) -> dict[str, Any]:
+        if not isinstance(state, dict):
+            raise TypeError(f"Gymnasium session state must be a dictionary, got {type(state).__name__}")
+        # Fail during prepare if the environment did not provide a JSON-safe
+        # logical snapshot. Live Python objects are never written implicitly.
+        return json.loads(json.dumps(state))
+
+    def deserialize_session_state(self, state: dict[str, Any]) -> Any:
+        return deepcopy(state)
+
+    async def export_checkpoint_state(self, rollout_id: str, attempt_index: int) -> dict[str, Any]:
+        session_id = self.execution_to_session[(rollout_id, attempt_index)]
+        return self.serialize_session_state(self.session_state[session_id])
+
+    async def restore_checkpoint_states(self, snapshots: list[ResourceSnapshot]) -> None:
+        replacement_state = dict(self.session_state)
+        replacement_index = dict(self.execution_to_session)
+        for snapshot in snapshots:
+            session_id = f"checkpoint:{snapshot.rollout_id}:a{snapshot.attempt_index}"
+            replacement_state[session_id] = self.deserialize_session_state(snapshot.state)
+            replacement_index[(snapshot.rollout_id, snapshot.attempt_index)] = session_id
+        self.session_state = replacement_state
+        self.execution_to_session = replacement_index
 
     async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:
         return None, {}

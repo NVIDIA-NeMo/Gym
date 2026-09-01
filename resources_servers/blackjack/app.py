@@ -48,7 +48,29 @@ def _fmt(hand: list[str]) -> str:
     return "[" + ", ".join(hand) + "]"
 
 
+def _nested_tuple(value):
+    if isinstance(value, list):
+        return tuple(_nested_tuple(item) for item in value)
+    return value
+
+
 class BlackjackEnv(GymnasiumServer):
+    def serialize_session_state(self, state: dict) -> dict:
+        return {
+            "player": list(state["player"]),
+            "dealer": list(state["dealer"]),
+            "rng_state": state["rng"].getstate(),
+        }
+
+    def deserialize_session_state(self, state: dict) -> dict:
+        rng = random.Random()
+        rng.setstate(_nested_tuple(state["rng_state"]))
+        return {
+            "player": list(state["player"]),
+            "dealer": list(state["dealer"]),
+            "rng": rng,
+        }
+
     async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:
         rng = random.Random()
         player = [_deal(rng), _deal(rng)]
