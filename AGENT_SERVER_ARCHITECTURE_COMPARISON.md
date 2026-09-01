@@ -129,10 +129,58 @@ Neither is optional if the goal is a complete trajectory, and this isn't obvious
 moment observability is on; omitting it crashes the model server at startup with a Pydantic validation
 error, not a "you forgot a flag" message.
 
+## Confirmed by real review: PR #2929
+
+Everything above was self-identified during the build. On 2026-09-01, `cwing-nvidia` (a Gym maintainer)
+left a `CHANGES_REQUESTED` review on PR #2929 that independently confirms the sharpest version of the
+"training-eligible in principle" caveat: as submitted, the in-tree agent is not actually training-eligible
+in practice, for reasons that are fixable but currently real.
+
+Four base-PR-blocking findings, all pointing at `GymResponsesChatModel._agenerate()`
+(`responses_api_agents/langchain_deepagents_agent/app.py`):
+
+- **The capture-mode path is dropped.** A request arriving at
+  `/ng-rollout/<id>/training-token-capture/v1/responses` gets forwarded to the model as a bare
+  `/ng-rollout/<id>/v1/responses` — `_agenerate()` builds its `url_path` from `rollout_path_prefix(rollout_id)`
+  alone, never consulting `self.url_path_for_request(...)`/`url_path_for_run(...)` (the methods
+  `simple_agent/app.py` actually uses for this). Training token IDs/logprobs are silently never captured;
+  nothing errors.
+- **Cookies are static for the whole request.** The original inbound cookies are resent on every internal
+  model call across a multi-turn deepagents run; `resp.cookies` from the model server is never captured or
+  threaded forward. `simple_agent` instead maintains two separate, evolving cookie jars
+  (`model_server_cookies`, `resources_server_cookies`), reassigned from each response after every call.
+- **Prior tool-call history is silently dropped on input.** `to_langchain()` filters Responses API input
+  items down to `type == "message"` only — any `function_call`/`function_call_output` items from a
+  replayed or continued trajectory are discarded rather than converted to `AIMessage.tool_calls`/`ToolMessage`.
+- **Tool calls and results are dropped from the output.** `to_responses()` builds the final response from
+  only the last non-empty `AIMessage.content` — every intermediate tool call and tool result in
+  `final_state["messages"]` is discarded. This is a permanent, unrecoverable loss of the agent trace for
+  every rollout, independent of whether structured `TrajectoryRecord` support exists yet.
+
+cwing also asked for a structural split — `app.py` currently mixes endpoint orchestration, the LangChain
+model bridge, message conversion, and request-scoped transport state in one file; the ask is to keep only
+`DeepAgentsAgent` there and move `GymResponsesChatModel` plus the conversion functions into a separate
+package-local module.
+
+The one piece of this doc's "what it buys you" list that cwing explicitly *confirmed* is fine to defer:
+full `TrajectoryRecord` support (model response IDs/usage, `TrajectoryTurn`, `TrajectoryToolCall`) can ship
+as a stacked follow-up PR. Direct quote: *"we do want support for TrajectoryRecord; it's okay to stack that
+PR on top if you want."* The four findings above are a different, narrower thing than full trajectory
+observability — they're about not silently corrupting/dropping data that already flows through the system,
+not about adding new structured capture — which is exactly why cwing treats them as base-PR-required
+rather than stackable alongside `TrajectoryRecord`.
+
+Net effect on this doc's framing: "on-policy, training-eligible in principle" undersells the gap. The
+architecture doesn't block training eligibility, but the current implementation actively breaks it
+(dropped capture path, dropped token metadata) in a way that fails silently rather than loudly — worse than
+simply "not implemented yet," since a training run against this agent today would proceed without any
+error and produce data with no token IDs.
+
 ## What it buys you
 
 - **On-policy, training-eligible in principle** — the whole reason `remote_agent` is explicitly documented
-  as eval-only.
+  as eval-only. See "Confirmed by real review" above: currently true architecturally, not yet true in this
+  implementation.
 - **Trajectory/tool-call observability is possible in principle**, unlike `remote_agent`: its own
   `service.py` docstring calls out that its bare-minimum response means deepagents' internal tool calls are
   invisible to `gym eval profile` entirely, by design. The in-tree agent doesn't currently capture that
