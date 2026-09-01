@@ -490,6 +490,8 @@ def test_invalid_request_body_does_not_drop_capture(tmp_path, request_bytes):
 def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path):
     """A caller attributes calls through the model base URL. The prefix is stripped before routing,
     while an ordinary unprefixed request remains unobserved."""
+    from nemo_gym.rollout_correlation import MODEL_CALL_ID_HEADER
+
     app = FastAPI()
 
     @app.post("/v1/responses")
@@ -515,6 +517,8 @@ def test_per_rollout_url_prefix_correlates_and_is_openai_compatible(tmp_path):
     calls = read_model_call_records(store, "task7-roll2")
     assert len(calls) == 2 and all(call.tokens_total == 4 for call in calls)
     assert len({call.model_call_id for call in calls}) == 2
+    assert r.headers[MODEL_CALL_ID_HEADER] == calls[0].model_call_id
+    assert r_repeat.headers[MODEL_CALL_ID_HEADER] == calls[1].model_call_id
     assert calls[0].model_call_id
     assert calls[0].model_ref is not None and calls[0].model_ref.name == "srv"
     assert calls[0].started_at is not None

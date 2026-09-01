@@ -19,6 +19,7 @@ from contextvars import ContextVar
 from typing import Any, Optional
 
 from pydantic import BaseModel
+from starlette.responses import JSONResponse
 
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.global_config import (
@@ -30,6 +31,43 @@ from nemo_gym.global_config import (
 
 
 _ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_rollout_id", default=None)
+_LOGICAL_ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_logical_rollout_id", default=None)
+_ATTEMPT_INDEX: ContextVar[Optional[int]] = ContextVar("nemo_gym_attempt_index", default=None)
+
+# These headers propagate execution identity independently of capture.
+# The rollout header is the stable logical ID.
+# The attempt header identifies one dispatch of that rollout.
+ROLLOUT_ID_HEADER = "x-nemo-gym-rollout-id"
+ATTEMPT_INDEX_HEADER = "x-nemo-gym-attempt-index"
+MODEL_CALL_ID_HEADER = "x-nemo-gym-model-call-id"
+
+# The transport id appends ``-a{n}`` for re-dispatch attempts. The suffix is a
+# capture and routing key, never the logical identity. This pattern recovers
+# the split when only the transport id is available; header-carried values are
+# authoritative because an explicit logical id may itself end in ``-a{n}``.
+_ATTEMPT_SUFFIX_PATTERN = re.compile(r"^(?P<logical>.+)-a(?P<attempt>\d+)$")
+
+
+def split_transport_rollout_id(rollout_id: Optional[str]) -> tuple[Optional[str], int]:
+    """Split a transport rollout id into ``(logical_id, attempt_index)``.
+
+    A missing or unsuffixed id has attempt index 0. The split is a fallback for
+    path-only sources; callers holding explicit header values must prefer them.
+    """
+    if rollout_id is None:
+        return None, 0
+    match = _ATTEMPT_SUFFIX_PATTERN.match(rollout_id)
+    if match is None:
+        return rollout_id, 0
+    return match.group("logical"), int(match.group("attempt"))
+
+
+def capture_key_for(logical_rollout_id: str, attempt_index: int) -> str:
+    """Return the attempt-qualified key used by capture paths and stores."""
+    if attempt_index < 0:
+        raise ValueError("attempt_index must be non-negative")
+    return logical_rollout_id if attempt_index == 0 else f"{logical_rollout_id}-a{attempt_index}"
+
 
 LOGICAL_REQUEST_HEADER = "x-nemo-gym-logical-request-id"
 
@@ -38,6 +76,14 @@ LOGICAL_REQUEST_HEADER = "x-nemo-gym-logical-request-id"
 # Exclude leading dots because stores also use the id as a filename component.
 # Middleware uses the same pattern.
 ROLLOUT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _run_body_field(body: BaseModel | Mapping[str, Any], key: str) -> Any:
+    if isinstance(body, Mapping):
+        return body.get(key)
+    if key == ROLLOUT_ID_KEY_NAME and hasattr(body, "capture_rollout_id"):
+        return body.capture_rollout_id
+    return getattr(body, key, None)
 
 
 def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -> Optional[str]:
@@ -53,14 +99,7 @@ def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -
     if not isinstance(body, (BaseModel, Mapping)):
         return None
 
-    def field(key: str) -> Any:
-        if isinstance(body, Mapping):
-            return body.get(key)
-        if key == ROLLOUT_ID_KEY_NAME and hasattr(body, "capture_rollout_id"):
-            return body.capture_rollout_id
-        return getattr(body, key, None)
-
-    explicit = field(ROLLOUT_ID_KEY_NAME)
+    explicit = _run_body_field(body, ROLLOUT_ID_KEY_NAME)
     if explicit is not None:
         # Reject malformed explicit ids instead of sanitizing them.
         # Rewriting would create a key the caller cannot look up.
@@ -71,28 +110,98 @@ def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -
             )
         rollout_id = explicit
     else:
-        task = field(TASK_INDEX_KEY_NAME)
-        rollout = field(ROLLOUT_INDEX_KEY_NAME)
+        task = _run_body_field(body, TASK_INDEX_KEY_NAME)
+        rollout = _run_body_field(body, ROLLOUT_INDEX_KEY_NAME)
         if task is None or rollout is None:
             return None
         rollout_id = f"{task}-{rollout}"
 
-    attempt = field(ATTEMPT_INDEX_KEY_NAME)
-    if attempt is not None and int(attempt) > 0:
-        rollout_id = f"{rollout_id}-a{int(attempt)}"
-    return rollout_id
+    attempt = int(_run_body_field(body, ATTEMPT_INDEX_KEY_NAME) or 0)
+    return capture_key_for(rollout_id, attempt)
+
+
+def execution_identity_from_run_body(
+    body: BaseModel | Mapping[str, Any] | None,
+) -> tuple[Optional[str], Optional[int]]:
+    """Return the logical rollout ID and attempt index from a run request.
+
+    This identity exists independently of observability and token capture.
+    The logical ID never includes Gym's attempt suffix.
+    """
+    if not isinstance(body, (BaseModel, Mapping)):
+        return None, None
+    explicit = _run_body_field(body, ROLLOUT_ID_KEY_NAME)
+    if explicit is not None:
+        if not (isinstance(explicit, str) and ROLLOUT_ID_PATTERN.fullmatch(explicit)):
+            raise ValueError(
+                f"{ROLLOUT_ID_KEY_NAME} must be a string of letters, digits, dots, dashes or "
+                f"underscores starting with a letter or digit; got {explicit!r}"
+            )
+        logical_rollout_id = explicit
+    else:
+        task = _run_body_field(body, TASK_INDEX_KEY_NAME)
+        rollout = _run_body_field(body, ROLLOUT_INDEX_KEY_NAME)
+        if task is None or rollout is None:
+            return None, None
+        logical_rollout_id = f"{task}-{rollout}"
+    attempt_index = int(_run_body_field(body, ATTEMPT_INDEX_KEY_NAME) or 0)
+    capture_key_for(logical_rollout_id, attempt_index)
+    return logical_rollout_id, attempt_index
 
 
 def current_rollout_id() -> Optional[str]:
+    """Return the attempt-qualified capture and routing key."""
     return _ROLLOUT_ID.get()
 
 
+def current_logical_rollout_id() -> Optional[str]:
+    """Return the stable rollout ID shared by all attempts."""
+    explicit = _LOGICAL_ROLLOUT_ID.get()
+    if explicit is not None:
+        return explicit
+    rollout_id = _ROLLOUT_ID.get()
+    return split_transport_rollout_id(rollout_id)[0]
+
+
+def current_attempt_index() -> Optional[int]:
+    """The attempt index of the current request context.
+
+    Falls back to the suffix of the transport rollout id when no explicit
+    attempt was set; ``None`` when there is no rollout context at all.
+    """
+    explicit = _ATTEMPT_INDEX.get()
+    if explicit is not None:
+        return explicit
+    rollout_id = _ROLLOUT_ID.get()
+    if rollout_id is None:
+        return None
+    return split_transport_rollout_id(rollout_id)[1]
+
+
+def current_execution_identity() -> tuple[Optional[str], Optional[int]]:
+    """Return the logical rollout ID and attempt index for this request."""
+    rollout_id = _ROLLOUT_ID.get()
+    if rollout_id is None:
+        return _LOGICAL_ROLLOUT_ID.get(), _ATTEMPT_INDEX.get()
+    return current_logical_rollout_id(), current_attempt_index()
+
+
 @contextmanager
-def rollout_context(rollout_id: Optional[str]) -> Iterator[None]:
+def rollout_context(
+    rollout_id: Optional[str],
+    attempt_index: Optional[int] = None,
+    *,
+    logical_rollout_id: Optional[str] = None,
+) -> Iterator[None]:
+    """Install an attempt-qualified capture key and its execution identity."""
     token = _ROLLOUT_ID.set(rollout_id)
+    logical_token = _LOGICAL_ROLLOUT_ID.set(logical_rollout_id)
+    attempt_token = _ATTEMPT_INDEX.set(attempt_index)
     try:
         yield
     finally:
+        _ATTEMPT_INDEX.reset(attempt_token)
+        _LOGICAL_ROLLOUT_ID.reset(logical_token)
         _ROLLOUT_ID.reset(token)
 
 
@@ -108,13 +217,82 @@ class RolloutContextMiddleware:
     def __init__(self, app: Any) -> None:
         self._app = app
 
+    @staticmethod
+    def _identity_from_headers(scope: dict[str, Any]) -> tuple[Optional[str], Optional[int], Optional[str]]:
+        values: dict[str, set[str]] = {ROLLOUT_ID_HEADER: set(), ATTEMPT_INDEX_HEADER: set()}
+        for name, value in scope.get("headers") or ():
+            key = name.decode("latin-1").lower()
+            if key in values:
+                values[key].add(value.decode("latin-1"))
+        if any(len(entries) > 1 for entries in values.values()):
+            return None, None, "conflicting duplicate execution identity headers"
+        rollout_values = values[ROLLOUT_ID_HEADER]
+        attempt_values = values[ATTEMPT_INDEX_HEADER]
+        if bool(rollout_values) != bool(attempt_values):
+            return None, None, "rollout ID and attempt index headers must be sent together"
+        if not rollout_values:
+            return None, None, None
+        rollout_id = next(iter(rollout_values))
+        attempt_raw = next(iter(attempt_values))
+        if ROLLOUT_ID_PATTERN.fullmatch(rollout_id) is None:
+            return None, None, "invalid logical rollout ID header"
+        try:
+            attempt_index = int(attempt_raw)
+        except ValueError:
+            return None, None, "invalid attempt index header"
+        if attempt_index < 0:
+            return None, None, "attempt index must be non-negative"
+        return rollout_id, attempt_index, None
+
+    @staticmethod
+    async def _reject(scope: dict[str, Any], receive: Any, send: Any, detail: str) -> None:
+        response = JSONResponse(
+            status_code=409,
+            content={"error": {"code": "execution_identity_mismatch", "detail": detail}},
+        )
+        await response(scope, receive, send)
+
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        match = self._PREFIX.match(scope.get("path", "")) if scope.get("type") == "http" else None
-        if match is None:
+        if scope.get("type") != "http":
             await self._app(scope, receive, send)
+            return
+
+        match = self._PREFIX.match(scope.get("path", ""))
+        logical_rollout_id, attempt_index, identity_error = self._identity_from_headers(scope)
+        if identity_error is not None:
+            await self._reject(scope, receive, send, identity_error)
+            return
+
+        if match is None:
+            if logical_rollout_id is None or attempt_index is None:
+                await self._app(scope, receive, send)
+                return
+            capture_key = capture_key_for(logical_rollout_id, attempt_index)
+            with rollout_context(
+                capture_key,
+                attempt_index=attempt_index,
+                logical_rollout_id=logical_rollout_id,
+            ):
+                await self._app(scope, receive, send)
+            return
+
+        capture_key = match.group("rollout_id")
+        if logical_rollout_id is None:
+            logical_rollout_id, attempt_index = split_transport_rollout_id(capture_key)
+        elif capture_key_for(logical_rollout_id, attempt_index or 0) != capture_key:
+            await self._reject(
+                scope,
+                receive,
+                send,
+                "capture path does not match the logical rollout ID and attempt index headers",
+            )
             return
 
         path = match.group("rest")
         scope = {**scope, "path": path, "raw_path": path.encode()}
-        with rollout_context(match.group("rollout_id")):
+        with rollout_context(
+            capture_key,
+            attempt_index=attempt_index,
+            logical_rollout_id=logical_rollout_id,
+        ):
             await self._app(scope, receive, send)

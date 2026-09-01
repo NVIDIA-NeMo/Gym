@@ -75,7 +75,15 @@ from nemo_gym.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import (
+    ATTEMPT_INDEX_HEADER,
+    ROLLOUT_ID_HEADER,
+    current_attempt_index,
+    current_logical_rollout_id,
+    current_rollout_id,
+    execution_identity_from_run_body,
+    maybe_rollout_id_from_run_body,
+)
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
@@ -489,9 +497,13 @@ class ServerClient(BaseModel):
         observability_enabled = self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False)
         server_entry = self.global_config_dict.get(server_name)
         rollout_id = current_rollout_id()
+        logical_rollout_id = current_logical_rollout_id()
+        attempt_index = current_attempt_index()
         if observability_enabled and server_entry is not None and "resources_servers" in server_entry:
             if url_path == "/verify":
                 rollout_id = rollout_id or maybe_rollout_id_from_run_body(json_obj)
+                if logical_rollout_id is None:
+                    logical_rollout_id, attempt_index = execution_identity_from_run_body(json_obj)
             if rollout_id is not None and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/"):
                 url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
 
@@ -504,6 +516,18 @@ class ServerClient(BaseModel):
             and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/")
         ):
             url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
+
+        if logical_rollout_id is not None and attempt_index is not None:
+            headers = dict(kwargs.get("headers") or {})
+            supplied_rollout_id = headers.get(ROLLOUT_ID_HEADER)
+            supplied_attempt_index = headers.get(ATTEMPT_INDEX_HEADER)
+            if supplied_rollout_id is not None and supplied_rollout_id != logical_rollout_id:
+                raise ValueError("caller-supplied rollout ID header disagrees with the active execution")
+            if supplied_attempt_index is not None and supplied_attempt_index != str(attempt_index):
+                raise ValueError("caller-supplied attempt index header disagrees with the active execution")
+            headers[ROLLOUT_ID_HEADER] = logical_rollout_id
+            headers[ATTEMPT_INDEX_HEADER] = str(attempt_index)
+            kwargs["headers"] = headers
 
         return await request(method=method, url=f"{base_url}{url_path}", _internal=True, **kwargs)
 
