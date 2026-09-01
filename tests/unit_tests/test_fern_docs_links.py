@@ -15,53 +15,57 @@ def read(path: str) -> str:
 
 
 class TestFernDocsLinks(unittest.TestCase):
-    def test_benchmark_onboarding_uses_the_manifest_command_journey(self):
+    def test_benchmark_onboarding_leads_with_the_overlay_copy_path(self):
         guide = read("fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx")
 
         commands = (
-            'gym search "task description"',
-            "gym env init --benchmark my_benchmark --profile custom-gym-verifier",
-            "gym env validate my_benchmark",
-            "gym env test my_benchmark",
-            "gym env publish my_benchmark",
+            'gym search resources-servers "math word problems"',
+            "cp -r benchmarks/gsm8k benchmarks/my_bench",
+            "gym env validate --benchmark my_bench",
+            "gym eval prepare --benchmark my_bench",
+            "gym eval run --benchmark my_bench \\",
         )
         positions = [guide.index(command) for command in commands]
 
         self.assertEqual(positions, sorted(positions))
-        self.assertIn("`manifest.yaml`", guide)
+        self.assertIn("config_paths:", guide)
+        self.assertIn("_inherit_from: math_with_judge", guide)
+        self.assertLess(
+            guide.index("cp -r benchmarks/gsm8k benchmarks/my_bench"),
+            guide.index("gym env init --benchmark my_benchmark --profile custom-gym-verifier"),
+        )
 
-    def test_benchmark_onboarding_explains_every_integration_profile(self):
-        guide = read("fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx")
-
-        for profile in (
-            "custom-gym-verifier",
-            "custom-gym-agent-loop",
-            "external-agent-loop",
-            "external-rollout-driver",
-        ):
-            with self.subTest(profile=profile):
-                self.assertIn(f"`{profile}`", guide)
-
-    def test_onboarding_docs_do_not_label_manifest_commands_as_experimental(self):
+    def test_benchmark_onboarding_does_not_treat_manifest_init_as_the_catalog_path(self):
         paths = (
             "fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx",
             "fern/versions/latest/pages/contribute/environments/new-environment.mdx",
             "fern/versions/latest/pages/reference/cli-commands.mdx",
             ".agents/skills/add-benchmark/SKILL.md",
         )
-        misleading_guidance = (
-            "create an experimental layout",
-            "creates a different, experimental layout",
-            "Experimental manifest contract",
-            "Do not use `gym env init --benchmark`",
-            "Do not run `gym env init --benchmark`",
-        )
-
         for path in paths:
             guide = read(path)
-            for guidance in misleading_guidance:
-                with self.subTest(path=path, guidance=guidance):
-                    self.assertNotIn(guidance, guide)
+            with self.subTest(path=path):
+                self.assertNotIn("Legacy overlay migration", guide)
+
+        adding = read("fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx")
+        self.assertIn("Do not run `gym env init --benchmark`", adding)
+        self.assertIn("VERIFIER_FIXTURE", adding)
+
+        faq = read("fern/versions/latest/pages/reference/faq.mdx")
+        self.assertIn("No, not for pull requests to this repository.", faq)
+        self.assertIn("Should I use gym env init --benchmark?", faq)
+
+    def test_onboarding_decision_tree_sends_new_scorers_to_new_environment(self):
+        tree = read("fern/versions/latest/pages/contribute/environments/onboarding-decision-tree.mdx")
+
+        self.assertIn("Copy `benchmarks/gsm8k`", tree)
+        self.assertIn("/contribute/environments/adding-a-benchmark", tree)
+        self.assertIn("/contribute/environments/new-environment", tree)
+        reuse_row = "Same scorer, new dataset | Folder under `benchmarks/`"
+        new_scorer_row = "New scoring code | Folder under `resources_servers/`"
+        self.assertIn(reuse_row, tree)
+        self.assertIn(new_scorer_row, tree)
+        self.assertLess(tree.index(reuse_row), tree.index(new_scorer_row))
 
     def test_model_call_capture_leads_with_a_copy_paste_consumer_workflow(self):
         for version in ("latest", "v0.5.0"):

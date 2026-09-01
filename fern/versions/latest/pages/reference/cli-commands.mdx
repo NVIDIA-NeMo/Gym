@@ -162,7 +162,7 @@ gym list benchmarks --json | jq '.[].name'
 
 ### `gym list environments`
 
-List the manifest-first catalog unioned with legacy environment and benchmark configs. Manifest-backed entries expose their declared metadata; unmigrated entries remain visible with `no-manifest` status.
+List the catalog of environments and benchmarks. Manifest-backed entries expose their declared metadata. Shipped overlays currently list as `no-manifest` — that is expected; overlay PRs do not add `manifest.yaml`.
 
 | Option | Description |
 | --- | --- |
@@ -398,7 +398,7 @@ Commands for developing, running, and inspecting environments. An environment de
 Scaffold a resources server, or create a manifest-backed environment or benchmark skeleton. Workload scaffolds include a manifest, Gym config, sample data, and the extension points selected by the integration profile.
 
 <Note>
-`--environment` and `--benchmark` create manifest-backed workloads. `--reuse-verifier` additionally requires the selected resources server to export `VERIFIER_FIXTURE`; scorers that have not adopted that contract remain reusable through legacy config overlays during migration. See [Add a benchmark](/contribute/environments/adding-a-benchmark).
+`--environment` / `--benchmark` / `--reuse-verifier` create a manifest layout. Scorers in this repository do not export `VERIFIER_FIXTURE`. To contribute a catalog benchmark, copy `benchmarks/gsm8k` or run `gym env init --resources-server`. See [Add a benchmark](/contribute/environments/adding-a-benchmark).
 </Note>
 
 | Option | Description |
@@ -441,7 +441,7 @@ gym env resolve \
 
 ### `gym env validate`
 
-Validate a manifest-backed workload or legacy config without starting Ray or server subprocesses. Manifest validation resolves the Gym config offline, checks composition mirrors and datasets, and reports the resolved components. Legacy validation retains the existing config pre-flight behavior. Exits `0` when valid, or `1` with a clean message when not.
+Validate a named config or a manifest-backed workload without starting Ray or server subprocesses. Overlay and resources-server configs use `--benchmark` / `--resources-server` / `--config`. Manifest-backed names (no flag) resolve `manifest.yaml` and composition mirrors. Exits `0` when valid, or `1` with a clean message when not.
 
 | Option | Description |
 | --- | --- |

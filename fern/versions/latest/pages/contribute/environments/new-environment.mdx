@@ -60,9 +60,9 @@ resources_servers/my_server/
 
 In YAML, the scorer block is `{name}_resources_server` and the agent block is `{name}_simple_agent`. Pass the agent block as `--agent`.
 
-<Note>
-This page follows the standalone scorer path. For a complete environment or benchmark, use `gym env init --environment` or `gym env init --benchmark`; those commands add the manifest and workload composition around the scorer. See [Add a benchmark](/contribute/environments/adding-a-benchmark) for the end-to-end benchmark path.
-</Note>
+<Warning>
+For pull requests to this repository, run `gym env init --resources-server` only. `--environment`, `--reuse-verifier`, and `--benchmark` create an experimental layout — see the accordion at the bottom of this page.
+</Warning>
 
 **Next:** implement `verify()` in `app.py`.
 
@@ -204,8 +204,8 @@ If you have compute, inspect reward distribution on at least ~500 prompts with 1
 A useful training check isolates this environment (for example GRPO with NeMo RL, 64 prompts per step, 16 rollouts per prompt). Include curves and config links in the PR if you run it.
 </Accordion>
 
-<Accordion title="Manifest-backed workload contract">
-Complete environments and benchmarks use the implemented manifest-backed onboarding path:
+<Accordion title="Experimental manifest contract">
+This layout is experimental and not required for catalog PRs. Environments and benchmarks in this repository do not ship `manifest.yaml`. The commands below are implemented but incomplete.
 
 ```bash
 gym env init --environment my_eval --profile custom-gym-verifier
@@ -214,9 +214,9 @@ gym env test my_eval
 gym env publish my_eval
 ```
 
-`--reuse-verifier` requires the reused server to export `VERIFIER_FIXTURE`. Scorers that have not adopted that contract remain available through the legacy `config_paths` and `_inherit_from` overlay path during migration.
+`--reuse-verifier` requires the reused server to export `VERIFIER_FIXTURE`. Production scorers do not. Reuse them with `config_paths` and `_inherit_from` instead.
 
-The fixture contract (full-reward, zero-reward, malformed, plus reseed when `seeded`) is the local bar on that path. Publication records readiness as `experimental`. CODEOWNERS updates, immutable-version enforcement, capability checks, certificate-backed validation, and a hosted catalog index are not automated yet.
+The fixture contract (full-reward, zero-reward, malformed, plus reseed when `seeded`) is the local bar on that path. Publication records readiness as `experimental`. CODEOWNERS, immutable versions, and a hosted catalog index are not automated yet.
 
 Integration profiles (`custom-gym-verifier`, `custom-gym-agent-loop`, `external-agent-loop`, `external-rollout-driver`) classify where the episode is driven. They are authored labels, not a runtime dispatcher. See `nemo_gym/environment/manifest.py` and [CLI: gym env init](/reference/cli-commands#gym-env-init).
 </Accordion>
@@ -233,6 +233,8 @@ On multi-step rollouts, propagate `prompt_token_ids`, `generation_token_ids`, an
 - [Onboarding decision tree](/contribute/environments/onboarding-decision-tree)
 - [Add a benchmark](/contribute/environments/adding-a-benchmark)
 - [Single-Step Environment](/environment-tutorials/single-step-environment)
+- [Build Verifiers](/build-verifiers)
+- [Prepare Data](/data)
 - [Environment Components](/about/architecture)
 - [CONTRIBUTING.md](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md)
 

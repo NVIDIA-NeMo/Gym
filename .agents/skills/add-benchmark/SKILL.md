@@ -16,7 +16,7 @@ description: >
 
 Before starting, determine which type of benchmark you're adding:
 
-**Manifest-backed benchmark** — use `gym env init --benchmark <name> --profile <profile>`. Reuse an existing resources server with `--reuse-verifier` when it exports `VERIFIER_FIXTURE`; otherwise use the documented legacy overlay migration path. Human docs: `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx`.
+**Native overlay** — reuse an existing resources server. Do this first. Add `benchmarks/<name>/config.yaml` with `config_paths` and `_inherit_from` (copy `benchmarks/gsm8k`). Do **not** run `gym env init --resources-server` unless no scorer exists. Human docs: `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx`.
 
 **Native new scorer** — verification logic implemented directly in a Gym resources server:
 - Resources server implements `verify()` with reward logic
@@ -33,14 +33,7 @@ Before starting, determine which type of benchmark you're adding:
 
 ## Workflow
 
-Search environments and scorers before creating anything. The default benchmark path is:
-
-```bash
-gym search "task description"
-gym env init --benchmark my_benchmark --profile custom-gym-verifier
-```
-
-When `math_with_judge`, `mcqa`, `code_gen`, or a similar scorer exports `VERIFIER_FIXTURE`, pass `--reuse-verifier`, `--reward-range`, and the reward direction. If the scorer has not migrated to that fixture contract, copy the closest legacy overlay and stop after prepare + CLI wiring:
+If this is an overlay on `math_with_judge`, `mcqa`, `code_gen`, or similar, skip scaffolding a new server. Copy the closest overlay and stop after prepare + CLI wiring:
 
 | Task | Copy |
 | --- | --- |
@@ -48,31 +41,29 @@ When `math_with_judge`, `mcqa`, `code_gen`, or a similar scorer exports `VERIFIE
 | Multiple choice | `benchmarks/gpqa` |
 | Unit-test code | `benchmarks/livecodebench/v5_2408_2502` |
 
-Human walkthrough: `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx`. Only scaffold a standalone resources server when you are contributing a reusable scorer without a complete benchmark.
+Human walkthrough: `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx`. Only do Step 1 when no existing scorer fits.
 
 When the overlay sets `prompt_config`, JSONL rows are raw fields (`question`, `expected_answer`, …). Do **not** bake `responses_create_params.input` into those rows. `prepare()` must return a `Path` equal to `jsonl_fpath`. Keep generated JSONL gitignored.
 
-Search scorers with `gym search resources-servers "…"` (bare `gym search` defaults to environments).
+Search scorers with `gym search resources-servers "…"` (bare `gym search` defaults to environments). Do not use `gym env init --benchmark` for catalog overlays.
 
-Manifest-backed local checks and smoke test (output is required):
+Smoke test (output is required):
 
 ```bash
-gym env validate my_benchmark
-gym env test my_benchmark
-gym eval prepare --benchmark my_benchmark
-gym eval run --benchmark my_benchmark \
+gym env validate --benchmark my_bench
+gym eval prepare --benchmark my_bench
+gym eval run --benchmark my_bench \
   --model-type openai_model \
   --split benchmark \
-  --output results/my_benchmark_rollouts.jsonl \
+  --output results/my_bench_rollouts.jsonl \
   --limit 2
-gym env publish my_benchmark
 ```
 
-Legacy overlays use `gym env validate --benchmark my_bench` and do not support workload `test` or `publish`. `--no-serve` also needs `--agent`, `--input`, `--prompt-config`, and `--output`.
+`--no-serve` also needs `--agent`, `--input`, `--prompt-config`, and `--output`. Overlay-only PRs skip `gym env test --resources-server`.
 
-### Step 1: Scaffold the server
+### Step 1: Scaffold the server (new scorer only)
 
-For a standalone scorer only, run `gym env init` to generate the directory structure:
+Skip this step for an overlay. When no existing scorer fits, run `gym env init` to generate the directory structure:
 
 ```bash
 gym env init --resources-server my_benchmark
@@ -124,19 +115,14 @@ MCQA: see `benchmarks/gpqa/prepare.py` (`question`, `problem`, `options`, `expec
 
 **`example.jsonl`**: Generate 5 entries for smoke testing. This file is committed directly to git in `data/example.jsonl`.
 
-**`train`/`validation` datasets**: Upload to the GitLab dataset registry — these must NOT be committed to git.
+**`train`/`validation` datasets**: Do not commit large splits. Public default is Hugging Face `source:` in the dataset YAML ([Prepare Data](fern/versions/latest/pages/data/index.mdx)). GitLab/MLflow upload is NVIDIA-internal only:
 
 ```bash
+# NVIDIA-internal dataset registry — skip if you are not using GitLab
 gym dataset upload --storage gitlab \
     --name my_benchmark \
     --revision 0.0.1 \
     --input resources_servers/my_benchmark/data/my_dataset.jsonl
-```
-
-Requires MLflow credentials in `env.yaml` (or passed via CLI):
-```yaml
-mlflow_tracking_uri: <your-gitlab-mlflow-tracking-uri>
-mlflow_tracking_token: <your-gitlab-api-token>
 ```
 
 **`data/.gitignore`**: The scaffold generates default patterns (`*train.jsonl`, `*validation.jsonl`, etc.). If your filename doesn't match (e.g. `my_eval.jsonl`), add a custom pattern (e.g. `*eval.jsonl`). If data was previously tracked, run `git rm --cached <file>`.
@@ -148,7 +134,7 @@ gym dataset collate --config resources_servers/my_benchmark/configs/my_benchmark
     --output-dir /tmp/prepare \
     --mode example_validation
 
-# Download and prepare train/validation from GitLab
+# Download and prepare train/validation (NVIDIA-internal GitLab registry)
 gym dataset collate --config resources_servers/my_benchmark/configs/my_benchmark.yaml \
     --output-dir data/my_benchmark \
     --mode train_preparation \
@@ -194,7 +180,7 @@ Key points:
 
 For multi-turn benchmarks, either use `proof_refinement_agent` or create a custom agent. See `references/patterns.md` § "Agent Patterns".
 
-For `train`/`validation` datasets, add `gitlab_identifier` alongside `jsonl_fpath`:
+For `train`/`validation` datasets on the NVIDIA-internal GitLab registry, add `gitlab_identifier` alongside `jsonl_fpath`. Public PRs should use Hugging Face `source:` instead (see Prepare Data). Example of the internal shape:
 ```yaml
 datasets:
 - name: my_dataset
