@@ -272,6 +272,12 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
         n_input_tokens, n_cache_tokens, n_output_tokens, _ = trial.compute_token_cost_totals()
 
+        if step_rewards is not None and "reward" not in step_rewards:
+            logger.warning(
+                "Harbor verifier result for trial %s has no 'reward' key; using the first available reward or 0.0",
+                trial.id,
+            )
+
         return HarborVerifyResponse.model_validate(
             body.model_dump(by_alias=True)
             | {
