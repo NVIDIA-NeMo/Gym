@@ -1441,9 +1441,9 @@ class OpenSandboxProvider:
         )
 
     def _pty_http_client(self) -> Any:
-        import aiohttp
+        from nemo_gym.server_utils import get_global_aiohttp_client
 
-        return aiohttp.ClientSession()
+        return get_global_aiohttp_client()
 
     async def _pty_target(self, handle: SandboxHandle) -> tuple[str, dict[str, str], float | None]:
         """Resolve the sandbox's execd base URL, headers and request timeout."""
