@@ -35,6 +35,7 @@ from nemo_gym.cli.env import (
     RunConfig,
     RunHelper,
     _delete_server_venv,
+    _discover_server_dirs,
     _resolve_server_dir,
     _select_shard,
     _test_single,
@@ -57,6 +58,30 @@ from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
 from nemo_gym.environment.scaffold import ScaffoldError
 from nemo_gym.registry import EnvironmentCatalogEntry
+
+
+class TestDiscoverServerDirs:
+    def test_separates_components_missing_readmes(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        documented = tmp_path / "resources_servers" / "documented"
+        documented.mkdir(parents=True)
+        (documented / "README.md").write_text("# Documented\n")
+        (documented / "requirements.txt").write_text("")
+        (tmp_path / "responses_api_agents" / "undocumented").mkdir(parents=True)
+        (tmp_path / "responses_api_agents" / "undocumented" / "requirements.txt").write_text("")
+        monkeypatch.setattr(nemo_gym.cli.env, "component_search_roots", lambda: [tmp_path])
+
+        candidates, testable = _discover_server_dirs()
+
+        assert candidates == ["resources_servers/documented", "responses_api_agents/undocumented"]
+        assert testable == [Path("resources_servers/documented")]
+
+    def test_all_repo_components_are_testable(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.cli.env, "component_search_roots", lambda: [PARENT_DIR])
+
+        candidates, testable = _discover_server_dirs()
+        missing = sorted(set(candidates) - {str(path) for path in testable})
+
+        assert not missing, f"Components missing README.md and excluded from the server test suite: {missing}"
 
 
 class TestSelectShard:
