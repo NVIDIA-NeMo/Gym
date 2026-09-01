@@ -407,8 +407,8 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
     observed: per-turn evidence is needed rather than just raw model-call capture,
     so a rollout collected with observability disabled produces no ``ng_perf`` at all.
 
-    Token fields are summed only over model calls owned by a reasoning-turn ``AgentInvocation``,
-    excluding compaction calls -- mixing in compaction overhead would skew the token efficiency signal.
+    Token fields are summed over model calls owned by a reasoning-turn ``AgentInvocation``. This includes
+    compaction calls when a harness assigns them to the invocation without separate compaction references.
 
     ``num_turns`` counts reasoning turns summed across all invocations (an ``AgentInvocation``
     is one root-agent or subagent conversation that may span many turns). Each invocation

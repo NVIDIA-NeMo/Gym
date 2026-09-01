@@ -291,6 +291,7 @@ class TestParseOpencodeSession:
         assert compaction.summary == "condensed context"
         assert compaction.first_kept_item_id == "p5"
         assert "compaction_model_call_boundary_unavailable" in {gap.code for gap in bundle.gaps}
+        assert "model_call_ownership_unavailable" not in {gap.code for gap in bundle.gaps}
 
     def test_reports_unaddressable_compaction_boundary(self, tmp_path) -> None:
         db = _session_db(
@@ -432,6 +433,7 @@ class TestRolloutObservability:
             NeMoGymEasyInputMessage(role="user", content="configured system\n\nrequest system\n\nsolve")
         ]
         assert "agent_transcript_unavailable" in {gap.code for gap in episode.observations.gaps}
+        assert "model_call_ownership_unavailable" in {gap.code for gap in episode.observations.gaps}
 
     def test_run_attaches_artifact_observations_when_enabled(self, tmp_path: Path) -> None:
         db = _session_db(tmp_path, [("assistant", [{"type": "text", "text": "done"}])])
