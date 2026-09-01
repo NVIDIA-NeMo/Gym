@@ -125,8 +125,10 @@ class FakeHttpClient:
         self.delete_calls.append((url, headers))
         return FakeResponse(200)
 
-    async def ws_connect(self, url: str, *, headers: dict[str, str]) -> FakeWs:
+    async def ws_connect(self, url: str, *, headers: dict[str, str], heartbeat: float | None = None) -> FakeWs:
         self.ws_calls.append((url, headers))
+        self.ws_heartbeats: list[float | None] = getattr(self, "ws_heartbeats", [])
+        self.ws_heartbeats.append(heartbeat)
         if isinstance(self._ws_error, list):
             if self._ws_error:
                 raise self._ws_error.pop(0)
@@ -584,6 +586,78 @@ async def test_provider_attach_pty_reuses_endpoint(monkeypatch: pytest.MonkeyPat
     await session.close()
 
 
+async def test_pty_sockets_dial_with_heartbeat() -> None:
+    # Silent half-open sockets are what takeover timeouts are made of; every
+    # PTY dial requests websocket heartbeats so a dead peer is detected and
+    # re-dialed instead of dangling until the next takeover.
+    from nemo_gym.sandbox.providers.opensandbox.pty import attach_pty_session
+
+    client = FakeHttpClient(ws=FakeWs([CONNECTED]))
+    session = await attach_pty_session(
+        client=client,  # type: ignore[arg-type]
+        base_url="http://server/base",
+        headers={},
+        session_id="s-1",
+        request_timeout_s=5.0,
+    )
+    assert client.ws_heartbeats == [pty_module._PTY_WS_HEARTBEAT_S]
+    await session.close()
+
+
+async def test_provider_attach_pty_retries_timed_out_takeover(monkeypatch: pytest.MonkeyPatch) -> None:
+    # execd waits for the evicted client to acknowledge a takeover; a
+    # half-open peer cannot, so the first attach closes 1008 while the stale
+    # client is torn down in the background. The provider re-dials and lands.
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    class FakeRaw:
+        async def get_endpoint(self, port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint="server/v1/sandboxes/sb-1/proxy/44772", headers={})
+
+    provider = OpenSandboxProvider(connection={"domain": "server", "api_key": "k", "protocol": "https"})
+    rejected = FakeWs([], close_code=1008)
+    rejected.closed = True
+    clients = [FakeHttpClient(ws=rejected), FakeHttpClient(ws=FakeWs([CONNECTED]))]
+    handed_out: list[FakeHttpClient] = []
+    monkeypatch.setattr(
+        provider, "_pty_http_client", lambda: handed_out.append(clients[len(handed_out)]) or handed_out[-1]
+    )
+    monkeypatch.setattr(pty_module, "_PTY_TAKEOVER_RETRY_DELAYS", (0.0,))
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
+    session = await provider.attach_pty(handle, "s-7", takeover=True)
+    assert len(handed_out) == 2, "the timed-out takeover must be re-dialed once"
+    assert handed_out[0].closed, "the failed attempt's client must be released"
+    await session.close()
+
+
+async def test_provider_attach_pty_does_not_retry_without_takeover(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    class FakeRaw:
+        async def get_endpoint(self, port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint="server/v1/sandboxes/sb-1/proxy/44772", headers={})
+
+    provider = OpenSandboxProvider(connection={"domain": "server", "api_key": "k", "protocol": "https"})
+    rejected = FakeWs([], close_code=1008)
+    rejected.closed = True
+    clients_handed = 0
+
+    def _client() -> FakeHttpClient:
+        nonlocal clients_handed
+        clients_handed += 1
+        return FakeHttpClient(ws=rejected)
+
+    monkeypatch.setattr(provider, "_pty_http_client", _client)
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
+    with pytest.raises(SandboxPtyError, match="already has an attached client"):
+        await provider.attach_pty(handle, "s-7", takeover=False)
+    assert clients_handed == 1, "without takeover the rejection is definitive"
+
+
 async def test_create_rejected_before_connected_raises_and_cleans_up() -> None:
     # The session we created is torn down when the socket is rejected.
     ws = FakeWs([], close_code=1008)
@@ -955,4 +1029,126 @@ async def test_replay_offset_is_exposed() -> None:
     session, ws, _ = await _session_over([CONNECTED, _binary(replay)])
     assert await session.read() == b"tail"
     assert session.replay_offset == 4096, "callers compare this to `since` to detect evicted output"
+    await session.close()
+
+
+async def test_detach_keeps_session_alive_and_reattach_resumes() -> None:
+    ws1 = FakeWs([CONNECTED, _binary(b"\x01before")])
+    ws2 = FakeWs([CONNECTED, _binary(b"\x01after")])
+    client = FakeHttpClient(ws=[ws2])  # ws1 goes straight to the constructor
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=ws1,  # type: ignore[arg-type]
+        session_id="s-1",
+        session_url="http://server/v1/sandboxes/sb-1/proxy/44772/pty/s-1",
+        headers={"OPEN-SANDBOX-API-KEY": "k"},
+        request_timeout_s=5.0,
+    )
+    assert await session.read() == b"before"
+    await session.detach()
+    assert ws1.closed
+    assert not session.closed, "a detached session must not look prunable"
+    assert client.delete_calls == [], "detach must not end the server-side session"
+    with pytest.raises(SandboxPtyError, match="detached"):
+        await session.write(b"x")
+    await session.reattach()
+    url, _ = client.ws_calls[-1]
+    assert "since=6" in url and "takeover=1" in url
+    assert await session.read() == b"after"
+    await session.close()
+    assert len(client.delete_calls) == 1, "an owned close still ends the session"
+
+
+async def test_close_while_detached_releases_and_unblocks_readers() -> None:
+    ws = FakeWs([CONNECTED])
+    client = FakeHttpClient(ws=ws)
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=ws,  # type: ignore[arg-type]
+        session_id="s-1",
+        session_url="http://server/v1/sandboxes/sb-1/proxy/44772/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+    )
+    await session._wait_connected(1.0)
+    await session.detach()
+    await session.close()
+    assert session.closed
+    assert len(client.delete_calls) == 1
+    with pytest.raises(SandboxPtyError):
+        await session.read()
+
+
+async def test_detach_after_close_raises() -> None:
+    session, ws, _ = await _session_over([CONNECTED])
+    await session.close()
+    with pytest.raises(SandboxPtyError, match="closed"):
+        await session.detach()
+
+
+class _LaunchWs(FakeWs):
+    """Captures the marker token from the launched command into shared state."""
+
+    def __init__(self, messages: list[SimpleNamespace], state: dict[str, Any]) -> None:
+        super().__init__(messages)
+        self._state = state
+
+    async def send_bytes(self, data: bytes) -> None:
+        await super().send_bytes(data)
+        self._state["launch"] = data
+        quoted = data.decode().splitlines()[-1].split("'")
+        self._state["marker"] = f"{quoted[3]}{quoted[5]}:0\r\n".encode()
+
+
+class _ReplayWs(FakeWs):
+    """Serves one replay frame built from the captured marker."""
+
+    def __init__(self, state: dict[str, Any], *, offset: int) -> None:
+        super().__init__([CONNECTED])
+        self._state = state
+        self._offset = offset
+
+    async def __anext__(self) -> SimpleNamespace:
+        if not self._messages and not self._state.get("served"):
+            self._state["served"] = True
+            payload = b"work-output\n" + self._state["marker"]
+            return _binary(b"\x03" + struct.pack(">Q", self._offset) + payload)
+        return await super().__anext__()
+
+
+async def _detached_session_over(reply_offset: int) -> tuple[OpenSandboxPtySession, dict[str, Any], FakeHttpClient]:
+    state: dict[str, Any] = {}
+    ws1 = _LaunchWs([CONNECTED], state)
+    client = FakeHttpClient(ws=[_ReplayWs(state, offset=reply_offset)])
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=ws1,  # type: ignore[arg-type]
+        session_id="s-1",
+        session_url="http://server/v1/sandboxes/sb-1/proxy/44772/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+    )
+    return session, state, client
+
+
+async def test_run_detached_polls_and_returns_marker_delimited_output() -> None:
+    session, state, client = await _detached_session_over(reply_offset=0)
+    output, exit_code = await session.run_detached("work", poll_interval_s=0.01)
+    assert (output, exit_code) == (b"work-output\n", 0)
+    assert "since=0" in client.ws_calls[-1][0] and "takeover=1" in client.ws_calls[-1][0]
+    await session.close()
+
+
+async def test_run_detached_doesnt_raise_on_evicted_output() -> None:
+    # The replay frame starts past everything we received: bytes were evicted
+    # from the server's retained window while detached.
+    session, _, _ = await _detached_session_over(reply_offset=4096)
+    await session.run_detached("chatty", poll_interval_s=0.01)
+    await session.close()
+
+
+async def test_run_detached_launch_uses_stdin_at_eof() -> None:
+    session, state, _ = await _detached_session_over(reply_offset=0)
+    await session.run_detached("work", poll_interval_s=0.01)
+    assert b"</dev/null" in state["launch"], "detached commands must not inherit the session's endless stdin"
     await session.close()

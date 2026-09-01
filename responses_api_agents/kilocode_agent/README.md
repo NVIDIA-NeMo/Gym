@@ -14,11 +14,11 @@ by `--model-type` serves that backend and Kilo calls the model server.
 
 ```bash
 gym env start \
-  --resources-server math_with_judge/math_with_judge_kilocode_agent \
+  --config environments/kilocode_math/config.yaml \
   --model-type openai_model
 
-gym eval run --no-serve --agent math_with_judge_kilocode_agent \
-  --input resources_servers/math_with_judge/data/example.jsonl \
+gym eval run --no-serve --agent kilocode_math_agent \
+  --input environments/kilocode_math/data/example.jsonl \
   --output kilocode_rollout.jsonl
 ```
 

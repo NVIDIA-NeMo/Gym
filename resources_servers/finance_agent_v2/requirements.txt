@@ -5,11 +5,9 @@
 # exact so the benchmark is reproducible (bump deliberately).
 -e nemo-gym[dev] @ ../../
 
-# Vals model-library (provides model_library.agent.Tool / ToolOutput / base.LLM).
-# finance-agent pins `model-library==0.1.25`. Its metadata declares
-# openai[aiohttp]>=2.28.0, which cannot resolve against the vLLM-compatible openai
-# nemo-gym pins; `overrides.txt` drops that floor. The code runs on the older
-# client — only the declared floor conflicts.
+# Vals model-library provides model_library.agent.Tool, ToolOutput, and base.LLM.
+# finance-agent pins `model-library==0.1.25`.
+# Its OpenAI floor is compatible with nemo-gym's exact pin.
 model-library==0.1.25
 
 # Vals finance-agent-v2 (provides finance_agent.tools.* and finance_agent.prompt).

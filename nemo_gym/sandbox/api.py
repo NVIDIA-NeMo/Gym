@@ -40,6 +40,8 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxPtyAttach,
     create_provider,
 )
+from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
+from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
 T = TypeVar("T")
@@ -195,6 +197,8 @@ class SandboxPty:
         rows: int = 24,
         cols: int = 80,
         pty: bool = True,
+        detach: bool = False,
+        poll_interval_s: float = 15.0,
     ) -> SandboxExecResult:
         """Run one command in a terminal session and collect its output.
 
@@ -214,6 +218,22 @@ class SandboxPty:
         only), and a command that ends the shell (``exit``) raises
         ``SandboxPtyError``.
 
+        With ``detach=True`` the command runs without holding a connection
+        while it works: it starts in a session, the socket is dropped, and the
+        session is briefly re-attached every ``poll_interval_s`` to drain
+        output and check for completion, so a long command occupies a
+        connection for milliseconds per poll instead of its whole runtime
+        (completion latency is bounded by ``poll_interval_s``). Nothing is
+        written to the sandbox filesystem; output rides the server's retained
+        window (~1 MiB) between polls, comes back as one merged stream
+        (``stderr`` is ``None``), and exceeding the window raises rather than
+        returning truncated output — run bulk-output commands attached or via
+        the exec API instead. A detached exec never reuses the default-shell
+        session implicitly: without ``session`` it opens a private one. With
+        ``session``, the session is detached while the command works, must
+        not be used concurrently, and is attached and reusable again when
+        this returns.
+
         PTY mode returns all output on ``stdout`` and ``None`` stderr; pipe mode
         splits the two. A command that outlives ``timeout_s`` returns
         ``error_type="timeout"`` like ``sandbox.exec()`` rather than raising;
@@ -221,6 +241,19 @@ class SandboxPty:
         unread output behind, so discard the session rather than reusing it (an
         implicitly reused session is retired automatically).
         """
+        if detach:
+            return await self._exec_detached(
+                command,
+                session=session,
+                cwd=cwd,
+                env=env,
+                user=user,
+                rows=rows,
+                cols=cols,
+                pty=pty,
+                timeout_s=timeout_s,
+                poll_interval_s=poll_interval_s,
+            )
         implicit = False
         if session is None and cwd is None and env is None and user is None and pty and (rows, cols) == (24, 80):
             if self._default_session is not None and self._default_session.closed:
@@ -274,6 +307,59 @@ class SandboxPty:
             return_code=return_code,
         )
 
+    async def _exec_detached(
+        self,
+        command: str,
+        *,
+        session: SandboxPtySession | None,
+        cwd: str | None,
+        env: dict[str, str] | None,
+        user: str | int | None,
+        rows: int,
+        cols: int,
+        pty: bool,
+        timeout_s: int | float | None,
+        poll_interval_s: float,
+    ) -> SandboxExecResult:
+        """``exec(detach=True)``: hand the command to the session's detached
+        runner, which holds the socket only for brief completion polls."""
+        private = session is None
+        if private:
+            session = await self.create(cwd=cwd, env=env, user=user, rows=rows, cols=cols, pty=pty)
+            if self._default_session is session:
+                # Private to this call: an implicit exec() grabbing it would
+                # collide with the detach cycle.
+                self._default_session = None
+        elif cwd is not None or env is not None or user is not None:
+            raise ValueError(
+                "cwd/env/user apply only when a detached exec opens its own session; "
+                "for an existing session they are fixed at pty.create() time"
+            )
+        if not hasattr(session, "run_detached"):
+            raise NotImplementedError(f"{type(session).__name__} does not support detached execution")
+        try:
+            async with asyncio.timeout(timeout_s):
+                # Same serialization as attached session execs: one command per
+                # sandbox at a time, for the command's whole duration.
+                async with self._session_exec_lock:
+                    output, exit_code = await session.run_detached(command, poll_interval_s=poll_interval_s)
+        except (TimeoutError, asyncio.TimeoutError):
+            return _pty_timeout_result(command, timeout_s, reusable=False)
+        finally:
+            if private:
+                await session.close()
+            else:
+                try:
+                    await session.reattach()  # no-op unless a timeout left it detached
+                except Exception:
+                    pass
+        return SandboxExecResult(
+            stdout=output.decode(errors="replace"),
+            stderr=None,
+            return_code=exit_code if exit_code is not None else SANDBOX_PTY_RUNTIME_RETURN_CODE,
+            error_type=None if exit_code is not None else "pty",
+        )
+
 
 class AsyncSandbox:
     """Async sandbox object backed by a runtime provider."""
@@ -289,6 +375,10 @@ class AsyncSandbox:
         self._stopped = True
         self._closed = False
         self.pty = SandboxPty(self)
+
+    def _telemetry_provider_name(self) -> str:
+        """Provider name for span attributes (`docker`, `daytona`, `opensandbox`, ...)."""
+        return getattr(self._provider, "name", type(self._provider).__name__)
 
     def _require_handle(self) -> SandboxHandle:
         if self._handle is None or self._stopped:
@@ -307,7 +397,15 @@ class AsyncSandbox:
         if requested_spec is None:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
 
-        handle = await self._provider.create(requested_spec)
+        if is_span_group_enabled(GymSpanGroup.SANDBOX):
+            with managed_span(
+                GymSpanGroup.SANDBOX,
+                "gym.sandbox.start",
+                **{"nemo.gym.sandbox.provider": self._telemetry_provider_name()},
+            ):
+                handle = await self._provider.create(requested_spec)
+        else:
+            handle = await self._provider.create(requested_spec)
         try:
             if requested_spec.files:
                 with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
@@ -328,6 +426,39 @@ class AsyncSandbox:
         return self
 
     async def exec(
+        self,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | float | None = 180,
+        user: str | int | None = None,
+    ) -> SandboxExecResult:
+        if not is_span_group_enabled(GymSpanGroup.SANDBOX):
+            return await self._exec_uninstrumented(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        # The command itself is deliberately not recorded. In a code-execution environment
+        # it is model output or task content, which must not land in a trace backend
+        # (`safe_set_span_attributes` would redact a key named `command`, not a value that
+        # happens to be one). Provider, exit code and duration are the useful,
+        # content-free parts.
+        with managed_span(
+            GymSpanGroup.SANDBOX,
+            "gym.sandbox.exec",
+            **{"nemo.gym.sandbox.provider": self._telemetry_provider_name()},
+        ) as span:
+            result = await self._exec_uninstrumented(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+            if span is not None:
+                safe_set_span_attributes(
+                    span,
+                    {
+                        "nemo.gym.sandbox.return_code": result.return_code,
+                        "nemo.gym.sandbox.error_type": result.error_type,
+                    },
+                )
+            return result
+
+    async def _exec_uninstrumented(
         self,
         command: str,
         *,
