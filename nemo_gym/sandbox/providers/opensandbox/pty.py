@@ -106,6 +106,7 @@ class OpenSandboxPtySession:
         headers: dict[str, str],
         request_timeout_s: float | None,
         owned: bool = True,
+        takeover: bool = False,
         diagnose: Callable[[], Awaitable[str | None]] | None = None,
     ) -> None:
         self._client = client
@@ -117,6 +118,10 @@ class OpenSandboxPtySession:
         # Attached sessions belong to whoever created them: closing one detaches
         # rather than ending it.
         self._owned = owned
+        # True when the initial socket asked to take the session over: an
+        # "already attached" refusal then just means execd is still evicting
+        # the previous, dead client — not that another client owns the session.
+        self._takeover = takeover
         # Asked for a better cause when the socket dies for no admitted reason
         # (the provider checks whether the sandbox itself was OOM-killed).
         self._diagnose = diagnose
@@ -363,6 +368,10 @@ class OpenSandboxPtySession:
             query={"takeover": "1", "since": str(self._received)},
             request_timeout_s=self._request_timeout_s,
         )
+        # This socket asked to take the session over, so the new pump must
+        # treat an "already attached" refusal as execd still evicting our own
+        # previous socket, and retry.
+        self._takeover = True
         self._detached = False
         self._pump_task = asyncio.create_task(self._pump())
 
@@ -598,6 +607,7 @@ async def attach_pty_session(
         headers=headers,
         request_timeout_s=request_timeout_s,
         owned=False,
+        takeover=takeover,
         diagnose=diagnose,
     )
 
@@ -641,6 +651,7 @@ async def _start_session(
     headers: dict[str, str],
     request_timeout_s: float | None,
     owned: bool = True,
+    takeover: bool = False,
     diagnose: Callable[[], Awaitable[str | None]] | None = None,
 ) -> OpenSandboxPtySession:
     session = OpenSandboxPtySession(
@@ -651,6 +662,7 @@ async def _start_session(
         headers=headers,
         request_timeout_s=request_timeout_s,
         owned=owned,
+        takeover=takeover,
         diagnose=diagnose,
     )
     try:
