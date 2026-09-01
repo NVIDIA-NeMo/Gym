@@ -146,13 +146,13 @@ class AdmissionLimiter:
                     f"rollout {rollout_id!r} attempt {attempt_index} was closed at a checkpoint "
                     f"deadline; the restored run dispatched a replacement attempt"
                 )
-            self._seen_attempts.add((rollout_id, attempt_index))
-
         if self.state != AdmissionState.ACCEPTING:
             raise AdmissionParkedError(
                 f"admission is {self.state.value} for a checkpoint; park and re-issue this "
                 f"operation after the checkpoint completes"
             )
+        if rollout_id is not None and attempt_index is not None:
+            self._seen_attempts.add((rollout_id, attempt_index))
 
         ticket = AdmissionTicket(
             rollout_id=rollout_id,

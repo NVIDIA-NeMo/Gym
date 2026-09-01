@@ -113,6 +113,9 @@ class ResourcesCheckpointParticipant:
     def mark_terminal_after_request(self, rollout_id: str, attempt_index: int) -> None:
         self._terminal_after_request.add((rollout_id, attempt_index))
 
+    def terminal_after_request(self, rollout_id: str, attempt_index: int) -> bool:
+        return (rollout_id, attempt_index) in self._terminal_after_request
+
     def retire(self, rollout_id: str, attempt_index: int) -> None:
         key = (rollout_id, attempt_index)
         self._revisions.pop(key, None)
@@ -230,11 +233,13 @@ class ResourcesSessionMiddleware:
                 return
             self._participant.register(rollout_id, attempt_index)
             revision: Optional[int] = None
+            successful_terminal_response = False
 
             async def send_with_revision(message: dict[str, Any]) -> None:
-                nonlocal revision
+                nonlocal revision, successful_terminal_response
                 if message.get("type") == "http.response.start" and int(message.get("status", 500)) < 400:
                     if path == "/verify":
+                        successful_terminal_response = True
                         self._participant.mark_terminal_after_request(rollout_id, attempt_index)
                     revision = self._participant.record_mutation(rollout_id, attempt_index)
                     headers = list(message.get("headers") or ())
@@ -250,7 +255,9 @@ class ResourcesSessionMiddleware:
             try:
                 await self._app(scope, receive, send_with_revision)
             finally:
-                if path == "/verify":
+                if path == "/verify" and (
+                    successful_terminal_response or self._participant.terminal_after_request(rollout_id, attempt_index)
+                ):
                     self._participant.retire(rollout_id, attempt_index)
 
     @staticmethod

@@ -19,7 +19,7 @@ import time
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 
 from nemo_gym.checkpoint import (
     RESOURCE_STATE_REVISION_HEADER,
@@ -138,6 +138,25 @@ async def test_verify_retires_completed_session_before_prepare() -> None:
         response = await client.post("/verify", headers=headers)
     assert response.status_code == 200
     assert await participant.prepare(time.time() + 2) == {"sessions": 0, "state": "prepared"}
+
+
+@pytest.mark.asyncio
+async def test_failed_verify_keeps_live_session_checkpointable() -> None:
+    state = {("rollout-a", 0): {"value": 1}}
+    participant = _participant(state)
+    app = FastAPI()
+
+    @app.post("/verify")
+    async def verify():
+        return Response(status_code=503)
+
+    app.add_middleware(ResourcesSessionMiddleware, participant=participant)
+    headers = {ROLLOUT_ID_HEADER: "rollout-a", ATTEMPT_INDEX_HEADER: "0"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/verify", headers=headers)
+    assert response.status_code == 503
+    assert await participant.prepare(time.time() + 2) == {"sessions": 1, "state": "prepared"}
+    assert participant.prepared_snapshots()[0].state == {"value": 1}
 
 
 @pytest.mark.asyncio

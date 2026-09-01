@@ -140,6 +140,8 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
             self.session_id_to_tool_env.pop(session_id, None)
             if identity is not None:
                 self.execution_to_session.pop(identity, None)
+                if self._checkpoint_participant is not None:
+                    self.checkpoint_participant().mark_terminal_after_request(*identity)
 
     @staticmethod
     def _current_identity() -> tuple[str, int] | None:
