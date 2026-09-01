@@ -990,6 +990,12 @@ NeMoGymChatCompletionMessageParam: TypeAlias = Annotated[
 ]
 
 
+# Provider extensions accepted by the strict chat request model beyond the
+# OpenAI SDK's own field set. Tests pin the model's fields to SDK ∪ this set so
+# unknown keys keep failing validation while these documented contracts pass.
+CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS = frozenset({"chat_template_kwargs", "thinking", "output_config"})
+
+
 class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1027,6 +1033,21 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     verbosity: Optional[Literal["low", "medium", "high"]] = None
     web_search_options: Optional[WebSearchOptions] = None
     stream: Optional[Literal[False]] = None
+
+    # Provider extensions Gym's own clients send through the proxies. They are
+    # typed (rather than allowed as arbitrary extras) so the strict schema still
+    # rejects typos while these documented contracts pass the ingress boundary:
+    # - ``chat_template_kwargs``: vLLM per-request template variables (e.g.
+    #   ``enable_thinking``), merged in the vLLM proxy under the configured
+    #   baseline and below per-request metadata overrides.
+    # - ``thinking`` / ``output_config``: Anthropic-compatible reasoning controls
+    #   accepted by the inference gateway for Claude judges (adaptive thinking,
+    #   effort). Kept as open mappings on purpose: the deployed contract is
+    #   ``{"type": "adaptive"}`` / ``{"effort": "high"}`` and must not be forced
+    #   through an SDK type that requires ``budget_tokens``.
+    chat_template_kwargs: Optional[Dict[str, Any]] = None
+    thinking: Optional[Dict[str, Any]] = None
+    output_config: Optional[Dict[str, Any]] = None
 
     # Disallow deprecated args
     # function_call: FunctionCall
