@@ -300,9 +300,6 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         eval_sandbox = await self._create_sandbox(test_spec)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
 
-        # @bxyu-nvidia: Activate the necessary conda environments for SWE Bench Verified Python instances
-        await eval_sandbox.exec("source /opt/miniconda3/bin/activate && conda activate testbed")
-
         if self.config.apply_anti_cheating:
             # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
             wd = (await eval_sandbox.exec("pwd")).stdout.strip()
