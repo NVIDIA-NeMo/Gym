@@ -203,10 +203,10 @@ def test_benchmark_prepare_fetches_snapshots_before_truncating_its_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A snapshot-download failure must not destroy an already-built benchmark JSONL."""
-    output = tmp_path / "enterpriseops_oracle_benchmark.jsonl"
-    output.write_text('{"existing": "rows"}\n', encoding="utf-8")
+    # DATA_DIR is patched, so output_fpath() derives the path under tmp_path.
     monkeypatch.setattr(benchmark_prepare, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(benchmark_prepare, "OUTPUT_FPATH", output)
+    output = benchmark_prepare.output_fpath()
+    output.write_text('{"existing": "rows"}\n', encoding="utf-8")
 
     def failing_ensure(**_kwargs: object) -> Path:
         raise RuntimeError("hub unreachable")
@@ -224,3 +224,18 @@ def test_prepared_snapshots_match_the_pinned_hash() -> None:
     """When the snapshots are present locally, they must match the committed pin."""
     actual = prepare_module.tree_hash(prepare_module.TOOLS_DIR, prepare_module.SNAPSHOT_FILENAMES)
     assert actual == (prepare_module.TOOLS_FILE_COUNT, prepare_module.TOOLS_TREE_SHA256)
+
+
+def test_benchmark_modes_and_output_paths_are_consistent() -> None:
+    """Each tool-set mode maps to its own output file; `gym eval prepare` raises a
+    ConfigError if this drifts from a benchmark config's `jsonl_fpath`."""
+    assert benchmark_prepare.DEFAULT_MODE == "oracle"
+    assert benchmark_prepare.VALID_MODES == ("oracle", "plus_5_tools", "plus_10_tools", "plus_15_tools")
+    names = {m: benchmark_prepare.output_fpath(m).name for m in benchmark_prepare.VALID_MODES}
+    assert names["oracle"] == "enterpriseops_oracle_benchmark.jsonl"  # unchanged for back-compat
+    assert len(set(names.values())) == len(benchmark_prepare.VALID_MODES)
+
+
+def test_benchmark_prepare_rejects_an_unknown_mode() -> None:
+    with pytest.raises(ValueError, match="Unknown mode"):
+        benchmark_prepare.prepare("plus_20_tools")
