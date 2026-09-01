@@ -47,9 +47,10 @@ gym env init --resources-server my_server
 resources_servers/my_server/
 +-- __init__.py
 +-- app.py                 # scoring code (starter tests use VerifierFixture — see step 2)
++-- example.jsonl          # scaffold writes this at the server root; CI wants data/example.jsonl
 +-- configs/my_server.yaml # block names: my_server_resources_server, my_server_simple_agent
 +-- data/
-|   +-- .gitignore
+|   +-- .gitignore         # data/example.jsonl is not created by init; add five rows here
 +-- tests/
 |   +-- __init__.py
 |   +-- test_app.py
@@ -137,9 +138,9 @@ Generate metrics:
 
 ```bash
 gym dataset collate \
-  "+config_paths=[resources_servers/my_server/configs/my_server.yaml]" \
-  +output_dirpath=data/my_server \
-  +mode=example_validation
+  --config resources_servers/my_server/configs/my_server.yaml \
+  --output-dir resources_servers/my_server/data \
+  --mode example_validation
 ```
 
 <Note>

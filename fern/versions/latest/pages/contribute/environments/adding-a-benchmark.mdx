@@ -67,7 +67,7 @@ Most overlays use Gym's default one-turn agent (`simple_agent`). If the task nee
 
 ## 2. Copy the overlay
 
-`--benchmark <name>` is the name printed by `gym list benchmarks`. For `benchmarks/gsm8k/config.yaml` that name is `gsm8k`. Nested folders use the path, for example `livecodebench/v5_2408_2502`.
+`--benchmark <name>` is the name printed by `gym list benchmarks`. For `benchmarks/gsm8k/config.yaml` that name is `gsm8k`. Nested configs do **not** shorten: `gym list` prints `livecodebench/v5_2408_2502/config`. `--benchmark livecodebench/v5_2408_2502` also resolves (it looks up `…/v5_2408_2502/config.yaml`). Copy the folder `benchmarks/livecodebench/v5_2408_2502`.
 
 Copy a working example. Do not start from an empty folder.
 
@@ -81,7 +81,7 @@ cp -r benchmarks/gsm8k benchmarks/my_bench
 
 ```text
 benchmarks/my_bench/
-+-- __init__.py      # required so gym eval prepare can import prepare.py
++-- __init__.py      # gsm8k has this; not required (prepare import uses the file path)
 +-- config.yaml      # points at the existing scorer
 +-- prepare.py       # writes the JSONL that jsonl_fpath points at
 +-- README.md        # license (code vs data) and run commands
