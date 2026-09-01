@@ -1,24 +1,30 @@
 ---
 title: "Compare Harnesses"
-description: "Run the same environment with a different agent harness to measure how much of a score comes from the harness rather than the model."
+description: "Ablate the agent harness the same way you ablate the model — swap it, hold everything else fixed, and measure the score delta."
 position: 3
 ---
 
 An agent harness turns a model into an agent: it manages conversation state, routes tool calls, and
-decides when a task is complete. Two harnesses running the same model on the same tasks can score very
-differently, so a harness is a variable worth isolating rather than a fixed part of the environment.
+decides when a task is complete. Two harnesses running the same model on the same tasks can score vary differently, and a harness that performs well on one model can perform poorly on another. Treat the harness as a variable worth isolating, not a fixed part of the environment.
 
 `--agent-type` runs an environment or benchmark with a harness other than the one its config names,
-without editing any config:
+without editing any config. To ablate the harness, hold everything else fixed — model, dataset, and repeat count — and vary only `--agent-type`, writing each run to its own output:
 
 ```bash
 gym list agents
 gym eval run --agent-type hermes_agent --benchmark gpqa --model-type vllm_model
 ```
 
-Holding the model, dataset, and repeat count fixed while changing only `--agent-type` gives you the
-harness contribution to the score. Refer to
-[Swapping the agent](/reference/cli-commands#swapping-the-agent) for the flag reference.
+Each run writes its own `_aggregate_metrics.json` next to its rollouts file. Comparing those across harnesses *is* the ablation — for example (illustrative, not real output):
+
+| Harness | Pass rate |
+|---|---|
+| `simple_agent` | 41% |
+| `hermes_agent` | 68% |
+| `openclaw_agent` | 35% |
+
+A spread this size, with the model and dataset held identical, means the harness — not the model — is the lever to pull. Refer to [Diagnose Results](/evaluation/diagnose-results) to have an agent explain *why* the harnesses diverged, or [Aggregate Metrics](/evaluation/aggregate-metrics) to build your own comparison across shards. For the flag reference itself, see
+[Swapping the agent](/reference/cli-commands#swapping-the-agent).
 
 ## The composed instance is renamed
 
@@ -53,7 +59,7 @@ NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING=1) to bypass the check.
 ```
 
 <Warning>
-`--allow-unsupported-pairing` runs the pairing anyway. Scores from an undeclared pairing may not mean
+`--allow-unsupported-pairing` bypasses this check at your own risk: an unsupported harness can score incorrectly without erroring.
 what they appear to mean — the harness might not be compatible with the resources server.
 </Warning>
 
