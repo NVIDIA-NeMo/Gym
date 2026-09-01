@@ -295,6 +295,14 @@ def _log_create_retry(retry_state: Any) -> None:
         exception,
     )
 
+    from nemo_gym.telemetry._fallbacks import is_span_group_enabled
+    from nemo_gym.telemetry.span_groups import GymSpanGroup
+
+    if is_span_group_enabled(GymSpanGroup.SANDBOX):
+        from nemo_gym.telemetry.gym_metrics import record_sandbox_create_retry
+
+        record_sandbox_create_retry(provider="daytona")
+
 
 def _log_operation_retry(retry_state: Any) -> None:
     exception = retry_state.outcome.exception() if retry_state.outcome else None
