@@ -1,9 +1,7 @@
 # LangChain DeepAgents Agent
 
-Runs a [LangChain DeepAgents](https://python.langchain.com/docs/experimental/deep_agents/) graph as a
-native NeMo Gym agent server — model calls go through Gym's own `model_server` (on-policy) instead of
-the agent bringing its own model client. This is the in-tree counterpart to `examples/langchain_deepagent`
-(which proxies the same graph through `remote_agent` from an externally-hosted service instead).
+Runs a [LangChain DeepAgents](https://python.langchain.com/docs/experimental/deep_agents/) agent as a
+native NeMo Gym agent server — model calls go through Gym's own `model_server` (on-policy).
 
 ## Quick start
 
@@ -49,10 +47,6 @@ gym env start --resources-server tavily_search/tavily_search_langchain_deepagent
     --model-type inference_provider/openrouter
 ```
 
-`inference_provider/openrouter` proxies to OpenRouter — the same backend `examples/langchain_deepagent`
-talks to directly, so reward numbers are comparable. Any other `responses_api_models` implementation
-(`vllm_model`, `local_vllm_model`, ...) works too; just swap `--model-type`.
-
 To attach this agent to a different resources server, add the generic
 [`configs/langchain_deepagents_agent.yaml`](configs/langchain_deepagents_agent.yaml) alongside your
 resources server's config and override its `resources_server.name` (`???` by default):
@@ -82,24 +76,9 @@ same 5 rows) — the underlying agent and model are unchanged, only the calling 
 - `max_search_results`: max results returned per `TavilySearch` call
 - `max_steps` (inherited, unused): deepagents runs its own internal tool loop and answers in one call
 
-## Structure
-
-- `app.py` — the generic base (`DeepAgentsAgent`, `GymResponsesChatModel`). Reusable by any future
-  deepagents-based agent.
-- `reasoning_search_agent.py` — the concrete instance this repo actually runs: TavilySearch tool, same
-  system prompt as the `remote_agent` version, reused across the reasoning_gym and tavily_search combo
-  configs above. Building a *different* deepagents-based agent means writing a new sibling file here
-  (subclass `DeepAgentsAgent`, implement `build_agent(model)`), not editing `app.py`.
-
 ## Known limitation: no trajectory/observability capture (yet)
 
 This agent does not build a `TrajectoryRecord` (per-tool-call/model-call observability) — `responses()`
 always takes the plain `graph.ainvoke()` path. Reward/pass-fail scoring is unaffected either way (`verify`
 only reads `body.response.output_text`); what's missing is only the rich per-call detail Gym's own
 rollout-collection pipeline can attach to a trajectory.
-
-This was implemented and then deliberately stripped before merging. 
-It's safe to re-add later: it only ever touched `responses()` via one
-`self.graph.astream_events(...)` branch, with no architectural rework required elsewhere.
-
-**Flag this explicitly as deferred follow-up work in the MR description — not an oversight.**
