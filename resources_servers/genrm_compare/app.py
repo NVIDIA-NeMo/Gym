@@ -63,7 +63,20 @@ from resources_servers.genrm_compare.utils import (
 
 logger = logging.getLogger(__name__)
 
-ComparisonResult = Tuple[float, float, float, float, float, float, float, float, float]
+ComparisonResult = Tuple[
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+]
 
 # Cohort state for verify(): buffer by prompt_key until num_rollouts_per_prompt received (Difference 1)
 _cohort_lock: asyncio.Lock = asyncio.Lock()
@@ -176,6 +189,14 @@ class GenRMCompareVerifyResponse(BaseVerifyResponse):
     genrm_parse_failure_rate_per_group: float = 0.0
     genrm_rubric_parse_failure_rate_per_group: float = 0.0
     genrm_api_error_rate_per_group: float = 0.0
+    genrm_input_tokens_per_comparison_mean: Optional[float] = None
+    genrm_input_tokens_per_comparison_p50: Optional[float] = None
+    genrm_input_tokens_per_comparison_p95: Optional[float] = None
+    genrm_output_tokens_per_comparison_mean: Optional[float] = None
+    genrm_output_tokens_per_comparison_p50: Optional[float] = None
+    genrm_output_tokens_per_comparison_p95: Optional[float] = None
+    genrm_output_tokens_total_per_group: Optional[float] = None
+    genrm_max_output_tokens_hit_rate_per_group: Optional[float] = None
 
 
 class GenRMCompareRequest(BaseModel):
@@ -419,6 +440,36 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             ),
             "genrm_api_error_rate_per_group": sum(result[-1] for result in raw_results) / total,
         }
+        token_usage = [
+            result[6:9]
+            for result in raw_results
+            if len(result) >= 12 and result[6] >= 0 and result[7] >= 0
+        ]
+        if token_usage:
+            input_tokens = [usage[0] for usage in token_usage]
+            output_tokens = [usage[1] for usage in token_usage]
+
+            def percentile(values: List[float], fraction: float) -> float:
+                ordered = sorted(values)
+                position = (len(ordered) - 1) * fraction
+                lower = int(position)
+                upper = min(lower + 1, len(ordered) - 1)
+                return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+
+            metrics.update(
+                {
+                    "genrm_input_tokens_per_comparison_mean": sum(input_tokens) / len(input_tokens),
+                    "genrm_input_tokens_per_comparison_p50": percentile(input_tokens, 0.50),
+                    "genrm_input_tokens_per_comparison_p95": percentile(input_tokens, 0.95),
+                    "genrm_output_tokens_per_comparison_mean": sum(output_tokens) / len(output_tokens),
+                    "genrm_output_tokens_per_comparison_p50": percentile(output_tokens, 0.50),
+                    "genrm_output_tokens_per_comparison_p95": percentile(output_tokens, 0.95),
+                    "genrm_output_tokens_total_per_group": sum(output_tokens),
+                    "genrm_max_output_tokens_hit_rate_per_group": (
+                        sum(usage[2] for usage in token_usage) / len(token_usage)
+                    ),
+                }
+            )
         return (
             rewards,
             raw_scores,
@@ -676,6 +727,10 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         responses_create_params.input = messages
         responses_create_params.metadata = metadata
 
+        input_tokens = 0.0
+        output_tokens = 0.0
+        max_output_tokens_hit = 0.0
+        usage_available = False
         try:
             # Retry logic for parse failures (not connection errors, which are handled elsewhere)
             max_attempts = max(1, int(cfg.genrm_parse_retries) + 1)
@@ -687,6 +742,26 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     json=responses_create_params,
                 )
                 raw_response = await response.json()
+
+                # Include retry attempts because each one consumes GenRM capacity.
+                usage = raw_response.get("usage") or {}
+                attempt_input_tokens = usage.get(
+                    "input_tokens", usage.get("prompt_tokens")
+                )
+                attempt_output_tokens = usage.get(
+                    "output_tokens", usage.get("completion_tokens")
+                )
+                if (
+                    isinstance(attempt_input_tokens, (int, float))
+                    and not isinstance(attempt_input_tokens, bool)
+                    and isinstance(attempt_output_tokens, (int, float))
+                    and not isinstance(attempt_output_tokens, bool)
+                ):
+                    input_tokens += float(attempt_input_tokens)
+                    output_tokens += float(attempt_output_tokens)
+                    usage_available = True
+                if (raw_response.get("incomplete_details") or {}).get("reason") == "max_output_tokens":
+                    max_output_tokens_hit = 1.0
 
                 # Extract output_text from GenRM response (skip reasoning, only parse the final JSON scores)
                 genrm_answer = extract_output_text(raw_response)
@@ -722,8 +797,13 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     selected = overall
                     selected_failed = overall_failed
 
+                token_metrics = (
+                    (input_tokens, output_tokens, max_output_tokens_hit)
+                    if usage_available
+                    else (-1.0, -1.0, -1.0)
+                )
                 if not selected_failed:
-                    return (*selected, *overall, overall_failed, rubric_failed, 0.0)
+                    return (*selected, *overall, *token_metrics, overall_failed, rubric_failed, 0.0)
 
                 if attempt_idx < max_attempts - 1:
                     await asyncio.sleep(float(cfg.genrm_parse_retry_sleep_s))
@@ -733,12 +813,17 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     f"[GenRM] {cfg.score_source} parse failed for pair {pair_idx} after "
                     f"{max_attempts} attempts; falling back to defaults."
                 )
-                return (*selected, *overall, overall_failed, rubric_failed, 0.0)
+                return (*selected, *overall, *token_metrics, overall_failed, rubric_failed, 0.0)
 
         except Exception as e:
             logger.error(f"[GenRM] Error in comparison for pair {pair_idx}: {e}")
             neutral = (cfg.default_score, cfg.default_score, cfg.default_ranking)
-            return (*neutral, *neutral, 0.0, 0.0, 1.0)
+            token_metrics = (
+                (input_tokens, output_tokens, max_output_tokens_hit)
+                if usage_available
+                else (-1.0, -1.0, -1.0)
+            )
+            return (*neutral, *neutral, *token_metrics, 0.0, 0.0, 1.0)
 
 
 if __name__ == "__main__":

@@ -394,8 +394,34 @@ class TestGenRMCompareResourcesServer:
             second = response_2["output"][0]["content"][0]["text"]
             seen_pairs.append((first, second))
             if first == "rollout":
-                return 5.0, 1.0, 1.0, 4.0, 2.0, 2.0, 0.0, 0.0, 0.0
-            return 1.0, 4.0, 6.0, 2.0, 3.0, 5.0, 0.0, 0.0, 0.0
+                return (
+                    5.0,
+                    1.0,
+                    1.0,
+                    4.0,
+                    2.0,
+                    2.0,
+                    100.0,
+                    20.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                )
+            return (
+                1.0,
+                4.0,
+                6.0,
+                2.0,
+                3.0,
+                5.0,
+                200.0,
+                40.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+            )
 
         monkeypatch.setattr(server, "_run_single_comparison", compare)
         (
@@ -418,6 +444,14 @@ class TestGenRMCompareResourcesServer:
         assert adjustments == approx([0.0])
         assert metrics["genrm_parse_failure_rate_per_group"] == 0.0
         assert metrics["genrm_rubric_parse_failure_rate_per_group"] == 0.0
+        assert metrics["genrm_input_tokens_per_comparison_mean"] == 150.0
+        assert metrics["genrm_input_tokens_per_comparison_p50"] == 150.0
+        assert metrics["genrm_input_tokens_per_comparison_p95"] == 195.0
+        assert metrics["genrm_output_tokens_per_comparison_mean"] == 30.0
+        assert metrics["genrm_output_tokens_per_comparison_p50"] == 30.0
+        assert metrics["genrm_output_tokens_per_comparison_p95"] == 39.0
+        assert metrics["genrm_output_tokens_total_per_group"] == 60.0
+        assert metrics["genrm_max_output_tokens_hit_rate_per_group"] == 0.5
 
     async def test_failed_rubric_parse_is_neutral_but_not_clean(self, monkeypatch: MonkeyPatch) -> None:
         config = GenRMCompareConfig(
@@ -565,7 +599,9 @@ class TestRunSingleComparison:
             )
         )
 
-        assert result == approx((4.0, 3.0, 3.0, 2.0, 5.0, 6.0, 0.0, 0.0, 0.0))
+        assert result == approx(
+            (4.0, 3.0, 3.0, 2.0, 5.0, 6.0, -1.0, -1.0, -1.0, 0.0, 0.0, 0.0)
+        )
 
     def test_rubric_parse_failure_keeps_valid_overall_diagnostic(self):
         server, _ = self._make_server()
@@ -581,7 +617,26 @@ class TestRunSingleComparison:
             )
         )
 
-        assert result == approx((3.0, 3.0, 3.5, 4.0, 2.0, 2.0, 0.0, 1.0, 0.0))
+        assert result == approx(
+            (3.0, 3.0, 3.5, 4.0, 2.0, 2.0, -1.0, -1.0, -1.0, 0.0, 1.0, 0.0)
+        )
+
+    def test_usage_and_max_output_tokens_are_recorded(self):
+        server, mock_client = self._make_server()
+        mock_client.post.return_value.json.return_value.update(
+            {
+                "usage": {"input_tokens": 100, "output_tokens": 25},
+                "incomplete_details": {"reason": "max_output_tokens"},
+            }
+        )
+
+        result = asyncio.run(
+            server._run_single_comparison(
+                [], self._make_response_obj("one"), self._make_response_obj("two")
+            )
+        )
+
+        assert result[6:9] == approx((100.0, 25.0, 1.0))
 
     def test_rubric_mean_requires_explicit_ids(self):
         server, _ = self._make_server()
