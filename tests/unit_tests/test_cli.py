@@ -69,6 +69,7 @@ class TestDiscoverServerDirs:
         (tmp_path / "responses_api_agents" / "undocumented").mkdir(parents=True)
         (tmp_path / "responses_api_agents" / "undocumented" / "requirements.txt").write_text("")
         monkeypatch.setattr(nemo_gym.cli.env, "component_search_roots", lambda: [tmp_path])
+        monkeypatch.setattr(nemo_gym.cli.env, "_resolve_server_dir", lambda path: tmp_path / path)
 
         candidates, testable = _discover_server_dirs()
 
