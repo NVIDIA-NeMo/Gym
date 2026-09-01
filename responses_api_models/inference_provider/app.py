@@ -20,7 +20,6 @@ OpenRouter, HF Inference, Gemini and any other OpenAI-compatible provider.
 For training workloads that require token IDs, use vllm_model instead.
 """
 
-from asyncio import Semaphore
 from time import time
 from typing import Any, Dict
 
@@ -41,6 +40,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 class InferenceProviderConfig(BaseResponsesAPIModelConfig):
@@ -65,7 +65,7 @@ class InferenceProvider(SimpleResponsesAPIModel):
             return_token_id_information=False,
             uses_reasoning_parser=self.config.uses_reasoning_parser,
         )
-        self._semaphore = Semaphore(self.config.num_concurrent_requests)
+        self._semaphore = TimedSemaphore(self.config.num_concurrent_requests, site="model.inference_provider")
         return super().model_post_init(context)
 
     async def responses(

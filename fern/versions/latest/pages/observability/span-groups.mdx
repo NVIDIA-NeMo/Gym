@@ -20,7 +20,7 @@ telemetry:
 | Preset | Groups | Use When |
 | --- | --- | --- |
 | `default` | `job`, `server`, `http_client`, `rollout` | You want the shape of a run and the cross-process trace, without per-request detail. |
-| `per_rollout` | `server`, `http_client`, `rollout`, `verify`, `agent`, `model_call` | You are debugging where a rollout spends its time. Each rollout is its own trace. |
+| `per_rollout` | `server`, `http_client`, `rollout`, `verify`, `agent`, `model_call`, `concurrency` | You are debugging where a rollout spends its time, including whether it is waiting on a concurrency limit. Each rollout is its own trace. |
 | `all` | Every group, including `sandbox` | You are debugging something specific and volume does not matter. |
 
 `default` is deliberately enough on its own to produce one trace per rollout across the
@@ -43,6 +43,7 @@ run's overall shape and unusable for a run with thousands of rollouts.
 | `model_call` | `gym.model.chat_completions`, `gym.model.responses`, `gym.model.messages` | Model servers |
 | `verify` | `gym.verify` | Resources servers' `/verify` endpoint |
 | `sandbox` | `gym.sandbox.start`, `gym.sandbox.exec` | Any sandbox provider |
+| `concurrency` | none (metric only: `gym.concurrency.queue_wait_duration_ms`) | Every concurrency-limiting semaphore Gym constructs — the rollout driver, agent servers, model servers, resources-server judges, and sandbox providers |
 
 ### Groups You Should Not Disable
 

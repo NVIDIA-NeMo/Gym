@@ -32,6 +32,56 @@ would disagree the first time one dropped a sample.
 Rollout duration is recorded even when a rollout fails. A crashed rollout still consumed
 wall-clock time, and dropping those samples would bias the histogram toward the fast path.
 
+## Attributed Metrics (Bottleneck Diagnosis)
+
+The five metrics above all forward through `nemo-lens`'s `record_gym_metrics`, which is
+undimensioned at the pinned commit — see "A Note on `gym.server.request_duration_ms`"
+below for why that rules out using it for anything that needs to be broken down further.
+The metrics in this section are created directly against the OTel Metrics API instead
+(`nemo_gym.telemetry.gym_metrics`), specifically so they **can** carry attributes. Each
+answers a "what is limiting this run" question the metrics above cannot:
+
+| Metric | Type | Unit | Attributes | Gated By | Answers |
+| --- | --- | --- | --- | --- | --- |
+| `gym.concurrency.queue_wait_duration_ms` | Histogram | ms | `nemo.gym.concurrency.site` | `concurrency` | Is a task waiting for a concurrency-limiting semaphore slot instead of doing work? |
+| `gym.rollout.completed_total` | Counter | count | `nemo.gym.rollout.outcome` (`success`\|`failure`) | `rollout` | What is this run's rollout throughput and failure rate? |
+| `gym.sandbox.startup_duration_ms` | Histogram | ms | `nemo.gym.sandbox.provider` | `sandbox` | How long does provisioning one sandbox take, per provider? |
+| `gym.sandbox.create_retry_total` | Counter | count | `nemo.gym.sandbox.provider` | `sandbox` | Is sandbox creation retrying, and how often? |
+| `gym.model.call_duration_ms` | Histogram | ms | `nemo.gym.model.dialect`, `nemo.gym.server.name` | `model_call` | How long does one model-server call take, per dialect and server? |
+| `gym.model.ttft_ms` | Histogram | ms | `nemo.gym.model.dialect`, `nemo.gym.server.name` | `model_call` | How long until the first response byte — is inference queued behind other work? |
+| `gym.http.timeout_total` | Counter | count | `nemo.gym.http.internal` | `http_client` | Is an outbound HTTP call timing out? |
+| `gym.http.retry_total` | Counter | count | `nemo.gym.http.retry_reason` (`server_disconnected`\|`client_os_error`\|`timeout`\|`other`) | `http_client` | Is Gym's HTTP client retrying, and why? |
+
+### Why These Are Attributed and the First Five Are Not
+
+An undimensioned `gym.concurrency.queue_wait_duration_ms` would mix the rollout driver's
+semaphore (typically hundreds of parallel tasks) with a judge's (typically single-digit
+concurrency) into one histogram — exactly the "answers no question anyone has" failure
+`gym.server.request_duration_ms` hits below, for the same reason: a number that averages
+unrelated things together. The difference is that `record_gym_metrics` cannot be given
+attributes at the pinned `nemo-lens` commit, so the metrics above route around it and talk
+to the OTel SDK directly. Filter by `nemo.gym.concurrency.site` (or the equivalent
+attribute on the other rows) to compare like with like — e.g. is the *rollout driver*
+queueing, or is a *specific judge*, or a *specific sandbox provider*.
+
+### Trajectory Throughput Is a Counter, Not a Rate
+
+`gym.rollout.completed_total` counts completed rollouts by outcome; throughput and
+failure rate are both derived downstream (`rate(...)` in your metrics backend) rather
+than computed and flattened in NeMo Gym. This is the same tradeoff `gym.verify.success_rate`
+hit — a gauge cannot express a rate on its own — resolved the other way: that one is
+stuck with a lens-provided gauge and has to keep a cumulative running fraction instead;
+this one is a local instrument, so it can just be a counter.
+
+### Not Yet Covered: CPU / Memory Pressure
+
+NeMo Gym does not currently emit host or process CPU/memory metrics for sandboxes or
+servers. `SandboxObservation` (the offline trajectory-capture schema, unrelated to OTel)
+has `cpu_time_s` / `peak_memory_mib` fields, but nothing populates them from a real
+measurement today. Filling this in needs a resource-sampling mechanism (per-sandbox-
+provider process stats, or cgroup reads) that does not exist yet — tracked as follow-up
+work, not covered by the metrics on this page.
+
 ### What `gym.verify.success_rate` Measures
 
 It measures whether the **verification call completed**, not whether the task passed.

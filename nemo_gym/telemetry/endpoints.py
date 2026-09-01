@@ -118,6 +118,46 @@ def traced_verify_endpoint(handler: Callable, static_attributes: Optional[dict] 
     return wrapper
 
 
+def traced_model_call_endpoint(
+    handler: Callable, span_name: str, dialect: str, static_attributes: Optional[dict] = None
+) -> Callable:
+    """`traced_endpoint` for one model-server dialect route, plus `gym.model.call_duration_ms`.
+
+    One model server registers three of these (`chat_completions`/`responses`/`messages`).
+    `dialect` becomes an attribute on the duration histogram so the three are comparable
+    against each other in a dashboard rather than collapsed into one undimensioned number
+    — the same reasoning `gym.rollout.duration_ms` gets away with skipping, because a
+    rollout is one comparable unit of work and a `/v1/messages` call is not a
+    `/v1/responses` call.
+
+    For a streaming response this measures "handler returned", not "stream fully
+    drained" — a pre-existing limit of the underlying `gym.model.*` spans, not introduced
+    here.
+    """
+    import time
+
+    from nemo_gym.telemetry.gym_metrics import record_model_call_duration
+    from nemo_gym.telemetry.span_groups import GymSpanGroup
+
+    traced = traced_endpoint(GymSpanGroup.MODEL_CALL, span_name, handler, static_attributes)
+    server_name = (static_attributes or {}).get("nemo.gym.server.name")
+
+    @wraps(handler)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if not is_span_group_enabled(GymSpanGroup.MODEL_CALL):
+            return await handler(*args, **kwargs)
+
+        started = time.perf_counter()
+        try:
+            return await traced(*args, **kwargs)
+        finally:
+            record_model_call_duration(
+                (time.perf_counter() - started) * 1000.0, dialect=dialect, server_name=server_name
+            )
+
+    return wrapper
+
+
 def traced_rollout_endpoint(handler: Callable, static_attributes: Optional[dict] = None) -> Callable:
     """`traced_endpoint` for the agent's `/run`, plus `gym.rollout.duration_ms`.
 

@@ -43,6 +43,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from responses_api_agents.harbor_agent.utils import HarborAgentUtils
 
 
@@ -219,7 +220,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
-        self.sem = Semaphore(self.config.concurrency)
+        self.sem = TimedSemaphore(self.config.concurrency, site="agent.harbor_agent")
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()

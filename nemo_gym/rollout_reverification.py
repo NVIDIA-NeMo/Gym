@@ -55,6 +55,7 @@ from nemo_gym.server_utils import (
     raise_for_status,
     setup_server_client,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 # Todo after merging branch `edobrowolska/judge_failures_v2`: replace this by importing from judge.py
@@ -754,7 +755,7 @@ class RolloutReverificationHelper(BaseModel):
         semaphore = nullcontext()
         if config.num_samples_in_parallel is not None:
             print(f"Verifying with {config.num_samples_in_parallel} concurrent requests")
-            semaphore = Semaphore(config.num_samples_in_parallel)
+            semaphore = TimedSemaphore(config.num_samples_in_parallel, site="rollout_driver")
 
         pcts_to_print = [20, 40, 60, 80, 90, 95, 98, 99, 100]
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in payloads_to_reverify)

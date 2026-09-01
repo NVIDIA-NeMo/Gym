@@ -52,6 +52,7 @@ from nemo_gym.reward_profile import (
     compute_pass_majority_metrics,
     highest_k_metrics,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 # ----------------------------
@@ -130,7 +131,7 @@ class EvalPlusResourcesServer(SimpleResourcesServer):
     config: EvalPlusResourcesServerConfig
 
     def model_post_init(self, context):
-        self._semaphore: Semaphore = Semaphore(value=self.config.num_processes)
+        self._semaphore: Semaphore = TimedSemaphore(value=self.config.num_processes, site="resources.evalplus")
         self._dataset, self._expected_output = _load_dataset_and_expected(
             self.config.dataset, self.config.evalplus_version
         )

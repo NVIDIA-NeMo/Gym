@@ -398,12 +398,19 @@ class AsyncSandbox:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
 
         if is_span_group_enabled(GymSpanGroup.SANDBOX):
+            import time
+
+            from nemo_gym.telemetry.gym_metrics import record_sandbox_startup
+
+            provider_name = self._telemetry_provider_name()
+            started = time.perf_counter()
             with managed_span(
                 GymSpanGroup.SANDBOX,
                 "gym.sandbox.start",
-                **{"nemo.gym.sandbox.provider": self._telemetry_provider_name()},
+                **{"nemo.gym.sandbox.provider": provider_name},
             ):
                 handle = await self._provider.create(requested_spec)
+            record_sandbox_startup((time.perf_counter() - started) * 1000.0, provider=provider_name)
         else:
             handle = await self._provider.create(requested_spec)
         try:

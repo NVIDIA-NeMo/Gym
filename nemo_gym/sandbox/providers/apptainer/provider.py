@@ -42,6 +42,7 @@ from nemo_gym.sandbox.providers.base import (
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
 from nemo_gym.sandbox.providers.utils import path_under_mount as _path_under_mount
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 LOGGER = logging.getLogger(__name__)
@@ -292,7 +293,7 @@ class ApptainerProvider:
         self._probe = _coerce_config(probe, ApptainerProbeConfig)
         self._binary = _require_apptainer(bin_path)
         self._subprocess_env = _apptainer_subprocess_env(bin_path)
-        self._semaphore = asyncio.Semaphore(self._exec_config.concurrency)
+        self._semaphore = TimedSemaphore(self._exec_config.concurrency, site="sandbox.apptainer")
 
     async def _run(
         self,

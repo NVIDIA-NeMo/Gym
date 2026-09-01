@@ -41,7 +41,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI
@@ -57,6 +56,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import get_response_json
+from nemo_gym.telemetry.concurrency import timed_semaphore_or_null
 
 
 LOG = logging.getLogger(__name__)
@@ -242,7 +242,7 @@ class AgentIFResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         mc = self.config.judge_endpoint_max_concurrency
-        self._semaphore = asyncio.Semaphore(mc) if mc is not None else nullcontext()
+        self._semaphore = timed_semaphore_or_null(mc, site="resources.agentif")
 
     def setup_webserver(self) -> FastAPI:
         return super().setup_webserver()

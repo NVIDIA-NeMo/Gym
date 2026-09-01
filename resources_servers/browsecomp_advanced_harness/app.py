@@ -53,6 +53,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status, request
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 
@@ -798,7 +799,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         print(f"Excluded domains: {self._exclude_domains}")
 
         # Terminal/disk mode setup
-        self._bash_semaphore = asyncio.Semaphore(self.config.bash_max_concurrency)
+        self._bash_semaphore = TimedSemaphore(
+            self.config.bash_max_concurrency, site="resources.browsecomp_advanced_harness"
+        )
         self._workspace_root = self.config.workspace_root or os.environ.get("BROWSECOMP_WS_ROOT", "/tmp/browsecomp_ws")
         if self.config.workspace == "per_session":
             Path(self._workspace_root).mkdir(parents=True, exist_ok=True)

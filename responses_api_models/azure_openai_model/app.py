@@ -30,6 +30,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from responses_api_models.vllm_model.app import VLLMConverter
 
 
@@ -51,7 +52,9 @@ class AzureOpenAIModelServer(SimpleResponsesAPIModel):
             api_version=self.config.default_query.get("api-version"),
         )
         self._converter = VLLMConverter(return_token_id_information=False)
-        self._semaphore: Semaphore = Semaphore(self.config.num_concurrent_requests)
+        self._semaphore: Semaphore = TimedSemaphore(
+            self.config.num_concurrent_requests, site="model.azure_openai_model"
+        )
         return super().model_post_init(context)
 
     async def responses(

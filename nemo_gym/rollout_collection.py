@@ -83,6 +83,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
@@ -1279,7 +1280,7 @@ class RolloutCollectionHelper(BaseModel):
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
-            semaphore = Semaphore(config.num_samples_in_parallel)
+            semaphore = TimedSemaphore(config.num_samples_in_parallel, site="rollout_driver")
 
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
@@ -1880,6 +1881,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             async with semaphore:
                 started_at = time()
                 res = None
+                outcome = "failure"
                 try:
                     res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                     await raise_for_status(res)
@@ -1887,6 +1889,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     result[_NG_ROLLOUT_LATENCY_MS_KEY] = (time() - started_at) * 1000
+                    outcome = "success"
                     return row, result
                 except Exception as e:
                     print(
@@ -1903,6 +1906,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # when the body was the part that failed.
                     status = getattr(e, "status", None) or getattr(res, "status", None)
                     return row, _agent_request_failure_row(e, status)
+                finally:
+                    if is_span_group_enabled(GymSpanGroup.ROLLOUT):
+                        from nemo_gym.telemetry.gym_metrics import record_rollout_completed
+
+                        record_rollout_completed(outcome=outcome)
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),

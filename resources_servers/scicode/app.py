@@ -38,6 +38,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 # Agent sentinel for a sub-step it could not generate (ran out of context); always fails.
@@ -82,7 +83,7 @@ class ScicodeResourcesServer(SimpleResourcesServer):
     config: ScicodeResourcesServerConfig
 
     def model_post_init(self, context):
-        self._semaphore = asyncio.Semaphore(value=self.config.num_processes)
+        self._semaphore = TimedSemaphore(value=self.config.num_processes, site="resources.scicode")
 
     def _resolve_test_data(self) -> str:
         if not self.config.test_data_fpath:

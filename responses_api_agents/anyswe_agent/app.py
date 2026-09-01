@@ -38,6 +38,7 @@ from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNo
 from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import apply_rollout_prefix
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 class SWEBenchMetrics(BaseModel):
@@ -253,7 +254,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
     _server: Optional[AnySweServerConfig] = None
 
     def model_post_init(self, context: Any) -> None:
-        self._sem = Semaphore(self.config.concurrency)
+        self._sem = TimedSemaphore(self.config.concurrency, site="agent.anyswe_agent")
 
         model_url = self.config.sandbox_model_base_url or ""
         if self.config.model_server is not None:

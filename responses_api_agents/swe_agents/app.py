@@ -70,6 +70,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.profiling import Profiler
 from nemo_gym.server_utils import get_first_server_config_dict
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from responses_api_agents.swe_agents.opencode_replay import (
     build_replay_subagent_manifest,
     merge_replay_subagent_trajectories,
@@ -3030,7 +3031,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             swe_rebench_setup_dir=SWERebenchDatasetProcessor(config=self.config).setup(),
         )
 
-        self._sem = Semaphore(self.config.concurrency)
+        self._sem = TimedSemaphore(self.config.concurrency, site="agent.swe_agents")
         self._vllm_converter = VLLMConverter(return_token_id_information=True)
 
         return super().model_post_init(context)

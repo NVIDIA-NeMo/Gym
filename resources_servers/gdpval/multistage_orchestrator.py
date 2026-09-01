@@ -70,6 +70,7 @@ from nemo_gym.rollout_collection import (
     NG_TERMINAL_KEY,
     _get_max_rollout_attempts,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from resources_servers.gdpval.multistage_elo import (
     PerReferenceTotals,
     StageSpec,
@@ -855,9 +856,7 @@ async def run_e2e_multistage(
     async def run_rollouts(rows: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
         semaphore = None
         if semaphore_size:
-            from asyncio import Semaphore
-
-            semaphore = Semaphore(semaphore_size)
+            semaphore = TimedSemaphore(semaphore_size, site="resources.gdpval.multistage_orchestrator")
         results: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
         for future in helper.run_examples(rows, semaphore=semaphore or nullcontext()):
             row, result = await future

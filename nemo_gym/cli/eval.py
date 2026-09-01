@@ -53,6 +53,12 @@ from nemo_gym.global_config import (
     get_global_config_dict,
     resolve_dataset_agent,
 )
+from nemo_gym.telemetry.setup import (
+    configure_telemetry_env,
+    init_telemetry,
+    shutdown_telemetry,
+    telemetry_config_from_global_config,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -448,10 +454,25 @@ def e2e_rollout_collection():  # pragma: no cover
 def collect_rollouts():  # pragma: no cover
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
-    config = RolloutCollectionConfig.model_validate(get_global_config_dict())
+    global_config_dict = get_global_config_dict()
+    config = RolloutCollectionConfig.model_validate(global_config_dict)
     rch = RolloutCollectionHelper()
 
-    asyncio.run(rch.run_from_config(config))
+    # `--no-serve` never goes through `RunHelper.start()` (that path spawns a head server
+    # and every other process, which `--no-serve` deliberately skips to talk to servers
+    # already running elsewhere) -- so nothing else in this process ever initialises
+    # telemetry. Without this, `gym.job` and every driver-side metric (rollout throughput,
+    # rollout-driver queue-wait) silently never fires under `--no-serve`, regardless of
+    # what `telemetry:` config is passed, because `get_telemetry()` stays `None` here.
+    configure_telemetry_env(telemetry_config_from_global_config(global_config_dict))
+    init_telemetry(server_name="eval_run", server_type="orchestrator")
+    try:
+        asyncio.run(rch.run_from_config(config))
+    finally:
+        # A BatchSpanProcessor/PeriodicExportingMetricReader buffers on a timer; without an
+        # explicit flush here, a short-lived `--no-serve` process can exit before its last
+        # interval ever exports, silently dropping the tail of the run's telemetry.
+        shutdown_telemetry()
 
 
 @exit_cleanly_on_config_error
