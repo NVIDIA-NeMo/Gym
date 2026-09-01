@@ -19,12 +19,15 @@ import contextlib
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 from httpx import Cookies
 
 import nemo_gym.server_utils as server_utils
+from nemo_gym.server_utils import ServerClient
 
 
 GYM_NAME = "stub-gym"
@@ -135,6 +138,38 @@ def run_agent_flow(client: TestClient, row: Dict[str, Any], do_tool_call: bool =
 
 
 class TestSeedToolVerify:
+    def test_native_sif_directory_is_passed_to_the_managed_runtime(self) -> None:
+        from resources_servers.enterpriseops_gym.app import (
+            EnterpriseOpsGymResourcesServer,
+            EnterpriseOpsGymResourcesServerConfig,
+        )
+
+        config = EnterpriseOpsGymResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="enterpriseops_gym",
+            native_sif_dir="/shared/enterpriseops-arm64",
+        )
+        server = EnterpriseOpsGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        assert server._managed_runtime.assets.native_sif_dir == Path("/shared/enterpriseops-arm64")
+
+    def test_lifespan_starts_managed_services_and_uses_their_endpoints(self, gym_env, make_server) -> None:
+        stub_url, state = gym_env
+        server = make_server()
+        row = make_row(stub_url, [V_COUNT])
+
+        runtime = server._managed_runtime
+        assert runtime.started is False
+        with TestClient(server.setup_webserver()) as client:
+            assert runtime.started is True
+            response = client.post("/seed_session", json=row)
+            assert response.status_code == 200, response.text
+
+        assert runtime.stopped is True
+        assert len(state.seed_events) == 1
+
     def test_success_flow_and_name_collapse_counts(self, gym_env, make_server) -> None:
         stub_url, state = gym_env
         server = make_server()
@@ -363,7 +398,8 @@ class TestVerifyLifecycle:
         with TestClient(server.setup_webserver()) as client:
             client.post("/seed_session", json=row)
         assert len(state.seed_events) == 1
-        assert state.delete_events == []
+        # Server shutdown is also a cleanup boundary for abandoned rollouts.
+        assert state.delete_events == state.seed_events
 
         # The TestClient's loop is gone; recycle the pooled aiohttp session for this loop.
         if server_utils._GLOBAL_AIOHTTP_CLIENT is not None:
@@ -396,34 +432,24 @@ class TestVerifyLifecycle:
         assert result["reward"] == 0.0
 
 
-class TestReplicaPool:
-    def test_seed_sessions_round_robin_across_replicas(self, gym_env, make_server) -> None:
-        from resources_servers.enterpriseops_gym.tests.conftest import start_stub_gym
+class TestManagedServices:
+    def test_sessions_use_the_managed_service_not_the_dataset_url(self, gym_env, make_server) -> None:
+        managed_url, state = gym_env
+        server = make_server()
+        row = make_row("http://dataset-url-must-not-be-used", [V_COUNT])
 
-        url_a, state_a = gym_env
-        url_b, state_b, stop_b = start_stub_gym()
-        try:
-            server = make_server(gym_url_pools={GYM_NAME: [url_a, url_b]})
-            row = make_row(url_a, [V_COUNT])  # dataset URL is ignored when a pool is configured
+        with TestClient(server.setup_webserver()) as client:
 
-            with TestClient(server.setup_webserver()) as client:
+            class StatelessCookies(Cookies):
+                def extract_cookies(self, response):
+                    pass
 
-                class StatelessCookies(Cookies):
-                    def extract_cookies(self, response):
-                        pass
+            client._cookies = StatelessCookies(client._cookies)
+            client.post("/seed_session", json=row)
+            client.post("/seed_session", json=row)
 
-                client._cookies = StatelessCookies(client._cookies)
-
-                # Two fresh sessions -> replicas A then B.
-                client.post("/seed_session", json=row)
-                client.post("/seed_session", json=row)
-
-            assert len(state_a.seed_events) == 1
-            assert len(state_b.seed_events) == 1
-            pinned = sorted(gym.base_url for s in server.sessions.values() for gym in s.gyms.values())
-            assert pinned == sorted([url_a, url_b])
-        finally:
-            stop_b()
+        assert len(state.seed_events) == 2
+        assert {gym.base_url for session in server.sessions.values() for gym in session.gyms.values()} == {managed_url}
 
 
 class TestAggregateMetrics:

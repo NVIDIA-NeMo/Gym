@@ -34,13 +34,13 @@ import asyncio
 import json
 import logging
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -53,6 +53,7 @@ from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
 from resources_servers.enterpriseops_gym.mcp_client import MCPGymClient, load_seed_sql
+from resources_servers.enterpriseops_gym.runtime import EnterpriseOpsAssets, EnterpriseOpsServiceRuntime
 from resources_servers.enterpriseops_gym.verifier_engine import VerifierEngine
 
 
@@ -63,20 +64,14 @@ RESERVED_ROUTES = {"seed_session", "verify", "aggregate_metrics"}
 
 
 class EnterpriseOpsGymResourcesServerConfig(BaseResourcesServerConfig):
-    # Maps EOG gym server names (e.g. "sn-csm-server") to base URLs, overriding the
-    # mcp_server_url baked into the dataset rows. Useful for pointing at replicas or
-    # non-default hosts without re-converting the dataset.
-    gym_url_overrides: Dict[str, str] = Field(default_factory=dict)
-
-    # Replica pools: gym server name -> list of base URLs. Each seed_session pins its
-    # rollout to one replica round-robin (all tool calls / SQL / delete stay on it).
-    # This is the horizontal-scale lever for RL rollout collection — run N copies of a
-    # domain's MCP container and list them here. Takes precedence over gym_url_overrides.
-    gym_url_pools: Dict[str, List[str]] = Field(default_factory=dict)
-
-    # Root directory for resolving relative seed_database_file paths from the dataset
-    # (EOG task paths look like "Domain Wise DBs and Task-DB Mappings/csm/dbs/db_x.sql").
-    seed_sql_root: str = "../enterpriseops-gym"
+    # Shared cache for the pinned EnterpriseOps checkout, database archive, and SIF images.
+    # Set this to a shared HPC filesystem path when several Gym resource-server processes
+    # run on the same cluster.
+    cache_dir: str = "~/.cache/nemo_gym/enterpriseops_gym"
+    # Directory containing the verified native ARM64 service SIFs produced by
+    # `python -m resources_servers.enterpriseops_gym.arm64_images`.
+    native_sif_dir: Optional[str] = None
+    service_start_timeout_seconds: float = 60.0
 
     # Database seeding executes a full SQL dump on the gym server; bound concurrent seeds
     # per gym server so large rollout batches don't stampede it.
@@ -164,16 +159,34 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
 
     gym_clients: Dict[str, MCPGymClient] = None
     seed_semaphores: Dict[str, asyncio.Semaphore] = None
-    replica_counters: Dict[str, int] = None
     janitor_task: Optional[asyncio.Task] = None
+    _managed_runtime: Any = PrivateAttr(default=None)
 
     def model_post_init(self, __context: Any) -> None:
         self.gym_clients = {}
         self.seed_semaphores = {}
-        self.replica_counters = {}
+        self._managed_runtime = EnterpriseOpsServiceRuntime(
+            assets=EnterpriseOpsAssets(
+                Path(self.config.cache_dir).expanduser(),
+                Path(self.config.native_sif_dir).expanduser() if self.config.native_sif_dir else None,
+            ),
+            readiness_timeout_seconds=self.config.service_start_timeout_seconds,
+        )
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app_: FastAPI):
+            await self._managed_runtime.start()
+            try:
+                async with parent_lifespan(app_) as state:
+                    yield state
+            finally:
+                await self._shutdown_managed_runtime()
+
+        app.router.lifespan_context = lifespan
 
         # Catch-all tool proxy. Registered after the base routes, so /seed_session,
         # /verify, and /aggregate_metrics keep precedence (Starlette matches in order).
@@ -212,16 +225,9 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
         path = Path(seed_database_file)
         if path.is_absolute():
             return path
-        # `gym env start` forks servers with CWD = the server dir, but users naturally write
-        # seed_sql_root relative to the gym repo root — try both.
-        candidates = [
-            Path(self.config.seed_sql_root) / path,
-            PARENT_DIR / self.config.seed_sql_root / path,
-        ]
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
-        return candidates[0]
+        if self._managed_runtime.seed_root is None:
+            raise RuntimeError("EnterpriseOps services are not started")
+        return self._managed_runtime.seed_root / path
 
     def _parse_session_gyms(self, verifier_metadata: Dict[str, Any]) -> Dict[str, SessionGym]:
         gym_servers_config = verifier_metadata.get("gym_servers_config") or []
@@ -235,14 +241,9 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
                     raise ValueError(f"gym_servers_config[{idx}] missing required field: '{field}'")
 
             gym_name = server_config["mcp_server_name"]
-            pool = self.config.gym_url_pools.get(gym_name)
-            if pool:
-                # Pin this rollout to one replica, round-robin across sessions.
-                replica_index = self.replica_counters.get(gym_name, 0)
-                self.replica_counters[gym_name] = replica_index + 1
-                base_url = pool[replica_index % len(pool)]
-            else:
-                base_url = self.config.gym_url_overrides.get(gym_name, server_config["mcp_server_url"])
+            base_url = self._managed_runtime.urls.get(gym_name)
+            if base_url is None:
+                raise ValueError(f"managed EnterpriseOps service is not available: {gym_name}")
             gyms[gym_name] = SessionGym(
                 gym_name=gym_name,
                 base_url=base_url,
@@ -251,6 +252,18 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
                 auth_config=server_config.get("auth_config"),
             )
         return gyms
+
+    async def _shutdown_managed_runtime(self) -> None:
+        if self.janitor_task is not None:
+            self.janitor_task.cancel()
+            try:
+                await self.janitor_task
+            except asyncio.CancelledError:
+                pass
+            self.janitor_task = None
+        for state in self.sessions.values():
+            await self._delete_session_dbs(state)
+        await self._managed_runtime.stop()
 
     async def _seed_gym_database(self, gym: SessionGym, seed_database_file: str) -> None:
         """Seed one gym's database. Mirrors EOG: a missing seed file logs an error and

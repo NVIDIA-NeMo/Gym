@@ -42,6 +42,23 @@ from resources_servers.enterpriseops_gym.tests.stub_gym import StubGymState, cre
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+TEST_SERVICE_URLS: dict[str, str] = {}
+
+
+class StaticManagedRuntime:
+    """Test-only managed-runtime stand-in backed by the real HTTP stub gym."""
+
+    def __init__(self) -> None:
+        self.seed_root = FIXTURES_DIR
+        self.urls = TEST_SERVICE_URLS
+        self.started = False
+        self.stopped = False
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> None:
+        self.stopped = True
 
 
 @pytest.fixture(autouse=True)
@@ -99,6 +116,8 @@ def gym_env(stub_gym):
     """Per-test view of the stub gym with clean state."""
     url, state = stub_gym
     state.reset()
+    TEST_SERVICE_URLS.clear()
+    TEST_SERVICE_URLS["stub-gym"] = url
     return url, state
 
 
@@ -112,12 +131,13 @@ def make_server() -> Callable[..., EnterpriseOpsGymResourcesServer]:
                     port=8080,
                     entrypoint="",
                     name="enterpriseops_gym",
-                    seed_sql_root=str(FIXTURES_DIR),
                     janitor_interval_seconds=0,  # tests drive cleanup_expired_sessions directly
                 )
                 | config_overrides
             )
         )
-        return EnterpriseOpsGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server = EnterpriseOpsGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        server._managed_runtime = StaticManagedRuntime()
+        return server
 
     return _make

@@ -3,15 +3,16 @@
 Adapts the [ServiceNow EnterpriseOps-Gym](https://github.com/ServiceNow/EnterpriseOps-Gym)
 benchmark (Apache 2.0) to NeMo Gym: 1,150 stateful enterprise tool-use tasks across 8 domains
 (Calendar, CSM, Drive, Email, HR, ITSM, Teams, Hybrid), executed against the upstream
-Dockerized MCP gym servers and graded by SQL verifiers on final database state.
+MCP gym services and graded by SQL verifiers on final database state.
 
 ## Architecture
 
-- The upstream MCP gym servers stay external (Docker containers, one per domain). This server
-  is a thin adapter: per-rollout `/seed_session` seeds a fresh database from the task's SQL
-  snapshot and pins `{gym -> database_id}` to the session cookie; a catch-all `POST /{tool_name}`
-  proxies tool calls with the session's `x-database-id` and task context headers; `/verify`
-  runs the task's verifiers (ported verbatim from EOG) and deletes the databases.
+- `gym env start` owns seven Apptainer sandboxes, one per EOG domain. Each runs the upstream
+  FastAPI/MCP application on its assigned endpoint. Per-rollout `/seed_session` seeds a fresh
+  database from the task's SQL snapshot and pins `{gym -> database_id}` to the session cookie;
+  a catch-all `POST /{tool_name}` proxies tool calls with the session's `x-database-id` and task
+  context headers; `/verify` runs the task's verifiers (ported verbatim from EOG) and deletes
+  the databases.
 - `mcp_client.py` — pooled-aiohttp port of EOG's MCP/JSON-RPC client (one MCP session per gym
   server; per-call database ids; in-memory seed SQL cache).
 - `verifier_engine.py` — line-for-line port of EOG's verifier engine (`database_state`,
@@ -26,9 +27,27 @@ Dockerized MCP gym servers and graded by SQL verifiers on final database state.
 
 ## Prerequisites
 
-1. The EnterpriseOps-Gym checkout with `gym_dbs.zip` unzipped (`seed_sql_root` config points at it).
-2. The upstream MCP gym Docker containers running (default ports: csm 8001, teams 8002,
-   calendar 8003, email 8004, itsm 8006, hr 8008, drive 8009).
+1. Apptainer available on the host. The runtime downloads the pinned EnterpriseOps source checkout
+   and its verified `gym_dbs.zip` database archive into `cache_dir` automatically.
+2. On x86_64, the runtime pulls and caches the seven digest-pinned upstream images automatically.
+
+### ARM64 service images
+
+The published upstream service images are AMD64. On ARM64, build the seven native SIFs once before
+starting Gym. By default, `gym env start` looks for them in
+`~/.cache/nemo_gym/enterpriseops_gym/images`; if any are missing, it fails before downloading
+assets or starting a sandbox and prints the missing paths.
+
+```bash
+python -m resources_servers.enterpriseops_gym.arm64_images --all \
+  --output-dir ~/.cache/nemo_gym/enterpriseops_gym/images
+```
+
+The command pulls the pinned AMD64 source images into a sibling `source-amd64/` cache, rebuilds
+only missing native `<domain>-arm64.sif` files, and writes `<domain>-arm64.sif.provenance.json`
+next to each result. It uses rootless `apptainer build --fakeroot`; add `--sudo` on systems where
+fakeroot is unavailable. With a custom `cache_dir`, use `<cache_dir>/images` as `--output-dir`.
+Set `native_sif_dir` to use a different shared read-only SIF directory.
 
 ## Prepare assets
 

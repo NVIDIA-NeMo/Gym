@@ -7,9 +7,10 @@ HR, ITSM, Teams, Hybrid), graded by SQL verifiers on final database state. See
 
 ## Prerequisites
 
-1. The upstream MCP gym Docker containers running (7 domain servers; see the resources
-   server README for ports) and the EOG checkout with `gym_dbs.zip` unzipped
-   (`seed_sql_root` config).
+1. Apptainer on the evaluation host. Gym owns the seven domain services and materializes
+   the pinned EnterpriseOps-Gym checkout and `gym_dbs.zip` itself; no external Docker
+   containers or `seed_sql_root` setting are needed. On ARM64, build the seven native SIFs
+   first as described in the resources-server README and set `ENTERPRISEOPS_NATIVE_SIF_DIR`.
 2. Hub egress at prepare time (`huggingface.co`) for two datasets: the task split
    (`ServiceNow-AI/EnterpriseOps-Gym`) and the tool schemas
    (`nvidia/NeMo-Gym-EnterpriseOps-Assets`, fetched by the resources server's
@@ -41,7 +42,8 @@ Per-domain and macro success rates are, since those are rates.
 gym eval prepare --benchmark enterpriseops
 
 gym env start --benchmark enterpriseops --model-type openai_model \
-    "++enterpriseops_benchmark_resources_server.resources_servers.enterpriseops_gym.seed_sql_root=<abs path to EOG checkout>"
+    --model-url http://127.0.0.1:8000/v1 --model-api-key EMPTY \
+    --model <served-model-name>
 
 # Swap in a distractor split with, e.g.:
 #   gym eval prepare --benchmark enterpriseops/plus_10_tools
