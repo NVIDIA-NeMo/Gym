@@ -13,11 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
+from collections.abc import Mapping
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 
 if TYPE_CHECKING:
@@ -25,6 +26,12 @@ if TYPE_CHECKING:
     # module) and would pull the mcp SDK into agent/model processes that never need it.
     from nemo_gym.mcp_auto_exposure import MCPTool
 
+from nemo_gym.checkpoint.control import ControlCapabilities
+from nemo_gym.checkpoint.resources import (
+    ResourcesCheckpointParticipant,
+    ResourceSnapshot,
+    install_resources_checkpoint,
+)
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.judge import judge_failsafe
 from nemo_gym.openai_utils import (
@@ -35,6 +42,7 @@ from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_met
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
+from nemo_gym.token_id_capture.config import token_id_capture_config
 
 
 NEMO_GYM_MCP_SESSION_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
@@ -146,6 +154,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     config: BaseResourcesServerConfig
 
     _CONTROL_COMPONENT = "resources_servers"
+    _checkpoint_participant: Optional[ResourcesCheckpointParticipant] = PrivateAttr(default=None)
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -164,8 +173,56 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         app.get("/reverify_mode")(self.get_reverify_mode)
         self.setup_control_plane(app)
+        self.setup_resources_checkpoint(app)
 
         return app
+
+    def checkpoint_state_enabled(self) -> bool:
+        """Whether this server implements logical session export and restore."""
+        return False
+
+    async def export_checkpoint_state(self, rollout_id: str, attempt_index: int) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def restore_checkpoint_states(self, snapshots: list[ResourceSnapshot]) -> None:
+        """Validate and atomically activate all restored sessions."""
+        raise NotImplementedError
+
+    def checkpoint_participant(self) -> ResourcesCheckpointParticipant:
+        if self._checkpoint_participant is None:
+            self._checkpoint_participant = ResourcesCheckpointParticipant(
+                export_state=self.export_checkpoint_state,
+                restore_states=self.restore_checkpoint_states,
+            )
+        return self._checkpoint_participant
+
+    def checkpoint_control_auth_token(self) -> Optional[str]:
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        if not isinstance(global_config, Mapping):
+            return None
+        settings = token_id_capture_config(global_config)
+        if settings is None or not settings.token_id_capture.external_staging:
+            return None
+        return settings.token_id_capture.resolve_control_auth_token()
+
+    def setup_resources_checkpoint(self, app: FastAPI) -> None:
+        auth_token = self.checkpoint_control_auth_token()
+        if auth_token is None or not self.checkpoint_state_enabled():
+            return
+        install_resources_checkpoint(
+            app,
+            participant=self.checkpoint_participant(),
+            fence=self.checkpoint_fence(),
+            auth_token=auth_token,
+            server_name=self.config.name,
+        )
+
+    def control_capabilities(self) -> ControlCapabilities:
+        capabilities = super().control_capabilities()
+        if self.checkpoint_state_enabled() and self.checkpoint_control_auth_token() is not None:
+            capabilities.checkpoint_mode = "export_restore"
+            capabilities.concurrency_contract = "serialized_per_session"
+        return capabilities
 
     def normalize_tool_name(self, name: str) -> str:
         """Strip this server's MCP namespace from a trajectory tool-call name (see module function)."""
