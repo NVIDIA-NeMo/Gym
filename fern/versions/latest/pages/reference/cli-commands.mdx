@@ -143,12 +143,13 @@ All commands accept:
 
 ### `gym list benchmarks`
 
-List the benchmarks available in NeMo Gym, with their domain, agent, and configured number of repeats.
+List the benchmarks available in NeMo Gym, with their kind, manifest status, domain, and description.
 The value in the **Name** column is the benchmark identifier and can be passed to `--benchmark`.
+To see which agent harness a benchmark composes with, inspect it with `gym list benchmarks <name>`.
 
 | Option | Description |
 | --- | --- |
-| `[<name>]` | Inspect a single benchmark (config path, dataset, prepare script) instead of listing all. |
+| `[<name>]` | Inspect a single benchmark (config path, manifest status, agent, datasets) instead of listing all. |
 | `--json` | Output the benchmark list as JSON. |
 
 ```bash
