@@ -51,9 +51,9 @@ taskset version, config, and order.
 
 The integration intentionally runs one V1 rollout per Gym row. V1 multi-agent environments and
 group rewards are not supported. Responses harnesses preserve Gym's native output items,
-including token IDs, log probabilities, and routed-expert payloads. Chat Completions and
-Anthropic Messages harnesses remain useful for evaluation, but V1 does not retain their native
-training fields in the trace.
+including token IDs, log probabilities, and routed-expert payloads. Chat Completions harnesses
+also preserve token IDs and log probabilities. Anthropic Messages harnesses remain useful for
+evaluation, but do not retain native training fields in the trace.
 
 ## Licensing
 

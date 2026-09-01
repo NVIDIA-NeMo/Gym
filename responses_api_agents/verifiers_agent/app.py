@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import asynccontextmanager
 from itertools import islice
 from os import environ
@@ -23,7 +23,11 @@ from typing import Annotated, Any
 import verifiers.v1 as vf
 from fastapi import Body, FastAPI, HTTPException
 from pydantic import BeforeValidator, ConfigDict, Field, PrivateAttr
+from verifiers.v1.clients import BaseClientConfig, Client, EvalClient, resolve_client
+from verifiers.v1.dialects import Dialect
 from verifiers.v1.dialects.chat import message_to_wire
+from verifiers.v1.graph import PendingTurn
+from verifiers.v1.interception import server as interception_server
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -32,8 +36,45 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import POLICY_API_KEY_KEY_NAME, POLICY_MODEL_NAME_KEY_NAME
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.openai_utils import TOKEN_METADATA_FIELDS, NeMoGymResponse, TokenIDLogProbMixin
 from nemo_gym.responses_converter import ResponsesConverter
+
+
+class NeMoGymChatCompletionsClientConfig(vf.EvalClientConfig):
+    pass
+
+
+class NeMoGymChatCompletionsClient(EvalClient):
+    async def get_response(
+        self,
+        dialect: Dialect,
+        body: dict,
+        model: str,
+        sampling_args: vf.SamplingConfig,
+        session_id: str | None = None,
+        turn: PendingTurn | None = None,
+        headers: Mapping[str, str] | None = None,
+    ) -> vf.Response:
+        response = await super().get_response(dialect, body, model, sampling_args, session_id, turn, headers)
+        if dialect.upstream_path != "/chat/completions" or response.raw is None:
+            return response
+
+        message = response.raw["choices"][0]["message"]
+        if not TOKEN_METADATA_FIELDS.intersection(message):
+            return response
+        token_information = TokenIDLogProbMixin.model_validate(message)
+        response.tokens = vf.TurnTokens(
+            prompt_ids=token_information.prompt_token_ids,
+            completion_ids=token_information.generation_token_ids,
+            completion_logprobs=token_information.generation_log_probs,
+        )
+        return response
+
+
+def resolve_nemo_gym_client(config: BaseClientConfig) -> Client:
+    if isinstance(config, NeMoGymChatCompletionsClientConfig):
+        return NeMoGymChatCompletionsClient(config)
+    return resolve_client(config)
 
 
 class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
@@ -89,8 +130,15 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
 
         @asynccontextmanager
         async def lifespan(app: FastAPI):
-            async with parent_lifespan(app), self._env.serving():
-                yield
+            # The interception server resolves ModelContext client configs internally, so install
+            # the Gym-aware client resolver for this component's serving lifetime.
+            original_resolver = interception_server.resolve_client
+            interception_server.resolve_client = resolve_nemo_gym_client
+            try:
+                async with parent_lifespan(app), self._env.serving():
+                    yield
+            finally:
+                interception_server.resolve_client = original_resolver
 
         app.router.lifespan_context = lifespan
         return app
@@ -123,7 +171,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         )
         context = vf.ModelContext(
             model=model,
-            client=vf.EvalClientConfig(
+            client=NeMoGymChatCompletionsClientConfig(
                 base_url=self.resolve_model_base_url(
                     self.config.model_server.name,
                     self.rollout_id_from_run(body),
@@ -148,8 +196,18 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         calls = iter(branch.calls)
         input_items, output = [], []
         items = input_items
+        path_token_ids: list[int] = []
         for node in branch.nodes:
             message = node.message
+            token_information = None
+            if node.sampled and node.logprobs:
+                completion_length = len(node.logprobs)
+                token_information = {
+                    "prompt_token_ids": [*path_token_ids, *node.token_ids[:-completion_length]],
+                    "generation_token_ids": node.token_ids[-completion_length:],
+                    "generation_log_probs": node.logprobs,
+                }
+            path_token_ids.extend(node.token_ids)
             if node.sampled:
                 items = output
                 call = next(calls, None)
@@ -159,6 +217,8 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             wire = message_to_wire(message)
             if isinstance(message, vf.AssistantMessage) and message.reasoning_content:
                 wire["content"] = f"<think>{message.reasoning_content}</think>{message.content or ''}"
+            if token_information is not None:
+                wire.update(token_information)
             items.extend(self._converter.chat_completions_messages_to_responses_items([wire]))
 
         tools = [
