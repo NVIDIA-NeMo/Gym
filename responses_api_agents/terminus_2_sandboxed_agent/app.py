@@ -40,6 +40,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.sandbox import AsyncSandbox, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.sandbox.providers.base import SandboxPtySession
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     get_response_json,
@@ -86,8 +87,9 @@ class Terminus2AgentVerifyResponse(BaseVerifyResponse):
 class NeMoGymSandboxEnvironment:
     """The Harbor environment surface used by Terminus 2, backed by AsyncSandbox."""
 
-    def __init__(self, sandbox: AsyncSandbox, logs_dir: Path, session_id: str):
+    def __init__(self, sandbox: AsyncSandbox, logs_dir: Path, pty_session: SandboxPtySession, session_id: str):
         self._sandbox = sandbox
+        self._pty_session = pty_session
         self.default_user = None
         self.trial_paths = SimpleNamespace(agent_dir=logs_dir)
         self.session_id = session_id
@@ -101,7 +103,10 @@ class NeMoGymSandboxEnvironment:
         env: dict[str, str] | None = None,
         **_: Any,
     ) -> Any:
-        result = await self._sandbox.exec(command, timeout_s=timeout_sec, cwd=cwd, user=user, env=env)
+        if env is None:
+            result = await self._sandbox.pty.exec(command, session=self._pty_session, timeout_s=timeout_sec, cwd=cwd)
+        else:
+            raise NotImplementedError
 
         return SimpleNamespace(
             stdout=result.stdout or "",
@@ -233,21 +238,23 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
-        self._session_sandboxes: dict[str, AsyncSandbox] = {}
+        self._session_sandboxes: dict[str, tuple[AsyncSandbox, SandboxPtySession]] = {}
 
         if not self.config.debug:
             harbor_logger.setLevel(logging.WARNING)
 
-    async def _connect_sandbox(self, sandbox_id: str) -> AsyncSandbox:
+    async def _connect_sandbox(self, sandbox_id: str, pty_session_id: str) -> tuple[AsyncSandbox, SandboxPtySession]:
         provider = create_provider(resolve_provider_config(self.config.sandbox_provider, get_global_config_dict()))
         sandbox = await AsyncSandbox.connect({"sandbox_id": sandbox_id}, provider=provider)
-        return sandbox
+        pty_session = await sandbox.pty.attach(session_id=pty_session_id, takeover=True)
+        return sandbox, pty_session
 
     async def _execute(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming,
         sandbox: AsyncSandbox,
+        pty_session: SandboxPtySession | None,
     ) -> Tuple[NeMoGymResponse, bool]:
         instruction = _instruction(body.input)
 
@@ -263,7 +270,9 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         )
 
         with tempfile.TemporaryDirectory(prefix="nemo-gym-terminus-2-") as log_dir:
-            environment = NeMoGymSandboxEnvironment(sandbox, Path(log_dir), request.session[SESSION_ID_KEY])
+            environment = NeMoGymSandboxEnvironment(
+                sandbox, Path(log_dir), pty_session, request.session[SESSION_ID_KEY]
+            )
             context = AgentContext()
             agent = NeMoGymTerminus2(
                 logs_dir=Path(log_dir),
@@ -282,12 +291,13 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             await environment.exec("mkdir -p /logs/agent", user="root")
             if self.config.remote_tmux_binary_path:
                 # We add the /usr/local/bin path at the end to not supersede and pre-existing orderings.
-                tmux_install_result = await sandbox.exec(
+                tmux_install_result = await sandbox.pty.exec(
                     f"""mkdir -p /usr/local/bin \
 && cp {self.config.remote_tmux_binary_path} /usr/local/bin/tmux \
 && chmod +x /usr/local/bin/tmux \
 && export PATH=$PATH:/usr/local/bin \
 && tmux -V""",
+                    session=pty_session,
                 )
                 assert tmux_install_result.return_code == 0, tmux_install_result
             else:
@@ -330,8 +340,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         session_key = request.session[SESSION_ID_KEY]
-        sandbox = self._session_sandboxes[session_key]
-        response, _ = await self._execute(request, body, sandbox)
+        sandbox, pty_session = self._session_sandboxes[session_key]
+        response, _ = await self._execute(request, body, sandbox, pty_session)
         return response
 
     async def run(self, request: Request, body: Terminus2AgentRunRequest) -> Terminus2AgentVerifyResponse:
@@ -347,12 +357,15 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         seed_session_result = await seed_session_response.json()
 
         sandbox_id = seed_session_result["sandbox_handle"]
+        pty_session_id = seed_session_result["pty_session_id"]
 
-        sandbox = await self._connect_sandbox(sandbox_id)
+        sandbox, pty_session = await self._connect_sandbox(sandbox_id, pty_session_id)
         session_key = request.session[SESSION_ID_KEY]
-        self._session_sandboxes[session_key] = sandbox
+        self._session_sandboxes[session_key] = (sandbox, pty_session)
 
-        response, terminus2_completed = await self._execute(request, body.responses_create_params, sandbox)
+        response, terminus2_completed = await self._execute(
+            request, body.responses_create_params, sandbox, pty_session
+        )
 
         verification = await self.server_client.post(
             server_name=self.config.resources_server.name,
@@ -364,9 +377,10 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
         self._session_sandboxes.pop(session_key)
         try:
+            await pty_session.close()
             await sandbox.stop()
         except:
-            print("Failed to stop sandbox", format_exc(), file=sys.stderr)
+            print(f"Hit an exception stopping sandbox in Terminus2: {format_exc()}")
 
         result = await get_response_json(verification)
         result["terminus2_completed"] = terminus2_completed

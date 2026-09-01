@@ -24,7 +24,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxPtySession, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -45,6 +45,7 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
 
 class TerminalBench21SeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
+    pty_session_id: str
 
 
 class TerminalBench21SeedSessionRequest(BaseModel):
@@ -126,7 +127,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
 
-        self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
+        self._session_id_to_sandbox: Dict[str, Tuple[AsyncSandbox, SandboxPtySession]] = dict()
 
     def _patch_sandbox_provider_options_for_instances(
         self, task_name: str, resources: SandboxResources, provider_options: Dict[str, Any]
@@ -146,7 +147,9 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 "disk_gib": resources.disk_gib,
             }
 
-    async def _create_sandbox(self, verify_request: TerminalBench21SeedSessionRequest) -> AsyncSandbox:
+    async def _create_sandbox(
+        self, verify_request: TerminalBench21SeedSessionRequest
+    ) -> Tuple[AsyncSandbox, SandboxPtySession]:
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
@@ -185,15 +188,19 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
         await eval_sandbox.start(eval_sandbox_spec)
 
-        return eval_sandbox
+        pty_session = await eval_sandbox.pty.create()
+
+        return eval_sandbox, pty_session
 
     async def seed_session(
         self, request: Request, body: TerminalBench21SeedSessionRequest
     ) -> TerminalBench21SeedSessionResponse:
-        eval_sandbox = await self._create_sandbox(body)
-        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
+        eval_sandbox, pty_session = await self._create_sandbox(body)
+        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox, pty_session
 
-        return TerminalBench21SeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
+        return TerminalBench21SeedSessionResponse(
+            sandbox_handle=eval_sandbox._handle.sandbox_id, pty_session_id=pty_session.session_id
+        )
 
     @contextmanager
     def _patch_golden_patch_solve_sh(
@@ -242,7 +249,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if self.config.is_verifying_golden_patch:
             if self.config.debug:
                 print(f"Creating eval sandbox for {body.task_name}", file=stderr)
-            eval_sandbox = await self._create_sandbox(body)
+            eval_sandbox, pty_session = await self._create_sandbox(body)
             cwd = (await eval_sandbox.exec("pwd")).stdout.strip()
             await self._upload_folder(
                 eval_sandbox, task_folder / "solution", cwd, GOLDEN_PATCH_SOLVE_SH_PATCHES, task_name=body.task_name
@@ -250,16 +257,16 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
             if self.config.debug:
                 print(f"Running golden patch for {body.task_name}", file=stderr)
-            golden_patch_result = await eval_sandbox.exec(
-                f"bash {cwd}/solve.sh",
-                timeout_s=self.config.evaluation_timeout,
+            golden_patch_result = await eval_sandbox.pty.exec(
+                f"bash {cwd}/solve.sh", session=pty_session, timeout_s=self.config.evaluation_timeout, detach=True
             )
             golden_patch_output = (golden_patch_result.stderr or "") + (golden_patch_result.stdout or "")
             if self.config.debug:
                 print(f"Golden patch output for {body.task_name}: {golden_patch_output}", file=stderr)
         else:
             # Re-use the original sandbox
-            eval_sandbox = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
+            eval_sandbox, pty_session = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
+            pty_session = await eval_sandbox.pty.attach(session_id=pty_session.session_id, takeover=True)
             golden_patch_output = None
 
         if self.config.debug:
@@ -267,9 +274,11 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         start_time = time()
         try:
             await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
-            eval_result = await eval_sandbox.exec(
+            eval_result = await eval_sandbox.pty.exec(
                 "bash /tests/test.sh",
                 timeout_s=self.config.evaluation_timeout,
+                session=pty_session,
+                detach=True,
             )
             test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
         except:
@@ -296,6 +305,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                     print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
 
         try:
+            await pty_session.close()
             await eval_sandbox.stop()
         except:
             print(f"Hit an exception stopping sandbox: {format_exc()}", file=stderr)
