@@ -108,3 +108,50 @@ A few notable details make it more general than the [older implementation](../ha
 > [!caution]
 > Using this agent for training is currently not supported because underlying Harbor agents may not return
 > token ID information. Adding this support is currently work in progress.
+
+### ATIF Conversion Contract
+
+The source `trajectory.json` remains the lossless, authoritative ATIF artifact. The Gym rollout contains the closest
+Responses-compatible representation and an `atif_conversion` object with source paths, trajectory identifiers, and
+warnings for every conversion that is lossy or cannot be represented natively. Conversion limitations do not fail a
+rollout.
+
+The converter applies these rules:
+
+- Scalar user, system, and assistant messages, function calls, and scalar tool outputs are converted directly and
+  retain their trajectory order.
+- User and system multimodal content is converted to native `input_text` and `input_image` parts when images use
+  portable URLs.
+- Assistant multimodal content has no native Responses output-message representation, so the complete ATIF content
+  array is serialized as JSON text and documented with a warning.
+- Multimodal tool outputs are converted to `input_text` and `input_image` parts when images use HTTP, HTTPS, or data
+  URLs. Content containing local image paths is serialized as JSON because local paths are not portable Gym URLs.
+- Missing tool-call IDs receive deterministic synthetic IDs and a warning because Gym requires a call ID.
+- Missing tool output content is represented as empty text and documented.
+- Unsupported ATIF metadata, continuation references, and subagent trajectories remain available in the source ATIF
+  artifact and are listed in the conversion warnings.
+- Training metadata is emitted only when prompt IDs, non-empty completion IDs, and aligned log probabilities describe
+  one attributable LLM output. Copied context, multi-call steps, partial metadata, and ambiguous reasoning/tool-call
+  steps use ordinary output messages and record why training metadata was omitted.
+
+Example rollout metadata:
+
+```json
+{
+  "atif_conversion": {
+    "lossless": false,
+    "warnings": ["step 2: multimodal message serialized as JSON because ..."],
+    "source_trajectory_paths": ["/path/to/trial/agent/trajectory.json"],
+    "trajectories": [
+      {
+        "schema_version": "ATIF-v1.7",
+        "session_id": "session-id",
+        "trajectory_id": "trajectory-id",
+        "agent_name": "opencode",
+        "agent_version": "1.0",
+        "agent_model_name": "provider/model"
+      }
+    ]
+  }
+}
+```

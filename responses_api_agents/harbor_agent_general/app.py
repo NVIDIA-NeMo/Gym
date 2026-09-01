@@ -25,11 +25,11 @@ import ray
 from harbor.job import Job
 from harbor.models.job.config import DatasetConfig, JobConfig, RetryConfig
 from harbor.models.task.paths import TaskPaths
-from harbor.models.trajectories import Trajectory
+from harbor.models.trajectories import ContentPart, Step, Trajectory
 from harbor.models.trial.config import AgentConfig, EnvironmentConfig, VerifierConfig
 from harbor.models.trial.paths import TrialPaths
 from harbor.models.trial.result import TrialResult
-from pydantic import ConfigDict, Field, PrivateAttr, field_validator
+from pydantic import ConfigDict, Field, PrivateAttr, ValidationError, field_validator
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -70,7 +70,7 @@ def harbor_job_worker(job_config_dict: dict, task_name: str) -> str:
 
 
 class HarborAgentConfig(BaseResponsesAPIAgentConfig):
-    harbor_ray_task_num_cpus: float = Field(default=0.1, ge=0)
+    harbor_ray_task_num_cpus: float = Field(default=0.25, ge=0)
     harbor_jobs_dir: Path
     harbor_debug: bool = Field(default=False)
     harbor_max_retries: int = Field(default=0)
@@ -157,14 +157,112 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 return self.failure_response(body, err)
 
     @staticmethod
-    def convert_atif_to_gym_responses(trajectory: Trajectory) -> list[dict]:
+    def convert_atif_to_gym_responses(
+        trajectory: Trajectory, conversion_warnings: list[str] | None = None
+    ) -> list[dict]:
         output_items = []
+        warnings = conversion_warnings if conversion_warnings is not None else []
+
+        def warn(message: str) -> None:
+            warnings.append(message)
+            logger.warning("ATIF conversion: %s", message)
+
+        def convert_input_content(parts: list[ContentPart], context: str) -> str | list[dict]:
+            serialized_content = [part.model_dump(mode="json", exclude_none=True) for part in parts]
+            local_image_paths = [
+                part.source.path
+                for part in parts
+                if part.type == "image"
+                and part.source is not None
+                and not part.source.path.startswith(("http://", "https://", "data:"))
+            ]
+            if local_image_paths:
+                warn(
+                    f"{context}: content serialized as JSON because local image paths are not portable Gym image "
+                    f"URLs: {local_image_paths}"
+                )
+                return json.dumps(serialized_content)
+
+            return [
+                {"type": "input_text", "text": part.text}
+                if part.type == "text"
+                else {"type": "input_image", "image_url": part.source.path, "detail": "auto"}
+                for part in parts
+                if part.type == "text" or part.source is not None
+            ]
+
+        def append_observations(step: Step) -> None:
+            observation = step.observation
+            for result_index, result in enumerate(observation.results if observation is not None else []):
+                context = f"step {step.step_id} observation {result_index}"
+                if isinstance(result.content, str):
+                    tool_output = result.content
+                elif result.content is None:
+                    tool_output = ""
+                    warn(f"{context}: absent content represented as empty text")
+                else:
+                    tool_output = convert_input_content(result.content, context)
+
+                call_id = result.source_call_id
+                if call_id is None:
+                    call_id = f"atif-step-{step.step_id}-observation-{result_index}"
+                    warn(f"{context}: missing source_call_id represented with synthetic call_id {call_id}")
+                if result.subagent_trajectory_ref:
+                    warn(f"{context}: subagent trajectory references are preserved only in the source ATIF trajectory")
+                if result.extra:
+                    warn(f"{context}: extra metadata is preserved only in the source ATIF trajectory")
+                output_items.append(
+                    NeMoGymFunctionCallOutput(
+                        call_id=call_id,
+                        output=tool_output,
+                        type="function_call_output",
+                        id=f"fco_{uuid4().hex[:8]}",
+                        status="completed",
+                    ).model_dump()
+                )
+
+        if trajectory.continued_trajectory_ref is not None:
+            warn("continued_trajectory_ref is preserved only in the source ATIF trajectory")
+        if trajectory.subagent_trajectories:
+            warn("embedded subagent trajectories are preserved only in the source ATIF trajectory")
+        if trajectory.notes is not None or trajectory.extra:
+            warn("trajectory notes or extra metadata are preserved only in the source ATIF trajectory")
+        if trajectory.final_metrics is not None:
+            warn("ATIF final_metrics are preserved only in the source trajectory; Gym usage comes from Harbor")
+        if trajectory.agent.tool_definitions:
+            warn("ATIF tool definitions are preserved only in the source trajectory; Gym response tools remain empty")
+        if trajectory.agent.extra:
+            warn("ATIF agent extra metadata is preserved only in the source trajectory")
 
         for step in trajectory.steps:
             if step.source != "agent":
+                message_content = (
+                    step.message
+                    if isinstance(step.message, str)
+                    else convert_input_content(step.message, f"step {step.step_id} {step.source} message")
+                )
+                output_items.append(
+                    NeMoGymEasyInputMessage(
+                        role=step.source,
+                        content=message_content,
+                        type="message",
+                    ).model_dump()
+                )
+                append_observations(step)
                 continue
+            if (
+                step.timestamp is not None
+                or step.model_name is not None
+                or step.reasoning_effort is not None
+                or step.extra
+            ):
+                warn(
+                    f"step {step.step_id}: timestamp, model, reasoning effort, or extra metadata is preserved only "
+                    "in the source ATIF trajectory"
+                )
 
             if step.reasoning_content:
+                warn(f"step {step.step_id}: reasoning_content represented as a Gym reasoning summary")
                 output_items.append(
                     NeMoGymResponseReasoningItem(
                         id=f"rs_{uuid4().hex[:12]}",
@@ -173,10 +271,19 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     ).model_dump()
                 )
 
+            if isinstance(step.message, str):
+                message_text = step.message
+            else:
+                message_text = json.dumps([part.model_dump(mode="json", exclude_none=True) for part in step.message])
+                warn(
+                    f"step {step.step_id}: multimodal message serialized as JSON because Gym assistant output "
+                    "messages support only text or refusal content"
+                )
+
             content = [
                 NeMoGymResponseOutputText(
                     annotations=[],
-                    text=step.message if isinstance(step.message, str) else "",
+                    text=message_text,
                     type="output_text",
                     logprobs=None,
                 )
@@ -184,33 +291,78 @@ class HarborAgent(SimpleResponsesAPIAgent):
             metrics = step.metrics
             metrics_extra = metrics.extra if metrics is not None and metrics.extra is not None else {}
             routed_experts = metrics_extra.get("routed_experts")
+            if metrics is not None and (
+                metrics.prompt_tokens is not None
+                or metrics.completion_tokens is not None
+                or metrics.cached_tokens is not None
+                or metrics.cost_usd is not None
+                or set(metrics_extra) - {"routed_experts"}
+            ):
+                warn(
+                    f"step {step.step_id}: scalar metrics, cost, or unrecognized metric extras are preserved only "
+                    "in the source ATIF trajectory"
+                )
             prompt_token_ids = metrics.prompt_token_ids if metrics is not None else None
             completion_token_ids = metrics.completion_token_ids if metrics is not None else None
             logprobs = metrics.logprobs if metrics is not None else None
-            if completion_token_ids:
-                if logprobs is None or len(logprobs) != len(completion_token_ids):
-                    raise ValueError("Harbor trajectory completion_token_ids and logprobs must have matching lengths")
-                message = NeMoGymResponseOutputMessageForTraining(
-                    id=f"msg_{uuid4().hex[:12]}",
-                    content=content,
-                    role="assistant",
-                    status="completed",
-                    prompt_token_ids=prompt_token_ids or [],
-                    generation_token_ids=completion_token_ids,
-                    generation_log_probs=logprobs,
-                    routed_experts=routed_experts,
-                )
-            else:
+            token_metadata_present = any(
+                value is not None for value in (prompt_token_ids, completion_token_ids, logprobs, routed_experts)
+            )
+            token_metadata_issues = []
+            if not completion_token_ids:
+                token_metadata_issues.append("completion_token_ids are missing or empty")
+            if prompt_token_ids is None:
+                token_metadata_issues.append("prompt_token_ids are missing")
+            if logprobs is None:
+                token_metadata_issues.append("logprobs are missing")
+            elif completion_token_ids is None or len(logprobs) != len(completion_token_ids):
+                token_metadata_issues.append("completion_token_ids and logprobs have different lengths")
+            if step.is_copied_context:
+                token_metadata_issues.append("step is copied context")
+            if step.llm_call_count not in (None, 1):
+                token_metadata_issues.append(f"llm_call_count is {step.llm_call_count}")
+            if step.reasoning_content or step.tool_calls:
+                token_metadata_issues.append("tokens cannot be attributed across reasoning or tool-call items")
+
+            message = None
+            if token_metadata_present and not token_metadata_issues:
+                try:
+                    message = NeMoGymResponseOutputMessageForTraining(
+                        id=f"msg_{uuid4().hex[:12]}",
+                        content=content,
+                        role="assistant",
+                        status="completed",
+                        prompt_token_ids=prompt_token_ids,
+                        generation_token_ids=completion_token_ids,
+                        generation_log_probs=logprobs,
+                        routed_experts=routed_experts,
+                    )
+                except ValidationError as err:
+                    token_metadata_issues.append(f"Gym rejected token metadata: {err.errors(include_url=False)}")
+
+            if message is None:
                 message = NeMoGymResponseOutputMessage(
                     id=f"msg_{uuid4().hex[:12]}",
                     content=content,
                     role="assistant",
                     status="completed",
                 )
+                if token_metadata_present:
+                    warn(f"step {step.step_id}: training metadata omitted: {'; '.join(token_metadata_issues)}")
             output_items.append(message.model_dump())
 
             tool_calls = step.tool_calls or []
+            if len(tool_calls) > 1:
+                warn(
+                    f"step {step.step_id}: ATIF does not record whether multiple tool calls were parallel; Gym "
+                    "parallel_tool_calls remains false"
+                )
             for tool_call in tool_calls:
+                if tool_call.extra:
+                    warn(
+                        f"step {step.step_id} tool call {tool_call.tool_call_id}: extra metadata is preserved only "
+                        "in the source ATIF trajectory"
+                    )
                 output_items.append(
                     NeMoGymResponseFunctionToolCall(
                         arguments=json.dumps(tool_call.arguments),
@@ -222,17 +374,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     ).model_dump()
                 )
 
-            observation = step.observation
-            for result in observation.results if observation is not None else []:
-                output_items.append(
-                    NeMoGymFunctionCallOutput(
-                        call_id=result.source_call_id or f"call_{uuid4().hex[:8]}",
-                        output=result.content if isinstance(result.content, str) else "",
-                        type="function_call_output",
-                        id=f"fco_{uuid4().hex[:8]}",
-                        status="completed",
-                    ).model_dump()
-                )
+            append_observations(step)
 
         return output_items
 
@@ -256,10 +398,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
             path_entries = [(task_paths.instruction_path, trial_paths.agent_dir / TaskPaths.TRAJECTORY_FILENAME)]
             step_rewards = [trial.verifier_result.rewards if trial.verifier_result is not None else None]
 
-        output = [
-            self.convert_atif_to_gym_responses(Trajectory.model_validate_json(trajectory_path.read_text()))
-            for _, trajectory_path in path_entries
+        trajectories = [
+            Trajectory.model_validate_json(trajectory_path.read_text()) for _, trajectory_path in path_entries
         ]
+        conversion_warnings: list[str] = []
+        output = [self.convert_atif_to_gym_responses(trajectory, conversion_warnings) for trajectory in trajectories]
 
         if len(output) > 1:
             logger.warning(
@@ -318,6 +461,22 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 "reward": float(
                     step_rewards.get("reward", next(iter(step_rewards.values()), 0.0)) if step_rewards else 0.0
                 ),
+                "atif_conversion": {
+                    "lossless": not conversion_warnings,
+                    "warnings": conversion_warnings,
+                    "source_trajectory_paths": [str(trajectory_path) for _, trajectory_path in path_entries],
+                    "trajectories": [
+                        {
+                            "schema_version": trajectory.schema_version,
+                            "session_id": trajectory.session_id,
+                            "trajectory_id": trajectory.trajectory_id,
+                            "agent_name": trajectory.agent.name,
+                            "agent_version": trajectory.agent.version,
+                            "agent_model_name": trajectory.agent.model_name,
+                        }
+                        for trajectory in trajectories
+                    ],
+                },
             }
         )
 
