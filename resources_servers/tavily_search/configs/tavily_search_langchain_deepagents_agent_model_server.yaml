@@ -42,3 +42,6 @@ tavily_search_langchain_deepagents_agent_model_server:
         name: policy_model
       tavily_api_key: ${tavily_api_key}
       max_search_results: 5
+      # tavily_search's verifier grades via LLM judge over the full response, not tag-based extraction
+      # like reasoning_gym — no system_prompt needed here.
+      system_prompt: null

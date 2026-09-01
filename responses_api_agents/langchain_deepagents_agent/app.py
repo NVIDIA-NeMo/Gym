@@ -25,11 +25,12 @@ aiohttp-backed `server_client` instead (httpx/httpcore's connection pooling degr
 concurrency). `GymResponsesChatModel` below reimplements the minimum LangChain model-calling surface
 deepagents needs (`bind_tools()` + `_agenerate()`) on top of `server_client.post()`.
 
-The compiled deepagents graph is built once, in `__init__`, mirroring `langgraph_agent`'s
-`self.graph = self.build_graph()` — not per-request. `GymResponsesChatModel` is a singleton bound to the
-owning agent, and gets its per-request `rollout_id`/cookies from a `ContextVar` set once per request in
-`responses()`, rather than being rebuilt per request. This is safe under concurrent in-flight requests:
-`ContextVar` values are asyncio-task-local.
+The compiled deepagents graph is built once, in `__init__`, and stored as `self.agent` — not per-request,
+and named to match how `deepagents`' own docs/examples name the object `create_deep_agent()` returns
+(`agent = create_deep_agent(...)`), rather than `langgraph_agent`'s `self.graph`. `GymResponsesChatModel`
+is a singleton bound to the owning agent, and gets its per-request `rollout_id`/cookies from a
+`ContextVar` set once per request in `responses()`, rather than being rebuilt per request. This is safe
+under concurrent in-flight requests: `ContextVar` values are asyncio-task-local.
 """
 
 import json
@@ -88,8 +89,8 @@ def to_langchain(input_items: list) -> list:
     """Gym Responses API input items -> LangChain messages. Runs once per responses() call, on the 
     first request that comes in. This is different from to_gym_input()/to_langchain_ai_message(), 
     which run once per internal model call inside GymResponsesChatModel._agenerate()."""
-    # TODO: developer is not a thing in langchain - is it because developer is a thing in openai responses api spec?
-    roles = {"user": HumanMessage, "assistant": AIMessage, "system": SystemMessage, "developer": SystemMessage} # TODO: check if remote agent does this too. 
+    # "developer" is an OpenAI Responses API role with no LangChain equivalent; map it to SystemMessage.
+    roles = {"user": HumanMessage, "assistant": AIMessage, "system": SystemMessage, "developer": SystemMessage}
     # Only "message" items are kept — function_call/function_call_output items in input_items are
     # silently dropped. Currently safe because deepagents' tools run internally (params["tools"] is
     # ignored, see below) so no function_call items ever appear in input_items today. Would need
@@ -224,7 +225,7 @@ class GymResponsesChatModel(BaseChatModel):
         )
         await raise_for_status(resp)
         gym_response = NeMoGymResponse.model_validate(await get_response_json(resp))
-        return ChatResult(generations=[ChatGeneration(message=to_langchain_ai_message(gym_response))]) # todo: make sure this function is reused as necessary
+        return ChatResult(generations=[ChatGeneration(message=to_langchain_ai_message(gym_response))])
 
 
 class DeepAgentsAgent(SimpleAgent):
@@ -235,11 +236,11 @@ class DeepAgentsAgent(SimpleAgent):
     limitation" section. That's deliberately deferred, not an oversight."""
 
     config: DeepAgentsAgentConfig
-    graph: Any = Field(default=None, exclude=True)
+    agent: Any = Field(default=None, exclude=True)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.graph = self.build_agent(GymResponsesChatModel(agent=self)) #TODO: not a huge fan of graph
+        self.agent = self.build_agent(GymResponsesChatModel(agent=self))
 
     @abstractmethod
     def build_agent(self, model: BaseChatModel) -> Any:
@@ -263,14 +264,14 @@ class DeepAgentsAgent(SimpleAgent):
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
 
         if isinstance(body.input, str):
-            input_items = [NeMoGymEasyInputMessage(role="user", content=body.input)] #TODO: check if NeMoGymEasyInputMessage can be used for the remote agent implementation of deepagent
+            input_items = [NeMoGymEasyInputMessage(role="user", content=body.input)]
         else:
             input_items = body.input
         input_messages = to_langchain(input_items)
 
         token = _request_context.set({"rollout_id": rollout_id, "cookies": request.cookies})
         try:
-            final_state = await self.graph.ainvoke({"messages": input_messages}) # TODO: possibly rename from graphi like above(would change anyways)
+            final_state = await self.agent.ainvoke({"messages": input_messages})
         finally:
             _request_context.reset(token)
 

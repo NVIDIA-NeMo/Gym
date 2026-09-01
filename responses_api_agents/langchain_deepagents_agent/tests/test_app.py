@@ -157,7 +157,7 @@ def test_base_class_build_agent_is_abstract():
 
 def test_concrete_agent_builds_successfully():
     agent = _make_agent()
-    assert agent.graph is not None
+    assert agent.agent is not None
 
 
 # --- cookie propagation ------------------------------------------------------------------------------
@@ -168,8 +168,8 @@ async def test_responses_propagates_inbound_cookies_to_outgoing_response():
     from fastapi import Response
 
     agent = _make_agent()
-    agent.graph = MagicMock()
-    agent.graph.ainvoke = AsyncMock(return_value={"messages": [AIMessage(content="done")]})
+    agent.agent = MagicMock()
+    agent.agent.ainvoke = AsyncMock(return_value={"messages": [AIMessage(content="done")]})
 
     request = MagicMock()
     request.cookies = {"session": "abc123"}

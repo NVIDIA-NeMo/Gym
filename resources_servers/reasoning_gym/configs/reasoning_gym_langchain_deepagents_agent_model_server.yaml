@@ -29,3 +29,6 @@ reasoning_gym_langchain_deepagents_agent_model_server:
         name: policy_model
       tavily_api_key: ${tavily_api_key}
       max_search_results: 5
+      # reasoning_gym's verifier extracts the answer from <answer></answer> tags in the final message;
+      # without this, correct reasoning still scores 0.
+      system_prompt: "Answer the user, then restate your final answer wrapped in <answer></answer> tags."
