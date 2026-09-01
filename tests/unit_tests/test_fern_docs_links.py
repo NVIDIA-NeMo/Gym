@@ -54,6 +54,31 @@ class TestFernDocsLinks(unittest.TestCase):
         self.assertIn("No, not for pull requests to this repository.", faq)
         self.assertIn("Should I use gym env init --benchmark?", faq)
 
+    def test_add_benchmark_skill_is_an_overlay_only_playbook(self):
+        skill = read(".agents/skills/add-benchmark/SKILL.md")
+
+        self.assertIn("cp -r benchmarks/gsm8k benchmarks/my_bench", skill)
+        self.assertIn("gym env init --benchmark", skill)
+        self.assertIn("gym env validate --benchmark my_bench", skill)
+        self.assertIn("gym eval prepare --benchmark my_bench", skill)
+        self.assertIn("--split benchmark", skill)
+        self.assertIn("new-environment.mdx", skill)
+        self.assertIn("Edit those files in place", skill)
+        self.assertIn("from benchmarks.livecodebench.prepare_utils import", skill)
+        self.assertNotIn("my_bench_math_with_judge_resources_server:", skill)
+        self.assertNotIn("gym env init --resources-server my_server", skill)
+        self.assertNotIn("## Path B", skill)
+        self.assertNotIn("## Path C", skill)
+        self.assertNotIn("+should_validate_data=true", skill)
+        self.assertNotIn("references/patterns.md", skill)
+        self.assertFalse((REPO_ROOT / ".agents/skills/add-benchmark/references/patterns.md").exists())
+
+        for path in (".claude/skills/add-benchmark", ".codex/skills/add-benchmark"):
+            link = REPO_ROOT / path
+            with self.subTest(path=path):
+                self.assertTrue(link.is_symlink(), path)
+                self.assertTrue((link / "SKILL.md").is_file(), path)
+
     def test_onboarding_decision_tree_sends_new_scorers_to_new_environment(self):
         tree = read("fern/versions/latest/pages/contribute/environments/onboarding-decision-tree.mdx")
 
