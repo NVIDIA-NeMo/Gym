@@ -26,8 +26,8 @@ pre-commit install
 **Run NeMo Gym Tests**:
 ```bash
 gym dev test                                   # Run all NeMo Gym core tests
-gym env test                                   # Run all server tests
 gym env test --resources-server example_single_tool_call    # Test a single resources server
+gym env test --all                             # Run all server tests (slow: one venv per server)
 ```
 
 **View Test Coverage**:

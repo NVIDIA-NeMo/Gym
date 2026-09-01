@@ -495,7 +495,11 @@ class AnthropicConverter:
         usage = response.usage.model_dump() if response.usage is not None else None
         message = NeMoGymAnthropicMessage.model_validate(
             {
-                "id": f"msg_{uuid4().hex}",
+                # Reuse the Responses envelope id instead of minting a new one.
+                # Token capture records the inner response's id.
+                # A client can then prove which served response it kept by possessing this id.
+                # A minted id here would break that join for the Messages dialect.
+                "id": str(getattr(response, "id", "") or "") or f"msg_{uuid4().hex}",
                 "type": "message",
                 "role": "assistant",
                 "model": model,

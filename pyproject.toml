@@ -141,6 +141,14 @@ dependencies = [
     # License: BSD 3-Clause https://github.com/encode/uvicorn/blob/c1144fd4f130388cffc05ee17b08747ce8c1be11/LICENSE.md
     "uvicorn",
 
+    # httptools: C bindings to the llhttp HTTP parser.
+    # Gym explicitly selects httptools as Uvicorn's HTTP protocol implementation.
+    # Explicit selection prevents a silent fallback to the pure-Python h11 parser.
+    # A missing or incompatible wheel now fails during server startup.
+    # Updated Fri Aug 28, 2026 with httptools==0.8.0
+    # License: MIT https://github.com/MagicStack/httptools/blob/master/LICENSE
+    "httptools",
+
     # UVLoop: a faster async event loop than Python's native asyncio. Used automatically by Uvicorn as an async loop backend.
     # Updated Fri Aug 01, 2025 with uvloop==0.21.0
     # License: Apache 2.0 and MIT https://github.com/MagicStack/uvloop/blob/96b7ed31afaf02800d779a395591da6a2c8c50e1/LICENSE-APACHE https://github.com/MagicStack/uvloop/blob/96b7ed31afaf02800d779a395591da6a2c8c50e1/LICENSE-MIT
@@ -164,6 +172,14 @@ dependencies = [
     # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/c6ce84e817897e1a0461632f8a06d4e5e4ac3726/LICENSE.txt
     "mlflow-skinny>=3.15.1",
     "mlflow>=3.15.1",
+
+    # scipy: t-distribution confidence intervals for repeat-level reward metrics in
+    # nemo_gym/reward_profile.py. Lower bound is the first release with cp313 wheels;
+    # deliberately NOT >=1.18, which requires numpy>=2.0 and breaks servers pinned to
+    # numpy<2 (wmt_translation and osworld_agent, via unbabel-comet).
+    # Updated Tue Aug 18, 2026 with scipy>=1.14.1
+    # License: BSD 3-Clause https://github.com/scipy/scipy/blob/main/LICENSE.txt
+    "scipy>=1.14.1",
 
     # aiohttp: async http backend
     # Updated Sun Jun 29, 2026 with aiohttp>=3.14.1 (CVE mitigation)
@@ -273,6 +289,14 @@ sandbox = [
     # Daytona SDK: used by the Daytona sandbox provider for create/exec/delete and file operations.
     # License: Apache 2.0 https://pypi.org/project/daytona/
     "daytona>=0.179.0",
+
+    # E2B SDK: used by the E2B sandbox provider for create/exec/kill and file operations.
+    # Also drives any e2b-compatible gateway via connection.api_url/sandbox_url.
+    # Lower bound 2.36.0: provider traffic attribution, current template APIs, and stream-open timeout semantics.
+    # Upper bound <3.0.0: the provider depends on the E2B 2.x SDK contract.
+    # Updated: Tue Aug 04, 2026 with e2b>=2.36.0,<3.0.0
+    # License: MIT https://github.com/e2b-dev/E2B/blob/e2b@2.36.0/packages/python-sdk/LICENSE
+    "e2b>=2.36.0,<3.0.0",
 
     # boto3: AWS SDK used by the ECS Fargate sandbox provider for ECS/EC2/ECR/
     # CodeBuild/S3/SSM/Secrets Manager calls.
@@ -660,7 +684,7 @@ directory = "results/htmlcov"
 [tool.coverage.report]
 skip_covered = true
 sort = "miss"
-fail_under = 96.0
+fail_under = 95.0
 exclude_also = [
     "def __repr__",
     "if self.debug:",

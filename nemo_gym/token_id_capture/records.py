@@ -25,6 +25,9 @@ Both records share a ``model_call_id``.
 
 from __future__ import annotations
 
+import hashlib
+import struct
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -34,14 +37,58 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # ``routed_experts`` is optional for MoE backends.
 TOKEN_FIELDS = ("prompt_token_ids", "generation_token_ids", "generation_log_probs", "routed_experts")
 
-# Increment this version when a field or its meaning changes.
+# Keep this at version 1 while the initial record contract is under development.
 # Writers and readers may run in different processes or repositories.
 # Records may outlive a deployment.
 # Readers must reject unsupported newer records.
 # ``extra="allow"`` otherwise hides unknown fields.
-#
-#   1  rollout and call identity, the token arrays, the output items and their carrier index
 TOKEN_ENTRY_RECORD_SCHEMA_VERSION = 1
+
+# Version 1 is the only supported initial schema.
+TOKEN_ENTRY_MIN_SCHEMA_VERSION = 1
+
+# Increment this version when the digest encoding changes.
+# A stale digest must fail verification.
+DIGEST_VERSION = 1
+_DIGEST_DOMAIN = b"nemo-gym-tokens"
+_EMPTY_DIGEST = hashlib.sha256(_DIGEST_DOMAIN).hexdigest()
+
+
+class ParentResolutionStatus(StrEnum):
+    """Describe whether a model call has a proven captured predecessor."""
+
+    ROOT = "root"
+    RESOLVED = "resolved"
+    UNRESOLVED = "unresolved"
+
+
+def encode_token_ids(token_ids: list[int]) -> bytes:
+    """Stable, length-delimited, big-endian encoding of a token sequence.
+
+    Independent implementations can hash the same bytes.
+    One vectorized pack replaces the per-token loop.
+    The byte layout remains identical to the original encoding.
+    """
+    header = struct.pack(">BQ", DIGEST_VERSION, len(token_ids))
+    if not token_ids:
+        return header
+    try:
+        return header + struct.pack(f">{len(token_ids)}Q", *token_ids)
+    except struct.error:
+        negative = next(token_id for token_id in token_ids if token_id < 0)
+        raise ValueError(f"token ids must be non-negative, got {negative}") from None
+
+
+def compute_digest(token_ids: list[int]) -> str:
+    """Digest of an exact token sequence.
+
+    The builder verifies a claimed parent by hashing the corresponding prompt prefix.
+    A mismatch quarantines the call.
+    This prevents stale or interleaved records from merging silently.
+    """
+    if not token_ids:
+        return _EMPTY_DIGEST
+    return hashlib.sha256(_DIGEST_DOMAIN + encode_token_ids(token_ids)).hexdigest()
 
 
 class TokenEntry(BaseModel):
@@ -71,8 +118,52 @@ class TokenEntry(BaseModel):
     # This index identifies the item that carried token arrays.
     # ``None`` means no item carried them.
     token_item_index: int | None = None
+    # The response id returned to the client for this model call.
+    # Terminal attribution uses it to match the agent's final response to these captured tokens.
+    response_id: str | None = None
     # This non-semantic timestamp helps diagnose retries and sibling branches.
     created_at: float = 0.0
+
+    # These fields preserve parent resolution within the initial schema.
+    # A missing parent call ID triggers strict token-prefix matching.
+    #
+    # A parent link identifies the exact call retained by the harness.
+    # This disambiguates retries with the same prompt.
+    # The builder verifies the link instead of trusting it.
+    parent_call_id: str | None = None
+    # This is the length of this call's prompt and generation.
+    # A child must start with a prefix of this length.
+    cum_len: int | None = None
+    # This is ``compute_digest(prompt_token_ids + generation_token_ids)``.
+    digest: str | None = None
+    # A request-time decision distinguishes a valid root from a missing parent.
+    # ``None`` is reserved for compatibility callers that do not provide one.
+    parent_resolution: ParentResolutionStatus | None = None
+    # These fields make a committed entry visible to request-time resolution.
+    # The fingerprint identifies the model-authored output.
+    continuation_fingerprint: str = ""
+    # The context fields verify the request that produced this call.
+    continuation_context_len: int = 0
+    continuation_context_digest: str = ""
+
+    # The resolver's diagnostic reason for the parent decision above.
+    # Persisted so a resolution-rate regression is debuggable from records alone.
+    parent_resolution_reason: str = ""
+    # The fingerprint algorithm version that produced continuation_fingerprint.
+    # A resolver must not match records stamped by a different algorithm.
+    fingerprint_version: int | None = None
+
+    # Delta storage is part of the initial record schema.
+    # A delta prompt stores only the suffix after the resolved parent.
+    # Root and unresolved records always store full prompts.
+    # This guarantees that every reconstructable chain has a full-prompt anchor.
+    prompt_is_delta: bool = False
+
+    # Prefix supply fields are part of the initial record schema.
+    # Request intent is distinct from generation-time proof.
+    prefix_requested: bool = False
+    # This is true only when generation-time prompt_token_ids prove prefix application.
+    prefix_supplied: bool = False
 
     @model_validator(mode="after")
     def _refuse_a_newer_record(self) -> "TokenEntry":
@@ -88,6 +179,12 @@ class TokenEntry(BaseModel):
                 f"up to {TOKEN_ENTRY_RECORD_SCHEMA_VERSION}. Upgrade the reader, or point it at "
                 "records written by a writer it matches."
             )
+        if self.schema_version < TOKEN_ENTRY_MIN_SCHEMA_VERSION:
+            raise ValueError(
+                f"token record is schema_version {self.schema_version}, below the supported minimum "
+                f"{TOKEN_ENTRY_MIN_SCHEMA_VERSION}. Pre-lineage records were never written in "
+                "production; regenerate the rollout with a current writer."
+            )
         if len(self.generation_token_ids) != len(self.generation_log_probs):
             raise ValueError(
                 "generation_token_ids and generation_log_probs must have the same length "
@@ -97,7 +194,57 @@ class TokenEntry(BaseModel):
             raise ValueError(
                 f"token_item_index {self.token_item_index} is outside output_items of length {len(self.output_items)}"
             )
+        if self.parent_resolution == ParentResolutionStatus.RESOLVED and not self.parent_call_id:
+            raise ValueError("resolved parent metadata requires parent_call_id")
+        if self.parent_resolution in {ParentResolutionStatus.ROOT, ParentResolutionStatus.UNRESOLVED}:
+            if self.parent_call_id is not None:
+                raise ValueError(f"{self.parent_resolution.value} parent metadata cannot carry parent_call_id")
+        if self.prompt_is_delta and (
+            self.parent_call_id is None or self.parent_resolution != ParentResolutionStatus.RESOLVED
+        ):
+            raise ValueError("a delta prompt requires a RESOLVED parent_call_id to reconstruct from")
         return self
+
+
+def cumulative_tokens(entry: TokenEntry) -> list[int]:
+    """The full sequence a child of this call must start with.
+
+    Delta records require parent-chain reconstruction.
+    """
+    if entry.prompt_is_delta:
+        raise ValueError(
+            f"model call {entry.model_call_id} stores a delta prompt; reconstruct through its parent chain"
+        )
+    return list(entry.prompt_token_ids) + list(entry.generation_token_ids)
+
+
+def stamp_lineage(
+    entry: TokenEntry,
+    parent_call_id: str | None,
+    *,
+    parent_resolution: ParentResolutionStatus | None = None,
+    cumulative: list[int] | None = None,
+) -> TokenEntry:
+    """Fill token lineage and the request-time parent decision.
+
+    ``cum_len`` and ``digest`` describe the full sequence.
+    A delta entry must pass ``cumulative`` explicitly.
+    ``parent_resolution=None`` preserves records built by compatibility callers.
+    """
+    if cumulative is None:
+        cumulative = cumulative_tokens(entry)
+    elif entry.prompt_is_delta is False and cumulative != cumulative_tokens(entry):
+        raise ValueError("provided cumulative tokens disagree with the entry's own arrays")
+    entry.cum_len = len(cumulative)
+    entry.digest = compute_digest(cumulative)
+    entry.parent_call_id = parent_call_id
+    entry.parent_resolution = parent_resolution
+    if parent_resolution == ParentResolutionStatus.RESOLVED and parent_call_id is None:
+        raise ValueError("resolved parent metadata requires parent_call_id")
+    if parent_resolution in {ParentResolutionStatus.ROOT, ParentResolutionStatus.UNRESOLVED}:
+        if parent_call_id is not None:
+            raise ValueError(f"{parent_resolution.value} parent metadata cannot carry parent_call_id")
+    return entry
 
 
 def response_to_output_items(payload: dict) -> list[dict]:
