@@ -101,12 +101,13 @@ jobs:
     # indefinitely on every PR push. Run it on the nightly schedule, or
     # on-demand via workflow_dispatch, instead.
     #
-    # A job's own `if:` replaces (not ANDs with) the implicit success()-of-
-    # needs check, so pre-flight/classify_changes/unit_tests success must be
-    # checked explicitly here - unit_tests may legitimately be "skipped" on a
-    # docs-only latest commit, so that's tolerated too.
+    # GitHub applies an implicit success() check before a job's `if:` unless
+    # the condition contains a status function. Evaluate this condition even
+    # when docs-only classification legitimately skips unit_tests, while still
+    # rejecting cancellation or failed dependencies explicitly.
     if: >-
       ${{
+        always() && !cancelled() &&
         needs.classify_changes.outputs.is_nightly == 'true' &&
         needs.pre-flight.result == 'success' &&
         needs.classify_changes.result == 'success' &&
@@ -176,6 +177,7 @@ jobs:
     # the push itself failed.
     if: >-
       ${{
+        always() && !cancelled() &&
         needs.classify_changes.outputs.is_nightly == 'true' &&
         needs.pre-flight.result == 'success' &&
         needs.classify_changes.result == 'success' &&
@@ -229,6 +231,7 @@ jobs:
     # Remove the leading `false &&` once the provider is healthy again.
     if: >-
       ${{
+        always() && !cancelled() &&
         false &&
         needs.classify_changes.outputs.is_nightly == 'true' &&
         needs.classify_changes.result == 'success' &&
