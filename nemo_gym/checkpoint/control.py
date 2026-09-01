@@ -164,6 +164,12 @@ class ControlCapabilities(BaseModel):
     )
     concurrency_contract: Literal["stateless", "serialized_per_session", "transactional_parallel"] = "stateless"
     multi_process: MultiProcessCapability
+    instance_role: Optional[Literal["policy", "auxiliary"]] = Field(
+        default=None,
+        description="Model servers only: 'policy' instances gate generation traffic during a "
+        "checkpoint; 'auxiliary' instances (judges, simulators) never pause so accepted "
+        "operations can finish draining.",
+    )
 
 
 def multi_process_capability_from_num_workers(num_workers: Optional[int]) -> MultiProcessCapability:
@@ -206,6 +212,20 @@ class ControlFence:
             "active_checkpoint_id": self.active_checkpoint_id,
             "deadline_ts": self.deadline.deadline_ts if self.deadline is not None else None,
         }
+
+    def mark_prepared(self, checkpoint_id: str) -> None:
+        """Record that this participant has finished draining."""
+        if self.active_checkpoint_id != checkpoint_id:
+            self._validate(checkpoint_id, frozenset({CheckpointPhase.PREPARING, CheckpointPhase.PREPARED}))
+        if self.phase == CheckpointPhase.PREPARED:
+            return
+        if self.phase != CheckpointPhase.PREPARING:
+            raise InvalidPhaseError(f"cannot mark prepared from phase {self.phase.value!r}")
+        self.phase = CheckpointPhase.PREPARED
+
+    def require_phase(self, checkpoint_id: str, allowed_phases: frozenset[CheckpointPhase]) -> None:
+        """Validate a read-only control request against the active checkpoint."""
+        self._validate(checkpoint_id, allowed_phases)
 
     def _validate(self, checkpoint_id: str, allowed_phases: frozenset[CheckpointPhase]) -> None:
         if checkpoint_id in self._retired:
