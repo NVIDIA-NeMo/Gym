@@ -60,13 +60,13 @@ _RAY_WORKER_EVENT_LOOP: asyncio.AbstractEventLoop | None = None
 
 
 @ray.remote(scheduling_strategy="SPREAD", runtime_env={"py_executable": sys.executable})
-def harbor_job_worker(job_config_dict: dict) -> str:
+def harbor_job_worker(job_config_dict: dict, task_name: str) -> str:
     global _RAY_WORKER_EVENT_LOOP
     logging.disable(logging.DEBUG)
     if _RAY_WORKER_EVENT_LOOP is None or _RAY_WORKER_EVENT_LOOP.is_closed():
         _RAY_WORKER_EVENT_LOOP = asyncio.new_event_loop()
         asyncio.set_event_loop(_RAY_WORKER_EVENT_LOOP)
-    return _RAY_WORKER_EVENT_LOOP.run_until_complete(HarborAgent.run_job(job_config_dict))
+    return _RAY_WORKER_EVENT_LOOP.run_until_complete(HarborAgent.run_job(job_config_dict, task_name))
 
 
 class HarborAgentConfig(BaseResponsesAPIAgentConfig):
@@ -123,8 +123,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
     _sem: asyncio.Semaphore = PrivateAttr()
 
     def model_post_init(self, context) -> None:
-        num_samples_in_parallel = get_global_config_dict().get(NUM_SAMPLES_IN_PARALLEL_KEY_NAME) or 1
-        self._sem = asyncio.Semaphore(num_samples_in_parallel)
+        self._sem = asyncio.Semaphore(get_global_config_dict().get(NUM_SAMPLES_IN_PARALLEL_KEY_NAME) or 1)
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         ## Harbor owns the full run() lifecycle.
@@ -140,7 +139,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 )
 
                 job_ref = harbor_job_worker.options(num_cpus=self.config.harbor_ray_task_num_cpus).remote(
-                    job_config.model_dump(mode="json")
+                    job_config.model_dump(mode="json"), body.task_name
                 )
                 try:
                     trial_dir = Path(await job_ref)
@@ -188,15 +187,17 @@ class HarborAgent(SimpleResponsesAPIAgent):
             prompt_token_ids = metrics.prompt_token_ids if metrics is not None else None
             completion_token_ids = metrics.completion_token_ids if metrics is not None else None
             logprobs = metrics.logprobs if metrics is not None else None
-            if prompt_token_ids or completion_token_ids or logprobs:
+            if completion_token_ids:
+                if logprobs is None or len(logprobs) != len(completion_token_ids):
+                    raise ValueError("Harbor trajectory completion_token_ids and logprobs must have matching lengths")
                 message = NeMoGymResponseOutputMessageForTraining(
                     id=f"msg_{uuid4().hex[:12]}",
                     content=content,
                     role="assistant",
                     status="completed",
                     prompt_token_ids=prompt_token_ids or [],
-                    generation_token_ids=completion_token_ids or [],
-                    generation_log_probs=logprobs or [],
+                    generation_token_ids=completion_token_ids,
+                    generation_log_probs=logprobs,
                     routed_experts=routed_experts,
                 )
             else:
@@ -337,7 +338,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
         )
 
     @staticmethod
-    async def run_job(job_config_dict: dict) -> str:
+    async def run_job(job_config_dict: dict, task_name: str) -> str:
         job_config = JobConfig.model_validate(job_config_dict)
         job_err: Exception | None = None
 
@@ -358,6 +359,9 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     continue
 
                 trial_result = TrialResult.model_validate_json(result_path.read_text())
+                if trial_result.task_name != task_name and Path(trial_result.task_name).name != task_name:
+                    continue
+
                 if trial_result.exception_info is not None:
                     exception_info = trial_result.exception_info
                     ## Deleting the trial result forces Harbor to delete the old trial and re-run when Gym retries.
