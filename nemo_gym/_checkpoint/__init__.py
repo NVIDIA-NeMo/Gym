@@ -39,6 +39,21 @@ from nemo_gym._checkpoint.admission import (
     mark_current_generation_safe,
     mark_current_generation_started,
 )
+from nemo_gym._checkpoint.agent import (
+    AGENT_CHECKPOINT_SCHEMA_VERSION,
+    AGENT_CHECKPOINT_URL_PREFIX,
+    AGENT_MANIFEST_NAME,
+    AGENT_STATE_SUBDIR,
+    AgentAdmissionClosedError,
+    AgentBoundaryRecord,
+    AgentCheckpointError,
+    AgentCheckpointParticipant,
+    AgentExecutionState,
+    DuplicateExecutionError,
+    commit_agent_state,
+    install_agent_checkpoint,
+    restore_agent_state,
+)
 from nemo_gym._checkpoint.control import (
     CONTROL_SCHEMA_VERSION,
     CONTROL_URL_PREFIX,
@@ -96,6 +111,10 @@ from nemo_gym._checkpoint.model_control_contracts import (
 
 
 __all__ = [
+    "AGENT_CHECKPOINT_SCHEMA_VERSION",
+    "AGENT_CHECKPOINT_URL_PREFIX",
+    "AGENT_MANIFEST_NAME",
+    "AGENT_STATE_SUBDIR",
     "CONTROL_SCHEMA_VERSION",
     "CONTROL_URL_PREFIX",
     "GATED_MODEL_ROUTE_SUFFIXES",
@@ -119,6 +138,11 @@ __all__ = [
     "GenerationCutPrefixAck",
     "GenerationCutReceipt",
     "GenerationCutWorkerProof",
+    "AgentAdmissionClosedError",
+    "AgentBoundaryRecord",
+    "AgentCheckpointError",
+    "AgentCheckpointParticipant",
+    "AgentExecutionState",
     "MissingWorkersError",
     "ModelAbortInflightRequest",
     "ModelAdmissionPauseRequest",
@@ -128,6 +152,7 @@ __all__ = [
     "build_coordinator_control_app",
     "bind_current_model_call",
     "current_admission_ticket",
+    "commit_agent_state",
     "CheckpointConflictError",
     "CheckpointControlRequest",
     "CheckpointPhase",
@@ -135,6 +160,7 @@ __all__ = [
     "ControlError",
     "ControlFence",
     "Deadline",
+    "DuplicateExecutionError",
     "CaptureLedgerCheckpointer",
     "CheckpointableCaptureLedger",
     "InvalidPhaseError",
@@ -145,10 +171,12 @@ __all__ = [
     "NotPolicyInstanceError",
     "StaleAttemptError",
     "StaleCheckpointError",
+    "install_agent_checkpoint",
     "install_control_plane",
     "install_model_admission",
     "install_model_checkpoint",
     "mark_current_generation_safe",
     "mark_current_generation_started",
     "multi_process_capability_from_num_workers",
+    "restore_agent_state",
 ]
