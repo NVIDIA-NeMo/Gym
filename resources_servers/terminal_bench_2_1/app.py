@@ -273,25 +273,27 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             )
             test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
         except:
-            print(f"Hit exception verifying TerminalBench 2.1: {format_exc()}", file=stderr)
+            print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
+            eval_result = None
             test_output = ""
         verification_time_taken = time() - start_time
 
         if self.config.debug:
             print(f"Test output for {body.task_name}: {test_output}", file=stderr)
 
-        try:
-            with NamedTemporaryFile(mode="w+", suffix=".txt") as temp_file:
-                await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
-                temp_file.seek(0)
-                reward = float(temp_file.read())
+        evaluation_completed = False
+        reward = 0.0
+        if eval_result is not None:
+            try:
+                with NamedTemporaryFile(mode="w+", suffix=".txt") as temp_file:
+                    await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
+                    temp_file.seek(0)
+                    reward = float(temp_file.read())
 
-            evaluation_completed = True
-        except:
-            if self.config.debug:
-                print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
-            evaluation_completed = False
-            reward = 0.0
+                evaluation_completed = True
+            except:
+                if self.config.debug:
+                    print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
 
         await eval_sandbox.stop()
 
