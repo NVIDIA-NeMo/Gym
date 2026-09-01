@@ -17,8 +17,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from nemo_gym.checkpoint import AgentBoundaryRecord
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.gymnasium_agent.app import GymnasiumAgent, GymnasiumAgentConfig, GymnasiumAgentRunRequest
 
@@ -140,6 +141,70 @@ class TestConfig:
 
 
 class TestRun:
+    @pytest.mark.asyncio
+    async def test_restored_attempt_skips_reset_and_preserves_reward_usage_and_history(self):
+        agent = _make_agent(max_steps=3)
+        continuation = AgentBoundaryRecord(
+            rollout_id="2-0",
+            attempt_index=0,
+            boundary_index=1,
+            output_items=_model_response("turn-1", input_toks=3, output_toks=4)["output"]
+            + [{"role": "user", "content": "observation-1", "type": "message"}],
+            usage={
+                "input_tokens": 3,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 4,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 7,
+            },
+            agent_state={
+                "reset_data": {"observation": "start", "info": {}},
+                "step_data": {
+                    "observation": "observation-1",
+                    "reward": 0.25,
+                    "terminated": False,
+                    "truncated": False,
+                    "info": {},
+                },
+                "total_reward": 0.25,
+                "env_cookies": {"session": "restored"},
+            },
+        )
+        agent.checkpoint_participant().install_restored([continuation])
+        call_log = _wire_mock_client(
+            agent,
+            {
+                "/ng-rollout/2-0-a1/v1/responses": [_model_response("turn-2", input_toks=5, output_toks=6)],
+                "/step": [
+                    {
+                        "observation": None,
+                        "reward": 0.75,
+                        "terminated": True,
+                        "truncated": False,
+                        "info": {},
+                    }
+                ],
+            },
+        )
+        request = MagicMock()
+        request.cookies = {}
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "play"}]},
+            **{
+                TASK_INDEX_KEY_NAME: 2,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                ATTEMPT_INDEX_KEY_NAME: 1,
+            },
+        )
+
+        result = await agent.run(request, body)
+
+        assert result.reward == 1.0
+        assert result.response.usage.total_tokens == 18
+        assert all(url != "/reset" for _server, url, _payload in call_log)
+        model_body = next(payload for _server, url, payload in call_log if url == "/ng-rollout/2-0-a1/v1/responses")
+        assert any(getattr(item, "content", None) == "observation-1" for item in model_body.input)
+
     @pytest.mark.asyncio
     async def test_terminates_on_first_step(self):
         agent = _make_agent()
