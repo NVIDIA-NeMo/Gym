@@ -1239,6 +1239,37 @@ async def test_detach_keeps_session_alive_and_reattach_resumes() -> None:
     assert len(client.delete_calls) == 1, "an owned close still ends the session"
 
 
+async def test_reattach_retries_refused_takeover(monkeypatch: pytest.MonkeyPatch) -> None:
+    """reattach() dials with takeover: an "already attached" refusal on that
+    socket is execd still evicting our own detached socket, so the new pump
+    must retry rather than end the session (seen live in run_detached polls)."""
+    monkeypatch.setattr(pty_module, "_PTY_TAKEOVER_RETRY_DELAYS", (0,))
+    monkeypatch.setattr(pty_module.OpenSandboxPtySession, "_reattach_socket", _REAL_REATTACH)
+
+    ws1 = FakeWs([CONNECTED, _binary(b"\x01before")])
+    refused = FakeWs([], close_code=pty_module.WS_CLOSE_POLICY_VIOLATION)
+    refused.closed = True
+    resume = b"\x03" + (6).to_bytes(8, "big") + b"after"
+    ws3 = FakeWs([_binary(resume), _text({"type": "exit", "exit_code": 0})])
+    ws3.closed = True
+    client = FakeHttpClient(ws=[refused, ws3])
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=ws1,  # type: ignore[arg-type]
+        session_id="s-1",
+        session_url="http://server/v1/sandboxes/sb-1/proxy/44772/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+    )
+    assert await session.read() == b"before"
+    await session.detach()
+    await session.reattach()
+    assert await session.read() == b"after", "the refused reattach must be retried, not fatal"
+    assert await session.wait_exit() == 0
+    assert len(client.ws_calls) == 2, "reattach dial + one takeover retry"
+    await session.close()
+
+
 async def test_close_while_detached_releases_and_unblocks_readers() -> None:
     ws = FakeWs([CONNECTED])
     client = FakeHttpClient(ws=ws)

@@ -365,6 +365,10 @@ class OpenSandboxPtySession:
             query={"takeover": "1", "since": str(self._received)},
             request_timeout_s=self._request_timeout_s,
         )
+        # This socket asked to take the session over, so the new pump must
+        # treat an "already attached" refusal as execd still evicting our own
+        # previous socket, and retry.
+        self._takeover = True
         self._detached = False
         self._pump_task = asyncio.create_task(self._pump())
 
