@@ -22,6 +22,7 @@ from nemo_gym.sandbox.providers.docker.provider import (
     DockerProbeConfig,
     DockerProvider,
 )
+from nemo_gym.sandbox.providers.docker.pty import DockerPtySession
 
 
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     "DockerExecConfig",
     "DockerProbeConfig",
     "DockerProvider",
+    "DockerPtySession",
 ]

@@ -17,6 +17,7 @@
 import asyncio
 import contextlib
 import ipaddress
+import json
 import logging
 import math
 import os
@@ -36,10 +37,13 @@ from nemo_gym.sandbox.providers.base import (
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
+    SandboxPtyError,
+    SandboxPtySpec,
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
 )
+from nemo_gym.sandbox.providers.docker import pty as docker_pty
 
 
 LOGGER = logging.getLogger(__name__)
@@ -579,6 +583,160 @@ class DockerProvider:
         if host in {"0.0.0.0", "::"}:
             host = self._create_config.publish_host
         return SandboxEndpoint(endpoint=_http_endpoint(host, host_port))
+
+    async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> "docker_pty.DockerPtySession":
+        """Open an interactive terminal inside the container.
+
+        Stages a small python3 broker into the container and starts it with
+        ``docker exec -d``; all session state lives in the container, so the
+        session survives this process and can be re-attached by id from any
+        process sharing the docker daemon (see ``attach_pty`` and the
+        ``docker_pty`` module docstring). Requires ``python3`` in the image.
+        """
+        inst = handle.raw
+        session_id = uuid.uuid4().hex
+        token = uuid.uuid4().hex
+        mode = "pty" if spec.pty else "pipe"
+        state_dir = docker_pty._session_dir(session_id)
+        timeout_s = self._exec_config.default_timeout_s
+
+        stage_argv = [self._binary, "exec", "-i", inst.name, "sh", "-c"]
+        stage_argv.append(docker_pty.staging_script(session_id, token, mode))
+        code, _out, err = await self._run(stage_argv, timeout_s=timeout_s, stdin=docker_pty.HELPER_SOURCE.encode())
+        if code == docker_pty.EXIT_NO_PYTHON3:
+            raise SandboxPtyError(
+                "docker PTY sessions require python3 inside the sandbox image "
+                f"(image {inst.image!r} has none); install python3 or use exec() instead"
+            )
+        if code != 0:
+            raise SandboxPtyError(f"failed to stage PTY session state (code={code}): {err.strip()}")
+
+        broker_flags: list[str] = ["-d"]
+        if spec.cwd is not None:
+            broker_flags += ["-w", spec.cwd]
+        merged_env = dict(inst.env)
+        if spec.env:
+            merged_env.update(spec.env)
+        for key, value in merged_env.items():
+            broker_flags += ["--env", f"{key}={value}"]
+        if spec.user is not None:
+            broker_flags += ["--user", "0" if spec.user == "root" or spec.user == 0 else str(spec.user)]
+        broker_argv = [
+            self._binary,
+            "exec",
+            *broker_flags,
+            inst.name,
+            "python3",
+            docker_pty._helper_path(session_id),
+            "broker",
+            state_dir,
+            inst.shell,
+            str(spec.rows),
+            str(spec.cols),
+            mode,
+        ]
+        if spec.command is not None:
+            broker_argv.append(spec.command)
+
+        async def _cleanup() -> None:
+            with contextlib.suppress(Exception):
+                await self._run(
+                    [self._binary, "exec", inst.name, "sh", "-c", f"rm -rf {state_dir}"], timeout_s=timeout_s
+                )
+
+        code, _out, err = await self._run(broker_argv, timeout_s=timeout_s)
+        if code != 0:
+            await _cleanup()
+            raise SandboxPtyError(f"failed to start PTY broker (code={code}): {err.strip()}")
+
+        # The broker signals readiness (FIFOs created, process spawned) by
+        # touching a `ready` file; wait for it before handing the session out.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + docker_pty.READY_DEADLINE_S
+        while True:
+            code, _out, _err = await self._run(
+                [self._binary, "exec", inst.name, "sh", "-c", f"test -f {state_dir}/ready"], timeout_s=timeout_s
+            )
+            if code == 0:
+                break
+            if loop.time() >= deadline:
+                _code, log, _err2 = await self._run(
+                    [self._binary, "exec", inst.name, "sh", "-c", f"cat {state_dir}/broker.log 2>/dev/null"],
+                    timeout_s=timeout_s,
+                )
+                await _cleanup()
+                raise SandboxPtyError(
+                    f"PTY broker did not become ready within {docker_pty.READY_DEADLINE_S:g}s; "
+                    f"broker log: {log.strip()!r}"
+                )
+            await asyncio.sleep(0.1)
+
+        return docker_pty.DockerPtySession(
+            provider=self,
+            container_name=inst.name,
+            session_id=session_id,
+            token=token,
+            mode=mode,
+            owned=True,
+        )
+
+    async def attach_pty(
+        self,
+        handle: SandboxHandle,
+        session_id: str,
+        *,
+        takeover: bool = True,
+        since: int | None = None,
+    ) -> "docker_pty.DockerPtySession":
+        """Re-attach to a PTY session by id, possibly from another process.
+
+        ``takeover`` rotates the session's owner token, so the evicted
+        client's next operation raises ``SandboxPtyError``; without it,
+        attaching to a held session raises. ``since`` is a byte offset into
+        the session's output log to replay from (``0`` replays everything;
+        the log retains the session's whole output). Pipe-mode attaches
+        always tail stderr live.
+        """
+        inst = handle.raw
+        token = uuid.uuid4().hex
+        argv = [
+            self._binary,
+            "exec",
+            inst.name,
+            "python3",
+            docker_pty._helper_path(session_id),
+            "attach",
+            docker_pty._session_dir(session_id),
+            token,
+            "1" if takeover else "0",
+        ]
+        try:
+            code, out, err = await self._run(argv, timeout_s=self._exec_config.default_timeout_s)
+        except TimeoutError as e:
+            raise SandboxPtyError(f"PTY attach to session {session_id} timed out: {e}") from e
+        if code == docker_pty.EXIT_HELD:
+            raise SandboxPtyError(
+                f"PTY session {session_id} already has an attached client (pass takeover=True to evict)"
+            )
+        if code == docker_pty.EXIT_DEAD or (code != 0 and "can't open file" in err.lower()):
+            raise SandboxPtyError(f"PTY session {session_id} does not exist in container {inst.name!r}")
+        if code != 0:
+            raise SandboxPtyError(f"PTY attach to session {session_id} failed (code={code}): {err.strip()}")
+        try:
+            meta = json.loads(out)
+        except ValueError as e:
+            raise SandboxPtyError(f"PTY attach to session {session_id} returned malformed metadata: {e!r}") from e
+        return docker_pty.DockerPtySession(
+            provider=self,
+            container_name=inst.name,
+            session_id=session_id,
+            token=token,
+            mode=str(meta.get("mode") or "pty"),
+            owned=False,
+            out_offset=int(since) if since is not None else int(meta.get("out_size") or 0),
+            err_offset=int(meta.get("err_size") or 0),
+            exit_code=meta["exit"] if meta.get("exit") is not None else None,
+        )
 
     async def close(self, handle: SandboxHandle) -> None:
         """Force-remove the container (already-gone counts as success)."""
