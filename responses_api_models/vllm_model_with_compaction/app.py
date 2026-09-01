@@ -151,6 +151,7 @@ class VLLMModelWithCompaction(VLLMModel):
         return self._converter.chat_completion_to_response(
             responses_create_params=standard_body,
             chat_completion=chat_completion_response,
+            preserve_envelope_id=self._external_capture_enabled,
         )
 
 
