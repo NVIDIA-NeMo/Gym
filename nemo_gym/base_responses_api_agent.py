@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 from abc import abstractmethod
 from collections.abc import Mapping
 from functools import wraps
@@ -19,6 +20,7 @@ from typing import Any, Optional
 from warnings import warn
 
 from fastapi import Body, FastAPI, Request
+from pydantic import PrivateAttr
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -26,6 +28,8 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
+from nemo_gym.checkpoint.agent import AgentBoundaryRecord, AgentCheckpointParticipant, install_agent_checkpoint
+from nemo_gym.checkpoint.control import ControlCapabilities
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
 from nemo_gym.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
@@ -51,6 +55,7 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.token_id_capture.config import token_id_capture_config
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
@@ -72,12 +77,14 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     config: BaseResponsesAPIAgentConfig
 
     _CONTROL_COMPONENT = "responses_api_agents"
+    _checkpoint_participant: Optional[AgentCheckpointParticipant] = PrivateAttr(default=None)
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
         self.setup_session_middleware(app)
         self.setup_control_plane(app)
+        self.setup_agent_checkpoint(app)
 
         agent_attributes = {"nemo.gym.server.name": self.config.name}
         traced_responses = traced_endpoint(GymSpanGroup.AGENT, "gym.agent.responses", self.responses, agent_attributes)
@@ -107,12 +114,61 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 attempt_index=attempt_index,
                 logical_rollout_id=logical_rollout_id,
             ):
-                return await run(*args, **kwargs)
+                if logical_rollout_id is None or attempt_index is None or self._checkpoint_participant is None:
+                    return await run(*args, **kwargs)
+                execution = await self._checkpoint_participant.begin(
+                    logical_rollout_id,
+                    attempt_index,
+                    task=asyncio.current_task(),
+                )
+                try:
+                    return await run(*args, **kwargs)
+                finally:
+                    await self._checkpoint_participant.finish(execution)
 
         app.post("/run")(run_with_rollout_context)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
 
         return app
+
+    def checkpoint_participant(self) -> AgentCheckpointParticipant:
+        if self._checkpoint_participant is None:
+            self._checkpoint_participant = AgentCheckpointParticipant()
+        return self._checkpoint_participant
+
+    def checkpoint_control_auth_token(self) -> Optional[str]:
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        if not isinstance(global_config, Mapping):
+            return None
+        settings = token_id_capture_config(global_config)
+        if settings is None or not settings.token_id_capture.external_staging:
+            return None
+        return settings.token_id_capture.resolve_control_auth_token()
+
+    def setup_agent_checkpoint(self, app: FastAPI) -> None:
+        auth_token = self.checkpoint_control_auth_token()
+        if auth_token is None:
+            return
+        install_agent_checkpoint(
+            app,
+            participant=self.checkpoint_participant(),
+            fence=self.checkpoint_fence(),
+            auth_token=auth_token,
+        )
+
+    def control_capabilities(self) -> ControlCapabilities:
+        capabilities = super().control_capabilities()
+        if self.checkpoint_control_auth_token() is not None:
+            capabilities.checkpoint_mode = "export_restore"
+            capabilities.concurrency_contract = "serialized_per_session"
+        return capabilities
+
+    def checkpoint_continuation(self, body: Any) -> Optional[AgentBoundaryRecord]:
+        """Return the restored boundary for the current replacement attempt."""
+        logical_rollout_id, attempt_index = execution_identity_from_run_body(body)
+        if logical_rollout_id is None or attempt_index is None or self._checkpoint_participant is None:
+            return None
+        return self._checkpoint_participant.continuation(logical_rollout_id, attempt_index)
 
     def _capture_correlation_enabled(self) -> bool:
         """Return whether this agent needs rollout correlation.
