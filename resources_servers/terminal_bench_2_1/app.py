@@ -198,9 +198,6 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         eval_sandbox, pty_session = await self._create_sandbox(body)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox, pty_session
 
-        # @bxyu-nvidia: Detach, not close because close will close the pty
-        await pty_session.detach()
-
         return TerminalBench21SeedSessionResponse(
             sandbox_handle=eval_sandbox._handle.sandbox_id, pty_session_id=pty_session.session_id
         )
@@ -261,7 +258,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             if self.config.debug:
                 print(f"Running golden patch for {body.task_name}", file=stderr)
             golden_patch_result = await eval_sandbox.pty.exec(
-                f"bash {cwd}/solve.sh", session=pty_session, timeout_s=self.config.evaluation_timeout
+                f"bash {cwd}/solve.sh", session=pty_session, timeout_s=self.config.evaluation_timeout, detach=True
             )
             golden_patch_output = (golden_patch_result.stderr or "") + (golden_patch_result.stdout or "")
             if self.config.debug:
@@ -277,7 +274,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         start_time = time()
         await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
         eval_result = await eval_sandbox.pty.exec(
-            "bash /tests/test.sh", session=pty_session, timeout_s=self.config.evaluation_timeout
+            "bash /tests/test.sh", session=pty_session, timeout_s=self.config.evaluation_timeout, detach=True
         )
         verification_time_taken = time() - start_time
         test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
