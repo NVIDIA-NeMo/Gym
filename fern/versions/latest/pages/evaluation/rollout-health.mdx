@@ -98,7 +98,7 @@ whether the check passes or produces a finding.
 | `anyterminal_agent` | V | X | X | X | X | X | O | X |
 | `aviary_agent` | V | X | X | X | X | X | O | X |
 | `browsecomp_agent` | V | X | X | X | X | X | O | X |
-| `claude_code_agent` | V | X | X | X | X | X | O | X |
+| `claude_code_agent` | V | X | O | X | X | X | O | X |
 | `cline_agent` | V | X | X | X | X | X | O | X |
 | `codex_agent` | V | X | X | X | X | X | O | X |
 | `critpt_agent` | V | X | X | X | X | X | O | X |
@@ -106,18 +106,18 @@ whether the check passes or produces a finding.
 | `finance_agent` | V | X | X | X | X | X | O | X |
 | `gymnasium_agent` | V | X | X | X | X | X | O | X |
 | `harbor_agent` | V | X | X | X | X | X | O | X |
-| `hermes_agent` | V | X | X | X | X | X | O | X |
+| `hermes_agent` | V | X | O | X | X | X | O | X |
 | `kilocode_agent` | V | X | X | X | X | X | O | X |
 | `labbench2_vlm_agent` | V | V | V | V | O | V | O | V |
 | `langgraph_agent` | V | X | X | X | X | X | O | X |
 | `mini_swe_agent` | V | X | X | X | X | X | O | X |
 | `mini_swe_agent_2` | V | X | X | X | X | X | O | X |
 | `non_executing_simple_agent` | V | X | X | X | X | X | O | X |
-| `openclaw_agent` | V | X | X | X | X | X | O | X |
+| `openclaw_agent` | V | X | O | X | X | X | O | X |
 | `opencode_agent` | V | X | X | X | X | X | O | X |
 | `opencode_sandboxed_agent` | V | X | X | X | X | X | O | X |
 | `osworld_agent` | V | X | X | X | X | X | O | X |
-| `pi_agent` | V | X | X | X | X | X | O | X |
+| `pi_agent` | V | X | O | X | X | X | O | X |
 | `proof_refinement_agent` | V | X | X | X | X | X | O | X |
 | `remote_agent` | V | X | X | X | X | X | O | X |
 | `scicode_agent` | V | X | X | X | X | X | O | X |
@@ -133,8 +133,12 @@ whether the check passes or produces a finding.
 
 The health runner currently uses `TrajectoryRecord.turns` for both structural checks and policy-model-call binding. It does
 not treat invocation-scoped conversation or model-call evidence as a substitute for `TrajectoryTurn`. As a result, an agent
-can have complete C1, C2, or C4 coverage in the trajectory capability matrix while its H2 through H6 and H8 checks remain
+can have complete C1, C2, or C4 coverage in the trajectory capability matrix while H2, H4 through H6, and H8 remain
 unobserved.
+
+Claude Code, Hermes, OpenClaw, and Pi can persist model-call references on `AgentInvocation` records. The current runner does
+not use an exact invocation reference as a binding source, but H3 can still report a reference-conflict gap produced when the
+trajectory was assembled. H3 is therefore conditional for those harnesses while H4 through H6 remain unavailable.
 
 `simple_agent` and `labbench2_vlm_agent` emit the required canonical turns and explicit call references. LabBench H5 is
 path-dependent because rows carrying the `multimodal_history_redacted` gap omit saved model request and response payloads.
