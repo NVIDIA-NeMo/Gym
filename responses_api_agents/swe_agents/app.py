@@ -36,7 +36,7 @@ from shutil import rmtree
 from subprocess import Popen
 from subprocess import run as subprocess_run
 from traceback import format_exc
-from typing import Any, Dict, Iterable, List, Literal, NamedTuple, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple, Union
 
 import ray
 import tomlkit
@@ -282,12 +282,6 @@ class SWEBenchMetrics(BaseModel):
     agent_timed_out: Optional[bool] = None
     eval_timed_out: Optional[bool] = None
 
-    # Stable Gym-to-trainer signal for calls rejected by the runtime during
-    # argument validation. The trainer must penalize these trajectories, not
-    # discard them as infrastructure failures.
-    invalid_structured_tool_call_call_ids: Optional[List[str]] = None
-    invalid_structured_tool_call_count: Optional[int] = None
-
     # Memory watchdog signals
     oom_killed: Optional[bool] = None
     eval_oom_killed: Optional[bool] = None
@@ -313,23 +307,6 @@ class SWEBenchMetrics(BaseModel):
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
     instance_config: SWEBenchWrapperInstanceConfig
     subagent_trajectories: Optional[List[Dict[str, Any]]] = None
-
-
-def get_invalid_structured_tool_call_call_ids(output_items: Iterable[Any]) -> List[str]:
-    """Return call IDs whose execution failed OpenHands argument validation."""
-    call_ids: List[str] = []
-    for item in output_items:
-        item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
-        output = item.get("output") if isinstance(item, dict) else getattr(item, "output", None)
-        call_id = item.get("call_id") if isinstance(item, dict) else getattr(item, "call_id", None)
-        if (
-            item_type == "function_call_output"
-            and isinstance(output, str)
-            and output.startswith("Validation failure for ")
-            and call_id
-        ):
-            call_ids.append(str(call_id))
-    return call_ids
 
 
 ########################################
@@ -3714,9 +3691,6 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             )
             input_items, output_items = split_responses_input_output_items(responses_items)
 
-        invalid_structured_tool_call_call_ids = get_invalid_structured_tool_call_call_ids(output_items)
-        metrics_to_update["invalid_structured_tool_call_call_ids"] = invalid_structured_tool_call_call_ids
-        metrics_to_update["invalid_structured_tool_call_count"] = len(invalid_structured_tool_call_call_ids)
         updated_metrics = update_and_read_metrics(params.metrics_fpath, metrics_to_update)
 
         # body.model can be None (replay JSONLs omit it; the openai_model proxy

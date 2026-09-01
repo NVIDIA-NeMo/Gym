@@ -50,7 +50,6 @@ from responses_api_agents.swe_agents.app import (
     SWEBenchWrapperServerConfig,
     SWERebenchDatasetProcessor,
     _extract_instance_dict,
-    get_invalid_structured_tool_call_call_ids,
     _read_verify_feedback,
     _render_opencode_user_message,
     _resolve_opencode_workspace_path,
@@ -74,16 +73,6 @@ def _cleanup_swebench_results():
 ########################################
 # Helpers
 ########################################
-
-
-def test_get_invalid_structured_tool_call_call_ids():
-    assert get_invalid_structured_tool_call_call_ids(
-        [
-            {"type": "function_call_output", "call_id": "call-invalid", "output": "Validation failure for edit"},
-            {"type": "function_call_output", "call_id": "call-ok", "output": "command completed"},
-            {"type": "function_call", "call_id": "call-invalid", "output": "Validation failure for edit"},
-        ]
-    ) == ["call-invalid"]
 
 
 def _minimal_server_config() -> SWEBenchWrapperConfig:
