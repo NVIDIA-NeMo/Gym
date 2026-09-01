@@ -3,7 +3,7 @@ name = "harbor-agent-general"
 version = "0.1.0"
 requires-python = ">=3.13.14"
 dependencies = [
-    "nemo-gym",
+    "nemo-gym[dev]",
     "harbor>=0.20.0",
 ]
 
