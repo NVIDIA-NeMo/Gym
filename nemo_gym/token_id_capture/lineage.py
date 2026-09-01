@@ -1000,6 +1000,11 @@ class FileLineageStore(IncrementalLineageStore):
         self._ledger_root.mkdir(parents=True, exist_ok=True)
         self._ledger_cache: dict[str, tuple[int, int, list[dict]]] = {}
 
+    @property
+    def checkpoint_root(self) -> Path:
+        """Directory containing token-free custody rows."""
+        return self._ledger_root
+
     def _read_locked(self, rollout_id: str):
         return self._store._locked(rollout_id, shared=True)
 
