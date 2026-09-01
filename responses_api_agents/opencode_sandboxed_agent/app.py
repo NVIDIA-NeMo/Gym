@@ -748,10 +748,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 env=session_env,
             )
             if session_list_result.return_code != 0:
-                raise RuntimeError(
-                    "Failed to list OpenCode sessions: "
-                    f"{(session_list_result.stderr or session_list_result.stdout or '').strip()}"
-                )
+                raise RuntimeError(f"Failed to list OpenCode sessions: {session_list_result}")
             session_id = _extract_opencode_session_id(session_list_result.stdout or "")
             export_result = await sandbox.exec(
                 command=(
