@@ -12,7 +12,10 @@ without editing any config. To ablate the harness, hold everything else fixed â€
 
 ```bash
 gym list agents
-gym eval run --agent-type hermes_agent --benchmark gpqa --model-type vllm_model
+gym eval run \
+    --benchmark terminal_bench_2_1/opencode \
+    --agent-type terminus_2_sandboxed_agent \
+    --model-type vllm_model
 ```
 
 Each run writes its own `_aggregate_metrics.json` next to its rollouts file. Comparing those across harnesses *is* the ablation â€” for example (illustrative, not real output):
