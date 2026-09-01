@@ -20,7 +20,7 @@ from unittest.mock import MagicMock, PropertyMock
 
 from omegaconf import OmegaConf
 from omegaconf.errors import ConfigKeyError
-from pytest import LogCaptureFixture, MonkeyPatch, mark, raises
+from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
@@ -339,6 +339,49 @@ b: 2
             }
             == global_config_dict
         )
+
+    def test_duplicate_config_paths_warning_goes_to_stderr(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys: CaptureFixture
+    ) -> None:
+        """Diagnostics must stay off stdout, which carries the `--json` payload."""
+        self._mock_versions_for_testing(monkeypatch)
+
+        # Clear any lingering env vars.
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        # Two roots pulling in the same child is what triggers the duplicate-path warning.
+        (tmp_path / "shared.yaml").write_text("a: 1\n")
+        for name in ("first.yaml", "second.yaml"):
+            (tmp_path / name).write_text(f"""\
+config_paths:
+- {tmp_path}/shared.yaml
+""")
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = True
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig({"config_paths": [f"{tmp_path}/first.yaml", f"{tmp_path}/second.yaml"]})
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        omegaconf_load_mock = MagicMock()
+        original_load = OmegaConf.load
+        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+
+        get_global_config_dict()
+
+        captured = capsys.readouterr()
+        assert "Found configs that reference the same source config path" in captured.err
+        assert f"- {tmp_path}/shared.yaml" in captured.err
+        assert captured.out == ""
 
     def test_get_global_config_dict_config_paths_recursive(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
@@ -1361,6 +1404,8 @@ contested: second_inner
         with raises(AlmostServerError, match="almost-server.*validation errors") as exc_info:
             get_global_config_dict()
         assert isinstance(exc_info.value, ConfigError)
+        # Diagnostics must stay off stdout, which carries the `--json` payload.
+        assert all(call.kwargs.get("file") is sys.stderr for call in rich_print_mock.call_args_list)
 
     def test_almost_servers_error_flag_bypasses_value_error(self, monkeypatch: MonkeyPatch) -> None:
         """
@@ -1426,6 +1471,8 @@ contested: second_inner
         assert "Configuration Warnings" in printed_messages
         assert "license" in printed_messages
         assert "domain" in printed_messages
+        # Diagnostics must stay off stdout, which carries the `--json` payload.
+        assert all(call.kwargs.get("file") is sys.stderr for call in rich_print_mock.call_args_list)
 
     def test_use_absolute_ip(self, monkeypatch: MonkeyPatch) -> None:
         """Test that use_absolute_ip=True uses machine's hostname ip for default_host."""
