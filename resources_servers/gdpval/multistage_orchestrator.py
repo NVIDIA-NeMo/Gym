@@ -440,7 +440,15 @@ def compute_fingerprint(
     connection_fields = {"host", "port"}
 
     def is_connection_field(name: str) -> bool:
-        return name in connection_fields or name.endswith("_api_key") or name.endswith("_base_url")
+        # ``endpoint_*`` covers the vLLM proxy's endpoint-file liveness knobs
+        # (stale grace, connection retries, poll interval): how a replica is
+        # reached, never what it generates.
+        return (
+            name in connection_fields
+            or name.endswith("_api_key")
+            or name.endswith("_base_url")
+            or name.startswith("endpoint_")
+        )
 
     def jsonable_runtime_block(block: Mapping[str, Any]) -> Dict[str, Any]:
         """Serialize a component block without endpoints or credentials."""
@@ -500,9 +508,11 @@ def compute_fingerprint(
             "sha256": materialized_hasher.hexdigest(),
         }
     if rollout_collection_config is not None:
+        # ``input_jsonl_fpath`` is deliberately absent: the materialized rows
+        # above hash the input by content, and the CLI's generated preprocessed
+        # path moves between releases without a byte of input changing.
         result_affecting_fields = (
             "agent_name",
-            "input_jsonl_fpath",
             "limit",
             "num_repeats",
             "num_repeats_add_seed",
@@ -2039,6 +2049,10 @@ async def run_e2e_multistage(
     semaphore_size = getattr(rollout_collection_config, "num_samples_in_parallel", None)
     dispatch_budget_s = getattr(rollout_collection_config, "dispatch_budget_s", None)
     drain_margin_s = getattr(rollout_collection_config, "drain_margin_s", None)
+    # The multistage driver bypasses run_from_config, so the failure-routing
+    # knob must be forwarded explicitly or a failed /run silently reverts to
+    # raising and killing every in-flight rollout of the stage.
+    route_failures_to_sidecar = bool(getattr(rollout_collection_config, "route_failures_to_sidecar", False))
     if dispatch_budget_s is not None and (semaphore_size is None or semaphore_size <= 0):
         raise ValueError(
             "dispatch_budget_s requires a finite positive num_samples_in_parallel; "
@@ -2064,6 +2078,7 @@ async def run_e2e_multistage(
             dispatch_budget_s=remaining_budget_s,
             drain_margin_s=drain_margin_s,
             latency_tracker=latency_tracker,
+            route_failures_to_sidecar=route_failures_to_sidecar,
         ):
             row, result = await future
             _attach_ng_perf(result, observability_enabled=observability_enabled)

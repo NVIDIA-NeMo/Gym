@@ -2421,6 +2421,62 @@ class TestFingerprint:
             == baseline
         )
 
+    def test_input_path_relocation_does_not_invalidate_fingerprint(self) -> None:
+        """The CLI's generated preprocessed-input path moves between releases.
+
+        Input identity is the materialized rows' content, which is hashed
+        already; the path string must not stale a journal on its own.
+        """
+        cfg = _two_stage_cfg()
+        dist = _distribution(["t0"])
+        rows = _materialized_rows(["t0"])
+
+        def run_config(path: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                agent_name="gdpval_stirrup_agent",
+                input_jsonl_fpath=path,
+                limit=None,
+                num_repeats=1,
+                num_repeats_add_seed=False,
+                responses_create_params=None,
+                prompt_config=None,
+                skills=None,
+            )
+
+        old_layout = "/runs/out/preprocessed_datasets/tasks.jsonl"
+        new_layout = "/runs/out/rollouts/preprocessed_datasets/tasks.jsonl"
+        assert compute_fingerprint(
+            cfg, REF_ELOS, dist, materialized_rows=rows, rollout_collection_config=run_config(old_layout)
+        ) == compute_fingerprint(
+            cfg, REF_ELOS, dist, materialized_rows=rows, rollout_collection_config=run_config(new_layout)
+        )
+
+    def test_endpoint_liveness_knobs_do_not_invalidate_fingerprint(self) -> None:
+        cfg = _two_stage_cfg()
+        dist = _distribution(["t0"])
+
+        def runtime(**endpoint_knobs: Any) -> Dict[str, Any]:
+            return {
+                "policy": {
+                    "responses_api_models": {
+                        "vllm": {"model": "/checkpoints/policy-a", "uses_reasoning_parser": True, **endpoint_knobs}
+                    }
+                }
+            }
+
+        baseline = compute_fingerprint(cfg, REF_ELOS, dist, resolved_global_config=runtime())
+        with_knobs = runtime(
+            endpoint_file="/tmp/endpoint.json",
+            endpoint_stale_grace_s=300.0,
+            endpoint_connection_retries=8,
+            endpoint_check_interval_s=10.0,
+        )
+        assert compute_fingerprint(cfg, REF_ELOS, dist, resolved_global_config=with_knobs) == baseline
+
+        changed_parser = runtime()
+        changed_parser["policy"]["responses_api_models"]["vllm"]["uses_reasoning_parser"] = False
+        assert compute_fingerprint(cfg, REF_ELOS, dist, resolved_global_config=changed_parser) != baseline
+
     def test_runtime_bind_addresses_do_not_invalidate_fingerprint(self) -> None:
         cfg = _two_stage_cfg()
         dist = _distribution(["t0"])
@@ -3117,6 +3173,7 @@ class TestIntegrationWiring:
             drain_margin_s=15.0,
             dispatch_longest_first=True,
             resume_from_cache=False,
+            route_failures_to_sidecar=True,
         )
         global_config = {
             "multistage": {"enabled": True, "stages": ["1", "1"], "seed": 0},
@@ -3133,6 +3190,9 @@ class TestIntegrationWiring:
         assert calls[0]["latency_tracker"] is calls[1]["latency_tracker"]
         assert 0 <= calls[1]["dispatch_budget_s"] <= calls[0]["dispatch_budget_s"] <= 120.0
         assert [call["drain_margin_s"] for call in calls] == [15.0, 15.0]
+        # The multistage driver bypasses run_from_config, so the failure-routing
+        # knob must reach run_examples explicitly or it silently reverts to raise.
+        assert [call["route_failures_to_sidecar"] for call in calls] == [True, True]
         persisted = [json.loads(line) for line in (tmp_path / "rollouts.jsonl").read_text().splitlines()]
         assert {row["expected_final_stage_index"] for row in persisted} == {1}
         assert {row["expected_stage_row_count"] for row in persisted} == {1}
