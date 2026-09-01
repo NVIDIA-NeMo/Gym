@@ -105,11 +105,7 @@ class NeMoGymSandboxEnvironment:
         if cwd is None and env is None:
             result = await self._sandbox.pty.exec(command, session=self._pty_session, timeout_s=timeout_sec)
         else:
-            # TODO @bxyu-nvidia: remove
-            import sys
-
-            print(f"Hit inside else exec: {cwd=} {env=}", file=sys.stderr)
-            result = await self._sandbox.exec(command, cwd=cwd, env=env, timeout_s=timeout_sec, user=user)
+            raise NotImplementedError
 
         return SimpleNamespace(
             stdout=result.stdout or "",
