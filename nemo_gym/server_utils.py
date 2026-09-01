@@ -21,8 +21,6 @@ import sys
 import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
-from logging import Filter as LoggingFilter
-from logging import LogRecord, getLogger
 from os import environ, getenv
 from pathlib import Path
 from threading import Thread
@@ -57,6 +55,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import (
     ROLLOUT_PATH_PREFIX,
+    TOKEN_CAPTURE_PATH_SEGMENT,
     BaseRunServerInstanceConfig,
     BaseServerConfig,
 )
@@ -66,6 +65,7 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
+    UVICORN_TIMEOUT_WORKER_HEALTHCHECK,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
@@ -206,7 +206,11 @@ DISCONNECTED_CLIENT_OS_HELP_TEXT = """We've run into this issue in two different
 
 
 async def request(
-    method: str, url: str, _internal: bool = False, **kwargs: Unpack[_RequestOptions]
+    method: str,
+    url: str,
+    _internal: bool = False,
+    _max_connection_retries: Optional[int] = None,
+    **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
@@ -232,6 +236,10 @@ async def request(
                     flush=True,
                 )
 
+            # Retrying forever is wrong if the endpoint is expected to sometimes die and move.
+            if _max_connection_retries is not None and retries >= _max_connection_retries:
+                raise
+
             await asyncio.sleep(0.5)
         except ClientOSError:
             global _NUM_CLIENT_OS_ERROR
@@ -243,6 +251,9 @@ async def request(
                     f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
                     flush=True,
                 )
+
+            if _max_connection_retries is not None and retries >= _max_connection_retries:
+                raise
 
             await asyncio.sleep(0.5)
         except Exception as e:
@@ -725,20 +736,10 @@ Full body: {json.dumps(exc.body, indent=4)}
             server.setup_profiling(app, profiling_config)
 
         uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
-        if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok:
-
-            class No200Filter(LoggingFilter):
-                def filter(self, record: LogRecord) -> bool:
-                    msg = record.getMessage()
-                    return not msg.strip().endswith("200")
-
-            uvicorn_logger = getLogger("uvicorn.access")
-            uvicorn_logger.addFilter(No200Filter())
-
-            if is_main_fastapi_proc:
-                print(
-                    "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
-                )
+        if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok and is_main_fastapi_proc:
+            print(
+                "Disabling a uvicorn access logging so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
+            )
 
         uvicorn_kwargs = dict(
             host=server.config.host,
@@ -746,9 +747,10 @@ Full body: {json.dumps(exc.body, indent=4)}
             # We add a very small graceful shutdown timeout so when we shutdown we cancel all inflight requests and there are no lingering requests (requests are cancelled)
             timeout_graceful_shutdown=0.5,
             # Some workers may take a while for imports and setup_webserver.
-            timeout_worker_healthcheck=30,
+            timeout_worker_healthcheck=global_config_dict.get(UVICORN_TIMEOUT_WORKER_HEALTHCHECK, 30),
             # Ensure server keepalive > client keepalive
             timeout_keep_alive=30,
+            access_log=uvicorn_logging_cfg.uvicorn_logging_show_200_ok,
         )
 
         if server.config.num_workers and server.config.num_workers > 1:
@@ -843,16 +845,19 @@ def get_server_url(server_name: str) -> str:
     return f"http://{model_server_config['host']}:{model_server_config['port']}"
 
 
-def rollout_path_prefix(rollout_id: Optional[str]) -> str:
+def rollout_path_prefix(rollout_id: Optional[str], *, token_capture: bool = False) -> str:
     """Return the leading model-server path prefix for a rollout, if available."""
-    return f"/{ROLLOUT_PATH_PREFIX}/{rollout_id}" if rollout_id else ""
+    if not rollout_id:
+        return ""
+    capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
+    return f"/{ROLLOUT_PATH_PREFIX}/{rollout_id}{capture_segment}"
 
 
-def apply_rollout_prefix(base_url: str, rollout_id: Optional[str]) -> str:
+def apply_rollout_prefix(base_url: str, rollout_id: Optional[str], *, token_capture: bool = False) -> str:
     """Append a rollout prefix to a model-server root URL."""
     if not rollout_id:
         return base_url
-    return base_url.rstrip("/") + rollout_path_prefix(rollout_id)
+    return base_url.rstrip("/") + rollout_path_prefix(rollout_id, token_capture=token_capture)
 
 
 def setup_server_client(head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:  # pragma: no cover

@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Config for the openair_congestion resources_server + the shared
+# gymnasium_agent that drives its /reset + /step loop. Schema mirrors
+# resources_servers/blackjack/configs/blackjack.yaml.
+openair_congestion:
+  resources_servers:
+    # Inner key must equal the on-disk dir name; entrypoint resolves relative
+    # to resources_servers/openair_congestion/.
+    openair_congestion:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: >-
+        Multi-turn 5G congestion control with deterministic synthetic dynamics,
+        Gymnasium API style. The agent observes rolling 5G KPIs each step and
+        issues exactly one network-control tool call (7 actuators + noop).
+        Dense per-step KPI reward; the agent sums step rewards into the episode
+        return. No live OAI/FlexRIC backend is included.
+      value: Stateful multi-turn telco control env (replay backend, no 5G lab/GPU).
+      # Custom keys bound by OpenAirCongestionResourcesServerConfig (config
+      # node type has extra='allow'). backend: 'replay' (default, causal and
+      # CI-safe) or 'dataset_replay' (recorded transitions, diagnostics only).
+      backend: replay
+      pool_size: 32
+      max_steps_default: 60
+      # Truncation-budget fallback for task rows that omit max_steps; must not
+      # exceed the gymnasium_agent max_steps below.
+      agent_max_steps: 16
+      # Reclaim a backend slot left behind by a hard client/process crash
+      # after one hour without reset/step activity.
+      session_ttl_s: 3600.0
+      protocol_violation_penalty: -1.0
+      # dataset_replay knobs — flip `backend: dataset_replay` and point
+      # dataset_path at recorded KPI-snapshot JSONL. Task rows must
+      # omit scenario_id (the seed then picks a dataset episode) or set it to
+      # a dataset episode key; data/example.jsonl pins replay scenario names
+      # and pairs with the default backend only. cell_capacity_mbps is the
+      # reward throughput normalizer.
+      # backend: dataset_replay
+      # dataset_path: data/fixtures/sample_provided.jsonl
+      # cell_capacity_mbps: 60.0
+      # Optional reward_weights overrides must match the contract used for any
+      # comparison with previously recorded scores.
+openair_congestion_gymnasium_agent:
+  responses_api_agents:
+    # Inner key 'gymnasium_agent' must match the shared
+    # responses_api_agents/gymnasium_agent dir name. Its run() loop: POST
+    # /reset, then per turn POST /v1/responses -> POST /step, appending
+    # tool_outputs + observation, until terminated/truncated or max_steps.
+    gymnasium_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: openair_congestion
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Episode budget: <= 16 model turns (matches max_steps: 16 in the task
+      # rows and agent_max_steps above, so env, server, and agent terminate
+      # in lockstep).
+      max_steps: 16
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/openair_congestion/data/example.jsonl
