@@ -557,9 +557,16 @@ class ServerClient(BaseModel):
             if rollout_id is not None and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/"):
                 url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
 
+        # The rollout-id prefix is also what makes a model call resolvable in
+        # `_ModelCallCaptureMiddleware` (the ASGI middleware in base_responses_api_model.py) --
+        # including its `GymSpanGroup.MODEL_CALL`-gated `gym.model.time_to_first_byte_ms`
+        # tracking, not just the JSONL capture pipeline `observability_enabled` was written for.
+        # Without this, `time_to_first_byte_ms` silently never fires when telemetry is on but
+        # `observability_enabled` (a separate, older flag) is not, since the middleware never
+        # sees a rollout id to key off of.
         if (
             rollout_id is not None
-            and observability_enabled
+            and (observability_enabled or is_span_group_enabled(GymSpanGroup.MODEL_CALL))
             and server_entry is not None
             and "responses_api_models" in server_entry
             and url_path.partition("?")[0] in {"/v1/responses", "/v1/chat/completions", "/v1/messages"}

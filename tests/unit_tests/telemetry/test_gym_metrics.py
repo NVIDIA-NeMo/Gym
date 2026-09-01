@@ -68,7 +68,7 @@ def test_recording_without_telemetry_is_a_no_op():
     gym_metrics.record_sandbox_startup(1.0, provider="docker")
     gym_metrics.record_sandbox_create_retry(provider="daytona")
     gym_metrics.record_model_call_duration(1.0, dialect="responses", server_name="m")
-    gym_metrics.record_model_ttft(1.0, dialect="responses", server_name="m")
+    gym_metrics.record_model_time_to_first_byte(1.0, dialect="responses", server_name="m")
     gym_metrics.record_http_timeout(internal=False)
     gym_metrics.record_retry(reason="timeout")
 
@@ -136,12 +136,12 @@ def test_model_call_duration_is_attributed_by_dialect_and_server(collected_metri
     assert attrs["nemo.gym.server.name"] == "vllm_model"
 
 
-def test_model_ttft_is_a_distinct_instrument_from_call_duration(collected_metrics):
+def test_model_time_to_first_byte_is_a_distinct_instrument_from_call_duration(collected_metrics):
     gym_metrics.record_model_call_duration(75.0, dialect="responses", server_name="m")
-    gym_metrics.record_model_ttft(20.0, dialect="responses", server_name="m")
+    gym_metrics.record_model_time_to_first_byte(20.0, dialect="responses", server_name="m")
     metrics = collected_metrics()
     assert metrics["gym.model.call_duration_ms"][0].sum == 75.0
-    assert metrics["gym.model.ttft_ms"][0].sum == 20.0
+    assert metrics["gym.model.time_to_first_byte_ms"][0].sum == 20.0
 
 
 def test_http_timeout_counts(collected_metrics):

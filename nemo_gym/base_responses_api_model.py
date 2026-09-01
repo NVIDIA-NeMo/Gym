@@ -70,7 +70,7 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 from nemo_gym.telemetry.endpoints import traced_model_call_endpoint
-from nemo_gym.telemetry.gym_metrics import record_model_ttft
+from nemo_gym.telemetry.gym_metrics import record_model_time_to_first_byte
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
     CaptureContext,
@@ -200,7 +200,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         app.post("/v1/chat/completions")(
             # "chat", not "chat_completions": matches `_OBSERVED_PATHS`'s dialect vocabulary
             # (the capture middleware below), so `gym.model.call_duration_ms` and
-            # `gym.model.ttft_ms` are attributed with the same dialect string.
+            # `gym.model.time_to_first_byte_ms` are attributed with the same dialect string.
             traced_model_call_endpoint(
                 self.chat_completions_dispatch, "gym.model.chat_completions", "chat", model_attributes
             )
@@ -1245,13 +1245,13 @@ class _CaptureMiddleware:
                         path,
                         exc_info=True,
                     )
-        # `telemetry_wants_ttft` widens the original `store is None and not capture_wanted`
+        # `telemetry_wants_time_to_first_byte` widens the original `store is None and not capture_wanted`
         # bail-out: without it, a run with JSONL capture off (the common case) would never
         # reach the TTFT-tracking block below even with `GymSpanGroup.MODEL_CALL` enabled,
         # since this guard would already have forwarded and returned.
-        telemetry_wants_ttft = is_span_group_enabled(GymSpanGroup.MODEL_CALL)
+        telemetry_wants_time_to_first_byte = is_span_group_enabled(GymSpanGroup.MODEL_CALL)
         if (
-            (self._store is None and not capture_wanted and not telemetry_wants_ttft)
+            (self._store is None and not capture_wanted and not telemetry_wants_time_to_first_byte)
             or rollout_from_path is None
             or dialect is None
         ):
@@ -1284,23 +1284,27 @@ class _CaptureMiddleware:
             # Pure telemetry, no capture at all (`capture_wanted` is False -- otherwise
             # this is the training-only-capture case below, which must keep forwarding
             # plain, unchanged). This is the common case: JSONL capture off, telemetry on.
-            if not capture_wanted and telemetry_wants_ttft:
+            if not capture_wanted and telemetry_wants_time_to_first_byte:
                 start = time.perf_counter()
-                ttft_recorded = False
+                time_to_first_byte_recorded = False
 
-                async def _send_ttft_only(message: dict[str, Any]) -> None:
-                    nonlocal ttft_recorded
-                    if not ttft_recorded and message.get("type") == "http.response.body" and message.get("body"):
-                        record_model_ttft(
+                async def _send_time_to_first_byte_only(message: dict[str, Any]) -> None:
+                    nonlocal time_to_first_byte_recorded
+                    if (
+                        not time_to_first_byte_recorded
+                        and message.get("type") == "http.response.body"
+                        and message.get("body")
+                    ):
+                        record_model_time_to_first_byte(
                             (time.perf_counter() - start) * 1000.0,
                             dialect=dialect,
                             server_name=self._model_server_name,
                         )
-                        ttft_recorded = True
+                        time_to_first_byte_recorded = True
                     await send(message)
 
                 try:
-                    await self._app(scope, receive, _send_ttft_only)
+                    await self._app(scope, receive, _send_time_to_first_byte_only)
                 finally:
                     if sink_token is not None:
                         reset_token_sink(sink_token)
@@ -1371,7 +1375,7 @@ class _CaptureMiddleware:
             error_category = _classify_status(upstream_status) if isinstance(upstream_status, int) else None
             error_category = error_category or _classify_exception(exc)
             if is_span_group_enabled(GymSpanGroup.MODEL_CALL) and state["ttft_ms"] is not None:
-                record_model_ttft(state["ttft_ms"], dialect=dialect, server_name=self._model_server_name)
+                record_model_time_to_first_byte(state["ttft_ms"], dialect=dialect, server_name=self._model_server_name)
             # Offload the blocking write+fsync so it never stalls the event loop.
             try:
                 await asyncio.to_thread(
@@ -1411,7 +1415,7 @@ class _CaptureMiddleware:
         request_bytes = bytes(request_body)
         store, model_server_name = self._store, self._model_server_name
         if is_span_group_enabled(GymSpanGroup.MODEL_CALL) and ttft_ms is not None:
-            record_model_ttft(ttft_ms, dialect=dialect, server_name=model_server_name)
+            record_model_time_to_first_byte(ttft_ms, dialect=dialect, server_name=model_server_name)
 
         def _parse_and_record() -> None:
             # Off the event loop: body parse + SSE reassembly is best-effort and fully guarded, so a

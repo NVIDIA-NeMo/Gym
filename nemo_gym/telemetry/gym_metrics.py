@@ -161,10 +161,10 @@ def record_model_call_duration(duration_ms: float, *, dialect: str, server_name:
     )
 
 
-def record_model_ttft(duration_ms: float, *, dialect: str, server_name: Optional[str]) -> None:
+def record_model_time_to_first_byte(duration_ms: float, *, dialect: str, server_name: Optional[str]) -> None:
     """Record time to first response byte for one model-server call."""
     _record_histogram(
-        "gym.model.ttft_ms",
+        "gym.model.time_to_first_byte_ms",
         "ms",
         "Time to first response byte for one model-server call.",
         duration_ms,

@@ -266,6 +266,71 @@ class TestServerUtils:
         )
         assert "my mock response" == actual_response
 
+    async def test_model_call_gets_rollout_prefix_under_model_call_telemetry_even_without_observability(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        """Regression: the rollout-id URL prefix that `_ModelCallCaptureMiddleware` needs to
+        resolve `rollout_from_path` (and therefore to record `gym.model.time_to_first_byte_ms`
+        at all) used to be gated solely on the older `observability_enabled` flag. A run with
+        telemetry on but `observability_enabled` off (the common case) never got the prefix,
+        making time-to-first-byte tracking silently unreachable regardless of span groups."""
+        from nemo_gym.rollout_correlation import rollout_context
+        from nemo_gym.telemetry.span_groups import GymSpanGroup
+
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="abcdef", port=12345),
+            global_config_dict=DictConfig(
+                {
+                    "policy_model": {"responses_api_models": {"model": {"host": "policy.test", "port": 80}}},
+                }
+            ),
+        )
+
+        captured_urls = []
+
+        async def fake_request(method, url, **kwargs):
+            captured_urls.append(url)
+            return "ok"
+
+        monkeypatch.setattr(nemo_gym.server_utils, "request", fake_request)
+        monkeypatch.setattr(
+            nemo_gym.server_utils, "is_span_group_enabled", lambda group: group == GymSpanGroup.MODEL_CALL
+        )
+
+        with rollout_context("4-2"):
+            await server_client.post(server_name="policy_model", url_path="/v1/responses", json={})
+
+        assert captured_urls[0].endswith("/ng-rollout/4-2/v1/responses"), captured_urls
+
+    async def test_model_call_keeps_unprefixed_url_when_neither_flag_is_on(self, monkeypatch: MonkeyPatch) -> None:
+        """The other side of the same guard: with `observability_enabled` off and no telemetry
+        wanting the model_call group, the URL must stay unprefixed -- unchanged behavior."""
+        from nemo_gym.rollout_correlation import rollout_context
+
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="abcdef", port=12345),
+            global_config_dict=DictConfig(
+                {
+                    "policy_model": {"responses_api_models": {"model": {"host": "policy.test", "port": 80}}},
+                }
+            ),
+        )
+
+        captured_urls = []
+
+        async def fake_request(method, url, **kwargs):
+            captured_urls.append(url)
+            return "ok"
+
+        monkeypatch.setattr(nemo_gym.server_utils, "request", fake_request)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda group: False)
+
+        with rollout_context("4-2"):
+            await server_client.post(server_name="policy_model", url_path="/v1/responses", json={})
+
+        assert captured_urls[0].endswith("/v1/responses")
+        assert "/ng-rollout/" not in captured_urls[0]
+
     def test_BaseServer_load_config_from_global_config(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
         monkeypatch.setenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, "my_server")
