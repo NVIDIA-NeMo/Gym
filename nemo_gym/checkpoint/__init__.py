@@ -51,6 +51,7 @@ from nemo_gym.checkpoint.agent import (
     restore_agent_state,
 )
 from nemo_gym.checkpoint.control import (
+    CHECKPOINT_CONTROL_TOKEN_ENV,
     CONTROL_SCHEMA_VERSION,
     CONTROL_URL_PREFIX,
     AdmissionState,
@@ -64,6 +65,7 @@ from nemo_gym.checkpoint.control import (
     InvalidPhaseError,
     MultiProcessCapability,
     StaleCheckpointError,
+    checkpoint_control_auth_token,
     install_control_plane,
     multi_process_capability_from_num_workers,
 )
@@ -118,6 +120,7 @@ __all__ = [
     "AGENT_STATE_SUBDIR",
     "CONTROL_SCHEMA_VERSION",
     "CONTROL_URL_PREFIX",
+    "CHECKPOINT_CONTROL_TOKEN_ENV",
     "GATED_MODEL_ROUTE_SUFFIXES",
     "LEDGER_MANIFEST_NAME",
     "MODEL_ADMISSION_URL_PREFIX",
@@ -148,6 +151,7 @@ __all__ = [
     "build_coordinator_control_app",
     "commit_agent_state",
     "commit_resources_state",
+    "checkpoint_control_auth_token",
     "CheckpointConflictError",
     "CheckpointControlRequest",
     "CheckpointPhase",

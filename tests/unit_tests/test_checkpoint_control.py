@@ -37,6 +37,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.checkpoint import (
+    CHECKPOINT_CONTROL_TOKEN_ENV,
     CONTROL_SCHEMA_VERSION,
     CONTROL_URL_PREFIX,
     CheckpointConflictError,
@@ -46,6 +47,7 @@ from nemo_gym.checkpoint import (
     Deadline,
     InvalidPhaseError,
     StaleCheckpointError,
+    checkpoint_control_auth_token,
     multi_process_capability_from_num_workers,
 )
 from nemo_gym.config_types import BaseServerConfig
@@ -63,6 +65,11 @@ def test_deadline_remaining_clamps_at_zero() -> None:
     assert deadline.remaining(now=2000.0) == 0.0
     assert deadline.expired(now=2000.0)
     assert not deadline.expired(now=900.0)
+
+
+def test_checkpoint_auth_is_independent_of_capture(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(CHECKPOINT_CONTROL_TOKEN_ENV, "checkpoint-secret")
+    assert checkpoint_control_auth_token({"token_id_capture": {"enabled": False}}) == "checkpoint-secret"
 
 
 def test_control_request_rejects_invalid_identity_and_deadline() -> None:
