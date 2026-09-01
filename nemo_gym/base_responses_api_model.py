@@ -61,7 +61,7 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import LOGICAL_REQUEST_HEADER, maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import LOGICAL_REQUEST_HEADER, MODEL_CALL_ID_HEADER, maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -1304,6 +1304,13 @@ class _CaptureMiddleware:
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
 
+        async def _send_with_model_call_id(message: dict[str, Any]) -> None:
+            if message.get("type") == "http.response.start":
+                headers = list(message.get("headers") or ())
+                headers.append((MODEL_CALL_ID_HEADER.encode("ascii"), model_call_id.encode("ascii")))
+                message = {**message, "headers": headers}
+            await send(message)
+
         # Give the model server a token sink keyed to this call.
         # The sink records token ids from the complete response.
         # Middleware cannot recover token ids from SSE.
@@ -1328,7 +1335,7 @@ class _CaptureMiddleware:
         # Forward without buffering while the sink is active.
         if self._store is None:
             try:
-                await self._app(scope, receive, send)
+                await self._app(scope, receive, _send_with_model_call_id)
             finally:
                 await _fail_uncommitted_external_call(capture_context)
                 if sink_token is not None:
@@ -1360,6 +1367,9 @@ class _CaptureMiddleware:
             nonlocal defer_response
             message_type = message.get("type")
             if message_type == "http.response.start":
+                headers = list(message.get("headers") or ())
+                headers.append((MODEL_CALL_ID_HEADER.encode("ascii"), model_call_id.encode("ascii")))
+                message = {**message, "headers": headers}
                 state["status"] = message.get("status")
                 content_type = _headers_content_type(message.get("headers") or [])
                 state["streaming"] = content_type.startswith(b"text/event-stream")
