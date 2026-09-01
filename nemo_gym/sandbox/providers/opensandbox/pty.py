@@ -435,7 +435,8 @@ class OpenSandboxPtySession:
                 except (aiohttp.ClientError, asyncio.TimeoutError):
                     pass
         finally:
-            await self._client.close()
+            # await self._client.close()
+            pass
 
     async def __aenter__(self) -> "OpenSandboxPtySession":
         return self
@@ -504,13 +505,13 @@ async def open_pty_session(
                 pass
             raise
     except SandboxPtyError:
-        await client.close()
+        # await client.close()
         raise
     except Exception as e:
-        await client.close()
+        # await client.close()
         raise SandboxPtyError(f"Failed to open PTY session: {e}") from e
     except BaseException:
-        await client.close()
+        # await client.close()
         raise
 
     session = await _start_session(
@@ -557,20 +558,20 @@ async def attach_pty_session(
             request_timeout_s=request_timeout_s,
         )
     except SandboxPtyError:
-        await client.close()
+        # await client.close()
         raise
     except aiohttp.WSServerHandshakeError as e:
-        await client.close()
+        # await client.close()
         if e.status == 409:
             raise SandboxPtyError(
                 f"PTY session {session_id} already has an attached client (pass takeover=True to evict)"
             ) from e
         raise SandboxPtyError(f"Failed to attach to PTY session {session_id}: {e}") from e
     except Exception as e:
-        await client.close()
+        # await client.close()
         raise SandboxPtyError(f"Failed to attach to PTY session {session_id}: {e}") from e
     except BaseException:
-        await client.close()
+        # await client.close()
         raise
     return await _start_session(
         client=client,
