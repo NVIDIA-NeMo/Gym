@@ -776,6 +776,66 @@ async def test_provider_attach_pty_detaches_own_stale_attachment(monkeypatch: py
     await old.close()
 
 
+def _always_refused_provider(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Provider whose every takeover attach is refused as 'already attached'."""
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    provider = OpenSandboxProvider(connection={"domain": "server", "api_key": "k", "protocol": "https"})
+
+    def _client() -> FakeHttpClient:
+        rejected = FakeWs([], close_code=1008)
+        rejected.closed = True
+        return FakeHttpClient(ws=rejected)
+
+    monkeypatch.setattr(provider, "_pty_http_client", _client)
+    monkeypatch.setattr(pty_module, "_PTY_TAKEOVER_RETRY_DELAYS", (0.0,))
+    return provider
+
+
+async def test_provider_attach_pty_reports_dead_sandbox_on_exhausted_takeover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A takeover refused across every retry usually means the sandbox is gone
+    (its stale attachment can never acknowledge the eviction); the error must
+    say that, not 'already has an attached client'."""
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+
+    class DeadRaw:
+        async def get_endpoint(self, port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint="server/v1/sandboxes/sb-1/proxy/44772", headers={})
+
+        async def get_info(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                status=SimpleNamespace(state="Failed", reason="FAILED", message="1/1 observed pods failed; node lost")
+            )
+
+    provider = _always_refused_provider(monkeypatch)
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=DeadRaw())
+    with pytest.raises(SandboxPtyError, match="Sandbox is dead") as exc_info:
+        await provider.attach_pty(handle, "s-7", takeover=True)
+    assert "already has an attached client" in str(exc_info.value.__cause__)
+
+
+async def test_provider_attach_pty_keeps_refusal_when_status_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+
+    class OpaqueRaw:
+        async def get_endpoint(self, port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint="server/v1/sandboxes/sb-1/proxy/44772", headers={})
+
+        async def get_info(self) -> SimpleNamespace:
+            raise RuntimeError("control plane unavailable")
+
+    provider = _always_refused_provider(monkeypatch)
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=OpaqueRaw())
+    with pytest.raises(SandboxPtyError, match="already has an attached client"):
+        await provider.attach_pty(handle, "s-7", takeover=True)
+
+
 async def test_create_rejected_before_connected_raises_and_cleans_up() -> None:
     # The session we created is torn down when the socket is rejected.
     ws = FakeWs([], close_code=1008)
