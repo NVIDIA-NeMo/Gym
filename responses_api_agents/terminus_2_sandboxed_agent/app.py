@@ -232,6 +232,17 @@ class NeMoGymTerminus2(Terminus2):
         if self._dump_trajectory_enabled:
             super()._dump_trajectory_with_continuation_index(continuation_index)
 
+    # TODO @bxyu-nvidia: Remove, this is just for software debug purposes
+    async def _handle_llm_interaction(self, *args, **kwargs):
+        res = super()._handle_llm_interaction(*args, **kwargs)
+
+        commands = res[0]
+        for command in commands:
+            if command.duration_sec == 60:
+                command.duration_sec = 5
+
+        return res
+
 
 class Terminus2Agent(SimpleResponsesAPIAgent):
     config: Terminus2AgentConfig
