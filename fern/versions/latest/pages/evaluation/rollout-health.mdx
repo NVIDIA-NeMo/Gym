@@ -69,6 +69,79 @@ from disagreeing. Rollouts collected before `ng_trajectory` was introduced can s
 are unobserved instead of being evaluated from inferred historical formats.
 </Note>
 
+### Applicability by Agent Harness
+
+The matrix below maps the evidence reported in the [trajectory capability matrix](/main/reference/trajectory-capabilities) to
+the inputs that the current health runner requires. It reports whether a check can evaluate the documented agent path, not
+whether the check passes or produces a finding.
+
+- `V`: the evaluated path supplies the evidence required by every check in the group when observability is configured as
+  documented.
+- `O`: applicability depends on the rollout, execution path, or repeat configuration. Inspect
+  `run.artifacts.coverage` in `quality_summary.json` and `ng_trajectory.gaps` in the rollout.
+- `X`: the evaluated path does not currently supply the required evidence. The checks in the group are unobserved.
+
+| ID | Health checks | Required evidence |
+| --- | --- | --- |
+| H1 | `check_execution_error`, `record_unreadable`, `rollout_duplicate_identity` | A rollout JSONL record; no agent observability is required. |
+| H2 | `rollout_missing_agent_turns`, `agent_turn_hollow` | Canonical `TrajectoryTurn` records. |
+| H3 | `trajectory_capture_mismatch` | Explicit model-call references on `TrajectoryTurn` records and canonical captured model calls, or a persisted reference-conflict gap. |
+| H4 | `model_call_failed`, `model_call_missing_token_counts`, `model_call_zero_completion_tokens` | Policy-model calls bound exactly through `TrajectoryTurn.model_calls`. |
+| H5 | `model_call_runaway_generation` | An exactly bound policy-model call, its finish reason, and its saved response content. |
+| H6 | `rollout_token_count_mismatch` | Complete top-level rollout token totals and complete token counts for all exactly bound policy-model calls. |
+| H7 | `task_consistently_unhealthy` | At least two rollout verdicts that are not `unobserved`; applicability therefore depends on repeat configuration and rollout findings. |
+| H8 | `task_no_successful_model_calls` | Complete policy-model-call bindings for every repeat of a task. |
+
+| Agent | H1 | H2 | H3 | H4 | H5 | H6 | H7 | H8 |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `anyswe_agent` | V | X | X | X | X | X | O | X |
+| `anyterminal_agent` | V | X | X | X | X | X | O | X |
+| `aviary_agent` | V | X | X | X | X | X | O | X |
+| `browsecomp_agent` | V | X | X | X | X | X | O | X |
+| `claude_code_agent` | V | X | X | X | X | X | O | X |
+| `cline_agent` | V | X | X | X | X | X | O | X |
+| `codex_agent` | V | X | X | X | X | X | O | X |
+| `critpt_agent` | V | X | X | X | X | X | O | X |
+| `cvdp_agent` | V | X | X | X | X | X | O | X |
+| `finance_agent` | V | X | X | X | X | X | O | X |
+| `gymnasium_agent` | V | X | X | X | X | X | O | X |
+| `harbor_agent` | V | X | X | X | X | X | O | X |
+| `hermes_agent` | V | X | X | X | X | X | O | X |
+| `kilocode_agent` | V | X | X | X | X | X | O | X |
+| `labbench2_vlm_agent` | V | V | V | V | O | V | O | V |
+| `langgraph_agent` | V | X | X | X | X | X | O | X |
+| `mini_swe_agent` | V | X | X | X | X | X | O | X |
+| `mini_swe_agent_2` | V | X | X | X | X | X | O | X |
+| `non_executing_simple_agent` | V | X | X | X | X | X | O | X |
+| `openclaw_agent` | V | X | X | X | X | X | O | X |
+| `opencode_agent` | V | X | X | X | X | X | O | X |
+| `opencode_sandboxed_agent` | V | X | X | X | X | X | O | X |
+| `osworld_agent` | V | X | X | X | X | X | O | X |
+| `pi_agent` | V | X | X | X | X | X | O | X |
+| `proof_refinement_agent` | V | X | X | X | X | X | O | X |
+| `remote_agent` | V | X | X | X | X | X | O | X |
+| `scicode_agent` | V | X | X | X | X | X | O | X |
+| `simple_agent` | V | V | V | V | V | V | O | V |
+| `speed_bench_agent` | V | X | X | X | X | X | O | X |
+| `stirrup_agent` | V | X | X | X | X | X | O | X |
+| `swe_agents` / OpenCode (legacy) | V | X | X | X | X | X | O | X |
+| `swe_agents` / OpenHands (legacy) | V | X | X | X | X | X | O | X |
+| `tau2` | V | X | X | X | X | X | O | X |
+| `tool_simulation_agent` | V | X | X | X | X | X | O | X |
+| `toolsandbox_agent` | V | X | X | X | X | X | O | X |
+| `verifiers_agent` | V | X | X | X | X | X | O | X |
+
+The health runner currently uses `TrajectoryRecord.turns` for both structural checks and policy-model-call binding. It does
+not treat invocation-scoped conversation or model-call evidence as a substitute for `TrajectoryTurn`. As a result, an agent
+can have complete C1, C2, or C4 coverage in the trajectory capability matrix while its H2 through H6 and H8 checks remain
+unobserved.
+
+`simple_agent` and `labbench2_vlm_agent` emit the required canonical turns and explicit call references. LabBench H5 is
+path-dependent because rows carrying the `multimodal_history_redacted` gap omit saved model request and response payloads.
+Their C3 trajectory coverage is marked partial because resolution status can be absent; H2 does not require resolution status.
+H7 is conditional for every agent because it also requires at least two computable repeats; the agent harness alone cannot
+guarantee that input.
+
 ## Findings and Verdicts
 
 A **finding** is evidence emitted by one check. Checks do not emit verdicts. After all enabled rollout-level checks run, the
