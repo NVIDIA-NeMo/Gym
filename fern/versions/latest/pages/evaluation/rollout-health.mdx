@@ -80,21 +80,24 @@ whether the check passes or produces a finding.
   `run.artifacts.coverage` in `quality_summary.json` and `ng_trajectory.gaps` in the rollout.
 - `X`: the evaluated path does not currently supply the required evidence. The check is unobserved.
 
-| ID | Health check | Required evidence |
+The capability basis identifies the observability contract that a check inspects. It does not imply that every rollout passes
+that contract: for example, `model_call_missing_token_counts` cites C2 because a missing C2 token count is the defect it reports.
+
+| ID | Health check | Capability basis |
 | --- | --- | --- |
-| H1 | `check_execution_error` | A parsed rollout JSONL record; no agent observability is required. |
-| H2 | `record_unreadable` | A non-empty rollout JSONL line; no agent observability is required. |
-| H3 | `rollout_duplicate_identity` | The task and rollout identity on every parsed input record. |
-| H4 | `rollout_missing_agent_turns` | Canonical `TrajectoryTurn` records. |
-| H5 | `agent_turn_hollow` | Canonical `TrajectoryTurn` records. |
-| H6 | `trajectory_capture_mismatch` | Explicit references from `TrajectoryTurn.model_calls` or `AgentInvocation.model_calls` and canonical captured model calls, or a persisted reference-conflict gap. |
-| H7 | `model_call_failed` | Policy-model calls bound exactly through turn or invocation references. |
-| H8 | `model_call_missing_token_counts` | Policy-model calls bound exactly through turn or invocation references. |
-| H9 | `model_call_zero_completion_tokens` | Policy-model calls bound exactly through turn or invocation references. |
-| H10 | `model_call_runaway_generation` | An exactly bound policy-model call, its finish reason, and its saved response content. |
-| H11 | `rollout_token_count_mismatch` | Complete top-level rollout token totals and complete token counts for all exactly turn-bound policy-model calls. |
-| H12 | `task_consistently_unhealthy` | At least two rollout verdicts that are not `unobserved`; applicability therefore depends on repeat configuration and rollout findings. |
-| H13 | `task_no_successful_model_calls` | Complete turn-to-model-call bindings for every repeat of a task. |
+| H1 | `check_execution_error` | None; runner failure containment. |
+| H2 | `record_unreadable` | None; rollout JSONL parsing. |
+| H3 | `rollout_duplicate_identity` | None; top-level rollout identity. |
+| H4 | `rollout_missing_agent_turns` | C3. |
+| H5 | `agent_turn_hollow` | C3. |
+| H6 | `trajectory_capture_mismatch` | C10 or C11. |
+| H7 | `model_call_failed` | C1 and either C10 or C11. |
+| H8 | `model_call_missing_token_counts` | C2 and either C10 or C11. |
+| H9 | `model_call_zero_completion_tokens` | C2 and either C10 or C11. |
+| H10 | `model_call_runaway_generation` | C1, C9, and either C10 or C11. |
+| H11 | `rollout_token_count_mismatch` | C2 and C11, plus top-level rollout token totals. |
+| H12 | `task_consistently_unhealthy` | None; at least two computable repeat verdicts. |
+| H13 | `task_no_successful_model_calls` | C11 for every repeat. |
 
 | Agent | H1 | H2 | H3 | H4 | H5 | H6 | H7 | H8 | H9 | H10 | H11 | H12 | H13 |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -135,19 +138,17 @@ whether the check passes or produces a finding.
 | `toolsandbox_agent` | V | V | V | X | X | X | X | X | X | X | X | O | X |
 | `verifiers_agent` | V | V | V | X | X | X | X | X | X | X | X | O | X |
 
-H6 through H10 accept exact policy-model-call references from either `TrajectoryTurn.model_calls` or
-`AgentInvocation.model_calls`. Claude Code, Hermes, OpenClaw, and Pi already emit invocation-owned references. OpenCode and
-sandboxed OpenCode emit them when their model calls carry the exact OpenCode session identity. These agents can therefore run
-the five per-call checks even though they do not emit canonical turns.
+H6 through H10 accept either ownership scope. Claude Code, Hermes, OpenClaw, and Pi provide invocation ownership through C10.
+OpenCode and sandboxed OpenCode provide C10 when their model calls carry the exact OpenCode session identity. These agents can
+therefore run the five per-call checks even though they do not provide C3 or C11.
 
-H4 and H5 remain turn-only because invocation histories do not define individual semantic turns. H11 and H13 also remain
-turn-only because an invocation can own support calls that should be inspected individually but must not be counted as
-trajectory calls in an aggregate claim.
+H4 and H5 require C3 because invocation histories do not define individual semantic turns. H11 and H13 require C11 because an
+invocation can own support calls that should be inspected individually but must not be counted as trajectory calls in an
+aggregate claim.
 
-`simple_agent` and `labbench2_vlm_agent` emit canonical turns and explicit call references. LabBench H10 is path-dependent
-because rows carrying the `multimodal_history_redacted` gap omit saved response payloads. Their C3 trajectory coverage is
-partial because resolution status can be absent; H4 and H5 do not require resolution status. H12 is conditional for every
-agent because it also requires at least two computable repeats; the agent harness alone cannot guarantee that input.
+`simple_agent` and `labbench2_vlm_agent` provide C3, C10, and C11. LabBench H10 is path-dependent because its C9 support is
+path-dependent: rows carrying the `multimodal_history_redacted` gap omit saved response payloads. H12 is conditional for every
+agent because it requires at least two computable repeats; the agent harness alone cannot guarantee that input.
 
 ## Findings and Verdicts
 
