@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
+from collections.abc import Mapping
+from numbers import Number
 from typing import Any
 
 from fastapi import Body, Request, Response
@@ -21,8 +23,39 @@ from pydantic import ConfigDict
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
 from nemo_gym.server_utils import get_response_json, raise_for_status
+
+
+def response_output_items(policy_outputs: list[Any]) -> list[Any]:
+    """Return only items that are valid members of a Responses API output."""
+    input_roles = {"user", "system", "developer"}
+    return [item for item in policy_outputs if getattr(item, "role", None) not in input_roles]
+
+
+def _aggregate_usage_values(values: list[Any]) -> Any:
+    """Recursively add numeric usage fields while preserving provider-specific details."""
+    values = [value for value in values if value is not None]
+    if not values:
+        return None
+    if all(isinstance(value, bool) for value in values):
+        return values[-1]
+    if all(isinstance(value, Number) and not isinstance(value, bool) for value in values):
+        return sum(values)
+    if all(isinstance(value, Mapping) for value in values):
+        keys = dict.fromkeys(key for value in values for key in value)
+        return {key: _aggregate_usage_values([value.get(key) for value in values]) for key in keys}
+    if all(isinstance(value, list) for value in values):
+        return [item for value in values for item in value]
+    return values[-1]
+
+
+def aggregate_response_usage(usages: list[NeMoGymResponseUsage]) -> NeMoGymResponseUsage | None:
+    """Aggregate usage from all model calls represented by one agent response."""
+    if not usages:
+        return None
+    usage = _aggregate_usage_values([item.model_dump(mode="python") for item in usages])
+    return NeMoGymResponseUsage.model_validate(usage)
 
 
 class LangGraphAgentConfig(BaseResponsesAPIAgentConfig):
@@ -75,6 +108,8 @@ class LangGraphAgentAdapter(SimpleResponsesAPIAgent):
         model_response = self.extract_model_response(final_state)
         outputs = self.extract_outputs(final_state)
         model_response.output = outputs
+        if "policy_usages" in final_state:
+            model_response.usage = aggregate_response_usage(final_state["policy_usages"])
         return model_response
 
     async def run(self, request: Request, body: BaseRunRequest) -> LangGraphVerifyResponse:

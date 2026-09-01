@@ -32,14 +32,31 @@ OUTPUT_FPATH = DATA_DIR / "swebench_verified_benchmark.jsonl"
 def prepare():
     ds = load_dataset("princeton-nlp/SWE-bench_Verified", split="test", token=get_hf_token())
 
+    prompt_template = Path("benchmarks/swebench/minimax_prompt.txt").read_text()
+
     with OUTPUT_FPATH.open("w", encoding="utf-8") as fout:
         for row in ds:
+            prompt = (
+                prompt_template.replace(
+                    "{{ workspace_path }}",
+                    "/testbed",
+                )
+                .replace(
+                    "{{ instance.problem_statement }}",
+                    row["problem_statement"],
+                )
+                .replace(
+                    "{{ instance.repo_language ~ ' ' if instance.repo_language else '' }}",
+                    "",
+                )
+            )
+
             row = row | {
                 "responses_create_params": {
                     "input": [
                         {
                             "role": "user",
-                            "content": row["problem_statement"],
+                            "content": prompt,
                         }
                     ],
                 },

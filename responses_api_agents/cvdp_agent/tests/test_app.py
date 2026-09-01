@@ -38,6 +38,20 @@ from responses_api_agents.cvdp_agent.app import (
 )
 
 
+def _drop_nulls(value):
+    """Remove dictionary entries with a value of ``None`` recursively.
+
+    SDK releases can add optional response fields at any depth.
+    Exact comparisons should ignore these unset fields.
+    Expected non-null values remain part of the comparison.
+    """
+    if isinstance(value, dict):
+        return {k: _drop_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_drop_nulls(v) for v in value]
+    return value
+
+
 class TestApp:
     def test_sanity(self) -> None:
         config = CVDPAgentConfig(
@@ -167,7 +181,7 @@ class TestApp:
             "prompt_cache_key": None,
             "safety_identifier": None,
         }
-        assert expected_responses_dict == actual_responses_dict
+        assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
 
 
 class TestAgenticSandboxSpec:
@@ -465,6 +479,7 @@ class TestAgenticSandboxSpec:
             "output": [
                 {
                     "id": "msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
+                    "content": None,
                     "encrypted_content": None,
                     "summary": [
                         {
@@ -511,4 +526,4 @@ class TestAgenticSandboxSpec:
             "prompt_cache_key": None,
             "safety_identifier": None,
         }
-        assert expected_responses_dict == actual_responses_dict
+        assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)

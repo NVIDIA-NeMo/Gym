@@ -22,9 +22,9 @@ Two compositions matter:
 | | Built from | Notes |
 | --- | --- | --- |
 | **Agent** | **Model** + **Agent harness** | The harness owns the loop, tools, context, and stop conditions. |
-| **Environment** | **Dataset** + **Verifier** + **State** (+ env tools) | The task world the agent acts on and is scored against. The **model is outside** the environment. |
+| **Environment** | **Dataset** + **Agent harness** + **Verifier** + **State** | Everything required for an agent to complete a task. The **model is outside** the environment. |
 
-The **agent harness** belongs to the agent, not the environment. In Gym packaging, an environment *config* still names which agent server to run — that is a wiring reference, not ownership of the harness.
+The **agent harness** belongs to the agent and is part of the environment definition. In Gym packaging, an environment *config* names which agent server to run.
 
 The **model** (also called the **policy**) is what you call for generation — local weights or a remote API endpoint. In Gym it is usually exposed by the **Model server** (or your harness can call an endpoint directly). The same environment shape can be used for **benchmark** eval (fixed taskset / protocol) or for **training** (rewards or synthetic data); the main differences are task split and contamination controls, not a different environment type.
 
@@ -54,7 +54,7 @@ The **model** (also called the **policy**) is what you call for generation — l
 
 | Term | Definition |
 | --- | --- |
-| **Environment** | The task world an agent runs against, excluding the model: `Dataset + Verifier + State` (plus environment tools). Gym configs also reference an **agent harness** for packaging. See [Environments](/about/concepts/environments) and [Build Environments](/environment-tutorials). |
+| **Environment** | Everything required for an agent to complete a task, excluding the model: `Dataset + Agent Harness + Verifier + State`. See [Environments](/about/concepts/environments) and [Build Environments](/environment-tutorials). |
 | **State** | Per-attempt mutable world (files, DB, tool results, and so on). `seed_session()` starts a clean session; tools update that session; it is not a snapshot of the whole environment config. |
 | **Verifier** | Scores a task attempt into a **reward** (typically 0–1) via `verify()` on the resources server. Also called scorer or grader. See [Build Verifiers](/build-verifiers). |
 | **Reward** | Numerical score (typically 0.0–1.0) for how well the attempt did — used as eval metrics and as the RL learning signal. |
@@ -67,6 +67,7 @@ The **model** (also called the **policy**) is what you call for generation — l
 | **Model / policy model** | The model being trained or evaluated — local weights or a remote endpoint, usually via the Model server. See [Model Server](/model-server). |
 | **Agent harness** | How the model interacts with the environment: loops model calls, routes tools, manages context, and decides when the task is done. See [Agent Server](/agent-server). |
 | **Agent** | Model + agent harness. |
+| **Rollout driver** | Coordinates an episode and records its trajectory. |
 | **Multi-turn** | Dialogue across turns where conversation context (and often state) persists. |
 | **Multi-step** | Sequential tool calls or intermediate steps in the agent loop before completion (may be single- or multi-turn). See [Multi-Step Environment](/environment-tutorials/multi-step-environment). |
 | **Tool use** | Function calling — invoking external capabilities (APIs, code execution, databases, and so on). |
@@ -76,7 +77,7 @@ The **model** (also called the **policy**) is what you call for generation — l
 | Term | Definition |
 | --- | --- |
 | **Evaluation** | Run an agent on tasks, score results, and measure performance. See [Evaluation](/about/concepts/evaluation) and the [Evaluate](/evaluation) workflow. |
-| **Benchmark** | Repeatable evaluation built on an environment: fixed dataset, metrics, and comparison protocol. Not every environment is used as a benchmark. See [Benchmarks](/evaluation/benchmarks). |
+| **Benchmark** | Repeatable, versioned evaluation built on an environment: canonical dataset split, prompt configuration, metrics, and comparison protocol. Not every environment is used as a benchmark. See [Benchmarks](/evaluation/benchmarks). |
 | **pass@k** | Fraction of tasks with at least one success among *k* rollouts. See [Aggregate Metrics](/evaluation/aggregate-metrics). |
 
 ### Training

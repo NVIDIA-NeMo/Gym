@@ -42,6 +42,20 @@ from responses_api_agents.simple_agent.app import (
 )
 
 
+def _drop_nulls(value):
+    """Remove dictionary entries with a value of ``None`` recursively.
+
+    SDK releases can add optional response fields at any depth.
+    Exact comparisons should ignore these unset fields.
+    Expected non-null values remain part of the comparison.
+    """
+    if isinstance(value, dict):
+        return {k: _drop_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_drop_nulls(v) for v in value]
+    return value
+
+
 def _make_agent(
     observability_enabled: bool, agent_type: type[SimpleAgent] = SimpleAgent
 ) -> tuple[SimpleAgent, MagicMock]:
@@ -193,7 +207,7 @@ class TestApp:
             "prompt_cache_key": None,
             "safety_identifier": None,
         }
-        assert expected_responses_dict == actual_responses_dict
+        assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
 
         prefixed_response = client.post(
             "/ng-rollout/0-0/v1/responses", json={"input": [{"role": "user", "content": "hello"}]}
@@ -322,7 +336,7 @@ class TestApp:
         ]
         assert all(turn.timestamp > 0 for turn in turns)
         assert [turn.model_calls[0].response_id for turn in turns] == ["resp-tool", "resp-final"]
-        assert turns[0].model_dump(mode="json")["question"] == [
+        assert _drop_nulls(turns[0].model_dump(mode="json")["question"]) == [
             {"role": "user", "content": "question", "type": "message"}
         ]
         assert [item["type"] for item in turns[1].model_dump(mode="json")["question"]] == [
@@ -621,6 +635,7 @@ class TestApp:
             "output": [
                 {
                     "id": "msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
+                    "content": None,
                     "encrypted_content": None,
                     "summary": [
                         {
@@ -667,7 +682,7 @@ class TestApp:
             "prompt_cache_key": None,
             "safety_identifier": None,
         }
-        assert expected_responses_dict == actual_responses_dict
+        assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
 
     async def test_usage_sanity(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(
@@ -863,6 +878,7 @@ class TestApp:
             "output": [
                 {
                     "id": "msg_688babb17a7881998cc7a42d53c8e5790abdf302bcd600d3",
+                    "content": None,
                     "encrypted_content": None,
                     "summary": [
                         {
@@ -895,4 +911,66 @@ class TestApp:
             "prompt_cache_key": None,
             "safety_identifier": None,
         }
-        assert expected_responses_dict == actual_responses_dict
+        assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
+
+    async def test_run_skip_verification_uses_configured_reward(self) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="simple_agent",
+            model_server=ModelServerRef(
+                type="responses_api_models",
+                name="my model server",
+            ),
+            resources_server=ResourcesServerRef(
+                type="resources_servers",
+                name="my resources server",
+            ),
+            skip_verification=True,
+            skip_verification_reward=0.25,
+        )
+        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        seed_response = AsyncMock()
+        seed_response.ok = True
+        seed_response.cookies = {"session": "seeded"}
+
+        model_response_payload = {
+            "id": "response_id",
+            "created_at": 1,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        model_response = AsyncMock()
+        model_response.ok = True
+        model_response.cookies = {"session": "model"}
+        model_response.read.return_value = json.dumps(model_response_payload).encode()
+
+        server.server_client.post.side_effect = [seed_response, model_response]
+
+        response = client.post(
+            "/run",
+            json={"responses_create_params": {"input": [{"role": "user", "content": "hello"}]}},
+        )
+
+        assert response.status_code == 200
+        response_json = response.json()
+        assert response_json["reward"] == 0.25
+        assert response_json["verification_skipped"] is True
+        assert response_json["response"]["id"] == "response_id"
+
+        post_call_kwargs = [post_call.kwargs for post_call in server.server_client.post.call_args_list]
+        assert [kwargs["url_path"] for kwargs in post_call_kwargs] == [
+            "/seed_session",
+            "/v1/responses",
+        ]
+        assert post_call_kwargs[0]["server_name"] == "my resources server"
+        assert post_call_kwargs[1]["server_name"] == "simple_agent"
+        assert post_call_kwargs[1]["cookies"] == {"session": "seeded"}

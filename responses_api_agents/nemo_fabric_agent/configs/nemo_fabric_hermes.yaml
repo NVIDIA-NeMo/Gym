@@ -1,0 +1,20 @@
+config_paths:
+  - responses_api_agents/nemo_fabric_agent/configs/nemo_fabric_agent.yaml
+
+nemo_fabric_hermes:
+  _inherit_from: nemo_fabric_agent
+  responses_api_agents:
+    nemo_fabric_agent:
+      adapter_id: nvidia.fabric.hermes
+      model_provider: anthropic
+      harness_settings:
+        reasoning_config:
+          enabled: true
+          effort: medium
+        max_tokens: 16000
+        terminal_timeout: 30
+      fabric_config:
+        runtime:
+          max_turns: 30
+        tools:
+          enabled: [terminal, file, code_execution, skills, todo]

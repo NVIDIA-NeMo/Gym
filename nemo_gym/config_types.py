@@ -180,6 +180,18 @@ class AlmostServerError(ConfigError, ValueError):
     `error_on_almost_servers` is set, so the run is aborted."""
 
 
+class AgentCompositionError(ConfigError, ValueError):
+    """A standalone agent config could not be composed onto the merged config's agent instances."""
+
+
+class UnsupportedAgentPairingError(ConfigError, ValueError):
+    """The selected agent is not one the environment's resources server declares support for."""
+
+
+class UnsupportedAgentOverrideError(ConfigError, ValueError):
+    """A command line override configures an agent that no instance ends up running."""
+
+
 ########################################
 # Dataset configs for handling and upload/download
 ########################################
@@ -521,6 +533,16 @@ class BenchmarkDatasetConfig(BaseModel):
     prepare_script: Path
     prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
+    agent: Optional[str] = Field(
+        default=None,
+        description=(
+            "Agent instance that runs this benchmark (a top-level key of the merged config). "
+            "Only needed when the config is ambiguous: the dataset is declared on a resources "
+            "server that several agents reference. The pin must name one of those agents — rows "
+            "are dispatched along the agent -> resources server edge, so any other value is a "
+            "config error. Unambiguous configs resolve without it."
+        ),
+    )
 
 
 ########################################
@@ -739,11 +761,62 @@ AGENT_REF_KEY = "agent_ref"
 
 
 ########################################
-# Weights and Biases
+# Exporter backends
 ########################################
 
 
-class WANDBConfig(BaseModel):
+class ExporterConfig(BaseModel):
+    """Credentials and run identity for one exporter backend.
+
+    The exporter registry validates these against the global config to decide which backends to
+    open, which is why they live here rather than next to the backend: checking availability must
+    not require importing a tracking SDK.
+    """
+
+    @property
+    def is_available(self) -> bool:
+        """Whether every field the backend needs to connect is set."""
+        raise NotImplementedError
+
+
+DEPRECATED_UPLOAD_ROLLOUTS_KEY = "upload_rollouts_to_wandb"
+
+
+class UploadRolloutsConfigMixin(BaseModel):
+    """`upload_rollouts` plus back-compat for the W&B-specific name it replaced.
+
+    The flag gates rollout upload for every configured exporter, not just W&B, so the old name is
+    accepted for one deprecation cycle and mapped onto the new field.
+    """
+
+    upload_rollouts: bool = Field(
+        default=True,
+        description=(
+            "Upload the rollouts to every configured exporter. Sometimes this should be off "
+            "because the rollouts are massive. Default: True"
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def map_deprecated_upload_rollouts(cls, data):
+        if not isinstance(data, dict) or DEPRECATED_UPLOAD_ROLLOUTS_KEY not in data:
+            return data
+
+        data = dict(data)
+        legacy = data.pop(DEPRECATED_UPLOAD_ROLLOUTS_KEY)
+        warnings.warn(
+            f"`{DEPRECATED_UPLOAD_ROLLOUTS_KEY}` is deprecated; use `upload_rollouts`, which "
+            "gates rollout upload for every configured exporter.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        # An explicit `upload_rollouts` wins, so callers can migrate without removing the old key.
+        data.setdefault("upload_rollouts", legacy)
+        return data
+
+
+class WANDBConfig(ExporterConfig):
     wandb_project: Optional[str] = None
     wandb_name: Optional[str] = None
     wandb_api_key: Optional[str] = None
@@ -752,6 +825,25 @@ class WANDBConfig(BaseModel):
     def is_available(self) -> bool:
         # If global_config recursively hide secrets is called, the api key will be set to ****
         return self.wandb_project and self.wandb_name and self.wandb_api_key and self.wandb_api_key != "****"
+
+
+class MLFlowConfig(ExporterConfig):
+    """Also used for the GitLab model registry, which needs only the URI and token."""
+
+    mlflow_tracking_uri: Optional[str] = None
+    mlflow_tracking_token: Optional[str] = None
+    mlflow_experiment_name: Optional[str] = None
+    mlflow_run_name: Optional[str] = None
+
+    @property
+    def is_available(self) -> bool:
+        # The token is optional: unauthenticated tracking servers are possible.
+        return (
+            self.mlflow_tracking_uri
+            and self.mlflow_experiment_name
+            and self.mlflow_run_name
+            and self.mlflow_tracking_token != "****"
+        )
 
 
 ########################################
@@ -788,6 +880,18 @@ class AggregateMetrics(BaseModel):
         default_factory=dict,
         description="Headline metrics for this benchmark. Subset of agent_metrics.",
     )
+    perf_summary: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Cross-rollout efficiency stats aggregated from each rollout's ng_perf field. "
+            "Absent (not null-valued keys) when no rollout in this batch carried ng_perf, "
+            "i.e. observability was disabled for the whole run."
+        ),
+    )
+    repeat_level_metrics: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Per-repeat summary stats (one dict per rollout_index).",
+    )
 
 
 ########################################
@@ -797,3 +901,4 @@ class AggregateMetrics(BaseModel):
 # Per-rollout model-call correlation. Callers place the rollout id in the model-server URL;
 # the capture middleware in base_responses_api_model.py strips this prefix before routing.
 ROLLOUT_PATH_PREFIX = "ng-rollout"
+TOKEN_CAPTURE_PATH_SEGMENT = "training-token-capture"
