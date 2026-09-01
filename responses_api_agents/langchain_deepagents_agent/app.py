@@ -86,8 +86,8 @@ def _output_text(content_items: list) -> str:
 
 
 def to_langchain(input_items: list) -> list:
-    """Gym Responses API input items -> LangChain messages. Runs once per responses() call, on the 
-    first request that comes in. This is different from to_gym_input()/to_langchain_ai_message(), 
+    """Gym Responses API input items -> LangChain messages. Runs once per responses() call, on the
+    first request that comes in. This is different from to_gym_input()/to_langchain_ai_message(),
     which run once per internal model call inside GymResponsesChatModel._agenerate()."""
     # "developer" is an OpenAI Responses API role with no LangChain equivalent; map it to SystemMessage.
     roles = {"user": HumanMessage, "assistant": AIMessage, "system": SystemMessage, "developer": SystemMessage}
@@ -201,9 +201,7 @@ class GymResponsesChatModel(BaseChatModel):
         # API type) requires "strict" as a present-but-nullable field — omitting it entirely fails
         # request validation ("Field required"), confirmed by actually running this against a live
         # model server. convert_to_openai_tool()'s "function" dict doesn't include it by default.
-        formatted = [
-            {"type": "function", "strict": False, **convert_to_openai_tool(t)["function"]} for t in tools
-        ]
+        formatted = [{"type": "function", "strict": False, **convert_to_openai_tool(t)["function"]} for t in tools]
         bind_kwargs: dict[str, Any] = {"tools": formatted}
         if tool_choice is not None:
             bind_kwargs["tool_choice"] = tool_choice

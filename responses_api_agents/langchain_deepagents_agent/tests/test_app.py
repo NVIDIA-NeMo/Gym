@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import asyncio
-import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -32,7 +31,6 @@ from nemo_gym.openai_utils import (
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.langchain_deepagents_agent.app import (
     DeepAgentsAgent,
-    DeepAgentsAgentConfig,
     _request_context,
     _text,
     to_gym_input,

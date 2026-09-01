@@ -41,7 +41,9 @@ class ReasoningSearchDeepAgent(DeepAgentsAgent):
     def build_agent(self, model: BaseChatModel):
         return create_deep_agent(
             model=model,
-            tools=[TavilySearch(max_results=self.config.max_search_results, tavily_api_key=self.config.tavily_api_key)],
+            tools=[
+                TavilySearch(max_results=self.config.max_search_results, tavily_api_key=self.config.tavily_api_key)
+            ],
             system_prompt=self.config.system_prompt,
         )
 
