@@ -14,7 +14,7 @@ The reward is the hit (accuracy); the reasoning score is reported separately via
 mirroring `OcrR_acc`'s dual `acc`/`_RP` reporting (:126-169).
 
 - **Source:** the mcore fork (dual-source pin in `config.yaml`:
-  `vlmevalkit_url=matthieul/VLMEvalKitMcore`, `vlmevalkit_commit=c0dfe394…`) — the
+  `vlmevalkit_url=matthieul/VLMEvalKitMcore`, `vlmevalkit_commit=6962c8d0…`) — the
   authoritative source for the P00 Omni benchmarks; same isolated per-benchmark pattern
   as OCRBench / MathVista / CharXiv
 - **Resources server:** `resources_servers/vlm_eval_kit` (`_score_OCR_Reasoning`)

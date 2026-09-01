@@ -15,7 +15,7 @@ ocrbench_v2_benchmark_resources_server:
       # wordnet-corrected vs paper 67.0 / 52.7) were produced against the mcore
       # fork — the authoritative source for these benchmarks.
       vlmevalkit_url: https://gitlab-master.nvidia.com/matthieul/VLMEvalKitMcore.git
-      vlmevalkit_commit: c0dfe394662232a58a00d08b67d7ade0e091db1c
+      vlmevalkit_commit: 6962c8d06b2b7b26a74a73d6212c06562b63e1b7
 
 ocrbench_v2_benchmark_simple_agent:
   _inherit_from: vlm_eval_kit_simple_agent

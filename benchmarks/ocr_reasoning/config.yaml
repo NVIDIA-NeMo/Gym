@@ -15,7 +15,7 @@ ocr_reasoning_benchmark_resources_server:
       # authoritative source for the P00 Omni benchmarks (dual-source pin, same isolated
       # pattern as OCRBench !402 / MathVista !404 / CharXiv DQ).
       vlmevalkit_url: https://gitlab-master.nvidia.com/matthieul/VLMEvalKitMcore.git
-      vlmevalkit_commit: c0dfe394662232a58a00d08b67d7ade0e091db1c
+      vlmevalkit_commit: 6962c8d06b2b7b26a74a73d6212c06562b63e1b7
       # Reference judge for OCR-Reasoning is gpt-4o-mini; proxy-served (non-ecn) ID.
       # The judge is REQUIRED (the reasoning rating needs it; prefetch-only degrades to
       # reason_score 0 and is NOT reference-comparable).

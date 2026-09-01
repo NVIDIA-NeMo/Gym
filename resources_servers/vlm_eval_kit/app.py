@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 UPSTREAM_VLMEVALKIT_URL = "https://github.com/open-compass/VLMEvalKit"
 UPSTREAM_VLMEVALKIT_COMMIT = "00804217f868058f871f5ff252a7b9623c3475d9"
 MCORE_VLMEVALKIT_URL = "https://gitlab-master.nvidia.com/matthieul/VLMEvalKitMcore.git"
-MCORE_VLMEVALKIT_COMMIT = "c0dfe394662232a58a00d08b67d7ade0e091db1c"
+MCORE_VLMEVALKIT_COMMIT = "6962c8d06b2b7b26a74a73d6212c06562b63e1b7"
 
 # Reasoning models wrap their chain-of-thought in <think>/<thinking> blocks; scorers
 # must judge only the final answer text.
