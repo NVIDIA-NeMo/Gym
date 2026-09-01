@@ -17,6 +17,7 @@ verifiers_agent:
             id: "null"
           max_turns: 6
       group_size: 1
+      token_id_capture: true
       max_concurrent_generation: -1
       max_concurrent_scoring: -1
       max_tokens: 8192

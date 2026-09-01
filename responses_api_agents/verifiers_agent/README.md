@@ -50,10 +50,9 @@ identifier. Rows refer to tasks by index, so export and rollout collection must 
 taskset version, config, and order.
 
 The integration intentionally runs one V1 rollout per Gym row. V1 multi-agent environments and
-group rewards are not supported. Responses harnesses preserve Gym's native output items,
-including token IDs, log probabilities, and routed-expert payloads. Chat Completions harnesses
-also preserve token IDs and log probabilities. Anthropic Messages harnesses remain useful for
-evaluation, but do not retain native training fields in the trace.
+group rewards are not supported. The example opts the agent into Gym's training-token capture.
+When capture is enabled for the run, Gym rebuilds the rollout output from model-server records
+containing token IDs, log probabilities, and routed-expert payloads.
 
 ## Licensing
 

@@ -175,7 +175,7 @@ class TestApp:
         agent._env = MagicMock()
         slot = MagicMock()
         agent._env.slots.return_value = [slot]
-        agent._env.run_slot = AsyncMock(return_value=vf.Episode.of(trace))
+        agent._env.run_slot = AsyncMock(return_value=vf.Episode(task=trace.task, traces=[trace], ok=True))
         monkeypatch.setattr(
             VerifiersAgent,
             "resolve_model_base_url",
@@ -223,7 +223,10 @@ class TestApp:
         agent._env = MagicMock()
         agent._env.slots.return_value = [MagicMock()]
         agent._env.run_slot = AsyncMock(
-            return_value=vf.Episode(errors=[vf.Error(type="RuntimeError", message="rollout failed")])
+            return_value=vf.Episode(
+                task=vf.TraceTask(type="Task", data=agent._tasks[0].data),
+                errors=[vf.Error(type="RuntimeError", message="rollout failed")],
+            )
         )
         monkeypatch.setattr(
             VerifiersAgent,
