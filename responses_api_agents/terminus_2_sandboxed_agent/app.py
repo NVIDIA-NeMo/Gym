@@ -234,7 +234,7 @@ class NeMoGymTerminus2(Terminus2):
 
     # TODO @bxyu-nvidia: Remove, this is just for software debug purposes
     async def _handle_llm_interaction(self, *args, **kwargs):
-        res = super()._handle_llm_interaction(*args, **kwargs)
+        res = await super()._handle_llm_interaction(*args, **kwargs)
 
         commands = res[0]
         for command in commands:
