@@ -1,0 +1,162 @@
+---
+title: "Extending"
+description: ""
+position: 6
+---
+Add spans to your own resources server, agent harness, or model server.
+
+## What You Get Without Doing Anything
+
+Before you add a single line, your server already produces:
+
+- A SERVER span per HTTP request, named after the route, from FastAPI auto-instrumentation.
+- `gym.verify` around your `verify()` implementation, if it is a resources server.
+- A CLIENT span for every outbound call your server makes through
+  `nemo_gym.server_utils.request()`.
+- `http.server.request.duration`, dimensioned by route, method, and status.
+
+Add your own spans when you want to name a phase *inside* one of those, such as the parse
+step of a verifier or a retrieval call in an agent harness.
+
+## Adding a Span
+
+```python
+from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
+from nemo_gym.telemetry.span_groups import GymSpanGroup
+
+
+class MyResourcesServer(SimpleResourcesServer):
+    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+        if is_span_group_enabled(GymSpanGroup.VERIFY):
+            with managed_span(GymSpanGroup.VERIFY, "my_server.parse_answer"):
+                answer = self._parse(body)
+        else:
+            answer = self._parse(body)
+        return BaseVerifyResponse(reward=self._score(answer))
+```
+
+Import from `nemo_gym.telemetry._fallbacks`, never from `nemo.lens` directly. That module
+resolves to the real implementations when `nemo-lens` is installed and to no-op stubs when
+it is not, so your server keeps working for users who never install the extra.
+
+## Check the Span Group First
+
+Always check `is_span_group_enabled` before entering `managed_span`, as shown above. The
+outer check looks redundant because `managed_span` also checks internally, but it is not:
+entering a disabled `managed_span` still constructs a context manager, which costs roughly
+30 times more than the check.
+
+NeMo Gym serves at 16k+ concurrency, so a per-request site is a hot path, and users who
+turned telemetry off should not pay for it.
+
+For the same reason, build attributes *inside* the check:
+
+```python
+# Correct — the dict and the f-string only run when the group is enabled.
+if is_span_group_enabled(GymSpanGroup.VERIFY):
+    with managed_span(GymSpanGroup.VERIFY, "my_server.parse", task=f"{body.task_id}"):
+        ...
+
+# Wrong — the f-string runs on every request, enabled or not.
+with managed_span(GymSpanGroup.VERIFY, "my_server.parse", task=f"{body.task_id}"):
+    ...
+```
+
+## Attributes
+
+Use `safe_set_span_attributes` to set attributes after a span starts. It drops non-scalar
+values instead of raising, and redacts values whose keys look sensitive.
+
+```python
+from nemo_gym.telemetry._fallbacks import safe_set_span_attributes
+
+with managed_span(GymSpanGroup.VERIFY, "my_server.parse") as span:
+    result = self._parse(body)
+    if span is not None:
+        safe_set_span_attributes(span, {"my_server.parsed_items": len(result)})
+```
+
+`managed_span` yields `None` when the group is disabled, so guard with `if span is not
+None` whenever you touch the span object.
+
+### What Not to Put on a Span
+
+Do not attach prompts, model outputs, dataset rows, tool arguments, or API keys. Traces
+are exported to a shared backend and retained. Redaction by key name catches an attribute
+called `prompt`; it cannot catch a prompt stored under `content`.
+
+Record shapes and outcomes instead: lengths, counts, exit codes, error categories, and
+durations. NeMo Gym's sandbox instrumentation follows this rule — it records the provider
+and the exit code, never the command, because in a code-execution environment the command
+is model output.
+
+### Choosing an Attribute Kind
+
+| Kind | Use When | NeMo Gym Example |
+| --- | --- | --- |
+| Resource attribute | Constant for the process's lifetime | `nemo.gym.server.name` |
+| Span attribute | Varies per operation; high cardinality is fine | `nemo.gym.rollout.id` |
+| Metric | A number you want aggregated over time | `gym.rollout.duration_ms` |
+
+Getting this wrong is expensive to undo once data is in a backend. A per-request value
+recorded as a metric label causes cardinality explosion; a value that should have been a
+metric becomes unqueryable as a span attribute.
+
+## Instrumenting an Async Function
+
+`managed_span` is a synchronous context manager and works around `await`:
+
+```python
+if is_span_group_enabled(GymSpanGroup.AGENT):
+    with managed_span(GymSpanGroup.AGENT, "my_agent.retrieve"):
+        documents = await self._retrieve(query)
+```
+
+The span stays current across the `await` because OpenTelemetry context is stored in a
+`ContextVar`, which asyncio propagates into tasks.
+
+One caveat: if you start a background task inside the span and do not await it, the span
+ends first and the task's spans attach to whatever context it captured at creation.
+
+## Adding a Metric
+
+Prefer spans. A span carries attributes, so it answers more questions than an
+undimensioned metric, and NeMo Gym's metric instruments come from `nemo-lens` and record
+without attributes today.
+
+If you do need a metric, get the meter from the telemetry handle:
+
+```python
+from nemo_gym.telemetry.setup import get_telemetry
+
+telemetry = get_telemetry()
+if telemetry is not None and telemetry.is_exporting:
+    telemetry.meter.create_counter("my_server.retries").add(1)
+```
+
+Check `is_exporting`, not just for `None`. A non-exporting process holds a handle whose
+meter is a no-op.
+
+## Testing Your Instrumentation
+
+Assert on the spans your code produces, not on whether a function was called:
+
+```python
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+
+def test_parse_emits_a_span():
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    ...
+    assert [span.name for span in exporter.get_finished_spans()] == ["my_server.parse_answer"]
+```
+
+Also test with telemetry disabled. That path is the one your users run, and it is the one
+that breaks silently.
+
+See `tests/unit_tests/telemetry/` for worked examples, including a two-server test that
+asserts trace context survives a real HTTP hop.

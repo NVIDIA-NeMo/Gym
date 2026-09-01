@@ -70,7 +70,11 @@ This failure is silent. Check `n_calls` on the first run before relying on the r
 
 ## What you get back
 
-Each rollout's model calls are stitched into a single Responses payload with contiguous `output` items. Each item's `prompt_token_ids` contains the running sequence. Its `generation_token_ids` contains the tokens sampled by the policy at that step. Gym replaces the rollout's `response.output` with these items, so a trainer reads `response.output` the same way for native agents and external harnesses.
+Each captured call records one parent-resolution result. `ROOT` means that the request contains no previous model-authored output. `RESOLVED` means that exactly one committed call matches and its request context was verified. `UNRESOLVED` means that the request appears to continue prior model output, but Gym cannot prove which committed call produced it.
+
+Each rollout's resolved model calls are stitched into a single Responses payload with contiguous `output` items. Each item's `prompt_token_ids` contains the running sequence. Its `generation_token_ids` contains the tokens sampled by the policy at that step. Gym replaces the rollout's `response.output` with these items, so a trainer reads `response.output` the same way for native agents and external harnesses.
+
+An unresolved call begins a separate incomplete fragment. Gym never crosses that boundary with token-prefix inference. The call and its descendants remain available for diagnostics or a consumer that explicitly supports partial trajectories, but single-response delivery sets `mask_sample: true`. Prefix inference is used only when a verified parent is absent from the frozen snapshot, such as a filtered call that generated no tokens.
 
 The loss mask follows from this structure instead of being sent separately. Prompt positions provide context. Generation positions are trainable.
 
@@ -87,7 +91,8 @@ Gym attaches a metrics dictionary to each rollout under `_ng_token_capture`. Agg
 | `delivered_fraction` | 1.0 | Sampled tokens were captured but not delivered. |
 | `quarantined_calls` | 0 | Two calls could not be told apart, so neither was used. |
 | `empty_generation_calls` | 0 | The output budget or a content filter is truncating generations. |
-| `mask_sample` | absent | The rollout lost a call and must not be trained on. |
+| `unresolved_parent_calls` | 0 | A request appeared to continue prior model output, but no exact committed parent was proven. |
+| `mask_sample` | absent | The rollout lost a call, split at an unresolved parent, or otherwise cannot be trained safely. |
 
 Pay particular attention to `n_calls`. A value of exactly 1 means the agentic path was never exercised, even though every other key can look correct.
 
@@ -99,7 +104,7 @@ Gym defines the record shape and builds each record. The training framework cont
 
 ### The interfaces
 
-Gym describes the sink and source as structural protocols. Framework adapters do not inherit from these definitions or import them at runtime. They implement the same method signatures, and Gym consumes the resulting objects by that method shape. The definitions below are the reference contract.
+Gym describes the sink, source, and lineage resolver as structural protocols. Framework adapters do not inherit from these definitions or import them at runtime. They implement the same method signatures, and Gym consumes the resulting objects by that method shape. The definitions below are the reference contract.
 
 ```python
 class TokenSink(Protocol):
@@ -111,9 +116,14 @@ class TokenSource(Protocol):
     async def freeze(self, rollout_id: str) -> TokenCaptureSnapshot: ...
     async def drop(self, rollout_id: str, *, snapshot_id: str, version: int) -> bool: ...
     async def close(self) -> None: ...
+
+class LineageStore(Protocol):
+    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution: ...
+    def is_process_shared(self) -> bool: ...
+    async def close(self) -> None: ...
 ```
 
-`put` must make the record durable before it returns. A reader that runs after the rollout must see every acknowledged record. This guarantee allows the consumer to freeze one complete view after the harness finishes.
+`TokenSink` remains the writer-side interface. `put` is the only publication boundary: it must make the complete token record and its compact continuation lookup metadata durable before returning. `LineageStore` is the worker-side read client over those committed entries; it does not publish a second record. A later request may resolve an entry only after the corresponding `put` has returned.
 
 `mark_incomplete` is the durable signal that a rollout lost a call. The model call still succeeds. A sink that drops this signal makes an incomplete rollout look complete.
 
@@ -123,9 +133,11 @@ class TokenSource(Protocol):
 
 `close` releases client resources. Gym closes clients it constructs, but it does not close a caller-installed source.
 
+`LineageResolution` has three semantic outcomes: `ROOT`, `RESOLVED`, and `UNRESOLVED`. Diagnostic reasons such as an ambiguous lookup or unavailable backend may accompany `UNRESOLVED`, but they do not change reconstruction behavior.
+
 ### Connecting a framework-owned transport
 
-The training framework owns the transport and its client configuration. Gym owns the model-server processes, so each server worker constructs a framework-provided `TokenSink` proxy from the configured class path. The configured class is a worker factory descriptor, not a shared Python object or a transport implementation owned by Gym.
+The training framework owns the transport and its client configuration. Gym owns the model-server processes, so each server worker constructs framework-provided `TokenSink` and `LineageStore` proxies from configured class paths. The configured classes are worker factory descriptors, not shared Python objects or transport implementations owned by Gym.
 
 ```yaml
 env:
@@ -136,10 +148,16 @@ env:
       sink_kwargs:
         endpoint: ${oc.env:MY_DATAPLANE_URL}
         shard: ${oc.select:cluster_shard,0}
+      lineage_store: my_pkg.sinks:MyDataPlaneLineageStore
+      lineage_store_kwargs:
+        endpoint: ${oc.env:MY_DATAPLANE_URL}
+        shard: ${oc.select:cluster_shard,0}
       rebuild_response: false
 ```
 
-Gym passes `sink_kwargs` to the constructor, so a sink can receive the required endpoint, client, or credentials instead of reading ambient state. Use `${oc.env:VAR}` for secrets instead of writing them into the config. Unsupported constructor arguments cause a startup error. A sink that does not implement `mark_incomplete` also causes a startup error because it could otherwise make a rollout with a missing call look complete.
+Gym passes each kwargs block to its constructor, so the clients can receive the required endpoint, shard, or credentials instead of reading ambient state. Use `${oc.env:VAR}` for secrets instead of writing them into the config. Unsupported constructor arguments cause a startup error. A sink that does not implement `mark_incomplete` also causes a startup error because it could otherwise make a rollout with a missing call look complete.
+
+The sink and lineage resolver must use the same backend namespace. The backend transaction behind `TokenSink.put` stores the `TokenEntry` and updates the continuation-key index together. Pointing the two clients at unrelated services does not satisfy the protocol even if both methods return successfully.
 
 `sink` replaces the file store, so a `dir` configured alongside it is not used. This condition produces a warning instead of an error because no data is lost. No capture files appear on disk.
 
@@ -163,8 +181,10 @@ Configure the sink instead of installing it from a launcher script. Programmatic
 
 `install_token_sink` sets a process global. A model server with `num_workers > 1` launches uvicorn with an app string and `workers=N`. Uvicorn spawns workers that re-import the app module instead of inheriting the launcher's memory. A sink installed by the parent process therefore does not exist in any worker. Capture then falls back to the file store. If no `dir` is set, the worker has no local destination.
 
-Gym constructs the configured sink inside each worker at app startup, which avoids this process-boundary problem.
+Gym constructs configured sink and resolver clients inside each worker at app startup. Every client must connect to the same process-shared backend. `LineageStore.is_process_shared()` must return `true`; startup rejects a process-local resolver when `num_workers > 1`.
 </Warning>
+
+With Gym's local file backend, all workers append and resolve from the same token JSONL under one per-rollout lock. The resolver incrementally indexes only newly appended entries in each worker. Freeze and retirement use the same lock. Retirement keeps the lock file and a tombstone, so an old worker cannot recreate a retired capture.
 
 ### Reading records back
 

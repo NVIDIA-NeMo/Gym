@@ -19,12 +19,14 @@ from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock
 
 from omegaconf import OmegaConf
-from pytest import LogCaptureFixture, MonkeyPatch, mark, raises
+from omegaconf.errors import ConfigKeyError
+from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
 from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config_types import (
+    AgentCompositionError,
     AlmostServerError,
     ConfigError,
     ConfigMissingValuesError,
@@ -32,9 +34,13 @@ from nemo_gym.config_types import (
     MalformedConfigPathsError,
     NoServerInstancesError,
     ServerRefNotFoundError,
+    UnsupportedAgentOverrideError,
+    UnsupportedAgentPairingError,
     WANDBConfig,
 )
 from nemo_gym.global_config import (
+    ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
+    ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     USE_ABSOLUTE_IP,
@@ -333,6 +339,49 @@ b: 2
             }
             == global_config_dict
         )
+
+    def test_duplicate_config_paths_warning_goes_to_stderr(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys: CaptureFixture
+    ) -> None:
+        """Diagnostics must stay off stdout, which carries the `--json` payload."""
+        self._mock_versions_for_testing(monkeypatch)
+
+        # Clear any lingering env vars.
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        # Two roots pulling in the same child is what triggers the duplicate-path warning.
+        (tmp_path / "shared.yaml").write_text("a: 1\n")
+        for name in ("first.yaml", "second.yaml"):
+            (tmp_path / name).write_text(f"""\
+config_paths:
+- {tmp_path}/shared.yaml
+""")
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = True
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig({"config_paths": [f"{tmp_path}/first.yaml", f"{tmp_path}/second.yaml"]})
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        omegaconf_load_mock = MagicMock()
+        original_load = OmegaConf.load
+        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+
+        get_global_config_dict()
+
+        captured = capsys.readouterr()
+        assert "Found configs that reference the same source config path" in captured.err
+        assert f"- {tmp_path}/shared.yaml" in captured.err
+        assert captured.out == ""
 
     def test_get_global_config_dict_config_paths_recursive(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
@@ -971,6 +1020,35 @@ contested: second_inner
         assert "viacopy.b" in missing
         assert "viainherit.b" in missing
 
+    def test_recursively_swap_keys_helper_new_struct(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            GlobalConfigDictParser, "parse_global_config_dict_from_cli", lambda *args, **kwargs: struct
+        )
+
+        parser = GlobalConfigDictParser()
+        struct = DictConfig(
+            {
+                "a": {
+                    "b": 1,
+                },
+                "a2": {
+                    "_inherit_from": "a",
+                    "c": 2,
+                },
+            },
+            flags={"struct": True},
+        )
+
+        parse_config = GlobalConfigDictParserConfig(skip_load_from_cli=False, skip_load_from_dotenv=True)
+
+        """
+        Assert no error:
+        omegaconf.errors.ConfigKeyError: Key 'c' is not in struct
+            full_key: a.c
+            object_type=dict
+        """
+        parser.parse(parse_config)
+
     def test_copy_of_missing_leaf_is_reported_not_opaque_error(self) -> None:
         # `${copy:source.model}` where source.model is unset must not raise an opaque "path does not
         # exist" error; the copy propagates MISSING so both the target and source are reported.
@@ -1326,6 +1404,8 @@ contested: second_inner
         with raises(AlmostServerError, match="almost-server.*validation errors") as exc_info:
             get_global_config_dict()
         assert isinstance(exc_info.value, ConfigError)
+        # Diagnostics must stay off stdout, which carries the `--json` payload.
+        assert all(call.kwargs.get("file") is sys.stderr for call in rich_print_mock.call_args_list)
 
     def test_almost_servers_error_flag_bypasses_value_error(self, monkeypatch: MonkeyPatch) -> None:
         """
@@ -1391,6 +1471,8 @@ contested: second_inner
         assert "Configuration Warnings" in printed_messages
         assert "license" in printed_messages
         assert "domain" in printed_messages
+        # Diagnostics must stay off stdout, which carries the `--json` payload.
+        assert all(call.kwargs.get("file") is sys.stderr for call in rich_print_mock.call_args_list)
 
     def test_use_absolute_ip(self, monkeypatch: MonkeyPatch) -> None:
         """Test that use_absolute_ip=True uses machine's hostname ip for default_host."""
@@ -1892,3 +1974,592 @@ class TestOpenAIVersionMatchesNemoGymConstraint:
 
         monkeypatch.setattr(importlib.metadata, "requires", raise_not_found)
         assert _openai_version_matches_nemo_gym_constraint("2.52.0") is True
+
+
+class TestComposeUnboundAgent:
+    """Composition of a standalone agent config onto the environment's agent instances."""
+
+    HARNESS_INSTANCE = "hermes_agent"
+
+    def _harness(self, **overrides) -> dict:
+        """The agent as its standalone config ships it, with `resources_server.name` left unset."""
+        block = {
+            "entrypoint": "app.py",
+            "resources_server": {"type": "resources_servers", "name": "???"},
+            # Deliberately not the environment's `policy_model`: assertions must be able to tell which
+            # side a carried-over binding came from.
+            "model_server": {"type": "responses_api_models", "name": "harness_model"},
+            "max_turns": 30,
+            "terminal_backend": "local",
+        }
+        block.update(overrides)
+        return {"responses_api_agents": {"hermes_agent": block}}
+
+    def _environment_agent(self, resources_server: str, **overrides) -> dict:
+        block = {
+            "entrypoint": "app.py",
+            "resources_server": {"type": "resources_servers", "name": resources_server},
+            "model_server": {"type": "responses_api_models", "name": "policy_model"},
+            "max_steps": 6,
+            "datasets": [
+                {
+                    "name": "gpqa",
+                    "type": "benchmark",
+                    "jsonl_fpath": "benchmarks/gpqa/data/gpqa_diamond_benchmark.jsonl",
+                    "prompt_config": "benchmarks/prompts/eval/aai/mcq-4choices.yaml",
+                    "prepare_script": "benchmarks/gpqa/prepare.py",
+                    "num_repeats": 8,
+                    "license": "CC-BY-4.0",
+                }
+            ],
+        }
+        block.update(overrides)
+        return {"responses_api_agents": {"simple_agent": block}}
+
+    def _config(self, **extra) -> DictConfig:
+        config = {
+            self.HARNESS_INSTANCE: self._harness(),
+            "gpqa_mcqa_simple_agent": self._environment_agent("gpqa_mcqa_resources_server"),
+            "gpqa_mcqa_resources_server": {
+                "resources_servers": {"mcqa": {"entrypoint": "app.py", "domain": "knowledge"}}
+            },
+        }
+        config.update(extra)
+        return DictConfig(config)
+
+    def _composed_name(self, original: str) -> str:
+        """The name an instance takes once rehosted: its environment prefix plus the new agent type."""
+        stem = original.removesuffix("_simple_agent").removesuffix("simple_agent").rstrip("_")
+        if stem == original:
+            stem = original.removesuffix("_agent").rstrip("_")
+        return f"{stem}_hermes_agent" if stem else "hermes_agent"
+
+    def _composed_block(self, config: DictConfig, instance: str) -> DictConfig:
+        renamed = self._composed_name(instance)
+        assert instance == renamed or instance not in config, f"{instance} was not renamed after rehosting"
+        agents = config[renamed]["responses_api_agents"]
+        assert list(agents) == ["hermes_agent"], f"{renamed} was not rehosted on the harness"
+        return agents["hermes_agent"]
+
+    def _guarded_config(self, *required_agents: str) -> DictConfig:
+        """The standard config with the environment's resources server declaring `allowed_agents`."""
+        config = self._config()
+        config["gpqa_mcqa_resources_server"]["resources_servers"]["mcqa"]["allowed_agents"] = list(required_agents)
+        return config
+
+    def _parse(self, config: DictConfig) -> DictConfig:
+        return GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=OmegaConf.merge(
+                    GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT, config
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+    def _parse_config_paths(self, *paths: str) -> DictConfig:
+        return self._parse(DictConfig({"config_paths": list(paths)}))
+
+    def test_noop_when_no_instance_is_unbound(self) -> None:
+        config = self._config()
+        config.pop(self.HARNESS_INSTANCE)
+        before = OmegaConf.to_container(config, resolve=False, throw_on_missing=False)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert OmegaConf.to_container(config, resolve=False, throw_on_missing=False) == before
+
+    def test_absent_resources_server_is_not_a_source(self) -> None:
+        # Self-contained agents omit `resources_server` entirely, which is not the same as leaving it unset.
+        self_contained = {
+            "responses_api_agents": {"swe_agents": {"entrypoint": "app.py", "agent_framework": "openhands"}}
+        }
+        config = self._config()
+        config.pop(self.HARNESS_INSTANCE)
+        config["swe_agents"] = self_contained
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config["swe_agents"]["responses_api_agents"]) == ["swe_agents"]
+        assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["simple_agent"]
+
+    @mark.parametrize("declared", [None, []], ids=["key absent", "empty list"])
+    def test_swap_allowed_when_the_verifier_declares_nothing(self, declared) -> None:
+        config = self._config() if declared is None else self._guarded_config(*declared)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]) == ["hermes_agent"]
+
+    def test_swap_allowed_when_the_selected_agent_is_declared(self) -> None:
+        config = self._guarded_config("simple_agent", "hermes_agent")
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]) == ["hermes_agent"]
+
+    def _set_allowed_agents(self, declared) -> DictConfig:
+        """The standard config with `allowed_agents` set to an arbitrary value, not just a list."""
+        config = self._config()
+        config["gpqa_mcqa_resources_server"]["resources_servers"]["mcqa"]["allowed_agents"] = declared
+        return config
+
+    def test_a_single_agent_may_be_declared_as_a_bare_string(self) -> None:
+        config = self._set_allowed_agents("hermes_agent")
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "gpqa_mcqa_hermes_agent" in config
+        assert "gpqa_mcqa_simple_agent" not in config
+        assert list(config["gpqa_mcqa_hermes_agent"]["responses_api_agents"]) == ["hermes_agent"]
+
+    def test_a_bare_string_still_rejects_a_different_agent(self) -> None:
+        config = self._set_allowed_agents("scicode_agent")
+
+        with raises(UnsupportedAgentPairingError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "accepts scicode_agent" in str(error.value)
+
+    @mark.parametrize("declared", [5, {"a": 1}], ids=["scalar", "mapping"])
+    def test_a_value_that_is_neither_string_nor_list_is_reported(self, declared) -> None:
+        config = self._set_allowed_agents(declared)
+
+        with raises(ConfigError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        message = str(error.value)
+        assert "gpqa_mcqa_resources_server.resources_servers.mcqa.allowed_agents" in message
+        assert "must be a list of agent types" in message
+
+    def test_swap_rejected_when_the_selected_agent_is_not_declared(self) -> None:
+        config = self._guarded_config("scicode_agent")
+
+        with raises(UnsupportedAgentPairingError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        message = str(error.value)
+        assert "gpqa_mcqa_simple_agent" in message
+        assert "scicode_agent" in message and "hermes_agent" in message
+        assert "--allow-unsupported-pairing" in message
+        # The rejected swap must not have been applied.
+        assert list(config["gpqa_mcqa_simple_agent"]["responses_api_agents"]) == ["simple_agent"]
+
+    def test_override_config_key_allows_the_rejected_swap(self) -> None:
+        config = self._guarded_config("scicode_agent")
+        config[ALLOW_UNSUPPORTED_PAIRING_KEY_NAME] = True
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]) == ["hermes_agent"]
+
+    @mark.parametrize("value, allowed", [("1", True), ("true", True), ("0", False), ("", False)])
+    def test_override_env_var(self, monkeypatch: MonkeyPatch, value: str, allowed: bool) -> None:
+        monkeypatch.setenv(ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME, value)
+        config = self._guarded_config("scicode_agent")
+
+        if allowed:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+            assert list(config[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]) == [
+                "hermes_agent"
+            ]
+        else:
+            with raises(UnsupportedAgentPairingError):
+                GlobalConfigDictParser().compose_unbound_agent(config)
+
+    def test_swap_allowed_when_the_requirement_cannot_be_determined(self) -> None:
+        """The guard permits what it cannot read, so the permissive paths are asserted, not assumed.
+
+        A server instance pins exactly one implementation, so a block with two is already invalid and is
+        reported by almost-server detection; the guard must not turn it into a pairing error.
+        """
+        config = self._config()
+        config["gpqa_mcqa_resources_server"]["resources_servers"]["extra"] = DictConfig(
+            {"entrypoint": "app.py", "domain": "knowledge", "allowed_agents": ["scicode_agent"]}
+        )
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]) == ["hermes_agent"]
+
+    def test_every_target_is_checked_not_just_the_first(self) -> None:
+        """A permissive verifier must not vouch for a restrictive one in the same config."""
+        config = self._guarded_config("hermes_agent")
+        config["strict_resources_server"] = DictConfig(
+            {"resources_servers": {"scicode": {"entrypoint": "app.py", "allowed_agents": ["scicode_agent"]}}}
+        )
+        config["strict_agent"] = DictConfig(self._environment_agent("strict_resources_server"))
+
+        with raises(UnsupportedAgentPairingError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "strict_agent" in str(error.value)
+
+    def test_reports_every_rejected_instance_at_once(self) -> None:
+        """Fixing one instance per re-resolve is the slow path; name them all in one error."""
+        config = self._guarded_config("simple_agent")
+        for name, required in (("scicode", ["scicode_agent", "simple_agent"]), ("critpt", ["critpt_agent"])):
+            config[f"{name}_resources_server"] = DictConfig(
+                {"resources_servers": {name: {"entrypoint": "app.py", "allowed_agents": required}}}
+            )
+            config[f"{name}_agent"] = DictConfig(self._environment_agent(f"{name}_resources_server"))
+
+        with raises(UnsupportedAgentPairingError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        message = str(error.value)
+        # All three rejected instances, each with what it accepts, not just the first one hit.
+        for instance in ("gpqa_mcqa_simple_agent", "scicode_agent", "critpt_agent"):
+            assert instance in message, f"{instance} missing from:\n{message}"
+        assert "3 of the agent instance(s)" in message
+        # critpt accepts no agent the others do, so there is nothing to recommend.
+        assert "No single agent satisfies all of them." in message
+
+    def test_recommendation_accounts_for_targets_that_accept_the_selection(self) -> None:
+        """An instance that accepts the selected agent still constrains what could replace it."""
+        config = self._guarded_config("hermes_agent")
+        config["strict_resources_server"] = DictConfig(
+            {"resources_servers": {"scicode": {"entrypoint": "app.py", "allowed_agents": ["scicode_agent"]}}}
+        )
+        config["strict_agent"] = DictConfig(self._environment_agent("strict_resources_server"))
+
+        with raises(UnsupportedAgentPairingError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        message = str(error.value)
+        assert "No single agent satisfies all of them." in message
+        assert "Select one of" not in message, "scicode_agent would only move the failure to gpqa"
+
+    def test_recommends_the_agent_every_rejected_instance_accepts(self) -> None:
+        config = self._guarded_config("scicode_agent", "simple_agent")
+        config["critpt_resources_server"] = DictConfig(
+            {
+                "resources_servers": {
+                    "critpt": {"entrypoint": "app.py", "allowed_agents": ["critpt_agent", "simple_agent"]}
+                }
+            }
+        )
+        config["critpt_agent"] = DictConfig(self._environment_agent("critpt_resources_server"))
+
+        with raises(UnsupportedAgentPairingError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "Select one of: simple_agent." in str(error.value)
+
+    def test_instance_is_renamed_after_the_agent_that_runs_it(self) -> None:
+        """#2657: the instance advertises the harness actually running it, not the one it was written for."""
+        config = self._config()
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "gpqa_mcqa_simple_agent" not in config
+        assert list(config["gpqa_mcqa_hermes_agent"]["responses_api_agents"]) == ["hermes_agent"]
+
+    @mark.parametrize(
+        "original, expected",
+        [
+            ("gpqa_mcqa_simple_agent", "gpqa_mcqa_hermes_agent"),
+            # Names not ending in their agent type keep their whole stem rather than losing part of it.
+            ("osworld_nano_omni", "osworld_nano_omni_hermes_agent"),
+            # Falls back to the generic `_agent` suffix rather than keeping the whole old name.
+            ("scicode_benchmark_agent", "scicode_benchmark_hermes_agent"),
+            ("simple_agent", "hermes_agent"),
+        ],
+    )
+    def test_rename_substitutes_the_trailing_agent_type(self, original: str, expected: str) -> None:
+        config = self._config()
+        config[original] = DictConfig(self._environment_agent("gpqa_mcqa_resources_server"))
+        if original != "gpqa_mcqa_simple_agent":
+            config.pop("gpqa_mcqa_simple_agent")
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert expected in config, f"expected {expected}, got {sorted(config)}"
+
+    def test_raises_when_the_rename_would_collide(self) -> None:
+        config = self._config()
+        config["gpqa_mcqa_hermes_agent"] = DictConfig(
+            {"resources_servers": {"mcqa": {"entrypoint": "app.py", "domain": "knowledge"}}}
+        )
+
+        with raises(AgentCompositionError) as error:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "same name" in str(error.value)
+
+    def test_rehosts_environment_instance_on_the_standalone_agent(self) -> None:
+        config = self._config()
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert self.HARNESS_INSTANCE not in config
+        # _composed_block asserts the instance kept its name and now hosts the harness.
+        block = self._composed_block(config, "gpqa_mcqa_simple_agent")
+
+        # The harness's own configuration comes across.
+        assert block["terminal_backend"] == "local"
+        assert block["max_turns"] == 30
+
+        # The environment's bindings and data are carried over, its agent parameters are not.
+        assert block["resources_server"] == {"type": "resources_servers", "name": "gpqa_mcqa_resources_server"}
+        assert block["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
+        assert "max_steps" not in block
+        assert OmegaConf.to_container(block["datasets"]) == [
+            {
+                "name": "gpqa",
+                "type": "benchmark",
+                "jsonl_fpath": "benchmarks/gpqa/data/gpqa_diamond_benchmark.jsonl",
+                "prompt_config": "benchmarks/prompts/eval/aai/mcq-4choices.yaml",
+                "prepare_script": "benchmarks/gpqa/prepare.py",
+                "num_repeats": 8,
+                "license": "CC-BY-4.0",
+            }
+        ]
+
+    def test_preserves_model_server_per_instance(self) -> None:
+        # Two instances differing only by model server, as genrm_compare does.
+        config = self._config(
+            genrm_reasoning_on=self._environment_agent(
+                "genrm_resources_server",
+                model_server={"type": "responses_api_models", "name": "policy_model"},
+            ),
+            genrm_reasoning_off=self._environment_agent(
+                "genrm_resources_server",
+                model_server={"type": "responses_api_models", "name": "policy_model_reasoning_off"},
+            ),
+        )
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert self._composed_block(config, "genrm_reasoning_on")["model_server"]["name"] == "policy_model"
+        assert (
+            self._composed_block(config, "genrm_reasoning_off")["model_server"]["name"] == "policy_model_reasoning_off"
+        )
+
+    def test_replaces_every_agent_instance(self) -> None:
+        # jailbreak_detection declares five agent instances, one per category.
+        categories = [f"jailbreak_{index}" for index in range(5)]
+        config = self._config(**{name: self._environment_agent("jailbreak_resources_server") for name in categories})
+        config.pop("gpqa_mcqa_simple_agent")
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        for name in categories:
+            assert self._composed_block(config, name)["resources_server"]["name"] == "jailbreak_resources_server"
+
+    def test_falls_back_to_harness_model_when_environment_has_none(self) -> None:
+        environment_agent = self._environment_agent("gpqa_mcqa_resources_server")
+        environment_agent["responses_api_agents"]["simple_agent"].pop("model_server")
+        config = self._config(no_model_server_agent=environment_agent)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert self._composed_block(config, "no_model_server_agent")["model_server"]["name"] == "harness_model"
+
+    def test_skips_an_instance_whose_agent_block_is_unset(self) -> None:
+        # Resolving the block would raise MissingMandatoryValue, which is not a ConfigError, so the CLI
+        # would print a traceback instead of the usual missing-value report.
+        config = self._config(broken={"responses_api_agents": {"simple_agent": "???"}})
+
+        names = {instance.name for instance in GlobalConfigDictParser()._agent_instances(config)}
+
+        assert "broken" not in names
+
+    def test_parse_reports_an_unset_agent_block(self) -> None:
+        config = self._config(broken={"responses_api_agents": {"simple_agent": "???"}})
+
+        with raises(ConfigMissingValuesError) as exc_info:
+            self._parse(config)
+
+        assert "broken.responses_api_agents.simple_agent" in str(exc_info.value)
+
+    def test_carries_over_a_binding_the_environment_leaves_unset(self) -> None:
+        # OmegaConf reports a '???' value as absent, so skipping on `in` alone let the incoming agent's own
+        # model server stand in for one the environment deliberately left for the user to supply.
+        config = self._config(unset_model=self._environment_agent("gpqa_mcqa_resources_server", model_server="???"))
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        block = self._composed_block(config, "unset_model")
+        assert OmegaConf.is_missing(block, "model_server"), "an unset binding must stay unset, not silently resolve"
+
+    def test_carry_over_leaves_an_absent_binding_to_the_incoming_agent(self) -> None:
+        # Absent is not unset: the environment simply has no opinion, so the agent's own value stands.
+        environment = self._environment_agent("gpqa_mcqa_resources_server")
+        del environment["responses_api_agents"]["simple_agent"]["model_server"]
+        config = self._config(no_model=environment)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        harness_model = self._harness()["responses_api_agents"]["hermes_agent"]["model_server"]["name"]
+        assert self._composed_block(config, "no_model")["model_server"]["name"] == harness_model
+
+    def test_leaves_self_contained_agents_alone(self) -> None:
+        # A self-contained agent declares no resources server, so there is no task to hand the new agent.
+        self_contained = self._environment_agent("unused")
+        agents = self_contained["responses_api_agents"]
+        agents["tau2"] = agents.pop("simple_agent")
+        del agents["tau2"]["resources_server"]
+        config = self._config(tau2_benchmark_agent=self_contained)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config["tau2_benchmark_agent"]["responses_api_agents"]) == ["tau2"]
+        composed = self._composed_block(config, "gpqa_mcqa_simple_agent")
+        assert composed["resources_server"]["name"] == "gpqa_mcqa_resources_server"
+
+    def test_reads_a_self_contained_agent_from_a_struct_config(self) -> None:
+        # Hydra hands the command line over in struct mode, where reading the absent `resources_server`
+        # raises instead of reporting it missing.
+        self_contained = self._environment_agent("unused")
+        agents = self_contained["responses_api_agents"]
+        agents["tau2"] = agents.pop("simple_agent")
+        del agents["tau2"]["resources_server"]
+        config = self._config(tau2_benchmark_agent=self_contained)
+        OmegaConf.set_struct(config, True)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert list(config["tau2_benchmark_agent"]["responses_api_agents"]) == ["tau2"]
+
+    def test_raises_when_two_instances_are_unbound(self) -> None:
+        config = self._config(second_harness=self._harness())
+
+        with raises(AgentCompositionError) as exc_info:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        message = str(exc_info.value)
+        assert "2 agent instances leave their 'resources_server' unset" in message
+        assert "'hermes_agent'" in message
+        assert "'second_harness'" in message
+
+    def test_raises_when_there_is_nothing_to_rehost(self) -> None:
+        config = DictConfig({self.HARNESS_INSTANCE: self._harness()})
+
+        with raises(AgentCompositionError) as exc_info:
+            GlobalConfigDictParser().compose_unbound_agent(config)
+
+        assert "no other agent instance to rehost it on" in str(exc_info.value)
+
+    def test_parse_fills_unbound_binding_before_missing_value_check(self) -> None:
+        resolved = self._parse(self._config())
+
+        block = resolved[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]["hermes_agent"]
+        assert block["resources_server"]["name"] == "gpqa_mcqa_resources_server"
+
+    def test_raises_when_every_other_agent_is_self_contained(self) -> None:
+        # Self-contained agents are left alone, so there is nothing here for the selected agent to run.
+        environment_agent = self._environment_agent("gpqa_mcqa_resources_server")
+        environment_agent["responses_api_agents"]["simple_agent"].pop("resources_server")
+        config = self._config()
+        config.pop("gpqa_mcqa_simple_agent")
+        config["self_contained_agent"] = environment_agent
+
+        with raises(AgentCompositionError) as exc_info:
+            self._parse(config)
+
+        assert "no other agent instance to rehost it on" in str(exc_info.value)
+
+    def test_real_benchmark_composes_onto_real_harness(self) -> None:
+        resolved = self._parse_config_paths(
+            "benchmarks/gpqa/config.yaml",
+            "responses_api_agents/hermes_agent/configs/hermes_agent.yaml",
+        )
+
+        block = resolved[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]["hermes_agent"]
+        assert block["resources_server"]["name"] == "gpqa_mcqa_resources_server"
+        assert block["max_turns"] == 30
+        assert "max_steps" not in block
+        assert OmegaConf.to_container(block["datasets"])[0]["num_repeats"] == 8
+        assert "hermes_agent" not in resolved
+
+    def _cli_dict(self, config: dict) -> DictConfig:
+        """A command line dict as Hydra hands it over: struct, so an undeclared key is an error."""
+        dict_config = DictConfig(config)
+        OmegaConf.set_struct(dict_config, True)
+        return dict_config
+
+    def _cli_override(self, instance: str, **block) -> DictConfig:
+        """An override addressed to an instance's agent, as `++<instance>...=<value>` produces."""
+        return self._cli_dict({instance: {"responses_api_agents": {"hermes_agent": block}}})
+
+    def _parse_with_cli(self, config: DictConfig, cli: DictConfig, monkeypatch: MonkeyPatch) -> DictConfig:
+        monkeypatch.setattr(GlobalConfigDictParser, "parse_global_config_dict_from_cli", lambda self: cli)
+        return GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=OmegaConf.merge(
+                    GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT, config
+                ),
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+    def test_predicts_the_names_composition_will_produce(self) -> None:
+        names = GlobalConfigDictParser()._composed_instance_names(self._config())
+
+        assert names == {self._composed_name("gpqa_mcqa_simple_agent")}
+
+    def test_predicts_no_names_when_nothing_is_unbound(self) -> None:
+        config = self._config()
+        config.pop(self.HARNESS_INSTANCE)
+
+        assert GlobalConfigDictParser()._composed_instance_names(config) == set()
+
+    def test_applies_command_line_override_to_the_composed_agent(self, monkeypatch: MonkeyPatch) -> None:
+        renamed = self._composed_name("gpqa_mcqa_simple_agent")
+
+        resolved = self._parse_with_cli(self._config(), self._cli_override(renamed, max_turns=99), monkeypatch)
+
+        assert resolved[renamed]["responses_api_agents"]["hermes_agent"]["max_turns"] == 99
+
+    def test_command_line_override_outranks_the_carried_over_bindings(self, monkeypatch: MonkeyPatch) -> None:
+        # The override must carry only the fields the user set, leaving the environment's bindings intact.
+        config = self._config(
+            **{
+                self.HARNESS_INSTANCE: self._harness(
+                    model_server={"type": "responses_api_models", "name": "policy_model"}
+                )
+            }
+        )
+        renamed = self._composed_name("gpqa_mcqa_simple_agent")
+
+        resolved = self._parse_with_cli(config, self._cli_override(renamed, max_turns=99), monkeypatch)
+
+        block = resolved[renamed]["responses_api_agents"]["hermes_agent"]
+        assert block["resources_server"]["name"] == "gpqa_mcqa_resources_server"
+        assert block["max_turns"] == 99
+
+    def test_holds_back_only_the_names_composition_produces(self) -> None:
+        renamed = self._composed_name("gpqa_mcqa_simple_agent")
+        cli = self._cli_dict(
+            {
+                renamed: {"responses_api_agents": {"hermes_agent": {"max_turns": 99}}},
+                "some_other_server": {"responses_api_models": {"a_model": {"entrypoint": "app.py"}}},
+            }
+        )
+
+        held = GlobalConfigDictParser()._hold_back_composed_agent_overrides(cli, self._config())
+
+        assert list(held) == [renamed], "only the composed instance should be held back"
+        assert list(cli) == ["some_other_server"], "everything else must still reach the merge"
+
+    def test_rejects_an_override_naming_an_instance_that_never_appears(self, monkeypatch: MonkeyPatch) -> None:
+        # The names are predicted before inheritance runs, which can drop an instance a base defined. An
+        # override held for one of those would otherwise vanish without trace.
+        config = self._config(base_simple_agent=self._environment_agent("gpqa_mcqa_resources_server"))
+        config["gpqa_mcqa_simple_agent"]["_inherit_from"] = "base_simple_agent"
+        cli = self._cli_override(self._composed_name("base_simple_agent"), max_turns=99)
+
+        with raises(UnsupportedAgentOverrideError) as exc_info:
+            self._parse_with_cli(config, cli, monkeypatch)
+
+        assert self._composed_name("base_simple_agent") in str(exc_info.value)
+
+    def test_rejects_a_field_the_incoming_agent_does_not_declare(self, monkeypatch: MonkeyPatch) -> None:
+        renamed = self._composed_name("gpqa_mcqa_simple_agent")
+
+        with raises(ConfigKeyError):
+            self._parse_with_cli(self._config(), self._cli_override(renamed, no_such_field=1), monkeypatch)

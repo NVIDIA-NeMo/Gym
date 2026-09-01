@@ -103,6 +103,15 @@ _ENV_FIELD_MAP = {
     "instrument_aiohttp": f"{_OTEL_PREFIX}_INSTRUMENT_AIOHTTP",
 }
 
+#: OTLP destination fields -> the standard (unprefixed) OTel SDK env vars they configure.
+#: Kept separate from _ENV_FIELD_MAP because these read back through the SDK itself, not
+#: through nemo-lens's NEMO_GYM_OTEL_*/NEMO_LENS_* prefix scheme.
+_OTLP_ENV_FIELD_MAP = {
+    "otlp_endpoint": "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "otlp_protocol": "OTEL_EXPORTER_OTLP_PROTOCOL",
+    "otlp_headers": "OTEL_EXPORTER_OTLP_HEADERS",
+}
+
 _TRUTHY = ("1", "true", "yes", "on")
 
 
@@ -156,7 +165,7 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
     process that shares nothing else with its parent.
 
     Uses ``setdefault`` throughout: a raw ``NEMO_GYM_OTEL_*`` / ``NEMO_LENS_*`` /
-    ``OTEL_SERVICE_NAME`` set by the user always wins over YAML.
+    ``OTEL_SERVICE_NAME`` / ``OTEL_EXPORTER_OTLP_*`` set by the user always wins over YAML.
 
     Returns the run id shared by every process in this run, or ``None`` when telemetry is
     disabled.
@@ -185,6 +194,11 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
         if value is None:
             continue
         os.environ.setdefault(env_name, "1" if value is True else "0" if value is False else str(value))
+
+    for field, env_name in _OTLP_ENV_FIELD_MAP.items():
+        value = getattr(telemetry_config, field, None)
+        if value is not None:
+            os.environ.setdefault(env_name, str(value))
 
     if telemetry_config.service_name:
         os.environ.setdefault(_SERVICE_NAME_ENV, str(telemetry_config.service_name))
@@ -268,9 +282,6 @@ def server_venv_requirements() -> list:
 
     Returns an empty list when telemetry is off or nemo-lens is not installed, so a
     normal run's venvs are byte-for-byte what they are today.
-
-    Not called anywhere yet in this PR — Gym's venv-building code has no telemetry call
-    site until the follow-up PR wires this in alongside the other call sites.
     """
     if not is_telemetry_env_enabled():
         return []
@@ -330,10 +341,6 @@ def init_telemetry(
     Returns:
         The :class:`TelemetryHandle`, or ``None`` when nemo-lens is absent or telemetry is
         disabled. Never raises: a telemetry failure must not take a server down.
-
-    Not called anywhere yet in this PR — setting ``telemetry.enabled: true`` alone does
-    nothing today. ``SimpleServer.run_webserver`` gaining a call to this is one of the
-    call sites that land in the follow-up PR.
     """
     global _TELEMETRY_HANDLE, _INITIALISED
     # The whole check-and-set plus the actual setup_telemetry() call is one critical
