@@ -9,10 +9,10 @@ config_paths:
 - benchmarks/swebench/verified/opencode.yaml
 - benchmarks/swebench/multilingual/opencode.yaml
 - benchmarks/deepswe/opencode.yaml
+- benchmarks/terminal_bench_2_1/terminus_2.yaml
+- benchmarks/swebench/pro/opencode.yaml
 - responses_api_models/vllm_model/configs/vllm_model.yaml
-# - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
-# SWE Bench Pro
-# Terminal Bench 2.1
+- benchmarks/nemotron_3.5_super/sandbox_utils.yaml
 
 ########################################
 # START Secrets
@@ -33,6 +33,7 @@ sandbox:
 critpt_benchmark_resources_server:
   resources_servers:
     critpt:
+      allowed_agents: [critpt_agent]
       api_key: dummy  # pragma: allowlist secret
 
 ########################################
@@ -104,6 +105,14 @@ opencode_sandboxed_agent_swebench_multilingual:
     opencode_sandboxed_agent:
       datasets: []
 opencode_sandboxed_agent_deepswe:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets: []
+terminus_2_sandboxed_agent_terminal_bench_2_1:
+  responses_api_agents:
+    terminus_2_sandboxed_agent:
+      datasets: []
+opencode_sandboxed_agent_swebench_pro:
   responses_api_agents:
     opencode_sandboxed_agent:
       datasets: []

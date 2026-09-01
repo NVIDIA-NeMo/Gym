@@ -11,6 +11,9 @@ CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
 SLURM_COMMENT="${SLURM_COMMENT:-}"
+OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-}"
+OPENSANDBOX_API_KEY="${OPENSANDBOX_API_KEY:-}"
+OPENSANDBOX_PROTOCOL="${OPENSANDBOX_PROTOCOL:-http}"
 
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
@@ -42,6 +45,8 @@ cd /opt/Gym
 export NEMO_GYM_RUN_ID="\$SLURM_JOB_ID"
 export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
 
+source "$VLLM_CONFIG"
+
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
 experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
@@ -55,8 +60,11 @@ rollouts_fpath=\${ROLLOUTS_FPATH:-results/\$experiment_name.jsonl}
 # ++upload_rollouts=false: Rollouts file is massive. We leave on the cluster.
 # global_aiohttp_connector_limit_per_host: 16k concurrent requests should be enough. We can raise further if our inference is efficient enough to support.
 # port_range_low, port_range_high: Move into ephemeral ports
+# We add the sandbox_utils and policy_model_override yamls so users don't need to add them on every invocation
 gym eval run \
     $@ \
+    --config benchmarks/nemotron_3.5_super/sandbox_utils.yaml \
+    --config benchmarks/nemotron_3.5_super/policy_model_override.yaml \
     +wandb_project=$USER-gym-eval \
     +wandb_name=\$experiment_name \
     +uv_venv_dir=/opt/uv_venvs \
@@ -73,7 +81,8 @@ gym eval run \
     ++upload_rollouts=false \
     ++global_aiohttp_connector_limit_per_host=16384 \
     ++port_range_low=63000 \
-    ++port_range_high=64000
+    ++port_range_high=64000 \
+    "\${GYM_MODEL_PARAMS[@]}"
 
 
 if (( $EXPORT_TO_CSV )); then
@@ -175,17 +184,17 @@ set -euo pipefail
 nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
 
 ALL_NODES="\${nodes[*]}" \
-srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
+srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 --kill-on-bad-exit=1 \
     --container-image=$CONTAINER \
     --container-name=container-on-node \
     --container-mounts=$MOUNTS \
     --container-workdir=\$SLURM_SUBMIT_DIR \
     --no-container-mount-home \
-    bash -lc '
+    bash -c '
         set -euo pipefail
         cd "\$SLURM_SUBMIT_DIR"
         exec "\$@"
-    ' bash bash -lc "\$vllm_command" &
+    ' bash bash -c "\$vllm_command" &
 server_step=\$!
 
 cleanup_server() {
@@ -219,10 +228,10 @@ if (( $should_run_eval )); then
         --container-mounts=$MOUNTS \
         --container-workdir="\$SLURM_SUBMIT_DIR" \
         --no-container-mount-home \
-        bash -lc '
+        bash -c '
             set -euo pipefail
             cd "\$SLURM_SUBMIT_DIR"
-            exec bash -lc "\$eval_command"
+            exec bash -c "\$eval_command"
         ' &
     eval_step=\$!
 
@@ -249,6 +258,12 @@ EOF
 
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
 submit_dir=$(pwd -P)
+# An exported connection is sent as arguments; otherwise env.yaml is read.
+if [[ -n "$OPENSANDBOX_DOMAIN" ]]; then
+    cleanup_connection=(--domain "$OPENSANDBOX_DOMAIN" --api-key "$OPENSANDBOX_API_KEY" --protocol "$OPENSANDBOX_PROTOCOL")
+else
+    cleanup_connection=(--connection-config "$submit_dir/env.yaml")
+fi
 cleanup_user=${NEMO_GYM_USER:-$USER}
 main_job_id=$(
     NEMO_GYM_USER="$cleanup_user" \
@@ -265,11 +280,13 @@ main_job_id=$(
         --comment="$SLURM_COMMENT" \
         --exclusive \
         --segment=$NUM_NODES \
-        --wrap 'exec bash -lc "$batch_command"'
+        --wrap 'exec bash -c "$batch_command"'
 )
 main_job_id=${main_job_id%%;*}
 
 if (( should_run_eval )); then
+    # @bxyu-nvidia: Don't run cleanup job in reservation
+    unset SBATCH_RESERVATION
     if ! cleanup_job_id=$(
         sbatch \
             --parsable \
@@ -277,6 +294,7 @@ if (( should_run_eval )); then
             --partition=cpu \
             --qos=cpu-short \
             --gres=none \
+            --gpus-per-node=0 \
             --nodes=1 \
             --ntasks=1 \
             --cpus-per-task=1 \
@@ -285,13 +303,15 @@ if (( should_run_eval )); then
             --job-name="gym-cleanup-$main_job_id" \
             --output="$submit_dir/slurm-logs/%j-gym-cleanup-$main_job_id.log" \
             "$submit_dir/nemo_gym/sandbox/providers/opensandbox/cleanup_sandboxes.py" \
-            --connection-config "$submit_dir/env.yaml" \
+            "${cleanup_connection[@]}" \
             --run-id "$main_job_id" \
             --user "$cleanup_user" \
             --reap
     ); then
-        echo "Failed to submit cleanup job for batch job $main_job_id; the batch job is still active" >&2
-        exit 1
+        echo "Submitted batch job $main_job_id"
+        echo "Failed to submit the sandbox-cleanup job for batch job $main_job_id;" \
+            "it is running and its sandboxes will need reaping by hand" >&2
+        exit 0
     fi
     cleanup_job_id=${cleanup_job_id%%;*}
 fi

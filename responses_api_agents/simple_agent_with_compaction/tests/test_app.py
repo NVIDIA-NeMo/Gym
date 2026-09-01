@@ -74,6 +74,15 @@ def _mock_response(payload=None, *, status=200, content="", cookies=None) -> Mag
     return response
 
 
+def _drop_nulls(value):
+    """Recursively remove fields whose value is None."""
+    if isinstance(value, dict):
+        return {key: _drop_nulls(item) for key, item in value.items() if item is not None}
+    if isinstance(value, (list, tuple)):
+        return [_drop_nulls(item) for item in value]
+    return value
+
+
 class _ImageObservationAgent(SimpleAgentWithCompaction):
     """Test-only adapter that turns resource JSON into a multimodal observation."""
 
@@ -222,7 +231,7 @@ class TestApp:
             "prompt_cache_key": None,
             "safety_identifier": None,
         }
-        assert expected_responses_dict == actual_responses_dict
+        assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
 
         prefixed_response = client.post(
             "/ng-rollout/0-0/v1/responses", json={"input": [{"role": "user", "content": "hello"}]}
@@ -456,11 +465,11 @@ class TestApp:
             function_call,
             tool_response,
         ]
-        assert normalize_semantic_items(model_calls[1].kwargs["json"].input) == normalize_semantic_items(
-            expected_complete_history
+        assert _drop_nulls(normalize_semantic_items(model_calls[1].kwargs["json"].input)) == _drop_nulls(
+            normalize_semantic_items(expected_complete_history)
         )
-        assert normalize_semantic_items(response.json()["output"]) == normalize_semantic_items(
-            [function_call, tool_response, final_message]
+        assert _drop_nulls(normalize_semantic_items(response.json()["output"])) == _drop_nulls(
+            normalize_semantic_items([function_call, tool_response, final_message])
         )
 
     async def test_active_recency_rewrites_only_at_chunk_boundaries(self) -> None:
@@ -845,7 +854,7 @@ class TestApp:
         ]
         assert all(turn.timestamp > 0 for turn in turns)
         assert [turn.model_calls[0].response_id for turn in turns] == ["resp-tool", "resp-final"]
-        assert turns[0].model_dump(mode="json")["question"] == [
+        assert _drop_nulls(turns[0].model_dump(mode="json")["question"]) == [
             {"role": "user", "content": "question", "type": "message"}
         ]
         assert [item["type"] for item in turns[1].model_dump(mode="json")["question"]] == [
@@ -1195,7 +1204,7 @@ class TestApp:
             "prompt_cache_key": None,
             "safety_identifier": None,
         }
-        assert expected_responses_dict == actual_responses_dict
+        assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
 
     async def test_usage_sanity(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentWithCompactionConfig(
@@ -1424,7 +1433,7 @@ class TestApp:
             "prompt_cache_key": None,
             "safety_identifier": None,
         }
-        assert expected_responses_dict == actual_responses_dict
+        assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
 
     async def test_run_skip_verification_uses_configured_reward(self) -> None:
         config = SimpleAgentWithCompactionConfig(

@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
 from contextlib import nullcontext
@@ -35,14 +36,17 @@ from nemo_gym.global_config import (
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.path_utils import failures_path_for
+from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
+    _coverage_report,
     _get_max_rollout_attempts,
     _rollout_for_export,
+    _rollout_request_debug_summary,
 )
 from nemo_gym.server_utils import (
     ServerClient,
@@ -185,7 +189,8 @@ def _agent_to_rs_mapping_from_resources_only_config(
     global_config_dict: Union[Dict[str, Any], "DictConfig"],
 ) -> Dict[str, str]:
     # The rollout rows still carry agent names that were never started, so fall back to the
-    # single resources server for EVERY requested key.
+    # single resources server for EVERY requested key — loudly, since this also absorbs typos
+    # and stale agent names that would otherwise be routing errors.
     resources_server_names = [
         str(name)
         for name, block in global_config_dict.items()
@@ -193,6 +198,12 @@ def _agent_to_rs_mapping_from_resources_only_config(
     ]
     if len(resources_server_names) == 1:
         only = resources_server_names[0]
+        warnings.warn(
+            f"reverify: config has no agent blocks; routing EVERY rollout agent name to the only "
+            f"resources server {only!r}. Mismatched or stale agent names cannot be detected in "
+            "this mode.",
+            stacklevel=2,
+        )
         return defaultdict(lambda: only)  # any key → the one resources server instance
     if not resources_server_names:
         raise ConfigError("reverify: no resources server found in the config.")
@@ -200,6 +211,32 @@ def _agent_to_rs_mapping_from_resources_only_config(
         f"reverify: multiple resources servers {resources_server_names} and no agent blocks to "
         "route by. Use a config with agent blocks."
     )
+
+
+def _rs_for_row(
+    row: Dict[str, Any],
+    agent_to_rs: Dict[str, str],
+    global_config_dict: Union[Dict[str, Any], "DictConfig"],
+) -> str:
+    """The resources server that verifies this row.
+
+    A task_source naming a resources server is authoritative (it is the declaring instance the
+    dataset was stamped with — no agent indirection needed). Otherwise fall back to the rollout's
+    agent_ref via the config's agent->rs edges.
+    """
+    ts = row.get(TASK_SOURCE_KEY_NAME)
+    if ts is not None:
+        block = global_config_dict.get(ts)
+        if isinstance(block, (dict, DictConfig)) and "resources_servers" in block:
+            return str(ts)
+    agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+    try:
+        return agent_to_rs[agent_name]
+    except KeyError:
+        raise ConfigError(
+            f"reverify: cannot find a resources server for row (agent_ref.name={agent_name!r}, "
+            f"task_source={ts!r}). Known agents: {sorted(agent_to_rs)}."
+        ) from None
 
 
 def _build_agent_to_resources_server_mapping(
@@ -449,7 +486,7 @@ def _run_verification_payloads(
 
     async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
         async with semaphore:
-            rs_name = agent_to_rs[row[AGENT_REF_KEY_NAME]["name"]]
+            rs_name = _rs_for_row(row, agent_to_rs, server_client.global_config_dict)
             res = await server_client.post(server_name=rs_name, url_path="/verify", json=row)
             try:
                 await raise_for_status(
@@ -554,15 +591,19 @@ async def _call_aggregate_metrics(
 
     server_client = setup_server_client()
     agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
-    # Group results by agent name
-    agent_results: Dict[str, List[Dict]] = {}
+    # Group results per (agent, resources server), routing each row with the SAME resolver used
+    # for /verify (_rs_for_row: task_source authoritative, agent_ref via config edges as the
+    # fallback). Routing aggregation independently by the agent's configured server allowed a
+    # remapped row to be verified by one server and aggregated by another.
+    agent_results: Dict[Tuple[str, str], List[Dict]] = {}
     for row, result in zip(rows, results):
         agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
         if not agent_name:
             continue
-        agent_results.setdefault(agent_name, []).append(result)
+        rs_name = _rs_for_row(row, agent_to_rs, server_client.global_config_dict)
+        agent_results.setdefault((agent_name, rs_name), []).append(result)
 
-    async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
+    async def _fetch_agent_metrics(agent_name: str, rs_name: str, agent_result_list: List[Dict]) -> Dict:
         # Strip heavyweight fields before sending, but preserve response.usage
         stripped = []
         for r in agent_result_list:
@@ -574,7 +615,7 @@ async def _call_aggregate_metrics(
 
         agg_request = AggregateMetricsRequest(verify_responses=stripped)
         agg_response = await server_client.post(
-            server_name=agent_to_rs[agent_name],
+            server_name=rs_name,
             url_path="/aggregate_metrics",
             json=agg_request,
         )
@@ -587,11 +628,14 @@ async def _call_aggregate_metrics(
             "agent_metrics": agg_result.agent_metrics,
             "key_metrics": agg_result.key_metrics,
             "group_level_metrics": agg_result.group_level_metrics,
+            "repeat_level_metrics": agg_result.repeat_level_metrics,
         }
         return agent_entry
 
     all_agent_metrics: List[Dict] = []
-    tasks = [_fetch_agent_metrics(name, results_list) for name, results_list in agent_results.items()]
+    tasks = [
+        _fetch_agent_metrics(name, rs_name, results_list) for (name, rs_name), results_list in agent_results.items()
+    ]
     for coro in asyncio.as_completed(tasks):
         agent_entry = await coro
         all_agent_metrics.append(agent_entry)
@@ -617,7 +661,7 @@ async def _call_aggregate_metrics(
     export_metrics(metrics_to_log)
 
     # Write single file with all agents
-    metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+    metrics_fpath = aggregate_metrics_path_for(output_fpath)
     metrics_fpath.write_bytes(orjson.dumps(all_agent_metrics, option=orjson.OPT_INDENT_2))
 
     return metrics_fpath
@@ -660,14 +704,14 @@ def _load_reverified_results(output_fpath: Path) -> Tuple[List[Dict], List[Dict]
     """Load the full main jsonl (cached + newly re-verified successes), sorted by (task, rollout).
 
     Returns ``(results, rows)``: ``results`` are the parsed rows — the source of truth used for both
-    the W&B rollouts export and the aggregate-metrics payload; ``rows`` is a minimal ``{AGENT_REF}``
-    projection used only to route each result to its resources server. Read once and reused for both
-    so the file is never read twice.
+    the W&B rollouts export and the aggregate-metrics payload; ``rows`` is a minimal
+    ``{agent_ref, task_source}`` projection used only to route each result to its resources server
+    (with the same resolver as /verify). Read once and reused for both so the file is never read twice.
     """
     with output_fpath.open("rb") as f:
         results = [orjson.loads(line) for line in f if line.strip()]
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
-    rows = [{AGENT_REF_KEY_NAME: r.get(AGENT_REF_KEY_NAME)} for r in results]
+    rows = [{k: r[k] for k in (AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME) if k in r} for r in results]
     return results, rows
 
 
@@ -716,6 +760,7 @@ class RolloutReverificationHelper(BaseModel):
         counts_left = Counter(r[AGENT_REF_KEY_NAME]["name"] for r in payloads_to_reverify)
         results_file = output_fpaths.output.open("ab")
         failures_file = output_fpaths.failures.open("ab")
+        failure_counts: Counter = Counter()
         completed = 0  # number of rows re-verified this run (for progress reporting)
         try:
             for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore):
@@ -724,6 +769,10 @@ class RolloutReverificationHelper(BaseModel):
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
                 result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
+                # Keep task_source alongside agent_ref: aggregation routes with the same resolver
+                # as /verify (task_source authoritative), so it must survive into the output file.
+                if TASK_SOURCE_KEY_NAME in row:
+                    result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
                 if SKILLS_REF_KEY_NAME in row:
                     result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
 
@@ -739,6 +788,14 @@ class RolloutReverificationHelper(BaseModel):
                 elif failure_class is not None:
                     # Non-kill_shaped failure → sidecar. The aggregator only reads
                     # the main jsonl, so this keeps win-rate uncontaminated.
+                    failure_counts[failure_class] += 1
+                    # Every dropped rollout says so as it happens, as in rollout collection.
+                    detail = str(result.get("_ng_failure_message") or result.get("error") or "")[:200]
+                    tqdm.write(
+                        "🚨 [rollout_reverification] rollout dropped from the score: "
+                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "
+                        f"class={failure_class} error={detail}"
+                    )
                     failures_file.write(serialized + b"\n")
                     failures_file.flush()
                 else:
@@ -784,9 +841,20 @@ class RolloutReverificationHelper(BaseModel):
             print("Computing aggregate metrics")
             aggregate_metrics_fpath = await _call_aggregate_metrics(results, agg_rows, output_fpaths.output)
 
+        expected_rollouts = len(results) + sum(failure_counts.values())
+        coverage = _coverage_report(expected_rollouts, len(results), failure_counts, output_fpaths.failures)
+        if get_exporters():  # pragma: no cover
+            export_metrics(
+                {
+                    "coverage/expected": expected_rollouts,
+                    "coverage/scored": len(results),
+                    "coverage/missing": sum(failure_counts.values()),
+                }
+            )
+
         print(f"""Finished rollout collection! View results at:
         Re-verified rollouts: {output_fpaths.output}
-        Aggregate metrics: {aggregate_metrics_fpath}""")
+        Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         if force_warning:
             print(force_warning)
 

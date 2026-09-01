@@ -20,7 +20,7 @@ from pathlib import Path
 from shlex import quote
 from time import time
 from traceback import format_exc
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from fastapi import Request
@@ -61,6 +61,8 @@ from nemo_gym.rollout_observability import (
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.providers.base import SandboxPtySession
+from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     get_response_json,
@@ -387,6 +389,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     opencode_version: str
     remote_opencode_install_script_path: Optional[str] = None
     remote_opencode_binary_path: Optional[str] = None
+    remote_opencode_musl_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
 
@@ -401,6 +404,31 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
 class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
     # Allow for benchmark params to propagate properly
     model_config = ConfigDict(extra="allow")
+
+
+def _build_remote_opencode_install_command(
+    install_script_path: str,
+    binary_path: str,
+    musl_binary_path: str,
+) -> str:
+    """Build the invocation for the network-free, libc-aware cached installer."""
+    return (
+        f"bash {quote(install_script_path)} "
+        f"--glibc-binary {quote(binary_path)} "
+        f"--musl-binary {quote(musl_binary_path)}"
+    )
+
+
+def _extract_opencode_session_id(session_list_stdout: str) -> str:
+    """Return the newest OpenCode session ID from ``session list`` JSON output."""
+    sessions = json.loads(session_list_stdout)
+    if not isinstance(sessions, list) or not sessions:
+        raise ValueError("OpenCode did not return any sessions")
+
+    session_id = sessions[0].get("id") if isinstance(sessions[0], dict) else None
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError("The newest OpenCode session does not have a valid ID")
+    return session_id
 
 
 class OpenCodeSandboxedAgentVerifyRequest(BaseVerifyRequest):
@@ -429,22 +457,29 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
 
-        self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
+        self._sandbox_id_to_sandbox: Dict[str, Tuple[AsyncSandbox, SandboxPtySession]] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
 
-    async def _start_sandbox(self, sandbox_id: Optional[str] = None) -> AsyncSandbox:
+    async def _start_sandbox(
+        self, sandbox_id: Optional[str] = None, pty_session_id: Optional[str] = None
+    ) -> Tuple[AsyncSandbox, SandboxPtySession]:
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = create_provider(
             resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         )
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
 
-        if sandbox_id:
+        if sandbox_id and pty_session_id:
             sandbox = await AsyncSandbox.connect({"sandbox_id": sandbox_id}, provider=resolved_sandbox_provider)
-            return sandbox
+            pty_session = await sandbox.pty.attach(session_id=pty_session_id, takeover=True)
+            return sandbox, pty_session
 
         if self.config.debug:
             print("Creating new sandbox since one wasn't provided", file=sys.stderr)
+
+        resources = SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {}))
+        # TODO @bxyu-nvidia: Refactor this after swapping to PTY as this should be set on the SWE Bench resources server side
+        env = cpu_cap_env(resources.cpu) if self.config.sandbox_config.get("derive_cpu_env", True) else {}
 
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         sandbox_spec = SandboxSpec(
@@ -452,14 +487,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
             workdir=None,  # Default to container's WORKDIR
-            env=dict(),
+            env=env,
             files=dict(),
             metadata=provider_default_metadata
             | self.config.sandbox_config.get("metadata", {})
             | {
                 "nemo_gym_agent": self.config.name,
             },
-            resources=SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {})),
+            resources=resources,
             entrypoint=None,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
@@ -467,7 +502,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         sandbox = AsyncSandbox(resolved_sandbox_provider)
         await sandbox.start(sandbox_spec)
 
-        return sandbox
+        pty_session = await sandbox.pty.create()
+
+        return sandbox, pty_session
 
     def _agent_sandbox_observation(
         self,
@@ -619,7 +656,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        sandbox = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
+        sandbox, pty_session = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
 
         query = None
         # This can be modified to handle system/developer prompts too.
@@ -638,15 +675,20 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if self.config.debug:
             opencode_debug_str = "--print-logs --log-level DEBUG"
 
-        # TODO @bxyu-nvidia: We need to manually activate the conda env here for SWE Verified
-        # Eventually this will only be present on the SWE Bench resources server side
-        # For now, the activation is put on the harness side.
-        conda_activate_command_str = "{ source /opt/miniconda3/bin/activate && conda activate testbed || true; }"
-
         opencode_thinking_str = "--thinking"
 
         if self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
-            install_str = f"""bash {self.config.remote_opencode_install_script_path} --binary {self.config.remote_opencode_binary_path}"""
+            if self.config.remote_opencode_musl_binary_path:
+                install_str = _build_remote_opencode_install_command(
+                    install_script_path=self.config.remote_opencode_install_script_path,
+                    binary_path=self.config.remote_opencode_binary_path,
+                    musl_binary_path=self.config.remote_opencode_musl_binary_path,
+                )
+            else:
+                install_str = (
+                    f"bash {quote(self.config.remote_opencode_install_script_path)} "
+                    f"--binary {quote(self.config.remote_opencode_binary_path)}"
+                )
         else:
             print(
                 "Downloading and installing OpenCode in the sandbox. Please consider mounting or uploading the appropriate OpenCode binary instead!",
@@ -656,34 +698,30 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && echo "Downloaded OpenCode installer to $installer" \
         && VERSION={self.config.opencode_version} bash "$installer\""""
 
-        # --auto is to approve not explicitly denied requests.
-        command = f"""
-        echo "Shell: $SHELL" \
-        && {conda_activate_command_str} \
-        && echo "Optionally activated Conda env" \
-        && {install_str} \
-        && export PATH=$HOME/.opencode/bin:$PATH \
-        && echo "Installed OpenCode" \
-        && opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
-        && echo "OpenCode run finished"
-        """
-
         opencode_config_content = json.dumps(await self._create_opencode_config(request))
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
         collect_observations = observation_invocation_id is not None
-        opencode_env = {
-            "OPENCODE_CONFIG_CONTENT": opencode_config_content,
-            # @bxyu-nvidia: OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
-            # and there is no way to set it to null.
-            # Here, we set an exorbitantly high number that cannot ever be reached.
-            # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
-            "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(1_000_000_000),
-        }
+        xdg_home_str = ""
         remote_data_home = None
         if collect_observations:
             remote_data_home = f"/tmp/nemo-gym-opencode-{uuid4().hex}"
-            opencode_env["XDG_DATA_HOME"] = remote_data_home
+            xdg_home_str = f"XDG_DATA_HOME={remote_data_home}"
+
+        # @bxyu-nvidia: Regarding `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000` below:
+        # OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
+        # and there is no way to set it to null.
+        # Here, we set an exorbitantly high number that cannot ever be reached.
+        # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
+        command = f"""
+        echo "Shell: $SHELL" \
+        && {install_str} \
+        && export PATH=$HOME/.opencode/bin:$PATH \
+        && echo "Installed OpenCode" \
+        && OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
+            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
+        && echo "OpenCode run finished"
+        """
 
         if self.config.debug:
             print(f"Running command:\n```bash\n{command}\n```\n", file=sys.stderr)
@@ -691,10 +729,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         run_error_type = None
         try:
-            result = await sandbox.exec(
+            result = await sandbox.pty.exec(
                 command=command,
+                session=pty_session,
                 timeout_s=self.config.sandbox_timeout,
-                env=opencode_env,
             )
         except Exception as exc:
             result = None
@@ -706,41 +744,48 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("OpenCode install and run stderr:\n", result.stderr, file=sys.stderr)
 
         export_fname = "export.json"
+        # Kept outside the sandbox workdir on purpose: SWE-bench-style environments set the workdir
+        # to the git repo, and resources servers extract the model patch with `git add -N . && git
+        # diff`, which would sweep this transcript into the patch.
+        export_remote_fpath = f"/tmp/opencode_{export_fname}"
         try:
-            export_result = await sandbox.exec(
-                command=f"""export PATH=$HOME/.opencode/bin:$PATH \
-            && (command -v jq >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends jq)) \
-            && session_id=$(opencode session list --format json | jq -r '.[0].id') \
-            && opencode export $session_id > {export_fname}""",
-                env={"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None,
+            session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
+            session_list_result = await sandbox.exec(
+                command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json",
+                env=session_env,
             )
-        except:
+            if session_list_result.return_code != 0:
+                raise RuntimeError(
+                    "Failed to list OpenCode sessions: "
+                    f"{(session_list_result.stderr or session_list_result.stdout or '').strip()}"
+                )
+            session_id = _extract_opencode_session_id(session_list_result.stdout or "")
+            export_result = await sandbox.exec(
+                command=(
+                    "export PATH=$HOME/.opencode/bin:$PATH "
+                    f"&& opencode export {quote(session_id)} > {quote(export_remote_fpath)}"
+                ),
+                env=session_env,
+            )
+        except Exception:
             export_result = None
             print("Failed to export results", format_exc(), file=sys.stderr)
         if self.config.debug and export_result:
             print("Export stdout:\n", export_result.stdout, file=sys.stderr)
             print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
-        try:
-            pwd_result = await sandbox.exec(command="pwd")
-            results_remote_fpath = Path(pwd_result.stdout.strip()) / export_fname
-        except:
-            print("Failed to get current working directory", format_exc(), file=sys.stderr)
-            results_remote_fpath = None
-
         results_dir: Path = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
         results_dir.mkdir(parents=True, exist_ok=True)
         results_local_fpath = results_dir / export_fname
-        if results_remote_fpath:
-            if self.config.debug:
-                print(f"Downloading results from {results_remote_fpath} to {results_local_fpath}", file=sys.stderr)
-            try:
-                await sandbox.download(str(results_remote_fpath), results_local_fpath)
-            except:
-                print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
-                if export_result:
-                    print("Export stdout:\n", export_result.stdout, file=sys.stderr)
-                    print("Export stderr:\n", export_result.stderr, file=sys.stderr)
+        if self.config.debug:
+            print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
+        try:
+            await sandbox.download(export_remote_fpath, results_local_fpath)
+        except:
+            print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
+            if export_result:
+                print("Export stdout:\n", export_result.stdout, file=sys.stderr)
+                print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
         observations = None
         if collect_observations:
@@ -796,7 +841,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         result_stdout = (result.stdout if result else "") or ""
         result_stderr = (result.stderr if result else "") or ""
-        opencode_finished = "OpenCode run finished" in result_stdout
+        opencode_finished = False
+        std_out_split = result_stdout.rsplit("Shell: ", maxsplit=1)
+        if len(std_out_split) > 1:
+            opencode_finished = "OpenCode run finished" in std_out_split[1]
 
         if collect_observations and observations is not None:
             agent_sandbox_observation = self._agent_sandbox_observation(
@@ -863,10 +911,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # @bxyu-nvidia: "sandbox_handle" comes from resources_servers/swebench/app.py
         # Once we graduate to use the sandbox server, this will be in a generic seed_session type that can be model validated.
         seed_session_result = await seed_session_response.json()
-        provider_sandbox_id = seed_session_result.get("sandbox_handle")
-        provider_sandbox_id = provider_sandbox_id if isinstance(provider_sandbox_id, str) else None
-        sandbox = await self._start_sandbox(sandbox_id=provider_sandbox_id)
-        self._sandbox_id_to_sandbox[session_key] = sandbox
+        sandbox, pty_session = await self._start_sandbox(
+            sandbox_id=seed_session_result.get("sandbox_handle"),
+            pty_session_id=seed_session_result.get("pty_session_id"),
+        )
+        self._sandbox_id_to_sandbox[request.session[SESSION_ID_KEY]] = (sandbox, pty_session)
 
         # Propagating the sandbox handle
         cookies["sandbox_id"] = session_key
@@ -892,6 +941,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         await raise_for_status(verify_response)
 
         try:
+            await pty_session.close()
             await sandbox.stop()
         except Exception:
             print("Failed to stop sandbox", format_exc(), file=sys.stderr)
