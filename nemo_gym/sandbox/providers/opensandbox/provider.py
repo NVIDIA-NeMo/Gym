@@ -1493,14 +1493,6 @@ class OpenSandboxProvider:
         from nemo_gym.sandbox.providers.opensandbox.pty import _PTY_TAKEOVER_RETRY_DELAYS, attach_pty_session
 
         base_url, headers, request_timeout_s = await self._pty_target(handle)
-        if takeover:
-            # Release our own live attachment first, so the takeover below has
-            # nothing to evict and cannot be refused as "already attached".
-            for stale in [s for s in self._pty_sessions if s.session_id == session_id and not s.closed]:
-                try:
-                    await stale.detach()
-                except SandboxPtyError:
-                    pass  # already dead; the retry loop below rides out eviction
         # A takeover evicts the attached client, and execd waits for that
         # client to acknowledge. A half-open peer (silently dropped along the
         # proxy path) cannot answer, so execd's eviction times out and the
