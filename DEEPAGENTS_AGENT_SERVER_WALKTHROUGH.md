@@ -36,22 +36,29 @@ README.md
 tests/test_app.py
 ```
 
-**`DeepAgentsAgent`** (`app.py:224-357`) subclasses `SimpleAgent`. `__init__` builds the graph exactly once:
+**`DeepAgentsAgent`** (`app.py:231-279`) subclasses `SimpleAgent`. `__init__` builds the graph exactly once,
+naming it `self.agent` (matching `deepagents`' own `agent = create_deep_agent(...)` convention, not
+`langgraph_agent`'s `self.graph`):
 
 ```python
-self.graph = self.build_agent(GymResponsesChatModel(agent=self))
+self.agent = self.build_agent(GymResponsesChatModel(agent=self))
 ```
 
-`build_agent` is abstract — `reasoning_search_agent.py`'s ~50-line implementation is just:
+`build_agent` is abstract — `reasoning_search_agent.py`'s implementation is just:
 
 ```python
-create_deep_agent(model=model, tools=[TavilySearch(...)], system_prompt=SYSTEM_PROMPT)
+create_deep_agent(model=model, tools=[TavilySearch(...)], system_prompt=self.config.system_prompt)
 ```
+
+`system_prompt` is a field on `ReasoningSearchDeepAgentConfig` (default `None`), set explicitly per
+combo YAML rather than shared as a module constant: `reasoning_gym`'s config sets the `<answer>`-tag
+prompt its verifier requires; `tavily_search`'s sets it to `null`, since its verifier grades the full
+response via an LLM judge instead of tag extraction.
 
 That's the whole agent definition. Everything else in `app.py` exists to make `model` — a Gym-shaped
 object — satisfy LangChain's `BaseChatModel` contract.
 
-**`GymResponsesChatModel`** (`app.py:178-221`) is the actual translation shim, and it's the most
+**`GymResponsesChatModel`** (`app.py:185-228`) is the actual translation shim, and it's the most
 substantial thing this build produced. `_agenerate` (async-only; `_generate` deliberately raises
 `NotImplementedError`) posts to Gym's model server via `self.agent.server_client` — Gym's aiohttp client,
 never `httpx`/`ChatOpenAI` — because `deepagents` internally calls `model.bind_tools(...).ainvoke(...)`
@@ -61,18 +68,19 @@ objects via `convert_to_openai_tool()`, then explicitly patches in `"strict": Fa
 it. Miss that and you get a 422 from the model server, not a helpful error at the LangChain layer. A test
 (`test_bind_tools_unnests_chat_completions_shape_into_responses_shape`) locks this in.
 
-**The `ContextVar`** (`app.py:69`, module-level `_request_context`): because the graph and its chat model
+**The `ContextVar`** (`app.py:62`, module-level `_request_context`): because the graph and its chat model
 are built once in `__init__`, there's no natural place to stash per-request data (rollout correlation id,
 cookies) — the model object is a singleton shared across concurrent requests. `responses()` sets it at the
 top of each request and resets it in a `finally`; `_agenerate()` reads it. It's task-local, so it's safe
 under concurrent in-flight requests — a dedicated test spins up two staggered concurrent calls and asserts
 neither leaks the other's rollout id.
 
-**Observability**: `_invoke_with_trajectory` drives `self.graph.astream_events(..., version="v2")`,
-reconstructing `ModelCallRef`s and `TrajectoryToolCall`s from `on_chat_model_end`/`on_tool_start`/
-`on_tool_end` events, and — matching `SimpleAgent`'s own pattern exactly — populates
-`AgentInvocation.conversation`. This path only runs when model-call capture is actually enabled;
-otherwise `responses()` takes a cheap `graph.ainvoke()` path with no event-streaming overhead.
+**Observability**: not implemented. `responses()` always takes the plain `self.agent.ainvoke()` path — no
+`TrajectoryRecord` is built, regardless of whether model-call capture is enabled. An event-streaming path
+(`astream_events`, reconstructing tool calls and populating `AgentInvocation.conversation` to match
+`SimpleAgent`'s own pattern) was built and then deliberately stripped before merging; see the README's
+"Known limitation" section. Reward/pass-fail scoring is unaffected (`verify` only reads
+`body.response.output_text`) — what's missing is per-call trajectory detail for `gym eval profile`.
 
 **The dependency pin** (`requirements.txt`): `deepagents<0.7.0`, resolving to `0.6.12`. `deepagents>=0.7.0`
 unconditionally pulls in `langchain-anthropic`, which requires `anthropic>=0.120.0` — but `nemo_gym[dev]`
@@ -130,13 +138,14 @@ binary, not a Python framework:
   `CLAUDE_CONFIG_DIR`) to reconstruct tool calls, subagent trees, and context-compaction events — the same
   *kind* of work as `GymResponsesChatModel`'s message conversion, just against a CLI's wire format instead
   of a Python object model.
-- It has its own, richer observability schema: `AgentObservationBundle` (subagent trees, tool timing,
-  compaction, explicit `ObservationGap`s for anything it can't establish exactly) feeding
-  `join_model_call_observations()`. This is a **separate schema from `TrajectoryRecord`**, which is what
-  `SimpleAgent` (and therefore `langchain_deepagents_agent`) actually populates. Confirmed directly: nothing in the
-  repo calls `join_model_call_observations()` on a `TrajectoryRecord`, including `SimpleAgent` itself —
-  its own `_create_episode` never passes `model_calls=`. So the "observability comes for free" assumption
-  doesn't hold even for Gym's own reference agent, independent of anything `langchain_deepagents_agent` did.
+- It has its own, richer observability schema: `AgentObservationBundle` (`nemo_gym/rollout_observability.py`;
+  subagent trees, tool timing, compaction, explicit `ObservationGap`s for anything it can't establish
+  exactly). This is a **separate schema from `TrajectoryRecord`**, which is what `SimpleAgent` (and
+  `langchain_deepagents_agent`, if it captured trajectories at all — see Part 1) populates. Note even
+  `SimpleAgent`'s own `_create_episode` doesn't pass `model_calls=` on the `TrajectoryRecord` it builds
+  directly (only on the nested `AgentInvocation`); `TrajectoryRecord.model_calls` at the top level is
+  filled in later, by `rollout_collection.py`'s `_build_trajectory_record`, from raw per-rollout
+  model-call-capture JSONL matched by `model_call_id` — not assembled by the agent itself.
 - No sandbox: `_create_episode` always appends `ObservationGap(code="no_sandbox_runtime")` — isolation
   comes only from a fresh per-request `CLAUDE_CONFIG_DIR`, cleaned up after.
 
@@ -194,8 +203,7 @@ deployment choice.
 
 ## Part 5: the resource-server side
 
-Purely additive — confirmed via `git diff main...HEAD -- resources_servers/` returning empty; the only new
-things are two untracked YAML configs, no server/verifier code touched:
+Purely additive — no server/verifier code touched, only two new combo-config YAMLs:
 
 - `resources_servers/reasoning_gym/configs/reasoning_gym_langchain_deepagents_agent_model_server.yaml`
 - `resources_servers/tavily_search/configs/tavily_search_langchain_deepagents_agent_model_server.yaml`
@@ -225,8 +233,8 @@ internally, one step is the whole rollout" — and no `model_server` field at al
 
 ## Where this all lives
 
-Everything above is grounded in code that's currently **untracked**
-(`responses_api_agents/langchain_deepagents_agent/`, both new resource-server YAMLs) — not yet committed on
-`hwolff/deepagents-agent-server`. `AGENT_SERVER_ARCHITECTURE_COMPARISON.md` at the repo root has the
-original cost narrative in prose form; this file is the concrete code-level grounding for each claim in
-it, plus the `langgraph_agent`/`claude_code_agent` comparisons it doesn't cover.
+Everything above is grounded in code committed on `hwolff/deepagents-agent-server`
+(`responses_api_agents/langchain_deepagents_agent/`, both new resource-server YAMLs).
+`AGENT_SERVER_ARCHITECTURE_COMPARISON.md` at the repo root has the cost narrative in prose form; this
+file is the concrete code-level grounding for each claim in it, plus the `langgraph_agent`/`claude_code_agent`
+comparisons it doesn't cover.
