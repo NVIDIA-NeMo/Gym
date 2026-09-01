@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import random
 import re
@@ -44,7 +45,84 @@ from resources_servers.gdpval.judge_panel import ResolvedJudge, merge_create_kwa
 # own parsed JSON, and a judge that emits its own "error" must not be discarded.
 SCORING_ERROR_KEY = "scoring_error"
 
+# Errors that cannot succeed when the same judge request is retried unchanged.
+# This is shared by rubric and comparison scoring so inner retry policy and the
+# outer rollout failure router cannot disagree about deterministic payload or
+# context failures.
+PERMANENT_JUDGE_ERROR_MARKERS = (
+    "request size is too large",
+    "request size budget exhausted",
+    "request body is too large",
+    "request entity too large",
+    "payload too large",
+    "content length limit exceeded",
+    "http 413",
+    "error code: 413",
+    "status code: 413",
+    "contextwindowexceeded",
+    "context window exceeded",
+    "maximum context length",
+    "maximum number of tokens allowed",
+    "input is too long",
+    "too many tokens",
+)
+
+# Throttle signals veto a permanent classification: provider 429 bodies often
+# contain permanent-sounding phrases ("you have sent too many tokens this
+# minute") yet succeed on retry. Misclassifying a throttle as permanent stamps
+# the trial terminal and silently drops the task from the benchmark.
+THROTTLE_ERROR_MARKERS = (
+    "http 429",
+    "error code: 429",
+    "status code: 429",
+    "too many requests",
+    "rate limit",
+    "rate-limit",
+    "retry-after",
+    "retry after",
+)
+
 JUDGE_REQUEST_TIMEOUT_SECONDS = float(os.environ.get("GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS", "1800"))
+
+
+def is_permanent_judge_error(error: BaseException | str) -> bool:
+    """Whether retrying the same judge request is guaranteed to fail again."""
+
+    if isinstance(error, str):
+        lowered = error.lower()
+        if any(marker in lowered for marker in THROTTLE_ERROR_MARKERS):
+            return False
+        return any(marker in lowered for marker in PERMANENT_JUDGE_ERROR_MARKERS)
+
+    parts: list[str] = []
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        parts.append(str(current))
+        statuses = {getattr(current, "status", None), getattr(current, "status_code", None)}
+        if 429 in statuses:
+            return False
+        if 413 in statuses:
+            return True
+        for attr in ("response_content", "body"):
+            value = getattr(current, attr, None)
+            if isinstance(value, bytes):
+                parts.append(value.decode("utf-8", errors="replace"))
+            elif value is not None:
+                parts.append(str(value))
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+
+    text = "\n".join(parts).lower()
+    if any(marker in text for marker in THROTTLE_ERROR_MARKERS):
+        return False
+    return any(marker in text for marker in PERMANENT_JUDGE_ERROR_MARKERS)
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +175,61 @@ def _score_from_truncated_json(text: str) -> float:
     if not scores:
         return 0.0
     return max(0.0, min(1.0, sum(scores) / len(scores)))
+
+
+_BINARY_SCORE_KEYS = ("overall_score", "total_score", "score", "average_score", "final_score")
+
+
+def _coerce_usable_score(value: Any) -> float | None:
+    """Return a finite numeric judge score, or ``None`` for unusable values."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return score if math.isfinite(score) else None
+
+
+def _extract_binary_score(result: Any) -> tuple[float | None, str | None, list[float]]:
+    """Extract a binary-rubric score without inventing zeros for missing fields."""
+    if not isinstance(result, dict):
+        return None, None, []
+
+    for key in _BINARY_SCORE_KEYS:
+        score = _coerce_usable_score(result.get(key))
+        if score is not None:
+            return score, key, []
+
+    criteria_scores = result.get("criteria_scores")
+    if not isinstance(criteria_scores, list):
+        return None, None, []
+    scores = [
+        score
+        for criterion in criteria_scores
+        if isinstance(criterion, dict)
+        for score in [_coerce_usable_score(criterion.get("score"))]
+        if score is not None
+    ]
+    if not scores:
+        return None, None, []
+    return sum(scores) / len(scores), "criteria_scores", scores
+
+
+def _no_score_metadata(
+    result: Any,
+    *,
+    judge_name: str,
+    raw_response_text: str,
+    include_raw_responses: bool,
+) -> dict:
+    """Preserve a parsed reply while tagging it as lacking a usable score."""
+    metadata = dict(result) if isinstance(result, dict) else {"parsed_response": result}
+    metadata[SCORING_ERROR_KEY] = "no_score_in_response"
+    metadata["judge_name"] = judge_name
+    if include_raw_responses:
+        metadata["raw_responses"] = [raw_response_text]
+    return metadata
 
 
 async def score_with_rubric(
@@ -165,6 +298,8 @@ async def score_with_rubric(
                 response = await client.chat.completions.create(**create_kwargs)
                 break
             except Exception as retry_err:
+                if is_permanent_judge_error(retry_err):
+                    raise
                 err_str = str(retry_err)
                 is_retryable = "429" in err_str or "503" in err_str or "504" in err_str or "rate" in err_str.lower()
                 if is_retryable and attempt < max_retries:
@@ -210,28 +345,26 @@ async def score_with_rubric(
             # can flag the row instead of averaging it in as a real score.
             return score, {SCORING_ERROR_KEY: "truncated_json", "partial_score": score}
 
-        print(f"Rubric judge parsed keys: {list(result.keys())}", flush=True)
-        if "criteria_scores" in result:
-            scores = [c.get("score", 0) for c in result["criteria_scores"] if isinstance(c, dict)]
-            print(f"Criteria scores: {scores}", flush=True)
-            print(f"Criteria count: {len(scores)}, mean: {sum(scores) / len(scores) if scores else 0}", flush=True)
-
-        score = None
-        for key in ["overall_score", "total_score", "score", "average_score", "final_score"]:
-            if key in result:
-                score = float(result[key])
-                print(f"Found score under key '{key}': {score}", flush=True)
-                break
-
-        if score is None and "criteria_scores" in result:
-            scores = [float(c.get("score", 0)) for c in result["criteria_scores"] if isinstance(c, dict)]
-            if scores:
-                score = sum(scores) / len(scores)
-                print(f"No overall_score key found, computed mean of criteria: {score}", flush=True)
+        print(
+            f"Rubric judge parsed keys: {list(result.keys()) if isinstance(result, dict) else '<non-object JSON>'}",
+            flush=True,
+        )
+        score, score_source, criteria_scores = _extract_binary_score(result)
+        if criteria_scores:
+            print(f"Criteria scores: {criteria_scores}", flush=True)
+        if score_source in _BINARY_SCORE_KEYS:
+            print(f"Found score under key '{score_source}': {score}", flush=True)
+        elif score_source == "criteria_scores":
+            print(f"No overall score key found, computed mean of criteria: {score}", flush=True)
 
         if score is None:
             print(f"Could not extract score. Full result: {json.dumps(result)[:1000]}", flush=True)
-            score = 0.0
+            return 0.0, _no_score_metadata(
+                result,
+                judge_name=judge.name,
+                raw_response_text=raw_response_text,
+                include_raw_responses=include_raw_responses,
+            )
 
         print(f"Rubric final score: {score} (judge: {judge.name})", flush=True)
         if isinstance(result, dict):
@@ -245,6 +378,8 @@ async def score_with_rubric(
 
         print(f"Rubric scoring failed: {e}", flush=True)
         traceback.print_exc()
+        if is_permanent_judge_error(e):
+            raise
         return 0.0, None
 
 
@@ -321,6 +456,8 @@ async def score_with_rubric_visual(
                 response = await client.chat.completions.create(**create_kwargs)
                 break
             except Exception as retry_err:
+                if is_permanent_judge_error(retry_err):
+                    raise
                 err_str = str(retry_err)
                 is_retryable = "429" in err_str or "503" in err_str or "504" in err_str or "rate" in err_str.lower()
                 if is_retryable and attempt < max_retries:
@@ -357,27 +494,26 @@ async def score_with_rubric_visual(
             # can flag the row instead of averaging it in as a real score.
             return score, {SCORING_ERROR_KEY: "truncated_json", "partial_score": score}
 
-        print(f"Visual judge parsed keys: {list(result.keys())}", flush=True)
-        if "criteria_scores" in result:
-            scores = [c.get("score", 0) for c in result["criteria_scores"] if isinstance(c, dict)]
-            print(f"Criteria scores: {scores}", flush=True)
-
-        score = None
-        for key in ["overall_score", "total_score", "score", "average_score", "final_score"]:
-            if key in result:
-                score = float(result[key])
-                print(f"Found score under key '{key}': {score}", flush=True)
-                break
-
-        if score is None and "criteria_scores" in result:
-            scores = [float(c.get("score", 0)) for c in result["criteria_scores"] if isinstance(c, dict)]
-            if scores:
-                score = sum(scores) / len(scores)
-                print(f"No overall_score key found, computed mean of criteria: {score}", flush=True)
+        print(
+            f"Visual judge parsed keys: {list(result.keys()) if isinstance(result, dict) else '<non-object JSON>'}",
+            flush=True,
+        )
+        score, score_source, criteria_scores = _extract_binary_score(result)
+        if criteria_scores:
+            print(f"Criteria scores: {criteria_scores}", flush=True)
+        if score_source in _BINARY_SCORE_KEYS:
+            print(f"Found score under key '{score_source}': {score}", flush=True)
+        elif score_source == "criteria_scores":
+            print(f"No overall score key found, computed mean of criteria: {score}", flush=True)
 
         if score is None:
             print(f"Could not extract score. Full result: {json.dumps(result)[:1000]}", flush=True)
-            score = 0.0
+            return 0.0, _no_score_metadata(
+                result,
+                judge_name=judge.name,
+                raw_response_text=raw_response_text,
+                include_raw_responses=include_raw_responses,
+            )
 
         print(f"Visual judge final score: {score} (judge: {judge.name})", flush=True)
         if isinstance(result, dict):
@@ -391,6 +527,8 @@ async def score_with_rubric_visual(
 
         print(f"Visual rubric scoring failed: {e}", flush=True)
         traceback.print_exc()
+        if is_permanent_judge_error(e):
+            raise
         return 0.0, None
 
 
@@ -507,6 +645,8 @@ async def score_with_rubric_structured(
                 response = await client.chat.completions.create(**create_kwargs)
                 resp_text = (response.choices[0].message.content or "").strip()
             except Exception as e:
+                if is_permanent_judge_error(e):
+                    raise
                 err_str = str(e).lower()
                 is_retryable = any(m in err_str for m in ("429", "503", "504", "rate", "timeout"))
                 if is_retryable and retry < formatting_retries - 1:

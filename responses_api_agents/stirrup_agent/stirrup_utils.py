@@ -20,6 +20,8 @@ nothing task-specific lives here.
 from __future__ import annotations
 
 import json
+import logging
+import re
 import uuid
 from typing import Any, List, Tuple, cast
 
@@ -37,6 +39,35 @@ from nemo_gym.openai_utils import (
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
 
 
+LOGGER = logging.getLogger(__name__)
+
+# A provider parser can occasionally leave an otherwise valid tool invocation in
+# assistant ``content`` instead of returning it through ``tool_calls``. Feeding
+# that raw block back on the next turn teaches the model to repeat the malformed
+# format. Strip it only from the provider-bound copy; the original Stirrup
+# history remains untouched for debugging and trajectory export.
+_UNPARSED_TOOL_BLOCKS = (
+    re.compile(r"<tool_call\b[^>]*>.*?(?:</tool_call>|$)", re.IGNORECASE | re.DOTALL),
+    re.compile(r"<function=[^>]*>.*?(?:</function>|$)", re.IGNORECASE | re.DOTALL),
+)
+
+
+def _strip_unparsed_tool_blocks(content: str) -> str:
+    cleaned = content
+    for pattern in _UNPARSED_TOOL_BLOCKS:
+        cleaned = pattern.sub("", cleaned)
+    if cleaned == content:
+        return content
+    # History is serialized again on every model turn. Keep this at debug so a
+    # malformed turn does not emit the same warning hundreds of times as the
+    # immutable history grows; trajectory export still preserves the evidence.
+    LOGGER.debug(
+        "Stripped an unparsed tool-call block from provider-bound assistant history; "
+        "the original trajectory remains unchanged."
+    )
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
 def restore_tool_messages_for_model(messages: list[ChatMessage]) -> list[ChatMessage]:
     """Return provider-valid history for OpenAI-compatible model calls.
 
@@ -52,7 +83,12 @@ def restore_tool_messages_for_model(messages: list[ChatMessage]) -> list[ChatMes
     for message in messages:
         if isinstance(message, AssistantMessage):
             pending_tool_call_ids = {tc.tool_call_id for tc in message.tool_calls if tc.tool_call_id}
-            restored.append(message)
+            provider_message = message
+            if not message.tool_calls and isinstance(message.content, str):
+                cleaned = _strip_unparsed_tool_blocks(message.content)
+                if cleaned != message.content:
+                    provider_message = message.model_copy(update={"content": cleaned})
+            restored.append(provider_message)
             continue
 
         if isinstance(message, NeMoUserMessage) and message.tool_call_id in pending_tool_call_ids:
@@ -101,10 +137,26 @@ def convert_stirrup_history_to_output_items(
     # keeps the raw id, so a trajectory that never repeats one is unchanged.
     call_seq: dict[str, int] = {}
     output_seq: dict[str, int] = {}
+    occurrence_ids: dict[tuple[str, int], str] = {}
+    used_ids: set[str] = set()
 
     def _disambiguate(raw: str, seen: dict[str, int]) -> str:
         seen[raw] = seen.get(raw, 0) + 1
-        return raw if seen[raw] == 1 else f"{raw}#{seen[raw]}"
+        occurrence = seen[raw]
+        key = (raw, occurrence)
+        if key in occurrence_ids:
+            return occurrence_ids[key]
+
+        preferred = raw if occurrence == 1 else f"{raw}#{occurrence}"
+        candidate = preferred
+        collision_index = 2
+        while candidate in used_ids:
+            candidate = f"{preferred}#{collision_index}"
+            collision_index += 1
+
+        occurrence_ids[key] = candidate
+        used_ids.add(candidate)
+        return candidate
 
     for turn in history:
         for msg in turn:

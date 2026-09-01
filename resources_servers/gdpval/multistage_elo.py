@@ -20,8 +20,9 @@ tasks, multi-stage ELO runs a sequence of *stages*. Each stage:
    ``responses_api_agents.stirrup_agent.task_distribution``); ``T`` is
    configurable per stage and **defaults to the full task set**,
 2. Includes a set of ``M`` reference models and assigns **each task a single
-   reference** drawn uniformly (equal weight) from that set — so a task is
-   judged against one reference, not all ``M``,
+   reference** from that set — an independent uniform draw by default, with an
+   opt-in seeded balanced assignment — so a task is judged against one reference,
+   not all ``M``,
 3. Fits an anchored Bradley-Terry MLE ELO from that stage's win/loss/tie
    battles pooled per reference (reusing ``comparison.calculate_mle_elo``), and
 4. Uses that estimate to choose the ``M`` references for the next stage.
@@ -47,7 +48,7 @@ import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from resources_servers.gdpval.comparison import calculate_mle_elo
 
@@ -56,6 +57,27 @@ from resources_servers.gdpval.comparison import calculate_mle_elo
 # "reference_elo": float}`` as produced (per task, then pooled) by the GDPVal
 # comparison verifier. This is the unit the ELO MLE is fit over.
 PerReferenceTotals = Dict[str, Dict[str, float]]
+
+
+@dataclass
+class PartialStagePolicy:
+    """Opt-in policy for accepting incomplete non-final calibration stages.
+
+    ``min_success_fraction`` gates successful rollout coverage across the whole
+    stage. ``min_per_reference_success_fraction`` and
+    ``min_successful_rows_per_reference`` apply independently to every selected
+    reference model, so an anchor cannot disappear entirely from a partial fit.
+    ``waivable_failure_classes`` lists the persisted failure classes that may be
+    newly waived; it defaults to task timeouts only, preserving the original
+    behaviour. Rows already resolved by the standard terminal/max-attempt rules
+    remain eligible, but every omission still counts against the configured
+    coverage floors. Drained/no-persist and missing rows keep the stage open.
+    """
+
+    min_success_fraction: float = 1.0
+    min_per_reference_success_fraction: float = 1.0
+    min_successful_rows_per_reference: int = 1
+    waivable_failure_classes: Tuple[str, ...] = ("timeout_exceeded",)
 
 
 @dataclass
@@ -69,12 +91,15 @@ class StageSpec:
     available references" (used for the first, broad stage). Each task is judged
     against **one** reference sampled uniformly from the included set. ``seed``
     makes this stage's task sampling and per-task reference assignment
-    reproducible.
+    reproducible. ``partial_completion`` is an explicit, non-final-stage-only
+    escape hatch for accepting a calibrated ELO with bounded missing evidence;
+    it is disabled by default.
     """
 
     num_tasks: Optional[int] = None
     num_models: Optional[int] = None
     seed: Optional[int] = None
+    partial_completion: Optional[PartialStagePolicy] = None
 
 
 # ---------------------------------------------------------------------------
@@ -146,13 +171,16 @@ def assign_task_references(
     reference_ids: Sequence[str],
     *,
     rng: random.Random,
+    balanced: bool = False,
 ) -> Dict[str, str]:
-    """Assign each task a single reference model, sampled with equal probability.
+    """Assign each task a single reference model.
 
     Rather than judging every task against every included reference, each task is
-    compared against **one** reference drawn uniformly (each included reference
-    weighted equally) from ``reference_ids``. Returns a ``{task_id: ref_id}`` map;
-    empty when no references are included.
+    compared against **one** reference from ``reference_ids``. By default each
+    assignment is an independent uniform draw. With ``balanced=True``, assignment
+    slots are shuffled while ensuring per-reference task counts differ by at most
+    one. Returns a ``{task_id: ref_id}`` map; empty when no references are
+    included.
 
     Deterministic given *rng*, so a stage's assignment replays identically on
     resume (it is also recorded in the stage journal).
@@ -160,7 +188,16 @@ def assign_task_references(
     refs = list(reference_ids)
     if not refs:
         return {}
-    return {str(tid): rng.choice(refs) for tid in task_ids}
+    if not balanced:
+        return {str(tid): rng.choice(refs) for tid in task_ids}
+
+    tasks = [str(tid) for tid in task_ids]
+    full_cycles, remainder = divmod(len(tasks), len(refs))
+    slots = refs * full_cycles
+    if remainder:
+        slots.extend(rng.sample(refs, remainder))
+    rng.shuffle(slots)
+    return dict(zip(tasks, slots))
 
 
 # ---------------------------------------------------------------------------

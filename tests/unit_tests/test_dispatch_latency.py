@@ -49,6 +49,16 @@ class TestSummary:
     def test_empty_is_stated_not_crashed(self):
         assert "No completed rollouts" in DispatchLatencyTracker().summary()
 
+    def test_all_drained_reports_count_without_completions(self):
+        t = DispatchLatencyTracker()
+        t.record_drained()
+        t.record_drained()
+
+        out = t.summary()
+
+        assert "No completed rollouts" in out
+        assert "Drained (not dispatched, no time left in the budget): 2" in out
+
 
 class TestObservedElapsed:
     def test_reads_top_level(self):

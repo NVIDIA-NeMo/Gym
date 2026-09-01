@@ -28,6 +28,7 @@ from resources_servers.gdpval.app import (
     GDPValResourcesServerConfig,
     GDPValVerifyRequest,
     _iter_ref_repeat_dirs,
+    _strict_comparison_trial_failure,
 )
 
 
@@ -78,6 +79,210 @@ def _verify_request(**fields) -> GDPValVerifyRequest:
         rubric_pretty=fields.pop("rubric_pretty", ""),
         **fields,
     )
+
+
+class TestStrictComparisonTrials:
+    @staticmethod
+    def _comparison_server_and_body(tmp_path, *, strict: bool | None, num_references: int = 1):
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        eval_dir.mkdir(parents=True)
+        (eval_dir / "finish_params.json").write_text("{}")
+
+        reference_models = {}
+        for index in range(num_references):
+            ref_id = f"ref-{index}"
+            ref_root = tmp_path / ref_id
+            ref_dir = ref_root / "task_task-1" / "repeat_0"
+            ref_dir.mkdir(parents=True)
+            (ref_dir / "finish_params.json").write_text("{}")
+            reference_models[ref_id] = {"deliverables_dir": str(ref_root), "elo": 1200.0}
+
+        extra = {}
+        if strict is not None:
+            extra["strict_comparison_trials"] = strict
+        server = _server(
+            reward_mode="comparison",
+            reference_models=reference_models,
+            preconvert_office_to_pdf=False,
+            num_comparison_trials=4,
+            **extra,
+        )
+        return server, _verify_request(deliverables_dir=str(eval_dir))
+
+    @staticmethod
+    def _missing_artifact_server_and_body(tmp_path, *, missing: str, strict: bool | None):
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        ref_root = tmp_path / "ref"
+        ref_dir = ref_root / "task_task-1" / "repeat_0"
+        if missing != "eval":
+            eval_dir.mkdir(parents=True)
+            (eval_dir / "finish_params.json").write_text("{}")
+        if missing != "reference":
+            ref_dir.mkdir(parents=True)
+            (ref_dir / "finish_params.json").write_text("{}")
+
+        extra = {}
+        if strict is not None:
+            extra["strict_comparison_trials"] = strict
+        server = _server(
+            reward_mode="comparison",
+            reference_deliverables_dir=str(ref_root),
+            **extra,
+        )
+        return server, _verify_request(deliverables_dir=str(eval_dir))
+
+    @staticmethod
+    async def _verify_with_trials(server, body, side_effect):
+        run_trials = MagicMock()
+        if isinstance(side_effect, dict):
+            run_trials.return_value = side_effect
+        else:
+            run_trials.side_effect = side_effect
+        with (
+            patch("resources_servers.gdpval.comparison.run_trials", new=run_trials),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
+            patch("openai.OpenAI", return_value=MagicMock()),
+        ):
+            return await server.verify(body)
+
+    @pytest.mark.asyncio
+    async def test_complete_contract_passes_when_enabled(self, tmp_path) -> None:
+        server, body = self._comparison_server_and_body(tmp_path, strict=True)
+        complete = {
+            "winner": "[[B]]",
+            "win_count_a": 0,
+            "win_count_b": 4,
+            "tie_count": 0,
+            "task_count": 4,
+            "invalid_count": 0,
+        }
+
+        response = await self._verify_with_trials(server, body, complete)
+
+        assert response.total_wins == 4
+        assert response.judge_response["total_judged"] == 4
+        assert response.judge_response["total_invalid"] == 0
+
+    @pytest.mark.parametrize(
+        ("result", "expected"),
+        [
+            (
+                {
+                    "winner": "[[B]]",
+                    "win_count_a": 0,
+                    "win_count_b": 3,
+                    "tie_count": 0,
+                    "task_count": 3,
+                    "invalid_count": 0,
+                },
+                "matchups=1 judged=3/4 invalid=0 reference_errors=0",
+            ),
+            (
+                {
+                    "winner": "[[B]]",
+                    "win_count_a": 0,
+                    "win_count_b": 3,
+                    "tie_count": 0,
+                    "task_count": 3,
+                    "invalid_count": 1,
+                },
+                "matchups=1 judged=3/4 invalid=1 reference_errors=0",
+            ),
+        ],
+        ids=["incomplete-judged", "invalid-trial"],
+    )
+    @pytest.mark.asyncio
+    async def test_incomplete_contract_fails_when_enabled(self, tmp_path, result, expected) -> None:
+        server, body = self._comparison_server_and_body(tmp_path, strict=True)
+
+        with pytest.raises(RuntimeError, match=expected):
+            await self._verify_with_trials(server, body, result)
+
+    @pytest.mark.asyncio
+    async def test_reference_error_fails_when_enabled(self, tmp_path) -> None:
+        server, body = self._comparison_server_and_body(tmp_path, strict=True, num_references=2)
+        complete = {
+            "winner": "[[B]]",
+            "win_count_a": 0,
+            "win_count_b": 4,
+            "tie_count": 0,
+            "task_count": 4,
+            "invalid_count": 0,
+        }
+
+        with pytest.raises(
+            RuntimeError,
+            match="matchups=2 judged=4/8 invalid=0 reference_errors=1",
+        ):
+            await self._verify_with_trials(server, body, [RuntimeError("judge timeout"), complete])
+
+    def test_zero_matchups_is_incomplete(self) -> None:
+        assert (
+            _strict_comparison_trial_failure(
+                attempted_matchups=0,
+                num_trials=4,
+                total_judged=0,
+                total_invalid=0,
+                ref_errors={},
+            )
+            == "matchups=0 judged=0/0 invalid=0 reference_errors=0"
+        )
+
+    @pytest.mark.parametrize("missing", ["reference", "eval"])
+    @pytest.mark.asyncio
+    async def test_missing_artifact_fails_when_enabled(self, tmp_path, missing) -> None:
+        server, body = self._missing_artifact_server_and_body(tmp_path, missing=missing, strict=True)
+
+        with pytest.raises(
+            RuntimeError,
+            match=rf"strict comparison trial contract failed for task task-1: {missing}_missing",
+        ):
+            await server.verify(body)
+
+    @pytest.mark.parametrize("missing", ["reference", "eval"])
+    @pytest.mark.asyncio
+    async def test_missing_artifact_keeps_legacy_response_by_default(self, tmp_path, missing) -> None:
+        server, body = self._missing_artifact_server_and_body(tmp_path, missing=missing, strict=None)
+
+        response = await server.verify(body)
+
+        assert server.config.strict_comparison_trials is False
+        assert response.reward == 0.0
+        assert response.judge_response == {"error": f"{missing}_missing"}
+
+    @pytest.mark.parametrize("strict", [True, False])
+    @pytest.mark.asyncio
+    async def test_missing_reference_strictness_contract(self, tmp_path, strict) -> None:
+        server, body = self._missing_artifact_server_and_body(tmp_path, missing="reference", strict=strict)
+
+        if strict:
+            with pytest.raises(RuntimeError, match="reference_missing"):
+                await server.verify(body)
+            return
+
+        response = await server.verify(body)
+        dumped = response.model_dump()
+        assert dumped["_ng_failure_class"] == "reference_missing"
+        assert dumped["_ng_failure_terminal"] is True
+
+    @pytest.mark.asyncio
+    async def test_default_is_non_strict_for_backward_compatibility(self, tmp_path) -> None:
+        server, body = self._comparison_server_and_body(tmp_path, strict=None)
+        incomplete = {
+            "winner": "[[B]]",
+            "win_count_a": 0,
+            "win_count_b": 3,
+            "tie_count": 0,
+            "task_count": 3,
+            "invalid_count": 1,
+        }
+
+        response = await self._verify_with_trials(server, body, incomplete)
+
+        assert server.config.strict_comparison_trials is False
+        assert response.judge_response["total_judged"] == 3
+        assert response.judge_response["total_invalid"] == 1
 
 
 class TestIterRefRepeatDirs:
@@ -146,6 +351,8 @@ class TestApp:
         assert resp.reward == 0.0
         assert resp.verify_mode == "rubric"
         assert resp.invalid_judge_response is True
+        assert resp.invalid_judge_retryable is False
+        assert resp.judge_response == {"scoring_error": "missing_rubric"}
 
     @pytest.mark.asyncio
     async def test_verify_rubric_with_canned_judge(self) -> None:
@@ -411,6 +618,12 @@ class TestApp:
         assert resp.reward == 0.0
         assert resp.verify_mode == "comparison"
         assert resp.judge_response == {"error": "reference_missing"}
+        # Stamped as a terminal failure, not returned as a zero-reward success:
+        # a success row carrying no battle evidence is rejected outright by the
+        # non-final-stage coverage gate, which no policy setting can relax.
+        dumped = resp.model_dump()
+        assert dumped["_ng_failure_class"] == "reference_missing"
+        assert dumped["_ng_failure_terminal"] is True
 
     @pytest.mark.asyncio
     async def test_verify_comparison_iterates_all_ref_repeats(self, tmp_path) -> None:
@@ -455,7 +668,7 @@ class TestApp:
             patch("resources_servers.gdpval.comparison.run_trials", side_effect=fake_run_trials),
             patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
-            patch("resources_servers.gdpval.app.OpenAI" if False else "openai.OpenAI", return_value=MagicMock()),
+            patch("openai.OpenAI", return_value=MagicMock()) as openai_ctor,
         ):
             resp = await server.verify(body)
 
@@ -469,6 +682,7 @@ class TestApp:
         assert resp.win is True
         assert resp.judge_response["ref_repeat_count"] == 3
         assert len(resp.judge_response["per_ref_repeat"]) == 3
+        assert openai_ctor.call_args.kwargs["max_retries"] == 0
 
     @pytest.mark.asyncio
     async def test_verify_comparison_flat_layout_back_compat(self, tmp_path) -> None:
@@ -737,6 +951,67 @@ class TestApp:
         assert captured_kwargs["include_raw_responses"] is True
         assert resp.judge_response["raw_responses"] == ["FINAL_SCORE[7]\nMAX_POSSIBLE_SCORE[10]"]
 
+    def test_rubric_aggregate_excludes_invalid_judge_rows(self) -> None:
+        """Judge-failure sentinel zeros must not reduce aggregate reward."""
+        import asyncio as _asyncio
+
+        from nemo_gym.config_types import AggregateMetricsRequest
+
+        server = _server(reward_mode="rubric")
+        responses = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "reward": 0.8,
+                "invalid_judge_response": False,
+                "response": {},
+            },
+            {
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 0,
+                "reward": 0.0,
+                "invalid_judge_response": True,
+                "response": {},
+            },
+        ]
+
+        result = _asyncio.run(server.aggregate_metrics(AggregateMetricsRequest(verify_responses=responses)))
+
+        assert result.agent_metrics["mean/reward"] == 0.8
+        assert result.agent_metrics["rubric/aggregate_rows_total"] == 2
+        assert result.agent_metrics["rubric/aggregate_rows_included"] == 1
+        assert result.agent_metrics["rubric/legacy_invalid_rows_excluded"] == 1
+        assert result.agent_metrics["rubric/aggregate_rows_included_fraction"] == 0.5
+        assert [group["_ng_task_index"] for group in result.group_level_metrics] == [0]
+
+    def test_rubric_aggregate_all_invalid_has_no_reward_headline(self) -> None:
+        """An all-invalid judge run reports coverage instead of mean reward zero."""
+        import asyncio as _asyncio
+
+        from nemo_gym.config_types import AggregateMetricsRequest
+
+        server = _server(reward_mode="rubric")
+        responses = [
+            {
+                "_ng_task_index": task_index,
+                "_ng_rollout_index": 0,
+                "reward": 0.0,
+                "invalid_judge_response": True,
+                "response": {},
+            }
+            for task_index in range(2)
+        ]
+
+        result = _asyncio.run(server.aggregate_metrics(AggregateMetricsRequest(verify_responses=responses)))
+
+        assert "mean/reward" not in result.agent_metrics
+        assert "mean/reward" not in result.key_metrics
+        assert result.group_level_metrics == []
+        assert result.key_metrics["rubric/aggregate_rows_total"] == 2
+        assert result.key_metrics["rubric/aggregate_rows_included"] == 0
+        assert result.key_metrics["rubric/legacy_invalid_rows_excluded"] == 2
+        assert result.key_metrics["rubric/aggregate_rows_included_fraction"] == 0.0
+
     def test_aggregate_metrics_comparison_elo(self) -> None:
         from nemo_gym.config_types import AggregateMetricsRequest
 
@@ -1001,6 +1276,9 @@ class TestMultiReference:
 
         assert resp.reward == 0.0
         assert resp.judge_response == {"error": "reference_missing"}
+        dumped = resp.model_dump()
+        assert dumped["_ng_failure_class"] == "reference_missing"
+        assert dumped["_ng_failure_terminal"] is True
 
     @staticmethod
     def _two_ref_server_and_body(tmp_path):
@@ -1179,9 +1457,8 @@ class TestMultiReference:
         # Untagged run carries no stage_* keys at all.
         assert not any(k.startswith("comparison/stage_") for k in unstaged)
 
-    def test_aggregate_metrics_stage_aware_headline_is_last_stage(self) -> None:
-        """When rollouts are tagged with ``stage_index`` the headline eval_elo is
-        the LAST stage's fit, and every stage's estimate is emitted as an extra."""
+    def test_aggregate_metrics_stage_aware_headline_is_expected_final_stage(self) -> None:
+        """The declared final stage supplies the headline when its fit is usable."""
         from nemo_gym.config_types import AggregateMetricsRequest
 
         server = _server(
@@ -1201,6 +1478,8 @@ class TestMultiReference:
                 "_ng_task_index": 0,
                 "_ng_rollout_index": 0,
                 "stage_index": 0,
+                "expected_final_stage_index": 1,
+                "expected_stage_row_count": 1,
                 "task_id": "t0",
                 "reward": 0.5,
                 "total_wins": 5,
@@ -1216,6 +1495,8 @@ class TestMultiReference:
                 "_ng_task_index": 1,
                 "_ng_rollout_index": 0,
                 "stage_index": 1,
+                "expected_final_stage_index": 1,
+                "expected_stage_row_count": 1,
                 "task_id": "t1",
                 "reward": 1.0,
                 "total_wins": 8,
@@ -1244,10 +1525,176 @@ class TestMultiReference:
         # Headline == last stage's fit, not the pooled midpoint.
         assert m["comparison/eval_elo"] == m["comparison/stage_1/eval_elo"]
         assert m["comparison/num_references"] == 1
+        assert m["comparison/expected_final_stage_index"] == 1
+        assert m["comparison/headline_stage_index"] == 1
+        assert m["comparison/final_stage_present"] == 1
+        assert m["comparison/final_stage_complete"] == 1
+        assert m["comparison/final_stage_fit"] == 1
+        assert m["comparison/final_stage_degraded"] == 0
+        assert m["comparison/observed_final_stage_row_count"] == 1
+        assert m["comparison/expected_final_stage_row_count"] == 1
         # Pooled descriptive win stats still cover every stage.
         assert m["comparison/wins"] == 13
         assert m["comparison/judged"] == 20
         assert all(isinstance(v, (int, float)) for v in m.values())
+
+    def test_expected_final_stage_missing_does_not_promote_observed_stage(self) -> None:
+        """An incomplete run exposes stage metrics but no misleading headline."""
+        import asyncio as _asyncio
+
+        from nemo_gym.config_types import AggregateMetricsRequest
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={"low": {"deliverables_dir": "/tmp/low", "elo": 1000.0}},
+        )
+        responses = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "stage_index": 0,
+                "expected_final_stage_index": 1,
+                "expected_stage_row_count": 1,
+                "task_id": "t0",
+                "reward": 1.0,
+                "total_wins": 8,
+                "total_losses": 2,
+                "total_ties": 0,
+                "per_reference": {
+                    "low": {"wins": 8, "losses": 2, "ties": 0, "reference_elo": 1000.0},
+                },
+                "response": {},
+            }
+        ]
+
+        metrics = _asyncio.run(
+            server.aggregate_metrics(AggregateMetricsRequest(verify_responses=responses))
+        ).agent_metrics
+
+        assert "comparison/stage_0/eval_elo" in metrics
+        assert "comparison/eval_elo" not in metrics
+        assert "comparison/headline_stage_index" not in metrics
+        assert metrics["comparison/expected_final_stage_index"] == 1
+        assert metrics["comparison/final_stage_present"] == 0
+        assert metrics["comparison/final_stage_complete"] == 0
+        assert metrics["comparison/final_stage_fit"] == 0
+        assert metrics["comparison/final_stage_degraded"] == 1
+
+    def test_expected_final_stage_unfit_does_not_fall_back_to_pooled_fit(self) -> None:
+        """A present final stage with no judged games cannot borrow an earlier ELO."""
+        import asyncio as _asyncio
+
+        from nemo_gym.config_types import AggregateMetricsRequest
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={"low": {"deliverables_dir": "/tmp/low", "elo": 1000.0}},
+        )
+        responses = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "stage_index": 0,
+                "expected_final_stage_index": 1,
+                "expected_stage_row_count": 1,
+                "task_id": "t0",
+                "reward": 1.0,
+                "total_wins": 8,
+                "total_losses": 2,
+                "total_ties": 0,
+                "per_reference": {
+                    "low": {"wins": 8, "losses": 2, "ties": 0, "reference_elo": 1000.0},
+                },
+                "response": {},
+            },
+            {
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 0,
+                "stage_index": 1,
+                "expected_final_stage_index": 1,
+                "expected_stage_row_count": 1,
+                "task_id": "t1",
+                "reward": 0.0,
+                "total_wins": 0,
+                "total_losses": 0,
+                "total_ties": 0,
+                "per_reference": {
+                    "low": {"wins": 0, "losses": 0, "ties": 0, "reference_elo": 1000.0},
+                },
+                "response": {},
+            },
+        ]
+
+        metrics = _asyncio.run(
+            server.aggregate_metrics(AggregateMetricsRequest(verify_responses=responses))
+        ).agent_metrics
+
+        assert "comparison/stage_0/eval_elo" in metrics
+        assert "comparison/stage_1/eval_elo" not in metrics
+        assert "comparison/eval_elo" not in metrics
+        assert metrics["comparison/final_stage_present"] == 1
+        assert metrics["comparison/final_stage_complete"] == 1
+        assert metrics["comparison/final_stage_fit"] == 0
+        assert metrics["comparison/final_stage_degraded"] == 1
+
+    def test_partial_expected_final_stage_does_not_emit_headline(self) -> None:
+        """A drained final stage cannot publish an ELO from its surviving subset."""
+        import asyncio as _asyncio
+
+        from nemo_gym.config_types import AggregateMetricsRequest
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={"low": {"deliverables_dir": "/tmp/low", "elo": 1000.0}},
+        )
+        responses = [
+            {
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "stage_index": 0,
+                "expected_final_stage_index": 1,
+                "expected_stage_row_count": 1,
+                "task_id": "t0",
+                "reward": 0.5,
+                "total_wins": 5,
+                "total_losses": 5,
+                "total_ties": 0,
+                "per_reference": {
+                    "low": {"wins": 5, "losses": 5, "ties": 0, "reference_elo": 1000.0},
+                },
+                "response": {},
+            },
+            {
+                "_ng_task_index": 1,
+                "_ng_rollout_index": 0,
+                "stage_index": 1,
+                "expected_final_stage_index": 1,
+                "expected_stage_row_count": 2,
+                "task_id": "t1",
+                "reward": 1.0,
+                "total_wins": 8,
+                "total_losses": 2,
+                "total_ties": 0,
+                "per_reference": {
+                    "low": {"wins": 8, "losses": 2, "ties": 0, "reference_elo": 1000.0},
+                },
+                "response": {},
+            },
+        ]
+
+        metrics = _asyncio.run(
+            server.aggregate_metrics(AggregateMetricsRequest(verify_responses=responses))
+        ).agent_metrics
+
+        assert "comparison/stage_1/eval_elo" in metrics
+        assert "comparison/eval_elo" not in metrics
+        assert "comparison/headline_stage_index" not in metrics
+        assert metrics["comparison/final_stage_present"] == 1
+        assert metrics["comparison/final_stage_complete"] == 0
+        assert metrics["comparison/final_stage_fit"] == 1
+        assert metrics["comparison/final_stage_degraded"] == 1
+        assert metrics["comparison/observed_final_stage_row_count"] == 1
+        assert metrics["comparison/expected_final_stage_row_count"] == 2
 
     def test_aggregate_metrics_handles_repeated_task_across_stages(self) -> None:
         """The same ``(task_index, rollout_index)`` may recur across stages (one
