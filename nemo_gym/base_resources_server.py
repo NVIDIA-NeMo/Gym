@@ -145,6 +145,8 @@ class MCPServerMetadata(BaseModel):
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
 
+    _CONTROL_COMPONENT = "resources_servers"
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
@@ -161,6 +163,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         )
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         app.get("/reverify_mode")(self.get_reverify_mode)
+        self.setup_control_plane(app)
 
         return app
 
