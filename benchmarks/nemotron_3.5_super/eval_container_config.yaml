@@ -10,6 +10,7 @@ config_paths:
 - benchmarks/swebench/multilingual/opencode.yaml
 - benchmarks/deepswe/opencode.yaml
 - benchmarks/terminal_bench_2_1/opencode.yaml
+- benchmarks/swebench/pro/opencode.yaml
 - responses_api_models/vllm_model/configs/vllm_model.yaml
 # - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 # SWE Bench Pro
@@ -109,6 +110,10 @@ opencode_sandboxed_agent_deepswe:
     opencode_sandboxed_agent:
       datasets: []
 opencode_sandboxed_agent_terminal_bench_2_1:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets: []
+opencode_sandboxed_agent_swebench_pro:
   responses_api_agents:
     opencode_sandboxed_agent:
       datasets: []

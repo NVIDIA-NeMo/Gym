@@ -41,3 +41,13 @@ opencode_sandboxed_agent_terminal_bench_2_1:
           jsonl_fpath: benchmarks/terminal_bench_2_1/data/benchmark.jsonl
           prepare_script: benchmarks/terminal_bench_2_1/prepare.py
           num_repeats: 8
+
+opencode_sandboxed_agent_swebench_pro:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets:
+        - name: swebench_pro
+          type: benchmark
+          jsonl_fpath: benchmarks/swebench/data/swebench_pro_benchmark.jsonl
+          prepare_script: benchmarks/swebench/pro/prepare.py
+          num_repeats: 3

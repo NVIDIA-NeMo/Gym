@@ -389,6 +389,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     opencode_version: str
     remote_opencode_install_script_path: Optional[str] = None
     remote_opencode_binary_path: Optional[str] = None
+    remote_opencode_musl_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
 
@@ -403,6 +404,31 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
 class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
     # Allow for benchmark params to propagate properly
     model_config = ConfigDict(extra="allow")
+
+
+def _build_remote_opencode_install_command(
+    install_script_path: str,
+    binary_path: str,
+    musl_binary_path: str,
+) -> str:
+    """Build the invocation for the network-free, libc-aware cached installer."""
+    return (
+        f"bash {quote(install_script_path)} "
+        f"--glibc-binary {quote(binary_path)} "
+        f"--musl-binary {quote(musl_binary_path)}"
+    )
+
+
+def _extract_opencode_session_id(session_list_stdout: str) -> str:
+    """Return the newest OpenCode session ID from ``session list`` JSON output."""
+    sessions = json.loads(session_list_stdout)
+    if not isinstance(sessions, list) or not sessions:
+        raise ValueError("OpenCode did not return any sessions")
+
+    session_id = sessions[0].get("id") if isinstance(sessions[0], dict) else None
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError("The newest OpenCode session does not have a valid ID")
+    return session_id
 
 
 class OpenCodeSandboxedAgentVerifyRequest(BaseVerifyRequest):
@@ -522,6 +548,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         return {
             "model": "nemo_gym/dummy_model",
             "$schema": "https://opencode.ai/config.json",
+            "agent": {"title": {"disable": True}},
             "provider": {
                 "nemo_gym": {
                     # TODO @bxyu-nvidia: We should use @ai-sdk/openai here but there is some /v1/responses streaming error.
@@ -652,7 +679,17 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         opencode_thinking_str = "--thinking"
 
         if self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
-            install_str = f"""bash {self.config.remote_opencode_install_script_path} --binary {self.config.remote_opencode_binary_path}"""
+            if self.config.remote_opencode_musl_binary_path:
+                install_str = _build_remote_opencode_install_command(
+                    install_script_path=self.config.remote_opencode_install_script_path,
+                    binary_path=self.config.remote_opencode_binary_path,
+                    musl_binary_path=self.config.remote_opencode_musl_binary_path,
+                )
+            else:
+                install_str = (
+                    f"bash {quote(self.config.remote_opencode_install_script_path)} "
+                    f"--binary {quote(self.config.remote_opencode_binary_path)}"
+                )
         else:
             print(
                 "Downloading and installing OpenCode in the sandbox. Please consider mounting or uploading the appropriate OpenCode binary instead!",
@@ -708,41 +745,48 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("OpenCode install and run stderr:\n", result.stderr, file=sys.stderr)
 
         export_fname = "export.json"
+        # Kept outside the sandbox workdir on purpose: SWE-bench-style environments set the workdir
+        # to the git repo, and resources servers extract the model patch with `git add -N . && git
+        # diff`, which would sweep this transcript into the patch.
+        export_remote_fpath = f"/tmp/opencode_{export_fname}"
         try:
-            export_result = await sandbox.exec(
-                command=f"""export PATH=$HOME/.opencode/bin:$PATH \
-            && (command -v jq >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends jq)) \
-            && session_id=$(opencode session list --format json | jq -r '.[0].id') \
-            && opencode export $session_id > {export_fname}""",
-                env={"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None,
+            session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
+            session_list_result = await sandbox.exec(
+                command="export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json",
+                env=session_env,
             )
-        except:
+            if session_list_result.return_code != 0:
+                raise RuntimeError(
+                    "Failed to list OpenCode sessions: "
+                    f"{(session_list_result.stderr or session_list_result.stdout or '').strip()}"
+                )
+            session_id = _extract_opencode_session_id(session_list_result.stdout or "")
+            export_result = await sandbox.exec(
+                command=(
+                    "export PATH=$HOME/.opencode/bin:$PATH "
+                    f"&& opencode export {quote(session_id)} > {quote(export_remote_fpath)}"
+                ),
+                env=session_env,
+            )
+        except Exception:
             export_result = None
             print("Failed to export results", format_exc(), file=sys.stderr)
         if self.config.debug and export_result:
             print("Export stdout:\n", export_result.stdout, file=sys.stderr)
             print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
-        try:
-            pwd_result = await sandbox.exec(command="pwd")
-            results_remote_fpath = Path(pwd_result.stdout.strip()) / export_fname
-        except:
-            print("Failed to get current working directory", format_exc(), file=sys.stderr)
-            results_remote_fpath = None
-
         results_dir: Path = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
         results_dir.mkdir(parents=True, exist_ok=True)
         results_local_fpath = results_dir / export_fname
-        if results_remote_fpath:
-            if self.config.debug:
-                print(f"Downloading results from {results_remote_fpath} to {results_local_fpath}", file=sys.stderr)
-            try:
-                await sandbox.download(str(results_remote_fpath), results_local_fpath)
-            except:
-                print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
-                if export_result:
-                    print("Export stdout:\n", export_result.stdout, file=sys.stderr)
-                    print("Export stderr:\n", export_result.stderr, file=sys.stderr)
+        if self.config.debug:
+            print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
+        try:
+            await sandbox.download(export_remote_fpath, results_local_fpath)
+        except:
+            print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
+            if export_result:
+                print("Export stdout:\n", export_result.stdout, file=sys.stderr)
+                print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
         observations = None
         if collect_observations:
