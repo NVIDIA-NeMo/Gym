@@ -24,6 +24,16 @@ from nemo_gym.token_id_capture.staging.records import RolloutManifest
 CONTROL_ROUTE_PREFIX = "/training-token-capture/control"
 
 
+def require_control_auth(authorization: str | None, auth_token: str) -> None:
+    """Reject a request that lacks the configured control-plane bearer."""
+    expected = f"Bearer {auth_token}"
+    if authorization is None or not hmac.compare_digest(authorization, expected):
+        raise HTTPException(
+            status_code=401,
+            detail="missing or invalid control-plane bearer token",
+        )
+
+
 def install_rollout_control_routes(
     app: Any,
     lineage_store: LineageStore,
@@ -33,22 +43,14 @@ def install_rollout_control_routes(
     """Install the bearer-protected manifest route."""
     if not auth_token:
         raise ValueError("rollout control routes require a non-empty auth token")
-    expected = f"Bearer {auth_token}"
     router = APIRouter(prefix=CONTROL_ROUTE_PREFIX)
-
-    def check_auth(authorization: str | None) -> None:
-        if authorization is None or not hmac.compare_digest(authorization, expected):
-            raise HTTPException(
-                status_code=401,
-                detail="missing or invalid control-plane bearer token",
-            )
 
     @router.get("/rollouts/{rollout_id}/manifest")
     async def rollout_manifest(
         rollout_id: str,
         authorization: str | None = Header(default=None),
     ) -> dict:
-        check_auth(authorization)
+        require_control_auth(authorization, auth_token)
         try:
             return await lineage_store.manifest(rollout_id)
         except ValueError as error:

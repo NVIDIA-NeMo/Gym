@@ -37,17 +37,21 @@ import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Literal, Mapping, Optional
 from uuid import uuid4
 
 import orjson
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
 
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
+from nemo_gym.checkpoint.admission import GATED_MODEL_ROUTE_SUFFIXES, AdmissionLimiter, AdmissionMiddleware
+from nemo_gym.checkpoint.control import AdmissionState, ControlCapabilities
+from nemo_gym.checkpoint.ledger import install_model_checkpoint
+from nemo_gym.checkpoint.model_admission import install_model_admission
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
@@ -186,7 +190,12 @@ def _orjson_dispatch_response(content: Any) -> Any:
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
-    pass
+    # Checkpoint role of this instance. 'policy' instances serve the
+    # generations that produce training tokens and gate admission during a
+    # checkpoint. 'auxiliary' instances serve environment traffic (judges,
+    # user or tool simulators) and never pause: accepted operations must be
+    # able to finish their nested calls while the policy instance drains.
+    instance_role: Literal["policy", "auxiliary"] = "policy"
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -196,19 +205,22 @@ class BaseResponsesAPIModel(BaseServer):
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     _CONTROL_COMPONENT = "responses_api_models"
 
+    _admission_limiter: Optional[AdmissionLimiter] = PrivateAttr(default=None)
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
         self.setup_session_middleware(app)
         self.setup_control_plane(app)
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        install_model_call_capture(
+        capture_ledger = install_model_call_capture(
             app,
             capture_config,
             model_server_name=self.config.name,
             global_config_dict=self.server_client.global_config_dict,
             num_workers=self.config.num_workers,
         )
+        app.state.nemo_gym_capture_ledger = capture_ledger
 
         model_attributes = {"nemo.gym.server.name": self.config.name}
         app.post("/v1/chat/completions")(
@@ -229,7 +241,68 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.messages", self.messages, model_attributes)
         )
 
+        self.setup_model_admission(app)
+
         return app
+
+    def admission_limiter(self) -> AdmissionLimiter:
+        if self._admission_limiter is None:
+            self._admission_limiter = AdmissionLimiter()
+        return self._admission_limiter
+
+    def setup_model_admission(self, app: FastAPI) -> None:
+        """Register admission control on this model server.
+
+        External token staging provides the authenticated control plane used by
+        the first checkpoint milestone.
+        """
+        auth_token = self.checkpoint_control_auth_token()
+        if auth_token is None:
+            return
+        install_model_admission(
+            app,
+            limiter=self.admission_limiter(),
+            fence=self.checkpoint_fence(),
+            instance_role=self.config.instance_role,
+            auth_token=auth_token,
+        )
+        install_model_checkpoint(
+            app,
+            fence=self.checkpoint_fence(),
+            limiter=self.admission_limiter(),
+            ledger_provider=lambda: getattr(app.state, "nemo_gym_capture_ledger", None),
+            file_ledger_root_provider=lambda: (
+                ledger.checkpoint_root
+                if isinstance((ledger := getattr(app.state, "nemo_gym_capture_ledger", None)), FileLineageStore)
+                else None
+            ),
+            instance_role=self.config.instance_role,
+            auth_token=auth_token,
+        )
+        if self.config.instance_role == "policy":
+            app.add_middleware(
+                AdmissionMiddleware,
+                limiter=self.admission_limiter(),
+                gated_suffixes=GATED_MODEL_ROUTE_SUFFIXES,
+            )
+
+    def checkpoint_control_auth_token(self) -> Optional[str]:
+        settings = token_id_capture_config(self.server_client.global_config_dict)
+        if settings is None or not settings.token_id_capture.external_staging:
+            return None
+        return settings.token_id_capture.resolve_control_auth_token()
+
+    def control_capabilities(self) -> ControlCapabilities:
+        capabilities = super().control_capabilities()
+        capabilities.instance_role = self.config.instance_role
+        if self.config.instance_role == "policy" and self.checkpoint_control_auth_token() is not None:
+            capabilities.admission_states = [
+                AdmissionState.ACCEPTING,
+                AdmissionState.DRAINING,
+                AdmissionState.PAUSED,
+            ]
+            capabilities.checkpoint_mode = "export_restore"
+        return capabilities
 
     @abstractmethod
     async def chat_completions(
@@ -1507,7 +1580,7 @@ def install_model_call_capture(
     model_server_name: str | None = None,
     global_config_dict: Any = None,
     num_workers: int | None = None,
-) -> None:
+) -> Optional[CaptureLedger]:
     """Install model-call capture middleware.
 
     Always strip ``/ng-rollout/<id>/...`` before routing.
@@ -1593,6 +1666,7 @@ def install_model_call_capture(
         external_staging=external_staging,
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
     )
+    return lineage_store if isinstance(lineage_store, CaptureLedger) else None
 
 
 # --- Run-level capture helpers (rollout-collection side) ---
