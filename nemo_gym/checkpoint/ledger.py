@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Protocol, runtime_checkable
 
 from fastapi import FastAPI, Header
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.checkpoint.admission import AdmissionLimiter
 from nemo_gym.checkpoint.control import (
@@ -96,6 +97,32 @@ class LedgerNotQuiescentError(ControlError):
     code = "ledger_not_quiescent"
 
 
+class AttemptIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rollout_id: str
+    attempt_index: int = Field(ge=0)
+
+
+class CaptureLedgerCommitResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rollouts: int = Field(ge=0)
+    rows: int = Field(ge=0)
+    excluded_tombstoned: int = Field(ge=0)
+    manifest_digest: str
+
+
+class CaptureLedgerRestoreResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rollouts: int = Field(ge=0)
+    rows: int = Field(ge=0)
+    checkpoint_id: Optional[str] = None
+    tombstones: list[AttemptIdentity] = Field(default_factory=list)
+    source_attempts: list[AttemptIdentity] = Field(default_factory=list)
+
+
 @runtime_checkable
 class CheckpointableCaptureLedger(CaptureLedger, Protocol):
     """Optional lifecycle implemented by framework-owned capture backends.
@@ -111,9 +138,9 @@ class CheckpointableCaptureLedger(CaptureLedger, Protocol):
         checkpoint_id: str,
         tombstones: tuple[tuple[str, int], ...],
         source_attempts: tuple[tuple[str, int], ...],
-    ) -> dict[str, Any]: ...
+    ) -> CaptureLedgerCommitResult: ...
 
-    async def restore_capture_ledger(self, checkpoint_dir: Path) -> dict[str, Any]: ...
+    async def restore_capture_ledger(self, checkpoint_dir: Path) -> CaptureLedgerRestoreResult: ...
 
 
 def _file_digest(path: Path) -> str:
@@ -348,13 +375,15 @@ def install_model_checkpoint(
         ledger = ledger_provider()
         if isinstance(ledger, CheckpointableCaptureLedger):
             if operation == "commit":
-                return await ledger.checkpoint_capture_ledger(
+                result = await ledger.checkpoint_capture_ledger(
                     checkpoint_dir,
                     checkpoint_id=checkpoint_id,
                     tombstones=tuple(limiter.tombstones()),
                     source_attempts=tuple(limiter.seen_attempts()),
                 )
-            return await ledger.restore_capture_ledger(checkpoint_dir)
+                return CaptureLedgerCommitResult.model_validate(result).model_dump(mode="json")
+            result = await ledger.restore_capture_ledger(checkpoint_dir)
+            return CaptureLedgerRestoreResult.model_validate(result).model_dump(mode="json")
 
         file_root = file_ledger_root_provider()
         if file_root is None:

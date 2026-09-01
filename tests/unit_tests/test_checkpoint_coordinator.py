@@ -62,6 +62,7 @@ class _Pool:
         self.workers = workers
         self.app = build_coordinator_control_app(
             coordinator,
+            auth_token="secret",
             capabilities=ControlCapabilities(
                 component="responses_api_models",
                 name="policy",
@@ -75,7 +76,11 @@ class _Pool:
         return self.workers[index][0]
 
     def client(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url="http://coordinator")
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=self.app),
+            base_url="http://coordinator",
+            headers={"authorization": "Bearer secret"},
+        )
 
     async def pause(self, client: httpx.AsyncClient, checkpoint_id: str = "ckpt-1") -> httpx.Response:
         return await client.post(
@@ -109,6 +114,22 @@ async def _stop_pool(pool: _Pool) -> None:
     for _, agent in pool.workers:
         await agent.stop()
     await pool.coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_control_routes_require_bearer(sock_dir: Path) -> None:
+    pool = await _start_pool(sock_dir, expected=1, connect=1)
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=pool.app), base_url="http://coordinator"
+        ) as client:
+            response = await client.post(
+                f"{MODEL_ADMISSION_URL_PREFIX}/pause",
+                json={"checkpoint_id": "ckpt-auth", "deadline_ts": 4e9},
+            )
+        assert response.status_code == 401
+    finally:
+        await _stop_pool(pool)
 
 
 @pytest.mark.asyncio
@@ -340,6 +361,7 @@ async def test_real_two_worker_uvicorn_pool_closes_as_one_service(sock_dir) -> N
 
         app = build_coordinator_control_app(
             coordinator,
+            auth_token="secret",
             capabilities=ControlCapabilities(
                 component="responses_api_models",
                 name="policy",
@@ -348,7 +370,11 @@ async def test_real_two_worker_uvicorn_pool_closes_as_one_service(sock_dir) -> N
             ),
             ack_timeout_s=2.0,
         )
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://coordinator") as control:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://coordinator",
+            headers={"authorization": "Bearer secret"},
+        ) as control:
             pause = await control.post(
                 f"{MODEL_ADMISSION_URL_PREFIX}/pause",
                 json={"checkpoint_id": "ckpt-real-workers", "deadline_ts": 4e9},

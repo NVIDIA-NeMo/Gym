@@ -17,7 +17,9 @@
 import asyncio
 import time
 
+import httpx
 import pytest
+from fastapi import FastAPI
 
 from nemo_gym.checkpoint import (
     AGENT_MANIFEST_NAME,
@@ -26,8 +28,13 @@ from nemo_gym.checkpoint import (
     AgentCheckpointError,
     AgentCheckpointParticipant,
     AgentStaleAttemptError,
+    ControlCapabilities,
+    ControlFence,
     DuplicateExecutionError,
+    MultiProcessCapability,
     commit_agent_state,
+    install_agent_checkpoint,
+    install_control_plane,
     restore_agent_state,
 )
 
@@ -45,6 +52,50 @@ def _boundary(*, attempt_index: int = 0, boundary_index: int = 1) -> AgentBounda
         last_committed_model_call_id="call-1",
         resource_state_revisions={"resources": 3},
     )
+
+
+@pytest.mark.asyncio
+async def test_timed_out_prepare_can_retire_and_retry() -> None:
+    participant = AgentCheckpointParticipant()
+    await participant.begin("rollout-a", 0, task=None)
+    fence = ControlFence()
+    app = FastAPI()
+    install_control_plane(
+        app,
+        capabilities=ControlCapabilities(
+            component="responses_api_agents",
+            name="agent",
+            multi_process=MultiProcessCapability(mode="single_worker", num_workers=1),
+        ),
+        fence=fence,
+    )
+    install_agent_checkpoint(app, participant=participant, fence=fence, auth_token="secret")
+    headers = {"authorization": "Bearer secret"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        failed = await client.post(
+            "/ng-control/v1/agent-checkpoint/prepare",
+            json={"checkpoint_id": "checkpoint-1", "deadline_ts": time.time() + 0.01},
+            headers=headers,
+        )
+        assert failed.status_code == 409
+        retired = await client.post(
+            "/ng-control/v1/agent-checkpoint/retire",
+            json={
+                "checkpoint_id": "checkpoint-1",
+                "deadline_ts": time.time() + 2,
+                "rollout_id": "rollout-a",
+                "attempt_index": 0,
+            },
+            headers=headers,
+        )
+        assert retired.status_code == 200
+        retried = await client.post(
+            "/ng-control/v1/agent-checkpoint/prepare",
+            json={"checkpoint_id": "checkpoint-1", "deadline_ts": time.time() + 2},
+            headers=headers,
+        )
+    assert retried.status_code == 200
+    assert retried.json()["running"] == 0
 
 
 @pytest.mark.asyncio

@@ -18,7 +18,7 @@
 import logging
 import uuid
 from collections.abc import Mapping
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import Body, Request, Response
 from pydantic import ConfigDict, Field, TypeAdapter
@@ -46,6 +46,13 @@ from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse
 
 _LOGGER = logging.getLogger(__name__)
 _INPUT_ITEMS_ADAPTER = TypeAdapter(list[NeMoGymResponseInputItem])
+
+
+def _cookie_values(cookies: Any) -> dict[str, str]:
+    return {
+        name: str(getattr(cookie, "value", cookie))
+        for name, cookie in (cookies.items() if cookies is not None else ())
+    }
 
 
 class GymnasiumAgentConfig(BaseResponsesAPIAgentConfig):
@@ -253,7 +260,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             if step_data.observation:
                 new_outputs.append(NeMoGymEasyInputMessage(role="user", content=step_data.observation))
 
-            if self._checkpoint_participant is not None:
+            if self._checkpoint_participant is not None and not (step_data.terminated or step_data.truncated):
                 logical_rollout_id = current_logical_rollout_id()
                 attempt_index = current_attempt_index()
                 if logical_rollout_id is not None and attempt_index is not None:
@@ -270,8 +277,8 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                                 "reset_data": reset_data.model_dump(mode="json"),
                                 "step_data": step_data.model_dump(mode="json"),
                                 "total_reward": total_reward,
-                                "model_server_cookies": dict(model_server_cookies or {}),
-                                "env_cookies": dict(env_cookies),
+                                "model_server_cookies": _cookie_values(model_server_cookies),
+                                "env_cookies": _cookie_values(env_cookies),
                             },
                         )
                     )

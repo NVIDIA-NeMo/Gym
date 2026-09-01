@@ -66,6 +66,13 @@ _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 _INPUT_ITEMS_ADAPTER = TypeAdapter(List[NeMoGymResponseInputItem])
 
 
+def _cookie_values(cookies: Any) -> dict[str, str]:
+    return {
+        name: str(getattr(cookie, "value", cookie))
+        for name, cookie in (cookies.items() if cookies is not None else ())
+    }
+
+
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
@@ -264,8 +271,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             last_committed_model_call_id=model_call_id,
                             resource_state_revisions={self.config.resources_server.name: resource_revision},
                             agent_state={
-                                "model_server_cookies": dict(model_server_cookies or {}),
-                                "resources_server_cookies": dict(resources_server_cookies or {}),
+                                "model_server_cookies": _cookie_values(model_server_cookies),
+                                "resources_server_cookies": _cookie_values(resources_server_cookies),
                             },
                         )
                     )

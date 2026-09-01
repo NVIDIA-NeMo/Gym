@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from http.cookies import SimpleCookie
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -21,7 +22,12 @@ from nemo_gym.checkpoint import AgentBoundaryRecord
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.gymnasium_agent.app import GymnasiumAgent, GymnasiumAgentConfig, GymnasiumAgentRunRequest
+from responses_api_agents.gymnasium_agent.app import (
+    GymnasiumAgent,
+    GymnasiumAgentConfig,
+    GymnasiumAgentRunRequest,
+    _cookie_values,
+)
 
 
 def _make_agent(max_steps=10, observability=True):
@@ -37,6 +43,13 @@ def _make_agent(max_steps=10, observability=True):
     server_client = MagicMock(spec=ServerClient)
     server_client.global_config_dict = {"observability_enabled": observability}
     return GymnasiumAgent(config=config, server_client=server_client)
+
+
+def test_checkpoint_cookie_values_do_not_serialize_morsel_attributes():
+    cookies = SimpleCookie()
+    cookies["sid"] = "abc"
+    cookies["sid"]["path"] = "/"
+    assert _cookie_values(cookies) == {"sid": "abc"}
 
 
 def _model_response(text: str, input_toks=1, output_toks=1, cached_toks=0, reasoning_toks=0) -> dict:
@@ -208,6 +221,10 @@ class TestRun:
     @pytest.mark.asyncio
     async def test_terminates_on_first_step(self):
         agent = _make_agent()
+        checkpoint_participant = MagicMock()
+        checkpoint_participant.commit_boundary = AsyncMock()
+        checkpoint_participant.continuation.return_value = None
+        agent._checkpoint_participant = checkpoint_participant
         model_path = "/ng-rollout/2-0/v1/responses"
         payloads = {
             "/reset": [{"observation": "go", "info": {}}],
@@ -237,6 +254,7 @@ class TestRun:
         assert urls.count("/close") == 0
         model_calls = [(u, h) for (u, h) in seen if u == model_path]
         assert model_calls == [(model_path, None)]
+        checkpoint_participant.commit_boundary.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_successful_rollout_survives_close_http_failure(self):

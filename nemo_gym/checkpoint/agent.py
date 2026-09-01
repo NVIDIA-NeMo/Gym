@@ -62,6 +62,10 @@ class AgentStaleAttemptError(ControlError):
     code = "stale_attempt"
 
 
+class AgentPrepareIncompleteError(ControlError):
+    code = "agent_prepare_incomplete"
+
+
 class AgentBoundaryRecord(BaseModel):
     """Continuation state after one complete whitebox agent turn."""
 
@@ -379,7 +383,12 @@ def install_agent_checkpoint(
         require_control_auth(authorization, auth_token)
 
         async def run() -> dict[str, Any]:
-            return await participant.prepare(body.deadline_ts)
+            result = await participant.prepare(body.deadline_ts)
+            if result["running"]:
+                raise AgentPrepareIncompleteError(
+                    f"{result['running']} agent execution(s) did not reach a committed boundary before the deadline"
+                )
+            return result
 
         result = await fence.run_operation(
             body.checkpoint_id,
@@ -473,6 +482,6 @@ def install_agent_checkpoint(
         require_control_auth(authorization, auth_token)
         fence.require_phase(
             body.checkpoint_id,
-            frozenset({CheckpointPhase.PREPARING, CheckpointPhase.PREPARED}),
+            frozenset({CheckpointPhase.IDLE, CheckpointPhase.PREPARING, CheckpointPhase.PREPARED}),
         )
         return await participant.retire(body.rollout_id, body.attempt_index)

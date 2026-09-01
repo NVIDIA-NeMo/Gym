@@ -44,7 +44,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Header, Query
 
 from nemo_gym.checkpoint.admission import AdmissionLimiter
 from nemo_gym.checkpoint.control import (
@@ -62,6 +62,7 @@ from nemo_gym.checkpoint.model_control_contracts import (
     ModelAdmissionPauseRequest,
     ModelAdmissionResumeRequest,
 )
+from nemo_gym.token_id_capture.control_routes import require_control_auth
 
 
 class MissingWorkersError(ControlError):
@@ -314,6 +315,7 @@ def build_coordinator_control_app(
     coordinator: AdmissionCoordinator,
     *,
     capabilities: ControlCapabilities,
+    auth_token: str,
     fence: Optional[ControlFence] = None,
     ack_timeout_s: float = 10.0,
 ) -> FastAPI:
@@ -344,7 +346,11 @@ def build_coordinator_control_app(
         return status
 
     @app.post(f"{MODEL_ADMISSION_URL_PREFIX}/pause")
-    async def coordinator_pause(body: ModelAdmissionPauseRequest) -> dict[str, Any]:
+    async def coordinator_pause(
+        body: ModelAdmissionPauseRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, Any]:
+        require_control_auth(authorization, auth_token)
         deadline = Deadline(deadline_ts=body.deadline_ts)
 
         async def run() -> dict[str, Any]:
@@ -382,7 +388,9 @@ def build_coordinator_control_app(
         checkpoint_id: str = Query(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"),
         wait_state: Optional[str] = None,
         timeout_s: float = 0.0,
+        authorization: Optional[str] = Header(default=None),
     ) -> dict[str, Any]:
+        require_control_auth(authorization, auth_token)
         fence.require_phase(
             checkpoint_id,
             frozenset({CheckpointPhase.PREPARING, CheckpointPhase.PREPARED}),
@@ -396,7 +404,12 @@ def build_coordinator_control_app(
         return status
 
     @app.post(f"{MODEL_ADMISSION_URL_PREFIX}/resume")
-    async def coordinator_resume(body: ModelAdmissionResumeRequest) -> dict[str, Any]:
+    async def coordinator_resume(
+        body: ModelAdmissionResumeRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, Any]:
+        require_control_auth(authorization, auth_token)
+
         async def run() -> dict[str, Any]:
             await coordinator.resume_admission()
             status = await _await_worker_acks(ack_timeout_s)
@@ -422,7 +435,12 @@ def build_coordinator_control_app(
         )
 
     @app.post(f"{MODEL_ADMISSION_URL_PREFIX}/abort_inflight")
-    async def coordinator_abort_inflight(body: ModelAbortInflightRequest) -> dict[str, Any]:
+    async def coordinator_abort_inflight(
+        body: ModelAbortInflightRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, Any]:
+        require_control_auth(authorization, auth_token)
+
         async def run() -> dict[str, Any]:
             await coordinator.add_tombstone(body.rollout_id, body.attempt_index)
             status = await _await_worker_acks(ack_timeout_s)
