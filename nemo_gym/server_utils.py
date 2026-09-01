@@ -85,6 +85,7 @@ _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 
 NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_NAME"
 NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_BASE_URL"
+CAPTURE_CAPABILITY_HEADER_NAME = "x-nemo-gym-capture-capability"
 
 
 class _PickleSafeRequestInfo(NamedTuple):
@@ -467,6 +468,15 @@ class ServerClient(BaseModel):
             # model URL explicitly instead.  Preserve that path rather than
             # resolving the unprefixed host/port from global config.
             base_url = model_server_base_url.rstrip("/")
+            if TOKEN_CAPTURE_PATH_SEGMENT in base_url:
+                # A capture-prefixed URL means an external gate fronts the model
+                # server; it admits calls by the rollout capability the launcher
+                # issued as the process's API key.
+                capability = getenv("OPENAI_API_KEY")
+                if capability:
+                    headers = dict(kwargs.get("headers") or {})
+                    headers.setdefault(CAPTURE_CAPABILITY_HEADER_NAME, capability)
+                    kwargs["headers"] = headers
         else:
             base_url = self._resolve_base_url(server_name)
 
