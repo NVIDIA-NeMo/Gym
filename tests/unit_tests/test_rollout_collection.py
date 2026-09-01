@@ -69,10 +69,13 @@ from nemo_gym.rollout_collection import (
     loads_jsonl_line,
 )
 from nemo_gym.token_id_capture import (
+    LineageResolution,
+    ParentResolutionStatus,
     TokenCaptureSnapshot,
     TokenCaptureStore,
     TokenEntry,
     clear_token_captures_for_rollouts,
+    stamp_lineage,
 )
 from nemo_gym.token_id_capture.delivery import (
     MASK_SAMPLE_KEY,
@@ -82,6 +85,19 @@ from nemo_gym.token_id_capture.delivery import (
     retire_rollout_token_capture,
     rollout_carries_token_ids,
 )
+
+
+class _StubLineageStore:
+    """Satisfy the normal custom-sink contract in collector-only tests."""
+
+    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
+        return LineageResolution(ParentResolutionStatus.ROOT)
+
+    def is_process_shared(self) -> bool:
+        return True
+
+    async def close(self) -> None:
+        pass
 
 
 @pytest.fixture
@@ -733,12 +749,10 @@ class TestRolloutCollection:
         assert NG_PERF_KEY not in result
         assert "_ng_rollout_latency_ms" not in result
 
-    @pytest.mark.parametrize("request_debug_enabled", [True, False])
-    async def test_run_examples_logs_failed_run_when_request_debug_enabled(
+    async def test_run_examples_logs_failed_run(
         self,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
-        request_debug_enabled: bool,
     ) -> None:
         row = {
             AGENT_REF_KEY_NAME: {"name": "my_agent"},
@@ -762,27 +776,20 @@ class TestRolloutCollection:
             raise RuntimeError("boom")
 
         monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", fail_raise_for_status)
-        monkeypatch.setattr(
-            nemo_gym.rollout_collection,
-            "is_global_aiohttp_client_request_debug_enabled",
-            lambda: request_debug_enabled,
-        )
 
         with pytest.raises(RuntimeError, match="boom"):
             await next(RolloutCollectionHelper().run_examples([row]))
 
         captured = capsys.readouterr()
-        if request_debug_enabled:
-            assert "[rollout_collection] /run failed status=500" in captured.out
-            assert '"_ng_task_index": 7' in captured.out
-            assert '"_ng_rollout_index": 0' in captured.out
-            assert '"agent_name": "my_agent"' in captured.out
-            assert "env_specific_metadata" not in captured.out
-            assert "do not log this either" not in captured.out
-            assert "responses_create_params" not in captured.out
-            assert "do not log this" not in captured.out
-        else:
-            assert "[rollout_collection] /run failed" not in captured.out
+        assert "[rollout_collection] /run failed status=500" in captured.out
+        assert '"_ng_task_index": 7' in captured.out
+        assert '"_ng_rollout_index": 0' in captured.out
+        assert '"agent_name": "my_agent"' in captured.out
+        assert "env_specific_metadata" not in captured.out
+        assert "do not log this either" not in captured.out
+        assert "responses_create_params" not in captured.out
+        assert "do not log this" not in captured.out
+        assert "[rollout_collection] /run failed" in captured.out
 
     async def test_run_examples_records_agent_http_failure_as_a_failure_row(
         self, monkeypatch: pytest.MonkeyPatch
@@ -894,7 +901,11 @@ class TestRolloutCollection:
         assert orjson.loads(orjson.dumps(result)) == result
 
     async def test_run_from_config_routes_agent_failure_to_sidecar_and_out_of_metrics(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        empty_global_config: MagicMock,
     ) -> None:
         """End to end: one 500 and one success, through the real dispatch and aggregation path."""
         input_jsonl_fpath = tmp_path / "input.jsonl"
@@ -922,6 +933,7 @@ class TestRolloutCollection:
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_jsonl_fpath),
             output_jsonl_fpath=str(output_jsonl_fpath),
+            route_failures_to_sidecar=True,
             disable_health_check=True,
         )
         results = await RolloutCollectionHelper().run_from_config(config)
@@ -947,6 +959,14 @@ class TestRolloutCollection:
         )
         agent_metrics = orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]
         assert agent_metrics["mean/reward"] == 1.0
+
+        # The run says the setting is on, names each dropped rollout once, and closes with the count.
+        printed = capsys.readouterr().out
+        assert "route_failures_to_sidecar is on" in printed
+        assert printed.count("rollout dropped from the score") == 1
+        assert "Rollouts missing from the score: 1 of 2 materialized" in printed
+        assert "Metrics cover: 1 of 2 rollouts" in printed
+        assert str(_failures_path_for(output_jsonl_fpath)) in printed
 
     async def test_run_from_config_resume_retries_an_agent_failure_row(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
@@ -1090,6 +1110,7 @@ class TestRolloutCollection:
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_jsonl_fpath),
             output_jsonl_fpath=str(output_jsonl_fpath),
+            route_failures_to_sidecar=True,
             count_failure_classes_as_zero=counted_classes,
             disable_health_check=True,
         )
@@ -1122,6 +1143,7 @@ class TestRolloutCollection:
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_jsonl_fpath),
             output_jsonl_fpath=str(output_jsonl_fpath),
+            route_failures_to_sidecar=True,
             disable_health_check=True,
         )
 
@@ -1200,6 +1222,125 @@ class TestRolloutCollection:
 
         assert isinstance(result["_ng_rollout_latency_ms"], float)
         assert result["_ng_rollout_latency_ms"] >= 0
+
+    async def test_run_from_config_does_not_route_failures_unless_asked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """Dropping failed rollouts shrinks the denominator, so it never happens unasked."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}}) + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(500)))
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            disable_health_check=True,
+        )
+
+        with pytest.raises(ClientResponseError):
+            await RolloutCollectionHelper().run_from_config(config)
+
+        assert (
+            not _failures_path_for(output_jsonl_fpath).exists()
+            or not _failures_path_for(output_jsonl_fpath).read_bytes()
+        )
+
+    async def test_run_from_config_reports_rollouts_dropped_by_the_agent_with_routing_off(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        empty_global_config: MagicMock,
+    ) -> None:
+        """Agents route their own failures whatever this flag says, so those are announced too."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            "\n".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}, "x": i})
+                for i in range(2)
+            )
+            + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples: list[dict], *args, **kwargs):
+                assert kwargs["route_failures_to_sidecar"] is False
+                futures = []
+                for example in examples:
+                    future = Future()
+                    scored = {"reward": 1.0}
+                    judge_failed = {"reward": 0.0, NG_FAILURE_CLASS_KEY: "judge_failed", "error": "judge 503"}
+                    future.set_result((example, scored if example["x"] == 0 else judge_failed))
+                    futures.append(future)
+                return futures
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return None
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            disable_health_check=True,
+        )
+        await Helper().run_from_config(config)
+
+        printed = capsys.readouterr().out
+        assert "route_failures_to_sidecar is on" not in printed
+        assert printed.count("rollout dropped from the score") == 1
+        assert "class=judge_failed" in printed
+        assert "judge 503" in printed
+        assert "Rollouts missing from the score: 1 of 2 materialized" in printed
+
+    async def test_run_from_config_reports_coverage_against_the_materialized_input_on_resume(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        empty_global_config: MagicMock,
+    ) -> None:
+        """A resumed hop dispatches little and can still be missing rollouts from earlier hops."""
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        materialized_fpath = tmp_path / "output_materialized_inputs.jsonl"
+        rows = [
+            {
+                "responses_create_params": {"input": []},
+                AGENT_REF_KEY_NAME: {"name": "my agent name"},
+                TASK_INDEX_KEY_NAME: task_index,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+            for task_index in range(3)
+        ]
+        materialized_fpath.write_bytes(b"\n".join(orjson.dumps(row) for row in rows) + b"\n")
+        # Two rollouts are already scored, and the third is out of attempts, so this hop runs nothing.
+        output_jsonl_fpath.write_bytes(b"\n".join(orjson.dumps({**row, "reward": 1.0}) for row in rows[:2]) + b"\n")
+        _failures_path_for(output_jsonl_fpath).write_bytes(
+            orjson.dumps({**rows[2], NG_FAILURE_CLASS_KEY: AGENT_RUN_ERROR_FAILURE_CLASS, NG_TERMINAL_KEY: True})
+            + b"\n"
+        )
+
+        class Helper(RolloutCollectionHelper):
+            def run_examples(self, examples: list[dict], *args, **kwargs):
+                assert examples == []
+                return []
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return None
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            resume_from_cache=True,
+            disable_health_check=True,
+        )
+        await Helper().run_from_config(config)
+
+        printed = capsys.readouterr().out
+        assert "Rollouts missing from the score: 1 of 3 materialized" in printed
+        assert "Metrics cover: 2 of 3 rollouts" in printed
 
     def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
         """prompt_config builds responses_create_params.input from template."""
@@ -2133,6 +2274,7 @@ class TestRolloutCollection:
                     "all_agents": True,
                     "sink": "framework.capture:Sink",
                     "rebuild_response": True,
+                    "lineage_store": f"{__name__}:_StubLineageStore",
                 }
             },
         )
@@ -2192,6 +2334,7 @@ class TestRolloutCollection:
                     "all_agents": True,
                     "sink": "framework.capture:Sink",
                     "rebuild_response": True,
+                    "lineage_store": f"{__name__}:_StubLineageStore",
                 }
             },
         )
@@ -3040,17 +3183,17 @@ class TestFinalizeRolloutTokenCapture:
 
     @staticmethod
     def _capture(store: TokenCaptureStore) -> None:
-        store.append(
-            TokenEntry(
-                rollout_id="0-0",
-                model_call_id="c1",
-                prompt_token_ids=[1, 2, 3],
-                generation_token_ids=[4, 5],
-                generation_log_probs=[-0.1, -0.2],
-                output_items=[{"type": "message", "role": "assistant", "content": []}],
-                token_item_index=0,
-            )
+        entry = TokenEntry(
+            rollout_id="0-0",
+            model_call_id="c1",
+            prompt_token_ids=[1, 2, 3],
+            generation_token_ids=[4, 5],
+            generation_log_probs=[-0.1, -0.2],
+            output_items=[{"type": "message", "role": "assistant", "content": []}],
+            token_item_index=0,
         )
+        stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+        store.append(entry)
 
     async def test_rebuilds_a_rollout_that_has_no_token_ids(self, tmp_path: Path) -> None:
         store = TokenCaptureStore(tmp_path)
@@ -3403,6 +3546,15 @@ _RESOLVER_CONFIG = {
     "shared_agent_a": {"responses_api_agents": {"a": {"resources_server": {"name": "shared_rs"}}}},
     "shared_agent_b": {"responses_api_agents": {"b": {"resources_server": {"name": "shared_rs"}}}},
     "orphan_rs": {"resources_servers": {"impl": {}}},
+    # Dataset-level `agent:` pins (the escape hatch for ambiguous configs).
+    "pinned_rs": {"resources_servers": {"impl": {"datasets": [{"agent": "pinned_agent_b"}]}}},
+    "pinned_agent_a": {"responses_api_agents": {"a": {"resources_server": {"name": "pinned_rs"}}}},
+    "pinned_agent_b": {"responses_api_agents": {"b": {"resources_server": {"name": "pinned_rs"}}}},
+    "mispinned_rs": {"resources_servers": {"impl": {"datasets": [{"agent": "math_agent"}]}}},
+    "conflict_rs": {
+        "resources_servers": {"impl": {"datasets": [{"agent": "shared_agent_a"}, {"agent": "shared_agent_b"}]}}
+    },
+    "mispinned_agent": {"responses_api_agents": {"a": {"datasets": [{"agent": "math_agent"}]}}},
 }
 
 
@@ -3441,6 +3593,25 @@ class TestResolveTaskSources:
     def test_rs_with_no_agent_raises(self) -> None:
         with pytest.raises(ValueError, match="no agent in the running config references"):
             self._resolve([{"task_source": "orphan_rs"}])
+
+    def test_agent_pin_disambiguates_shared_rs(self) -> None:
+        """The dataset-level `agent:` pin reaches dispatch: an RS referenced by two agents routes
+        to the pinned one instead of erroring as ambiguous."""
+        rows = [{"task_source": "pinned_rs"}]
+        assert self._resolve(rows)[0]["agent_ref"] == {"name": "pinned_agent_b"}
+
+    def test_agent_pin_not_referencing_the_rs_raises(self) -> None:
+        """A pin naming an agent wired to a different RS must not silently re-route."""
+        with pytest.raises(ValueError, match="no agent of that name references resources server 'mispinned_rs'"):
+            self._resolve([{"task_source": "mispinned_rs"}])
+
+    def test_conflicting_agent_pins_raise_naming_agent_map(self) -> None:
+        with pytest.raises(ValueError, match=r"conflicting agents.*agent_map"):
+            self._resolve([{"task_source": "conflict_rs"}])
+
+    def test_agent_pin_on_agent_declared_dataset_must_name_the_declarer(self) -> None:
+        with pytest.raises(ValueError, match="the pin would silently not apply"):
+            self._resolve([{"task_source": "mispinned_agent"}])
 
     def test_task_source_survives_resolution(self) -> None:
         """The stamp stays on the row (provenance); only agent_ref is added."""

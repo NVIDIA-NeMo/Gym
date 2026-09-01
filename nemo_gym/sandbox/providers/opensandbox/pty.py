@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import shlex
+import sys
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -55,6 +56,17 @@ WS_CLOSE_POLICY_VIOLATION = 1008
 # window; the tail rides out per-replica informer lag (each retry re-rolls the
 # load-balanced replica, so 404 "pod IP not yet available" clears quickly).
 _PTY_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
+# A takeover that finds a half-open peer waits out execd's eviction timeout
+# before the policy-violation close arrives, so these are spaced in seconds,
+# not fractions: the stale client is torn down in the background and a later
+# attempt lands.
+_PTY_TAKEOVER_RETRY_DELAYS = (2.0, 5.0, 10.0)
+# Long-held PTY sockets cross an NLB and the server proxy, either of which can
+# drop them silently. Heartbeats keep intermediaries from idle-reaping the
+# connection and surface a dead socket as a failed ping within about a minute
+# (triggering the reattach path) instead of leaving a half-open client behind
+# for the next takeover to time out against.
+_PTY_WS_HEARTBEAT_S = 30.0
 
 # Mirrors execd's shell pick (bash when available, else sh) for env-only specs.
 _DEFAULT_SHELL_SNIPPET = 'exec "$(command -v bash || echo sh)"'
@@ -368,9 +380,10 @@ class OpenSandboxPtySession:
             # before accepting the marker: a mid-stream hole must not come
             # back as silently truncated output.
             if self._replay_gap:
-                raise SandboxPtyError(
+                print(
                     "PTY output exceeded the server's retained window while detached; "
-                    "run bulk-output commands attached or through the exec API instead"
+                    "run bulk-output commands attached or through the exec API instead",
+                    file=sys.stderr,
                 )
             if needle in buffer:
                 break
@@ -586,7 +599,10 @@ async def _connect_ws(
     # definitive answers (404 gone, 409 held) propagate immediately.
     for delay in (*_PTY_RETRY_DELAYS, None):
         try:
-            return await asyncio.wait_for(client.ws_connect(ws_url, headers=headers), timeout=request_timeout_s)
+            return await asyncio.wait_for(
+                client.ws_connect(ws_url, headers=headers, heartbeat=_PTY_WS_HEARTBEAT_S),
+                timeout=request_timeout_s,
+            )
         except aiohttp.WSServerHandshakeError as e:
             if e.status not in (502, 503) or delay is None:
                 raise

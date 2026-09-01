@@ -26,7 +26,7 @@ from pathlib import Path
 from platform import python_version
 from random import randint
 from socket import gethostbyname, gethostname, socket
-from typing import ClassVar, Dict, List, Optional, Tuple, Type
+from typing import ClassVar, Dict, List, Optional, Set, Tuple, Type
 
 import hydra
 import rich
@@ -49,13 +49,20 @@ from nemo_gym.config_types import (
     NoServerInstancesError,
     ServerInstanceConfig,
     ServerRefNotFoundError,
+    UnsupportedAgentOverrideError,
+    UnsupportedAgentPairingError,
     is_almost_server,
     is_server_ref,
     maybe_get_server_instance_config,
 )
 from nemo_gym.exporters import setup_exporters
 from nemo_gym.secret_utils import recursively_hide_secrets
-from nemo_gym.telemetry.setup import TELEMETRY_KEY_NAME
+from nemo_gym.telemetry.setup import (
+    TELEMETRY_KEY_NAME,
+    configure_telemetry_env,
+    server_venv_requirements,
+    telemetry_config_from_global_config,
+)
 
 
 _GLOBAL_CONFIG_DICT = None
@@ -104,6 +111,8 @@ TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
 COMPONENT_NAME_KEY_NAME = "component_name"
 SKIP_VERIFICATION_KEY_NAME = "skip_verification"
 SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
+ALLOW_UNSUPPORTED_PAIRING_KEY_NAME = "allow_unsupported_pairing"
+ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME = "NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING"
 NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     CONFIG_PATHS_KEY_NAME,
     ENTRYPOINT_KEY_NAME,
@@ -140,11 +149,15 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
     TELEMETRY_KEY_NAME,
+    ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
 ]
 
 AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
+# Declared on a resources server: the agent types it is known to score correctly. Absent means any harness.
+ALLOWED_AGENTS_KEY_NAME = "allowed_agents"
+RESOURCES_SERVER_TYPE_KEY_NAME = "resources_servers"
 
 
 @dataclass(frozen=True)
@@ -174,6 +187,57 @@ AGENT_REF_KEY_NAME = "agent_ref"
 # resolved to an agent at dispatch time. See the dataset-decoupling RFC.
 TASK_SOURCE_KEY_NAME = "task_source"
 SKILLS_REF_KEY_NAME = "skills_ref"
+REWARD_KEY_NAME = "reward"
+
+# Metric key names. `RewardProfiler` builds its metric names from these prefixes and suffixes, and
+# consumers of `*_aggregate_metrics.json` (e.g. `gym eval compare`) parse them back out -- so they
+# live here, where both sides can import them without pulling in pandas/scipy/wandb.
+MEAN_STAT_NAME = "mean"
+MAX_STAT_NAME = "max"
+MIN_STAT_NAME = "min"
+MEDIAN_STAT_NAME = "median"
+STD_STAT_NAME = "std"
+SEM_STAT_NAME = "sem"
+P25_STAT_NAME = "p25"
+P75_STAT_NAME = "p75"
+CI_LOW_95_STAT_NAME = "ci_low_95"
+CI_HIGH_95_STAT_NAME = "ci_high_95"
+HISTOGRAM_STAT_NAME = "histogram"
+
+# `<stat>/<field>`, e.g. `mean/reward`.
+STAT_SEPARATOR = "/"
+MEAN_PREFIX = f"{MEAN_STAT_NAME}{STAT_SEPARATOR}"
+MAX_PREFIX = f"{MAX_STAT_NAME}{STAT_SEPARATOR}"
+MIN_PREFIX = f"{MIN_STAT_NAME}{STAT_SEPARATOR}"
+MEDIAN_PREFIX = f"{MEDIAN_STAT_NAME}{STAT_SEPARATOR}"
+STD_PREFIX = f"{STD_STAT_NAME}{STAT_SEPARATOR}"
+SEM_PREFIX = f"{SEM_STAT_NAME}{STAT_SEPARATOR}"
+P25_PREFIX = f"{P25_STAT_NAME}{STAT_SEPARATOR}"
+P75_PREFIX = f"{P75_STAT_NAME}{STAT_SEPARATOR}"
+CI_LOW_95_PREFIX = f"{CI_LOW_95_STAT_NAME}{STAT_SEPARATOR}"
+CI_HIGH_95_PREFIX = f"{CI_HIGH_95_STAT_NAME}{STAT_SEPARATOR}"
+
+# `<stat>_across_repeats/mean/<field>`: one repeat's estimate aggregated over the run's repeats.
+ACROSS_REPEATS_MARKER = f"_across_repeats{STAT_SEPARATOR}"
+MEAN_ACROSS_REPEATS_PREFIX = f"{MEAN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+MEDIAN_ACROSS_REPEATS_PREFIX = f"{MEDIAN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+STD_ACROSS_REPEATS_PREFIX = f"{STD_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+MIN_ACROSS_REPEATS_PREFIX = f"{MIN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+MAX_ACROSS_REPEATS_PREFIX = f"{MAX_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+SE_ACROSS_REPEATS_PREFIX = f"se{ACROSS_REPEATS_MARKER}"
+CI_LOW_95_ACROSS_REPEATS_PREFIX = f"{CI_LOW_95_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+CI_HIGH_95_ACROSS_REPEATS_PREFIX = f"{CI_HIGH_95_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+
+# Suffixes `compute_pass_majority_metrics` appends to a pass@k metric name.
+STD_DEV_ACROSS_RUNS_SUFFIX = f"{STAT_SEPARATOR}std_dev_across_runs"
+STD_ERR_ACROSS_RUNS_SUFFIX = f"{STAT_SEPARATOR}std_err_across_runs"
+AVG_SAMPLE_STD_DEV_SUFFIX = f"{STAT_SEPARATOR}avg_sample_std_dev"
+
+# Per-task keys in `group_level_metrics`.
+ROLLOUT_INFOS_KEY_NAME = "rollout_infos"
+NUM_ROLLOUTS_KEY_NAME = "num_rollouts"
+EXPECTED_NUM_ROLLOUTS_KEY_NAME = "expected_num_rollouts"
+MISSING_NUM_ROLLOUTS_KEY_NAME = "missing_num_rollouts"
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
 POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
@@ -383,10 +447,14 @@ Check the path is spelled correctly and is relative to your working directory, a
 
         if duplicate_config_paths:
             duplicate_config_paths_str = "".join(f"- {p}\n" for p in duplicate_config_paths)
-            print(f"""Found configs that reference the same source config path. You may want to double check whether the configs you have need to use different configs for the same server.
+            # Diagnostics go to stderr so that `--json` output on stdout stays machine-readable.
+            print(
+                f"""Found configs that reference the same source config path. You may want to double check whether the configs you have need to use different configs for the same server.
 In cases like these, you may want to consider using the `inherit_from` OmegaConf directive e.g. '++my_specific_server=${{inherit_from:generic_server}}' and then overriding config parameters in `my_specific_server`.
 Duplicate config paths:
-{duplicate_config_paths_str}""")
+{duplicate_config_paths_str}""",
+                file=sys.stderr,
+            )
 
         # Flatten the include tree so that every config merges after -- and therefore
         # overrides -- the ones it pulled in, and each subtree stays contiguous in
@@ -579,8 +647,13 @@ Duplicate config paths:
         reference = self._resources_server_reference(server_config)
         return reference is not None and OmegaConf.is_missing(reference, "name")
 
-    def compose_unbound_agent(self, global_config_dict: DictConfig) -> None:
-        """Rehost every other agent instance on the config's unbound agent, then drop that agent."""
+    def compose_unbound_agent(
+        self, global_config_dict: DictConfig, held_agent_overrides: Optional[DictConfig] = None
+    ) -> None:
+        """Rehost every other agent instance on the config's unbound agent, then drop that agent.
+
+        `held_agent_overrides` are command line overrides keyed by the name each instance is renamed to.
+        """
         instances = self._agent_instances(global_config_dict)
         sources = [instance for instance in instances if self._is_unbound_agent(instance.server_config)]
         if not sources:
@@ -606,16 +679,204 @@ Duplicate config paths:
                 f"resources server alongside the agent so there is a task for it to run."
             )
 
+        self._raise_on_unsupported_pairing(global_config_dict, source, targets)
+
+        renames = {target.name: self._composed_instance_name(target, source.agent_type) for target in targets}
+        self._raise_on_name_collision(global_config_dict, renames, source.name)
+
         # Struct mode would reject the key removals below - we need open_dict to allow it.
         with open_dict(global_config_dict):
+            # delete the source instance before any renames to avoid corner cases
+            global_config_dict.pop(source.name)
             for target in targets:
                 composed = deepcopy(source.server_config)
                 self._carry_over_agent_bindings(target.server_config, composed)
-                # Instance names are kept: `agent_ref` is baked into prepared data, so renaming breaks collection.
-                agents = global_config_dict[target.name][AGENT_SERVER_TYPE_KEY_NAME]
+                self._apply_held_agent_override(
+                    held_agent_overrides, renames[target.name], source.agent_type, composed
+                )
+
+                # extract the target instance, remove the old agent config, add the new agent
+                # and add the whole thing back to the config under the new name
+                instance = global_config_dict.pop(target.name)
+                agents = instance[AGENT_SERVER_TYPE_KEY_NAME]
                 agents.pop(target.agent_type)
                 agents[source.agent_type] = composed
-            global_config_dict.pop(source.name)
+                global_config_dict[renames[target.name]] = instance
+
+            self._raise_on_outdated_routing(global_config_dict, renames)
+            self._route_rows_stamped_before_the_swap(global_config_dict, renames)
+
+        self._raise_on_unapplied_agent_overrides(held_agent_overrides, set(renames.values()))
+
+    @staticmethod
+    def _composed_instance_name(target: _AgentInstance, agent_type: str) -> str:
+        """Rename the instance after swapping the agent.
+
+        Substituting the trailing agent type keeps the environment prefix that makes the name readable
+        (`gpqa_mcqa_simple_agent` -> `gpqa_mcqa_hermes_agent`); names not ending in their agent type just
+        gain the suffix. Safe because routing resolves `task_source` through the resources server edge,
+        not through this name.
+        """
+        stem = target.name.removesuffix(f"_{target.agent_type}").removesuffix(target.agent_type).rstrip("_")
+        if stem == target.name:
+            # The name does not end in its agent type, so fall back to the generic suffix most of them
+            # share; without this the whole old name survives and the result carries two agent names.
+            stem = target.name.removesuffix("_agent").rstrip("_")
+        return f"{stem}_{agent_type}" if stem else agent_type
+
+    @staticmethod
+    def _raise_on_name_collision(global_config_dict: DictConfig, renames: dict, source_name: str) -> None:
+        # The source instance is dropped by the composition, so its name is free to reuse.
+        taken = set(global_config_dict) - set(renames) - {source_name}
+        clashes = sorted(
+            f"{old} -> {new}" for old, new in renames.items() if new in taken or list(renames.values()).count(new) > 1
+        )
+        if clashes:
+            raise AgentCompositionError(
+                f"Composing would give two instances the same name: {', '.join(clashes)}. "
+                f"Rename the environment's agent instance or compose the config manually."
+            )
+
+    @staticmethod
+    def _raise_on_outdated_routing(global_config_dict: DictConfig, renames: Dict[str, str]) -> None:
+        """Reject routing that sends rows to an instance the swap renamed away.
+
+        Destinations name a server that has to exist: `agent_name`, `agent_map` values and `fan_out`
+        entries. Their keys are matching bases read off the data, so those may name the old instance.
+        """
+        outdated = []
+        selected = global_config_dict.get("agent_name")
+        if selected in renames:
+            outdated.append(("agent_name", selected))
+
+        declared = global_config_dict.get("agent_map")
+        if isinstance(declared, DictConfig):
+            outdated += [(f"agent_map[{key}]", value) for key, value in declared.items() if value in renames]
+
+        listed = global_config_dict.get("fan_out")
+        if isinstance(listed, DictConfig):
+            outdated += [
+                (f"fan_out[{key}]", agent) for key, agents in listed.items() for agent in agents if agent in renames
+            ]
+        if not outdated:
+            return
+        listing = "\n".join(f"  - {where}: '{name}' is now '{renames[name]}'" for where, name in outdated)
+        raise AgentCompositionError(
+            f"""Routing names agent instances that no longer exist once the agent is swapped:
+{listing}
+
+Use the name the composed config reports."""
+        )
+
+    @staticmethod
+    def _route_rows_stamped_before_the_swap(global_config_dict: DictConfig, renames: Dict[str, str]) -> None:
+        """Map the pre-swap instance name onto the composed one, for rows stamped before it happened.
+
+        Only a matching base is added, so a route the user declared still wins.
+        """
+        declared = global_config_dict.get("agent_map")
+        routes = dict(renames)
+        if isinstance(declared, DictConfig):
+            routes.update({str(key): value for key, value in declared.items()})
+        global_config_dict["agent_map"] = routes
+
+    def _raise_on_unsupported_pairing(
+        self, global_config_dict: DictConfig, source: _AgentInstance, targets: List[_AgentInstance]
+    ) -> None:
+        """Reject swapping `source` onto any target whose resources server does not declare support for it.
+
+        Compatibility is declared verifier-side because that is where it is known: an environment's author
+        knows which harnesses score their task correctly, while a generic harness cannot know that for every
+        environment. A server that declares nothing accepts any harness.
+        """
+        if pairing_override_enabled(global_config_dict):
+            return
+
+        restrictions: List[Set[str]] = []
+        rejected: List[Tuple[_AgentInstance, List[str]]] = []
+        for target in targets:
+            reference = self._resources_server_reference(target.server_config)
+            allowed = allowed_agents_for(global_config_dict, reference.get("name") if reference else None)
+            if allowed is None:
+                continue
+            restrictions.append(set(allowed))
+            if source.agent_type not in allowed:
+                rejected.append((target, allowed))
+        if not rejected:
+            return
+
+        # Report every rejected instance at once: a config can bring in several, and fixing them one
+        # error at a time means one full re-resolve per instance.
+        rejected_list = "\n".join(
+            f"  - {target.name} uses {target.server_config['resources_server']['name']} "
+            f"and accepts {', '.join(allowed)}"
+            for target, allowed in rejected
+        )
+        supported = sorted(set.intersection(*restrictions))
+        remedy = f"Select one of: {', '.join(supported)}." if supported else "No single agent satisfies all of them."
+        raise UnsupportedAgentPairingError(
+            f"""'{source.agent_type}' is not declared compatible with {len(rejected)} of the agent instance(s) """
+            f"""it would replace, so it cannot be scored correctly:
+{rejected_list}
+
+{remedy} Or pass --allow-unsupported-pairing (or set {ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME}=1) to bypass \
+the check."""
+        )
+
+    def _composed_instance_names(self, config_dict: DictConfig) -> set:
+        """The instance names composition will produce, worked out before it runs."""
+        instances = self._agent_instances(config_dict)
+        sources = [instance for instance in instances if self._is_unbound_agent(instance.server_config)]
+        if len(sources) != 1:
+            return set()
+        return {
+            self._composed_instance_name(target, sources[0].agent_type)
+            for target in instances
+            if target.name != sources[0].name
+        }
+
+    def _hold_back_composed_agent_overrides(
+        self, cli_global_config_dict: DictConfig, config_dict: DictConfig
+    ) -> DictConfig:
+        """Take command line overrides naming an instance composition is about to create out of the dict.
+
+        That instance does not exist yet, so merging them now would build a partial server beside it.
+        Returned to be applied to the composed agent instead.
+        """
+        composed_names = self._composed_instance_names(config_dict)
+        held = OmegaConf.create({})
+        for name in list(cli_global_config_dict.keys()):
+            if name not in composed_names:
+                continue
+            with open_dict(cli_global_config_dict), open_dict(held):
+                held[name] = cli_global_config_dict.pop(name)
+        return held
+
+    @staticmethod
+    def _apply_held_agent_override(
+        held_agent_overrides: Optional[DictConfig], name: str, agent_type: str, composed: DictConfig
+    ) -> None:
+        """Merge the override held for `name` onto the composed agent, in place, after the bindings."""
+        if held_agent_overrides is None:
+            return
+        override = OmegaConf.select(held_agent_overrides, f"{name}.{AGENT_SERVER_TYPE_KEY_NAME}.{agent_type}")
+        if not isinstance(override, DictConfig):
+            return
+        # Struct mode is what makes a field the agent does not declare an error rather than a silent add.
+        OmegaConf.set_struct(composed, True)
+        composed.merge_with(override)
+
+    @staticmethod
+    def _raise_on_unapplied_agent_overrides(held_agent_overrides: Optional[DictConfig], composed_names: set) -> None:
+        """Report held overrides that named an instance composition did not produce."""
+        unapplied = sorted(name for name in (held_agent_overrides or {}) if name not in composed_names)
+        if not unapplied:
+            return
+        raise UnsupportedAgentOverrideError(
+            "Command line overrides name agent instances that do not exist:\n"
+            + "\n".join(f"  - {name}" for name in unapplied)
+            + "\nUse the instance name the composed config reports, e.g. from `gym env resolve`."
+        )
 
     @staticmethod
     def _carry_over_agent_bindings(original: DictConfig, composed: DictConfig) -> None:
@@ -767,13 +1028,15 @@ For example, on the command line:
         if parse_config is None:
             parse_config = GlobalConfigDictParserConfig()
 
-        global_config_dict = (
+        cli_global_config_dict = (
             DictConfig(dict()) if parse_config.skip_load_from_cli else self.parse_global_config_dict_from_cli()
         )
+        # @bxyu-nvidia: Hydra returns `cli_global_config_dict` as a struct, but this causes problems in downstream swapping/merging.
+        OmegaConf.set_struct(cli_global_config_dict, False)
 
         # Command line overrides function input.
         initial_global_config_dict = OmegaConf.create(parse_config.initial_global_config_dict or dict())
-        global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, global_config_dict)
+        global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, cli_global_config_dict)
 
         # Load the env.yaml config. We load it early so that people can use it to conveniently store config paths.
         # Search NEMO_GYM_EXTRA_ROOTS, cwd, then the install root.
@@ -807,7 +1070,15 @@ Pass each config with --config (it builds the list for you), e.g.:
 
         # Merge config dicts
         # global_config_dict is the last config arg here since we want command line args to override everything else.
-        global_config_dict = OmegaConf.merge(*extra_configs, global_config_dict)
+        # An agent override naming an instance no config defines is addressed to one composition is about to
+        # create, so it is held back from this merge, which has nowhere to put it, and applied there instead.
+        held_agent_overrides = self._hold_back_composed_agent_overrides(
+            cli_global_config_dict, OmegaConf.merge(*extra_configs, initial_global_config_dict)
+        )
+        # Rebuilt rather than reused: the command line dict was trimmed after the early merge above.
+        global_config_dict = OmegaConf.merge(
+            *extra_configs, OmegaConf.merge(initial_global_config_dict, cli_global_config_dict)
+        )
 
         # Update the config paths after postprocessing
         if config_paths:
@@ -818,7 +1089,7 @@ Pass each config with --config (it builds the list for you), e.g.:
 
         # Must run after the swap above (inherited bindings must exist to carry over) and before the
         # missing-value check below (it removes the unbound agent instance that still carries '???').
-        self.compose_unbound_agent(global_config_dict)
+        self.compose_unbound_agent(global_config_dict, held_agent_overrides)
 
         # Fail fast with one actionable error if any required value is still '???'. Runs *after*
         # _recursively_swap_keys so that _delete_key/_inherit_from/_copy have been applied first —
@@ -848,14 +1119,15 @@ Pass each config with --config (it builds the list for you), e.g.:
         almost_servers = self.detect_and_report_almost_servers(global_config_dict)
 
         if almost_servers:
-            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]")
-            rich.print("[yellow]Configuration Warnings: Almost-Servers Detected[/yellow]")
-            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]")
+            # Diagnostics go to stderr so that `--json` output on stdout stays machine-readable.
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]", file=sys.stderr)
+            rich.print("[yellow]Configuration Warnings: Almost-Servers Detected[/yellow]", file=sys.stderr)
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]", file=sys.stderr)
 
             for server_name, error in almost_servers:
-                rich.print(format_almost_server_warning(server_name, error))
+                rich.print(format_almost_server_warning(server_name, error), file=sys.stderr)
 
-            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]\n")
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]\n", file=sys.stderr)
 
             error_on_almost_servers = global_config_dict.get("error_on_almost_servers", True)
             if error_on_almost_servers:
@@ -946,6 +1218,14 @@ Found global config dict yaml:
                     "openai from nemo-gym's own constraint (the parent and the servers then run "
                     "different openai versions across the HTTP boundary)."
                 )
+            # Telemetry, when enabled. Server venvs install nemo-gym[dev], not
+            # nemo-gym[telemetry], so without this the orchestrator would export spans and
+            # every server process would silently have no telemetry at all — a trace with a
+            # hole in the middle. Translating the config into the environment first is what
+            # lets server_venv_requirements() see that telemetry is on.
+            configure_telemetry_env(telemetry_config_from_global_config(global_config_dict))
+            head_server_deps.extend(server_venv_requirements())
+
             global_config_dict[HEAD_SERVER_DEPS_KEY_NAME] = head_server_deps
 
             # Constrain python version since ray is sensitive to this.
@@ -1138,6 +1418,39 @@ def get_first_server_config_dict(global_config_dict: DictConfig, top_level_path:
     return server_config_dict
 
 
+def allowed_agents_for(global_config_dict: DictConfig, resources_server_name: Optional[str]) -> Optional[List[str]]:
+    """The agent types `resources_server_name` declares support for, or None when it declares none.
+
+    A bare string is accepted as a single entry: an `++...allowed_agents=name` override arrives before the
+    server model is validated, and iterating it would read the name as its characters.
+    """
+    instance = global_config_dict.get(resources_server_name) if resources_server_name else None
+    if not isinstance(instance, DictConfig) or RESOURCES_SERVER_TYPE_KEY_NAME not in instance:
+        return None
+    servers = instance[RESOURCES_SERVER_TYPE_KEY_NAME]
+    if not isinstance(servers, DictConfig) or len(servers) != 1:
+        return None
+    implementation = next(iter(servers))
+    declared = servers[implementation].get(ALLOWED_AGENTS_KEY_NAME)
+    if not declared:
+        return None
+    if isinstance(declared, str):
+        return [declared]
+    if not isinstance(declared, ListConfig):
+        raise ConfigError(
+            f"'{resources_server_name}.{RESOURCES_SERVER_TYPE_KEY_NAME}.{implementation}."
+            f"{ALLOWED_AGENTS_KEY_NAME}' must be a list of agent types, got {type(declared).__name__}."
+        )
+    return [str(name) for name in declared]
+
+
+def pairing_override_enabled(global_config_dict: DictConfig) -> bool:
+    """True when the `allowed_agents` guard has been waived by config key or environment variable."""
+    return bool(global_config_dict.get(ALLOW_UNSUPPORTED_PAIRING_KEY_NAME)) or getenv(
+        ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME, ""
+    ).lower() not in ("", "0", "false")
+
+
 def agents_by_resources_server(global_config_dict: DictConfig) -> Dict[str, List[str]]:
     """Invert the agent -> resources_server edges of a merged config.
 
@@ -1158,6 +1471,72 @@ def agents_by_resources_server(global_config_dict: DictConfig) -> Dict[str, List
         if isinstance(rs_name, str):
             result[rs_name].append(str(instance_name))
     return result
+
+
+def dataset_agent_pins(global_config_dict: DictConfig, instance_name: str) -> List[str]:
+    """Distinct dataset-level ``agent:`` pins declared by one server instance, in declaration order."""
+    try:
+        inner = get_first_server_config_dict(global_config_dict, instance_name)
+    except Exception:
+        return []
+    pins: List[str] = []
+    for dataset in inner.get("datasets") or []:
+        if not isinstance(dataset, (dict, DictConfig)):
+            continue
+        pin = dataset.get("agent")
+        if isinstance(pin, str) and pin not in pins:
+            pins.append(pin)
+    return pins
+
+
+def resolve_dataset_agent(
+    global_config_dict: DictConfig, declaring_instance_name: str, pin: Optional[str] = None
+) -> str:
+    """Resolve the agent that runs a dataset declared by ``declaring_instance_name``.
+
+    Single source of truth for dataset -> agent routing, shared by benchmark discovery,
+    preparation, manifest validation, and rollout dispatch, so they can never disagree.
+    First hit wins:
+
+    1. ``pin`` (the dataset's ``agent:`` key) — validated: it must name the declaring agent
+       itself, or an agent referencing the declaring resources server. Anything else is a hard
+       error, never a silent re-route (rows carry only the declaring instance name).
+    2. The declaring agent block itself.
+    3. The unique agent referencing the declaring resources server; zero or 2+ is a hard error.
+    """
+    block = global_config_dict.get(declaring_instance_name)
+    is_agent = isinstance(block, DictConfig) and "responses_api_agents" in block
+
+    if is_agent:
+        if pin is not None and pin != declaring_instance_name:
+            raise ConfigError(
+                f"dataset declared by agent {declaring_instance_name!r} pins agent {pin!r}, but rows are "
+                f"dispatched to the declaring agent, so the pin would silently not apply. Drop the `agent:` "
+                "key, or declare the dataset on the resources server and pin there."
+            )
+        return str(declaring_instance_name)
+
+    candidates = agents_by_resources_server(global_config_dict).get(str(declaring_instance_name), [])
+    if pin is not None:
+        if pin not in candidates:
+            raise ConfigError(
+                f"the dataset pins agent {pin!r}, but no agent of that name references resources server "
+                f"{declaring_instance_name!r} (rows are dispatched along the agent -> resources server edge). "
+                f"Agents referencing it: {sorted(candidates) if candidates else 'none'}."
+            )
+        return pin
+    if not candidates:
+        raise ConfigError(
+            f"no agent in the running config references resources server {declaring_instance_name!r}. "
+            "Point an agent's `resources_server` at it, or declare the dataset on the agent."
+        )
+    if len(candidates) > 1:
+        raise ConfigError(
+            f"{len(candidates)} agents reference this resources server ({sorted(candidates)}). "
+            "Pin the harness with an `agent:` key on the dataset declaration, or pass "
+            f"+agent_map={{{declaring_instance_name}: <agent>}} to pick one at run time."
+        )
+    return candidates[0]
 
 
 def find_open_port(
