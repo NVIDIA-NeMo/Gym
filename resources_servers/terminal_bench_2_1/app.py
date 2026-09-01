@@ -266,12 +266,16 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             print(f"Running tests for {body.task_name}", file=stderr)
         start_time = time()
         await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
-        eval_result = await eval_sandbox.exec(
-            "bash /tests/test.sh",
-            timeout_s=self.config.evaluation_timeout,
-        )
+        try:
+            eval_result = await eval_sandbox.exec(
+                "bash /tests/test.sh",
+                timeout_s=self.config.evaluation_timeout,
+            )
+            test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
+        except:
+            print(f"Hit exception verifying TerminalBench 2.1: {format_exc()}", file=stderr)
+            test_output = ""
         verification_time_taken = time() - start_time
-        test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
 
         if self.config.debug:
             print(f"Test output for {body.task_name}: {test_output}", file=stderr)
