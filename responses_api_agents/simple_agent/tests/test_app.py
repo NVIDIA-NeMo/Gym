@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from http.cookies import SimpleCookie
 from unittest.mock import AsyncMock, MagicMock, call
 
 import orjson
@@ -39,6 +40,7 @@ from responses_api_agents.simple_agent.app import (
     SimpleAgent,
     SimpleAgentConfig,
     SimpleAgentRunRequest,
+    _cookie_values,
 )
 
 
@@ -54,6 +56,13 @@ def _drop_nulls(value):
     if isinstance(value, list):
         return [_drop_nulls(v) for v in value]
     return value
+
+
+def test_checkpoint_cookie_values_do_not_serialize_morsel_attributes() -> None:
+    cookies = SimpleCookie()
+    cookies["sid"] = "abc"
+    cookies["sid"]["path"] = "/"
+    assert _cookie_values(cookies) == {"sid": "abc"}
 
 
 def _make_agent(

@@ -18,7 +18,7 @@
 import logging
 import uuid
 from collections.abc import Mapping
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import Body, Request, Response
 from pydantic import ConfigDict, Field, TypeAdapter
@@ -28,7 +28,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.checkpoint import AgentBoundaryRecord
+from nemo_gym.checkpoint import RESOURCE_STATE_REVISION_HEADER, AgentBoundaryRecord
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -46,6 +46,13 @@ from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse
 
 _LOGGER = logging.getLogger(__name__)
 _INPUT_ITEMS_ADAPTER = TypeAdapter(list[NeMoGymResponseInputItem])
+
+
+def _cookie_values(cookies: Any) -> dict[str, str]:
+    return {
+        name: str(getattr(cookie, "value", cookie))
+        for name, cookie in (cookies.items() if cookies is not None else ())
+    }
 
 
 class GymnasiumAgentConfig(BaseResponsesAPIAgentConfig):
@@ -191,6 +198,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         last_model_response = None
         finished = False
         start_step = 0
+        resource_revision = 0
         if continuation is not None:
             new_outputs.extend(_INPUT_ITEMS_ADAPTER.validate_python(continuation.output_items))
             total_reward = float(continuation.agent_state.get("total_reward", 0.0))
@@ -198,6 +206,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             model_server_cookies = continuation.agent_state.get("model_server_cookies") or None
             step_data = EnvStepResponse.model_validate(continuation.agent_state["step_data"])
             start_step = continuation.boundary_index
+            resource_revision = continuation.resource_state_revisions.get(self.config.resources_server.name, 0)
 
         for step in range(start_step + 1, self.config.max_steps + 1):
             new_body = base_body.model_copy(update={"input": base_body.input + new_outputs})
@@ -232,6 +241,9 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             )
             await raise_for_status(step_resp)
             step_data = EnvStepResponse.model_validate(await get_response_json(step_resp))
+            step_headers = getattr(step_resp, "headers", None)
+            if isinstance(step_headers, Mapping) and step_headers.get(RESOURCE_STATE_REVISION_HEADER) is not None:
+                resource_revision = int(step_headers[RESOURCE_STATE_REVISION_HEADER])
             total_reward += step_data.reward
             if step_resp.cookies:
                 env_cookies.update(step_resp.cookies)
@@ -248,7 +260,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             if step_data.observation:
                 new_outputs.append(NeMoGymEasyInputMessage(role="user", content=step_data.observation))
 
-            if self._checkpoint_participant is not None:
+            if self._checkpoint_participant is not None and not (step_data.terminated or step_data.truncated):
                 logical_rollout_id = current_logical_rollout_id()
                 attempt_index = current_attempt_index()
                 if logical_rollout_id is not None and attempt_index is not None:
@@ -260,12 +272,13 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                             output_items=[item.model_dump(mode="json") for item in new_outputs],
                             usage=usage.model_dump(mode="json") if usage is not None else None,
                             last_committed_model_call_id=model_call_id,
+                            resource_state_revisions={self.config.resources_server.name: resource_revision},
                             agent_state={
                                 "reset_data": reset_data.model_dump(mode="json"),
                                 "step_data": step_data.model_dump(mode="json"),
                                 "total_reward": total_reward,
-                                "model_server_cookies": dict(model_server_cookies or {}),
-                                "env_cookies": dict(env_cookies),
+                                "model_server_cookies": _cookie_values(model_server_cookies),
+                                "env_cookies": _cookie_values(env_cookies),
                             },
                         )
                     )

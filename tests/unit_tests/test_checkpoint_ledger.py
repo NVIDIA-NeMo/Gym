@@ -186,6 +186,12 @@ def test_commit_requires_completed_drain_and_restore_stays_paused(tmp_path) -> N
         headers=AUTH_HEADERS,
     )
     assert commit.status_code == 200
+    retry = source_client.post(
+        f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
+        json=commit_body,
+        headers=AUTH_HEADERS,
+    )
+    assert retry.json() == commit.json()
 
     restored_client, restored_limiter = _participant(tmp_path / "ledger-b")
     restore = restored_client.post(
@@ -199,6 +205,8 @@ def test_commit_requires_completed_drain_and_restore_stays_paused(tmp_path) -> N
     )
     assert restore.status_code == 200
     assert restored_limiter.counts()["state"] == "paused"
+    with pytest.raises(StaleAttemptError):
+        restored_limiter.admit(rollout_id="rollout-a", attempt_index=0)
 
 
 def test_restored_tombstone_fences_exact_attempt(tmp_path) -> None:

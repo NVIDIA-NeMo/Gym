@@ -56,6 +56,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym import WORKING_DIR
 from nemo_gym.checkpoint.control import (
+    CONTROL_URL_PREFIX,
     ControlCapabilities,
     ControlFence,
     install_control_plane,
@@ -1049,6 +1050,9 @@ repr(e): {repr(e)}"""
         server.setup_telemetry()
 
         app = server.setup_webserver()
+        capabilities_path = f"{CONTROL_URL_PREFIX}/capabilities"
+        if not any(getattr(route, "path", None) == capabilities_path for route in app.routes):
+            server.setup_control_plane(app)
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):

@@ -49,7 +49,13 @@ from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_valid
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.checkpoint.admission import GATED_MODEL_ROUTE_SUFFIXES, AdmissionLimiter, AdmissionMiddleware
-from nemo_gym.checkpoint.control import AdmissionState, ControlCapabilities
+from nemo_gym.checkpoint.control import (
+    AdmissionState,
+    ControlCapabilities,
+)
+from nemo_gym.checkpoint.control import (
+    checkpoint_control_auth_token as resolve_checkpoint_control_auth_token,
+)
 from nemo_gym.checkpoint.ledger import install_model_checkpoint
 from nemo_gym.checkpoint.model_admission import install_model_admission
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
@@ -287,10 +293,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             )
 
     def checkpoint_control_auth_token(self) -> Optional[str]:
-        settings = token_id_capture_config(self.server_client.global_config_dict)
-        if settings is None or not settings.token_id_capture.external_staging:
-            return None
-        return settings.token_id_capture.resolve_control_auth_token()
+        return resolve_checkpoint_control_auth_token(getattr(self.server_client, "global_config_dict", None))
 
     def control_capabilities(self) -> ControlCapabilities:
         capabilities = super().control_capabilities()

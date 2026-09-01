@@ -58,6 +58,14 @@ class AgentAdmissionClosedError(ControlError):
     code = "agent_admission_closed"
 
 
+class AgentStaleAttemptError(ControlError):
+    code = "stale_attempt"
+
+
+class AgentPrepareIncompleteError(ControlError):
+    code = "agent_prepare_incomplete"
+
+
 class AgentBoundaryRecord(BaseModel):
     """Continuation state after one complete whitebox agent turn."""
 
@@ -115,6 +123,7 @@ class AgentCheckpointParticipant:
     def __init__(self) -> None:
         self._executions: dict[tuple[str, int], AgentExecution] = {}
         self._restored: dict[tuple[str, int], AgentBoundaryRecord] = {}
+        self._tombstones: set[tuple[str, int]] = set()
         self._accepting = True
         self._changed = asyncio.Condition()
 
@@ -128,6 +137,8 @@ class AgentCheckpointParticipant:
         if not self._accepting:
             raise AgentAdmissionClosedError("agent admission is closed for checkpoint preparation")
         key = (rollout_id, attempt_index)
+        if key in self._tombstones:
+            raise AgentStaleAttemptError(f"rollout {rollout_id!r} attempt {attempt_index} was retired by restore")
         existing = self._executions.get(key)
         if existing is not None and existing.state not in {
             AgentExecutionState.COMPLETED,
@@ -139,8 +150,12 @@ class AgentCheckpointParticipant:
         await self._notify()
         return execution
 
-    async def finish(self, execution: AgentExecution) -> None:
-        if execution.state != AgentExecutionState.RETIRED:
+    async def finish(self, execution: AgentExecution, *, outcome: Literal["completed", "failed", "cancelled"]) -> None:
+        if outcome == "cancelled" and execution.state == AgentExecutionState.PARKED and execution.boundary is not None:
+            # Cancellation tears down the HTTP task, not the durable boundary.
+            # Keep it in the prepared cut until commit or explicit retirement.
+            execution.task = None
+        elif execution.state != AgentExecutionState.RETIRED:
             execution.state = AgentExecutionState.COMPLETED
         await self._notify()
 
@@ -198,8 +213,11 @@ class AgentCheckpointParticipant:
         released = 0
         for execution in self._executions.values():
             if execution.state == AgentExecutionState.PARKED:
-                execution.resume_event.set()
-                released += 1
+                if execution.task is None:
+                    execution.state = AgentExecutionState.RETIRED
+                else:
+                    execution.resume_event.set()
+                    released += 1
         await self._notify()
         return {"state": "accepting", "released": released}
 
@@ -251,6 +269,7 @@ class AgentCheckpointParticipant:
 
     def install_restored(self, records: list[AgentBoundaryRecord]) -> None:
         for record in records:
+            self._tombstones.add((record.rollout_id, record.attempt_index))
             self._restored[(record.rollout_id, record.attempt_index + 1)] = record
         self._accepting = False
 
@@ -281,7 +300,7 @@ def commit_agent_state(
     directory.mkdir(parents=True, exist_ok=True)
     manifest_path = directory / AGENT_MANIFEST_NAME
     if manifest_path.exists():
-        raise AgentCheckpointError(f"agent checkpoint already committed at {directory}")
+        return _validate_agent_manifest(directory, checkpoint_id=checkpoint_id)
 
     files: dict[str, str] = {}
     for record in participant.records_for_commit():
@@ -311,6 +330,24 @@ def commit_agent_state(
     os.replace(temporary, manifest_path)
     _fsync_dir(directory)
     return {"records": len(files), "manifest_digest": hashlib.sha256(payload).hexdigest()}
+
+
+def _validate_agent_manifest(directory: Path, *, checkpoint_id: str) -> dict[str, Any]:
+    manifest_path = directory / AGENT_MANIFEST_NAME
+    payload = manifest_path.read_bytes()
+    manifest = json.loads(payload)
+    if manifest.get("checkpoint_id") != checkpoint_id:
+        raise AgentCheckpointError(
+            f"agent checkpoint directory belongs to {manifest.get('checkpoint_id')!r}, not {checkpoint_id!r}"
+        )
+    for name, digest in manifest.get("files", {}).items():
+        path = directory / name
+        if not path.exists() or _digest(path) != digest:
+            raise AgentCheckpointError(f"agent checkpoint record {name!r} is missing or corrupted")
+    return {
+        "records": len(manifest.get("files", {})),
+        "manifest_digest": hashlib.sha256(payload).hexdigest(),
+    }
 
 
 def restore_agent_state(participant: AgentCheckpointParticipant, checkpoint_dir: Path) -> dict[str, Any]:
@@ -346,7 +383,12 @@ def install_agent_checkpoint(
         require_control_auth(authorization, auth_token)
 
         async def run() -> dict[str, Any]:
-            return await participant.prepare(body.deadline_ts)
+            result = await participant.prepare(body.deadline_ts)
+            if result["running"]:
+                raise AgentPrepareIncompleteError(
+                    f"{result['running']} agent execution(s) did not reach a committed boundary before the deadline"
+                )
+            return result
 
         result = await fence.run_operation(
             body.checkpoint_id,
@@ -419,6 +461,7 @@ def install_agent_checkpoint(
             "agent-checkpoint/resume",
             allowed_phases=frozenset(
                 {
+                    CheckpointPhase.IDLE,
                     CheckpointPhase.PREPARING,
                     CheckpointPhase.PREPARED,
                     CheckpointPhase.COMMITTED_PAUSED,
@@ -439,6 +482,6 @@ def install_agent_checkpoint(
         require_control_auth(authorization, auth_token)
         fence.require_phase(
             body.checkpoint_id,
-            frozenset({CheckpointPhase.PREPARING, CheckpointPhase.PREPARED}),
+            frozenset({CheckpointPhase.IDLE, CheckpointPhase.PREPARING, CheckpointPhase.PREPARED}),
         )
         return await participant.retire(body.rollout_id, body.attempt_index)

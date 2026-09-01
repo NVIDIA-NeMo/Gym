@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from abc import abstractmethod
-from collections.abc import Mapping
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
@@ -26,7 +25,7 @@ if TYPE_CHECKING:
     # module) and would pull the mcp SDK into agent/model processes that never need it.
     from nemo_gym.mcp_auto_exposure import MCPTool
 
-from nemo_gym.checkpoint.control import ControlCapabilities
+from nemo_gym.checkpoint.control import ControlCapabilities, checkpoint_control_auth_token
 from nemo_gym.checkpoint.resources import (
     ResourcesCheckpointParticipant,
     ResourceSnapshot,
@@ -42,7 +41,6 @@ from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_met
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
 from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
-from nemo_gym.token_id_capture.config import token_id_capture_config
 
 
 NEMO_GYM_MCP_SESSION_TOKEN_HEADER = "X-NeMo-Gym-Session-Token"
@@ -198,12 +196,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
     def checkpoint_control_auth_token(self) -> Optional[str]:
         global_config = getattr(self.server_client, "global_config_dict", None)
-        if not isinstance(global_config, Mapping):
-            return None
-        settings = token_id_capture_config(global_config)
-        if settings is None or not settings.token_id_capture.external_staging:
-            return None
-        return settings.token_id_capture.resolve_control_auth_token()
+        return checkpoint_control_auth_token(global_config)
 
     def setup_resources_checkpoint(self, app: FastAPI) -> None:
         auth_token = self.checkpoint_control_auth_token()

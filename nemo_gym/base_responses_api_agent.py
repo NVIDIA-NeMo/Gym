@@ -29,7 +29,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.checkpoint.agent import AgentBoundaryRecord, AgentCheckpointParticipant, install_agent_checkpoint
-from nemo_gym.checkpoint.control import ControlCapabilities
+from nemo_gym.checkpoint.control import ControlCapabilities, checkpoint_control_auth_token
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
 from nemo_gym.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
@@ -56,7 +56,6 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.token_id_capture.config import token_id_capture_config
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
@@ -124,9 +123,15 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     task=asyncio.current_task(),
                 )
                 try:
-                    return await run(*args, **kwargs)
-                finally:
-                    await self._checkpoint_participant.finish(execution)
+                    result = await run(*args, **kwargs)
+                except asyncio.CancelledError:
+                    await self._checkpoint_participant.finish(execution, outcome="cancelled")
+                    raise
+                except BaseException:
+                    await self._checkpoint_participant.finish(execution, outcome="failed")
+                    raise
+                await self._checkpoint_participant.finish(execution, outcome="completed")
+                return result
 
         app.post("/run")(run_with_rollout_context)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
@@ -140,12 +145,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
     def checkpoint_control_auth_token(self) -> Optional[str]:
         global_config = getattr(self.server_client, "global_config_dict", None)
-        if not isinstance(global_config, Mapping):
-            return None
-        settings = token_id_capture_config(global_config)
-        if settings is None or not settings.token_id_capture.external_staging:
-            return None
-        return settings.token_id_capture.resolve_control_auth_token()
+        return checkpoint_control_auth_token(global_config)
 
     def setup_agent_checkpoint(self, app: FastAPI) -> None:
         auth_token = self.checkpoint_control_auth_token()

@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Protocol, runtime_checkable
 
 from fastapi import FastAPI, Header
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.checkpoint.admission import AdmissionLimiter
 from nemo_gym.checkpoint.control import (
@@ -96,6 +97,32 @@ class LedgerNotQuiescentError(ControlError):
     code = "ledger_not_quiescent"
 
 
+class AttemptIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rollout_id: str
+    attempt_index: int = Field(ge=0)
+
+
+class CaptureLedgerCommitResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rollouts: int = Field(ge=0)
+    rows: int = Field(ge=0)
+    excluded_tombstoned: int = Field(ge=0)
+    manifest_digest: str
+
+
+class CaptureLedgerRestoreResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    rollouts: int = Field(ge=0)
+    rows: int = Field(ge=0)
+    checkpoint_id: Optional[str] = None
+    tombstones: list[AttemptIdentity] = Field(default_factory=list)
+    source_attempts: list[AttemptIdentity] = Field(default_factory=list)
+
+
 @runtime_checkable
 class CheckpointableCaptureLedger(CaptureLedger, Protocol):
     """Optional lifecycle implemented by framework-owned capture backends.
@@ -110,9 +137,10 @@ class CheckpointableCaptureLedger(CaptureLedger, Protocol):
         *,
         checkpoint_id: str,
         tombstones: tuple[tuple[str, int], ...],
-    ) -> dict[str, Any]: ...
+        source_attempts: tuple[tuple[str, int], ...],
+    ) -> CaptureLedgerCommitResult: ...
 
-    async def restore_capture_ledger(self, checkpoint_dir: Path) -> dict[str, Any]: ...
+    async def restore_capture_ledger(self, checkpoint_dir: Path) -> CaptureLedgerRestoreResult: ...
 
 
 def _file_digest(path: Path) -> str:
@@ -154,7 +182,14 @@ class CaptureLedgerCheckpointer:
     def _rollout_ids(self) -> list[str]:
         return sorted(path.name[: -len(_LEDGER_SUFFIX)] for path in self.store_root.glob(f"*{_LEDGER_SUFFIX}"))
 
-    def commit(self, checkpoint_dir: Path, *, checkpoint_id: str, tombstones: list[tuple[str, int]]) -> dict[str, Any]:
+    def commit(
+        self,
+        checkpoint_dir: Path,
+        *,
+        checkpoint_id: str,
+        tombstones: list[tuple[str, int]],
+        source_attempts: Optional[list[tuple[str, int]]] = None,
+    ) -> dict[str, Any]:
         """Copy the ledger into ``checkpoint_dir``; the caller has already drained.
 
         The store must be quiescent (admission paused) when this runs: the
@@ -162,7 +197,7 @@ class CaptureLedgerCheckpointer:
         """
         ledger_dir = Path(checkpoint_dir) / MODEL_LEDGER_SUBDIR
         if (ledger_dir / LEDGER_MANIFEST_NAME).exists():
-            raise LedgerMismatchError(f"checkpoint ledger already committed at {ledger_dir}")
+            return self._validate_committed(ledger_dir, checkpoint_id=checkpoint_id)
         ledger_dir.mkdir(parents=True, exist_ok=True)
         fenced = {capture_key_for(rollout_id, attempt_index) for rollout_id, attempt_index in tombstones}
 
@@ -191,6 +226,10 @@ class CaptureLedgerCheckpointer:
             "tombstones": [
                 {"rollout_id": rollout_id, "attempt_index": attempt} for rollout_id, attempt in sorted(tombstones)
             ],
+            "source_attempts": [
+                {"rollout_id": rollout_id, "attempt_index": attempt}
+                for rollout_id, attempt in sorted(source_attempts or [])
+            ],
         }
         payload = json.dumps(manifest, sort_keys=True, indent=1).encode()
         with tempfile.NamedTemporaryFile(dir=ledger_dir, prefix=".manifest-", delete=False) as handle:
@@ -209,6 +248,29 @@ class CaptureLedgerCheckpointer:
             "rollouts": len(rollouts),
             "rows": total_rows,
             "excluded_tombstoned": excluded,
+            "manifest_digest": hashlib.sha256(payload).hexdigest(),
+        }
+
+    @staticmethod
+    def _validate_committed(ledger_dir: Path, *, checkpoint_id: str) -> dict[str, Any]:
+        manifest_path = ledger_dir / LEDGER_MANIFEST_NAME
+        payload = manifest_path.read_bytes()
+        manifest = json.loads(payload)
+        if manifest.get("checkpoint_id") != checkpoint_id:
+            raise LedgerMismatchError(
+                f"ledger directory belongs to {manifest.get('checkpoint_id')!r}, not {checkpoint_id!r}"
+            )
+        total_rows = 0
+        for rollout_id, metadata in manifest.get("rollouts", {}).items():
+            for name, digest in metadata.get("files", {}).items():
+                path = ledger_dir / name
+                if not path.exists() or _file_digest(path) != digest:
+                    raise LedgerMismatchError(f"committed ledger file {name!r} for {rollout_id!r} is corrupted")
+            total_rows += int(metadata.get("rows", 0))
+        return {
+            "rollouts": len(manifest.get("rollouts", {})),
+            "rows": total_rows,
+            "excluded_tombstoned": len(manifest.get("tombstones", [])),
             "manifest_digest": hashlib.sha256(payload).hexdigest(),
         }
 
@@ -261,6 +323,7 @@ class CaptureLedgerCheckpointer:
             "rows": total_rows,
             "checkpoint_id": manifest.get("checkpoint_id"),
             "tombstones": list(manifest.get("tombstones", ())),
+            "source_attempts": list(manifest.get("source_attempts", ())),
         }
 
 
@@ -312,12 +375,15 @@ def install_model_checkpoint(
         ledger = ledger_provider()
         if isinstance(ledger, CheckpointableCaptureLedger):
             if operation == "commit":
-                return await ledger.checkpoint_capture_ledger(
+                result = await ledger.checkpoint_capture_ledger(
                     checkpoint_dir,
                     checkpoint_id=checkpoint_id,
                     tombstones=tuple(limiter.tombstones()),
+                    source_attempts=tuple(limiter.seen_attempts()),
                 )
-            return await ledger.restore_capture_ledger(checkpoint_dir)
+                return CaptureLedgerCommitResult.model_validate(result).model_dump(mode="json")
+            result = await ledger.restore_capture_ledger(checkpoint_dir)
+            return CaptureLedgerRestoreResult.model_validate(result).model_dump(mode="json")
 
         file_root = file_ledger_root_provider()
         if file_root is None:
@@ -332,6 +398,7 @@ def install_model_checkpoint(
                     checkpoint_dir,
                     checkpoint_id=checkpoint_id,
                     tombstones=limiter.tombstones(),
+                    source_attempts=limiter.seen_attempts(),
                 )
             )
         return await _run_sync(lambda: checkpointer.restore(checkpoint_dir))
@@ -381,6 +448,8 @@ def install_model_checkpoint(
             )
             for tombstone in result["tombstones"]:
                 limiter.install_tombstone(tombstone["rollout_id"], tombstone["attempt_index"])
+            for source_attempt in result.get("source_attempts", []):
+                limiter.install_tombstone(source_attempt["rollout_id"], source_attempt["attempt_index"])
             return result
 
         return await fence.run_operation(

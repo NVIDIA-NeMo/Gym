@@ -76,6 +76,7 @@ def test_new_root_operation_parks_while_draining() -> None:
     limiter.close()
     with pytest.raises(AdmissionParkedError):
         limiter.admit(rollout_id="9-9", attempt_index=0)
+    assert ("9-9", 0) not in limiter.seen_attempts()
     limiter.release(held)
 
 
