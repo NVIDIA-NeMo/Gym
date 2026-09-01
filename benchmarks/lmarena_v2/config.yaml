@@ -1,4 +1,5 @@
 # LMArena proxy v2 benchmark.
+judge_api_key: dummy  # pragma: allowlist secret
 
 config_paths:
   - resources_servers/arena/configs/lmarena_v2.yaml

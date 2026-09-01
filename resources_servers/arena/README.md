@@ -20,7 +20,7 @@ policy_model_name: YOUR_MODEL_ID
 judge_api_key: YOUR_JUDGE_API_KEY
 ```
 
-Gym loads these values automatically, so evaluation commands do not need endpoint, model, or API-key flags. Dataset preparation does not call either endpoint and does not require these credentials.
+Gym loads these values automatically, so evaluation commands do not need endpoint, model, or API-key flags. The benchmark's dummy judge key only allows dataset preparation without credentials; `env.yaml` overrides it during evaluation.
 
 The benchmark config defines the judge and generation settings. Both LMArena versions use policy reasoning, `temperature: 1.0`, and `top_p: 0.95`.
 
@@ -113,41 +113,44 @@ gym eval run \
 
 No judge calls are made during generation-only runs; only `response_tokens/*` and `reasoning_tokens/*` metrics are reported.
 
-Judge the saved responses:
+Judge the saved responses without calling the policy model:
 
 ```bash
-gym eval run \
+gym eval reverify \
     --config benchmarks/lmarena_v3/config.yaml \
-    --agent lmarena_v3_benchmark_agent \
-    --input results/lmarena_v3/my-model/responses.jsonl \
+    --inputs results/lmarena_v3/my-model/responses_materialized_inputs.jsonl \
+    --rollouts results/lmarena_v3/my-model/responses.jsonl \
     --output results/lmarena_v3/my-model/judged.jsonl \
-    --split benchmark \
-    --resume \
-    --concurrency 64 \
-    ++lmarena_v3_benchmark_agent.responses_api_agents.simple_agent.reuse_saved_response=true
+    --concurrency 64
 ```
 
-The agent reuses each saved response instead of calling the policy model.
+Both files are produced by the generation-only run. Reverification sends each saved response directly to the Arena verifier.
 
 ## Rejudge existing responses
 
-First join saved responses to the target benchmark by `question_id`:
+Arena supports Gym's native stateless reverification, so saved responses can be rejudged without calling the policy model.
+
+Use the rollout and materialized-input files from the original run:
 
 ```bash
-resources_servers/arena/.venv/bin/python resources_servers/arena/scripts/prepare_rejudge_input.py \
+gym eval reverify \
+    --config benchmarks/lmarena_v3/config.yaml \
+    --inputs results/old-run/rollouts_materialized_inputs.jsonl \
     --rollouts results/old-run/rollouts.jsonl \
-    --benchmark-input benchmarks/lmarena_v3/data/lmarena_v3_validation.jsonl \
-    --output results/lmarena_v3/my-model/responses.jsonl
+    --output results/old-run/rejudged.jsonl \
+    --concurrency 64
 ```
 
-Then run the judgment-only command above. To retry only failed judgments:
+To recover only judge failures from a run's failure sidecar:
 
 ```bash
-resources_servers/arena/.venv/bin/python resources_servers/arena/scripts/remove_failed_rollouts.py \
-    results/lmarena_v3/my-model/judged.jsonl
+gym eval reverify --judge-failed-only \
+    --config benchmarks/lmarena_v3/config.yaml \
+    --inputs results/old-run/rollouts_materialized_inputs.jsonl \
+    --rollouts results/old-run/rollouts.jsonl \
+    --output results/old-run/recovered.jsonl \
+    --concurrency 64
 ```
-
-The cleanup keeps the original file as `judged.jsonl.back`. Rerun judgment-only with `--resume`.
 
 ## Recompute scores
 
@@ -171,8 +174,7 @@ Run these scripts with `resources_servers/arena/.venv/bin/python` so Arena-speci
 | `count_rollout_tokens_directory.py` | Run the token-length report across matching rollout files in a directory. |
 | `create_replay_validation_from_arena_eval.py` | Convert human Arena evaluation records into prompts for replaying model responses; use OFF scores because its reference length is only a placeholder. |
 | `fit_anchored_elo.py` | Estimate one model's Elo while holding opponent Elo values fixed. |
-| `prepare_rejudge_input.py` | Join saved responses to a target benchmark before rejudging them. |
-| `remove_failed_rollouts.py` | Remove failed rollouts so `--resume` retries them. |
+| `remove_failed_rollouts.py` | Remove failed rollouts so `--resume` regenerates and rejudges them. |
 | `summarize_prompt_blend.py` | Report prompt lengths, turn counts, and taxonomy distribution for a benchmark. |
 
 ## Tests

@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from time import perf_counter, time
 from typing import Any, List
 
-from fastapi import HTTPException, Request, Response
+from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
 
 from nemo_gym.base_resources_server import (
@@ -60,13 +60,10 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = None
-    reuse_saved_response: bool = False
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
-
-    response: NeMoGymResponse | None = None
 
 
 class SimpleAgentVerifyRequest(BaseVerifyRequest):
@@ -279,33 +276,25 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         cookies = request.cookies
-        if self.config.reuse_saved_response and body.response is None:
-            raise HTTPException(
-                status_code=400,
-                detail="reuse_saved_response=true requires a saved `response` field.",
-            )
 
         seed_session_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/seed_session",
-            json=body.model_dump(exclude={"response"}),
+            json=body.model_dump(),
             cookies=cookies,
         )
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
 
-        if self.config.reuse_saved_response:
-            model_response_json = body.response.model_dump()
-        else:
-            response = await self.server_client.post(
-                server_name=self.config.name,
-                url_path=self.url_path_for_run("/v1/responses", body),
-                json=body.responses_create_params,
-                cookies=cookies,
-            )
-            await raise_for_status(response)
-            model_response_json = await get_response_json(response)
-            cookies = response.cookies
+        response = await self.server_client.post(
+            server_name=self.config.name,
+            url_path=self.url_path_for_run("/v1/responses", body),
+            json=body.responses_create_params,
+            cookies=cookies,
+        )
+        await raise_for_status(response)
+        model_response_json = await get_response_json(response)
+        cookies = response.cookies
 
         trajectory = None
         expected_rollout_id = self.rollout_id_from_run(body)
@@ -343,7 +332,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             }
         else:
             verify_request = SimpleAgentVerifyRequest.model_validate(
-                body.model_dump(exclude={"response"}) | {"response": model_response_json}
+                body.model_dump() | {"response": model_response_json}
             )
             verify_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
