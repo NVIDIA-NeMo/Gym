@@ -53,6 +53,7 @@ from nemo_gym.openai_utils import (
 from resources_servers.genrm_compare.utils import (
     GenRMOutputParseError,
     aggregate_scores,
+    extract_from_response_obj,
     extract_output_text,
     generate_comparison_pairs,
     get_prompt_key_from_input,
@@ -165,6 +166,8 @@ class GenRMCompareVerifyRequest(BaseVerifyRequest):
 
 
 class GenRMCompareVerifyResponse(BaseVerifyResponse):
+    reasoning_text: str
+    answer_text: str
     reward_score_raw: float
     reward_rubric_mean_clean: Optional[float] = None
     reward_overall_raw: float
@@ -230,12 +233,20 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         cfg = self.config
         principle = body.principle
         expected_rubric_ids = body.expected_rubric_ids
+        response_obj = (
+            body.response.model_dump()
+            if hasattr(body.response, "model_dump")
+            else body.response
+        )
+        reasoning_text, answer_text = extract_from_response_obj(response_obj)
         if cfg.score_source == "rubric_mean" and not expected_rubric_ids:
             raise ValueError("score_source=rubric_mean requires expected_rubric_ids")
         if cfg.num_rollouts_per_prompt <= 1:
             return GenRMCompareVerifyResponse(
                 responses_create_params=body.responses_create_params,
                 response=body.response,
+                reasoning_text=reasoning_text,
+                answer_text=answer_text,
                 reward=cfg.default_score,
                 reward_score_raw=cfg.default_score,
                 reward_overall_raw=cfg.default_score,
@@ -342,6 +353,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         return GenRMCompareVerifyResponse(
             responses_create_params=body.responses_create_params,
             response=body.response,
+            reasoning_text=reasoning_text,
+            answer_text=answer_text,
             **result,
         )
 

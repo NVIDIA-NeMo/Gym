@@ -369,6 +369,8 @@ class TestGenRMCompareResourcesServer:
         expected_rewards = golden_rewards
         actual_rewards = [r.reward for r in results]
         assert expected_rewards == actual_rewards
+        assert all(r.reasoning_text.startswith("I have identified") for r in results)
+        assert all(r.answer_text == "hi :) how are you?" for r in results)
 
     async def test_fixed_baseline_counterbalances_and_keeps_clean_scores(self, monkeypatch: MonkeyPatch) -> None:
         config = GenRMCompareConfig(
