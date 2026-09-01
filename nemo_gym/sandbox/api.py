@@ -64,14 +64,13 @@ def _pty_timeout_result(command: str, timeout_s: float | int | None, *, reusable
 async def _run_in_pty_session(session: SandboxPtySession, command: str) -> SandboxExecResult:
     """Run ``command`` in a live session, delimited by unique markers."""
     token = f"NGPTY{uuid.uuid4().hex[:12]}"
-    # Markers are assembled from two literals so the shell's echo of the typed
-    # lines cannot match what we scan for. Both printfs live inside the brace
-    # group: every echoed input line and prompt lands before the start marker,
-    # and the status marker follows the output with no prompt in between, so
-    # the slice between the markers is the command's output alone. The group
-    # keeps shell state while putting stdin at EOF: the session's stdin never
-    # ends, so a stdin-reading command would block forever and eat the marker
-    # line.
+    # The markers are split across two printf arguments so the shell's echo of
+    # these lines can never match them. Both printfs run inside the brace
+    # group: all echoed input and prompts appear before the start marker, and
+    # the exit-status marker directly follows the output, so the slice between
+    # the markers is the command's output alone. The group also puts stdin at
+    # EOF — the session's stdin never ends, so a stdin-reading command would
+    # otherwise block forever.
     await session.write(
         f"{{ printf '%s%s\\n' '{token[:5]}' '{token[5:]}S'\n"
         f"{command}\n"

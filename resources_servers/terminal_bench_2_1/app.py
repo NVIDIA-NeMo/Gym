@@ -267,9 +267,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             if self.config.debug:
                 print(f"Golden patch output for {body.task_name}: {golden_patch_output}", file=stderr)
         else:
-            # Re-use the original sandbox. attach(takeover=True) detaches our
-            # stale attachment first and rides out execd's eviction of a
-            # half-open peer (the 1008 policy-violation race).
+            # Re-use the original sandbox; attach(takeover=True) handles
+            # releasing and evicting the stale attachment from the agent phase.
             eval_sandbox, pty_session = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
             pty_session = await eval_sandbox.pty.attach(session_id=pty_session.session_id, takeover=True)
             golden_patch_output = None

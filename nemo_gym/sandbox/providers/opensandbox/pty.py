@@ -116,9 +116,9 @@ class OpenSandboxPtySession:
         # Attached sessions belong to whoever created them: closing one detaches
         # rather than ending it.
         self._owned = owned
-        # True when the initial socket was dialed with takeover=1: a policy
-        # violation then means execd is still evicting a dead peer, not that
-        # another client legitimately owns the session.
+        # True when the initial socket asked to take the session over: an
+        # "already attached" refusal then just means execd is still evicting
+        # the previous, dead client — not that another client owns the session.
         self._takeover = takeover
         self.mode: str | None = None
         self.replay_offset: int | None = None
@@ -225,11 +225,11 @@ class OpenSandboxPtySession:
                 if self._ws.close_code == WS_CLOSE_TAKEN_OVER:
                     break
                 if self._ws.close_code == WS_CLOSE_POLICY_VIOLATION:
-                    # After a reattach — or on an initial socket dialed with
-                    # takeover=1 — this is a race: execd hasn't torn down the
-                    # dead TCP peer yet. Retry with _PTY_TAKEOVER_RETRY_DELAYS
-                    # to wait out the eviction. Otherwise another client owns
-                    # the session, so break immediately.
+                    # Execd refused us because it still counts the previous
+                    # client as attached. After a reattach — or when we asked
+                    # to take the session over — that client is dead and execd
+                    # just hasn't finished evicting it, so wait and retry.
+                    # Otherwise another client really owns the session: give up.
                     if not (reattached or self._takeover) or takeover_retries >= len(_PTY_TAKEOVER_RETRY_DELAYS):
                         break
                     await asyncio.sleep(_PTY_TAKEOVER_RETRY_DELAYS[takeover_retries])
@@ -385,11 +385,10 @@ class OpenSandboxPtySession:
         """
         token = f"NGPTY{uuid.uuid4().hex[:12]}"
         needle = f"{token}:".encode()
-        # Markers from two literals so the echo cannot match them; both
-        # printfs sit inside the brace group so echoed input and prompts land
-        # before the start marker and the status marker directly follows the
-        # output (see _run_in_pty_session in the api module for the same
-        # discipline). The group keeps shell state while putting stdin at EOF.
+        # Same marker discipline as _run_in_pty_session in the api module:
+        # markers split across two printf arguments so the shell's echo can
+        # never match them, both printfs inside the brace group so the slice
+        # between the markers is the command's output alone, stdin at EOF.
         await self.write(
             f"{{ printf '%s%s\\n' '{token[:5]}' '{token[5:]}S'\n"
             f"{command}\n"
@@ -422,8 +421,8 @@ class OpenSandboxPtySession:
             await self.reattach()
         output, _, trailing = bytes(buffer).partition(needle)
         # Drop the echoed input and prompts: real output starts on the line
-        # after the start marker. (The marker can be missing if the retained
-        # window evicted it while detached; keep the prefix then.)
+        # after the start marker. (Replay may have evicted the marker while
+        # detached; keep the prefix then.)
         _, seen_start, after_start = output.partition(f"{token}S".encode())
         if seen_start:
             output = after_start.partition(b"\n")[2]

@@ -1494,9 +1494,8 @@ class OpenSandboxProvider:
 
         base_url, headers, request_timeout_s = await self._pty_target(handle)
         if takeover:
-            # Release our own live attachment first: execd then has nothing to
-            # evict, instead of racing its eviction of a client that may
-            # already be half-open (the 1008 policy-violation close below).
+            # Release our own live attachment first, so the takeover below has
+            # nothing to evict and cannot be refused as "already attached".
             for stale in [s for s in self._pty_sessions if s.session_id == session_id and not s.closed]:
                 try:
                     await stale.detach()
