@@ -778,13 +778,13 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         results_dir: Path = Path(__file__).parent / "results" / request.session[SESSION_ID_KEY]
         results_dir.mkdir(parents=True, exist_ok=True)
         results_local_fpath = results_dir / export_fname
-        if self.config.debug:
-            print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
-        try:
-            await sandbox.download(export_remote_fpath, results_local_fpath)
-        except:
-            print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
-            if export_result:
+        if export_result is not None and export_result.return_code == 0:
+            if self.config.debug:
+                print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
+            try:
+                await sandbox.download(export_remote_fpath, results_local_fpath)
+            except:
+                print(f"Failed to download export results to {results_local_fpath}", format_exc(), file=sys.stderr)
                 print("Export stdout:\n", export_result.stdout, file=sys.stderr)
                 print("Export stderr:\n", export_result.stderr, file=sys.stderr)
 
