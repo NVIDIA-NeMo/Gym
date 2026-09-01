@@ -474,6 +474,13 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             pty_session = await sandbox.pty.attach(session_id=pty_session_id, takeover=True)
             return sandbox, pty_session
 
+        if sandbox_id or pty_session_id:
+            # Falling through would silently hand the agent a default sandbox holding the wrong repository.
+            raise ValueError(
+                "seed_session must return both sandbox_handle and pty_session_id to attach to a task sandbox; "
+                f"got sandbox_handle={sandbox_id!r}, pty_session_id={pty_session_id!r}"
+            )
+
         if self.config.debug:
             print("Creating new sandbox since one wasn't provided", file=sys.stderr)
 

@@ -33,7 +33,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox import AsyncSandbox, SandboxPtySession, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY, get_first_server_config_dict, is_nemo_gym_fastapi_entrypoint
 from resources_servers.deepswe.task_store import (
@@ -94,6 +94,8 @@ class DeepSWESeedSessionRequest(DeepSWEInstanceRequest, BaseSeedSessionRequest):
 class DeepSWESeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str
     sandbox_descriptor: dict[str, Any]
+    # The agent attaches to this session; without it, it builds its own sandbox instead.
+    pty_session_id: str
 
 
 class DeepSWEVerifyRequest(DeepSWEInstanceRequest, BaseVerifyRequest):
@@ -149,6 +151,7 @@ class AgentSandboxSession:
     sandbox: AsyncSandbox
     sandbox_handle: str
     sandbox_descriptor: dict[str, Any]
+    pty_session: SandboxPtySession
 
 
 def _resolve_task_id(body: DeepSWEInstanceRequest) -> str:
@@ -267,6 +270,19 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 timeout_s=60,
             )
         return sandbox
+
+    async def _close_pty_session(self, session: SandboxPtySession | None, *, task_id: str) -> None:
+        """Close the agent's terminal; a session outliving its sandbox leaks its connection."""
+        if session is None:
+            return
+        try:
+            await session.close()
+        except Exception:
+            print(f"Failed to close DeepSWE PTY session for {task_id}: {format_exc()}", file=sys.stderr)
+
+    async def _stop_agent_session(self, session: AgentSandboxSession, *, phase: str) -> None:
+        await self._close_pty_session(session.pty_session, task_id=session.task_id)
+        await self._stop_sandbox(session.sandbox, task_id=session.task_id, phase=phase)
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> None:
         try:
@@ -408,13 +424,10 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         session_id = str(request.session[SESSION_ID_KEY])
         previous_session = self._agent_sessions.pop(session_id, None)
         if previous_session is not None:
-            await self._stop_sandbox(
-                previous_session.sandbox,
-                task_id=previous_session.task_id,
-                phase="replaced-agent",
-            )
+            await self._stop_agent_session(previous_session, phase="replaced-agent")
 
         sandbox: AsyncSandbox | None = None
+        pty_session: SandboxPtySession | None = None
         try:
             sandbox = await self._create_sandbox(task, phase="agent")
             current_task_id = task_id(task)
@@ -424,18 +437,22 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             if not isinstance(sandbox_handle, str) or not sandbox_handle:
                 raise RuntimeError("DeepSWE sandbox provider did not return a sandbox_id")
             sandbox_descriptor = dict(descriptor)
+            pty_session = await sandbox.pty.create()
             self._agent_sessions[session_id] = AgentSandboxSession(
                 task_id=current_task_id,
                 image=current_task_image,
                 sandbox=sandbox,
                 sandbox_handle=sandbox_handle,
                 sandbox_descriptor=sandbox_descriptor,
+                pty_session=pty_session,
             )
             return DeepSWESeedSessionResponse(
                 sandbox_handle=sandbox_handle,
                 sandbox_descriptor=sandbox_descriptor,
+                pty_session_id=pty_session.session_id,
             )
         except Exception:
+            await self._close_pty_session(pty_session, task_id=task_id(task))
             if sandbox is not None:
                 await self._stop_sandbox(sandbox, task_id=task_id(task), phase="failed-agent-seed")
             raise
@@ -479,7 +496,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                     patch_error = f"{type(error).__name__}: {error}"
                 finally:
                     patch_collection_time_s = monotonic() - started
-                    await self._stop_sandbox(agent_session.sandbox, task_id=current_task_id, phase="agent")
+                    await self._stop_agent_session(agent_session, phase="agent")
 
         patch_sha256 = hashlib.sha256(model_patch).hexdigest()
         log_dir = _resolve_repo_path(self.config.logs_dir) / current_task_id / session_id

@@ -227,6 +227,8 @@ async def test_rollout_collects_committed_patch_and_verifies_in_fresh_sandbox(
     )
     agent_sandbox = AsyncMock()
     agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox", "workdir": "/app"}
+    agent_pty_session = AsyncMock(session_id="agent-pty")
+    agent_sandbox.pty.create.return_value = agent_pty_session
     verifier_sandbox = AsyncMock()
     monkeypatch.setattr(server, "_create_sandbox", AsyncMock(side_effect=[agent_sandbox, verifier_sandbox]))
     collect_model_patch = AsyncMock(return_value=b"agent patch\n")
@@ -244,6 +246,9 @@ async def test_rollout_collects_committed_patch_and_verifies_in_fresh_sandbox(
 
     assert seed.sandbox_handle == "agent-sandbox"
     assert seed.sandbox_descriptor == {"sandbox_id": "agent-sandbox", "workdir": "/app"}
+    # Without a PTY session to attach to, the agent starts its own sandbox on an unrelated image.
+    assert seed.pty_session_id == "agent-pty"
+    agent_pty_session.close.assert_awaited_once()
     captured_task = collect_model_patch.await_args.args[1]
     assert task_image(captured_task) == UPSTREAM_IMAGE
     assert collect_model_patch.await_args.args == (agent_sandbox, captured_task)
@@ -294,6 +299,7 @@ async def test_rollout_collect_failure_is_structured_and_cleans_up(
     )
     agent_sandbox = AsyncMock()
     agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    agent_sandbox.pty.create.return_value = AsyncMock(session_id="agent-pty")
     create_sandbox = AsyncMock(return_value=agent_sandbox)
     monkeypatch.setattr(server, "_create_sandbox", create_sandbox)
     monkeypatch.setattr(server, "_collect_model_patch", AsyncMock(side_effect=RuntimeError("broken git repo")))
