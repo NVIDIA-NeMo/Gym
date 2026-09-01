@@ -40,7 +40,6 @@ class TestFernDocsLinks(unittest.TestCase):
             "fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx",
             "fern/versions/latest/pages/contribute/environments/new-environment.mdx",
             "fern/versions/latest/pages/reference/cli-commands.mdx",
-            ".agents/skills/add-benchmark/SKILL.md",
         )
         for path in paths:
             guide = read(path)

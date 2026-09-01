@@ -9,7 +9,7 @@ Point an AI coding assistant at this repository and it can follow Gym's endorsed
 No extra install: clone Gym, then ask in plain language (for example, "add a new benchmark" or "debug this rollout failure").
 
 <Tip>
-Adding a benchmark? Humans start at the [onboarding decision tree](/contribute/environments/onboarding-decision-tree). Assistants should follow [`.agents/skills/add-benchmark`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/add-benchmark) — copy an existing overlay first; add a new scorer only when nothing can grade the task.
+Adding a catalog overlay? Humans start at the [onboarding decision tree](/contribute/environments/onboarding-decision-tree), then [Add a benchmark](/contribute/environments/adding-a-benchmark). The in-tree [`add-benchmark`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/add-benchmark) skill still scaffolds a new resources server — use the human overlay guide for PRs to this repo until that skill is updated.
 </Tip>
 
 ## Where skills live
@@ -20,7 +20,7 @@ One source of truth: [`.agents/skills/`](https://github.com/NVIDIA-NeMo/Gym/tree
 
 | Skill | Use it when you want to |
 |---|---|
-| [`add-benchmark`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/add-benchmark) | Add a benchmark overlay or a new scorer |
+| [`add-benchmark`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/add-benchmark) | Scaffold a new scorer or wrap an external library (catalog overlays: [Add a benchmark](/contribute/environments/adding-a-benchmark)) |
 | [`nemo-gym-reward-profiling`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-reward-profiling) | Run `gym eval run` / `gym eval profile` and inspect scores |
 | [`nemo-gym-debugging`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-debugging) | Diagnose empty JSONL, scorer errors, or stuck jobs |
 | [`nemo-gym-docs`](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-docs) | Add, move, or remove pages on this docs site |
@@ -37,6 +37,6 @@ Follow .agents/skills/add-benchmark/SKILL.md to integrate this benchmark.
 ## Related Topics
 
 - [Onboarding decision tree](/contribute/environments/onboarding-decision-tree) — overlay vs new scorer vs a different agent
-- [Add a benchmark](/contribute/environments/adding-a-benchmark) — human copy-paste walkthrough (same path as the skill)
+- [Add a benchmark](/contribute/environments/adding-a-benchmark) — human copy-paste walkthrough for catalog overlays
 - [New Environment](/contribute/environments/new-environment) — new scoring code
 - [Development Setup](/contribute/development-setup) — install, CI, and `git commit -s`

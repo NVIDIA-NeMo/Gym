@@ -16,13 +16,10 @@ description: >
 
 Before starting, determine which type of benchmark you're adding:
 
-**Native overlay** — reuse an existing resources server. Do this first. Add `benchmarks/<name>/config.yaml` with `config_paths` and `_inherit_from` (copy `benchmarks/gsm8k`). Do **not** run `gym env init --resources-server` unless no scorer exists. Human docs: `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx`.
-
-**Native new scorer** — verification logic implemented directly in a Gym resources server:
+**Native benchmark** — verification logic implemented directly in a Gym resources server:
 - Resources server implements `verify()` with reward logic
 - Agent server orchestrates model calls (use `simple_agent` for single-turn, or custom agent for multi-turn)
 - Example: `code_gen`, `instruction_following`, `math_with_judge`
-- CI requires `data/example.jsonl` (5), `data/example_metrics.json`, `data/example_rollouts.jsonl` (5); local `gym env test --resources-server` skips data checks unless `+should_validate_data=true`
 
 **External benchmark** — wrapping a 3rd-party library that has its own orchestration:
 - Integrate at the agent server level (not resources server)
@@ -33,37 +30,9 @@ Before starting, determine which type of benchmark you're adding:
 
 ## Workflow
 
-If this is an overlay on `math_with_judge`, `mcqa`, `code_gen`, or similar, skip scaffolding a new server. Copy the closest overlay and stop after prepare + CLI wiring:
+### Step 1: Scaffold the server
 
-| Task | Copy |
-| --- | --- |
-| Math / short answer | `benchmarks/gsm8k` |
-| Multiple choice | `benchmarks/gpqa` |
-| Unit-test code | `benchmarks/livecodebench/v5_2408_2502` |
-
-Human walkthrough: `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx`. Only do Step 1 when no existing scorer fits.
-
-When the overlay sets `prompt_config`, JSONL rows are raw fields (`question`, `expected_answer`, …). Do **not** bake `responses_create_params.input` into those rows. `prepare()` must return a `Path` equal to `jsonl_fpath`. Keep generated JSONL gitignored.
-
-Search scorers with `gym search resources-servers "…"` (bare `gym search` defaults to environments). Do not use `gym env init --benchmark` for catalog overlays.
-
-Smoke test (output is required):
-
-```bash
-gym env validate --benchmark my_bench
-gym eval prepare --benchmark my_bench
-gym eval run --benchmark my_bench \
-  --model-type openai_model \
-  --split benchmark \
-  --output results/my_bench_rollouts.jsonl \
-  --limit 2
-```
-
-`--no-serve` also needs `--agent`, `--input`, `--prompt-config`, and `--output`. Overlay-only PRs skip `gym env test --resources-server`.
-
-### Step 1: Scaffold the server (new scorer only)
-
-Skip this step for an overlay. When no existing scorer fits, run `gym env init` to generate the directory structure:
+Run `gym env init` to generate the directory structure:
 
 ```bash
 gym env init --resources-server my_benchmark
@@ -84,17 +53,7 @@ For external benchmarks, create the agent server manually under `responses_api_a
 
 ### Step 2: Prepare data
 
-Convert your source dataset to Gym JSONL format.
-
-**Overlay with `prompt_config`:** write raw fields the prompt and verifier need. Do not include `responses_create_params.input`. Example (`math_with_judge`):
-
-```json
-{"question": "Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?", "expected_answer": 72}
-```
-
-MCQA: see `benchmarks/gpqa/prepare.py` (`question`, `problem`, `options`, `expected_answer`). `prepare()` must return a `Path` equal to `jsonl_fpath`. Keep generated JSONL gitignored.
-
-**New resources server example rows / no prompt_config:** each line has `responses_create_params.input` (OpenAI message format). Task-specific verification data goes in `verifier_metadata` or top-level scorer fields:
+Convert your source dataset to Gym JSONL format. Each line must have `responses_create_params.input` (OpenAI message format). Task-specific verification data goes in `verifier_metadata`.
 
 ```json
 {
@@ -111,18 +70,23 @@ MCQA: see `benchmarks/gpqa/prepare.py` (`question`, `problem`, `options`, `expec
 }
 ```
 
-**Data conversion:** Overlay `prepare.py` lives next to `benchmarks/<name>/config.yaml`. For a new resources server, conversion scripts often live in the source dataset repo; exception when there is no external source repo. See `references/patterns.md` § "Data Conversion Script Pattern".
+**Data conversion**: Write conversion scripts in the **source repo** (e.g. your dataset repository), not in NeMo-Gym. Prompt files also belong in the source repo. Exception: when there is no external source repo. See `references/patterns.md` § "Data Conversion Script Pattern".
 
 **`example.jsonl`**: Generate 5 entries for smoke testing. This file is committed directly to git in `data/example.jsonl`.
 
-**`train`/`validation` datasets**: Do not commit large splits. Public default is Hugging Face `source:` in the dataset YAML ([Prepare Data](fern/versions/latest/pages/data/index.mdx)). GitLab/MLflow upload is NVIDIA-internal only:
+**`train`/`validation` datasets**: Upload to the GitLab dataset registry — these must NOT be committed to git.
 
 ```bash
-# NVIDIA-internal dataset registry — skip if you are not using GitLab
 gym dataset upload --storage gitlab \
     --name my_benchmark \
     --revision 0.0.1 \
     --input resources_servers/my_benchmark/data/my_dataset.jsonl
+```
+
+Requires MLflow credentials in `env.yaml` (or passed via CLI):
+```yaml
+mlflow_tracking_uri: <your-gitlab-mlflow-tracking-uri>
+mlflow_tracking_token: <your-gitlab-api-token>
 ```
 
 **`data/.gitignore`**: The scaffold generates default patterns (`*train.jsonl`, `*validation.jsonl`, etc.). If your filename doesn't match (e.g. `my_eval.jsonl`), add a custom pattern (e.g. `*eval.jsonl`). If data was previously tracked, run `git rm --cached <file>`.
@@ -134,7 +98,7 @@ gym dataset collate --config resources_servers/my_benchmark/configs/my_benchmark
     --output-dir /tmp/prepare \
     --mode example_validation
 
-# Download and prepare train/validation (NVIDIA-internal GitLab registry)
+# Download and prepare train/validation from GitLab
 gym dataset collate --config resources_servers/my_benchmark/configs/my_benchmark.yaml \
     --output-dir data/my_benchmark \
     --mode train_preparation \
@@ -180,7 +144,7 @@ Key points:
 
 For multi-turn benchmarks, either use `proof_refinement_agent` or create a custom agent. See `references/patterns.md` § "Agent Patterns".
 
-For `train`/`validation` datasets on the NVIDIA-internal GitLab registry, add `gitlab_identifier` alongside `jsonl_fpath`. Public PRs should use Hugging Face `source:` instead (see Prepare Data). Example of the internal shape:
+For `train`/`validation` datasets, add `gitlab_identifier` alongside `jsonl_fpath`:
 ```yaml
 datasets:
 - name: my_dataset
@@ -270,7 +234,7 @@ pre-commit run --all-files
 
 First run may fail as hooks auto-modify files (`verified: false` flag, README table). Stage changes and run again.
 
-Leave `verified: false` on the first PR. Maintainers flip it after reward profiling. Include W&B links and screenshots in the PR if you already ran profiling.
+Set `verified: true` in YAML config after successful baselining. Include W&B links and screenshots of results in the PR description.
 
 To avoid committing unrelated auto-fixes from other servers, scope pre-commit to your files:
 ```bash
@@ -289,7 +253,7 @@ git checkout -- resources_servers/other_server/
 - Code must run on Linux
 - `/run` endpoint must be async
 - Errors from tool execution or bad model output must return error responses, not crash
-- All commits require DCO sign-off (`-s`). Cryptographic signing (`-S`) is optional.
+- All commits require DCO sign-off (`-s`) and cryptographic signature (`-S`)
 
 ## Reference
 
