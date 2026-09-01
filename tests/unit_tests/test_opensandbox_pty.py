@@ -381,6 +381,20 @@ async def test_ws_handshake_transient_is_retried(monkeypatch: pytest.MonkeyPatch
     await session.close()
 
 
+async def test_ws_server_disconnect_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", (0,))
+    client = FakeHttpClient(ws=FakeWs([CONNECTED]), ws_error=[aiohttp.ServerDisconnectedError("disconnected")])
+    session = await open_pty_session(
+        client=client,  # type: ignore[arg-type]
+        base_url="http://server/base",
+        headers={},
+        spec=SandboxPtySpec(),
+        request_timeout_s=5.0,
+    )
+    assert len(client.ws_calls) == 2
+    await session.close()
+
+
 async def test_open_pty_session_ws_failure_deletes_session() -> None:
     client = FakeHttpClient(ws_error=RuntimeError("upgrade refused"))
     with pytest.raises(SandboxPtyError, match="upgrade refused"):
