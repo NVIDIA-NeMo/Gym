@@ -139,10 +139,8 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     job_name=f"t{body.task_index}-r{body.rollout_index}",
                 )
 
-                job_ref = (
-                    harbor_job_worker
-                    .options(num_cpus=self.config.harbor_ray_task_num_cpus)
-                    .remote(job_config.model_dump(mode="json"))
+                job_ref = harbor_job_worker.options(num_cpus=self.config.harbor_ray_task_num_cpus).remote(
+                    job_config.model_dump(mode="json")
                 )
                 try:
                     trial_dir = Path(await job_ref)
