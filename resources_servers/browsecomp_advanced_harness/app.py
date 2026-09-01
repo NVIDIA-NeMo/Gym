@@ -79,6 +79,13 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     # Results returned per search query (both providers). The reference Exa
     # reference uses 10; its Tavily path (and this harness historically) uses 5.
     max_results: int = 5
+    # Total characters one `search` call may return, split evenly across the queries
+    # in that call (max_total_length // len(queries)). This — not max_results — is what
+    # actually binds: measured on a reference run, 64% of query blocks already return fewer
+    # than 5 results because the per-query slice runs out first, and search output is
+    # 92.5% of all tool-output characters. The tool schema does not expose the field, so
+    # this config value applies to every real call; an explicit request value still wins.
+    search_max_total_length: int = 30000
 
     @model_validator(mode="after")
     def _check_provider_key(self) -> "TavilySearchResourcesServerConfig":
@@ -93,7 +100,9 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
 
 class TavilySearchRequest(BaseModel):
     queries: Optional[List[str]] = None  # Make optional to handle missing args gracefully
-    max_total_length: int = 30000
+    # None = fall back to the server's search_max_total_length (30000 unless configured).
+    # Kept settable so a programmatic caller or a test can still pin the budget per call.
+    max_total_length: Optional[int] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -1066,7 +1075,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if body.queries is None or len(body.queries) == 0:
             return TavilySearchResponse(results_string="Query is none or empty")
 
-        max_per_query_length = body.max_total_length // len(body.queries)
+        # The tool schema does not expose max_total_length, so body.max_total_length is
+        # None on every real model call and the configured budget applies.
+        total_length = (
+            body.max_total_length if body.max_total_length is not None else self.config.search_max_total_length
+        )
+        max_per_query_length = total_length // len(body.queries)
         if self.config.search_provider == "exa":
             # Exa: highlights-only, always inline (no disk pages, even in terminal mode).
             results = await asyncio.gather(
