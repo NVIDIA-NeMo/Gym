@@ -20,6 +20,7 @@ import socket
 import sys
 import time
 from abc import abstractmethod
+from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
 from os import environ, getenv
 from pathlib import Path
@@ -788,6 +789,8 @@ class SimpleServer(BaseServer):
                     print(response_content)
 
                 return JSONResponse(content=response_content, status_code=500)
+            except CancelledError:
+                return JSONResponse(content="An unknown error occurred", status_code=500)
             except Exception as e:
                 print(
                     f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
@@ -948,6 +951,10 @@ Full body: {json.dumps(exc.body, indent=4)}
             timeout_worker_healthcheck=global_config_dict.get(UVICORN_TIMEOUT_WORKER_HEALTHCHECK, 30),
             # Ensure server keepalive > client keepalive
             timeout_keep_alive=30,
+            # Parse HTTP with httptools instead of pure-Python h11.
+            # Explicit selection prevents Uvicorn from silently falling back to h11.
+            # A missing or incompatible httptools wheel now fails during startup.
+            http="httptools",
             access_log=uvicorn_logging_cfg.uvicorn_logging_show_200_ok,
         )
 
