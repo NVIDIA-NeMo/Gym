@@ -36,7 +36,7 @@ def _ensure_server_venv() -> Path:
     venv_python = SERVER_DIR / ".venv" / "bin" / "python"
     if not venv_python.exists():
         subprocess.run(
-            f"cd {SERVER_DIR} && uv venv --python 3.12 && uv pip install --python .venv/bin/python -e .",
+            f"cd {SERVER_DIR} && uv venv --python 3.13.14 && uv pip install --python .venv/bin/python -e .",
             shell=True,
             check=True,
         )

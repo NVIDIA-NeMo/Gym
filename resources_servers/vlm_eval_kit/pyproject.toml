@@ -79,6 +79,9 @@ dependencies = [
     "portalocker",
     "protobuf",
     "pylatexenc==2.10",
+    # Required by VLMEvalKitMcore (video datasets import these unguarded at package import).
+    "pysubs2",
+    "av",
     "python-dotenv",
     "qwen_vl_utils",
     "requests",
@@ -100,7 +103,10 @@ dependencies = [
     "torchmetrics",
     "torchvision",
     "tqdm",
-    "transformers",
+    # transformers 5.x breaks vlmeval imports (AutoModelForVision2Seq removed,
+    # huggingface_hub is_offline_mode shim); without a lower bound the resolver
+    # backtracks to 4.12. Verified against the mcore pin.
+    "transformers>=4.49,<5",
     "typing_extensions",
     "validators",
     "xlsxwriter",

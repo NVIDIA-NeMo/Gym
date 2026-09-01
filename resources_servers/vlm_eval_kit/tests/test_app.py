@@ -459,4 +459,3 @@ class TestOCRReasoning:
             }
         )
         assert metrics == {"mean/OCR_Reasoning": 0.5414}
-

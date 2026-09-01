@@ -1505,4 +1505,3 @@ class TestAggregateOtherMetrics:
         assert metrics["bbox"]["without bbox"] == 2
         assert isinstance(metrics["score"], AvgMinMax)
         assert metrics["score"].total == 2
-

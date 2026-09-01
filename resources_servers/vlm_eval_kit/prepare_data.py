@@ -27,6 +27,7 @@ from vlmeval.dataset.image_mcq import ImageMCQDataset
 from vlmeval.dataset.image_vqa import OCRBench
 from vlmeval.dataset.utils.multiple_choice import build_choices
 
+
 _IMAGE_MIME_BY_SUFFIX = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
