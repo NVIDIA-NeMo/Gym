@@ -104,6 +104,8 @@ class GymnasiumServer(SimpleResourcesServer):
             await self.close_session(session_id)
             if identity is not None:
                 self.execution_to_session.pop(identity, None)
+                if self._checkpoint_participant is not None:
+                    self.checkpoint_participant().mark_terminal_after_request(*identity)
         return EnvStepResponse(observation=obs, reward=reward, terminated=terminated, truncated=truncated, info=info)
 
     @staticmethod

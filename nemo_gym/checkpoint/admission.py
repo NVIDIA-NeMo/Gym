@@ -106,6 +106,7 @@ class AdmissionLimiter:
         self.state = AdmissionState.ACCEPTING
         self._inflight: dict[str, AdmissionTicket] = {}
         self._tombstones: set[tuple[str, int]] = set()
+        self._seen_attempts: set[tuple[str, int]] = set()
         self._drained = asyncio.Event()
         self._drained.set()
         self._listeners: list[Callable[[], None]] = []
@@ -145,6 +146,7 @@ class AdmissionLimiter:
                     f"rollout {rollout_id!r} attempt {attempt_index} was closed at a checkpoint "
                     f"deadline; the restored run dispatched a replacement attempt"
                 )
+            self._seen_attempts.add((rollout_id, attempt_index))
 
         if self.state != AdmissionState.ACCEPTING:
             raise AdmissionParkedError(
@@ -214,6 +216,9 @@ class AdmissionLimiter:
 
     def tombstones(self) -> list[tuple[str, int]]:
         return sorted(self._tombstones)
+
+    def seen_attempts(self) -> list[tuple[str, int]]:
+        return sorted(self._seen_attempts)
 
     # -- observation ---------------------------------------------------------
 

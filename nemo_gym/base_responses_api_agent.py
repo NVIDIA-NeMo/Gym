@@ -123,9 +123,15 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     task=asyncio.current_task(),
                 )
                 try:
-                    return await run(*args, **kwargs)
-                finally:
-                    await self._checkpoint_participant.finish(execution)
+                    result = await run(*args, **kwargs)
+                except asyncio.CancelledError:
+                    await self._checkpoint_participant.finish(execution, outcome="cancelled")
+                    raise
+                except BaseException:
+                    await self._checkpoint_participant.finish(execution, outcome="failed")
+                    raise
+                await self._checkpoint_participant.finish(execution, outcome="completed")
+                return result
 
         app.post("/run")(run_with_rollout_context)
         app.post("/aggregate_metrics")(self.aggregate_metrics)

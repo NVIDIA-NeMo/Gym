@@ -92,7 +92,9 @@ async def test_restore_activates_replacement_attempt_as_one_set(tmp_path) -> Non
     source.record_mutation("rollout-a", 0)
     source.record_mutation("rollout-b", 2)
     await source.prepare(time.time() + 2)
-    commit_resources_state(source, tmp_path, checkpoint_id="checkpoint-1", server_name="resources")
+    first = commit_resources_state(source, tmp_path, checkpoint_id="checkpoint-1", server_name="resources")
+    second = commit_resources_state(source, tmp_path, checkpoint_id="checkpoint-1", server_name="resources")
+    assert second == first
 
     checkpoint_id, snapshots = load_resources_state(tmp_path, server_name="resources")
     assert checkpoint_id == "checkpoint-1"
@@ -104,6 +106,38 @@ async def test_restore_activates_replacement_attempt_as_one_set(tmp_path) -> Non
         ("rollout-b", 3): {"value": 9},
     }
     assert restored.status()["state"] == "paused"
+
+    app = FastAPI()
+
+    @app.post("/mutate")
+    async def mutate():
+        return {"ok": True}
+
+    app.add_middleware(ResourcesSessionMiddleware, participant=restored)
+    stale_headers = {ROLLOUT_ID_HEADER: "rollout-a", ATTEMPT_INDEX_HEADER: "0"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        stale = await client.post("/mutate", headers=stale_headers)
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "stale_attempt"
+
+
+@pytest.mark.asyncio
+async def test_verify_retires_completed_session_before_prepare() -> None:
+    state = {("rollout-a", 0): {"value": 1}}
+    participant = _participant(state)
+    app = FastAPI()
+
+    @app.post("/verify")
+    async def verify():
+        state.pop(("rollout-a", 0))
+        return {"reward": 1.0}
+
+    app.add_middleware(ResourcesSessionMiddleware, participant=participant)
+    headers = {ROLLOUT_ID_HEADER: "rollout-a", ATTEMPT_INDEX_HEADER: "0"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/verify", headers=headers)
+    assert response.status_code == 200
+    assert await participant.prepare(time.time() + 2) == {"sessions": 0, "state": "prepared"}
 
 
 @pytest.mark.asyncio

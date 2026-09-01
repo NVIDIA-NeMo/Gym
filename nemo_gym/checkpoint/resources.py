@@ -38,7 +38,7 @@ RESOURCES_MANIFEST_NAME = "manifest.json"
 RESOURCES_CHECKPOINT_SCHEMA_VERSION = 1
 RESOURCE_STATE_REVISION_HEADER = "x-nemo-gym-resource-state-revision"
 
-_NONMUTATING_PATHS = frozenset({"/verify", "/aggregate_metrics", "/reverify_mode"})
+_NONMUTATING_PATHS = frozenset({"/aggregate_metrics", "/reverify_mode"})
 
 
 class ResourcesCheckpointError(ControlError):
@@ -47,6 +47,10 @@ class ResourcesCheckpointError(ControlError):
 
 class ResourcesAdmissionClosedError(ControlError):
     code = "resources_admission_closed"
+
+
+class ResourcesStaleAttemptError(ControlError):
+    code = "stale_attempt"
 
 
 class ResourceSnapshot(BaseModel):
@@ -92,6 +96,8 @@ class ResourcesCheckpointParticipant:
         self._locks: dict[tuple[str, int], asyncio.Lock] = {}
         self._revisions: dict[tuple[str, int], int] = {}
         self._prepared: list[ResourceSnapshot] = []
+        self._tombstones: set[tuple[str, int]] = set()
+        self._terminal_after_request: set[tuple[str, int]] = set()
         self._accepting = True
         self._prepare_lock = asyncio.Lock()
 
@@ -101,10 +107,25 @@ class ResourcesCheckpointParticipant:
     def register(self, rollout_id: str, attempt_index: int) -> None:
         self._revisions.setdefault((rollout_id, attempt_index), 0)
 
+    def is_tombstoned(self, rollout_id: str, attempt_index: int) -> bool:
+        return (rollout_id, attempt_index) in self._tombstones
+
+    def mark_terminal_after_request(self, rollout_id: str, attempt_index: int) -> None:
+        self._terminal_after_request.add((rollout_id, attempt_index))
+
+    def retire(self, rollout_id: str, attempt_index: int) -> None:
+        key = (rollout_id, attempt_index)
+        self._revisions.pop(key, None)
+        self._terminal_after_request.discard(key)
+
     def record_mutation(self, rollout_id: str, attempt_index: int) -> int:
         key = (rollout_id, attempt_index)
         revision = self._revisions.get(key, 0) + 1
-        self._revisions[key] = revision
+        if key in self._terminal_after_request:
+            self._terminal_after_request.remove(key)
+            self._revisions.pop(key, None)
+        else:
+            self._revisions[key] = revision
         return revision
 
     @property
@@ -149,6 +170,7 @@ class ResourcesCheckpointParticipant:
         # The environment validates and activates the complete replacement set
         # as one operation. A per-session restore loop could expose a mixed cut.
         await self._restore_states(replacements)
+        self._tombstones.update((snapshot.rollout_id, snapshot.attempt_index) for snapshot in snapshots)
         for snapshot in replacements:
             key = (snapshot.rollout_id, snapshot.attempt_index)
             self._revisions[key] = snapshot.state_revision
@@ -180,7 +202,8 @@ class ResourcesSessionMiddleware:
         self._participant = participant
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope.get("type") != "http" or not self._is_mutation(scope.get("path", "")):
+        path = scope.get("path", "")
+        if scope.get("type") != "http" or not self._is_mutation(path):
             await self._app(scope, receive, send)
             return
         try:
@@ -192,6 +215,9 @@ class ResourcesSessionMiddleware:
             await self._reject_identity(send)
             return
         rollout_id, attempt_index = identity
+        if self._participant.is_tombstoned(rollout_id, attempt_index):
+            await self._reject_stale(send, rollout_id, attempt_index)
+            return
         if not self._participant.accepting:
             await self._reject(send)
             return
@@ -208,6 +234,8 @@ class ResourcesSessionMiddleware:
             async def send_with_revision(message: dict[str, Any]) -> None:
                 nonlocal revision
                 if message.get("type") == "http.response.start" and int(message.get("status", 500)) < 400:
+                    if path == "/verify":
+                        self._participant.mark_terminal_after_request(rollout_id, attempt_index)
                     revision = self._participant.record_mutation(rollout_id, attempt_index)
                     headers = list(message.get("headers") or ())
                     headers.append(
@@ -219,7 +247,11 @@ class ResourcesSessionMiddleware:
                     message = {**message, "headers": headers}
                 await send(message)
 
-            await self._app(scope, receive, send_with_revision)
+            try:
+                await self._app(scope, receive, send_with_revision)
+            finally:
+                if path == "/verify":
+                    self._participant.retire(rollout_id, attempt_index)
 
     @staticmethod
     def _is_mutation(path: str) -> bool:
@@ -274,6 +306,25 @@ class ResourcesSessionMiddleware:
         )
         await send({"type": "http.response.body", "body": payload})
 
+    @staticmethod
+    async def _reject_stale(send: Any, rollout_id: str, attempt_index: int) -> None:
+        payload = json.dumps(
+            {
+                "error": {
+                    "code": ResourcesStaleAttemptError.code,
+                    "message": f"rollout {rollout_id!r} attempt {attempt_index} was retired by restore",
+                }
+            }
+        ).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 409,
+                "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(payload)).encode())],
+            }
+        )
+        await send({"type": "http.response.body", "body": payload})
+
 
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -307,7 +358,7 @@ def commit_resources_state(
     directory.mkdir(parents=True, exist_ok=True)
     manifest_path = directory / RESOURCES_MANIFEST_NAME
     if manifest_path.exists():
-        raise ResourcesCheckpointError(f"resources checkpoint already committed at {directory}")
+        return _validate_resources_manifest(directory, checkpoint_id=checkpoint_id, server_name=server_name)
     files: dict[str, str] = {}
     for snapshot in participant.prepared_snapshots():
         name = f"{snapshot.rollout_id}.a{snapshot.attempt_index}.json"
@@ -325,6 +376,22 @@ def commit_resources_state(
     _write_atomic(manifest_path, payload)
     _fsync_dir(directory)
     return {"sessions": len(files), "manifest_digest": hashlib.sha256(payload).hexdigest()}
+
+
+def _validate_resources_manifest(directory: Path, *, checkpoint_id: str, server_name: str) -> dict[str, Any]:
+    manifest_path = directory / RESOURCES_MANIFEST_NAME
+    payload = manifest_path.read_bytes()
+    manifest = json.loads(payload)
+    if manifest.get("checkpoint_id") != checkpoint_id or manifest.get("server_name") != server_name:
+        raise ResourcesCheckpointError("resources checkpoint manifest belongs to a different transaction or server")
+    for name, digest in manifest.get("files", {}).items():
+        path = directory / name
+        if not path.exists() or _digest(path) != digest:
+            raise ResourcesCheckpointError(f"resources checkpoint state {name!r} is missing or corrupted")
+    return {
+        "sessions": len(manifest.get("files", {})),
+        "manifest_digest": hashlib.sha256(payload).hexdigest(),
+    }
 
 
 def load_resources_state(checkpoint_dir: Path, *, server_name: str) -> tuple[str, list[ResourceSnapshot]]:

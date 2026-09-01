@@ -25,6 +25,7 @@ from nemo_gym.checkpoint import (
     AgentBoundaryRecord,
     AgentCheckpointError,
     AgentCheckpointParticipant,
+    AgentStaleAttemptError,
     DuplicateExecutionError,
     commit_agent_state,
     restore_agent_state,
@@ -52,9 +53,9 @@ async def test_one_run_per_attempt() -> None:
     execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
     with pytest.raises(DuplicateExecutionError):
         await participant.begin("rollout-a", 0, task=asyncio.current_task())
-    await participant.finish(execution)
+    await participant.finish(execution, outcome="completed")
     replacement = await participant.begin("rollout-a", 1, task=asyncio.current_task())
-    await participant.finish(replacement)
+    await participant.finish(replacement, outcome="completed")
 
 
 @pytest.mark.asyncio
@@ -74,7 +75,38 @@ async def test_prepare_waits_for_boundary_and_resume_is_explicit() -> None:
     assert not boundary.done()
     assert (await participant.resume())["released"] == 1
     await boundary
-    await participant.finish(execution)
+    await participant.finish(execution, outcome="completed")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_parked_run_keeps_boundary_until_commit(tmp_path) -> None:
+    participant = AgentCheckpointParticipant()
+    begun = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def run() -> None:
+        execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+        begun.set()
+        await proceed.wait()
+        try:
+            await participant.commit_boundary(_boundary())
+        except asyncio.CancelledError:
+            await participant.finish(execution, outcome="cancelled")
+            raise
+
+    task = asyncio.create_task(run())
+    await begun.wait()
+    prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+    await asyncio.sleep(0)
+    proceed.set()
+    report = await prepare
+    assert report["parked"] == 1
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert commit_agent_state(participant, tmp_path, checkpoint_id="checkpoint-1")["records"] == 1
+    assert (await participant.resume())["state"] == "accepting"
 
 
 @pytest.mark.asyncio
@@ -85,7 +117,7 @@ async def test_prepare_deadline_reports_execution_between_boundaries() -> None:
     assert report["running"] == 1
     assert report["executions"][0]["state"] == "park_requested"
     await participant.retire("rollout-a", 0)
-    await participant.finish(execution)
+    await participant.finish(execution, outcome="completed")
 
 
 @pytest.mark.asyncio
@@ -97,7 +129,7 @@ async def test_boundary_indices_are_monotonic_and_idempotent() -> None:
     await participant.commit_boundary(record)
     with pytest.raises(AgentCheckpointError):
         await participant.commit_boundary(record.model_copy(update={"last_committed_model_call_id": "other"}))
-    await participant.finish(execution)
+    await participant.finish(execution, outcome="completed")
 
 
 @pytest.mark.asyncio
@@ -121,10 +153,29 @@ async def test_commit_restore_maps_source_attempt_to_replacement(tmp_path) -> No
     assert continuation.boundary_index == 4
     assert continuation.last_committed_model_call_id == "call-1"
     assert continuation.resource_state_revisions == {"resources": 3}
+    await restored.resume()
+    with pytest.raises(AgentStaleAttemptError):
+        await restored.begin("rollout-a", 2, task=None)
 
     await participant.resume()
     await park
-    await participant.finish(execution)
+    await participant.finish(execution, outcome="completed")
+
+
+@pytest.mark.asyncio
+async def test_durable_agent_commit_retry_returns_original_result(tmp_path) -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+    await asyncio.sleep(0)
+    park = asyncio.create_task(participant.commit_boundary(_boundary()))
+    await prepare
+    first = commit_agent_state(participant, tmp_path, checkpoint_id="checkpoint-1")
+    second = commit_agent_state(participant, tmp_path, checkpoint_id="checkpoint-1")
+    assert second == first
+    await participant.resume()
+    await park
+    await participant.finish(execution, outcome="completed")
 
 
 def test_restore_rejects_corrupted_boundary_before_activation(tmp_path) -> None:
