@@ -1283,36 +1283,44 @@ class OpenSandboxProvider:
         except Exception as error:
             if not isinstance(error, SandboxBackendUnreachableError) and _exception_status_code(error) != 502:
                 raise
-
-            get_info = getattr(handle.raw, "get_info", None)
-            if get_info is not None:
-                deadline = asyncio.get_running_loop().time() + 5.0
-                while (remaining_s := deadline - asyncio.get_running_loop().time()) > 0:
-                    try:
-                        info = await self._await_sdk_call(
-                            get_info(),
-                            operation="get_info after exec 502",
-                            sandbox_id=handle.sandbox_id,
-                            timeout_s=min(2.0, remaining_s),
-                        )
-                    except Exception:
-                        break
-                    raw_status = getattr(info, "status", None)
-                    state = getattr(raw_status, "state", None)
-                    reason = getattr(raw_status, "reason", None)
-                    message = getattr(raw_status, "message", None)
-                    status_text = f"{reason} {message}"
-                    if re.search(r"\boom[\s_-]*killed\b|\bout of memory\b", status_text, re.IGNORECASE):
-                        message = str(message or "")[:500]
-                        raise SandboxBackendUnreachableError(
-                            "Sandbox was OOM-killed. "
-                            f"OpenSandbox status: state={state!r}, reason={reason!r}, message={message!r}; "
-                            f"sandbox_id={handle.sandbox_id!r}"
-                        ) from error
-                    if message and _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
-                        break
-                    await asyncio.sleep(min(0.5, max(0.0, deadline - asyncio.get_running_loop().time())))
+            notice = await self._oom_death_notice(handle)
+            if notice is not None:
+                raise SandboxBackendUnreachableError(notice) from error
             raise
+
+    async def _oom_death_notice(self, handle: SandboxHandle) -> str | None:
+        """Briefly poll the sandbox status; describe an OOM kill, else None.
+
+        When the backend stops answering it usually takes the control plane a
+        moment to record why, so poll for up to 5s before giving up."""
+        get_info = getattr(handle.raw, "get_info", None)
+        if get_info is None:
+            return None
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while (remaining_s := deadline - asyncio.get_running_loop().time()) > 0:
+            try:
+                info = await self._await_sdk_call(
+                    get_info(),
+                    operation="get_info after backend loss",
+                    sandbox_id=handle.sandbox_id,
+                    timeout_s=min(2.0, remaining_s),
+                )
+            except Exception:
+                return None
+            raw_status = getattr(info, "status", None)
+            state = getattr(raw_status, "state", None)
+            reason = getattr(raw_status, "reason", None)
+            message = getattr(raw_status, "message", None)
+            if re.search(r"\boom[\s_-]*killed\b|\bout of memory\b", f"{reason} {message}", re.IGNORECASE):
+                return (
+                    "Sandbox was OOM-killed. "
+                    f"OpenSandbox status: state={state!r}, reason={reason!r}, message={str(message or '')[:500]!r}; "
+                    f"sandbox_id={handle.sandbox_id!r}"
+                )
+            if message and _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
+                return None
+            await asyncio.sleep(min(0.5, max(0.0, deadline - asyncio.get_running_loop().time())))
+        return None
 
     async def _exec_background(
         self,
@@ -1476,6 +1484,7 @@ class OpenSandboxProvider:
             headers=headers,
             spec=spec,
             request_timeout_s=request_timeout_s,
+            diagnose=lambda: self._oom_death_notice(handle),
         )
         await self._retire_closed_pty_sessions()
         self._pty_sessions.add(session)
@@ -1509,6 +1518,7 @@ class OpenSandboxProvider:
                     takeover=takeover,
                     since=since,
                     request_timeout_s=request_timeout_s,
+                    diagnose=lambda: self._oom_death_notice(handle),
                 )
                 break
             except SandboxPtyError as e:
