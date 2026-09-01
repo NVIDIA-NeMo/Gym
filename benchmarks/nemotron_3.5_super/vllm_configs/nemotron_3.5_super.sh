@@ -1,5 +1,10 @@
 #!/bin/bash
 
+GYM_MODEL_PARAMS=(
+    "++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0"
+    "++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95"
+)
+
 # @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
 VLLM_COMMON_ARGS=(
     --trust-remote-code
