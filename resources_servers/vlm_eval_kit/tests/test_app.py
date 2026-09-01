@@ -83,6 +83,9 @@ class TestApp:
         assert "VLMEvalKitMcore" in cmd
         # dual-source contract: never pip-installed (sys.path selection instead)
         assert "pip install" not in cmd
+        # POSIX `.` not bash-only `source` — setup runs via subprocess shell=True (sh).
+        assert "&& . .venv/bin/activate" in cmd
+        assert "&& source " not in cmd
 
 
 def make_ocrbench_v2_request(

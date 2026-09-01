@@ -85,7 +85,7 @@ def build_vlmevalkit_setup_command(url: str, commit: str, this_dir: "Path") -> s
     """
     clone_dir = vlmevalkit_clone_dir(url)
     return f"""cd {this_dir} \
-&& source .venv/bin/activate \
+&& . .venv/bin/activate \
 && if [ ! -d {clone_dir} ]; then git clone {url} {clone_dir}; fi \
 && cd {clone_dir} \
 && git fetch origin {commit} --depth 1 2>/dev/null; git checkout {commit} \
