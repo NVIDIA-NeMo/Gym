@@ -184,6 +184,14 @@ class AgentCompositionError(ConfigError, ValueError):
     """A standalone agent config could not be composed onto the merged config's agent instances."""
 
 
+class UnsupportedAgentPairingError(ConfigError, ValueError):
+    """The selected agent is not one the environment's resources server declares support for."""
+
+
+class UnsupportedAgentOverrideError(ConfigError, ValueError):
+    """A command line override configures an agent that no instance ends up running."""
+
+
 ########################################
 # Dataset configs for handling and upload/download
 ########################################
@@ -525,6 +533,16 @@ class BenchmarkDatasetConfig(BaseModel):
     prepare_script: Path
     prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
+    agent: Optional[str] = Field(
+        default=None,
+        description=(
+            "Agent instance that runs this benchmark (a top-level key of the merged config). "
+            "Only needed when the config is ambiguous: the dataset is declared on a resources "
+            "server that several agents reference. The pin must name one of those agents — rows "
+            "are dispatched along the agent -> resources server edge, so any other value is a "
+            "config error. Unambiguous configs resolve without it."
+        ),
+    )
 
 
 ########################################

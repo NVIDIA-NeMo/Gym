@@ -141,6 +141,14 @@ dependencies = [
     # License: BSD 3-Clause https://github.com/encode/uvicorn/blob/c1144fd4f130388cffc05ee17b08747ce8c1be11/LICENSE.md
     "uvicorn",
 
+    # httptools: C bindings to the llhttp HTTP parser.
+    # Gym explicitly selects httptools as Uvicorn's HTTP protocol implementation.
+    # Explicit selection prevents a silent fallback to the pure-Python h11 parser.
+    # A missing or incompatible wheel now fails during server startup.
+    # Updated Fri Aug 28, 2026 with httptools==0.8.0
+    # License: MIT https://github.com/MagicStack/httptools/blob/master/LICENSE
+    "httptools",
+
     # UVLoop: a faster async event loop than Python's native asyncio. Used automatically by Uvicorn as an async loop backend.
     # Updated Fri Aug 01, 2025 with uvloop==0.21.0
     # License: Apache 2.0 and MIT https://github.com/MagicStack/uvloop/blob/96b7ed31afaf02800d779a395591da6a2c8c50e1/LICENSE-APACHE https://github.com/MagicStack/uvloop/blob/96b7ed31afaf02800d779a395591da6a2c8c50e1/LICENSE-MIT

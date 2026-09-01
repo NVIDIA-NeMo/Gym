@@ -1,0 +1,38 @@
+terminus_2_sandboxed_agent:
+  responses_api_agents:
+    terminus_2_sandboxed_agent:
+      entrypoint: app.py
+      num_workers: 4
+      resources_server:
+        type: resources_servers
+        name: swebench_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      max_turns: null
+      parser_name: json
+      enable_summarize: true
+      proactive_summarization_threshold: 8000
+      tmux_pane_width: 160
+      tmux_pane_height: 40
+      dump_trajectory: false
+      debug: false
+      model_context_limit: 262144
+      model_output_limit: null
+
+      sandbox_provider: sandbox
+      sandbox_timeout: 10800  # 3 hrs
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 0.25
+          memory_mib: 512MB
+          disk_gib: 30
+        provider_options: {}
+        metadata:
+          harness: terminus-2
+      remote_tmux_binary_path: null
+
+      datasets: []

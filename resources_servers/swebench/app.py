@@ -39,12 +39,12 @@ from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.rollout_observability import SandboxObservation
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.providers.base import SandboxPtySession
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,
-    patch_swebench_multilingual_resources_request,
     patch_swebench_multilingual_sandbox,
     run_instance,
 )
@@ -137,6 +137,7 @@ class DockerContainer(BaseModel):
             )
         except Exception as exc:
             self._sandbox_error_type = self._sandbox_error_type or type(exc).__name__
+            print(f"Failed to exec in SWE Bench for {self.instance_id}", format_exc(), file=sys.stderr)
             raise
         if res.error_type is not None:
             self._sandbox_error_type = self._sandbox_error_type or res.error_type
@@ -174,6 +175,9 @@ class DockerContainer(BaseModel):
             test_output = ""
         except Exception as exc:
             self._sandbox_error_type = type(exc).__name__
+            print(
+                f"Failed to exec_run_with_timeout in SWE Bench for {self.instance_id}", format_exc(), file=sys.stderr
+            )
             raise
 
         return (test_output, timed_out, time() - start_time)
@@ -187,6 +191,11 @@ class DockerContainer(BaseModel):
             await self._inner_container.upload(local_path=src, remote_path=str(dest))
         except Exception as exc:
             self._sandbox_error_type = self._sandbox_error_type or type(exc).__name__
+            print(
+                f"Failed to upload to verification sandbox in SWE Bench for {self.instance_id}",
+                format_exc(),
+                file=sys.stderr,
+            )
             raise
 
     async def cleanup(self) -> None:
@@ -227,6 +236,7 @@ class SWEBenchSeedSessionRequest(SWEBenchInstanceRequest, BaseSeedSessionRequest
 
 class SWEBenchSeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
+    pty_session_id: str
 
 
 class SwebenchResourcesServer(SimpleResourcesServer):
@@ -235,7 +245,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
 
-        self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
+        self._session_id_to_sandbox: Dict[str, Tuple[AsyncSandbox, SandboxPtySession]] = dict()
 
     async def _create_sandbox(self, test_spec: TestSpec) -> AsyncSandbox:
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
@@ -243,8 +253,6 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
         resources = dict(self.config.sandbox_config.get("resources", {}))
-
-        patch_swebench_multilingual_resources_request(resources, test_spec.instance_id)
 
         # Derive from the final resources map (after the multilingual bump);
         # explicit sandbox_config.env keys win over the derived caps.
@@ -289,13 +297,11 @@ class SwebenchResourcesServer(SimpleResourcesServer):
     async def seed_session(self, request: Request, body: SWEBenchSeedSessionRequest) -> SWEBenchSeedSessionResponse:
         test_spec = self._make_test_spec(body)
         eval_sandbox = await self._create_sandbox(test_spec)
-        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
+        pty_session = await eval_sandbox.pty.create()
+        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = (eval_sandbox, pty_session)
 
         # @bxyu-nvidia: Activate the necessary conda environments for SWE Bench Verified Python instances
-        # This may be overfit and needs to be config'd or detected.
-        # TODO @bxyu-nvidia: This pattern is not yet supported because calls to sandbox.exec use separate processes
-        # For now, the activation is put on the harness side.
-        # await eval_sandbox.exec("source /opt/miniconda3/bin/activate && conda activate testbed")
+        await eval_sandbox.pty.exec("source /opt/miniconda3/bin/activate && conda activate testbed")
 
         if self.config.apply_anti_cheating:
             # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
@@ -312,7 +318,9 @@ Stdout:
 Stderr:
 {result.stderr}""")
 
-        return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
+        return SWEBenchSeedSessionResponse(
+            sandbox_handle=eval_sandbox._handle.sandbox_id, pty_session_id=pty_session.session_id
+        )
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
         """
@@ -346,7 +354,7 @@ Stderr:
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
-            original_sandbox = self._session_id_to_sandbox[request.session[SESSION_ID_KEY]]
+            original_sandbox, original_pty_session = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
             try:
                 original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
                 model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")
@@ -354,6 +362,7 @@ Stderr:
             except:
                 print("Failed to extract patch from container", format_exc(), file=sys.stderr)
             try:
+                await original_pty_session.close()
                 await original_sandbox.stop()
             except:
                 print("Failed to stop original sandbox", format_exc(), file=sys.stderr)
@@ -404,7 +413,7 @@ Stderr:
         return SWEBenchVerifyResponse(
             **body.model_dump(),
             # run_instance returns "completed"; the response field is "evaluation_completed".
-            evaluation_completed=res["completed"],
+            evaluation_completed=res["completed"] and mock_container._sandbox_error_type is None,
             resolved=res["resolved"],
             reward=int(res["resolved"]),
             eval_sandbox_start_time_taken=eval_sandbox_start_time_taken,
