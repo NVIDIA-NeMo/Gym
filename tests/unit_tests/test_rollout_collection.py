@@ -107,6 +107,12 @@ def empty_global_config(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     return get_global_config_dict
 
 
+@pytest.fixture(autouse=True)
+def _instant_infra_retry_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep infra-error retries instant; the backoff duration itself is not under test."""
+    monkeypatch.setattr(nemo_gym.rollout_collection, "_INFRA_RETRY_BACKOFF_S", 0.0)
+
+
 class FakeResponse:
     """The parts of aiohttp's ClientResponse that the rollout dispatcher touches."""
 
@@ -818,11 +824,11 @@ class TestRolloutCollection:
         assert "response" not in result
         assert NG_TERMINAL_KEY not in result
 
-    @pytest.mark.parametrize("status", [401, 429, 503, 504])
-    async def test_run_examples_records_any_status_without_resending(
+    @pytest.mark.parametrize("status", [400, 401, 422])
+    async def test_run_examples_records_a_non_infra_status_without_resending(
         self, monkeypatch: pytest.MonkeyPatch, status: int
     ) -> None:
-        """No status is retried in place; the agent may already have run."""
+        """A 4xx is deterministic: resending it would only repeat it."""
         post = AsyncMock(return_value=FakeResponse(status))
         install_fake_server_client(monkeypatch, post)
 
@@ -831,28 +837,110 @@ class TestRolloutCollection:
         assert result["_ng_failure_http_status"] == status
         assert post.await_count == 1
 
+    @pytest.mark.parametrize("status", [429, 500, 503, 504])
+    async def test_run_examples_retries_an_infra_status_before_recording_it(
+        self, monkeypatch: pytest.MonkeyPatch, status: int
+    ) -> None:
+        """A 429/5xx is infrastructure weather: resent with backoff until attempts run out."""
+        post = AsyncMock(return_value=FakeResponse(status))
+        install_fake_server_client(monkeypatch, post)
+        infra_error_counts: Counter = Counter()
+
+        _, result = await next(
+            RolloutCollectionHelper().run_examples(
+                [failing_row()], route_failures_to_sidecar=True, infra_error_counts=infra_error_counts
+            )
+        )
+
+        assert result["_ng_failure_http_status"] == status
+        assert post.await_count == _DEFAULT_MAX_ROLLOUT_ATTEMPTS
+        assert infra_error_counts == Counter({str(status): _DEFAULT_MAX_ROLLOUT_ATTEMPTS})
+
+    async def test_run_examples_retried_infra_error_succeeds_on_a_later_attempt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The incident shape: one transient 500 from /run must cost a retry, not the run."""
+        row = failing_row()
+        post = AsyncMock(side_effect=[FakeResponse(500), FakeResponse(200, {"reward": 1.0})])
+        install_fake_server_client(monkeypatch, post)
+        clear_captures = MagicMock()
+        clear_token_captures = MagicMock()
+        monkeypatch.setattr(nemo_gym.rollout_collection, "clear_model_call_captures_for_rollouts", clear_captures)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "clear_token_captures_for_rollouts", clear_token_captures)
+        infra_error_counts: Counter = Counter()
+
+        returned_row, result = await next(
+            RolloutCollectionHelper().run_examples([row], infra_error_counts=infra_error_counts)
+        )
+
+        assert returned_row is row
+        assert result["reward"] == 1.0
+        assert post.await_count == 2
+        assert infra_error_counts == Counter({"500": 1})
+        # The retry reuses the rollout id, so the failed attempt's partial captures were cleared.
+        clear_captures.assert_called_once()
+        clear_token_captures.assert_called_once()
+        assert clear_captures.call_args.args[0] == [row]
+
+    async def test_run_examples_routes_an_exhausted_infra_failure_when_asked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The config driver sets route_infra_failures_to_sidecar so an infra failure never ends the run."""
+        post = AsyncMock(return_value=FakeResponse(503))
+        install_fake_server_client(monkeypatch, post)
+        infra_error_counts: Counter = Counter()
+
+        _, result = await next(
+            RolloutCollectionHelper().run_examples(
+                [failing_row()], route_infra_failures_to_sidecar=True, infra_error_counts=infra_error_counts
+            )
+        )
+
+        assert result[NG_FAILURE_CLASS_KEY] == AGENT_REQUEST_FAILED_FAILURE_CLASS
+        assert post.await_count == _DEFAULT_MAX_ROLLOUT_ATTEMPTS
+        assert infra_error_counts == Counter({"503": _DEFAULT_MAX_ROLLOUT_ATTEMPTS})
+
+    async def test_run_examples_non_infra_error_raises_despite_infra_routing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Routing exhausted infra failures must not swallow deterministic errors like a 422."""
+        post = AsyncMock(return_value=FakeResponse(422))
+        install_fake_server_client(monkeypatch, post)
+
+        with pytest.raises(ClientResponseError):
+            await next(RolloutCollectionHelper().run_examples([failing_row()], route_infra_failures_to_sidecar=True))
+
+        assert post.await_count == 1
+
     @pytest.mark.parametrize(
-        ("error", "status", "expected_class"),
+        ("error", "status", "expected_class", "expected_awaits"),
         [
             (
                 ClientConnectorError(MagicMock(), OSError("connection refused")),
                 None,
                 AGENT_REQUEST_FAILED_FAILURE_CLASS,
+                _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
             ),
-            (ServerDisconnectedError(), None, AGENT_REQUEST_FAILED_FAILURE_CLASS),
-            (http_error(503), 503, AGENT_REQUEST_FAILED_FAILURE_CLASS),
-            (http_error(500), 500, AGENT_RUN_ERROR_FAILURE_CLASS),
-            (http_error(400), 400, AGENT_RUN_ERROR_FAILURE_CLASS),
-            (orjson.JSONDecodeError("unexpected end of data", "", 0), 200, AGENT_RUN_ERROR_FAILURE_CLASS),
+            (ServerDisconnectedError(), None, AGENT_REQUEST_FAILED_FAILURE_CLASS, _DEFAULT_MAX_ROLLOUT_ATTEMPTS),
+            (http_error(503), 503, AGENT_REQUEST_FAILED_FAILURE_CLASS, _DEFAULT_MAX_ROLLOUT_ATTEMPTS),
+            (http_error(500), 500, AGENT_RUN_ERROR_FAILURE_CLASS, _DEFAULT_MAX_ROLLOUT_ATTEMPTS),
+            (http_error(400), 400, AGENT_RUN_ERROR_FAILURE_CLASS, 1),
+            (orjson.JSONDecodeError("unexpected end of data", "", 0), 200, AGENT_RUN_ERROR_FAILURE_CLASS, 1),
         ],
         ids=["connection refused", "dropped mid-flight", "gateway 503", "agent 500", "agent 400", "unreadable body"],
     )
     async def test_run_examples_classifies_by_who_answered(
-        self, monkeypatch: pytest.MonkeyPatch, error: BaseException, status: int | None, expected_class: str
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        error: BaseException,
+        status: int | None,
+        expected_class: str,
+        expected_awaits: int,
     ) -> None:
         """A NeMo Gym agent answers 500 when its handler raises, so its own statuses mean it ran.
 
-        A gateway status or no reply at all does not, and neither is ever resent from here.
+        A gateway status or no reply at all does not. Infra-level failures are resent until their
+        attempts run out; a deterministic answer (4xx, unreadable body) is recorded as it stands.
         """
         post = AsyncMock(side_effect=error) if status is None else AsyncMock(return_value=FakeResponse(status))
         install_fake_server_client(monkeypatch, post)
@@ -869,15 +957,17 @@ class TestRolloutCollection:
         assert result["_ng_failure_type"] == type(error).__name__
         assert result["_ng_failure_http_status"] == status
         assert "reward" not in result
-        assert post.await_count == 1
+        assert post.await_count == expected_awaits
 
     async def test_run_examples_raises_for_direct_callers(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Library callers (NeMo-RL) keep the exception contract they have today."""
+        """Library callers (NeMo-RL) keep the exception contract they have today, after the retries."""
         post = AsyncMock(return_value=FakeResponse(500))
         install_fake_server_client(monkeypatch, post)
 
         with pytest.raises(ClientResponseError):
             await next(RolloutCollectionHelper().run_examples([failing_row()]))
+
+        assert post.await_count == _DEFAULT_MAX_ROLLOUT_ATTEMPTS
 
     @pytest.mark.parametrize("error", [RuntimeError("dispatcher bug"), asyncio.CancelledError()])
     async def test_run_examples_propagates_non_request_failures(
@@ -1223,16 +1313,16 @@ class TestRolloutCollection:
         assert isinstance(result["_ng_rollout_latency_ms"], float)
         assert result["_ng_rollout_latency_ms"] >= 0
 
-    async def test_run_from_config_does_not_route_failures_unless_asked(
+    async def test_run_from_config_does_not_route_non_infra_failures_unless_asked(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
-        """Dropping failed rollouts shrinks the denominator, so it never happens unasked."""
+        """Dropping failed rollouts shrinks the denominator, so a deterministic 4xx still fails loudly."""
         input_jsonl_fpath = tmp_path / "input.jsonl"
         input_jsonl_fpath.write_text(
             json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}}) + "\n"
         )
         output_jsonl_fpath = tmp_path / "output.jsonl"
-        install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(500)))
+        install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(422)))
 
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(input_jsonl_fpath),
@@ -1247,6 +1337,80 @@ class TestRolloutCollection:
             not _failures_path_for(output_jsonl_fpath).exists()
             or not _failures_path_for(output_jsonl_fpath).read_bytes()
         )
+
+    async def test_run_from_config_survives_an_infra_failure_without_routing_opt_in(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+        empty_global_config: MagicMock,
+    ) -> None:
+        """One rollout's persistent 500 lands in the sidecar and the default run finishes and scores."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            "\n".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
+                for i in range(2)
+            )
+            + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        async def post(server_name: str, url_path: str, json: dict, **kwargs):
+            if url_path == "/run":
+                if json["x"] == 0:
+                    raise http_error(500, "sandbox backend died")
+                return FakeResponse(200, {"reward": 1.0})
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            disable_health_check=True,
+        )
+        results = await RolloutCollectionHelper().run_from_config(config)
+
+        assert len(results) == 2
+        persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
+        assert [r["reward"] for r in persisted] == [1.0]
+        failures = [orjson.loads(line) for line in _failures_path_for(output_jsonl_fpath).read_bytes().splitlines()]
+        assert [r[NG_FAILURE_CLASS_KEY] for r in failures] == [AGENT_RUN_ERROR_FAILURE_CLASS]
+
+        printed = capsys.readouterr().out
+        assert f"Infra errors so far: {_DEFAULT_MAX_ROLLOUT_ATTEMPTS} " in printed
+        assert '{"500": 3}' in printed
+        assert "Rollouts missing from the score: 1 of 2 materialized" in printed
+
+    async def test_run_from_config_aborts_when_most_rollouts_produce_no_result(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """Routing infra failures must not let a run with dead infrastructure grind to the end."""
+        num_rows = nemo_gym.rollout_collection._NO_RESULT_ABORT_MIN_RESULTS + 10
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            "\n".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}})
+                for _ in range(num_rows)
+            )
+            + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(500)))
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            disable_health_check=True,
+        )
+
+        with pytest.raises(RuntimeError, match="infrastructure looks down"):
+            await RolloutCollectionHelper().run_from_config(config)
+
+        # The attempts made it to disk, so a resume can retry them once the infrastructure is back.
+        failures = _failures_path_for(output_jsonl_fpath).read_bytes().splitlines()
+        assert len(failures) >= nemo_gym.rollout_collection._NO_RESULT_ABORT_MIN_RESULTS
 
     async def test_run_from_config_reports_rollouts_dropped_by_the_agent_with_routing_off(
         self,

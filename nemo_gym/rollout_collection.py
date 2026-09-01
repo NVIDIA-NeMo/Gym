@@ -17,6 +17,7 @@ import glob as glob_module
 import json
 import logging
 import os
+import random
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
@@ -29,7 +30,7 @@ from time import time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
-from aiohttp import ClientError
+from aiohttp import ClientError, ClientResponseError
 from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel, Field, field_validator, model_validator
 from tqdm.asyncio import tqdm
@@ -131,6 +132,9 @@ logger = logging.getLogger(__name__)
 #     per attempt, with ``_ng_failure_class`` set. An ``agent_run_error`` or
 #     ``agent_request_failed`` row holds no reward and no response: there was
 #     no rollout. The two differ in whether the agent answered at all.
+#   - An infra-level `/run` failure (429/5xx, connection error, timeout) is
+#     retried in place with backoff before it becomes a sidecar row, and in
+#     the config-driven run it never ends the run (see ``run_examples``).
 #   - ``kill_shaped`` failures (Slurm SIGTERM, Ray actor died, OOM, ...) go
 #     NOWHERE: the absence of a row is the canonical signal. Resume's
 #     set-difference re-dispatches them naturally; per-task timeout bounds
@@ -154,6 +158,13 @@ _NG_ROLLOUT_LATENCY_MS_KEY = "_ng_rollout_latency_ms"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+
+# In-run retry backoff for infra-level /run failures: base * 2**(attempt-1) seconds, with jitter.
+_INFRA_RETRY_BACKOFF_S = 1.0
+# Safety valve: when most completed rollouts produced no result at all, the infrastructure is
+# down, not one rollout unlucky. Same shape as token capture's max_mask_fraction abort.
+_NO_RESULT_ABORT_FRACTION = 0.5
+_NO_RESULT_ABORT_MIN_RESULTS = 50
 
 
 def _nonnegative_int(value: Any) -> Optional[int]:
@@ -609,7 +620,10 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         description=(
             "Record a failed agent /run as a failures-sidecar row and keep going, instead of ending "
             "the run. The failed rollouts are then absent from the rollouts jsonl and from the "
-            "score, which is reported over fewer rollouts than were dispatched."
+            "score, which is reported over fewer rollouts than were dispatched. Infra-level "
+            "failures (429/5xx, connection errors, timeouts) are retried and, once retries are "
+            "exhausted, routed to the sidecar regardless of this flag; the flag extends routing "
+            "to the remaining request failures (e.g. a 4xx)."
         ),
     )
     rollout_collection_driver: Optional[str] = Field(
@@ -800,6 +814,17 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
 
 # Request failures that are data, not bugs. Anything else still propagates.
 _RUN_FAILURE_ERRORS = (ClientError, orjson.JSONDecodeError, TimeoutError)
+
+
+def _is_infra_error(exc: BaseException) -> bool:
+    """Transient infrastructure failures worth retrying: the server answered 429/5xx, or the
+    request never completed (connect/reset/timeout). Any other answer (e.g. a 4xx validation
+    error, an unreadable body) is deterministic and retrying would only repeat it."""
+    if isinstance(exc, ClientResponseError):
+        return exc.status == 429 or exc.status >= 500
+    return isinstance(exc, (ClientError, TimeoutError))
+
+
 # Statuses something in front of the agent answers with; the agent itself returns 500.
 _AGENT_DID_NOT_RUN_STATUSES = frozenset({429, 502, 503, 504})
 _MAX_FAILURE_BODY_CHARS = 2000
@@ -1350,8 +1375,15 @@ class RolloutCollectionHelper(BaseModel):
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
         failure_counts: Counter = Counter()
+        infra_error_counts: Counter = Counter()
         for future in self.run_examples(
-            input_rows, semaphore=semaphore, route_failures_to_sidecar=config.route_failures_to_sidecar
+            input_rows,
+            semaphore=semaphore,
+            route_failures_to_sidecar=config.route_failures_to_sidecar,
+            # One rollout's dead sandbox must not end a whole run: an infra failure that
+            # exhausted its retries becomes a sidecar row here, never an exception.
+            route_infra_failures_to_sidecar=True,
+            infra_error_counts=infra_error_counts,
         ):
             row, result = await future
 
@@ -1450,6 +1482,17 @@ class RolloutCollectionHelper(BaseModel):
                 )
                 failures_file.write(serialized + b"\n")
                 failures_file.flush()
+                no_result_dropped = sum(failure_counts[c] for c in _NO_RESULT_FAILURE_CLASSES)
+                if (
+                    len(results) >= _NO_RESULT_ABORT_MIN_RESULTS
+                    and no_result_dropped / len(results) > _NO_RESULT_ABORT_FRACTION
+                ):
+                    raise RuntimeError(
+                        f"{no_result_dropped}/{len(results)} completed rollouts produced no result "
+                        f"({dict(failure_counts)}), exceeding {_NO_RESULT_ABORT_FRACTION:.0%}: the "
+                        "infrastructure looks down, not one rollout unlucky. Aborting instead of "
+                        f"failing every remaining rollout; see {failures_fpath} and resume to retry."
+                    )
             else:
                 # Success → main jsonl.
                 results_file.write(serialized + b"\n")
@@ -1494,6 +1537,11 @@ class RolloutCollectionHelper(BaseModel):
                 time_taken = timedelta(seconds=int(time_taken_s))
                 rollouts_per_min = len(results) / (time_taken_s / 60)
                 print_str = f"Finished {len(results)} / {len(input_rows)} rollouts ({int(current_pct)}%) in {time_taken} ({rollouts_per_min:.2f} rollouts/min). "
+                if infra_error_counts:
+                    print_str += (
+                        f"Infra errors so far: {sum(infra_error_counts.values())} "
+                        f"({json.dumps(dict(infra_error_counts), sort_keys=True)}). "
+                    )
 
                 top_left = counts_left.most_common()
                 top_left_str = "\n".join(f"{i + 1}. {k}: {v}" for i, (k, v) in enumerate(top_left))
@@ -1512,7 +1560,10 @@ class RolloutCollectionHelper(BaseModel):
                 tqdm.write(print_str)
 
                 if get_exporters():
-                    step_metrics = {"progress/total/rollouts_per_min": rollouts_per_min}
+                    step_metrics = {
+                        "progress/total/rollouts_per_min": rollouts_per_min,
+                        "progress/total/infra_errors": sum(infra_error_counts.values()),
+                    }
                     for agent_name, metrics in agent_name_to_metrics.items():
                         step_metrics[f"progress/{agent_name}/reward"] = round(
                             100 * metrics["reward"] / agent_name_to_counts[agent_name], 2
@@ -1858,6 +1909,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
         route_failures_to_sidecar: bool = False,
+        route_infra_failures_to_sidecar: bool = False,
+        infra_error_counts: Optional[Counter] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -1866,43 +1919,67 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         but run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are NOT applied — call
         ``preprocess_examples`` first if you need them.
 
+        An infra-level `/run` failure (429/5xx, connection error, timeout) is retried in place
+        with exponential backoff, up to ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`` (default 3) total
+        attempts; every infra error observed also lands in ``infra_error_counts`` when the caller
+        passes a Counter. Other failures (e.g. a 4xx) are deterministic and never resent.
+
         ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
         that ends every rollout still in flight. It defaults off because those rollouts then leave
-        the score.
+        the score. ``route_infra_failures_to_sidecar`` routes only the infra-level failures that
+        exhausted their retries: the config driver always sets it so one dead sandbox cannot end
+        a whole run, while direct callers keep their exception contract.
         """
         server_client = self.setup_server_client(head_server_config)
         self.resolve_task_sources(examples, server_client.global_config_dict)
         self._validate_agent_names(examples, server_client.global_config_dict)
         self._validate_agent_pairings(examples, server_client.global_config_dict)
         semaphore = semaphore or nullcontext()
+        # A retry reuses its rollout id, so the failed attempt's partial captures must be cleared
+        # before re-dispatch or they would merge into the retried attempt's record.
+        capture_dirs = model_call_capture_dirs_from_config(server_client.global_config_dict)
+        token_capture_dirs = token_id_capture_dirs_from_config(server_client.global_config_dict)
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
                 started_at = time()
-                res = None
-                try:
-                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                    await raise_for_status(res)
-                    result = await get_response_json(res)
-                    # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
-                    # from summed model-call/tool latencies to account for additional overhead.
-                    result[_NG_ROLLOUT_LATENCY_MS_KEY] = (time() - started_at) * 1000
-                    return row, result
-                except Exception as e:
-                    print(
-                        "[rollout_collection] /run failed "
-                        f"status={getattr(res, 'status', None)} "
-                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                        flush=True,
-                    )
-                    if not route_failures_to_sidecar or not isinstance(e, _RUN_FAILURE_ERRORS):
-                        raise
-                    if res is not None:
-                        res.release()
-                    # The status comes from the error when it carries one, and from the response
-                    # when the body was the part that failed.
-                    status = getattr(e, "status", None) or getattr(res, "status", None)
-                    return row, _agent_request_failure_row(e, status)
+                max_attempts = _get_max_rollout_attempts()
+                for attempt in range(1, max_attempts + 1):
+                    res = None
+                    try:
+                        res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                        await raise_for_status(res)
+                        result = await get_response_json(res)
+                        # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
+                        # from summed model-call/tool latencies to account for additional overhead.
+                        result[_NG_ROLLOUT_LATENCY_MS_KEY] = (time() - started_at) * 1000
+                        return row, result
+                    except Exception as e:
+                        infra = _is_infra_error(e)
+                        # The status comes from the error when it carries one, and from the response
+                        # when the body was the part that failed.
+                        status = getattr(e, "status", None) or getattr(res, "status", None)
+                        if infra and infra_error_counts is not None:
+                            infra_error_counts[str(status) if status is not None else type(e).__name__] += 1
+                        print(
+                            "[rollout_collection] /run failed "
+                            f"status={getattr(res, 'status', None)} "
+                            f"infra={infra} attempt={attempt}/{max_attempts} "
+                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                            flush=True,
+                        )
+                        if res is not None:
+                            res.release()
+                        if infra and attempt < max_attempts:
+                            clear_model_call_captures_for_rollouts([row], capture_dirs)
+                            clear_token_captures_for_rollouts([row], token_capture_dirs)
+                            await asyncio.sleep(_INFRA_RETRY_BACKOFF_S * 2 ** (attempt - 1) * (0.5 + random.random()))
+                            continue
+                        if not isinstance(e, _RUN_FAILURE_ERRORS) or not (
+                            route_failures_to_sidecar or (infra and route_infra_failures_to_sidecar)
+                        ):
+                            raise
+                        return row, _agent_request_failure_row(e, status)
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),
