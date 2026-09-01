@@ -542,6 +542,19 @@ class TestServerUtils:
 
         TestSimpleServer.run_webserver()
 
+    def test_setup_liveness_exposes_root_and_health(self) -> None:
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        app = FastAPI()
+        BaseServer.setup_liveness(MagicMock(), app)
+
+        with TestClient(app) as client:
+            for path in ("/", "/health"):
+                response = client.get(path)
+                assert response.status_code == 200
+                assert response.json() == {"status": "ok"}
+
     def test_setup_session_middleware_idempotent(self) -> None:
         from fastapi import FastAPI, Request
         from fastapi.testclient import TestClient

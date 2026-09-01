@@ -626,6 +626,7 @@ class BaseServer(BaseModel):
         return server_config
 
     def setup_liveness(self, app: FastAPI) -> None:
+        @app.get("/health", include_in_schema=False)
         @app.get("/", include_in_schema=False)
         async def _liveness():
             return {"status": "ok"}
