@@ -20,7 +20,7 @@ from pathlib import Path
 from shlex import quote
 from time import time
 from traceback import format_exc
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from fastapi import Request
@@ -61,7 +61,6 @@ from nemo_gym.rollout_observability import (
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import SandboxPtySession
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
@@ -457,22 +456,19 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
 
-        self._sandbox_id_to_sandbox: Dict[str, Tuple[AsyncSandbox, SandboxPtySession]] = dict()
+        self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
 
-    async def _start_sandbox(
-        self, sandbox_id: Optional[str] = None, pty_session_id: Optional[str] = None
-    ) -> Tuple[AsyncSandbox, SandboxPtySession]:
+    async def _start_sandbox(self, sandbox_id: Optional[str] = None) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = create_provider(
             resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         )
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
 
-        if sandbox_id and pty_session_id:
+        if sandbox_id:
             sandbox = await AsyncSandbox.connect({"sandbox_id": sandbox_id}, provider=resolved_sandbox_provider)
-            pty_session = await sandbox.pty.attach(session_id=pty_session_id, takeover=True)
-            return sandbox, pty_session
+            return sandbox
 
         if self.config.debug:
             print("Creating new sandbox since one wasn't provided", file=sys.stderr)
@@ -502,9 +498,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         sandbox = AsyncSandbox(resolved_sandbox_provider)
         await sandbox.start(sandbox_spec)
 
-        pty_session = await sandbox.pty.create()
-
-        return sandbox, pty_session
+        return sandbox
 
     def _agent_sandbox_observation(
         self,
@@ -656,7 +650,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        sandbox, pty_session = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
+        sandbox = self._sandbox_id_to_sandbox[request.cookies["sandbox_id"]]
 
         query = None
         # This can be modified to handle system/developer prompts too.
@@ -729,11 +723,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         run_error_type = None
         try:
-            result = await sandbox.pty.exec(
+            result = await sandbox.exec(
                 command=command,
-                session=pty_session,
                 timeout_s=self.config.sandbox_timeout,
-                detach=True,
             )
         except Exception as exc:
             result = None
@@ -912,11 +904,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # @bxyu-nvidia: "sandbox_handle" comes from resources_servers/swebench/app.py
         # Once we graduate to use the sandbox server, this will be in a generic seed_session type that can be model validated.
         seed_session_result = await seed_session_response.json()
-        sandbox, pty_session = await self._start_sandbox(
+        sandbox = await self._start_sandbox(
             sandbox_id=seed_session_result.get("sandbox_handle"),
-            pty_session_id=seed_session_result.get("pty_session_id"),
         )
-        self._sandbox_id_to_sandbox[request.session[SESSION_ID_KEY]] = (sandbox, pty_session)
+        self._sandbox_id_to_sandbox[request.session[SESSION_ID_KEY]] = sandbox
 
         # Propagating the sandbox handle
         cookies["sandbox_id"] = session_key
@@ -942,7 +933,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         await raise_for_status(verify_response)
 
         try:
-            await pty_session.close()
             await sandbox.stop()
         except Exception:
             print("Failed to stop sandbox", format_exc(), file=sys.stderr)
