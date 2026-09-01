@@ -8,6 +8,7 @@ import sys
 import tempfile
 from pathlib import Path
 from time import time
+from traceback import format_exc
 from types import SimpleNamespace
 from typing import Any, Optional, Tuple
 from uuid import uuid4
@@ -359,7 +360,10 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         await raise_for_status(verification)
 
         self._session_sandboxes.pop(session_key)
-        await sandbox.stop()
+        try:
+            await sandbox.stop()
+        except:
+            print("Failed to stop sandbox", format_exc(), file=sys.stderr)
 
         result = await get_response_json(verification)
         result["terminus2_completed"] = terminus2_completed
