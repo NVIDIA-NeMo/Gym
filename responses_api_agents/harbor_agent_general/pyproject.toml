@@ -4,7 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev]",
-    "harbor>=0.20.0",
+    "harbor>=0.22",
 ]
 
 [build-system]
@@ -17,9 +17,3 @@ include = ["harbor_agent_general"]
 
 [tool.uv]
 sources.nemo-gym = { path = "../..", editable = true }
-
-##
-# WARNING: Required to resolve conflict between Harbor and NeMo-Gym.
-# This package is never used because the Harbor's agent uses its own implementation.
-#
-override-dependencies = ["litellm"]

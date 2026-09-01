@@ -59,10 +59,7 @@ NUM_SAMPLES_IN_PARALLEL_KEY_NAME = "num_samples_in_parallel"
 _RAY_WORKER_EVENT_LOOP: asyncio.AbstractEventLoop | None = None
 
 
-@ray.remote(
-    scheduling_strategy="SPREAD",
-    runtime_env={"py_executable": sys.executable},
-)
+@ray.remote(scheduling_strategy="SPREAD", runtime_env={"py_executable": sys.executable})
 def harbor_job_worker(job_config_dict: dict) -> str:
     global _RAY_WORKER_EVENT_LOOP
     logging.disable(logging.DEBUG)
@@ -73,6 +70,7 @@ def harbor_job_worker(job_config_dict: dict) -> str:
 
 
 class HarborAgentConfig(BaseResponsesAPIAgentConfig):
+    harbor_ray_task_num_cpus: float = Field(default=0.1, ge=0)
     harbor_jobs_dir: Path
     harbor_debug: bool = Field(default=False)
     harbor_max_retries: int = Field(default=0)
@@ -96,6 +94,7 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
             n_attempts=1,
             n_concurrent_trials=1,
             debug=self.harbor_debug,
+            quiet=True,
             retry=RetryConfig(max_retries=self.harbor_max_retries),
             datasets=[
                 self.harbor_dataset.model_copy(update={"task_names": [task_name]}),
@@ -140,11 +139,18 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     job_name=f"t{body.task_index}-r{body.rollout_index}",
                 )
 
-                trial_dir = Path(await harbor_job_worker.remote(job_config.model_dump(mode="json")))
+                job_ref = (
+                    harbor_job_worker
+                    .options(num_cpus=self.config.harbor_ray_task_num_cpus)
+                    .remote(job_config.model_dump(mode="json"))
+                )
+                try:
+                    trial_dir = Path(await job_ref)
+                except asyncio.CancelledError:
+                    ray.cancel(job_ref, force=True)
+                    raise
 
                 return self.success_response(body, trial_dir)
-            except asyncio.CancelledError:
-                raise
             except Exception as err:
                 logger.exception(
                     "Harbor rollout failed: task_index=%s rollout_index=%s",
@@ -239,7 +245,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
             path_entries = [
                 (
                     task_paths.step_instruction_path(step.step_name),
-                    trial_paths.step_agent_dir(step.step_name) / "trajectory.json",
+                    trial_paths.step_agent_dir(step.step_name) / TaskPaths.TRAJECTORY_FILENAME,
                 )
                 for step in trial.step_results
             ]
@@ -248,7 +254,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 for step in trial.step_results
             ]
         else:
-            path_entries = [(task_paths.instruction_path, trial_paths.agent_dir / "trajectory.json")]
+            path_entries = [(task_paths.instruction_path, trial_paths.agent_dir / TaskPaths.TRAJECTORY_FILENAME)]
             step_rewards = [trial.verifier_result.rewards if trial.verifier_result is not None else None]
 
         output = [
@@ -346,14 +352,17 @@ class HarborAgent(SimpleResponsesAPIAgent):
         job_dir = job_config.jobs_dir / job_config.job_name
         if job_dir.exists():
             for trial_dir in job_dir.iterdir():
-                result_path = trial_dir / "result.json"
-                if not trial_dir.is_dir() or not result_path.is_file():
+                if not trial_dir.is_dir():
+                    continue
+
+                result_path = TrialPaths(trial_dir).result_path
+                if not result_path.is_file():
                     continue
 
                 trial_result = TrialResult.model_validate_json(result_path.read_text())
                 if trial_result.exception_info is not None:
                     exception_info = trial_result.exception_info
-                    ## Deleting result.json forces harbor to delete the old trial and re-run when Gym retries.
+                    ## Deleting the trial result forces Harbor to delete the old trial and re-run when Gym retries.
                     result_path.unlink()
                     raise RuntimeError(
                         f"Harbor trial failed with {exception_info.exception_type}: {exception_info.exception_message}"
