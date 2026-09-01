@@ -12,23 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""EnterpriseOps-Gym resources server.
-
-Adapts the ServiceNow EnterpriseOps-Gym benchmark (external MCP gym servers + SQL/judge
-verifiers) to NeMo Gym:
-
-- ``/seed_session`` seeds a fresh database per rollout on each task gym server (SQL content
-  cached in memory, seeding bounded by a per-gym semaphore) and pins {gym -> database_id}
-  to the NeMo Gym session cookie.
-- A catch-all ``POST /{tool_name}`` route proxies tool calls to the right MCP gym server
-  with the session's ``x-database-id`` and task context headers. The response body is the
-  MCP JSON-RPC ``result`` object, byte-compatible with what the EOG harness feeds its model.
-- ``/verify`` runs the task's verifiers via the ported EOG verifier engine. The headline
-  ``reward`` uses EOG's name-collapsed all-pass semantics for leaderboard parity; strict
-  every-verifier metrics are also emitted for RL reward shaping. Verify is idempotent
-  (results are cached per session) and always deletes the rollout's databases.
-- A TTL janitor deletes databases of sessions that never reached verify (killed rollouts).
-"""
+"""EnterpriseOps-Gym resources server: seeds SQL databases, proxies MCP tool calls,
+and verifies task completion against the EOG verifier engine."""
 
 import asyncio
 import json
@@ -50,7 +35,10 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError, SandboxSpec
+from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
 from resources_servers.enterpriseops_gym.mcp_client import MCPGymClient, load_seed_sql
 from resources_servers.enterpriseops_gym.verifier_engine import VerifierEngine
@@ -61,45 +49,88 @@ logger = logging.getLogger(__name__)
 
 RESERVED_ROUTES = {"seed_session", "verify", "aggregate_metrics"}
 
+# Digest-pinned images per EOG domain: (image@digest, python app module).
+_DOMAIN_GYMS: Dict[str, Tuple[str, str]] = {
+    "gym-calendar": (
+        "shivakrishnareddyma225/enterpriseops-gym-mcp-calendar@sha256:994c5421a6dd065861bc7f813a177f6d408875e9df60fe8d012959bc4510da02",  # pragma: allowlist secret
+        "main",
+    ),
+    "sn-csm-server": (
+        "shivakrishnareddyma225/enterpriseops-gym-mcp-csm@sha256:eaa456ac9aa85728426e7d3813a0bbca0949d6a8695be30e26f03894e6e6b189",  # pragma: allowlist secret
+        "main",
+    ),
+    "gym-google-drive-mcp": (
+        "shivakrishnareddyma225/enterpriseops-gym-mcp-drive@sha256:3475962fcf6da7675e194dbf138de01fa3e96134a302ad47316e4111a5e63f32",  # pragma: allowlist secret
+        "app.main",
+    ),
+    "gym-email-mcp": (
+        "shivakrishnareddyma225/enterpriseops-gym-mcp-email@sha256:69c2081fe4ab0962b86233f9fb52b307b8ad0019f6746ba64ce75851036201cd",  # pragma: allowlist secret
+        "main",
+    ),
+    "sn-hr-internal": (
+        "shivakrishnareddyma225/enterpriseops-gym-mcp-hr@sha256:1ea1c1d64d4be35e8062e56f00b8318e9e6c09289cfa56bcfd0595bfa59ac64d",  # pragma: allowlist secret
+        "main",
+    ),
+    "gym-itsm-mcp": (
+        "shivakrishnareddyma225/enterpriseops-gym-mcp-itsm@sha256:a234ae3fb7cee196ba25e6b9957969dea829919b6e8271dddae128f065aaf39f",  # pragma: allowlist secret
+        "main",
+    ),
+    "gym-teams-mcp": (
+        "shivakrishnareddyma225/enterpriseops-gym-mcp-teams@sha256:602655e46f6501885540c36dc9b12114cb173c75063d7f25c17ed0652695fa78",  # pragma: allowlist secret
+        "main",
+    ),
+}
+
+_EOG_PORT = 8000  # fixed port per container (isolation is at the network namespace level)
+
+# Injected into each container and run as a background process to start the EOG uvicorn app.
+_SERVICE_LAUNCHER = """\
+import importlib, os, sys, uvicorn
+
+os.chdir("/app")
+sys.path.insert(0, "/app")
+port = os.environ["EOG_PORT"]
+base_url = f"http://127.0.0.1:{port}"
+for key in ("API_BASE_URL", "FASTAPI_BASE_URL", "HR_API_BASE_URL", "ITSM_API_BASE_URL", "GOOGLEDRIVE_API_BASE_URL"):
+    os.environ[key] = base_url
+os.environ["API_PORT"] = port
+os.environ["MCP_SERVER_PORT"] = port
+uvicorn.run(importlib.import_module(os.environ["EOG_APP"]).app, host="0.0.0.0", port=int(port), log_level="warning")
+"""
+_LAUNCHER_PATH = "/tmp/eog_service.py"
+
 
 class EnterpriseOpsGymResourcesServerConfig(BaseResourcesServerConfig):
-    # Maps EOG gym server names (e.g. "sn-csm-server") to base URLs, overriding the
-    # mcp_server_url baked into the dataset rows. Useful for pointing at replicas or
-    # non-default hosts without re-converting the dataset.
+    # gym_name -> base URL, replaces mcp_server_url in dataset rows.
     gym_url_overrides: Dict[str, str] = Field(default_factory=dict)
 
-    # Replica pools: gym server name -> list of base URLs. Each seed_session pins its
-    # rollout to one replica round-robin (all tool calls / SQL / delete stay on it).
-    # This is the horizontal-scale lever for RL rollout collection — run N copies of a
-    # domain's MCP container and list them here. Takes precedence over gym_url_overrides.
+    # gym_name -> list of base URLs for round-robin replica selection per rollout.
+    # Takes precedence over gym_url_overrides.
     gym_url_pools: Dict[str, List[str]] = Field(default_factory=dict)
 
-    # Root directory for resolving relative seed_database_file paths from the dataset
-    # (EOG task paths look like "Domain Wise DBs and Task-DB Mappings/csm/dbs/db_x.sql").
+    # Root for resolving relative seed_database_file paths from dataset rows.
     seed_sql_root: str = "../enterpriseops-gym"
 
-    # Database seeding executes a full SQL dump on the gym server; bound concurrent seeds
-    # per gym server so large rollout batches don't stampede it.
+    # Bounds concurrent SQL seeds per gym server to avoid overwhelming it under load.
     max_concurrent_seeds: int = 4
 
-    # Sessions that never reach /verify (killed rollouts) get their databases deleted by
-    # the janitor after this TTL. Verified sessions are dropped after the TTL as well.
     session_ttl_seconds: float = 3600.0
     janitor_interval_seconds: float = 300.0
 
-    # False (default) = EOG leaderboard parity: reward is all-pass over NAME-COLLAPSED
-    # verifier results (duplicate-named verifiers overwrite; see verifier_engine.py).
-    # True = strict RL mode: reward is all-pass over every defined verifier.
+    # False = EOG leaderboard parity (name-collapsed verifiers, see verifier_engine.py).
+    # True = strict mode: every defined verifier must pass.
     strict_verifiers: bool = False
 
     tool_call_timeout_seconds: float = 30.0
     sql_timeout_seconds: float = 30.0
 
-    # Judge model for response_check verifiers. EOG uses the policy model as its own judge;
-    # point this at policy_model for parity, or pin a fixed judge for RL.
+    # Judge model for response_check verifiers. Point at policy_model for EOG parity.
     judge_model_server: Optional[ModelServerRef] = None
-    # Extra responses-create params merged into judge calls (e.g. temperature, max_output_tokens).
     judge_responses_create_params: Dict[str, Any] = Field(default_factory=dict)
+
+    # Named sandbox provider (e.g. "sandbox"). When set, the server starts EOG containers
+    # per session. Leave empty to use pre-running containers via mcp_server_url in dataset rows.
+    sandbox_provider: str = ""
 
 
 class SessionGym(BaseModel):
@@ -138,7 +169,7 @@ class EnterpriseOpsVerifyRequest(BaseVerifyRequest):
 class EnterpriseOpsVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
-    # EOG-parity scoring (name-collapsed verifier results; see verifier_engine.py).
+    # EOG-parity scoring (name-collapsed verifier results, see verifier_engine.py).
     overall_success: bool
     verifier_pass_rate: float
     verification_results: Dict[str, Any]
@@ -151,8 +182,7 @@ class EnterpriseOpsVerifyResponse(BaseVerifyResponse):
     num_verifiers_scored: int
     num_tool_calls: int
 
-    # Per-tool-call latencies in execution order (this server proxies every MCP call,
-    # so it can time them — something the upstream harness cannot).
+    # Per-tool-call latencies in execution order (timed here because the agent harness cannot).
     tool_latencies_ms: List[Dict[str, Any]] = Field(default_factory=list)
 
 
@@ -166,24 +196,21 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
     seed_semaphores: Dict[str, asyncio.Semaphore] = None
     replica_counters: Dict[str, int] = None
     janitor_task: Optional[asyncio.Task] = None
+    _sandbox_sessions: Dict[str, Dict[str, Any]] = None
 
     def model_post_init(self, __context: Any) -> None:
         self.gym_clients = {}
         self.seed_semaphores = {}
         self.replica_counters = {}
+        self._sandbox_sessions = {}
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
 
-        # Catch-all tool proxy. Registered after the base routes, so /seed_session,
-        # /verify, and /aggregate_metrics keep precedence (Starlette matches in order).
+        # Registered last so base routes (/seed_session, /verify, /aggregate_metrics) take precedence.
         app.post("/{tool_name}")(self.call_tool)
 
         return app
-
-    # ------------------------------------------------------------------
-    # Gym client / session helpers
-    # ------------------------------------------------------------------
 
     def _get_gym_client(self, gym: SessionGym) -> MCPGymClient:
         key = json.dumps([gym.base_url, gym.mcp_endpoint, gym.auth_config], sort_keys=True)
@@ -212,8 +239,7 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
         path = Path(seed_database_file)
         if path.is_absolute():
             return path
-        # `gym env start` forks servers with CWD = the server dir, but users naturally write
-        # seed_sql_root relative to the gym repo root — try both.
+        # servers run with CWD = server dir, but seed_sql_root is usually relative to repo root
         candidates = [
             Path(self.config.seed_sql_root) / path,
             PARENT_DIR / self.config.seed_sql_root / path,
@@ -237,7 +263,6 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
             gym_name = server_config["mcp_server_name"]
             pool = self.config.gym_url_pools.get(gym_name)
             if pool:
-                # Pin this rollout to one replica, round-robin across sessions.
                 replica_index = self.replica_counters.get(gym_name, 0)
                 self.replica_counters[gym_name] = replica_index + 1
                 base_url = pool[replica_index % len(pool)]
@@ -253,8 +278,7 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
         return gyms
 
     async def _seed_gym_database(self, gym: SessionGym, seed_database_file: str) -> None:
-        """Seed one gym's database. Mirrors EOG: a missing seed file logs an error and
-        proceeds with database_id=None instead of failing the rollout."""
+        # Missing seed file logs and continues with database_id=None, matching EOG behavior.
         seed_path = self._resolve_seed_sql_path(seed_database_file)
         if seed_path is None or not seed_path.exists():
             logger.error(f"SQL seed file not found for gym '{gym.gym_name}': {seed_path}")
@@ -266,7 +290,43 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
             sql_content, seed_semaphore=self._get_seed_semaphore(gym.base_url)
         )
 
-    async def _delete_session_dbs(self, state: SessionState) -> None:
+    async def _start_gym_sandbox(self, gym_name: str) -> Tuple[str, AsyncSandbox]:
+        """Start an EOG container for gym_name and return (base_url, sandbox)."""
+        gym_def = _DOMAIN_GYMS.get(gym_name)
+        if gym_def is None:
+            raise ValueError(
+                f"No pinned image for EOG gym '{gym_name}'. "
+                "Add it to _DOMAIN_GYMS or set gym_url_overrides to point at a running container."
+            )
+        image, app_module = gym_def
+        provider_config = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
+        spec = SandboxSpec(
+            image=image,
+            ports=[_EOG_PORT],
+            files={_LAUNCHER_PATH: _SERVICE_LAUNCHER},
+            env={"EOG_APP": app_module, "EOG_PORT": str(_EOG_PORT)},
+            ttl_s=int(self.config.session_ttl_seconds) + 120,
+        )
+        sandbox = AsyncSandbox(provider_config, spec)
+        try:
+            await sandbox.start()
+        except SandboxCreateError as e:
+            raise RuntimeError(f"Failed to create sandbox for EOG gym '{gym_name}': {e}") from e
+        # Run the launcher in the background then poll /openapi.json for up to 120s.
+        await sandbox.exec(f"nohup python {_LAUNCHER_PATH} >/tmp/eog.log 2>&1 &", timeout_s=5.0)
+        health = await sandbox.exec(
+            f"sh -c 'i=0; until curl -fsS http://127.0.0.1:{_EOG_PORT}/openapi.json >/dev/null 2>&1; "
+            f"do i=$((i+1)); [ $i -ge 120 ] && exit 1; sleep 1; done'",
+            timeout_s=180.0,
+        )
+        if health.return_code != 0:
+            logs = (await sandbox.exec("tail -c 2000 /tmp/eog.log", timeout_s=10.0)).stdout or ""
+            await sandbox.stop()
+            raise RuntimeError(f"EOG service '{gym_name}' did not start in sandbox. Logs: {logs.strip()}")
+        endpoint = await sandbox.endpoint(_EOG_PORT)
+        return endpoint.endpoint, sandbox
+
+    async def _delete_session_dbs(self, state: SessionState, session_id: Optional[str] = None) -> None:
         if state.dbs_deleted:
             return
         state.dbs_deleted = True
@@ -276,14 +336,15 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
                     await self._get_gym_client(gym).delete_database(gym.database_id)
                 except Exception as e:
                     logger.error(f"Failed to delete database {gym.database_id} for gym '{gym.gym_name}': {e}")
-
-    # ------------------------------------------------------------------
-    # Janitor
-    # ------------------------------------------------------------------
+        # Stop containers after DB deletion so /api/delete-database can still reach the server.
+        for sandbox in self._sandbox_sessions.pop(session_id or "", {}).values():
+            try:
+                await sandbox.stop()
+            except Exception as e:
+                logger.error(f"Failed to stop sandbox for session {session_id}: {e}")
 
     def _ensure_janitor(self) -> None:
-        # janitor_interval_seconds <= 0 disables the background janitor (tests call
-        # cleanup_expired_sessions directly).
+        # janitor_interval_seconds <= 0 disables the janitor so tests can call cleanup directly
         if self.config.janitor_interval_seconds <= 0:
             return
         if self.janitor_task is None or self.janitor_task.done():
@@ -298,7 +359,6 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
                 logger.error(f"Janitor sweep failed: {e}")
 
     async def cleanup_expired_sessions(self, now: Optional[float] = None) -> int:
-        """Delete databases and drop state for sessions older than the TTL. Returns count."""
         now = now if now is not None else time.time()
         expired = [
             session_id
@@ -309,12 +369,8 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
             state = self.sessions.pop(session_id)
             if not state.dbs_deleted:
                 logger.warning(f"Janitor deleting databases for expired session {session_id} (rollout never verified)")
-            await self._delete_session_dbs(state)
+            await self._delete_session_dbs(state, session_id=session_id)
         return len(expired)
-
-    # ------------------------------------------------------------------
-    # Routes
-    # ------------------------------------------------------------------
 
     async def seed_session(
         self, request: Request, body: EnterpriseOpsSeedSessionRequest
@@ -324,7 +380,22 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
         gyms = self._parse_session_gyms(body.verifier_metadata)
         gym_servers_config = body.verifier_metadata.get("gym_servers_config") or []
 
-        # Seed all gyms' databases concurrently (bounded by per-gym-server semaphores).
+        if self.config.sandbox_provider:
+            gyms_for_sandbox = [
+                gym
+                for gym in gyms.values()
+                if gym.gym_name not in self.config.gym_url_overrides and gym.gym_name not in self.config.gym_url_pools
+            ]
+            if gyms_for_sandbox:
+                sandbox_results = await asyncio.gather(
+                    *(self._start_gym_sandbox(gym.gym_name) for gym in gyms_for_sandbox)
+                )
+                session_sandboxes: Dict[str, Any] = {}
+                for gym, (url, sandbox) in zip(gyms_for_sandbox, sandbox_results):
+                    gym.base_url = url
+                    session_sandboxes[gym.gym_name] = sandbox
+                self._sandbox_sessions[session_id] = session_sandboxes
+
         await asyncio.gather(
             *(
                 self._seed_gym_database(
@@ -345,11 +416,7 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
         return EnterpriseOpsSeedSessionResponse(databases={name: gym.database_id for name, gym in gyms.items()})
 
     async def call_tool(self, tool_name: str, request: Request) -> Response:
-        """Catch-all MCP tool proxy.
-
-        The response body is exactly ``json.dumps(<jsonrpc result>)`` (or ``{}`` on transport
-        error) — the same observation string the EOG harness feeds its model.
-        """
+        """MCP tool proxy. Returns json.dumps(jsonrpc result) matching what EOG feeds the model."""
         if tool_name in RESERVED_ROUTES:  # pragma: no cover - starlette routes these first
             return Response(content=json.dumps({}), media_type="application/json", status_code=404)
 
@@ -371,7 +438,6 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
                 status_code=400,
             )
 
-        # Route the tool to its gym: dataset-provided mapping, else the only gym.
         gym_name = state.tool_to_gym.get(tool_name)
         if gym_name is None and len(state.gyms) == 1:
             gym_name = next(iter(state.gyms))
@@ -394,11 +460,9 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
             }
         )
 
-        # EOG parity: the model observes json.dumps(tool_result.get("result", {})).
         return Response(content=json.dumps(tool_result.get("result", {})), media_type="application/json")
 
     async def _judge(self, system_prompt: str, user_prompt: str) -> str:
-        """response_check judge call. EOG judges with a plain system+user chat completion."""
         judge_body = {
             "input": [
                 {"role": "system", "content": system_prompt},
@@ -425,12 +489,7 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
 
     @staticmethod
     def build_model_response(response: NeMoGymResponse) -> Tuple[Dict[str, Any], int]:
-        """Build the EOG-shape model_response dict from a Responses API trajectory.
-
-        EOG passes {"content": <final response>, "tool_calls": [{"name", "args"}, ...]} to its
-        verifiers, where the final response is the last AI text (or, when the loop ended on a
-        tool step, the last tool observation).
-        """
+        """Convert a Responses API trajectory to the EOG verifier shape: {content, tool_calls}."""
         final_response = ""
         tool_calls: List[Dict[str, Any]] = []
         for item in response.output:
@@ -456,8 +515,7 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
         if state is None:
             raise ValueError("No seeded session found for verify. Call /seed_session first.")
 
-        # Idempotency: the harness may retry verify if the response was lost; the databases
-        # are gone after the first verify, so replay the cached result instead of re-running.
+        # Databases are deleted on first verify, so cache and replay the result on retries.
         if state.verify_result is not None:
             return EnterpriseOpsVerifyResponse.model_validate(state.verify_result)
 
@@ -476,30 +534,22 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
                 gym_contexts={name: gym.context for name, gym in state.gyms.items()},
             )
         finally:
-            await self._delete_session_dbs(state)
+            await self._delete_session_dbs(state, session_id=session_id)
 
-        # EOG-parity scoring over the name-collapsed results (executor.py semantics).
-        # NOTE: like upstream, an empty result set (all verifiers skipped for unknown gyms)
-        # yields all([]) == True here — preserved for leaderboard comparability (PARITY.md §1);
-        # `num_verifiers_scored` exposes the condition to callers.
+        # all([]) == True matches upstream EOG behavior. num_verifiers_scored exposes the case.
         total_verifiers = len(verification_results)
         passed_verifiers = sum(1 for v in verification_results.values() if v.get("passed", False))
         overall_success = all(v["passed"] for v in verification_results.values())
         verifier_pass_rate = passed_verifiers / total_verifiers if total_verifiers > 0 else 0.0
 
-        # Strict scoring over every defined verifier (skipped verifiers count as failed).
-        # Unlike the parity path above, strict mode feeds RL rewards, so an empty verifier
-        # set must NOT score as success.
+        # Strict mode: skipped verifiers count as failed, empty set is not a pass.
         strict_passed = [entry["result"].get("passed", False) for entry in all_verifier_results]
         strict_success = bool(strict_passed) and all(strict_passed)
         strict_pass_rate = sum(strict_passed) / len(strict_passed) if strict_passed else 0.0
 
         reward = float(strict_success) if self.config.strict_verifiers else float(overall_success)
 
-        # A `gym_servers_config` typo skips every verifier, and the parity path above then
-        # scores the task as a pass (all([]) is True — deliberate, PARITY.md §1). In the
-        # aggregate metrics that is indistinguishable from a genuine all-pass, so surface it.
-        # Logging only: scoring is intentionally unchanged.
+        # Log when all verifiers were skipped (usually a gym_name mismatch in gym_servers_config).
         if verifiers and total_verifiers == 0:
             referenced = sorted({v["gym_name"] for v in verifiers if v.get("gym_name")})
             logger.warning(
@@ -526,7 +576,6 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
         return verify_response
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """Per-domain breakdown mirroring the EOG leaderboard (per-domain success + macro avg)."""
         domain_rewards: Dict[str, List[float]] = {}
         domain_pass_rates: Dict[str, List[float]] = {}
         domain_strict: Dict[str, List[float]] = {}

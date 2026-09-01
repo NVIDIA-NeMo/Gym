@@ -28,9 +28,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import os
 import shutil
 import tempfile
+import urllib.request
+import zipfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +43,10 @@ DEFAULT_REPO_ID = "nvidia/NeMo-Gym-EnterpriseOps-Assets"
 DEFAULT_REVISION = "8918dc64b8575d5ff476e62e1cc3687523ab59c2"  # pragma: allowlist secret
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PREPARE_COMMAND = "python -m resources_servers.enterpriseops_gym.prepare"
+
+EOG_REPO_REVISION = "de22905d21a080b83bf4a54258afe4250ee2dd55"  # pragma: allowlist secret
+GYM_DBS_ARCHIVE_URL = f"https://github.com/ServiceNow/EnterpriseOps-Gym/raw/{EOG_REPO_REVISION}/gym_dbs.zip"
+GYM_DBS_DIR = REPO_ROOT / "resources_servers/enterpriseops_gym/data/gym_dbs"
 
 TOOLS_DIR = REPO_ROOT / "resources_servers/enterpriseops_gym/data/tools"
 REMOTE_TOOLS_DIR = Path("enterpriseops_gym/tools")
@@ -199,6 +206,18 @@ def prepare(
     return tuple(bundle.local_dir for bundle in bundles)
 
 
+def ensure_gym_dbs(dest: Path = GYM_DBS_DIR) -> Path:
+    """Download and extract gym_dbs.zip from the pinned EOG release. No-op if dest is non-empty."""
+    if dest.is_dir() and any(dest.iterdir()):
+        return dest
+    dest.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(GYM_DBS_ARCHIVE_URL) as response:
+        data = response.read()
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        zf.extractall(dest)
+    return dest
+
+
 def ensure_tool_snapshots(
     *,
     repo_id: str = DEFAULT_REPO_ID,
@@ -251,6 +270,8 @@ def main() -> None:
     )
     for destination in destinations:
         print(f"Prepared EnterpriseOps-Gym tool snapshots in {destination}")
+    gym_dbs = ensure_gym_dbs()
+    print(f"Prepared EnterpriseOps-Gym seed SQL archive in {gym_dbs}")
 
 
 if __name__ == "__main__":
