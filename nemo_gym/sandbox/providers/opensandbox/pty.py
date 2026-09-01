@@ -128,7 +128,6 @@ class OpenSandboxPtySession:
         self._error: SandboxPtyError | None = None
         self._closed = False
         self._detached = False
-        self._socket_state_changed = asyncio.Condition()
         self._received = 0  # bytes of the session's retained stream seen so far
         self._replay_gap = 0  # bytes the server evicted before we could replay them
         self._pump_task = asyncio.create_task(self._pump())
@@ -192,7 +191,7 @@ class OpenSandboxPtySession:
         """Re-dial the session's WebSocket, resuming from the last received byte."""
         base_url = self._session_url.rsplit("/pty/", 1)[0]
         try:
-            ws = await _connect_ws(
+            self._ws = await _connect_ws(
                 client=self._client,
                 base_url=base_url,
                 headers=self._headers,
@@ -202,9 +201,6 @@ class OpenSandboxPtySession:
             )
         except Exception:
             return False
-        async with self._socket_state_changed:
-            self._ws = ws
-            self._socket_state_changed.notify_all()
         LOGGER.warning("PTY socket lost; re-attached session %s at offset %s", self.session_id, self._received)
         return True
 
@@ -232,8 +228,6 @@ class OpenSandboxPtySession:
                 if barren >= 3 or not await self._reattach_socket():
                     break
         finally:
-            async with self._socket_state_changed:
-                self._socket_state_changed.notify_all()
             # A detach ends the pump without ending the session: skip the
             # finalization so reads and the exit future survive reattach().
             if not self._detached:
@@ -308,20 +302,8 @@ class OpenSandboxPtySession:
             raise SandboxPtyError("PTY session is detached; reattach() first")
         if self._closed:
             raise SandboxPtyError("PTY session is closed (session)")
-
-        # A proxy can close the WebSocket between commands while the pump is
-        # already reconnecting it. Do not reject the next command during that
-        # short window; wait for the pump to either install its replacement or
-        # finish and prove the session is no longer usable. We intentionally do
-        # not retry a failed send below, because the old socket may have
-        # delivered the command before reporting its connection error.
-        while self._ws.closed:
-            closed_ws = self._ws
-            async with self._socket_state_changed:
-                while self._ws is closed_ws and not self._closed and not self._pump_task.done():
-                    await self._socket_state_changed.wait()
-            if self._closed or self._ws is closed_ws:
-                raise SandboxPtyError("PTY session is closed (websocket)")
+        if self._ws.closed:
+            raise SandboxPtyError("PTY session is closed (websocket)")
         try:
             if isinstance(frame, bytes):
                 await self._ws.send_bytes(frame)
