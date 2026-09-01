@@ -58,6 +58,21 @@ from nemo_gym._checkpoint.coordinator import (
     WorkerAdmissionAgent,
     build_coordinator_control_app,
 )
+from nemo_gym._checkpoint.ledger import (
+    LEDGER_MANIFEST_NAME,
+    MODEL_CHECKPOINT_URL_PREFIX,
+    MODEL_LEDGER_SUBDIR,
+    CaptureLedgerCheckpointer,
+    CheckpointableCaptureLedger,
+    LedgerMismatchError,
+    LedgerNotCheckpointableError,
+    LedgerNotQuiescentError,
+    install_model_checkpoint,
+)
+from nemo_gym._checkpoint.model_admission import (
+    NotPolicyInstanceError,
+    install_model_admission,
+)
 from nemo_gym._checkpoint.model_control_contracts import (
     MODEL_ADMISSION_URL_PREFIX,
     ModelAbortInflightRequest,
@@ -70,7 +85,10 @@ __all__ = [
     "CONTROL_SCHEMA_VERSION",
     "CONTROL_URL_PREFIX",
     "GATED_MODEL_ROUTE_SUFFIXES",
+    "LEDGER_MANIFEST_NAME",
     "MODEL_ADMISSION_URL_PREFIX",
+    "MODEL_CHECKPOINT_URL_PREFIX",
+    "MODEL_LEDGER_SUBDIR",
     "PLANE_HEADER",
     "AdmissionLimiter",
     "AdmissionMiddleware",
@@ -91,10 +109,18 @@ __all__ = [
     "ControlError",
     "ControlFence",
     "Deadline",
+    "CaptureLedgerCheckpointer",
+    "CheckpointableCaptureLedger",
     "InvalidPhaseError",
+    "LedgerMismatchError",
+    "LedgerNotCheckpointableError",
+    "LedgerNotQuiescentError",
     "MultiProcessCapability",
+    "NotPolicyInstanceError",
     "StaleAttemptError",
     "StaleCheckpointError",
     "install_control_plane",
+    "install_model_admission",
+    "install_model_checkpoint",
     "multi_process_capability_from_num_workers",
 ]

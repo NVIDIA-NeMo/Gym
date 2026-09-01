@@ -162,7 +162,10 @@ async def test_drain_aggregates_inflight_across_workers(sock_dir) -> None:
             assert body["inflight_total"] == 1
 
             long_poll = asyncio.create_task(
-                client.get(f"{MODEL_ADMISSION_URL_PREFIX}/status", params={"wait_state": "paused", "timeout_s": 2.0})
+                client.get(
+                    f"{MODEL_ADMISSION_URL_PREFIX}/status",
+                    params={"checkpoint_id": "ckpt-1", "wait_state": "paused", "timeout_s": 2.0},
+                )
             )
             await asyncio.sleep(0.05)
             pool.limiter(2).release(held)
@@ -184,6 +187,11 @@ async def test_missing_worker_is_an_error_not_a_zero(sock_dir) -> None:
             response = await pool.pause(client)
             assert response.status_code == 409
             assert response.json()["error"]["code"] == "missing_workers"
+        reopened = await pool.coordinator.wait_until(
+            lambda status: all(worker[0].state == AdmissionState.ACCEPTING for worker in pool.workers),
+            timeout_s=2.0,
+        )
+        assert reopened["state"] == "accepting"
     finally:
         await _stop_pool(pool)
 
@@ -358,7 +366,7 @@ async def test_real_two_worker_uvicorn_pool_closes_as_one_service(sock_dir) -> N
             assert all(response.status_code == 200 for response in await asyncio.gather(*held_requests))
             status = await control.get(
                 f"{MODEL_ADMISSION_URL_PREFIX}/status",
-                params={"wait_state": "paused", "timeout_s": 5.0},
+                params={"checkpoint_id": "ckpt-real-workers", "wait_state": "paused", "timeout_s": 5.0},
             )
             assert status.json()["state"] == "paused"
             assert status.json()["inflight_total"] == 0
