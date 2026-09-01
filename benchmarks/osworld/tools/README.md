@@ -7,17 +7,18 @@ configuration entry point; host checks and lifecycle wrappers live here:
 ```text
 model host       -> probe_model_endpoint.py
 environment host -> check_environment.sh
-agent/control     -> prepare.py -> start_control.sh -> run_eval.sh
-abnormal recovery -> cleanup_run.sh
+agent/control     -> prepare.py -> prefetch/opt-in deps -> start_control.sh -> run_eval.sh
+abnormal recovery -> cleanup_run.sh -> cleanup_opensandbox_run.py
 ```
 
 | Tool | Purpose |
 | --- | --- |
 | `probe_model_endpoint.py` | Require the configured model identity and optionally exercise the one- or three-image chat-completions request shape |
 | `check_environment.sh` | Validate local or SSH-reached Linux/Docker/KVM/qcow2 environment-host readiness |
-| `start_control.sh` | Preflight the agent/control build toolchain, then run `gym env start` |
+| `start_control.sh` | Preflight the build toolchain and explicitly prepared OSWorld agent venv, then run `gym env start` |
 | `run_eval.sh` | Supervisor-friendly wrapper around `gym eval run --no-serve` |
 | `cleanup_run.sh` | Recovery-only cleanup for stale processes or labeled Sandbox containers after abnormal termination |
+| `cleanup_opensandbox_run.py` | Read-only audit or opt-in reaping of OpenSandbox instances matching one exact run ID |
 | `prepare_osworld_vm.sh` | Download and verify the pinned OSWorld qcow2 baseline |
 
 Model serving itself belongs to the selected model's deployment project;
@@ -55,6 +56,13 @@ Both runtime wrappers require `OSWORLD_RUN_ID`. Set
 address. Their optional positional argument selects the root for logs and
 results; it defaults to the Gym repository root.
 
+`prepare.py` prints the exact `gym env prefetch` and
+`install_optional_runtime_deps.sh` commands for the configured managed agent
+venv. The install remains an explicit opt-in because these packages are
+excluded from Gym's shipped environments. `start_control.sh` validates their
+versions and imports and prints the same remediation if they are not ready; it
+does not install anything automatically.
+
 For a split-host Gym Docker deployment, run the wrappers on the agent/control
 host and point its normal Docker CLI at the OSWorld environment host. The
 identical qcow2 path and non-interactive SSH authorization are one-time host
@@ -89,3 +97,15 @@ validates both the PID environment and command before signaling it. Docker
 cleanup requires the Sandbox, OSWorld workload, and run-ID labels to match; it
 does not remove unlabeled or other-run containers. Model services are outside
 this lifecycle and are never stopped by this tool.
+
+When both `OPENSANDBOX_BASE_URL` and `OPENSANDBOX_API_KEY` are set,
+`cleanup_run.sh` also invokes the OpenSandbox reaper through the Gym Python
+environment. The reaper queries both OSWorld's `run-id` metadata and Gym's
+`nemo-gym.nvidia.com/run` attribution metadata, then rechecks returned metadata
+client-side before terminating anything. Run it without `--reap` for a
+read-only audit:
+
+```bash
+export OSWORLD_RUN_ID=my-osworld-run
+.venv/bin/python benchmarks/osworld/tools/cleanup_opensandbox_run.py
+```

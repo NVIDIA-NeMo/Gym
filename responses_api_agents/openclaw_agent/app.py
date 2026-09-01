@@ -14,18 +14,22 @@
 # limitations under the License.
 
 import asyncio
+import contextlib
 import copy
 import json
 import logging
 import os
 import shlex
 import shutil
+import signal
 from asyncio import Semaphore
+from collections.abc import Mapping
 from pathlib import Path
 from time import time
-from typing import Any, ClassVar, Optional
+from typing import Any, Callable, ClassVar, Optional
 from uuid import uuid4
 
+import psutil
 from fastapi import Request
 from pydantic import ConfigDict, Field
 
@@ -36,7 +40,6 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -47,13 +50,28 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
+    NeMoGymSummary,
+)
+from nemo_gym.rollout_observability import (
+    AgentEpisode,
+    AgentObservationBundle,
+    ObservationGap,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from responses_api_agents.openclaw_agent.observability import (
+    OPENCLAW_OBSERVATION_SOURCE,
+    OpenClawSessionTree,
+    build_openclaw_observation_tree,
+    build_openclaw_observations,
+    discover_openclaw_session_tree,
+)
 from responses_api_agents.openclaw_agent.setup_openclaw import ensure_openclaw
 
 
 LOG = logging.getLogger(__name__)
+_INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
 def _decode_last_json_dict_suffix(raw: str) -> Optional[dict[str, Any]]:
@@ -93,7 +111,7 @@ def _text_from_openclaw_payloads(envelope: dict[str, Any]) -> str:
 def parse_openclaw_output(stdout: str) -> tuple[list[Any], dict[str, int]]:
     envelope = _decode_last_json_dict_suffix(stdout)
     if not envelope:
-        return [], {"input_tokens": 0, "output_tokens": 0}
+        return [], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
 
     text = _text_from_openclaw_payloads(envelope)
     output_items: list[Any] = []
@@ -114,30 +132,85 @@ def parse_openclaw_output(stdout: str) -> tuple[list[Any], dict[str, int]]:
     cache_read = int(usage.get("cacheRead") or 0)
     input_tokens = int(usage.get("input") or 0) + cache_read
     output_tokens = int(usage.get("output") or 0)
-    return output_items, {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    return output_items, {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_tokens": cache_read,
+    }
 
 
-def parse_openclaw_session(session_text: str) -> list[Any]:
-    """Convert an OpenClaw session .jsonl into Gym output items, including tool calls"""
+def parse_openclaw_session_items(events: list[dict[str, Any]], *, include_input: bool = False) -> list[Any]:
+    """Convert OpenClaw session events into Gym conversation items."""
     output_items: list[Any] = []
-    for line in session_text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for event in events:
+        event_id = event.get("id")
         if event.get("type") != "message":
             continue
         message = event.get("message") or {}
+        if not isinstance(message, dict):
+            continue
         role = message.get("role")
         content = message.get("content")
-        if not isinstance(content, list):
+
+        if include_input and role in {"user", "system", "developer"}:
+            text = content if isinstance(content, str) else ""
+            if isinstance(content, list):
+                text = "\n".join(
+                    block.get("text", "")
+                    for block in content
+                    if isinstance(block, dict) and isinstance(block.get("text"), str) and block["text"]
+                )
+            if text:
+                output_items.append(NeMoGymEasyInputMessage(role=role, content=text))
+            continue
+        if not include_input and not isinstance(content, list):
             continue
 
         if role == "assistant":
-            texts = [b["text"] for b in content if isinstance(b, dict) and (b.get("text") or "").strip()]
+            reasoning = []
+            for key in ("reasoning_content", "reasoning_text", "thinking"):
+                value = message.get(key)
+                if isinstance(value, str) and value:
+                    reasoning.append(value)
+            message_reasoning = message.get("reasoning")
+            if isinstance(message_reasoning, str) and message_reasoning:
+                reasoning.append(message_reasoning)
+            elif isinstance(message_reasoning, dict):
+                for key in ("content", "text", "summary"):
+                    value = message_reasoning.get(key)
+                    if isinstance(value, str) and value:
+                        reasoning.append(value)
+            if isinstance(content, list):
+                reasoning.extend(
+                    text
+                    for block in content
+                    if isinstance(block, dict)
+                    and block.get("type") in {"thinking", "reasoning"}
+                    and isinstance((text := block.get("thinking") or block.get("text") or block.get("reasoning")), str)
+                    and text
+                )
+            if include_input and reasoning:
+                output_items.append(
+                    NeMoGymResponseReasoningItem(
+                        id=f"rs_{event_id or len(output_items)}",
+                        summary=[NeMoGymSummary(text="\n".join(reasoning), type="summary_text")],
+                    )
+                )
+
+            texts = [content] if include_input and isinstance(content, str) and content else []
+            if isinstance(content, list):
+                texts = [
+                    block["text"] for block in content if isinstance(block, dict) and (block.get("text") or "").strip()
+                ]
+                if include_input:
+                    texts = [
+                        block["text"]
+                        for block in content
+                        if isinstance(block, dict)
+                        and block.get("type") not in {"thinking", "reasoning", "toolCall"}
+                        and isinstance(block.get("text"), str)
+                        and block["text"].strip()
+                    ]
             if texts:
                 output_items.append(
                     NeMoGymResponseOutputMessage(
@@ -148,10 +221,12 @@ def parse_openclaw_session(session_text: str) -> list[Any]:
                         type="message",
                     )
                 )
-            for block in content:
+            for block in content if isinstance(content, list) else []:
                 if not isinstance(block, dict) or block.get("type") != "toolCall":
                     continue
                 args = block.get("arguments")
+                if include_input and args is None:
+                    args = block.get("partialArgs")
                 arguments = json.dumps(args) if isinstance(args, (dict, list)) else str(args or "")
                 call_id = block.get("id") or f"call-{uuid4().hex[:8]}"
                 output_items.append(
@@ -166,10 +241,16 @@ def parse_openclaw_session(session_text: str) -> list[Any]:
                 )
 
         elif role == "toolResult":
-            call_id = message.get("toolCallId", "")
-            result_text = "".join(
-                b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"
-            )
+            call_id = message.get("toolCallId") or (message.get("tool_call_id") if include_input else "") or ""
+            result_text = content if include_input and isinstance(content, str) else ""
+            if isinstance(content, list):
+                result_text = "".join(
+                    block.get("text", "")
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+            if include_input and not result_text and message.get("details") is not None:
+                result_text = json.dumps(message["details"], ensure_ascii=False)
             output_items.append(
                 NeMoGymFunctionCallOutput(
                     type="function_call_output",
@@ -180,6 +261,51 @@ def parse_openclaw_session(session_text: str) -> list[Any]:
             )
 
     return output_items
+
+
+def openclaw_session_conversation(
+    events: list[dict[str, Any]],
+    *,
+    input_items: list[Any] | None = None,
+    fallback_output: list[Any] | None = None,
+) -> list[Any]:
+    """Prefer retained transcript items and fill only evidence missing from the artifact."""
+    conversation = parse_openclaw_session_items(events, include_input=True)
+    inputs = input_items or []
+    fallback = fallback_output or []
+    if not conversation:
+        return [*inputs, *fallback]
+    retained_roles = {
+        role for item in conversation if (role := getattr(item, "role", None)) in {"user", "system", "developer"}
+    }
+    missing_inputs = (
+        [item for item in inputs if getattr(item, "role", None) not in retained_roles] if retained_roles else inputs
+    )
+    if missing_inputs:
+        conversation = [*missing_inputs, *conversation]
+    if fallback and not any(
+        getattr(item, "role", None) == "assistant"
+        or getattr(item, "type", None) in {"reasoning", "function_call", "function_call_output"}
+        for item in conversation
+    ):
+        conversation.extend(fallback)
+    return conversation
+
+
+def parse_openclaw_session(session_text: str) -> list[Any]:
+    """Convert an OpenClaw session .jsonl into Gym output items, including tool calls."""
+    return parse_openclaw_session_items(parse_openclaw_session_events(session_text))
+
+
+def parse_openclaw_session_events(session_text: str) -> list[dict[str, Any]]:
+    events = []
+    for line in session_text.splitlines():
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, RecursionError):
+            event = {"raw": line}
+        events.append(event if isinstance(event, dict) else {"raw": line})
+    return events
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -231,8 +357,8 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     timeout: int = 900
     extra_args: list[str] = []
     openclaw_config: dict[str, Any] = Field(default_factory=dict)
-    context_window: int = 262144
-    max_output_tokens: int = 131072
+    context_window: Optional[int] = None
+    max_output_tokens: Optional[int] = None
     # required: every config must pin an explicit version so runs are reproducible and cannot silently drift
     openclaw_version: str
 
@@ -249,6 +375,10 @@ class OpenClawAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     turns_used: int = 0
     finished_naturally: bool = False
+    ng_agent_observations: AgentObservationBundle | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class OpenClawAgent(SimpleResponsesAPIAgent):
@@ -256,6 +386,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
     config: OpenClawAgentConfig
     sem: Semaphore = None
+    sigterm_events: set = Field(default_factory=set)
+    sigterm_handler_installed: bool = False
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     # deny the interactive "message" channel so the headless agent finishes
@@ -285,42 +417,38 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         merged = list(dict.fromkeys([item for item in deny if isinstance(item, str)] + list(self._HEADLESS_TOOL_DENY)))
         tools["deny"] = merged
 
-    def _build_openclaw_config(self, base: dict[str, Any]) -> dict[str, Any]:
+    def _build_openclaw_config(self, base: dict[str, Any], rollout_id: Optional[str] = None) -> dict[str, Any]:
         cfg = copy.deepcopy(base)
         self._deep_merge(cfg, copy.deepcopy(self.config.openclaw_config))
         if self.config.model_server:
             providers = cfg.setdefault("models", {}).setdefault("providers", {})
             nemo = providers.setdefault("nemo", {})
+            model_entry = {
+                "id": self.config.model,
+                "name": self.config.model,
+                "api": "openai-completions",
+                "reasoning": True,
+                "input": ["text"],
+            }
+            if self.config.context_window is not None:
+                model_entry["contextWindow"] = self.config.context_window
+            if self.config.max_output_tokens is not None:
+                model_entry["maxTokens"] = self.config.max_output_tokens
             nemo.update(
                 {
                     "api": "openai-completions",
-                    "baseUrl": self._resolve_model_base_url(),
+                    "baseUrl": self._resolve_model_base_url(rollout_id),
                     "apiKey": "EMPTY",  # pragma: allowlist secret
-                    "models": [
-                        {
-                            "id": self.config.model,
-                            "name": self.config.model,
-                            "api": "openai-completions",
-                            "reasoning": True,
-                            "input": ["text"],
-                            "contextWindow": self.config.context_window,
-                            "maxTokens": self.config.max_output_tokens,
-                        }
-                    ],
+                    "models": [model_entry],
                 }
             )
         self._merge_headless_tool_denies(cfg)
         return cfg
 
-    def _resolve_model_base_url(self) -> str:
+    def _resolve_model_base_url(self, rollout_id: Optional[str] = None) -> str:
         if self.config.model_server is None:
             return ""
-        config = get_first_server_config_dict(
-            self.server_client.global_config_dict,
-            self.config.model_server.name,
-        )
-        base_url = self.server_client._build_server_base_url(config).rstrip("/")
-        return base_url if base_url.endswith("/v1") else f"{base_url}/v1"
+        return self.resolve_model_base_url(self.config.model_server.name, rollout_id)
 
     def _effective_model(self) -> str:
         return f"nemo/{self.config.model}" if self.config.model_server else self.config.model
@@ -357,10 +485,31 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
-            proc.kill()
+            self._kill_process_tree(proc.pid)
             await proc.communicate()
             raise TimeoutError(f"Timed out after {timeout}s: {shlex.join(args)}") from None
+        except asyncio.CancelledError:
+            # Cancellation (e.g. SIGTERM salvage) only stops us from awaiting the process; it does
+            # not stop the process itself. Kill it here so we never leak an orphaned process tree.
+            self._kill_process_tree(proc.pid)
+            with contextlib.suppress(Exception):
+                await proc.communicate()
+            raise
         return proc.returncode or 0, stdout.decode(errors="replace"), stderr.decode(errors="replace")
+
+    @staticmethod
+    def _kill_process_tree(pid: int) -> None:
+        """Kill a subprocess and every descendant it has already started."""
+        try:
+            parent = psutil.Process(pid)
+            children = parent.children(recursive=True)
+        except psutil.NoSuchProcess:
+            return
+        for child in reversed(children):
+            with contextlib.suppress(psutil.NoSuchProcess):
+                child.kill()
+        with contextlib.suppress(psutil.NoSuchProcess):
+            parent.kill()
 
     @staticmethod
     def _session_file(envelope: Optional[dict[str, Any]]) -> Optional[Path]:
@@ -369,8 +518,58 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         session_file = agent_meta.get("sessionFile") if isinstance(agent_meta, dict) else None
         return Path(session_file) if isinstance(session_file, str) and session_file else None
 
+    @staticmethod
+    def _find_partial_session(home: Path) -> Optional[Path]:
+        """Locate OpenClaw's session file on disk when there is no completion envelope to point at
+        it, i.e. the run was cut short by a timeout. OpenClaw writes the session incrementally, so
+        the transcript up to the last completed turn is already on disk; return the most recently
+        written .jsonl under the OpenClaw home that parses to at least one message."""
+        try:
+            candidates = sorted(
+                (p for p in home.rglob("*.jsonl") if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            return None
+        for path in candidates:
+            try:
+                if parse_openclaw_session(path.read_text(errors="replace")):
+                    return path
+            except OSError:
+                continue
+        return None
+
+    def _install_sigterm_handler(self) -> None:
+        """Install one process-level wrapper that fans SIGTERM out to active runs.
+
+        Keep the event loop's existing handler registered so uvicorn still receives the signal
+        through Python's wakeup fd and performs its normal graceful shutdown.
+        """
+        if self.sigterm_handler_installed:
+            return
+        previous = signal.getsignal(signal.SIGTERM)
+
+        def _on_sigterm(signum, frame) -> None:
+            for event in self.sigterm_events:
+                event.set()
+            if callable(previous):
+                previous(signum, frame)
+
+        try:
+            signal.signal(signal.SIGTERM, _on_sigterm)
+            self.sigterm_handler_installed = True
+        except ValueError:
+            pass  # signal handlers need the main thread; fall back to timeout-only salvage
+
     async def _run_openclaw(
-        self, instruction: str, system_prompt: Optional[str]
+        self,
+        instruction: str,
+        system_prompt: Optional[str],
+        rollout_id: Optional[str] = None,
+        observation_collector: Optional[
+            Callable[[str, list[dict[str, Any]], OpenClawSessionTree, list[ObservationGap]], None]
+        ] = None,
     ) -> tuple[list[Any], dict[str, int], str]:
         """setup and run agent. returns (output_items, usage, model_name)."""
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
@@ -381,19 +580,19 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
         try:
             code, _, stderr = await self._run_exec(
-                [*self.config.command_parts, "setup", "--non-interactive", "--accept-risk", "--mode", "local"],
+                [*self.config.command_parts, "onboard", "--non-interactive", "--accept-risk", "--skip-health"],
                 cwd=str(work_dir),
                 env=env,
                 timeout=self.config.setup_timeout,
             )
             if code:
-                LOG.warning("openclaw setup exited %d: %s", code, stderr)
+                raise RuntimeError(f"openclaw onboard exited {code}: {stderr}")
 
             config_path = home / ".openclaw" / "openclaw.json"
             if not config_path.is_file():
-                raise RuntimeError(f"openclaw setup did not produce a config at {config_path}: {stderr}")
+                raise RuntimeError(f"openclaw onboard did not produce a config at {config_path}: {stderr}")
             base_cfg = json.loads(config_path.read_text())
-            config_path.write_text(json.dumps(self._build_openclaw_config(base_cfg), indent=2) + "\n")
+            config_path.write_text(json.dumps(self._build_openclaw_config(base_cfg, rollout_id), indent=2) + "\n")
 
             cmd = [
                 *self.config.command_parts,
@@ -410,28 +609,83 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 prompt,
                 *self.config.extra_args,
             ]
-            code, stdout, stderr = await self._run_exec(cmd, cwd=str(work_dir), env=env, timeout=self.config.timeout)
+            # Run OpenClaw, salvaging a partial transcript if the run is cut short. It can be cut
+            # short two ways: our own self.config.timeout (raises TimeoutError), or an outer
+            # harness/sandbox timeout that SIGTERMs this whole process during its grace window before
+            # SIGKILL. In the SIGTERM case a plain `finally` would not run in time and the workdir
+            # would be lost, so we stop waiting on the signal, read OpenClaw's incrementally-written
+            # session off disk, and return it. Returning quickly lets the harness still write the
+            # response before the SIGKILL, so no harness change is needed.
+            code, stdout, stderr = None, "", ""
+            self._install_sigterm_handler()
+            sigterm_hit = asyncio.Event()
+            self.sigterm_events.add(sigterm_hit)
+            run_task = asyncio.ensure_future(
+                self._run_exec(cmd, cwd=str(work_dir), env=env, timeout=self.config.timeout)
+            )
+            try:
+                term_task = asyncio.ensure_future(sigterm_hit.wait())
+                done, _ = await asyncio.wait({run_task, term_task}, return_when=asyncio.FIRST_COMPLETED)
+                term_task.cancel()
+                if run_task in done:
+                    code, stdout, stderr = run_task.result()
+                else:
+                    LOG.warning("openclaw received SIGTERM; salvaging partial session")
+                    run_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await run_task
+            except TimeoutError:
+                LOG.warning("openclaw timed out after %ds; salvaging partial session", self.config.timeout)
+            finally:
+                self.sigterm_events.discard(sigterm_hit)
+
             if code:
                 LOG.warning("openclaw exited %d: %s", code, stderr)
-            LOG.debug("openclaw stdout (%d chars): %s", len(stdout), stdout[:2000])
+            if stdout:
+                LOG.debug("openclaw stdout (%d chars): %s", len(stdout), stdout[:2000])
 
             fallback_items, usage = parse_openclaw_output(stdout)
             envelope = _decode_last_json_dict_suffix(stdout)
 
+            # On a normal finish the envelope points at the session file; on a cut-short run there is
+            # no envelope, so fall back to locating the partial session that OpenClaw wrote to disk.
             output_items: list[Any] = []
-            session_path = self._session_file(envelope)
+            session_path = self._session_file(envelope) or self._find_partial_session(home)
             if session_path and session_path.is_file():
-                output_items = parse_openclaw_session(session_path.read_text(errors="replace"))
+                session_text = session_path.read_text(errors="replace")
+                output_items = parse_openclaw_session(session_text)
+                if observation_collector is not None:
+                    try:
+                        session_events = parse_openclaw_session_events(session_text)
+                        native_session_id = next(
+                            (
+                                event.get("id")
+                                for event in session_events
+                                if event.get("type") == "session" and isinstance(event.get("id"), str)
+                            ),
+                            session_path.stem,
+                        )
+                        session_tree, tree_gaps = discover_openclaw_session_tree(
+                            home / ".openclaw" / "agents",
+                            native_session_id,
+                        )
+                        observation_collector(native_session_id, session_events, session_tree, tree_gaps)
+                    except Exception:
+                        LOG.exception("failed to record OpenClaw session artifact")
             if not output_items:
                 output_items = fallback_items
             return output_items, usage, self.config.model
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
-    async def responses(
+    async def _create_response(
         self,
-        request: Request,
-        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        rollout_id: Optional[str] = None,
+        observation_collector: Optional[
+            Callable[[str, list[dict[str, Any]], OpenClawSessionTree, list[ObservationGap]], None]
+        ] = None,
+        output_collector: Optional[Callable[[list[Any]], None]] = None,
     ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
@@ -442,11 +696,18 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         system_prompt = "\n\n".join(system_parts) if system_parts else None
 
         try:
-            output_items, usage, model_name = await self._run_openclaw(user_message, system_prompt)
+            output_items, usage, model_name = await self._run_openclaw(
+                user_message,
+                system_prompt,
+                rollout_id=rollout_id,
+                observation_collector=observation_collector,
+            )
         except TimeoutError:
             LOG.warning("OpenClaw timed out, padding empty output so the rollout scores instead of erroring")
             output_items, usage, model_name = [], {"input_tokens": 0, "output_tokens": 0}, self.config.model
 
+        if output_collector is not None:
+            output_collector(list(output_items))
         if not output_items:
             LOG.warning("OpenClaw produced no assistant message. Padding empty output")
             output_items.append(
@@ -461,6 +722,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
+        cached_tokens = usage.get("cached_tokens", 0)
 
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
@@ -473,12 +735,105 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
                 output_tokens=output_tokens,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=input_tokens + output_tokens,
             ),
         )
+
+    async def responses(
+        self,
+        request: Request,
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+    ) -> NeMoGymResponse:
+        path_params = getattr(request, "path_params", None)
+        rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
+        if not isinstance(rollout_id, str):
+            return await self._create_response(body)
+        episode = await self._create_episode(body, rollout_id=rollout_id)
+        return episode.response.model_copy(
+            update={_INTERNAL_OBSERVATIONS_KEY: episode.observations.model_dump(mode="json")}
+        )
+
+    async def _create_episode(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        rollout_id: str,
+    ) -> AgentEpisode:
+        session_id: Optional[str] = None
+        session_events: list[dict[str, Any]] = []
+        session_tree: OpenClawSessionTree = []
+        tree_gaps: list[ObservationGap] = []
+        input_items: list[Any] = (
+            [NeMoGymEasyInputMessage(role="user", content=body.input)]
+            if isinstance(body.input, str)
+            else list(body.input)
+        )
+        observed_output: list[Any] = []
+
+        def collect(
+            value: str,
+            events: list[dict[str, Any]],
+            tree: OpenClawSessionTree,
+            gaps: list[ObservationGap],
+        ) -> None:
+            nonlocal session_id, session_events, session_tree, tree_gaps
+            session_id = value
+            session_events = events
+            session_tree = tree
+            tree_gaps = gaps
+
+        def collect_output(value: list[Any]) -> None:
+            observed_output.extend(value)
+
+        response = await self._create_response(
+            body,
+            rollout_id=rollout_id,
+            observation_collector=collect,
+            output_collector=collect_output,
+        )
+        try:
+            if session_tree:
+                tree_inputs = []
+                for invocation_id, parent_id, events in session_tree:
+                    conversation = openclaw_session_conversation(
+                        events,
+                        input_items=input_items if parent_id is None else None,
+                        fallback_output=observed_output if parent_id is None else None,
+                    )
+                    tree_inputs.append((invocation_id, parent_id, conversation, events))
+                observations = build_openclaw_observation_tree(
+                    tree_inputs,
+                    model_ref=self.config.model_server,
+                )
+                observations.gaps.extend(tree_gaps)
+            else:
+                transcript_available = any(event.get("type") == "message" for event in session_events)
+                observations = build_openclaw_observations(
+                    session_id or response.id,
+                    openclaw_session_conversation(
+                        session_events,
+                        input_items=input_items,
+                        fallback_output=observed_output,
+                    ),
+                    session_events,
+                    transcript_available=transcript_available,
+                    model_ref=self.config.model_server,
+                )
+                if any(gap.code == "subagent_hierarchy_unavailable" for gap in tree_gaps):
+                    observations.gaps = [
+                        gap for gap in observations.gaps if gap.code != "subagent_hierarchy_unavailable"
+                    ]
+                observations.gaps.extend(tree_gaps)
+        except Exception:
+            LOG.exception("failed to build OpenClaw observations")
+            observations = AgentObservationBundle(
+                source=OPENCLAW_OBSERVATION_SOURCE,
+                gaps=[ObservationGap(code="observation_capture_failed")],
+            )
+        return AgentEpisode(response=response, observations=observations)
 
     async def run(self, request: Request, body: OpenClawAgentRunRequest) -> OpenClawAgentVerifyResponse:
         async with self.sem:
@@ -493,15 +848,22 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             await raise_for_status(seed_resp)
             cookies = seed_resp.cookies
 
+            rollout_id = self.rollout_id_from_run(body)
             agent_resp = await self.server_client.post(
                 server_name=self.config.name,
-                url_path="/v1/responses",
+                url_path=self.url_path_for_run("/v1/responses", body),
                 json=body.responses_create_params,
                 cookies=cookies,
             )
             await raise_for_status(agent_resp)
             cookies = agent_resp.cookies
             agent_resp_json = await get_response_json(agent_resp)
+            raw_observations = (
+                agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None) if rollout_id is not None else None
+            )
+            observations = (
+                AgentObservationBundle.model_validate(raw_observations) if isinstance(raw_observations, dict) else None
+            )
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -521,9 +883,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             last = gym_resp.output[-1] if gym_resp.output else None
             naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
 
-            return OpenClawAgentVerifyResponse.model_validate(
-                verify_json | {"turns_used": turns, "finished_naturally": naturally}
-            )
+            result = verify_json | {"turns_used": turns, "finished_naturally": naturally}
+            if observations is not None:
+                result["ng_agent_observations"] = observations.model_dump(mode="json")
+            return OpenClawAgentVerifyResponse.model_validate(result)
 
 
 if __name__ == "__main__":

@@ -24,6 +24,12 @@ Run sandboxes through an OpenSandbox server and SDK.
 <Badge minimal outlined>provider</Badge> <Badge minimal outlined>opensandbox</Badge>
 </Card>
 
+<Card title="E2B Provider" href="/infrastructure/sandbox/e2b">
+Run isolated cloud sandboxes through E2B or an E2B-compatible gateway.
+
+<Badge minimal outlined>provider</Badge> <Badge minimal outlined>e2b</Badge>
+</Card>
+
 <Card title="Apptainer Provider" href="/infrastructure/sandbox/apptainer">
 Run sandboxes as local Apptainer instances on a host or HPC node.
 
@@ -80,7 +86,7 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 provider_config = {"apptainer": {}}
 
 spec = SandboxSpec(
-    image="docker://python:3.12-slim",
+    image="docker://python:3.13.14-slim",
     ttl_s=1800,
     ready_timeout_s=300,
     workdir="/sandbox",
@@ -295,7 +301,7 @@ from nemo_gym.sandbox import rewrite_image
 
 
 image = rewrite_image(
-    "docker.io/library/python:3.12-slim",
+    "docker.io/library/python:3.13.14-slim",
     [{"from": "docker.io/", "to": "mirror.example.com/dockerhub/"}],
 )
 ```

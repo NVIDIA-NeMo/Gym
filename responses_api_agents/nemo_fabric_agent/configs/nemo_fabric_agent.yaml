@@ -1,0 +1,22 @@
+nemo_fabric_agent:
+  responses_api_agents:
+    nemo_fabric_agent:
+      entrypoint: app.py
+      description: Run any installed agent harness through the typed NeMo Fabric lifecycle.
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      adapter_id: ???
+      model_provider: openai-compatible
+      model: gym-policy-model
+      model_api_key: local  # pragma: allowlist secret
+      concurrency: 32
+      timeout: 600
+      system_prompt: null
+      cwd: null
+      harness_settings: ???
+      fabric_config: ???
+      datasets: []
