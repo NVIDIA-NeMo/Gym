@@ -258,11 +258,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             if self.config.debug:
                 print(f"Running golden patch for {body.task_name}", file=stderr)
             golden_patch_result = await eval_sandbox.pty.exec(
-                f"bash {cwd}/solve.sh", session=pty_session, timeout_s=self.config.evaluation_timeout, detach=True
+                f"bash {cwd}/solve.sh", session=pty_session, timeout_s=self.config.evaluation_timeout
             )
-            # assert golden_patch_result.return_code == 0, (
-            #     f"Failed to apply golden patch for {body.task_name}: {golden_patch_result}"
-            # )
             golden_patch_output = (golden_patch_result.stderr or "") + (golden_patch_result.stdout or "")
             if self.config.debug:
                 print(f"Golden patch output for {body.task_name}: {golden_patch_output}", file=stderr)
@@ -282,7 +279,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         start_time = time()
         await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
         eval_result = await eval_sandbox.pty.exec(
-            "bash /tests/test.sh", session=pty_session, timeout_s=self.config.evaluation_timeout, detach=True
+            "bash /tests/test.sh", session=pty_session, timeout_s=self.config.evaluation_timeout
         )
         verification_time_taken = time() - start_time
         test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
