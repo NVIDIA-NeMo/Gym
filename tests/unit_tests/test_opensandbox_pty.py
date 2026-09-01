@@ -259,7 +259,7 @@ async def test_close_is_idempotent_and_tears_down() -> None:
     await session.close()
     await session.close()
     assert ws.closed
-    assert client.closed
+    assert not client.closed, "PTY sessions use the shared aiohttp client"
     assert client.delete_calls == [
         ("http://server/v1/sandboxes/sb-1/proxy/44772/pty/s-1", {"OPEN-SANDBOX-API-KEY": "k"})
     ]
@@ -332,7 +332,7 @@ async def test_open_pty_session_create_failure(post_status: int, match: str) -> 
             spec=SandboxPtySpec(),
             request_timeout_s=5.0,
         )
-    assert client.closed
+    assert not client.closed
 
 
 async def test_pty_create_propagates_server_detail() -> None:
@@ -346,7 +346,7 @@ async def test_pty_create_propagates_server_detail() -> None:
             spec=SandboxPtySpec(),
             request_timeout_s=5.0,
         )
-    assert client.closed
+    assert not client.closed
 
 
 async def test_pty_create_retries_proxy_transients(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -392,7 +392,7 @@ async def test_open_pty_session_ws_failure_deletes_session() -> None:
             request_timeout_s=5.0,
         )
     assert client.delete_calls[0][0] == "http://server/base/pty/s-1"
-    assert client.closed
+    assert not client.closed
 
 
 def test_effective_command_rewrites() -> None:
@@ -556,7 +556,7 @@ async def test_attach_pty_session_failure_closes_client() -> None:
             session_id="s-9",
             request_timeout_s=5.0,
         )
-    assert client.closed
+    assert not client.closed
     assert client.delete_calls == [], "attach must not delete a session it did not create"
 
 
@@ -628,7 +628,7 @@ async def test_provider_attach_pty_retries_timed_out_takeover(monkeypatch: pytes
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
     session = await provider.attach_pty(handle, "s-7", takeover=True)
     assert len(handed_out) == 2, "the timed-out takeover must be re-dialed once"
-    assert handed_out[0].closed, "the failed attempt's client must be released"
+    assert not handed_out[0].closed, "the failed attempt must not close the shared client"
     await session.close()
 
 
@@ -671,11 +671,11 @@ async def test_create_rejected_before_connected_raises_and_cleans_up() -> None:
             spec=SandboxPtySpec(),
             request_timeout_s=5.0,
         )
-    assert client.closed
+    assert not client.closed
     assert client.delete_calls[0][0] == "http://server/base/pty/s-1"
 
 
-async def test_connected_timeout_closes_session_and_client() -> None:
+async def test_connected_timeout_closes_session_and_keeps_shared_client_open() -> None:
     # Server accepts the socket but never sends `connected`.
     ws = FakeWs([])
     client = FakeHttpClient(ws=ws)
@@ -687,7 +687,7 @@ async def test_connected_timeout_closes_session_and_client() -> None:
             spec=SandboxPtySpec(),
             request_timeout_s=0.05,
         )
-    assert client.closed
+    assert not client.closed
     assert ws.closed
     assert client.delete_calls[0][0] == "http://server/base/pty/s-1"
 
@@ -745,6 +745,43 @@ async def test_send_failure_becomes_sandbox_pty_error() -> None:
     await session.close()
 
 
+async def test_send_waits_for_the_pump_to_reattach_a_closed_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pty_module.OpenSandboxPtySession, "_reattach_socket", _REAL_REATTACH)
+    first_ws = FakeWs([CONNECTED])
+    replacement_ws = FakeWs([CONNECTED])
+    client = FakeHttpClient(ws=first_ws)
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=first_ws,  # type: ignore[arg-type]
+        session_id="s-1",
+        session_url="http://server/v1/sandboxes/sb-1/proxy/44772/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+    )
+    await session._wait_connected(1.0)
+
+    reconnect_started = asyncio.Event()
+    allow_reconnect = asyncio.Event()
+
+    async def delayed_connect(**_: Any) -> FakeWs:
+        reconnect_started.set()
+        await allow_reconnect.wait()
+        return replacement_ws
+
+    monkeypatch.setattr(pty_module, "_connect_ws", delayed_connect)
+    first_ws.closed = True
+    await reconnect_started.wait()
+
+    writer = asyncio.create_task(session.write(b"ls\n"))
+    await asyncio.sleep(0)
+    assert not writer.done()
+
+    allow_reconnect.set()
+    await writer
+    assert replacement_ws.sent == [b"\x00ls\n"]
+    await session.close()
+
+
 async def test_provider_aclose_closes_live_pty_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
     pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
@@ -761,7 +798,7 @@ async def test_provider_aclose_closes_live_pty_sessions(monkeypatch: pytest.Monk
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
     session = await provider.create_pty(handle, SandboxPtySpec())
     await provider.aclose()
-    assert client.closed, "aclose must close PTY-owned aiohttp clients"
+    assert not client.closed, "aclose must not close the shared aiohttp client"
     assert ws.closed
     await session.close()
 
@@ -879,7 +916,7 @@ async def test_open_pty_session_rejects_exit_before_connected() -> None:
             spec=SandboxPtySpec(),
             request_timeout_s=5.0,
         )
-    assert client.closed
+    assert not client.closed
 
 
 async def test_ended_session_is_closed_and_prune_releases_it(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -913,7 +950,7 @@ async def test_ended_session_is_closed_and_prune_releases_it(monkeypatch: pytest
     # without DELETEing server-side state: the pump may have ended because
     # another client took the session over and still runs it.
     await provider.create_pty(handle, SandboxPtySpec())
-    assert clients[0].closed, "pruning must release the ended session's client"
+    assert not clients[0].closed, "pruning must not close the shared aiohttp client"
     assert clients[0].delete_calls == [], "pruning must never end the session server-side"
     assert first not in provider._pty_sessions
     await provider.aclose()
@@ -935,7 +972,7 @@ async def test_attach_never_deletes_a_session_it_did_not_create() -> None:
             takeover=False,
             request_timeout_s=5.0,
         )
-    assert client.closed
+    assert not client.closed
     assert client.delete_calls == [], "attach must not DELETE a session it did not create"
 
     # Closing a successfully attached session leaves it alive for its owner.
@@ -949,7 +986,7 @@ async def test_attach_never_deletes_a_session_it_did_not_create() -> None:
         request_timeout_s=5.0,
     )
     await session.close()
-    assert client2.closed and ws2.closed
+    assert not client2.closed and ws2.closed
     assert client2.delete_calls == [], "detaching must not end the session"
 
 
@@ -969,7 +1006,7 @@ async def test_initial_resize_failure_closes_session_and_client() -> None:
             spec=SandboxPtySpec(rows=50, cols=200),
             request_timeout_s=5.0,
         )
-    assert client.closed
+    assert not client.closed
     assert ws.closed
     assert client.delete_calls[0][0] == "http://s/b/pty/s-1"
 
