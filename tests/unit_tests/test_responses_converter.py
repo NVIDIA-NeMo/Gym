@@ -1311,6 +1311,42 @@ def test_chat_completion_to_response_sanity(converter: ResponsesConverter, finis
     assert expected_response == actual_response
 
 
+@pytest.mark.parametrize(
+    ("chat_completion_id", "preserve_envelope_id", "expected_id"),
+    [
+        # Default path mints a Gym-owned resp_* id regardless of the backend's id.
+        ("chatcmpl-777", False, "resp_123"),
+        # Capture path reuses the served envelope id: it is the terminal-attribution join key.
+        ("chatcmpl-777", True, "chatcmpl-777"),
+        # A backend that omits its id still gets a minted one (the capture
+        # record site fails closed on the missing id independently).
+        ("", True, "resp_123"),
+    ],
+)
+def test_chat_completion_to_response_envelope_id(
+    converter: ResponsesConverter, chat_completion_id, preserve_envelope_id, expected_id
+):
+    response = converter.chat_completion_to_response(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(model="", input="hello"),
+        chat_completion=NeMoGymChatCompletion(
+            id=chat_completion_id,
+            created=0,
+            model="",
+            object="chat.completion",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(role="assistant", content="hi", tool_calls=[]),
+                )
+            ],
+        ),
+        preserve_envelope_id=preserve_envelope_id,
+    )
+
+    assert response.id == expected_id
+
+
 def test_chat_completion_to_response_preserves_unknown_usage_details(converter: ResponsesConverter):
     response = converter.chat_completion_to_response(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(model="", input="hello"),

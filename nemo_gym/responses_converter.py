@@ -742,6 +742,8 @@ class ResponsesConverter(BaseModel):
         self,
         responses_create_params: NeMoGymResponseCreateParamsNonStreaming,
         chat_completion: NeMoGymChatCompletion,
+        *,
+        preserve_envelope_id: bool = False,
     ) -> NeMoGymResponse:
         choice = chat_completion.choices[0]
 
@@ -782,12 +784,14 @@ class ResponsesConverter(BaseModel):
 
         # Chat Completion -> Response
         return NeMoGymResponse(
-            # Reuse the chat completion's envelope id instead of minting one.
-            # Token capture records the id of the served payload; the id the
-            # client keeps must match it for terminal attribution to join the
-            # scored response back to its captured call. A minted id here
-            # would break that join for the Responses dialect.
-            id=str(getattr(chat_completion, "id", "") or "") or f"resp_{uuid4().hex}",
+            # Under external token capture the chat completion's envelope id is
+            # reused instead of minting one: capture records the id of the served
+            # payload, and the id the client keeps must match it for terminal
+            # attribution to join the scored response back to its captured call.
+            # Everywhere else Gym mints the id, keeping the resp_* format and
+            # uniqueness independent of the backend.
+            id=(str(getattr(chat_completion, "id", "") or "") if preserve_envelope_id else "")
+            or f"resp_{uuid4().hex}",
             created_at=chat_completion.created,
             model=responses_create_params.model,
             object="response",

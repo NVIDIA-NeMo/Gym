@@ -408,7 +408,11 @@ class VLLMModel(SimpleResponsesAPIModel):
         chat_completion_response = await self.chat_completions(request, chat_completion_create_params)
 
         return self._converter.chat_completion_to_response(
-            responses_create_params=body, chat_completion=chat_completion_response
+            responses_create_params=body,
+            chat_completion=chat_completion_response,
+            # The served envelope id is the terminal-attribution join key; only
+            # capture-enabled servers trade the minted resp_* id for it.
+            preserve_envelope_id=self._external_capture_enabled,
         )
 
     def _apply_sampling_overrides(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
