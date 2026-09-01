@@ -18,6 +18,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryRecord,
     join_model_call_observations,
 )
+from responses_api_agents.opencode_agent.observability import associate_opencode_session_calls
 
 
 @pytest.mark.parametrize(
@@ -172,9 +173,12 @@ def test_join_model_calls_uses_exact_opencode_session_ownership() -> None:
         ModelCallRecord(model_call_id="call-unknown", client_session_id="unknown", call_index=2),
     ]
 
-    joined = join_model_call_observations(bundle, calls)
-    joined_again = join_model_call_observations(joined, calls)
+    associated = associate_opencode_session_calls(bundle, calls)
+    joined = join_model_call_observations(associated, calls)
+    associated_again = associate_opencode_session_calls(joined, calls)
+    joined_again = join_model_call_observations(associated_again, calls)
 
+    assert all(not invocation.model_calls for invocation in bundle.records)
     assert joined_again.model_dump() == joined.model_dump()
     invocations = {record.invocation_id: record for record in joined.records if isinstance(record, AgentInvocation)}
     assert [reference.model_call_id for reference in invocations["root"].model_calls] == ["call-root"]
@@ -182,6 +186,76 @@ def test_join_model_calls_uses_exact_opencode_session_ownership() -> None:
     assert [gap.detail for gap in joined.gaps if gap.code == "model_call_ownership_unavailable"] == [
         "capture:call-unknown:call_index=2"
     ]
+
+
+def test_opencode_session_association_does_not_mutate_or_retain_phantom_calls() -> None:
+    bundle = AgentObservationBundle(source="opencode", records=[AgentInvocation(invocation_id="root")])
+    first = [ModelCallRecord(model_call_id="first", client_session_id="root", call_index=0)]
+    second = [ModelCallRecord(model_call_id="second", client_session_id="root", call_index=0)]
+
+    first_result = associate_opencode_session_calls(bundle, first)
+    second_result = associate_opencode_session_calls(bundle, second)
+
+    assert not bundle.records[0].model_calls
+    assert [reference.model_call_id for reference in first_result.records[0].model_calls] == ["first"]
+    assert [reference.model_call_id for reference in second_result.records[0].model_calls] == ["second"]
+
+
+def test_opencode_session_association_ignores_other_producers() -> None:
+    bundle = AgentObservationBundle(source="other", records=[AgentInvocation(invocation_id="root")])
+
+    assert associate_opencode_session_calls(bundle, []) is bundle
+
+
+def test_opencode_session_association_skips_calls_without_a_session_id() -> None:
+    bundle = AgentObservationBundle(source="opencode", records=[AgentInvocation(invocation_id="")])
+    calls = [ModelCallRecord(model_call_id="unowned", call_index=0)]
+
+    associated = associate_opencode_session_calls(bundle, calls)
+    joined = join_model_call_observations(associated, calls)
+
+    assert not associated.records[0].model_calls
+    assert [gap.detail for gap in joined.gaps if gap.code == "model_call_ownership_unavailable"] == [
+        "capture:unowned:call_index=0"
+    ]
+
+
+def test_opencode_session_association_deduplicates_existing_exact_references() -> None:
+    model_ref = ModelServerRef(name="policy", type="responses_api_models")
+    bundle = AgentObservationBundle(
+        source="opencode",
+        records=[
+            AgentInvocation(
+                invocation_id="root",
+                model_calls=[ModelCallRef(model_ref=model_ref, response_id="response")],
+            )
+        ],
+    )
+    calls = [
+        ModelCallRecord(
+            model_call_id="call",
+            client_session_id="root",
+            model_ref=model_ref,
+            response_id="response",
+            call_index=0,
+        )
+    ]
+
+    associated = associate_opencode_session_calls(bundle, calls)
+
+    assert len(associated.records[0].model_calls) == 1
+
+
+def test_opencode_session_association_scales_to_long_rollouts() -> None:
+    bundle = AgentObservationBundle(source="opencode", records=[AgentInvocation(invocation_id="root")])
+    calls = [
+        ModelCallRecord(model_call_id=f"call-{index}", client_session_id="root", call_index=index)
+        for index in range(2_000)
+    ]
+
+    associated = associate_opencode_session_calls(bundle, calls)
+
+    assert len(associated.records[0].model_calls) == len(calls)
 
 
 def test_join_model_calls_does_not_guess_ambiguous_response_ids() -> None:
