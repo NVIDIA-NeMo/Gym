@@ -315,16 +315,6 @@ def join_model_call_observations(
             }
         )
 
-    if result.source == "opencode":
-        invocations_by_id = {invocation.invocation_id: invocation for invocation in invocations}
-        for call in captured:
-            invocation = invocations_by_id.get(call.client_session_id or "")
-            if invocation is None or not call.model_call_id:
-                continue
-            if any(call in matches(reference) for reference in invocation.model_calls):
-                continue
-            invocation.model_calls.append(canonical(call))
-
     join_codes = {
         "model_call_reference_ambiguous",
         "model_call_reference_conflict",

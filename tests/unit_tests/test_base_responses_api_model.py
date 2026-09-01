@@ -1352,6 +1352,37 @@ def test_merge_capture_owns_opencode_calls_by_client_session(tmp_path):
     assert record["ng_agent_observations"]["gaps"] == []
 
 
+def test_merge_capture_reports_opencode_session_association_failure(tmp_path, monkeypatch):
+    from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    exchange = _capture_exchange("chat", "A", {}, {"id": "resp-A"})
+    exchange["client_session_id"] = "opencode-root"
+    store.record("0-0", exchange)
+    record = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "ng_agent_observations": {
+            "source": "opencode",
+            "records": [{"kind": "agent_invocation", "invocation_id": "opencode-root"}],
+        },
+    }
+
+    def fail_association(*_args, **_kwargs):
+        raise RuntimeError("association failed")
+
+    monkeypatch.setattr(
+        "responses_api_agents.opencode_agent.observability.associate_opencode_session_calls",
+        fail_association,
+    )
+    merge_model_call_capture_into_record(record, [tmp_path])
+
+    assert {(gap["code"], gap["detail"]) for gap in record["ng_agent_observations"]["gaps"]} == {
+        ("model_call_ownership_unavailable", "opencode_session_join_failed"),
+        ("model_call_ownership_unavailable", "capture:call-A:call_index=0"),
+    }
+
+
 def test_merge_capture_reports_missing_capture(tmp_path):
     from nemo_gym.base_responses_api_model import CaptureStore, merge_model_call_capture_into_record
 
