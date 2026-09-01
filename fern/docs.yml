@@ -34,6 +34,10 @@ versions:
   - display-name: Main
     path: versions/main.yml
     slug: main
+  - display-name: "0.5.0"
+    path: versions/v0.5.0.yml
+    slug: v0.5.0
+    availability: stable
   - display-name: "0.4.0"
     path: versions/v0.4.0.yml
     slug: v0.4.0
@@ -102,6 +106,15 @@ redirects:
     destination: "/nemo/gym/tutorials/training-tutorials/nemo-rl-grpo/single-node-training"
   - source: "/nemo/gym/tutorials/offline-training-w-rollouts.html"
     destination: "/nemo/gym/tutorials/training-tutorials/offline-training-w-rollouts"
+  # Pre-nest Sphinx/Fern paths: tutorials/nemo-rl-grpo → tutorials/training-tutorials/nemo-rl-grpo
+  - source: "/nemo/gym/tutorials/nemo-rl-grpo"
+    destination: "/nemo/gym/main/tutorials/training-tutorials/nemo-rl-grpo"
+  - source: "/nemo/gym/tutorials/nemo-rl-grpo/:path*"
+    destination: "/nemo/gym/main/tutorials/training-tutorials/nemo-rl-grpo/:path*"
+  - source: "/nemo/gym/main/tutorials/nemo-rl-grpo"
+    destination: "/nemo/gym/main/tutorials/training-tutorials/nemo-rl-grpo"
+  - source: "/nemo/gym/main/tutorials/nemo-rl-grpo/:path*"
+    destination: "/nemo/gym/main/tutorials/training-tutorials/nemo-rl-grpo/:path*"
   # Renamed/moved pages within the Fern site
   - source: "/nemo/gym/training-tutorials"
     destination: "/nemo/gym/tutorials/training-tutorials"
@@ -118,6 +131,15 @@ redirects:
     destination: "/nemo/gym/main/get-started/installation"
   - source: "/nemo/gym/main/get-started/rollout-collection"
     destination: "/nemo/gym/main/get-started/quickstart"
+  # Tutorial sections were nested under `/tutorials/`; preserve old flat URLs.
+  - source: "/nemo/gym/main/training-tutorials"
+    destination: "/nemo/gym/main/tutorials/training-tutorials"
+  - source: "/nemo/gym/main/training-tutorials/:path*"
+    destination: "/nemo/gym/main/tutorials/training-tutorials/:path*"
+  - source: "/nemo/gym/main/evaluation-tutorials"
+    destination: "/nemo/gym/main/tutorials/evaluation-tutorials"
+  - source: "/nemo/gym/main/evaluation-tutorials/:path*"
+    destination: "/nemo/gym/main/tutorials/evaluation-tutorials/:path*"
   - source: "/nemo/gym/latest/about/concepts/core-components"
     destination: "/nemo/gym/main/about/architecture"
   - source: "/nemo/gym/main/about/core-components"
@@ -181,6 +203,24 @@ redirects:
     destination: "/nemo/gym/v0.2.1"
   - source: "/nemo/gym/0.2.0/:path*"
     destination: "/nemo/gym/v0.2.1/:path*"
+  # Retired pre-Fern trains 0.1.0 / 0.1.1 → main (no Fern snapshot exists).
+  # Rewrite GRPO paths in one hop; other paths fall through to /main/:path*.
+  - source: "/nemo/gym/0.1.0/tutorials/nemo-rl-grpo"
+    destination: "/nemo/gym/main/tutorials/training-tutorials/nemo-rl-grpo"
+  - source: "/nemo/gym/0.1.0/tutorials/nemo-rl-grpo/:path*"
+    destination: "/nemo/gym/main/tutorials/training-tutorials/nemo-rl-grpo/:path*"
+  - source: "/nemo/gym/0.1.1/tutorials/nemo-rl-grpo"
+    destination: "/nemo/gym/main/tutorials/training-tutorials/nemo-rl-grpo"
+  - source: "/nemo/gym/0.1.1/tutorials/nemo-rl-grpo/:path*"
+    destination: "/nemo/gym/main/tutorials/training-tutorials/nemo-rl-grpo/:path*"
+  - source: "/nemo/gym/0.1.0"
+    destination: "/nemo/gym/main"
+  - source: "/nemo/gym/0.1.0/:path*"
+    destination: "/nemo/gym/main/:path*"
+  - source: "/nemo/gym/0.1.1"
+    destination: "/nemo/gym/main"
+  - source: "/nemo/gym/0.1.1/:path*"
+    destination: "/nemo/gym/main/:path*"
   # README/blog links that pointed to Sphinx pages whose canonical was renamed in Fern
   - source: "/nemo/gym/latest/training-tutorials/unsloth-training"
     destination: "/nemo/gym/tutorials/training-tutorials/unsloth"

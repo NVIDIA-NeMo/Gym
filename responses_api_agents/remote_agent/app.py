@@ -62,6 +62,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    accumulate_response_usage,
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import (
@@ -184,29 +185,25 @@ class RemoteAgent(SimpleResponsesAPIAgent):
             output = agent_response.output
             new_outputs.extend(output)
 
-            if not usage:
-                usage = agent_response.usage
-                agent_response.usage = None
-
-            if usage and agent_response.usage:
-                usage.input_tokens += agent_response.usage.input_tokens
-                usage.output_tokens += agent_response.usage.output_tokens
-                usage.total_tokens += agent_response.usage.total_tokens
-
-                # TODO support more advanced token details
-                usage.input_tokens_details.cached_tokens = 0
-                usage.output_tokens_details.reasoning_tokens = 0
+            usage = accumulate_response_usage(usage, agent_response.usage)
+            agent_response.usage = None
 
             if agent_response.incomplete_details:
                 break
 
             # Execute only unpaired calls: a call the service already answered itself (matching
             # function_call_output in the same response) is its own internal-tool record and
-            # passes through into the trajectory untouched.
-            answered_call_ids = {o.call_id for o in output if o.type == "function_call_output"}
-            all_fn_calls: List[NeMoGymResponseFunctionToolCall] = [
-                o for o in output if o.type == "function_call" and o.call_id not in answered_call_ids
-            ]
+            # passes through into the trajectory untouched. Duplicate call_ids collapse to the
+            # last occurrence (call_id is unique by contract).
+            pending_calls: Dict[str, NeMoGymResponseFunctionToolCall] = {}
+            answered_call_ids = set()
+            for item in output:
+                if item.type == "function_call_output":
+                    answered_call_ids.add(item.call_id)
+                    pending_calls.pop(item.call_id, None)
+                elif item.type == "function_call" and item.call_id not in answered_call_ids:
+                    pending_calls[item.call_id] = item
+            all_fn_calls: List[NeMoGymResponseFunctionToolCall] = list(pending_calls.values())
             all_output_messages: List[NeMoGymResponseOutputMessage] = [
                 o for o in output if o.type == "message" and o.role == "assistant"
             ]
