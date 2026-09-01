@@ -836,6 +836,32 @@ async def test_provider_attach_pty_keeps_refusal_when_status_unavailable(
         await provider.attach_pty(handle, "s-7", takeover=True)
 
 
+async def test_provider_session_reports_non_oom_death_on_server_error_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A session whose socket dies with a server-error close while the sandbox
+    is in a terminal non-OOM state (node lost) must name the death, not the
+    close code — seen live as a bare 'close code 1011' on verify()."""
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    class LostRaw:
+        async def get_endpoint(self, port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint="server/v1/sandboxes/sb-1/proxy/44772", headers={})
+
+        async def get_info(self) -> SimpleNamespace:
+            return SimpleNamespace(status=SimpleNamespace(state="Failed", reason="FAILED", message="node lost"))
+
+    provider = OpenSandboxProvider(connection={"domain": "server", "api_key": "k", "protocol": "https"})
+    dying = FakeWs([CONNECTED], close_code=1011)
+    dying.closed = True
+    monkeypatch.setattr(provider, "_pty_http_client", lambda: FakeHttpClient(ws=dying))
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=LostRaw())
+    session = await provider.attach_pty(handle, "s-7", takeover=True)
+    with pytest.raises(SandboxPtyError, match="Sandbox is dead"):
+        await session.wait_exit(timeout_s=5)
+    await session.close()
+
+
 async def test_create_rejected_before_connected_raises_and_cleans_up() -> None:
     # The session we created is torn down when the socket is rejected.
     ws = FakeWs([], close_code=1008)

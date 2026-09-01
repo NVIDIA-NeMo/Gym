@@ -1487,7 +1487,7 @@ class OpenSandboxProvider:
             headers=headers,
             spec=spec,
             request_timeout_s=request_timeout_s,
-            diagnose=lambda: self._oom_death_notice(handle),
+            diagnose=lambda: self._oom_death_notice(handle, any_death=True),
         )
         await self._retire_closed_pty_sessions()
         self._pty_sessions.add(session)
@@ -1529,7 +1529,7 @@ class OpenSandboxProvider:
                     takeover=takeover,
                     since=since,
                     request_timeout_s=request_timeout_s,
-                    diagnose=lambda: self._oom_death_notice(handle),
+                    diagnose=lambda: self._oom_death_notice(handle, any_death=True),
                 )
                 break
             except SandboxPtyError as e:
