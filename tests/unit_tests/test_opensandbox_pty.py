@@ -590,6 +590,67 @@ async def test_evicted_session_reports_takeover() -> None:
     await session.close()
 
 
+async def _diagnosed_session(close_code: int, notice: str | None) -> tuple[OpenSandboxPtySession, FakeWs, list[int]]:
+    """Session whose socket dies with ``close_code``; diagnose returns ``notice``."""
+    calls: list[int] = []
+
+    async def diagnose() -> str | None:
+        calls.append(1)
+        return notice
+
+    ws = FakeWs([CONNECTED], close_code=close_code)
+    session = OpenSandboxPtySession(
+        client=FakeHttpClient(ws=ws),  # type: ignore[arg-type]
+        ws=ws,  # type: ignore[arg-type]
+        session_id="s-1",
+        session_url="http://server/v1/sandboxes/sb-1/proxy/44772/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+        diagnose=diagnose,
+    )
+    return session, ws, calls
+
+
+async def test_unexpected_close_reports_oom_diagnosis() -> None:
+    # A socket dying with a bare server-error close often means the sandbox
+    # itself died; the diagnosis (an OOM kill here) must replace the close code
+    # everywhere the session's death surfaces.
+    session, ws, calls = await _diagnosed_session(1011, "Sandbox was OOM-killed. state='Failed'")
+    ws.closed = True
+    with pytest.raises(SandboxPtyError, match="OOM-killed"):
+        await session.wait_exit(timeout_s=5)
+    with pytest.raises(SandboxPtyError, match="OOM-killed"):
+        await session.read()
+    assert calls == [1]
+    await session.close()
+
+
+async def test_unexpected_close_without_diagnosis_keeps_close_code() -> None:
+    session, ws, calls = await _diagnosed_session(1011, None)
+    ws.closed = True
+    with pytest.raises(SandboxPtyError, match="close code 1011"):
+        await session.wait_exit(timeout_s=5)
+    assert calls == [1]
+    await session.close()
+
+
+async def test_takeover_close_skips_diagnosis() -> None:
+    # An eviction names its own cause; the sandbox is alive, so don't poll it.
+    session, ws, calls = await _diagnosed_session(4001, "Sandbox was OOM-killed.")
+    ws.closed = True
+    with pytest.raises(SandboxPtyError, match="taken over"):
+        await session.wait_exit(timeout_s=5)
+    assert calls == []
+    await session.close()
+
+
+async def test_user_close_skips_diagnosis() -> None:
+    session, _, calls = await _diagnosed_session(1000, "Sandbox was OOM-killed.")
+    await session._wait_connected(1.0)
+    await session.close()
+    assert calls == []
+
+
 async def test_provider_attach_pty_reuses_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
     pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
