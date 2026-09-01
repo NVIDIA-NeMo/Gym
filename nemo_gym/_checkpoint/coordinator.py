@@ -44,7 +44,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 
 from nemo_gym._checkpoint.admission import AdmissionLimiter
 from nemo_gym._checkpoint.control import (
@@ -349,7 +349,11 @@ def build_coordinator_control_app(
 
         async def run() -> dict[str, Any]:
             await coordinator.close_admission(body.checkpoint_id)
-            status = await _await_worker_acks(min(ack_timeout_s, max(deadline.remaining(), 0.001)))
+            try:
+                status = await _await_worker_acks(min(ack_timeout_s, max(deadline.remaining(), 0.001)))
+            except BaseException:
+                await coordinator.resume_admission()
+                raise
             return {
                 "state": status["state"],
                 "workers": {
@@ -360,22 +364,35 @@ def build_coordinator_control_app(
                 "waiters_total": status["waiters_total"],
             }
 
-        return await fence.run_operation(
+        result = await fence.run_operation(
             body.checkpoint_id,
             "model-admission/pause",
             allowed_phases=frozenset({CheckpointPhase.IDLE}),
             phase_during=CheckpointPhase.PREPARING,
-            phase_after=CheckpointPhase.PREPARED,
+            phase_after=CheckpointPhase.PREPARING,
             run=run,
             deadline=deadline,
         )
+        if result["state"] == AdmissionState.PAUSED.value:
+            fence.mark_prepared(body.checkpoint_id)
+        return result
 
     @app.get(f"{MODEL_ADMISSION_URL_PREFIX}/status")
-    async def coordinator_status(wait_state: Optional[str] = None, timeout_s: float = 0.0) -> dict[str, Any]:
+    async def coordinator_status(
+        checkpoint_id: str = Query(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"),
+        wait_state: Optional[str] = None,
+        timeout_s: float = 0.0,
+    ) -> dict[str, Any]:
+        fence.require_phase(
+            checkpoint_id,
+            frozenset({CheckpointPhase.PREPARING, CheckpointPhase.PREPARED}),
+        )
         if wait_state == "paused" and timeout_s > 0:
             status = await coordinator.wait_until(lambda s: s["state"] == "paused", timeout_s=timeout_s)
         else:
             status = coordinator.status()
+        if status["state"] == AdmissionState.PAUSED.value:
+            fence.mark_prepared(checkpoint_id)
         return status
 
     @app.post(f"{MODEL_ADMISSION_URL_PREFIX}/resume")

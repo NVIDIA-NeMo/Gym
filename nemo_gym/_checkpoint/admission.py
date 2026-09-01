@@ -205,6 +205,11 @@ class AdmissionLimiter:
         return aborted
 
     def install_tombstone(self, logical_rollout_id: str, attempt_index: int) -> None:
+        """Install a fence for an already-logical identity (checkpoint restore).
+
+        The checkpoint records logical IDs and explicit attempt indices.
+        This method preserves those values without parsing capture-key suffixes.
+        """
         self._tombstones.add((logical_rollout_id, attempt_index))
 
     def tombstones(self) -> list[tuple[str, int]]:
