@@ -104,7 +104,7 @@ Check IDs identify both the evidence being evaluated and the condition detected.
 | `model_call_runaway_generation` | Policy-model call | An exactly bound policy-model call ended with `finish_reason: length` and its saved response contains no answer or reasoning content. |
 | `model_call_zero_completion_tokens` | Policy-model call | An exactly bound policy-model call reports zero completion tokens. |
 | `task_consistently_unhealthy` | Task | At least two repeats are computable and every computable repeat is unhealthy. Unobserved repeats do not prevent the flag. |
-| `task_no_successful_model_calls` | Task | Every repeat has at least one policy-model-call reference, every reference resolves to exactly one captured call, and none of the matched calls completed successfully. |
+| `task_no_successful_model_calls` | Task | Every repeat has at least one turn-to-model-call reference, every turn reference resolves to exactly one captured call, and none of those turn-bound calls completed successfully. |
 
 ### What Counts as Agent Activity
 
@@ -133,7 +133,9 @@ evaluated once. Unreferenced model calls are not assigned to the policy model be
 The per-call checks are `model_call_failed`, `model_call_missing_token_counts`, `model_call_runaway_generation`,
 `model_call_zero_completion_tokens`, and `trajectory_capture_mismatch`. Invocation ownership is sufficient for these checks
 because each evaluates one call or one explicit reference independently. `rollout_token_count_mismatch` and
-`task_no_successful_model_calls` remain turn-bound; this change does not broaden their aggregate accounting rules.
+`task_no_successful_model_calls` use only turn-owned calls. These aggregate checks require per-turn placement: an invocation can
+also own support calls that should be inspected individually but must not satisfy a trajectory-level token total or successful-call
+claim.
 
 <Note>
   The conservative binding rule avoids attributing a judge or user-simulator failure to the evaluated model. Its trade-off is
@@ -174,9 +176,9 @@ conflict produces a finding.
 least two computable repeats and flags the task when all of them are unhealthy. An additional unobserved repeat does not erase
 the repeated observed failures.
 
-`task_no_successful_model_calls` requires complete policy-model-call bindings for every repeat. If any repeat lacks complete
-bindings, the task check is unobserved. This prevents the runner from claiming that a task had no successful policy-model call
-when an unobserved repeat might contain one.
+`task_no_successful_model_calls` requires complete turn-to-model-call bindings for every repeat. If any repeat lacks complete
+turn bindings, the task check is unobserved. Invocation-only support calls do not satisfy this task-level check. This prevents the
+runner from claiming that a task had no successful trajectory call when an unobserved repeat might contain one.
 
 Duplicate persisted records are kept in the per-rollout report and counted at run level, but records with the same task and
 rollout indices count as one repeat during task-level reduction. This prevents copied records from appearing to be independent

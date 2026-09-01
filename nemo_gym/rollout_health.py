@@ -27,7 +27,7 @@ from nemo_gym.health.checks import (
     _ROLLOUT_SPECS,
     _TASK_SPECS,
     CHECK_REGISTRY,
-    _bind_policy_calls,
+    _bind_policy_call_views,
     _canonical_trajectory,
     _is_failed,
     _is_successful,
@@ -42,6 +42,7 @@ from nemo_gym.health.checks import (
     normalize_ignored_checks,
 )
 from nemo_gym.health.types import (
+    CALL_BINDING_INPUTS,
     QUALITY_SUMMARY_FILENAME,
     ROLLOUT_ID_KEY,
     ROLLOUT_INDEX_KEY,
@@ -119,12 +120,7 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
     turns_observed = trajectory_observed and not _trajectory_has_gap(trajectory, "turns_unavailable")
     model_calls_observed = trajectory_observed and not _trajectory_has_any_gap(trajectory, _INCOMPLETE_MODEL_CALL_GAPS)
     calls = _normalized_trajectory_calls(trajectory) if trajectory_observed else []
-    turn_bindings = _bind_policy_calls(trajectory, calls) if trajectory_observed else _bind_policy_calls({}, [])
-    owned_bindings = (
-        _bind_policy_calls(trajectory, calls, include_invocations=True)
-        if trajectory_observed
-        else _bind_policy_calls({}, [], include_invocations=True)
-    )
+    turn_bindings, owned_bindings = _bind_policy_call_views(trajectory if trajectory_observed else {}, calls)
     findings: list[Finding] = []
     unobserved: list[str] = []
 
@@ -159,8 +155,9 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         if CheckInput.AGENT_TURNS in spec.reads and not turns_observed:
             unobserved.append(spec.id)
             continue
-        bindings = owned_bindings if CheckInput.OWNED_MODEL_CALLS in spec.reads else turn_bindings
-        if CheckInput.BOUND_CALLS in spec.reads or CheckInput.OWNED_MODEL_CALLS in spec.reads:
+        binding_input = next(iter(spec.reads & CALL_BINDING_INPUTS), None)
+        bindings = owned_bindings if binding_input == CheckInput.OWNED_MODEL_CALLS else turn_bindings
+        if binding_input is not None:
             if not model_calls_observed:
                 unobserved.append(spec.id)
                 continue
