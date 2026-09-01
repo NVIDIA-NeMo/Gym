@@ -141,6 +141,13 @@ def test_check_ids_encode_subject_without_replacing_evaluation_scope() -> None:
     assert by_id["rollout_token_count_mismatch"].reads == frozenset(
         {health.CheckInput.RECORD, health.CheckInput.TRAJECTORY, health.CheckInput.BOUND_CALLS}
     )
+    with pytest.raises(ValueError, match="cannot read both"):
+        health.CheckSpec(
+            id="model_call_invalid_binding_inputs",
+            evaluation_scope=health.CheckScope.ROLLOUT,
+            subject=health.CheckSubject.MODEL_CALL,
+            reads=frozenset({health.CheckInput.BOUND_CALLS, health.CheckInput.OWNED_MODEL_CALLS}),
+        )
 
 
 def test_invocation_owned_calls_are_observed_without_turns(tmp_path: Path) -> None:
@@ -195,19 +202,68 @@ def test_invocation_owned_call_checks_fire_without_turns(
     assert digest.verdict == "unhealthy"
     if check == "model_call_failed":
         [finding] = [finding for finding in digest.findings if finding.check == check]
-        assert finding.detail["terminal"] is False
+        assert finding.detail["terminal"] is True
 
 
 def test_turn_and_invocation_reference_evaluate_one_call(tmp_path: Path) -> None:
-    record = _record(0, 0)
+    model_ref = {"type": "responses_api_models", "name": "policy_model"}
+    record = _record(0, 0, refs=[{"model_ref": model_ref, "response_id": "r1"}])
     record["ng_trajectory"]["invocations"] = [
         {"kind": "agent_invocation", "invocation_id": "root", "model_calls": [{"model_call_id": "c1"}]}
     ]
-    rollout_path = _write_fixture(tmp_path, [(record, [_call(tokens_out=0)])])
+    rollout_path = _write_fixture(
+        tmp_path,
+        [(record, [_call(model_ref=model_ref, tokens_out=0, status_code=500)])],
+    )
 
     [digest] = run_health_checks(rollout_path, workers=1).rollouts
 
     assert [finding.check for finding in digest.findings].count("model_call_zero_completion_tokens") == 1
+    failed = [finding for finding in digest.findings if finding.check == "model_call_failed"]
+    assert len(failed) == 1
+    assert failed[0].detail["terminal"] is True
+
+
+def test_unbindable_turn_reference_does_not_shadow_invocation_reference(tmp_path: Path) -> None:
+    record = _record(0, 0, refs=[{"model_call_id": "c1", "response_id": "stale-response"}])
+    record["ng_trajectory"]["invocations"] = [
+        {"kind": "agent_invocation", "invocation_id": "root", "model_calls": [{"model_call_id": "c1"}]}
+    ]
+    rollout_path = _write_fixture(tmp_path, [(record, [_call(status_code=500)])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert [finding.check for finding in digest.findings].count("trajectory_capture_mismatch") == 1
+    failed = [finding for finding in digest.findings if finding.check == "model_call_failed"]
+    assert len(failed) == 1
+    assert failed[0].locator == {"call_id": "c1"}
+    assert failed[0].detail["terminal"] is False
+
+
+def test_task_no_successful_model_calls_remains_turn_bound(tmp_path: Path) -> None:
+    rows = []
+    for rollout_index in range(2):
+        record = _record(8, rollout_index, usage={"input_tokens": 3, "output_tokens": 2})
+        record["ng_trajectory"]["invocations"] = [
+            {
+                "kind": "agent_invocation",
+                "invocation_id": "root",
+                "model_calls": [{"model_call_id": "c1"}, {"model_call_id": "support"}],
+            }
+        ]
+        rows.append(
+            (
+                record,
+                [
+                    _call(model_call_id="c1", status_code=500),
+                    _call(model_call_id="support", response_id="support-response"),
+                ],
+            )
+        )
+    result = run_health_checks(_write_fixture(tmp_path, rows), workers=1)
+
+    assert all(digest.successful_model_calls == 0 for digest in result.rollouts)
+    assert "task_no_successful_model_calls" in result.summary["tasks"]["8"]["flags"]
 
 
 def test_all_registered_semantic_checks_fire_on_synthetic_artifacts(tmp_path: Path) -> None:
