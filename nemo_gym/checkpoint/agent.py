@@ -419,6 +419,7 @@ def install_agent_checkpoint(
             "agent-checkpoint/resume",
             allowed_phases=frozenset(
                 {
+                    CheckpointPhase.IDLE,
                     CheckpointPhase.PREPARING,
                     CheckpointPhase.PREPARED,
                     CheckpointPhase.COMMITTED_PAUSED,

@@ -32,7 +32,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.checkpoint import AgentBoundaryRecord
+from nemo_gym.checkpoint import RESOURCE_STATE_REVISION_HEADER, AgentBoundaryRecord
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -113,12 +113,14 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         step = 0
         invocation_status = "completed"
         model_server_cookies = None
+        resource_revision = 0
         if continuation is not None:
             new_outputs.extend(_INPUT_ITEMS_ADAPTER.validate_python(continuation.output_items))
             usage = NeMoGymResponseUsage.model_validate(continuation.usage) if continuation.usage is not None else None
             step = continuation.boundary_index
             model_server_cookies = continuation.agent_state.get("model_server_cookies") or None
             resources_server_cookies = continuation.agent_state.get("resources_server_cookies") or None
+            resource_revision = continuation.resource_state_revisions.get(self.config.resources_server.name, 0)
 
         while True:
             step += 1
@@ -214,6 +216,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     )
                     tool_output = (await api_response.content.read()).decode()
                     resources_server_cookies = api_response.cookies
+                    headers = getattr(api_response, "headers", None)
+                    if isinstance(headers, Mapping) and headers.get(RESOURCE_STATE_REVISION_HEADER) is not None:
+                        resource_revision = int(headers[RESOURCE_STATE_REVISION_HEADER])
                     if collect_trajectory:
                         completed = 200 <= api_response.status < 400
                         tool_status = "completed" if completed else "failed"
@@ -257,6 +262,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             output_items=[item.model_dump(mode="json") for item in new_outputs],
                             usage=usage.model_dump(mode="json") if usage is not None else None,
                             last_committed_model_call_id=model_call_id,
+                            resource_state_revisions={self.config.resources_server.name: resource_revision},
                             agent_state={
                                 "model_server_cookies": dict(model_server_cookies or {}),
                                 "resources_server_cookies": dict(resources_server_cookies or {}),

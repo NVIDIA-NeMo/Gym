@@ -438,6 +438,7 @@ def install_resources_checkpoint(
             "resources-checkpoint/resume",
             allowed_phases=frozenset(
                 {
+                    CheckpointPhase.IDLE,
                     CheckpointPhase.PREPARED,
                     CheckpointPhase.COMMITTED_PAUSED,
                     CheckpointPhase.RESTORED_PAUSED,

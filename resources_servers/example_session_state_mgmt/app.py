@@ -25,6 +25,8 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.checkpoint import ResourceSnapshot
+from nemo_gym.rollout_correlation import current_attempt_index, current_logical_rollout_id
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
@@ -55,6 +57,7 @@ class StatefulCounterSeedSessionRequest(BaseSeedSessionRequest):
 class StatefulCounterResourcesServer(SimpleResourcesServer):
     config: StatefulCounterResourcesServerConfig
     session_id_to_counter: Dict[str, int] = Field(default_factory=dict)
+    execution_to_session: Dict[tuple[str, int], str] = Field(default_factory=dict)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -67,10 +70,13 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
     async def seed_session(self, request: Request, body: StatefulCounterSeedSessionRequest) -> BaseSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
         self.session_id_to_counter.setdefault(session_id, body.initial_count)
+        identity = self._current_identity()
+        if identity is not None:
+            self.execution_to_session[identity] = session_id
         return BaseSeedSessionResponse()
 
     async def increment_counter(self, request: Request, body: IncrementCounterRequest) -> IncrementCounterResponse:
-        session_id = request.session[SESSION_ID_KEY]
+        session_id = self._session_id(request)
         counter = self.session_id_to_counter.setdefault(session_id, 0)
 
         counter += body.count
@@ -80,12 +86,12 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
         return IncrementCounterResponse(success=True)
 
     async def get_counter_value(self, request: Request) -> GetCounterValueResponse:
-        session_id = request.session[SESSION_ID_KEY]
+        session_id = self._session_id(request)
         counter = self.session_id_to_counter.setdefault(session_id, 0)
         return GetCounterValueResponse(count=counter)
 
     async def verify(self, request: Request, body: StatefulCounterVerifyRequest) -> BaseVerifyResponse:
-        session_id = request.session[SESSION_ID_KEY]
+        session_id = self._session_id(request)
 
         reward = 0.0
         if session_id in self.session_id_to_counter:
@@ -93,6 +99,37 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
             reward = float(body.expected_count == counter)
 
         return BaseVerifyResponse(**body.model_dump(), reward=reward)
+
+    @staticmethod
+    def _current_identity() -> tuple[str, int] | None:
+        rollout_id = current_logical_rollout_id()
+        attempt_index = current_attempt_index()
+        if rollout_id is None or attempt_index is None:
+            return None
+        return rollout_id, attempt_index
+
+    def _session_id(self, request: Request) -> str:
+        identity = self._current_identity()
+        if identity is not None and identity in self.execution_to_session:
+            return self.execution_to_session[identity]
+        return request.session[SESSION_ID_KEY]
+
+    def checkpoint_state_enabled(self) -> bool:
+        return True
+
+    async def export_checkpoint_state(self, rollout_id: str, attempt_index: int) -> dict:
+        session_id = self.execution_to_session[(rollout_id, attempt_index)]
+        return {"counter": self.session_id_to_counter[session_id]}
+
+    async def restore_checkpoint_states(self, snapshots: list[ResourceSnapshot]) -> None:
+        counters = dict(self.session_id_to_counter)
+        index = dict(self.execution_to_session)
+        for snapshot in snapshots:
+            session_id = f"checkpoint:{snapshot.rollout_id}:a{snapshot.attempt_index}"
+            counters[session_id] = int(snapshot.state["counter"])
+            index[(snapshot.rollout_id, snapshot.attempt_index)] = session_id
+        self.session_id_to_counter = counters
+        self.execution_to_session = index
 
 
 if __name__ == "__main__":
