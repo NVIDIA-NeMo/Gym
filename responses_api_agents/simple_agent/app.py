@@ -15,10 +15,10 @@
 import json
 from collections.abc import Mapping
 from time import perf_counter, time
-from typing import Any, List
+from typing import Any, List, Optional
 
 from fastapi import Request, Response
-from pydantic import ConfigDict, ValidationError
+from pydantic import ConfigDict, TypeAdapter, ValidationError
 
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -32,6 +32,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.checkpoint import AgentBoundaryRecord
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -39,8 +40,16 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseInputItem,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseUsage,
     accumulate_response_usage,
+)
+from nemo_gym.rollout_correlation import (
+    MODEL_CALL_ID_HEADER,
+    current_attempt_index,
+    current_logical_rollout_id,
+    current_rollout_id,
 )
 from nemo_gym.rollout_observability import (
     AgentInvocation,
@@ -54,6 +63,7 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
+_INPUT_ITEMS_ADAPTER = TypeAdapter(List[NeMoGymResponseInputItem])
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -86,6 +96,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         task_id: str = "unscoped",
         rollout_id: str = "unscoped",
         collect_trajectory: bool = False,
+        continuation: Optional[AgentBoundaryRecord] = None,
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
         invocation_id = "root"
         tool_records: list[TrajectoryToolCall] = []
@@ -102,6 +113,12 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         step = 0
         invocation_status = "completed"
         model_server_cookies = None
+        if continuation is not None:
+            new_outputs.extend(_INPUT_ITEMS_ADAPTER.validate_python(continuation.output_items))
+            usage = NeMoGymResponseUsage.model_validate(continuation.usage) if continuation.usage is not None else None
+            step = continuation.boundary_index
+            model_server_cookies = continuation.agent_state.get("model_server_cookies") or None
+            resources_server_cookies = continuation.agent_state.get("resources_server_cookies") or None
 
         while True:
             step += 1
@@ -115,6 +132,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 json=new_body,
                 cookies=model_server_cookies,
             )
+            model_call_id = None
+            if self._checkpoint_participant is not None:
+                headers = getattr(model_response, "headers", None)
+                if isinstance(headers, Mapping):
+                    model_call_id = headers.get(MODEL_CALL_ID_HEADER)
             # We raise for status here since we expect model calls to always work.
             await raise_for_status(model_response)
             model_response_json = await get_response_json(model_response)
@@ -213,16 +235,34 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         )
                     )
 
-                new_outputs.append(
-                    NeMoGymFunctionCallOutput(
-                        type="function_call_output",
-                        call_id=output_function_call.call_id,
-                        output=tool_output,
-                    )
+                function_output = NeMoGymFunctionCallOutput(
+                    type="function_call_output",
+                    call_id=output_function_call.call_id,
+                    output=tool_output,
                 )
+                new_outputs.append(function_output)
 
             if collect_trajectory and all_fn_calls:
                 turns[-1].step_count = len(tool_records)
+
+            if all_fn_calls and self._checkpoint_participant is not None:
+                logical_rollout_id = current_logical_rollout_id()
+                attempt_index = current_attempt_index()
+                if logical_rollout_id is not None and attempt_index is not None:
+                    await self.checkpoint_participant().commit_boundary(
+                        AgentBoundaryRecord(
+                            rollout_id=logical_rollout_id,
+                            attempt_index=attempt_index,
+                            boundary_index=step,
+                            output_items=[item.model_dump(mode="json") for item in new_outputs],
+                            usage=usage.model_dump(mode="json") if usage is not None else None,
+                            last_committed_model_call_id=model_call_id,
+                            agent_state={
+                                "model_server_cookies": dict(model_server_cookies or {}),
+                                "resources_server_cookies": dict(resources_server_cookies or {}),
+                            },
+                        )
+                    )
 
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
@@ -256,14 +296,26 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
         path_params = getattr(request, "path_params", None)
-        rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
+        rollout_id = current_rollout_id()
+        if rollout_id is None and isinstance(path_params, Mapping):
+            rollout_id = path_params.get("rollout_id")
         collect_trajectory = self._model_call_capture_enabled() and isinstance(rollout_id, str)
+        logical_rollout_id = current_logical_rollout_id()
+        attempt_index = current_attempt_index()
+        continuation = (
+            self.checkpoint_participant().continuation(logical_rollout_id, attempt_index)
+            if self._checkpoint_participant is not None
+            and logical_rollout_id is not None
+            and attempt_index is not None
+            else None
+        )
         model_response, trajectory, model_server_cookies, resources_server_cookies = await self._create_episode(
             body,
             model_url_path=self.url_path_for_request("/v1/responses", request),
             resources_server_cookies=request.cookies,
             rollout_id=rollout_id or "unscoped",
             collect_trajectory=collect_trajectory,
+            continuation=continuation,
         )
         # Propogate any extra cookies necessary for downstream verification
         for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
@@ -276,15 +328,18 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         cookies = request.cookies
-
-        seed_session_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(seed_session_response)
-        cookies = seed_session_response.cookies
+        continuation = self.checkpoint_continuation(body)
+        if continuation is None:
+            seed_session_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/seed_session",
+                json=body.model_dump(),
+                cookies=cookies,
+            )
+            await raise_for_status(seed_session_response)
+            cookies = seed_session_response.cookies
+        else:
+            cookies = continuation.agent_state.get("resources_server_cookies") or cookies
 
         response = await self.server_client.post(
             server_name=self.config.name,
