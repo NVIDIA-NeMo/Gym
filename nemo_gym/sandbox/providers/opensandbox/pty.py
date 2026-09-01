@@ -280,8 +280,10 @@ class OpenSandboxPtySession:
     async def _send(self, frame: bytes | str) -> None:
         if self._detached:
             raise SandboxPtyError("PTY session is detached; reattach() first")
-        if self._closed or self._ws.closed:
-            raise SandboxPtyError("PTY session is closed")
+        if self._closed:
+            raise SandboxPtyError("PTY session is closed (session)")
+        if self._ws.closed:
+            raise SandboxPtyError("PTY session is closed (websocket)")
         try:
             if isinstance(frame, bytes):
                 await self._ws.send_bytes(frame)
