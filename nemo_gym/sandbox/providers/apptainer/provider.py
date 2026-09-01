@@ -34,6 +34,7 @@ from typing import Any
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
@@ -57,6 +58,7 @@ APPTAINER_RUNTIME_ERROR_MARKERS = ("fatal:", "no instance found", "instance not 
 APPTAINER_MISSING_INSTANCE_MARKERS = ("no instance found", "instance not found", "does not exist")
 APPTAINER_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 APPTAINER_ENV_FILE_READONLY = frozenset({"EUID", "GID", "HOME", "IFS", "OPTIND", "PWD", "UID"})
+APPTAINER_ISOLATED_NETWORK_FLAGS = ("--net", "--netns-path")
 
 
 class ApptainerCreateError(SandboxCreateError):
@@ -181,6 +183,14 @@ def _resolve_image(image: str) -> str:
     if "://" in image or image.startswith(("/", ".")) or image.endswith(".sif"):
         return image
     return f"docker://{image}"
+
+
+def _uses_isolated_network(start_args: list[str], env: Mapping[str, str]) -> bool:
+    if env.get("APPTAINER_UNSHARE_NET", "").lower() in {"1", "true", "yes", "on"}:
+        return True
+    return any(
+        arg == flag or arg.startswith(f"{flag}=") for arg in start_args for flag in APPTAINER_ISOLATED_NETWORK_FLAGS
+    )
 
 
 def _to_sandbox_status(state: str | None) -> SandboxStatus:
@@ -415,6 +425,10 @@ class ApptainerProvider:
         # Extra per-sandbox bind mounts (validated before we allocate anything).
         extra_binds = _coerce_binds(spec.provider_options.get("binds"))
 
+        start_args = list(self._create_config.extra_start_args)
+        if spec.ports and _uses_isolated_network(start_args, self._subprocess_env):
+            raise ValueError("SandboxSpec.ports require the host network; remove --net or --netns-path")
+
         # host staging dir (bind-mounted in), mount point, unique name.
         mount_point = self._create_config.mount_point
         staging_dir = Path(
@@ -429,7 +443,6 @@ class ApptainerProvider:
             argv += ["--bind", bind]
         for bind in extra_binds:
             argv += ["--bind", bind]
-        start_args = list(self._create_config.extra_start_args)
         resource_limit_flags = _resource_limit_flags(spec.resources)
         if resource_limit_flags and self._create_config.apply_resource_limits:
             if "--fakeroot" in start_args:
@@ -692,6 +705,10 @@ class ApptainerProvider:
 
         # Not listed -> it has been stopped (or never existed anymore).
         return SandboxStatus.STOPPED
+
+    async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
+        """Resolve a declared service port on Apptainer's host network."""
+        return SandboxEndpoint(endpoint=f"http://127.0.0.1:{port}")
 
     async def close(self, handle: SandboxHandle) -> None:
         """Stop the instance and clean up the host staging dir.

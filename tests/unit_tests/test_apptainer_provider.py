@@ -21,8 +21,10 @@ from typing import Any, Callable
 
 import pytest
 
+from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
 from nemo_gym.sandbox.providers.base import (
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
@@ -315,6 +317,21 @@ async def test_create_builds_argv_and_runs_probe(
     assert all(not path.exists() for path in env_files)
 
 
+async def test_create_rejects_declared_ports_with_custom_network(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider, rec = _make_provider(
+        monkeypatch,
+        lambda _argv: (1, "", "instance start should not run"),
+        create={"extra_start_args": ["--net"]},
+    )
+
+    with pytest.raises(ValueError, match="ports.*--net"):
+        await provider.create(SandboxSpec(image="docker://ubuntu:22.04", ports=[8001]))
+
+    assert rec.calls == []
+
+
 @pytest.mark.parametrize("create_config", [{"apply_resource_limits": False}, {"extra_start_args": ["--fakeroot"]}])
 async def test_create_skips_cgroup_resource_limits(
     fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, create_config: dict[str, Any]
@@ -389,6 +406,29 @@ async def test_create_requires_image(fake_binary: str, monkeypatch: pytest.Monke
     provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
     with pytest.raises(apptainer_provider.ApptainerCreateError, match="image is required"):
         await provider.create(SandboxSpec(image=None))
+
+
+async def test_create_rejects_isolated_network_for_declared_service_port(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider, _rec = _make_provider(
+        monkeypatch,
+        lambda argv: (0, "", ""),
+        create={"extra_start_args": ["--net"]},
+    )
+
+    with pytest.raises(ValueError, match="host network"):
+        await provider.create(SandboxSpec(image="docker://img", ports=[8001]))
+
+
+async def test_create_rejects_unshared_network_environment_for_declared_service_port(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("APPTAINER_UNSHARE_NET", "1")
+    provider, _rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+
+    with pytest.raises(ValueError, match="host network"):
+        await provider.create(SandboxSpec(image="docker://img", ports=[8001]))
 
 
 async def test_create_start_failure_cleans_up(
@@ -752,6 +792,50 @@ async def test_status_unknown_paths(fake_binary: str, monkeypatch: pytest.Monkey
 
     provider, _rec = _make_provider(monkeypatch, timeout_responder)
     assert await provider.status(handle) is SandboxStatus.UNKNOWN
+
+
+# --------------------------------------------------------------------------- #
+# endpoint
+# --------------------------------------------------------------------------- #
+async def test_async_sandbox_endpoint_resolves_declared_host_local_port(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(apptainer_provider.tempfile, "mkdtemp", lambda prefix: str(staging.mkdir() or staging))
+
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if "exec" in argv:
+            return (0, apptainer_provider.READY_PROBE_EXPECTED, "")
+        return (0, "", "")
+
+    provider, _rec = _make_provider(monkeypatch, responder)
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="docker://ubuntu:22.04", ports=[8001]))
+    try:
+        assert await sandbox.endpoint(8001) == SandboxEndpoint(endpoint="http://127.0.0.1:8001")
+    finally:
+        await sandbox.stop()
+
+
+async def test_async_sandbox_endpoint_rejects_undeclared_port(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(apptainer_provider.tempfile, "mkdtemp", lambda prefix: str(staging.mkdir() or staging))
+
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if "exec" in argv:
+            return (0, apptainer_provider.READY_PROBE_EXPECTED, "")
+        return (0, "", "")
+
+    provider, _rec = _make_provider(monkeypatch, responder)
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="docker://ubuntu:22.04", ports=[8001]))
+    try:
+        with pytest.raises(ValueError, match="Sandbox port 8002 was not declared"):
+            await sandbox.endpoint(8002)
+    finally:
+        await sandbox.stop()
 
 
 # --------------------------------------------------------------------------- #
