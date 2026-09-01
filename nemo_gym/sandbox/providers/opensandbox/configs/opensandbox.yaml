@@ -69,7 +69,7 @@ sandbox:
       # @bxyu-nvidia: Too frequent of a poll interval can quickly reduce server performance.
       # e.g. on SWE Bench Verified 500 samples with 3 repeats = 1500 concurrent samples, we would do polling every `background_poll_interval_s` seconds
       background_poll_initial_s: 1.0
-      background_poll_interval_s: 5.0
+      background_poll_interval_s: 30.0
       # Per-request budget for status polls, which are small idempotent GETs:
       # without their own short budget, each poll against an unreachable
       # sandbox hangs for the full connection request_timeout_s (tuned for
