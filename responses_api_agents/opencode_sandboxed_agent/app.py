@@ -881,9 +881,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             run_result["_ng_agent_observations"] = observations
         self._sandbox_id_to_run_result[request.cookies["sandbox_id"]] = run_result
 
-        # Release pty session since this is not the owner
-        await pty_session.close()
-
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
