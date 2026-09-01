@@ -11,7 +11,7 @@ description: >-
 
 ## Invocation Check
 
-Use this skill when something failed or looks suspicious in a Nemo Gym run. If the task is adding a new env, use the `nemo-gym-env-integration` skill; if it is changing profiling behavior, use the `nemo-gym-reward-profiling` skill.
+Use this skill when something failed or looks suspicious in a Nemo Gym run. If the task is adding a catalog overlay, use the `add-benchmark` skill; if it is changing profiling behavior, use the `nemo-gym-reward-profiling` skill. New `verify()` / resources servers are not `add-benchmark` — see `fern/versions/latest/pages/contribute/environments/new-environment.mdx`.
 
 Debug by classification, not by guessing. The first goal is to decide whether the issue is:
 
