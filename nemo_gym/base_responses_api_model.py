@@ -194,10 +194,13 @@ class BaseResponsesAPIModel(BaseServer):
 
 
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+    _CONTROL_COMPONENT = "responses_api_models"
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
         self.setup_session_middleware(app)
+        self.setup_control_plane(app)
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
         install_model_call_capture(
             app,

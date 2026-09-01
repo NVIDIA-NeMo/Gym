@@ -71,10 +71,13 @@ class BaseResponsesAPIAgent(BaseServer):
 class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, SimpleServer):
     config: BaseResponsesAPIAgentConfig
 
+    _CONTROL_COMPONENT = "responses_api_agents"
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
         self.setup_session_middleware(app)
+        self.setup_control_plane(app)
 
         agent_attributes = {"nemo.gym.server.name": self.config.name}
         traced_responses = traced_endpoint(GymSpanGroup.AGENT, "gym.agent.responses", self.responses, agent_attributes)
