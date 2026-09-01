@@ -977,6 +977,35 @@ contested: second_inner
         assert "viacopy.b" in missing
         assert "viainherit.b" in missing
 
+    def test_recursively_swap_keys_helper_new_struct(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            GlobalConfigDictParser, "parse_global_config_dict_from_cli", lambda *args, **kwargs: struct
+        )
+
+        parser = GlobalConfigDictParser()
+        struct = DictConfig(
+            {
+                "a": {
+                    "b": 1,
+                },
+                "a2": {
+                    "_inherit_from": "a",
+                    "c": 2,
+                },
+            },
+            flags={"struct": True},
+        )
+
+        parse_config = GlobalConfigDictParserConfig(skip_load_from_cli=False, skip_load_from_dotenv=True)
+
+        """
+        Assert no error:
+        omegaconf.errors.ConfigKeyError: Key 'c' is not in struct
+            full_key: a.c
+            object_type=dict
+        """
+        parser.parse(parse_config)
+
     def test_copy_of_missing_leaf_is_reported_not_opaque_error(self) -> None:
         # `${copy:source.model}` where source.model is unset must not raise an opaque "path does not
         # exist" error; the copy propagates MISSING so both the target and source are reported.
