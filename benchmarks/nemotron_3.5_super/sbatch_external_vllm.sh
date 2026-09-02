@@ -135,7 +135,9 @@ if (( SLURM_PROCID == 0 )); then
     # Don't manually wait as vllm-router will wait for the URLs to come up
     router_args=( \
         --prefill-policy cache_aware \
-        --decode-policy power_of_two \
+        --decode-policy cache_aware \
+        --balance-abs-threshold 4 \
+        --balance-rel-threshold 1.1 \
         --vllm-pd-disaggregation \
         --host \$this_node_hostname \
         --port $ROUTER_SERVER_PORT \
