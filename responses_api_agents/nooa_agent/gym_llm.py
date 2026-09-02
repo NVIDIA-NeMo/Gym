@@ -21,12 +21,14 @@ from typing import Any
 from nooa.unifiedllm import LLMResponse, Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel
 
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
+from nemo_gym.rollout_observability import ModelCallRef
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
 
 
@@ -111,7 +113,7 @@ class GymResponsesLLM(UnifiedLLM):
         model_server_name: str,
         model_url_path: str,
         max_steps: int,
-        response_collector: list[NeMoGymResponse],
+        model_call_collector: list[ModelCallRef],
         cookies: dict[str, str],
         model: str = "gym-policy",
     ) -> None:
@@ -120,7 +122,7 @@ class GymResponsesLLM(UnifiedLLM):
         self._model_server_name = model_server_name
         self._model_url_path = model_url_path
         self._max_steps = max_steps
-        self._response_collector = response_collector
+        self._model_call_collector = model_call_collector
         self._cookies = cookies
         self._calls = 0
 
@@ -184,7 +186,12 @@ class GymResponsesLLM(UnifiedLLM):
         raw = await get_response_json(http_response)
         response = NeMoGymResponse.model_validate(raw)
         self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
-        self._response_collector.append(response)
+        self._model_call_collector.append(
+            ModelCallRef(
+                model_ref=ModelServerRef(name=self._model_server_name, type="responses_api_models"),
+                response_id=response.id,
+            )
+        )
 
         dumped_output = [item.model_dump(mode="json", exclude_none=True) for item in response.output]
         function_calls = [item for item in response.output if isinstance(item, NeMoGymResponseFunctionToolCall)]
