@@ -143,12 +143,13 @@ All commands accept:
 
 ### `gym list benchmarks`
 
-List the benchmarks available in NeMo Gym, with their domain, agent, and configured number of repeats.
+List the benchmarks available in NeMo Gym, with their kind, manifest status, domain, and description.
 The value in the **Name** column is the benchmark identifier and can be passed to `--benchmark`.
+To see which agent harness a benchmark composes with, inspect it with `gym list benchmarks <name>`.
 
 | Option | Description |
 | --- | --- |
-| `[<name>]` | Inspect a single benchmark (config path, dataset, prepare script) instead of listing all. |
+| `[<name>]` | Inspect a single benchmark (config path, manifest status, agent, datasets) instead of listing all. |
 | `--json` | Output the benchmark list as JSON. |
 
 ```bash
@@ -438,12 +439,15 @@ gym env resolve \
 
 Validate a manifest-backed workload or legacy config without starting Ray or server subprocesses. Manifest validation resolves the Gym config offline, checks composition mirrors and datasets, and reports the resolved components. Legacy validation retains the existing config pre-flight behavior. Exits `0` when valid, or `1` with a clean message when not.
 
+By default, values a run needs but the config leaves undefined (such as `policy_base_url` from `env.yaml`) are filled with placeholders so the rest can still be checked, and reported as a warning. Pass `--strict` to fail on them instead.
+
 | Option | Description |
 | --- | --- |
 | `NAME` | Manifest-backed catalog entry to validate. |
 | `--kind environment\|benchmark` | Resolve an ambiguous catalog name. |
 | `--manifest PATH` | Validate a manifest directly instead of selecting by name. |
 | `--sync` | Atomically synchronize config-owned composition mirrors after all checks pass. |
+| `--strict` | Resolve the config exactly as a run would, with no placeholder model values. An undefined value fails instead of warning. |
 | `--json` | Output the manifest validation report as JSON. |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--environment NAME` / `--benchmark NAME` | Validate a named environment / benchmark config. |
@@ -460,6 +464,9 @@ gym env validate --benchmark gsm8k
 
 # or explicit config path(s)
 gym env validate --config resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml
+
+# fail unless everything a run needs is defined, credentials included
+gym env validate --resources-server example_single_tool_call --model-type openai_model --strict
 ```
 
 ### `gym env packages`
@@ -617,7 +624,7 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | `--num-repeats` | Rollouts per task (for mean@k metrics). Pass an int to apply to every task, or a dict keyed by `agent_ref.name` for per-agent counts (e.g. `'{simple_agent: 32, swe_agent: 1}'`) when one input file mixes agents. In dict form, the special key `_default` is the fallback for agents not explicitly listed; without it, any unlisted row's agent raises a single consolidated error. |
 | `--prompt-config` | Prompt template YAML to apply. |
 | `--concurrency` | Maximum number of concurrent samples. |
-| `--split` | Dataset split to use (`train`, `validation`, or `benchmark`). |
+| `--split` | Dataset split to use (`train`, `validation`, or `benchmark`). A dataset of the matching `type` must be declared in the loaded configs. `example` datasets are smoke-test samples, not a runnable split — run them with `--no-serve` and `--input` as shown in the [Quickstart](/get-started/quickstart). |
 | `--model`, `-m` | Served model identifier. |
 | `--model-url` | Model server base URL. |
 | `--model-api-key` | Model server API key. |
