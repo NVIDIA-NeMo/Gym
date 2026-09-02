@@ -774,17 +774,33 @@ class SimpleServer(BaseServer):
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
+    def _client_response_error_response(
+        self, request: Request, exc: ClientResponseError
+    ) -> Optional[Response]:  # pragma: no cover
+        """Let adapters preserve a downstream HTTP response for their public API."""
+
+        return None
+
     def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
         @app.middleware("http")
         async def exception_handling_middleware(request: Request, call_next):
             try:
                 return await call_next(request)
             except ClientResponseError as e:
-                assert hasattr(e, "response_content"), (
-                    "Please use `nemo_gym.server_utils.raise_for_status` for HTTP exceptions!"
-                )
+                adapter_response = self._client_response_error_response(request, e)
+                if adapter_response is not None:
+                    return adapter_response
 
-                response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
+                if hasattr(e, "response_content"):
+                    detail = e.response_content
+                else:
+                    detail = (
+                        f"{type(e).__name__} did not include response content. "
+                        "HTTP responses must be checked with `nemo_gym.server_utils.raise_for_status`."
+                    )
+                response_content = (
+                    f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {detail}"
+                )
                 if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                     print(response_content)
 

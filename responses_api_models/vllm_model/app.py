@@ -24,7 +24,7 @@ from time import monotonic, time, time_ns
 from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from aiohttp.client_exceptions import ClientResponseError
-from fastapi import Request
+from fastapi import Request, Response
 from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.base_responses_api_model import (
@@ -64,6 +64,8 @@ _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "step": "x-nemo-gym-log-step",
     "parse_attempt": "x-nemo-gym-log-parse-attempt",
 }
+
+_AUXILIARY_ERROR_ATTRIBUTE = "nemo_gym_auxiliary"
 
 
 def _transport_log_context(request: Request) -> Dict[str, Any]:
@@ -272,6 +274,42 @@ class VLLMModel(SimpleResponsesAPIModel):
         "mm_processor_kwargs",
         "required_prefix_token_ids",
     )
+
+    def _model_client_response_error_response(self, request: Request, exc: ClientResponseError) -> Optional[Response]:
+        """Restore a real provider response after model-call capture observes its exception."""
+
+        if not self._is_propagatable_provider_error(exc):
+            return None
+
+        content_type = exc.headers.get("content-type") if exc.headers else None
+        headers = {"content-type": content_type} if content_type else None
+        return Response(
+            content=exc.response_content,
+            status_code=exc.status,
+            headers=headers,
+            media_type=None if headers else "application/json",
+        )
+
+    @staticmethod
+    def _is_propagatable_provider_error(exc: Exception) -> bool:
+        content = getattr(exc, "response_content", None)
+        status = getattr(exc, "status", None)
+        return (
+            isinstance(exc, ClientResponseError)
+            and not getattr(exc, _AUXILIARY_ERROR_ATTRIBUTE, False)
+            and isinstance(content, (bytes, str))
+            and isinstance(status, int)
+            and 400 <= status <= 599
+        )
+
+    @staticmethod
+    def _mark_auxiliary_error(exc: Exception) -> None:
+        setattr(exc, _AUXILIARY_ERROR_ATTRIBUTE, True)
+
+    def _should_propagate_streaming_responses_exception(self, exc: Exception) -> bool:
+        """Preserve vLLM HTTP failures raised before a synthesized Responses stream starts."""
+
+        return self._is_propagatable_provider_error(exc)
 
     def get_converter(self) -> "VLLMConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
@@ -812,32 +850,15 @@ class VLLMModel(SimpleResponsesAPIModel):
                         "elapsed_ns": finished_ns - started_ns,
                         "pid": os.getpid(),
                         "http_status": e.status,
-                        "raw_response_body": e.response_content.decode(errors="replace"),
+                        "raw_response_body": (
+                            e.response_content.decode(errors="replace")
+                            if isinstance(getattr(e, "response_content", None), bytes)
+                            else str(getattr(e, "response_content", ""))
+                        ),
                         "error": repr(e),
                     }
                 )
-            """
-            Example messages for out of context length:
-
-            1. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L914
-            ```json
-            {"object":"error","message":"This model\'s maximum context length is 32768 tokens. However, you requested 32818 tokens in the messages, Please reduce the length of the messages. None","type":"BadRequestError","param":null,"code":400}
-            ```
-            2. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L940
-            3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
-            4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
-            """
-            result_content_str = e.response_content.decode()
-
-            is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
-            )
-            if is_out_of_context_length:
-                res = self._create_empty_chat_completion()
-                res.choices[0].finish_reason = "length"
-                return res
-            else:
-                raise e
+            raise
         except Exception as e:
             if transport_io_enabled:
                 finished_ns = time_ns()
@@ -926,7 +947,11 @@ class VLLMModel(SimpleResponsesAPIModel):
                             "vLLM response generation token IDs disagree with choice logprob token IDs."
                         )
                 else:
-                    tokenize_response = await client.create_tokenize(**self._get_tokenize_chat_body(body_dict))
+                    try:
+                        tokenize_response = await client.create_tokenize(**self._get_tokenize_chat_body(body_dict))
+                    except ClientResponseError as exc:
+                        self._mark_auxiliary_error(exc)
+                        raise
                     prompt_token_ids = self._require_token_id_list(
                         tokenize_response.get("tokens"),
                         "tokenize.tokens",
@@ -1138,18 +1163,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         client = self._resolve_client(request)
 
-        try:
-            completion_dict = await client.create_completion(**completion_body)
-        except ClientResponseError as e:
-            result_content_str = e.response_content.decode()
-            is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
-            )
-            if is_out_of_context_length:
-                res = self._create_empty_chat_completion()
-                res.choices[0].finish_reason = "length"
-                return res
-            raise
+        completion_dict = await client.create_completion(**completion_body)
 
         if self.config.return_token_id_information:
             choice_dict = completion_dict["choices"][0]
@@ -1160,7 +1174,11 @@ class VLLMModel(SimpleResponsesAPIModel):
                 )
                 if "add_special_tokens" in completion_body:
                     tokenize_body["add_special_tokens"] = completion_body["add_special_tokens"]
-                tokenize_response = await client.create_tokenize(**tokenize_body)
+                try:
+                    tokenize_response = await client.create_tokenize(**tokenize_body)
+                except ClientResponseError as exc:
+                    self._mark_auxiliary_error(exc)
+                    raise
                 choice_dict["prompt_token_ids"] = tokenize_response["tokens"]
 
         return self._completion_dict_to_chat_completion(completion_dict)

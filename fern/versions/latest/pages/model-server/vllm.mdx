@@ -286,37 +286,38 @@ base_url:
 
 ## Context Length Exceeded Handling
 
-When a conversation exceeds the vLLM model's maximum context length (`max_seq_length`), VLLMModel handles the error gracefully instead of crashing the entire rollout collection.
+When a request exceeds the vLLM model's maximum context length (`max_model_len`), vLLM rejects it before generation. VLLMModel preserves that provider error so the calling agent can recover according to its own context-management policy.
 
 ### How it works
 
 1. **vLLM rejects the request**: vLLM returns an HTTP 400 error with a message like `"This model's maximum context length is 32768 tokens. However, you requested 32818 tokens..."`.
-2. **VLLMModel catches the error**: Instead of propagating the exception, VLLMModel returns an empty response with `finish_reason: "length"`.
-3. **Responses API mapping**: The `finish_reason: "length"` is converted to `incomplete_details: { reason: "max_output_tokens" }` in the Responses API response returned to the agent.
+2. **VLLMModel preserves the error**: `/v1/chat/completions` and `/v1/responses` return the same HTTP status and OpenAI-compatible error body. This also applies when the caller requested streaming because Gym validates and buffers the provider call before starting its synthesized SSE stream.
+3. **Anthropic compatibility**: `/v1/messages` returns the same status in an Anthropic error envelope. Context-overflow messages begin with `prompt is too long` so Claude Code recognizes the condition and can run its compaction flow; the original vLLM detail follows that prefix.
 
-This is particularly important for multi-turn agentic rollouts where conversation length can grow unpredictably across tool-call turns.
+The adapter does not convert the rejection into a successful empty completion. A `finish_reason: "length"` or `incomplete_details.reason: "max_output_tokens"` now describes only a request that generated output and exhausted its output budget.
 
-### How to detect truncated responses
+### Handle context overflow
 
-Downstream consumers (agents, RL training frameworks) can check the `incomplete_details` field on the response:
+OpenAI clients raise their bad-request exception for this response. Agents that manage long histories should catch that exception, identify the context-overflow message, and compact, truncate, or stop according to their rollout policy:
 
 ```python
-response = await model_server.responses(request, body)
-
-if response.incomplete_details and response.incomplete_details["reason"] == "max_output_tokens":
-    # The conversation exceeded the model's context window.
-    # The response output will be empty — handle accordingly.
-    pass
+try:
+    response = await client.responses.create(**params)
+except openai.BadRequestError as exc:
+    if "maximum context length" in str(exc).lower():
+        # Compact or truncate the conversation, then retry.
+        ...
+    raise
 ```
 
 <Note>
-When `incomplete_details.reason == "max_output_tokens"`, the response output is empty because vLLM rejected the request before generation began. This differs from a normal `max_output_tokens` truncation where the model generates up to the token limit — in this case, the input itself was too long.
+Gym's built-in agents use a shared classifier that also checks the provider response body. This matters for aiohttp exceptions, whose string representation does not include `response_content`.
 
 </Note>
 
 ### Implications for training
 
-When using NeMo Gym with NeMo RL or another training framework, responses with `incomplete_details.reason == "max_output_tokens"` indicate that the full conversation (prompt + prior generations) exceeded `max_seq_length`. Training frameworks should filter or handle these responses appropriately since they contain no generated tokens.
+Because vLLM rejects an overlong input before sampling, the error contains no generated tokens and must not be recorded as a successful on-policy completion. The model-call capture records the failed status and provider body for rollout diagnostics.
 
 ## Training vs Offline Inference
 By default, VLLMModel will not track any token IDs explicitly. However, token IDs are necessary when using NeMo Gym in conjunction with a training framework in order to train a model. For training workflows, use the training-dedicated config which enables token ID tracking:
