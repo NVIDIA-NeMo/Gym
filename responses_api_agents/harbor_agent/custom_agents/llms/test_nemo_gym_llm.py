@@ -235,7 +235,14 @@ async def test_context_length_error_propagates():
 
 
 @pytest.mark.asyncio
-async def test_context_length_error_from_http_400():
+@pytest.mark.parametrize(
+    "error_text",
+    [
+        "maximum context length exceeded",
+        "max_completion_tokens=1024 cannot be greater than max_model_len=512",
+    ],
+)
+async def test_context_length_error_from_http_400(error_text):
     """HTTP 400 with context-length phrase raises ContextLengthExceededError."""
     llm = _make_llm()
     mock_client = AsyncMock()
@@ -244,7 +251,7 @@ async def test_context_length_error_from_http_400():
     mock_client.post = AsyncMock(
         return_value=httpx.Response(
             status_code=400,
-            text="maximum context length exceeded",
+            text=error_text,
             request=httpx.Request("POST", "http://localhost:8000/v1/chat/completions"),
         )
     )
@@ -255,11 +262,12 @@ async def test_context_length_error_from_http_400():
 
 
 @pytest.mark.asyncio
-async def test_fake_response_id_raises_context_length_error():
-    """Gym proxy returns fake 200 with id='chtcmpl-123' for context-length overflow."""
+async def test_synthetic_response_id_is_not_treated_as_context_length_error():
+    """A shared synthetic response ID does not identify the response's execution outcome."""
     llm = _make_llm()
-    with pytest.raises(ContextLengthExceededError, match="chtcmpl-123"):
-        await _call(llm, _mock_response(content=None, id="chtcmpl-123"), prompt="hello")
+    response, _ = await _call(llm, _mock_response(content=None, id="chtcmpl-123"), prompt="hello")
+    assert response.content == ""
+    assert llm.context_length_exceeded is False
 
 
 @pytest.mark.asyncio

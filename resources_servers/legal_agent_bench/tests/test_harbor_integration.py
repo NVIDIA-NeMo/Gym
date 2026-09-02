@@ -10,7 +10,7 @@ import time
 from asyncio import Semaphore
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from omegaconf import OmegaConf
@@ -20,6 +20,7 @@ from resources_servers.legal_agent_bench.legal_harbor_agent import (
     LegalAgentBenchHarborAgent,
     OpenAICompatibleAdapter,
     _chat_with_timeout,
+    _run_agent_async,
 )
 from resources_servers.legal_agent_bench.prepare import (
     EXPECTED_TASK_COUNT,
@@ -81,6 +82,31 @@ def test_folder_config_is_public_docker_only() -> None:
     assert agent["harbor_environment_type"] == "docker"
     assert agent["harbor_environment_import_path"] is None
     assert "docker_image" not in json.dumps(agent)
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_detects_context_overflow_in_response_content(tmp_path) -> None:
+    exc = RuntimeError("400, message='Bad Request'")
+    exc.response_content = b'{"error":{"message":"maximum context length is 512 tokens"}}'
+    adapter = MagicMock()
+    adapter.timeout_seconds = None
+    adapter.make_system_message.return_value = {"role": "system", "content": "system"}
+    adapter.make_user_message.return_value = {"role": "user", "content": "start"}
+    adapter.chat = AsyncMock(side_effect=exc)
+    tool_executor = MagicMock()
+    tool_executor.get_metrics.return_value = {}
+
+    result = await _run_agent_async(
+        adapter=adapter,
+        system_prompt="system",
+        tool_executor=tool_executor,
+        tools=[],
+        max_turns=1,
+        transcript_path=tmp_path / "transcript.jsonl",
+    )
+
+    assert result["context_overflow"] is True
+    assert result["model_error"] is None
 
 
 def test_pinned_snapshot_has_1749_tasks_and_five_committed_examples() -> None:

@@ -29,7 +29,6 @@ installed.
 import asyncio
 import json
 import logging
-import re
 import time
 from enum import Enum
 from typing import Any, List, Optional
@@ -50,6 +49,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.context_errors import is_context_overflow_error
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -65,32 +65,6 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 logger = logging.getLogger(__name__)
 
 _MODEL_OUTPUT_TYPES = frozenset({"reasoning", "function_call"})
-
-# The model is reached over HTTP, so a context-window rejection arrives as error
-# text rather than a typed exception and has to be recognised by shape.
-_CONTEXT_OVERFLOW_RE = re.compile(
-    r"maximum context length is \d+ tokens|"
-    r"context length is (?:only )?\d+ tokens|"
-    r"maximum input length of \d+ tokens|"
-    r"Please reduce the length of the input|"
-    r"exceed.* context (limit|window|length)|"
-    r"context window exceeds|"
-    r"exceeds maximum length|"
-    r"too long.*tokens.*maximum|"
-    r"too large for model with \d+ maximum context length|"
-    r"longer than the model's context length|"
-    r"too many tokens.*size limit exceeded|"
-    r"prompt is too long|"
-    r"maximum prompt length|"
-    r"input length should be|"
-    r"sent message larger than max|"
-    r"input tokens exceeded|"
-    r"(messages?|total length).*too long|"
-    r"payload.*too large|"
-    r"string too long|"
-    r"input exceeded the context window",
-    re.IGNORECASE,
-)
 
 
 def _decoded_object(raw: str) -> Optional[dict]:
@@ -181,7 +155,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
     @staticmethod
     def _is_context_overflow_error(exc: Exception) -> bool:
         """True when *exc* indicates the input exceeded the model's context window."""
-        return _CONTEXT_OVERFLOW_RE.search(str(exc)) is not None
+        return is_context_overflow_error(exc)
 
     @staticmethod
     def _is_model_output(item: Any) -> bool:

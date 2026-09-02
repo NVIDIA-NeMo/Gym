@@ -140,8 +140,7 @@ Stirrup's `ChatCompletionsClient` sends a static
 `max_completion_tokens = self._max_tokens` on every call.  For long-context
 models (Ultra V3, Qwen3-Coder-30B's 131K, etc.), this can exceed
 `max_model_len − prompt_tokens` once the prompt grows, and the server
-returns an HTTP 400 (or `finish_reason=length` with zero output) that the
-agent cannot recover from.
+returns an HTTP 400 that the upstream agent cannot recover from.
 
 The wrapper ships a `DynamicMaxTokensChatCompletionsClient`
 (`nemo_client.py`) that, on every request:
@@ -150,8 +149,10 @@ The wrapper ships a `DynamicMaxTokensChatCompletionsClient`
    `AutoTokenizer` loaded from `model_id`.
 2. Computes `max_completion_tokens = context_window − input_tokens − completion_token_buffer`.
 3. Replicates upstream's response parsing but does **not** raise
-   `ContextOverflowError` on `finish_reason=length`; the agent loop
-   terminates normally via the `finish` tool or `max_turns`.
+   `ContextOverflowError` on `finish_reason=length`.
+4. Converts a provider context-length HTTP 400 into Stirrup's
+   `ContextOverflowError`, which invokes Stirrup's built-in history unwind and
+   retry path when an imperfect estimate still exceeds the server window.
 
 Set `model_id` to the same checkpoint (or HF id) you are serving via
 vLLM and the tokeniser match is exact.  Leave it unset and the client

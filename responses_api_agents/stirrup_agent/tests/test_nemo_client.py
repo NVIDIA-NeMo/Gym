@@ -23,6 +23,9 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from httpx import Request, Response
+from openai import BadRequestError
+from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import AssistantMessage, SystemMessage, TokenUsage, ToolCall, ToolMessage, UserMessage
 
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
@@ -51,6 +54,11 @@ def _make_response(content: str = "ok"):
     response.usage.completion_tokens = 5
     response.usage.completion_tokens_details = None
     return response
+
+
+def _bad_request(message: str) -> BadRequestError:
+    response = Response(400, request=Request("POST", "http://test/v1/chat/completions"))
+    return BadRequestError(message, response=response, body={"message": message, "type": "BadRequestError"})
 
 
 @pytest.mark.asyncio
@@ -155,6 +163,49 @@ async def test_max_completion_tokens_cap_overrides_dynamic_size() -> None:
 
     sent = fake_create.await_args.kwargs
     assert sent["max_completion_tokens"] == 512
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        "This model's maximum context length is 8192 tokens",
+        "max_completion_tokens=1024 cannot be greater than max_model_len=512",
+    ],
+)
+async def test_context_length_bad_request_triggers_stirrup_recovery(message: str) -> None:
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=10_000,
+        base_url="http://test",
+        api_key="k",
+    )
+    client._client = MagicMock()
+    client._client.chat.completions.create = AsyncMock(side_effect=_bad_request(message))
+
+    with pytest.raises(ContextOverflowError) as exc_info:
+        await client.generate([UserMessage(content="hi")], tools={})
+
+    assert message in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, BadRequestError)
+
+
+@pytest.mark.asyncio
+async def test_non_context_bad_request_still_raises() -> None:
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=10_000,
+        base_url="http://test",
+        api_key="k",
+    )
+    error = _bad_request("max_tokens must be at least 1")
+    client._client = MagicMock()
+    client._client.chat.completions.create = AsyncMock(side_effect=error)
+
+    with pytest.raises(BadRequestError) as exc_info:
+        await client.generate([UserMessage(content="hi")], tools={})
+
+    assert exc_info.value is error
 
 
 def test_defaults_match_pre_lift_behaviour() -> None:

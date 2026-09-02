@@ -19,7 +19,7 @@ that break on long-context models served by vLLM:
 1. It sends ``max_completion_tokens = self._max_tokens`` with every call —
    a static value that does not account for the input size.  When the
    prompt consumes a non-trivial fraction of the model's context window,
-   the server can return ``finish_reason=length`` with zero output tokens.
+   the server can reject the request with a context-length HTTP 400.
 
 2. On any ``finish_reason in ("max_tokens", "length")`` it raises
    ``ContextOverflowError`` unconditionally, even when the response has
@@ -32,11 +32,11 @@ and size ``max_completion_tokens`` as::
 
     context_window − tokenized(messages) − completion_token_buffer
 
-clamped to a minimum of ``_MIN_COMPLETION_TOKENS``.  On the response
-side, we replicate Stirrup parsing but do *not* raise on
-``finish_reason=length`` — the agent loop will either terminate when the
-model invokes the ``finish`` tool or exhaust ``max_turns``, yielding a
-clean timeout instead of a crash.
+clamped to a minimum of ``_MIN_COMPLETION_TOKENS``.  On the response side,
+we replicate Stirrup parsing but do *not* raise on ``finish_reason=length``.
+If the estimate still undershoots and the provider rejects the request for
+context length, we raise Stirrup's ``ContextOverflowError`` so its built-in
+history unwind and retry path can recover.
 
 ``model_id`` selects the HuggingFace tokenizer (or local checkpoint path).
 When unset, a conservative character-count fallback is used.
@@ -49,9 +49,11 @@ from time import perf_counter
 from typing import Any, Optional
 
 import stirrup.core.agent as _stirrup_agent_mod
+from openai import BadRequestError
 from pydantic import ValidationError as _PydanticValidationError
 from stirrup.clients.chat_completions_client import ChatCompletionsClient
 from stirrup.clients.utils import to_openai_tools
+from stirrup.core.exceptions import ContextOverflowError
 from stirrup.core.models import (
     AssistantMessage,
     ChatMessage,
@@ -61,6 +63,7 @@ from stirrup.core.models import (
     ToolCall,
 )
 
+from nemo_gym.context_errors import is_context_overflow_error
 from nemo_gym.openai_utils import NeMoGymChatCompletionMessageParam
 from responses_api_agents.stirrup_agent.stirrup_utils import to_provider_openai_messages
 
@@ -349,6 +352,12 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         request_start_time = perf_counter()
         try:
             response = await self._client.chat.completions.create(**request_kwargs)
+        except BadRequestError as exc:
+            if not is_context_overflow_error(exc):
+                LOGGER.error("API call raised %s: %s", type(exc).__name__, exc)
+                raise
+            LOGGER.warning("Model request exceeded the context window; asking Stirrup to unwind history.")
+            raise ContextOverflowError(str(exc)) from exc
         except Exception as exc:
             LOGGER.error("API call raised %s: %s", type(exc).__name__, exc)
             raise
