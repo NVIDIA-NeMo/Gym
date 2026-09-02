@@ -28,7 +28,12 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.rollout_observability import ModelCallRef
-from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM, PolicyCallBudgetExceeded
+from responses_api_agents.nooa_agent.gym_llm import (
+    GymResponsesLLM,
+    PolicyCallBudgetExceeded,
+    _finish_reason,
+    _tool_schema,
+)
 
 
 class FakeContent:
@@ -87,6 +92,70 @@ def make_llm(payload: dict, *, max_steps: int = 2) -> tuple[GymResponsesLLM, Mag
         cookies={},
     )
     return llm, server_client, collected
+
+
+@pytest.mark.parametrize(
+    ("schema", "expected"),
+    [
+        (
+            {
+                "type": "object",
+                "properties": {"code": {"type": "string"}},
+                "required": ["code"],
+                "additionalProperties": False,
+            },
+            True,
+        ),
+        (
+            {
+                "type": "object",
+                "properties": {"code": {"type": "string"}},
+                "required": ["code"],
+            },
+            False,
+        ),
+        (
+            {
+                "type": "object",
+                "properties": {"code": {"type": "string"}},
+                "required": ["code"],
+                "additionalProperties": True,
+            },
+            False,
+        ),
+        (
+            {
+                "type": "object",
+                "properties": {"code": {"type": "string"}, "timeout": {"type": "integer"}},
+                "required": ["code"],
+                "additionalProperties": False,
+            },
+            False,
+        ),
+    ],
+)
+def test_tool_schema_enables_strict_mode_only_for_closed_required_schemas(schema: dict, expected: bool) -> None:
+    tool = MagicMock()
+    tool.name = "execute_python"
+    tool.description = "Execute Python"
+    tool.get_parameter_schema.return_value = schema
+
+    assert _tool_schema(tool)["strict"] is expected
+
+
+@pytest.mark.parametrize(
+    ("incomplete_details", "expected"),
+    [
+        (None, "stop"),
+        ({"reason": "max_output_tokens"}, "length"),
+        ({"reason": "content_filter"}, "error"),
+    ],
+)
+def test_finish_reason_preserves_incomplete_response_cause(incomplete_details: dict | None, expected: str) -> None:
+    payload = model_response()
+    payload["incomplete_details"] = incomplete_details
+
+    assert _finish_reason(NeMoGymResponse.model_validate(payload)) == expected
 
 
 @pytest.mark.asyncio
