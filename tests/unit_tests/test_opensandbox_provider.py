@@ -1841,3 +1841,403 @@ async def test_exec_background_retries_timed_out_status_poll(monkeypatch: pytest
 
     assert commands.status_calls == ["exec-slowpoll", "exec-slowpoll"]
     assert result.return_code == 0
+
+
+class FakeAiohttpOptions:
+    """Stand-in for the SDK's ``AiohttpOptions`` model (a kwargs bag either way)."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+
+
+@dataclass(frozen=True)
+class FakeRetryPolicy:
+    """Stand-in for ``opensandbox.transport.RetryPolicy``."""
+
+    max_retries: int = 3
+
+    @classmethod
+    def disabled(cls) -> "FakeRetryPolicy":
+        return cls(max_retries=0)
+
+
+@pytest.fixture
+def fake_aiohttp_options(monkeypatch: pytest.MonkeyPatch) -> type[FakeAiohttpOptions]:
+    # The installed SDK may predate the aiohttp backend (CI pins the PyPI
+    # release), so the options model is faked like the rest of the SDK.
+    monkeypatch.setattr(opensandbox_provider, "_require_opensandbox_aiohttp_options", lambda: FakeAiohttpOptions)
+    monkeypatch.setattr(opensandbox_provider, "_require_opensandbox_retry_policy", lambda: FakeRetryPolicy)
+    return FakeAiohttpOptions
+
+
+def test_connection_config_rejects_unknown_transport_backend() -> None:
+    with pytest.raises(ValueError, match="transport_backend must be one of: httpx, aiohttp, aiohttp-native"):
+        opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "curl"})
+    with pytest.raises(ValueError, match="connect_retries"):
+        opensandbox_provider.OpenSandboxProvider(connection={"connect_retries": -1})
+    for backend in opensandbox_provider.TRANSPORT_BACKENDS:
+        assert opensandbox_provider.OpenSandboxConnectionConfig(transport_backend=backend).transport_backend == backend
+
+
+async def test_native_backend_passes_provider_session_and_options_to_sdk(
+    fake_opensandbox_sdk: None, fake_aiohttp_options: type[FakeAiohttpOptions]
+) -> None:
+    import aiohttp
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "domain": "sandbox.example",
+            "api_key": "key",  # pragma: allowlist secret
+            "use_server_proxy": True,
+            "transport_backend": "aiohttp-native",
+            "keepalive_expiry_s": 3.0,
+            "max_connections": None,
+            "connect_retries": 2,
+        },
+        operations={"close_on_terminal_frame": True},
+    )
+    try:
+        config = provider._connection_config()
+        # The SDK builds its own aiohttp stack: no injected httpx transport.
+        assert "transport" not in config.kwargs
+        assert config.kwargs["http_backend"] == "aiohttp"
+        # The provider owns retries; the SDK's default RetryPolicy (3 retries
+        # with backoff) must not stack underneath as it would without an
+        # injected transport.
+        assert config.kwargs["retry_policy"] == FakeRetryPolicy.disabled()
+        # Proxy-mode header injection is backend-independent.
+        assert config.kwargs["headers"] == {"OPEN-SANDBOX-API-KEY": "key"}  # pragma: allowlist secret
+        session = config.kwargs["aiohttp_session"]
+        assert isinstance(session, aiohttp.ClientSession)
+        assert not session.closed
+        # One session per provider, shared by every ConnectionConfig and by PTY.
+        assert provider._connection_config().kwargs["aiohttp_session"] is session
+        assert provider._pty_http_client() is session
+        assert provider._pty_owns_client() is False
+        connector = session.connector
+        assert connector.limit == 0, "max_connections=null must be uncapped (aiohttp limit=0)"
+        assert connector.limit_per_host == 0
+        assert connector.force_close is False
+        assert connector._keepalive_timeout == 3.0
+        assert connector._ssl is True
+        assert isinstance(session.cookie_jar, aiohttp.DummyCookieJar)
+        # No session-wide deadline: the SDK times out per request.
+        assert session.timeout == aiohttp.ClientTimeout()
+        assert config.kwargs["aiohttp"].kwargs == {
+            "limit": 0,
+            "limit_per_host": 0,
+            "keepalive_timeout": 3.0,
+            "force_close": False,
+            "ssl_verify": True,
+            "connect_retries": 2,
+            "close_on_terminal_frame": True,
+        }
+    finally:
+        await provider.aclose()
+    assert session.closed, "aclose must close the provider-owned session"
+    assert provider._aiohttp_session is None
+    # A later use builds a fresh session; aclose stays idempotent.
+    fresh = provider._get_aiohttp_session()
+    assert fresh is not session and not fresh.closed
+    await provider.aclose()
+    await provider.aclose()
+    assert fresh.closed
+
+
+async def test_native_backend_maps_pool_knobs_and_tls(
+    fake_opensandbox_sdk: None, fake_aiohttp_options: type[FakeAiohttpOptions]
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "transport_backend": "aiohttp-native",
+            "max_connections": 7,
+            "keepalive_expiry_s": None,
+            "disable_connection_pooling": True,
+            "tls_verify": False,
+            "connect_retries": 0,
+        }
+    )
+    try:
+        config = provider._connection_config()
+        assert config.kwargs["aiohttp"].kwargs == {
+            "limit": 7,
+            "limit_per_host": 0,
+            # null keepalive means "SDK default" (15s on the aiohttp backend).
+            "keepalive_timeout": 15.0,
+            "force_close": True,
+            "ssl_verify": False,
+            "connect_retries": 0,
+            "close_on_terminal_frame": False,
+        }
+        connector = config.kwargs["aiohttp_session"].connector
+        assert connector.limit == 7
+        # aiohttp forbids keepalive_timeout with force_close, so it must be omitted.
+        assert connector.force_close is True
+        assert connector._ssl is False
+    finally:
+        await provider.aclose()
+
+
+async def test_native_backend_session_refuses_a_foreign_event_loop(
+    fake_opensandbox_sdk: None, fake_aiohttp_options: type[FakeAiohttpOptions]
+) -> None:
+    import threading
+
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "aiohttp-native"})
+    other_loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=other_loop.run_forever, daemon=True)
+    thread.start()
+
+    async def _build() -> Any:
+        return provider._get_aiohttp_session()
+
+    try:
+        foreign = asyncio.run_coroutine_threadsafe(_build(), other_loop).result(timeout=5)
+        assert not foreign.closed
+        # aiohttp sessions are loop-bound; a clear error beats an opaque one later.
+        with pytest.raises(RuntimeError, match="different event loop"):
+            provider._get_aiohttp_session()
+        with pytest.raises(RuntimeError, match="different event loop"):
+            provider._connection_config()
+    finally:
+        provider._aiohttp_session = None
+        asyncio.run_coroutine_threadsafe(foreign.close(), other_loop).result(timeout=5)
+        other_loop.call_soon_threadsafe(other_loop.stop)
+        thread.join(timeout=5)
+        other_loop.close()
+
+
+async def test_native_backend_falls_back_to_bridge_when_sdk_lacks_it(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import aiohttp
+
+    def missing() -> Any:
+        raise ModuleNotFoundError("aiohttp-native requires an OpenSandbox SDK with the aiohttp backend")
+
+    monkeypatch.setattr(opensandbox_provider, "_require_opensandbox_aiohttp_options", missing)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"transport_backend": "aiohttp-native", "keepalive_expiry_s": 3.0}
+    )
+    try:
+        with caplog.at_level(logging.WARNING, logger=opensandbox_provider.LOGGER.name):
+            first = provider._connection_config()
+            second = provider._connection_config()
+        # The shipped default must keep working on a released SDK: bridge mode
+        # (injected transport, no SDK aiohttp knobs), warned about exactly once.
+        for config in (first, second):
+            assert "http_backend" not in config.kwargs
+            assert "aiohttp_session" not in config.kwargs
+            assert "retry_policy" not in config.kwargs
+            assert config.kwargs["transport"] is provider._transport
+        fallback_warnings = [
+            r for r in caplog.records if "Falling back to connection.transport_backend=aiohttp" in r.message
+        ]
+        assert len(fallback_warnings) == 1
+        assert "aiohttp-native requires an OpenSandbox SDK" in fallback_warnings[0].message
+        assert provider._transport_backend() == "aiohttp"
+        assert provider._aiohttp_session is None
+        # PTY sessions get (and own) their own client in bridge mode.
+        assert provider._pty_owns_client() is True
+        client = provider._pty_http_client()
+        assert isinstance(client, aiohttp.ClientSession)
+        await client.close()
+    finally:
+        await provider.aclose()
+
+
+async def test_shipped_config_builds_a_connection_config_with_the_installed_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The shipped yaml, loaded as the CLI would, against whatever SDK is
+    # installed: native when the SDK ships the aiohttp backend, bridge mode
+    # otherwise. Never skipped, so a default config that fails on first use
+    # cannot slip past CI.
+    from omegaconf import OmegaConf  # noqa: PLC0415
+    from opensandbox.config import ConnectionConfig  # noqa: PLC0415
+
+    monkeypatch.setenv("OPENSANDBOX_API_KEY", "shipped-key")  # pragma: allowlist secret
+    monkeypatch.delenv("OPENSANDBOX_DOMAIN", raising=False)
+    monkeypatch.delenv("OPENSANDBOX_INSECURE_TLS", raising=False)
+    config_path = Path(opensandbox_provider.__file__).parent / "configs" / "opensandbox.yaml"
+    shipped = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
+    assert isinstance(shipped, dict)
+    block = shipped["sandbox"]["opensandbox"]
+    assert block["connection"]["transport_backend"] == "aiohttp-native"
+
+    provider = opensandbox_provider.OpenSandboxProvider(**block)
+    try:
+        config = provider._connection_config()
+        assert isinstance(config, ConnectionConfig)
+        # (The SDK may add a best-effort OPEN-SANDBOX-CLIENT-IP header of its own.)
+        assert config.headers["OPEN-SANDBOX-API-KEY"] == "shipped-key"  # pragma: allowlist secret
+        sdk_has_native_backend = "http_backend" in ConnectionConfig.model_fields
+        if sdk_has_native_backend:
+            assert provider._transport_backend() == "aiohttp-native"
+            assert config.http_backend == "aiohttp"
+            assert config.transport is None
+            assert config.aiohttp_session is provider._aiohttp_session
+            assert config.retry_policy.max_retries == 0
+        else:
+            assert provider._transport_backend() == "aiohttp"
+            assert config.transport is provider._transport
+        materialized = config.with_transport_if_missing()
+        assert materialized.transport is not None
+        if sdk_has_native_backend:
+            from opensandbox.aiohttp_backend.transport import AiohttpTransport  # noqa: PLC0415
+
+            # RetryPolicy.disabled(): no RetryAsyncTransport in the stack.
+            assert isinstance(materialized.transport, AiohttpTransport)
+        await materialized.close_transport_if_owned()
+    finally:
+        await provider.aclose()
+
+
+def test_native_backend_requires_sdk_with_aiohttp_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_import = builtins.__import__
+
+    def fake_import(
+        name: str,
+        globals_: dict[str, Any] | None = None,
+        locals_: dict[str, Any] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> Any:
+        if name == "opensandbox.config" and "AiohttpOptions" in (fromlist or ()):
+            raise ImportError("cannot import name 'AiohttpOptions'")
+        return real_import(name, globals_, locals_, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(ModuleNotFoundError, match="aiohttp-native requires an OpenSandbox SDK"):
+        opensandbox_provider._require_opensandbox_aiohttp_options()
+
+
+async def test_native_backend_against_real_sdk_connection_config() -> None:
+    # Only where the installed SDK ships the aiohttp backend: the kwargs the
+    # provider builds must validate, and the SDK must treat the session as
+    # caller-owned (never closing it).
+    try:
+        from opensandbox.config import AiohttpOptions, ConnectionConfig  # noqa: PLC0415
+    except ImportError:
+        pytest.skip("installed OpenSandbox SDK has no aiohttp backend")
+
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "domain": "sandbox.example",
+            "transport_backend": "aiohttp-native",
+            "max_connections": None,
+            "keepalive_expiry_s": 3.0,
+        },
+        operations={"close_on_terminal_frame": True},
+    )
+    try:
+        config = provider._connection_config()
+        assert isinstance(config, ConnectionConfig)
+        assert config.http_backend == "aiohttp"
+        assert config.transport is None
+        assert config.retry_policy.max_retries == 0
+        session = provider._get_aiohttp_session()
+        assert config.aiohttp_session is session
+        options = config.aiohttp
+        assert isinstance(options, AiohttpOptions)
+        assert (options.limit, options.keepalive_timeout, options.connect_retries) == (0, 3.0, 2)
+        assert options.close_on_terminal_frame is True
+
+        materialized = config.with_transport_if_missing()
+        assert materialized.transport is not None
+        # Gym owns retries: the SDK stack is the bare aiohttp transport, not
+        # RetryAsyncTransport(AiohttpTransport) as with the SDK's default policy.
+        from opensandbox.aiohttp_backend.transport import AiohttpTransport  # noqa: PLC0415
+
+        assert isinstance(materialized.transport, AiohttpTransport)
+        owner = materialized.get_aiohttp_session_owner()
+        assert owner.get() is session
+        assert owner.owns_session is False
+        await materialized.close_transport_if_owned()
+        assert not session.closed, "the SDK must never close the provider-owned session"
+    finally:
+        await provider.aclose()
+    assert session.closed
+
+
+async def test_create_merges_execd_env_under_spec_env(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"execd_env": {"EXECD_API_GRACE_SHUTDOWN": "50ms", "SHARED": "from-config"}},
+        probe={"command": None},
+    )
+    await provider.create(SandboxSpec(image="image:tag", env={"SHARED": "from-spec", "ONLY_SPEC": "1"}))
+    # Provider-level execd tuning reaches every sandbox; the spec wins on conflicts.
+    assert FakeSandbox.created_kwargs["env"] == {
+        "EXECD_API_GRACE_SHUTDOWN": "50ms",
+        "SHARED": "from-spec",
+        "ONLY_SPEC": "1",
+    }
+
+    plain = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    await plain.create(SandboxSpec(image="image:tag", env={"A": "1"}))
+    assert FakeSandbox.created_kwargs["env"] == {"A": "1"}
+
+    # Values are stringified like spec env; non-mappings are rejected up front.
+    assert opensandbox_provider.OpenSandboxCreateConfig(execd_env={"N": 1}).execd_env == {"N": "1"}
+    assert opensandbox_provider.OpenSandboxCreateConfig().execd_env == {}
+    with pytest.raises(TypeError, match="execd_env must be a mapping"):
+        opensandbox_provider.OpenSandboxProvider(create={"execd_env": ["EXECD_API_GRACE_SHUTDOWN=50ms"]})
+
+
+def test_tls_verify_env_override_reaches_httpx_transports(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import ssl
+
+    ConnectionConfig = opensandbox_provider.OpenSandboxConnectionConfig
+    monkeypatch.delenv(opensandbox_provider.INSECURE_TLS_ENV, raising=False)
+    assert ConnectionConfig().tls_verify is True
+    assert ConnectionConfig(tls_verify=False).tls_verify is False
+    monkeypatch.setenv(opensandbox_provider.INSECURE_TLS_ENV, "0")
+    assert ConnectionConfig().tls_verify is True
+    monkeypatch.setenv(opensandbox_provider.INSECURE_TLS_ENV, " 1 ")
+    assert ConnectionConfig().tls_verify is False
+    assert ConnectionConfig(tls_verify=True).tls_verify is False, "the env override must win over the config"
+
+    insecure = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "httpx"})
+    assert insecure._build_transport()._pool._ssl_context.verify_mode == ssl.CERT_NONE
+
+    monkeypatch.delenv(opensandbox_provider.INSECURE_TLS_ENV)
+    verified = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "httpx"})
+    assert verified._build_transport()._pool._ssl_context.verify_mode == ssl.CERT_REQUIRED
+
+    httpx_aiohttp = pytest.importorskip("httpx_aiohttp", reason="optional httpx-aiohttp is not installed")
+    bridge = opensandbox_provider.OpenSandboxProvider(
+        connection={"transport_backend": "aiohttp", "tls_verify": False}
+    )._build_transport()
+    assert isinstance(bridge, httpx_aiohttp.AiohttpTransport)
+    assert bridge.ssl_context.verify_mode == ssl.CERT_NONE
+
+
+async def test_pty_http_client_is_owned_per_session_on_httpx_backends(
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import aiohttp
+
+    monkeypatch.delenv(opensandbox_provider.INSECURE_TLS_ENV, raising=False)
+    provider = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "aiohttp"})
+    first, second = provider._pty_http_client(), provider._pty_http_client()
+    try:
+        assert isinstance(first, aiohttp.ClientSession)
+        assert first is not second, "httpx backends hand each PTY session its own client"
+        assert provider._pty_owns_client() is True
+        assert first.connector._ssl is True
+        assert provider._aiohttp_session is None
+    finally:
+        await first.close()
+        await second.close()
+
+    # Same OPENSANDBOX_INSECURE_TLS contract as the SDK transports.
+    monkeypatch.setenv(opensandbox_provider.INSECURE_TLS_ENV, "1")
+    insecure = opensandbox_provider.OpenSandboxProvider()
+    client = insecure._pty_http_client()
+    try:
+        assert client.connector._ssl is False
+    finally:
+        await client.close()
+    await provider.aclose()

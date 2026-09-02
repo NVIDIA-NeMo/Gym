@@ -42,13 +42,22 @@ sandbox:
       protocol: http
       request_timeout_s: 300
       use_server_proxy: true
+      keepalive_expiry_s: 3.0
+      max_keepalive_connections: 20
+      max_connections: null
+      connect_retries: 2
+      transport_backend: aiohttp-native
+      tls_verify: true
     create:
       request_timeout_s: 1200
-      timeout_s: 1200
-      skip_health_check: true
+      timeout_s: 1500
+      connect_attempt_timeout_s: 1500
+      skip_health_check: false
       retries: 10
       retry_delay_s: 5.0
       retry_max_delay_s: 90.0
+      execd_env:
+        EXECD_API_GRACE_SHUTDOWN: "50ms"
     probe:
       timeout_s: 60
       deadline_s: 180
@@ -60,6 +69,11 @@ sandbox:
       retry_max_delay_s: 45.0
       command_retries: 0
       close_timeout_s: 30
+      background_exec: true
+      background_poll_initial_s: 0.5
+      background_poll_interval_s: 30.0
+      status_poll_timeout_s: 10.0
+      close_on_terminal_frame: false
 ```
 
 Run an agent with the provider config by passing it alongside the agent and model configs:
@@ -75,10 +89,30 @@ The provider constructor accepts four optional config sections:
 
 | Section | Purpose |
 | --- | --- |
-| `connection` | OpenSandbox SDK connection settings: domain, API key, protocol, request timeout, and server proxy mode. |
-| `create` | Sandbox create timeout, retry, image pull policy, and health-check behavior. |
+| `connection` | OpenSandbox SDK connection settings: domain, API key, protocol, request timeout, server proxy mode, connection pool limits, the HTTP `transport_backend`, and `tls_verify`. |
+| `create` | Sandbox create timeout, retry, image pull policy, health-check behavior, and `execd_env` (container env every sandbox gets). |
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
-| `operations` | Retry and timeout behavior for SDK operations after create, including command retries, close timeout, background command polling, and the dedicated `status_poll_timeout_s` budget for background status polls. |
+| `operations` | Retry and timeout behavior for SDK operations after create, including command retries, close timeout, background command polling, the dedicated `status_poll_timeout_s` budget for background status polls, and `close_on_terminal_frame`. |
+
+## Connection and Transport
+
+The provider talks to the OpenSandbox server (and, through its proxy, to each sandbox's exec daemon) over one shared connection pool per provider instance. `connection.transport_backend` selects the HTTP stack underneath the OpenSandbox SDK:
+
+| Value | Behavior |
+| --- | --- |
+| `aiohttp-native` (shipped default) | The SDK's own aiohttp backend (`ConnectionConfig(http_backend="aiohttp")`). The provider owns a single `aiohttp.ClientSession` built from `max_connections` (`null` means no cap), `keepalive_expiry_s` (`null` falls back to the SDK's 15 s), `disable_connection_pooling`, `connect_retries`, and `tls_verify`; it hands that session to the SDK as caller-owned and closes it in `aclose()`. PTY sessions reuse the same session instead of opening a client each. The SDK's own retry policy is disabled underneath it (the provider owns retries and timeouts). Requires an SDK that ships the backend, which no PyPI release up to `0.1.16` does; with an older SDK the provider logs a warning once and behaves as `aiohttp`. |
+| `aiohttp` | The SDK's httpx client layer over the optional `httpx-aiohttp` bridge transport. Falls back to `httpx` with a warning when the bridge is not installed. |
+| `httpx` | The SDK's default httpx transport with the configured `httpx.Limits`. |
+
+Pool settings apply to every backend. `keepalive_expiry_s` must stay below the server's keep-alive idle timeout so pooled sockets are not reused after the server has closed them, and `max_connections` also caps in-flight sandbox operations per process. `disable_connection_pooling` opens a fresh connection per request (`force_close` on aiohttp), for load balancers that silently reap idle pooled connections.
+
+`connection.tls_verify` (default `true`) controls certificate verification on `https` endpoints for the SDK transport, the native aiohttp session, and PTY sockets alike. Setting the environment variable `OPENSANDBOX_INSECURE_TLS=1` forces it off regardless of the config value; use that only against validation endpoints whose certificates the client cannot verify, never in production.
+
+### execd tuning: `create.execd_env`
+
+`create.execd_env` is a map of container environment variables applied to every sandbox the provider creates, underneath the sandbox spec's own `env` (spec keys win on conflicts). The shipped config sets `EXECD_API_GRACE_SHUTDOWN: "50ms"`: execd holds every `/command` response open for this duration after the terminal frame (1 s by default) so an egress sidecar can sync policy changes the command made. NeMo Gym commands never touch egress policy, so the shorter grace removes about one second from every exec, background submit, and create probe. `operations.background_poll_initial_s: 0.5` is tuned for that shorter tail.
+
+`operations.close_on_terminal_frame` (`aiohttp-native` only, default `false`) makes the SDK stop reading a foreground command stream at its terminal frame and close the connection instead of waiting out execd's grace tail. It costs a reconnect per command, so it only pays off on deployments where the grace cannot be lowered through `execd_env`.
 
 ## SandboxSpec Provider Options
 
@@ -118,7 +152,7 @@ Unknown provider option keys raise `ValueError`; values with the wrong type rais
 | `image` | Container image passed to OpenSandbox create. |
 | `ttl_s` | Converted to an OpenSandbox sandbox timeout. |
 | `ready_timeout_s` | Converted to an OpenSandbox ready timeout. |
-| `env` | Passed to OpenSandbox create and command execution. |
+| `env` | Passed to OpenSandbox create (merged over `create.execd_env`) and command execution. |
 | `files` | Seed files uploaded before the first command. |
 | `metadata` | Passed to OpenSandbox create after provider-specific normalization. |
 | `resources` | Mapped to OpenSandbox resource quantities. |

@@ -16,6 +16,7 @@
 
 import asyncio
 import logging
+import os
 import re
 import shlex
 from collections.abc import Mapping
@@ -115,6 +116,11 @@ IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
 VALID_IMAGE_PULL_POLICIES = {"Always", "IfNotPresent", "Never"}
 STATUS_CODE_RE = re.compile(r"(?:status code|http)\D+(\d{3})", re.IGNORECASE)
+TRANSPORT_BACKENDS = ("httpx", "aiohttp", "aiohttp-native")
+# "1" disables TLS certificate verification on every connection the provider
+# opens (SDK transport or native aiohttp session, and PTY sockets). For
+# validation endpoints with certificates the client cannot verify only.
+INSECURE_TLS_ENV = "OPENSANDBOX_INSECURE_TLS"
 
 
 def validate_image_pull_policy(image_pull_policy: str) -> str:
@@ -139,6 +145,27 @@ def _require_opensandbox_sdk() -> tuple[Any, Any, Any, Any, Any]:
         ) from e
 
     return Sandbox, ConnectionConfig, RunCommandOpts, PlatformSpec, Volume
+
+
+def _require_opensandbox_aiohttp_options() -> Any:
+    """Return the SDK's ``AiohttpOptions`` model, which only SDKs with the aiohttp backend ship."""
+    try:
+        from opensandbox.config import AiohttpOptions
+    except ImportError as e:
+        raise ModuleNotFoundError(
+            "connection.transport_backend=aiohttp-native requires an OpenSandbox SDK with the aiohttp "
+            "backend (ConnectionConfig.http_backend and AiohttpOptions; no PyPI release up to 0.1.16 "
+            'ships it). Install an SDK that does, or set transport_backend to "aiohttp" or "httpx".'
+        ) from e
+
+    return AiohttpOptions
+
+
+def _require_opensandbox_retry_policy() -> Any:
+    """Return the SDK's ``RetryPolicy`` (``opensandbox.transport``, present since 0.1.16)."""
+    from opensandbox.transport import RetryPolicy
+
+    return RetryPolicy
 
 
 def _require_tenacity() -> tuple[Any, Any, Any, Any]:
@@ -384,11 +411,22 @@ class OpenSandboxConnectionConfig:
 
     ``keepalive_expiry_s`` must stay below the server's own keep-alive idle
     timeout (uvicorn defaults to 5s), or pooled sockets are reused after the
-    server has closed them; null falls back to the SDK's default transport.
-    ``transport_backend`` is "httpx" or "aiohttp" (via the optional
-    ``httpx-aiohttp`` bridge, falling back to httpx when it is absent).
+    server has closed them; null falls back to the SDK's default transport
+    (or, for ``aiohttp-native``, to the SDK's 15s keep-alive).
+    ``transport_backend`` selects the HTTP stack under the SDK:
+
+    - ``"httpx"``: the SDK's httpx transport with the pool limits below.
+    - ``"aiohttp"``: the same httpx client layer over the optional
+      ``httpx-aiohttp`` bridge, falling back to httpx when it is absent.
+    - ``"aiohttp-native"``: the SDK's own aiohttp backend
+      (``ConnectionConfig(http_backend="aiohttp")``) on one provider-owned
+      ``aiohttp.ClientSession`` that PTY sockets share too. Needs an SDK that
+      ships the backend (no PyPI release up to 0.1.16 does); with an older
+      SDK the provider falls back to ``"aiohttp"`` and logs a warning once.
+
     The pool is shared, so ``max_connections`` also caps in-flight sandbox
-    operations per process; null means no cap.
+    operations per process; null means no cap. ``tls_verify`` applies to every
+    connection the provider opens; ``OPENSANDBOX_INSECURE_TLS=1`` forces it off.
     """
 
     domain: str | None = None
@@ -405,6 +443,18 @@ class OpenSandboxConnectionConfig:
     max_connections: int | None = 100
     connect_retries: int = 2
     transport_backend: str = "httpx"
+    tls_verify: bool = True
+
+    def __post_init__(self) -> None:
+        if self.transport_backend not in TRANSPORT_BACKENDS:
+            raise ValueError(
+                f"connection.transport_backend must be one of: {', '.join(TRANSPORT_BACKENDS)}; "
+                f"got {self.transport_backend!r}"
+            )
+        if self.connect_retries < 0:
+            raise ValueError("connection.connect_retries must be >= 0")
+        if os.environ.get(INSECURE_TLS_ENV, "").strip() == "1":
+            object.__setattr__(self, "tls_verify", False)
 
 
 @dataclass(frozen=True)
@@ -461,10 +511,18 @@ class OpenSandboxCreateConfig:
     skip_health_check: bool = False
     connect_attempt_timeout_s: float = 30.0
     connect_poll_s: float = 2.0
+    # Container env applied to every sandbox under the spec's own env (the
+    # spec wins on conflicts). Meant for execd tuning such as
+    # EXECD_API_GRACE_SHUTDOWN, which every benchmark should get without
+    # editing its own sandbox_spec.
+    execd_env: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.image_pull_policy is not None:
             validate_image_pull_policy(self.image_pull_policy)
+        if not isinstance(self.execd_env, Mapping):
+            raise TypeError("create.execd_env must be a mapping of environment variables")
+        object.__setattr__(self, "execd_env", _string_map(dict(self.execd_env)))
         if self.timeout_s is not None and self.timeout_s <= 0:
             raise ValueError("create.timeout_s must be > 0")
         if self.retries < 0:
@@ -522,6 +580,11 @@ class OpenSandboxOperationConfig:
     # unreachable sandbox hangs for the shared request timeout (tuned for long
     # submits) before failing. None falls back to that shared budget.
     status_poll_timeout_s: float | None = 10.0
+    # aiohttp-native only: stop reading a foreground command stream at its
+    # terminal frame and close the connection instead of waiting out execd's
+    # graceful-shutdown tail (EXECD_API_GRACE_SHUTDOWN, 1s by default). Costs
+    # a reconnect per command, so leave it off when the tail is already short.
+    close_on_terminal_frame: bool = False
 
     def __post_init__(self) -> None:
         if self.retries < 0:
@@ -636,6 +699,14 @@ class OpenSandboxProvider:
         # create, so the provider owns this one: built once, reused by every
         # ConnectionConfig, closed in aclose().
         self._transport: Any | None = None
+        # aiohttp-native: the one aiohttp.ClientSession behind every SDK call
+        # and PTY socket. Created lazily on the running loop (aiohttp sessions
+        # are loop-bound), handed to the SDK as a caller-owned session it never
+        # closes, and closed in aclose().
+        self._aiohttp_session: Any | None = None
+        # connection.transport_backend after the SDK capability check (see
+        # _transport_backend); resolved on first use.
+        self._resolved_transport_backend: str | None = None
         # Sessions own aiohttp clients that only close() releases: aclose()
         # sweeps any still open; ended ones are retired on the next create/attach.
         self._pty_sessions: set[Any] = set()
@@ -654,6 +725,26 @@ class OpenSandboxProvider:
         image_pull_policy = validate_image_pull_policy(image_pull_policy)
         resolved.setdefault(IMAGE_PULL_POLICY_EXTENSION_KEY, image_pull_policy)
         resolved.setdefault(IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY, image_pull_policy)
+        return resolved
+
+    def _transport_backend(self) -> str:
+        """Effective ``connection.transport_backend``.
+
+        ``aiohttp-native`` needs an SDK that ships the aiohttp backend. When the
+        installed SDK predates it, fall back to the ``aiohttp`` bridge (which
+        itself falls back to httpx) and warn once, so the shipped default config
+        keeps working on every released SDK instead of failing on first use.
+        """
+        resolved = self._resolved_transport_backend
+        if resolved is None:
+            resolved = self._connection.transport_backend
+            if resolved == "aiohttp-native":
+                try:
+                    _require_opensandbox_aiohttp_options()
+                except ModuleNotFoundError as e:
+                    LOGGER.warning("%s Falling back to connection.transport_backend=aiohttp for this provider.", e)
+                    resolved = "aiohttp"
+            self._resolved_transport_backend = resolved
         return resolved
 
     def _connection_config(
@@ -684,9 +775,84 @@ class OpenSandboxProvider:
             # untrusted code and must never see it.
             if self._connection.api_key is not None:
                 kwargs["headers"] = {"OPEN-SANDBOX-API-KEY": self._connection.api_key}
-        if self._connection.keepalive_expiry_s is not None or self._connection.disable_connection_pooling:
+        if self._transport_backend() == "aiohttp-native":
+            # No `transport`: the SDK builds its aiohttp stack over the
+            # provider-owned session. The options still matter with a
+            # caller-owned session for the non-connector knobs
+            # (connect_retries, close_on_terminal_frame).
+            AiohttpOptions = _require_opensandbox_aiohttp_options()
+            kwargs["http_backend"] = "aiohttp"
+            kwargs["aiohttp_session"] = self._get_aiohttp_session()
+            # The provider owns retries and per-operation budgets (tenacity).
+            # Without an injected transport the SDK would also install its
+            # default RetryPolicy (3 retries, 0.5-30s backoff, Retry-After up
+            # to 60s) under every GET/DELETE and pre-send POST, stacking sleeps
+            # and extra requests inside those budgets; the httpx/bridge modes
+            # never had it because injecting a transport disables it.
+            kwargs["retry_policy"] = _require_opensandbox_retry_policy().disabled()
+            kwargs["aiohttp"] = AiohttpOptions(
+                limit=self._connection.max_connections or 0,
+                limit_per_host=0,
+                keepalive_timeout=self._aiohttp_keepalive_timeout_s(),
+                force_close=self._connection.disable_connection_pooling,
+                ssl_verify=self._connection.tls_verify,
+                connect_retries=self._connection.connect_retries,
+                close_on_terminal_frame=self._operations.close_on_terminal_frame,
+            )
+        elif self._connection.keepalive_expiry_s is not None or self._connection.disable_connection_pooling:
             kwargs["transport"] = self._get_transport()
         return ConnectionConfig(**kwargs)
+
+    def _aiohttp_keepalive_timeout_s(self) -> float:
+        # null means "SDK default" for the httpx backends; the SDK's aiohttp
+        # backend defaults to 15s, which stays under uvicorn's 30s keep-alive.
+        if self._connection.keepalive_expiry_s is None:
+            return 15.0
+        return float(self._connection.keepalive_expiry_s)
+
+    def _get_aiohttp_session(self) -> Any:
+        """Return the provider-owned aiohttp session, creating it on first use.
+
+        Must run inside the event loop that will use it: aiohttp sessions are
+        loop-bound, and one created on another loop fails opaquely later, so
+        that case is refused up front (one provider instance per loop; the
+        sync facade's per-sandbox loop satisfies this because it also builds
+        a provider per sandbox).
+        """
+        import aiohttp
+
+        loop = asyncio.get_running_loop()
+        session = self._aiohttp_session
+        if session is not None and not session.closed:
+            if session._loop is not loop:
+                raise RuntimeError(
+                    "OpenSandbox provider-owned aiohttp session is bound to a different event loop; "
+                    "use one OpenSandboxProvider per event loop"
+                )
+            return session
+
+        connector_kwargs: dict[str, Any] = {}
+        if not self._connection.disable_connection_pooling:
+            # aiohttp rejects a keep-alive timeout on a force-closed connector.
+            connector_kwargs["keepalive_timeout"] = self._aiohttp_keepalive_timeout_s()
+        connector = aiohttp.TCPConnector(
+            # aiohttp's 0 is httpx's None: no cap.
+            limit=self._connection.max_connections or 0,
+            limit_per_host=0,
+            force_close=self._connection.disable_connection_pooling,
+            # True keeps aiohttp's default verified context; False disables
+            # certificate verification (OPENSANDBOX_INSECURE_TLS).
+            ssl=bool(self._connection.tls_verify),
+            **connector_kwargs,
+        )
+        self._aiohttp_session = aiohttp.ClientSession(
+            connector=connector,
+            # No session-wide deadline (aiohttp's default total=300s would cut
+            # long command streams); the SDK sets per-request timeouts.
+            timeout=aiohttp.ClientTimeout(),
+            cookie_jar=aiohttp.DummyCookieJar(),
+        )
+        return self._aiohttp_session
 
     def _get_transport(self) -> Any:
         """Return the provider-owned shared transport, building it on first use."""
@@ -706,17 +872,18 @@ class OpenSandboxProvider:
             max_keepalive_connections=max_keepalive,
             keepalive_expiry=self._connection.keepalive_expiry_s,
         )
-        if self._connection.transport_backend == "aiohttp":
+        verify = self._connection.tls_verify
+        if self._transport_backend() == "aiohttp":
             try:
                 from httpx_aiohttp import AiohttpTransport
 
-                return AiohttpTransport(limits=limits, retries=self._connection.connect_retries)
+                return AiohttpTransport(verify=verify, limits=limits, retries=self._connection.connect_retries)
             except ImportError:
                 LOGGER.warning(
                     "connection.transport_backend=aiohttp requested but httpx-aiohttp "
                     "is not installed; falling back to the httpx transport"
                 )
-        return httpx.AsyncHTTPTransport(limits=limits, retries=self._connection.connect_retries)
+        return httpx.AsyncHTTPTransport(verify=verify, limits=limits, retries=self._connection.connect_retries)
 
     async def _retire_closed_pty_sessions(self) -> None:
         """Release sessions that ended on their own; their aiohttp client is
@@ -738,8 +905,9 @@ class OpenSandboxProvider:
 
     async def aclose(self) -> None:
         """Close provider-owned resources."""
-        # PTY sessions hold their own aiohttp clients, which the shared httpx
-        # transport below does not cover.
+        # PTY sessions first: on the httpx backends they hold their own aiohttp
+        # clients, and on aiohttp-native they borrow the shared session closed
+        # below, so their sockets must be released before it goes away.
         for session in list(self._pty_sessions):
             try:
                 await session.close()
@@ -751,6 +919,9 @@ class OpenSandboxProvider:
         transport, self._transport = self._transport, None
         if transport is not None:
             await transport.aclose()
+        aiohttp_session, self._aiohttp_session = self._aiohttp_session, None
+        if aiohttp_session is not None and not aiohttp_session.closed:
+            await aiohttp_session.close()
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
         """Return a descriptor for reattaching to this sandbox by id.
@@ -1054,7 +1225,8 @@ class OpenSandboxProvider:
         options = OpenSandboxProviderOptions.from_mapping(spec.provider_options)
 
         kwargs: dict[str, Any] = {
-            "env": spec.env,
+            # Provider-level execd tuning first so a benchmark's own env wins.
+            "env": {**self._create.execd_env, **spec.env},
             "metadata": spec.metadata,
             "resource": _resource_map(spec.resources),
             "extensions": self._resolve_extensions(options.extensions),
@@ -1441,9 +1613,23 @@ class OpenSandboxProvider:
         )
 
     def _pty_http_client(self) -> Any:
+        """Return the aiohttp client for one PTY session.
+
+        aiohttp-native shares the provider-owned session (see
+        ``_pty_owns_client``); the httpx backends hand each session its own
+        client, which the session closes.
+        """
         import aiohttp
 
+        if self._transport_backend() == "aiohttp-native":
+            return self._get_aiohttp_session()
+        if not self._connection.tls_verify:
+            return aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False))
         return aiohttp.ClientSession()
+
+    def _pty_owns_client(self) -> bool:
+        """Whether a PTY session may close the client it was given."""
+        return self._transport_backend() != "aiohttp-native"
 
     async def _pty_target(self, handle: SandboxHandle) -> tuple[str, dict[str, str], float | None]:
         """Resolve the sandbox's execd base URL, headers and request timeout."""
@@ -1476,6 +1662,7 @@ class OpenSandboxProvider:
             headers=headers,
             spec=spec,
             request_timeout_s=request_timeout_s,
+            owns_client=self._pty_owns_client(),
         )
         await self._retire_closed_pty_sessions()
         self._pty_sessions.add(session)
@@ -1509,6 +1696,7 @@ class OpenSandboxProvider:
                     takeover=takeover,
                     since=since,
                     request_timeout_s=request_timeout_s,
+                    owns_client=self._pty_owns_client(),
                 )
                 break
             except SandboxPtyError as e:

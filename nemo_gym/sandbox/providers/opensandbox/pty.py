@@ -105,6 +105,7 @@ class OpenSandboxPtySession:
         headers: dict[str, str],
         request_timeout_s: float | None,
         owned: bool = True,
+        owns_client: bool = True,
     ) -> None:
         self._client = client
         self._ws = ws
@@ -115,6 +116,10 @@ class OpenSandboxPtySession:
         # Attached sessions belong to whoever created them: closing one detaches
         # rather than ending it.
         self._owned = owned
+        # A borrowed client (the provider's shared aiohttp session) outlives the
+        # session: close() then releases the socket, and the server-side record
+        # when owned, but never the client.
+        self._owns_client = owns_client
         self.mode: str | None = None
         self.replay_offset: int | None = None
         self._output: asyncio.Queue[bytes | None] = asyncio.Queue()
@@ -435,13 +440,20 @@ class OpenSandboxPtySession:
                 except (aiohttp.ClientError, asyncio.TimeoutError):
                     pass
         finally:
-            await self._client.close()
+            if self._owns_client:
+                await self._client.close()
 
     async def __aenter__(self) -> "OpenSandboxPtySession":
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         await self.close()
+
+
+async def _release_client(client: aiohttp.ClientSession, owns_client: bool) -> None:
+    """Close ``client`` after a failure, unless the caller keeps it (shared session)."""
+    if owns_client:
+        await client.close()
 
 
 async def open_pty_session(
@@ -451,10 +463,13 @@ async def open_pty_session(
     headers: dict[str, str],
     spec: SandboxPtySpec,
     request_timeout_s: float | None,
+    owns_client: bool = True,
 ) -> OpenSandboxPtySession:
     """Create an execd PTY session and attach its WebSocket.
 
-    Owns ``client``: it is closed on failure and by ``session.close()``.
+    Owns ``client`` unless ``owns_client`` is False: an owned client is closed
+    on failure and by ``session.close()``; a borrowed one (the provider's
+    shared aiohttp session) is left open in both cases.
     """
     body: dict[str, str] = {}
     if spec.cwd is not None:
@@ -462,7 +477,7 @@ async def open_pty_session(
     try:
         command = _effective_command(spec)
     except BaseException:
-        await client.close()
+        await _release_client(client, owns_client)
         raise
     if command is not None:
         body["command"] = command
@@ -504,13 +519,13 @@ async def open_pty_session(
                 pass
             raise
     except SandboxPtyError:
-        await client.close()
+        await _release_client(client, owns_client)
         raise
     except Exception as e:
-        await client.close()
+        await _release_client(client, owns_client)
         raise SandboxPtyError(f"Failed to open PTY session: {e}") from e
     except BaseException:
-        await client.close()
+        await _release_client(client, owns_client)
         raise
 
     session = await _start_session(
@@ -520,6 +535,7 @@ async def open_pty_session(
         session_id=session_id,
         headers=headers,
         request_timeout_s=request_timeout_s,
+        owns_client=owns_client,
     )
     # execd hardcodes 80x24 at spawn; size is only settable post-attach.
     if spec.pty and (spec.rows, spec.cols) != (24, 80):
@@ -540,8 +556,9 @@ async def attach_pty_session(
     takeover: bool = True,
     since: int | None = None,
     request_timeout_s: float | None,
+    owns_client: bool = True,
 ) -> OpenSandboxPtySession:
-    """Attach to an existing execd PTY session. Owns ``client`` as above."""
+    """Attach to an existing execd PTY session. ``client`` ownership as above."""
     query: dict[str, str] = {}
     if takeover:
         query["takeover"] = "1"
@@ -557,20 +574,20 @@ async def attach_pty_session(
             request_timeout_s=request_timeout_s,
         )
     except SandboxPtyError:
-        await client.close()
+        await _release_client(client, owns_client)
         raise
     except aiohttp.WSServerHandshakeError as e:
-        await client.close()
+        await _release_client(client, owns_client)
         if e.status == 409:
             raise SandboxPtyError(
                 f"PTY session {session_id} already has an attached client (pass takeover=True to evict)"
             ) from e
         raise SandboxPtyError(f"Failed to attach to PTY session {session_id}: {e}") from e
     except Exception as e:
-        await client.close()
+        await _release_client(client, owns_client)
         raise SandboxPtyError(f"Failed to attach to PTY session {session_id}: {e}") from e
     except BaseException:
-        await client.close()
+        await _release_client(client, owns_client)
         raise
     return await _start_session(
         client=client,
@@ -580,6 +597,7 @@ async def attach_pty_session(
         headers=headers,
         request_timeout_s=request_timeout_s,
         owned=False,
+        owns_client=owns_client,
     )
 
 
@@ -622,6 +640,7 @@ async def _start_session(
     headers: dict[str, str],
     request_timeout_s: float | None,
     owned: bool = True,
+    owns_client: bool = True,
 ) -> OpenSandboxPtySession:
     session = OpenSandboxPtySession(
         client=client,
@@ -631,6 +650,7 @@ async def _start_session(
         headers=headers,
         request_timeout_s=request_timeout_s,
         owned=owned,
+        owns_client=owns_client,
     )
     try:
         await session._wait_connected(request_timeout_s)

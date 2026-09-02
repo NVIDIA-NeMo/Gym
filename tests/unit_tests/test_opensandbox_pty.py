@@ -1152,3 +1152,136 @@ async def test_run_detached_launch_uses_stdin_at_eof() -> None:
     await session.run_detached("work", poll_interval_s=0.01)
     assert b"</dev/null" in state["launch"], "detached commands must not inherit the session's endless stdin"
     await session.close()
+
+
+async def test_borrowed_client_survives_session_close() -> None:
+    # aiohttp-native hands every PTY session the provider's shared aiohttp
+    # session: close() must release the socket and the server-side record,
+    # never the client.
+    ws = FakeWs([CONNECTED])
+    client = FakeHttpClient(ws=ws)
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=ws,  # type: ignore[arg-type]
+        session_id="s-1",
+        session_url="http://server/base/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+        owns_client=False,
+    )
+    await session.close()
+    await session.close()
+    assert ws.closed
+    assert client.delete_calls == [("http://server/base/pty/s-1", {})]
+    assert not client.closed
+
+
+async def test_open_and_attach_with_borrowed_client_never_close_it() -> None:
+    from nemo_gym.sandbox.providers.opensandbox.pty import attach_pty_session
+
+    ws = FakeWs([CONNECTED])
+    client = FakeHttpClient(ws=ws)
+    session = await open_pty_session(
+        client=client,  # type: ignore[arg-type]
+        base_url="http://server/base",
+        headers={},
+        spec=SandboxPtySpec(),
+        request_timeout_s=5.0,
+        owns_client=False,
+    )
+    await session.close()
+    assert ws.closed and not client.closed
+    assert client.delete_calls[0][0] == "http://server/base/pty/s-1", "an owned session is still ended server-side"
+
+    ws2 = FakeWs([CONNECTED])
+    client2 = FakeHttpClient(ws=ws2)
+    attached = await attach_pty_session(
+        client=client2,  # type: ignore[arg-type]
+        base_url="http://server/base",
+        headers={},
+        session_id="s-9",
+        request_timeout_s=5.0,
+        owns_client=False,
+    )
+    await attached.close()
+    assert ws2.closed and not client2.closed
+    assert client2.delete_calls == []
+
+
+@pytest.mark.parametrize(
+    "fail",
+    [
+        # Every failure path that closes an owned client leaves a borrowed one open.
+        lambda client: open_pty_session(
+            client=client,
+            base_url="http://server/base",
+            headers={},
+            spec=SandboxPtySpec(user=0),  # invalid spec, before any request
+            request_timeout_s=5.0,
+            owns_client=False,
+        ),
+        lambda client: open_pty_session(
+            client=client,
+            base_url="http://server/base",
+            headers={},
+            spec=SandboxPtySpec(),
+            request_timeout_s=5.0,
+            owns_client=False,
+        ),
+        lambda client: pty_module.attach_pty_session(
+            client=client,
+            base_url="http://server/base",
+            headers={},
+            session_id="s-9",
+            request_timeout_s=5.0,
+            owns_client=False,
+        ),
+    ],
+    ids=["invalid-spec", "create-500", "attach-error"],
+)
+async def test_failure_paths_leave_borrowed_client_open(fail: Any) -> None:
+    client = FakeHttpClient(post_status=500, ws_error=RuntimeError("gone"))
+    with pytest.raises((SandboxPtyError, ValueError)):
+        await fail(client)
+    assert not client.closed
+    assert client.delete_calls == []
+
+
+async def test_provider_native_backend_borrows_shared_client_for_pty(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    class FakeRaw:
+        async def get_endpoint(self, port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint="server/base", headers={})
+
+    provider = OpenSandboxProvider(
+        connection={"domain": "server", "protocol": "http", "transport_backend": "aiohttp-native"}
+    )
+    # One shared client stands in for the provider-owned aiohttp session. The
+    # third socket ends right after `connected` so its session ends on its own.
+    ended_ws = FakeWs([CONNECTED])
+    ended_ws.closed = True
+    client = FakeHttpClient(ws=[FakeWs([CONNECTED]), FakeWs([CONNECTED]), ended_ws])
+    monkeypatch.setattr(provider, "_pty_http_client", lambda: client)
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
+
+    created = await provider.create_pty(handle, SandboxPtySpec())
+    attached = await provider.attach_pty(handle, "s-7", takeover=True)
+    assert created._owns_client is False and attached._owns_client is False
+    await created.close()
+    assert not client.closed, "closing one PTY session must not close the shared client"
+    assert client.delete_calls[0][0] == "http://server/base/pty/s-1"
+
+    # An ended session retired on the next create releases only its socket.
+    ended = await provider.create_pty(handle, SandboxPtySpec())
+    await ended._pump_task
+    assert ended.closed
+    await provider._retire_closed_pty_sessions()
+    assert ended not in provider._pty_sessions
+    assert not client.closed
+
+    await provider.aclose()
+    assert attached.closed
+    assert not client.closed, "the shared client is the provider's to close, not the sessions'"
