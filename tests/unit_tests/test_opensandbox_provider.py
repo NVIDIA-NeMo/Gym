@@ -95,6 +95,23 @@ def test_sdk_info_logs_are_silenced(caplog: pytest.LogCaptureFixture) -> None:
     assert sdk_messages == ["SDK warning"]
 
 
+def test_sdk_missing_sandbox_terminate_warning_is_silenced(caplog: pytest.LogCaptureFixture) -> None:
+    sdk_logger = logging.getLogger("opensandbox.adapters.sandboxes_adapter")
+
+    with caplog.at_level(logging.WARNING):
+        sdk_logger.warning(
+            "Failed to terminate sandbox sandbox-1: Kill sandbox sandbox-1 failed: [KUBERNETES::SANDBOX_NOT_FOUND]"
+        )
+        sdk_logger.warning("Failed to terminate sandbox sandbox-2: backend unavailable")
+        sdk_logger.warning("Sandbox sandbox-3 not found | [KUBERNETES::SANDBOX_NOT_FOUND]")
+
+    sdk_messages = [record.message for record in caplog.records if record.name == sdk_logger.name]
+    assert sdk_messages == [
+        "Failed to terminate sandbox sandbox-2: backend unavailable",
+        "Sandbox sandbox-3 not found | [KUBERNETES::SANDBOX_NOT_FOUND]",
+    ]
+
+
 def test_sdk_import_helpers_and_retry_classification() -> None:
     assert len(opensandbox_provider._require_opensandbox_sdk()) == 5
     assert len(opensandbox_provider._require_tenacity()) == 4

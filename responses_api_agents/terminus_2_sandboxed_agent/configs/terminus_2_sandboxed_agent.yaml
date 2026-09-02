@@ -5,7 +5,7 @@ terminus_2_sandboxed_agent:
       num_workers: 4
       resources_server:
         type: resources_servers
-        name: swebench_resources_server
+        name: ???
       model_server:
         type: responses_api_models
         name: policy_model

@@ -625,7 +625,7 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | `--num-repeats` | Rollouts per task (for mean@k metrics). Pass an int to apply to every task, or a dict keyed by `agent_ref.name` for per-agent counts (e.g. `'{simple_agent: 32, swe_agent: 1}'`) when one input file mixes agents. In dict form, the special key `_default` is the fallback for agents not explicitly listed; without it, any unlisted row's agent raises a single consolidated error. |
 | `--prompt-config` | Prompt template YAML to apply. |
 | `--concurrency` | Maximum number of concurrent samples. |
-| `--split` | Dataset split to use (`train`, `validation`, or `benchmark`). |
+| `--split` | Dataset split to use (`train`, `validation`, or `benchmark`). A dataset of the matching `type` must be declared in the loaded configs. `example` datasets are smoke-test samples, not a runnable split — run them with `--no-serve` and `--input` as shown in the [Quickstart](/get-started/quickstart). |
 | `--model`, `-m` | Served model identifier. |
 | `--model-url` | Model server base URL. |
 | `--model-api-key` | Model server API key. |

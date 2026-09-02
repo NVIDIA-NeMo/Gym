@@ -28,7 +28,8 @@ import orjson
 import pytest
 import yaml
 from aiohttp import ClientConnectorError, ClientResponseError, ServerDisconnectedError
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
+from pydantic import ValidationError
 
 import nemo_gym.rollout_collection
 import nemo_gym.token_id_capture.delivery
@@ -3415,6 +3416,20 @@ class TestE2EInputJsonlFpathRejected:
                 }
             )
 
+    def test_e2e_config_rejects_input_jsonl_fpath_from_dictconfig(self) -> None:
+        # The CLI passes an OmegaConf DictConfig (a Mapping, not a dict). An isinstance(dict)
+        # check silently let input_jsonl_fpath through on the real path — pin the Mapping match.
+        with pytest.raises(ConfigError, match=r"not supported when serving end-to-end"):
+            E2ERolloutCollectionConfig.model_validate(
+                DictConfig(
+                    {
+                        "output_jsonl_fpath": "out.jsonl",
+                        "split": "train",
+                        "input_jsonl_fpath": "my_data.jsonl",
+                    }
+                )
+            )
+
     def test_e2e_config_accepts_without_input_jsonl_fpath(self) -> None:
         config = E2ERolloutCollectionConfig.model_validate({"output_jsonl_fpath": "out.jsonl", "split": "train"})
         assert config.split == "train"
@@ -3424,6 +3439,17 @@ class TestE2EInputJsonlFpathRejected:
             {"output_jsonl_fpath": "out.jsonl", "input_jsonl_fpath": "my_data.jsonl"}
         )
         assert config.input_jsonl_fpath == "my_data.jsonl"
+
+
+class TestE2EExampleSplitRejected:
+    @pytest.mark.parametrize("wrap", [dict, DictConfig])
+    def test_example_split_gets_actionable_error_not_literal_error(self, wrap) -> None:
+        with pytest.raises(ConfigError, match=r"--no-serve --agent <agent> --input"):
+            E2ERolloutCollectionConfig.model_validate(wrap({"output_jsonl_fpath": "out.jsonl", "split": "example"}))
+
+    def test_other_invalid_splits_still_fail_literal_validation(self) -> None:
+        with pytest.raises(ValidationError, match=r"split"):
+            E2ERolloutCollectionConfig.model_validate({"output_jsonl_fpath": "out.jsonl", "split": "test"})
 
 
 class TestAgentMapRouting:
