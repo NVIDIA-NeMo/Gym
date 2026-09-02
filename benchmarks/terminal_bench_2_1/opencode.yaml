@@ -18,4 +18,4 @@ opencode_sandboxed_agent_terminal_bench_2_1:
           type: benchmark
           jsonl_fpath: benchmarks/terminal_bench_2_1/data/benchmark.jsonl
           prepare_script: benchmarks/terminal_bench_2_1/prepare.py
-          num_repeats: 1
+          num_repeats: 8
