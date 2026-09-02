@@ -14,9 +14,11 @@
 #     bug: https://github.com/vllm-project/router/issues/197
 #     fix: https://github.com/vllm-project/router/pull/216 (unmerged upstream)
 #
-# This script is the standalone/validation path: it produces a wheel on Lustre
-# that can be inspected, smoke-tested and reused. build_eval_container.sh
-# performs the equivalent build inline so the container is self-contained.
+# This is the only place the router is built. build_eval_container.sh takes the
+# resulting wheel via its required VLLM_ROUTER_WHEEL input and asserts that what it
+# installs really carries the fix, so a container cannot be built with the bad
+# router by omission. The wheel is built inside the eval base image, so its
+# extension module matches the Python that runs vllm-router at eval time.
 #
 # Usage:
 #   SBATCH_ACCOUNT=... SBATCH_PARTITION=cpu SBATCH_QOS=cpu-short \

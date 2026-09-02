@@ -31,15 +31,16 @@ sbatch --gres=gpu:4 \
 
 
 ### vllm-router patch (decode-node cache imbalance)
-`build_eval_container.sh` does **not** install the released `vllm-router` wheel.
+`build_eval_container.sh` requires `VLLM_ROUTER_WHEEL` and does **not** fall back to
+installing the released `vllm-router` wheel.
 
 The released router resets every worker's in-flight load counter from the registry
-health checker, every 10 health-check cycles (10 minutes at the default 60s
-interval). The `cache_aware` policy reads those counters to decide when to abandon
+health checker, every 10 health-check cycles -- 10 minutes at the default 60s
+interval. The `cache_aware` policy reads those counters to decide when to abandon
 prefix affinity in favour of shortest-queue routing, so the reset makes an
 already-saturated worker look idle. Under P/D disaggregation
 (`--vllm-pd-disaggregation --decode-policy cache_aware`, as used by
-`sbatch_external_vllm.sh`) that is a feedback loop: the worker holding the hot
+`sbatch_external_vllm.sh`) that closes a feedback loop: the worker holding the hot
 prefixes keeps attracting requests, and shortest-queue never triggers to break it.
 
 Note the reset is *unconditional*. There is a second, dead copy of the same logic in
@@ -51,12 +52,9 @@ worker every 10 cycles regardless of load.
 - bug: https://github.com/vllm-project/router/issues/197
 - fix: https://github.com/vllm-project/router/pull/216 (unmerged upstream)
 
-The container build pins and builds the PR head
-(`VLLM_ROUTER_COMMIT`, defaults to the #216 head) and asserts the periodic reset is
-really gone before building. Set `VLLM_ROUTER_WHEEL` to a wheel path reachable
-inside the container to install a prebuilt artifact instead of paying for the Rust
-build again. `build_vllm_router_wheel.sh` produces such a wheel, and is the place to
-validate a router change before committing to a full container rebuild:
+Build the wheel once with `build_vllm_router_wheel.sh`, then pass it to the container
+build. The wheel is built inside the eval base image, so its extension module matches
+the Python that runs `vllm-router` at eval time:
 
 ```bash
 SBATCH_ACCOUNT=my-slurm-account \
@@ -66,31 +64,22 @@ CONTAINER=/path/to/vllm/container \
 sbatch --nodes=1 --ntasks=1 --cpus-per-task=96 --mem=0 --time=03:00:00 --gpus-per-node=0 \
   benchmarks/nemotron_3.5_super/build_vllm_router_wheel.sh
 # -> results/vllm_router/wheels/vllm_router-*.whl
-```
 
-If an eval image already exists and the router is the only thing that needs to
-change, `patch_container_vllm_router.sh` swaps it in place and leaves everything
-else byte-identical -- a full rebuild re-runs `gym eval prepare`, which needs live
-credentials for the gated benchmarks. It is also what you want for a controlled A/B:
-
-```bash
-SBATCH_ACCOUNT=my-slurm-account \
-SBATCH_PARTITION=cpu \
-SBATCH_QOS=cpu-normal \
-INPUT_CONTAINER=/path/to/with_gym.sqsh \
-OUTPUT_CONTAINER=/path/to/with_gym_patched.sqsh \
 VLLM_ROUTER_WHEEL=results/vllm_router/wheels/vllm_router-0.1.15-cp38-abi3-linux_aarch64.whl \
-sbatch benchmarks/nemotron_3.5_super/patch_container_vllm_router.sh
+INPUT_CONTAINER=... OUTPUT_CONTAINER=... MOUNTS=... GYM_CONFIG=... \
+sbatch benchmarks/nemotron_3.5_super/build_eval_container.sh
 ```
 
-Both container-producing scripts stage to `$OUTPUT_CONTAINER.partial` and publish
-only on success. This matters more than it looks: pyxis `--container-save` exports
-the image when the step tears down *regardless of the inner script's exit status*,
-and overwrites whatever already sits at the target -- so without the staging step a
-failed build silently replaces a verified image with an unverified one. The
-provenance marker is likewise written only after the binary assertions pass, so a
-shipped image cannot claim a commit its `.so` does not carry. To check an image
-after the fact, boot it and grep the extension:
+The wheel's directory is mounted into the build automatically; it only has to live on
+storage the compute node can read.
+
+PR #216 does not bump the version -- a fixed router and the stock 0.1.15 wheel both
+report `0.1.15` -- so the container build asserts on the compiled extension instead:
+stock carries the string `Resetting worker loads (cycle`, and only the fix carries
+`Attempted to decrement load counter that is already at 0`. A wheel built from the
+wrong commit fails the build rather than shipping silently.
+
+To check an image after the fact, boot it and grep the extension:
 
 ```bash
 srun --container-image=/path/to/image.sqsh --no-container-mount-home bash -c '
@@ -101,17 +90,17 @@ srun --container-image=/path/to/image.sqsh --no-container-mount-home bash -c '
 ```
 
 The same one-liner works against a *running* job with
-`srun --overlap --jobid=<id> --container-name=container-on-node`, which is how to
-confirm which router an in-flight eval is actually using.
-
-Once upstream merges #216 and cuts a release, drop both build paths and go back to
-`uv pip install --system vllm-router`.
+`srun --overlap --jobid=<id> --container-name=container-on-node`. From a finished
+job's Slurm log, the router's own source line identifies the build:
+`vllm_pd_router.rs:1935` for stock 0.1.15, `:1999` for the #216 build.
 
 #### Measured effect
 
 Two SWE-bench Multilingual runs on the released router exhibited the runaway. Both
-are 2 prefill / 2 decode with 450 rollouts in parallel; the ratio is decode max/min
-running requests, sampled per minute:
+are 2 prefill / 2 decode with 450 rollouts in parallel. Ratio is decode max/min
+running requests sampled per minute, over the minutes where the busiest decode node
+held at least 100 running; `starved` counts minutes where one node sat at ~0 running
+while its peer was busy:
 
 | run | router | loaded | starved | median | max | early -> late | max KV | max queued |
 |-----|--------|--------|---------|--------|-----|---------------|--------|------------|
@@ -125,32 +114,18 @@ running requests, sampled per minute:
 
 Both bad runs show the same signature: an even start that diverges monotonically
 (`early -> late`), ending with one decode node pinned near 100% KV cache with 200+
-requests queued while its peer drains toward idle. 6800138 spent 3 minutes with one
-node at essentially zero running requests, and stalled at 583/900 rollouts. The
-patched runs stay flat, never queue, and hold KV below 29%.
+requests queued while its peer drains toward idle. 6800138 stalled at 583/900
+rollouts. The patched runs stay flat, never queue, and hold KV below 29%.
 
-Not every run on the released router hits this -- it depends on getting into and
-staying in a saturated decode regime -- so a single clean run does not tell you
-which router you are on. Fingerprint it instead: the router logs its own source
-line, `vllm_pd_router.rs:1935` for stock 0.1.15 and `:1999` for the #216 build.
-
-**Why the gate is on the busiest node, not the pair.** `compare --min-load` gates on
-`max(loads)`. Gating on the pair's combined running count is post-treatment: when the
-router hot-spots, the cold node's slots go unused and work accumulates in the hot
-node's *waiting* queue rather than the pair's *running* count, so combined load falls
-precisely when imbalance is worst (Spearman -0.77 on 6800138). An earlier version of
-this table used a combined-load gate and reported 6800138 as median 4.99 / max 70,
-because the gate had silently discarded its most extreme minutes. The `starved`
-column exists for the same reason -- minutes where one node sits at ~0 have no finite
-ratio and would otherwise vanish from the summary entirely.
-
-Reproduce with `decode_balance.py` in this directory:
+Not every run on the released router hits this -- it needs a sustained saturated
+decode regime -- so a clean run does not tell you which router you are on. Use the
+fingerprint above instead.
 
 #### What the fix does not cover
 
-Both verified against the shipped source; neither is reachable with the flags
-`sbatch_external_vllm.sh` uses today, and neither is a regression -- v0.1.15 behaved
-the same way. They matter only if the deployment changes.
+Neither of these is reachable with the flags `sbatch_external_vllm.sh` uses today,
+and neither is a regression -- v0.1.15 behaved the same way. They matter only if the
+deployment changes.
 
 - **Streaming.** `process_vllm_two_stage_request` releases the decode load guard as
   soon as the decode response *headers* arrive, before the body is forwarded. For a
@@ -167,13 +142,11 @@ the same way. They matter only if the deployment changes.
 Also worth knowing: with the CLI defaults `--balance-abs-threshold 64` and
 `--balance-rel-threshold 1.5`, cache affinity can hold a sustained ~64-request or
 1.5x decode split indefinitely without ever tripping shortest-queue. That is the
-ceiling the fix leaves in place. Runs above sit at 1.03-1.04, well inside it.
+ceiling the fix leaves in place.
 
-The router exports `vllm_router_worker_load` and `vllm_router_worker_health` on a
-Prometheus endpoint that is always enabled, and #216 is what wires the load gauge on
-the P/D path. Scraping it would replace the vLLM-engine-log reconstruction the tools
-above do. Health-state transitions are logged nowhere, so that endpoint (or the
-router's own `/health`, which lists unhealthy servers) is the only way to see them.
+Once upstream merges #216 and cuts a release, drop `build_vllm_router_wheel.sh` and
+the `VLLM_ROUTER_WHEEL` requirement and go back to `uv pip install --system
+vllm-router`.
 
 
 ### Launch vLLM
