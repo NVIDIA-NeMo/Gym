@@ -1298,47 +1298,36 @@ class OpenSandboxProvider:
         except Exception as error:
             if not isinstance(error, SandboxBackendUnreachableError) and _exception_status_code(error) != 502:
                 raise
-            notice = await self._oom_death_notice(handle)
-            if notice is not None:
-                raise SandboxBackendUnreachableError(notice) from error
+
+            get_info = getattr(handle.raw, "get_info", None)
+            if get_info is not None:
+                deadline = asyncio.get_running_loop().time() + 5.0
+                while (remaining_s := deadline - asyncio.get_running_loop().time()) > 0:
+                    try:
+                        info = await self._await_sdk_call(
+                            get_info(),
+                            operation="get_info after exec 502",
+                            sandbox_id=handle.sandbox_id,
+                            timeout_s=min(2.0, remaining_s),
+                        )
+                    except Exception:
+                        break
+                    raw_status = getattr(info, "status", None)
+                    state = getattr(raw_status, "state", None)
+                    reason = getattr(raw_status, "reason", None)
+                    message = getattr(raw_status, "message", None)
+                    status_text = f"{reason} {message}"
+                    if re.search(r"\boom[\s_-]*killed\b|\bout of memory\b", status_text, re.IGNORECASE):
+                        message = str(message or "")[:500]
+                        raise SandboxBackendUnreachableError(
+                            "Sandbox was OOM-killed. "
+                            f"OpenSandbox status: state={state!r}, reason={reason!r}, message={message!r}; "
+                            f"sandbox_id={handle.sandbox_id!r}"
+                        ) from error
+                    if message and _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
+                        break
+                    await asyncio.sleep(min(0.5, max(0.0, deadline - asyncio.get_running_loop().time())))
             raise
-
-    async def _oom_death_notice(self, handle: SandboxHandle, *, any_death: bool = False) -> str | None:
-        """Briefly poll the sandbox status; describe an OOM kill, else None.
-
-        With ``any_death`` every terminal state is reported, not just an OOM
-        kill — for callers that need to know whether the sandbox is gone at
-        all, not specifically why. When the backend stops answering it usually
-        takes the control plane a moment to record why, so poll for up to 5s
-        before giving up."""
-        get_info = getattr(handle.raw, "get_info", None)
-        if get_info is None:
-            return None
-        deadline = asyncio.get_running_loop().time() + 5.0
-        while (remaining_s := deadline - asyncio.get_running_loop().time()) > 0:
-            try:
-                info = await self._await_sdk_call(
-                    get_info(),
-                    operation="get_info after backend loss",
-                    sandbox_id=handle.sandbox_id,
-                    timeout_s=min(2.0, remaining_s),
-                )
-            except Exception:
-                return None
-            raw_status = getattr(info, "status", None)
-            state = getattr(raw_status, "state", None)
-            reason = getattr(raw_status, "reason", None)
-            message = getattr(raw_status, "message", None)
-            status_text = (
-                f"OpenSandbox status: state={state!r}, reason={reason!r}, message={str(message or '')[:500]!r}; "
-                f"sandbox_id={handle.sandbox_id!r}"
-            )
-            if re.search(r"\boom[\s_-]*killed\b|\bout of memory\b", f"{reason} {message}", re.IGNORECASE):
-                return f"Sandbox was OOM-killed. {status_text}"
-            if message and _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
-                return f"Sandbox is dead. {status_text}" if any_death else None
-            await asyncio.sleep(min(0.5, max(0.0, deadline - asyncio.get_running_loop().time())))
-        return None
 
     async def _exec_background(
         self,
@@ -1467,9 +1456,9 @@ class OpenSandboxProvider:
         )
 
     def _pty_http_client(self) -> Any:
-        from nemo_gym.server_utils import get_global_aiohttp_client
+        import aiohttp
 
-        return get_global_aiohttp_client()
+        return aiohttp.ClientSession()
 
     async def _pty_target(self, handle: SandboxHandle) -> tuple[str, dict[str, str], float | None]:
         """Resolve the sandbox's execd base URL, headers and request timeout."""
@@ -1502,7 +1491,6 @@ class OpenSandboxProvider:
             headers=headers,
             spec=spec,
             request_timeout_s=request_timeout_s,
-            diagnose=lambda: self._oom_death_notice(handle, any_death=True),
         )
         await self._retire_closed_pty_sessions()
         self._pty_sessions.add(session)
@@ -1536,21 +1524,10 @@ class OpenSandboxProvider:
                     takeover=takeover,
                     since=since,
                     request_timeout_s=request_timeout_s,
-                    diagnose=lambda: self._oom_death_notice(handle, any_death=True),
                 )
                 break
             except SandboxPtyError as e:
-                if not takeover or "already has an attached client" not in str(e):
-                    raise
-                if delay is None:
-                    # The eviction never completed across every retry. When the
-                    # sandbox itself is gone (node loss, OOM kill) the stale
-                    # attachment can never acknowledge its eviction, so the
-                    # takeover is refused forever — report the sandbox's death
-                    # instead of the refusal.
-                    notice = await self._oom_death_notice(handle, any_death=True)
-                    if notice is not None:
-                        raise SandboxPtyError(f"PTY attach takeover kept being refused: {notice}") from e
+                if not takeover or delay is None or "already has an attached client" not in str(e):
                     raise
             await asyncio.sleep(delay)
         await self._retire_closed_pty_sessions()
