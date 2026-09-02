@@ -44,6 +44,15 @@ _THIS_DIR = Path(__file__).parent
 DEFAULT_TASKS_CACHE = Path.home() / ".cache" / "harbor" / "tasks"
 DEFAULT_DATASET_NAME = "terminal-bench@2.0"
 
+# Pinned Terminal-Bench 2.1 checkout used by `prepare()` (the `gym eval prepare`
+# entrypoint); same pin as responses_api_agents/harbor_agent/prepare_terminal_bench_2_1.py.
+TB21_REPO_URL = "https://github.com/harbor-framework/terminal-bench-2-1.git"
+TB21_PINNED_COMMIT = (
+    "36d417f56c293b8271b306a0e4c566f58e98c153"  # pragma: allowlist secret  (git commit SHA, not a credential)
+)
+TB21_CHECKOUT_DIR = _THIS_DIR / "data" / "terminal-bench-2-1"
+TB21_OUTPUT_FPATH = _THIS_DIR / "data" / "terminal_bench_2_1.jsonl"
+
 
 def _load_task_config(task_dir: Path) -> dict:
     """Read task.toml and instruction.md from a task directory."""
@@ -276,6 +285,55 @@ def build_images(task_rows: list[dict], image_dir: Path, jobs: int, force: bool)
             print(f"  - {name}", flush=True)
         sys.exit(1)
     print(f"All images ready. Use: container_formatter='{image_dir}/{{task_name}}.sif'", flush=True)
+
+
+def _ensure_tb21_tasks_dir() -> Path:
+    """Return the pinned TB 2.1 tasks directory, cloning the repo if needed.
+
+    ``TERMINAL_BENCH_2_1_TASKS_DIR`` overrides the default checkout location
+    (it must point at a directory of task dirs, each with a task.toml).
+    """
+    env_dir = os.environ.get("TERMINAL_BENCH_2_1_TASKS_DIR")
+    if env_dir:
+        tasks_dir = Path(env_dir)
+        if not tasks_dir.exists():
+            raise FileNotFoundError(f"TERMINAL_BENCH_2_1_TASKS_DIR does not exist: {tasks_dir}")
+        return tasks_dir
+
+    tasks_dir = TB21_CHECKOUT_DIR / "tasks"
+    if not tasks_dir.exists():
+        TB21_CHECKOUT_DIR.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "clone", TB21_REPO_URL, str(TB21_CHECKOUT_DIR)], check=True)
+        subprocess.run(["git", "-C", str(TB21_CHECKOUT_DIR), "checkout", TB21_PINNED_COMMIT], check=True)
+    return tasks_dir
+
+
+def prepare(agent_name: str = "anyterminal_oracle", output_fpath: Path | str | None = None) -> Path:
+    """`gym eval prepare` entrypoint: emit one Gym row per Terminal-Bench 2.1 task.
+
+    Clones the pinned TB 2.1 tasks repo on first use; rows bake absolute
+    ``task_dir`` paths into the checkout, which oracle mode reads at run time
+    (solution/ and tests/), so keep the checkout in place.
+    """
+    output = Path(output_fpath) if output_fpath else TB21_OUTPUT_FPATH
+    tasks_dir = _ensure_tb21_tasks_dir()
+    task_dirs = sorted(p for p in tasks_dir.iterdir() if p.is_dir() and (p / "task.toml").exists())
+    if not task_dirs:
+        raise RuntimeError(f"No tasks with task.toml found under {tasks_dir}")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for task_dir in task_dirs:
+        task_cfg = _load_task_config(task_dir)
+        if not task_cfg:
+            continue
+        row = _to_gym_row(task_dir, task_cfg)
+        row["agent_ref"] = {"name": agent_name}
+        rows.append(json.dumps(row))
+    output.write_text("\n".join(rows) + "\n")
+
+    print(f"Wrote {len(rows)} tasks to {output}")
+    return output
 
 
 def main() -> None:
