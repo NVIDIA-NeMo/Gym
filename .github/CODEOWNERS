@@ -1,4 +1,101 @@
+# NeMo Gym — code ownership
+#
+# Two kinds of lines in this file:
+#
+#   <path-pattern> @user-or-team ...
+#     Standard CODEOWNERS syntax. ENFORCED: GitHub auto-requests review from
+#     these owners, and main's branch protection requires their approval
+#     before merge.
+#
+#   # suggest: <path-pattern> @user-or-team ...
+#     Same path-pattern syntax, prefixed with a literal `# suggest:` comment
+#     tag. ADVISORY ONLY: GitHub's CODEOWNERS parser ignores every line
+#     starting with `#`, so these can never become required reviewers no
+#     matter what branch protection does. .github/workflows/suggest-reviewers.yml
+#     reads only these tagged lines and requests those users/teams as PR
+#     reviewers (visible in the Reviewers sidebar) without blocking merge.
+#
+# Put a `# suggest:` line right under the enforced rule it relates to, so
+# there's one file to update instead of two.
+#
+# GitHub applies the LAST matching pattern for a path, for both kinds of line
+# independently.
+
+# ── Enforced ──────────────────────────────────────────────────────────────
 .github/ @nvidia-nemo/automation
 docker/ @nvidia-nemo/automation
 pyproject.toml @nvidia-nemo/automation
 uv.lock @nvidia-nemo/automation
+
+# ── Suggested (advisory only, see header) ───────────────────────────────────
+# Path → team map below mirrors the ownership proposal from PR #2439 (not
+# merged/enforced — kept here as suggestions only). Teams verified to exist
+# via the GitHub API at authoring time.
+
+# suggest: * @nvidia-nemo/gym_architects
+
+# Frontier Eval
+# suggest: /responses_api_agents/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /resources_servers/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /benchmarks/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /environments/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/cli/ @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/cli_setup_command.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/benchmarks.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/dataset_orchestrator.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/gitlab_utils.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/hf_utils.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/prompt.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/reward_profile.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/judge.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/skills.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/rollout_reverification.py @nvidia-nemo/gym_env_benchmarks
+
+# Core-Arch + RL
+# suggest: /responses_api_models/ @nvidia-nemo/gym_core
+# suggest: /nemo_gym/server_utils.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/openai_utils.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/anthropic_utils.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/anthropic_converter.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/responses_converter.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/base_resources_server.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/base_responses_api_agent.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/base_responses_api_model.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/registry.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/agent_registry.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/rollout_collection.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/profiling.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/server_metadata.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/server_status.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/train_data_utils.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/sandbox/ @nvidia-nemo/gym_core
+# suggest: /nemo_gym/resources/ @nvidia-nemo/gym_core
+# suggest: /nemo_gym/chat_streaming.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/responses_streaming.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/discovery.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/model_registry.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/resources_server_registry.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/mcp_auto_exposure.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/orchestration/ @nvidia-nemo/gym_core
+# suggest: /nemo_gym/rollout_correlation.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/rollout_observability.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/decorators.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/path_utils.py @nvidia-nemo/gym_core
+# suggest: /tests/ @nvidia-nemo/gym_core
+
+# Co-owned
+# suggest: /nemo_gym/__init__.py @nvidia-nemo/gym_core @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/config_types.py @nvidia-nemo/gym_core @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/global_config.py @nvidia-nemo/gym_core @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/package_info.py @nvidia-nemo/gym_core @nvidia-nemo/gym_env_benchmarks
+# suggest: /responses_api_agents/verifiers_agent/ @nvidia-nemo/gym_env_benchmarks @nvidia-nemo/gym_core
+
+# Docs
+# suggest: /docs/ @nvidia-nemo/gym_leads
+# suggest: /fern/ @nvidia-nemo/gym_leads
+
+# CI & Build (already enforced above via @nvidia-nemo/automation; kept here
+# only for the paths PR #2439 additionally called out)
+# suggest: /Makefile @nvidia-nemo/automation
+# suggest: /codecov.yml @nvidia-nemo/automation
+# suggest: /.pre-commit-config.yaml @nvidia-nemo/automation
