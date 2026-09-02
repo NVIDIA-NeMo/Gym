@@ -868,3 +868,29 @@ def test_slurm_launcher_falls_back_to_the_checkout_env_yaml(tmp_path: Path) -> N
     assert cleanup_call[cleanup_call.index("--connection-config") + 1] == f"{repo_root}/env.yaml"
     assert "--domain" not in cleanup_call
     assert "--api-key" not in cleanup_call
+
+
+def test_insecure_tls_env_disables_certificate_verification(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = Session(page([]), page([]), page([]))
+    connector_calls, _, _ = install_session(monkeypatch, session)
+    monkeypatch.setenv("OPENSANDBOX_INSECURE_TLS", "1")
+
+    assert run_cleanup(domain="https://sandbox.example", protocol="https") == 0
+
+    assert connector_calls == [
+        {
+            "limit": cleanup_sandboxes.REAP_CONCURRENCY,
+            "limit_per_host": cleanup_sandboxes.REAP_CONCURRENCY,
+            "ssl": False,
+        }
+    ]
+
+
+def test_tls_verification_stays_on_without_the_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = Session(page([]), page([]), page([]))
+    connector_calls, _, _ = install_session(monkeypatch, session)
+    monkeypatch.delenv("OPENSANDBOX_INSECURE_TLS", raising=False)
+
+    assert run_cleanup(domain="https://sandbox.example", protocol="https") == 0
+
+    assert "ssl" not in connector_calls[0]

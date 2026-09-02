@@ -6,6 +6,7 @@
 
 import argparse
 import asyncio
+import os
 import re
 import sys
 import urllib.parse
@@ -45,7 +46,12 @@ async def cleanup_sandboxes(
         normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._-")
         scope[key] = normalized[:63].strip("._-") or "metadata"
 
-    connector = aiohttp.TCPConnector(limit=REAP_CONCURRENCY, limit_per_host=REAP_CONCURRENCY)
+    connector_kwargs: dict[str, Any] = {"limit": REAP_CONCURRENCY, "limit_per_host": REAP_CONCURRENCY}
+    # Same contract as the provider: OPENSANDBOX_INSECURE_TLS=1 disables certificate
+    # verification for cells that front the server with a self-signed certificate.
+    if os.environ.get("OPENSANDBOX_INSECURE_TLS", "").strip() == "1":
+        connector_kwargs["ssl"] = False
+    connector = aiohttp.TCPConnector(**connector_kwargs)
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
     async with aiohttp.ClientSession(
         connector=connector,
