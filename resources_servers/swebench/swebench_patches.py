@@ -263,6 +263,7 @@ async def run_instance(
 
 def patch_swebench_verified_env_vars(repo: str, env: Dict[str, Any]) -> None:
     if MAP_REPO_TO_EXT.get(repo) == "py":
+        # Activate the SWEBench Verified python conda environment
         env["CONDA_EXE"] = "/opt/miniconda3/bin/conda"
         env["_CE_M"] = ""
         env["CONDA_PREFIX"] = "/opt/miniconda3/envs/testbed"
