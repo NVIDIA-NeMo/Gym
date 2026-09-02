@@ -1841,3 +1841,36 @@ async def test_exec_background_retries_timed_out_status_poll(monkeypatch: pytest
 
     assert commands.status_calls == ["exec-slowpoll", "exec-slowpoll"]
     assert result.return_code == 0
+
+
+@pytest.mark.asyncio
+async def test_create_merges_execd_env_under_spec_env(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={
+            "execd_env": {"EXECD_API_GRACE_SHUTDOWN": "50ms", "SHARED": 1},
+            "skip_health_check": True,
+        },
+        probe={"command": None},
+    )
+
+    await provider._create_once(SandboxSpec(image="image:tag", env={"SHARED": "spec", "ONLY_SPEC": "x"}))
+
+    # Provider defaults apply to every sandbox, values are coerced to str, and the spec's own env wins.
+    assert FakeSandbox.created_kwargs["env"] == {
+        "EXECD_API_GRACE_SHUTDOWN": "50ms",
+        "SHARED": "spec",
+        "ONLY_SPEC": "x",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_execd_env_defaults_to_spec_env_only(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"skip_health_check": True},
+        probe={"command": None},
+    )
+
+    await provider._create_once(SandboxSpec(image="image:tag", env={"A": "b"}))
+
+    assert FakeSandbox.created_kwargs["env"] == {"A": "b"}
+    assert provider._create.execd_env == {}

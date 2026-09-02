@@ -462,8 +462,16 @@ class OpenSandboxCreateConfig:
     skip_health_check: bool = False
     connect_attempt_timeout_s: float = 30.0
     connect_poll_s: float = 2.0
+    # Environment merged under every sandbox's ``SandboxSpec.env`` (spec keys win). Meant for
+    # execd knobs such as ``EXECD_API_GRACE_SHUTDOWN``: execd holds every /command response
+    # open for this long after the terminal event (default 1s), which is pure tail latency on
+    # every exec, background submit and create probe.
+    execd_env: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "execd_env", {str(key): str(value) for key, value in dict(self.execd_env or {}).items()}
+        )
         if self.image_pull_policy is not None:
             validate_image_pull_policy(self.image_pull_policy)
         if self.timeout_s is not None and self.timeout_s <= 0:
@@ -1059,7 +1067,7 @@ class OpenSandboxProvider:
         options = OpenSandboxProviderOptions.from_mapping(spec.provider_options)
 
         kwargs: dict[str, Any] = {
-            "env": spec.env,
+            "env": {**self._create.execd_env, **spec.env},
             "metadata": spec.metadata,
             "resource": _resource_map(spec.resources),
             "extensions": self._resolve_extensions(options.extensions),
