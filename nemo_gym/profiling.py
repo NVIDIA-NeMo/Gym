@@ -18,7 +18,6 @@ from subprocess import run
 from typing import Optional
 
 import yappi
-from gprof2dot import main as gprof2dot_main
 from pydantic import BaseModel
 from pydot import graph_from_dot_file
 
@@ -57,6 +56,11 @@ Please install dot using:
         self.dump()
 
     def dump(self) -> None:
+        # Profiling is optional for normal Gym serving. Import gprof2dot only
+        # when a profile is actually rendered so prebuilt actor environments
+        # can start without this developer-only dependency.
+        from gprof2dot import main as gprof2dot_main
+
         self.base_profile_dir.mkdir(parents=True, exist_ok=True)
         log_path = self.base_profile_dir / f"{self.name}.log"
         callgrind_path = self.base_profile_dir / f"{self.name}.callgrind"

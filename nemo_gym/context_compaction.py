@@ -341,7 +341,6 @@ class ContextCompactionSession:
         turn_id: int,
     ) -> tuple[PreparedHistoryView, tuple[Any, ...], tuple[int, ...] | None]:
         prepared = self.history_controller.prepare(applies_to_step=turn_id)
-        self.final_policy_decision = prepared.view.decision
         if self.config.shadow_only:
             assert_identity_shadow_matches(legacy_request_input, prepared.view)
             request_input = tuple(legacy_request_input)
@@ -492,6 +491,10 @@ class ContextCompactionSession:
         )
         self.lineage_deltas.append(lineage_delta)
         self._parent_transformation_id = lineage_delta.transformation_id
+        # A guard can reject a prepared view before it becomes an authoritative
+        # model call. Publish the final manifest only after its matching lineage
+        # delta is admitted so the two representations stay reconstructable.
+        self.final_policy_decision = call.prepared_history.view.decision
         return call
 
     def record_model_response(
