@@ -37,15 +37,15 @@ class ValidAgent(Agent):
 
 class FakeAgent:
     instances = 0
+    get_weather: Any
 
     def __init__(self, *, llm: Any, label: str) -> None:
-        type(self).instances += 1
+        FakeAgent.instances += 1
         self.llm = llm
         self.label = label
-        self.gym_tools: Any = None
 
     async def analyze(self, text: str, customer_id: str) -> str:
-        weather = await self.gym_tools.get_weather(city=customer_id)
+        weather = await self.get_weather(city=customer_id)
         return f"{text}: {weather['weather']}"
 
 
@@ -53,7 +53,7 @@ class Row(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    customer_id: str
+    agent_inputs: dict[str, str]
 
 
 class FakeContent:
@@ -78,7 +78,7 @@ def make_runner() -> tuple[EmbeddedNOOARunner, MagicMock]:
                     "source": "responses_create_params.input",
                     "transform": "latest_user_text",
                 },
-                "customer_id": {"source": "customer_id"},
+                "customer_id": {"source": "agent_inputs.customer_id"},
             },
         }
     )
@@ -97,7 +97,7 @@ def make_runner() -> tuple[EmbeddedNOOARunner, MagicMock]:
 
 def row(customer_id: str) -> Row:
     return Row(
-        customer_id=customer_id,
+        agent_inputs={"customer_id": customer_id},
         responses_create_params={
             "input": [{"role": "user", "content": "Check delivery"}],
             "tools": [
@@ -119,7 +119,7 @@ def row(customer_id: str) -> Row:
 
 
 @pytest.mark.asyncio
-async def test_embedded_runner_maps_full_row_and_attaches_gym_tools() -> None:
+async def test_embedded_runner_maps_full_row_and_attaches_resource_methods() -> None:
     runner, client = make_runner()
 
     result = await runner.run(
@@ -135,6 +135,8 @@ async def test_embedded_runner_maps_full_row_and_attaches_gym_tools() -> None:
     assert result.return_value == "Check delivery: cold"
     assert result.agent.label == "configured"
     assert result.agent.llm.model == "gym-policy"
+    assert "get_weather" in vars(type(result.agent))
+    assert "gym_tools" not in vars(result.agent)
     assert result.tool_executions[0].name == "get_weather"
     assert client.post.await_args.kwargs["json"] == {"city": "Paris"}
 

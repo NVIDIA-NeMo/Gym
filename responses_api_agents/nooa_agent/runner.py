@@ -20,12 +20,17 @@ from typing import Any, Protocol
 
 from nooa import Agent
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.rollout_observability import ModelCallRef
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
 from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM
-from responses_api_agents.nooa_agent.gym_tools import GymToolExecution, GymTools
 from responses_api_agents.nooa_agent.mapping import materialize_arguments
+from responses_api_agents.nooa_agent.resource_tools import (
+    ResourceToolDispatcher,
+    ResourceToolExecution,
+    create_agent_class_with_resource_methods,
+    validate_agent_resource_method_bindings,
+)
 
 
 @dataclass(slots=True)
@@ -42,8 +47,8 @@ class NOOARunRequest:
 class NOOARunResult:
     return_value: Any
     agent: Agent
-    model_responses: list[NeMoGymResponse]
-    tool_executions: list[GymToolExecution]
+    model_calls: list[ModelCallRef]
+    tool_executions: list[ResourceToolExecution]
     model_cookies: dict[str, str]
     resource_cookies: dict[str, str]
 
@@ -72,25 +77,29 @@ class EmbeddedNOOARunner:
         self._agent_class, _ = validate_invocation(invocation)
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
-        responses: list[NeMoGymResponse] = []
-        executions: list[GymToolExecution] = []
+        model_calls: list[ModelCallRef] = []
+        executions: list[ResourceToolExecution] = []
         llm = GymResponsesLLM(
             server_client=self._server_client,
             model_server_name=self._model_server_name,
             model_url_path=request.model_url_path,
             max_steps=self._max_steps,
-            response_collector=responses,
+            model_call_collector=model_calls,
             cookies=request.model_cookies,
         )
-        agent = self._agent_class(llm=llm, **self._invocation.init_kwargs)
-        tools = GymTools(
+        dispatcher = ResourceToolDispatcher(
             server_client=self._server_client,
             resources_server_name=self._resources_server_name,
-            tools=list(request.row.responses_create_params.tools),
             cookies=request.resource_cookies,
-            observations=executions,
+            executions=executions,
         )
-        agent.gym_tools = tools
+        agent_class = create_agent_class_with_resource_methods(
+            self._agent_class,
+            dispatcher=dispatcher,
+            tools=list(request.row.responses_create_params.tools),
+        )
+        agent = agent_class(llm=llm, **self._invocation.init_kwargs)
+        validate_agent_resource_method_bindings(agent)
 
         arguments = materialize_arguments(request.row, self._invocation.arguments)
         entrypoint = getattr(agent, self._invocation.entrypoint)
@@ -98,7 +107,7 @@ class EmbeddedNOOARunner:
         return NOOARunResult(
             return_value=return_value,
             agent=agent,
-            model_responses=responses,
+            model_calls=model_calls,
             tool_executions=executions,
             model_cookies=request.model_cookies,
             resource_cookies=request.resource_cookies,
