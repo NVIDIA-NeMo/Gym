@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from asyncio import Semaphore
 from contextlib import contextmanager
 from copy import deepcopy
 from glob import glob
@@ -39,6 +40,8 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
     # Sandbox config
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
+
+    max_concurrency: int
 
     debug: bool = False
 
@@ -127,6 +130,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         super().model_post_init(context)
 
         self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
+        self._semaphore = Semaphore(value=self.config.max_concurrency)
 
     def _patch_sandbox_provider_options_for_instances(
         self, task_name: str, resources: SandboxResources, provider_options: Dict[str, Any]
@@ -192,6 +196,9 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
     ) -> TerminalBench21SeedSessionResponse:
         eval_sandbox = await self._create_sandbox(body)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
+
+        async with self._semaphore:
+            pass
 
         return TerminalBench21SeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
