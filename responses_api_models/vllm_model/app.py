@@ -467,6 +467,21 @@ class VLLMModel(SimpleResponsesAPIModel):
             encoded = base64.b64encode(f.read()).decode("ascii")
         return f"data:audio/{mime};base64,{encoded}"
 
+    @staticmethod
+    def _strip_hosted_only_tool_fields(body_dict: Dict[str, Any]) -> None:
+        """Remove OpenAI-hosted-only fields from function tool definitions.
+
+        ``strict`` is an OpenAI-hosted schema-enforcement flag that vLLM does
+        not implement: its FunctionDefinition keeps the unknown key, and chat
+        templates that render unknown function-definition keys (e.g.
+        Nemotron's ``render_extra_keys``) inject it into the prompt,
+        perturbing every tool-bearing request. Strip it at the vLLM boundary
+        so hosted providers keep their ``strict`` semantics.
+        """
+        for tool_dict in body_dict.get("tools") or []:
+            if tool_dict.get("type") == "function":
+                (tool_dict.get("function") or {}).pop("strict", None)
+
     def _preprocess_chat_completion_create_params(self, request: Request, body_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Preprocess the body dict before issuing a chat completion request.
 
@@ -483,6 +498,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             The (possibly mutated) ``body_dict`` that will be forwarded to
             ``client.create_chat_completion``.
         """
+        self._strip_hosted_only_tool_fields(body_dict)
+
         if self.config.replace_developer_role_with_system:
             for message_dict in body_dict["messages"]:
                 if message_dict.get("role") == "developer":
@@ -1087,6 +1104,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         modes — /v1/completions is text-only.
         """
         body_dict = body.model_dump(exclude_unset=True)
+        # This path never runs _preprocess_chat_completion_create_params, and
+        # _render_messages_via_chat_template hands tools to apply_chat_template,
+        # so hosted-only fields must be stripped here too.
+        self._strip_hosted_only_tool_fields(body_dict)
         messages = body_dict.get("messages", []) or []
         metadata = body_dict.get("metadata", {}) or {}
 

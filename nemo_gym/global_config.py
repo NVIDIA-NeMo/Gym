@@ -187,6 +187,57 @@ AGENT_REF_KEY_NAME = "agent_ref"
 # resolved to an agent at dispatch time. See the dataset-decoupling RFC.
 TASK_SOURCE_KEY_NAME = "task_source"
 SKILLS_REF_KEY_NAME = "skills_ref"
+REWARD_KEY_NAME = "reward"
+
+# Metric key names. `RewardProfiler` builds its metric names from these prefixes and suffixes, and
+# consumers of `*_aggregate_metrics.json` (e.g. `gym eval compare`) parse them back out -- so they
+# live here, where both sides can import them without pulling in pandas/scipy/wandb.
+MEAN_STAT_NAME = "mean"
+MAX_STAT_NAME = "max"
+MIN_STAT_NAME = "min"
+MEDIAN_STAT_NAME = "median"
+STD_STAT_NAME = "std"
+SEM_STAT_NAME = "sem"
+P25_STAT_NAME = "p25"
+P75_STAT_NAME = "p75"
+CI_LOW_95_STAT_NAME = "ci_low_95"
+CI_HIGH_95_STAT_NAME = "ci_high_95"
+HISTOGRAM_STAT_NAME = "histogram"
+
+# `<stat>/<field>`, e.g. `mean/reward`.
+STAT_SEPARATOR = "/"
+MEAN_PREFIX = f"{MEAN_STAT_NAME}{STAT_SEPARATOR}"
+MAX_PREFIX = f"{MAX_STAT_NAME}{STAT_SEPARATOR}"
+MIN_PREFIX = f"{MIN_STAT_NAME}{STAT_SEPARATOR}"
+MEDIAN_PREFIX = f"{MEDIAN_STAT_NAME}{STAT_SEPARATOR}"
+STD_PREFIX = f"{STD_STAT_NAME}{STAT_SEPARATOR}"
+SEM_PREFIX = f"{SEM_STAT_NAME}{STAT_SEPARATOR}"
+P25_PREFIX = f"{P25_STAT_NAME}{STAT_SEPARATOR}"
+P75_PREFIX = f"{P75_STAT_NAME}{STAT_SEPARATOR}"
+CI_LOW_95_PREFIX = f"{CI_LOW_95_STAT_NAME}{STAT_SEPARATOR}"
+CI_HIGH_95_PREFIX = f"{CI_HIGH_95_STAT_NAME}{STAT_SEPARATOR}"
+
+# `<stat>_across_repeats/mean/<field>`: one repeat's estimate aggregated over the run's repeats.
+ACROSS_REPEATS_MARKER = f"_across_repeats{STAT_SEPARATOR}"
+MEAN_ACROSS_REPEATS_PREFIX = f"{MEAN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+MEDIAN_ACROSS_REPEATS_PREFIX = f"{MEDIAN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+STD_ACROSS_REPEATS_PREFIX = f"{STD_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+MIN_ACROSS_REPEATS_PREFIX = f"{MIN_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+MAX_ACROSS_REPEATS_PREFIX = f"{MAX_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+SE_ACROSS_REPEATS_PREFIX = f"se{ACROSS_REPEATS_MARKER}"
+CI_LOW_95_ACROSS_REPEATS_PREFIX = f"{CI_LOW_95_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+CI_HIGH_95_ACROSS_REPEATS_PREFIX = f"{CI_HIGH_95_STAT_NAME}{ACROSS_REPEATS_MARKER}"
+
+# Suffixes `compute_pass_majority_metrics` appends to a pass@k metric name.
+STD_DEV_ACROSS_RUNS_SUFFIX = f"{STAT_SEPARATOR}std_dev_across_runs"
+STD_ERR_ACROSS_RUNS_SUFFIX = f"{STAT_SEPARATOR}std_err_across_runs"
+AVG_SAMPLE_STD_DEV_SUFFIX = f"{STAT_SEPARATOR}avg_sample_std_dev"
+
+# Per-task keys in `group_level_metrics`.
+ROLLOUT_INFOS_KEY_NAME = "rollout_infos"
+NUM_ROLLOUTS_KEY_NAME = "num_rollouts"
+EXPECTED_NUM_ROLLOUTS_KEY_NAME = "expected_num_rollouts"
+MISSING_NUM_ROLLOUTS_KEY_NAME = "missing_num_rollouts"
 
 POLICY_BASE_URL_KEY_NAME = "policy_base_url"
 POLICY_API_KEY_KEY_NAME = "policy_api_key"  # pragma: allowlist secret
@@ -396,10 +447,14 @@ Check the path is spelled correctly and is relative to your working directory, a
 
         if duplicate_config_paths:
             duplicate_config_paths_str = "".join(f"- {p}\n" for p in duplicate_config_paths)
-            print(f"""Found configs that reference the same source config path. You may want to double check whether the configs you have need to use different configs for the same server.
+            # Diagnostics go to stderr so that `--json` output on stdout stays machine-readable.
+            print(
+                f"""Found configs that reference the same source config path. You may want to double check whether the configs you have need to use different configs for the same server.
 In cases like these, you may want to consider using the `inherit_from` OmegaConf directive e.g. '++my_specific_server=${{inherit_from:generic_server}}' and then overriding config parameters in `my_specific_server`.
 Duplicate config paths:
-{duplicate_config_paths_str}""")
+{duplicate_config_paths_str}""",
+                file=sys.stderr,
+            )
 
         # Flatten the include tree so that every config merges after -- and therefore
         # overrides -- the ones it pulled in, and each subtree stays contiguous in
@@ -976,6 +1031,8 @@ For example, on the command line:
         cli_global_config_dict = (
             DictConfig(dict()) if parse_config.skip_load_from_cli else self.parse_global_config_dict_from_cli()
         )
+        # @bxyu-nvidia: Hydra returns `cli_global_config_dict` as a struct, but this causes problems in downstream swapping/merging.
+        OmegaConf.set_struct(cli_global_config_dict, False)
 
         # Command line overrides function input.
         initial_global_config_dict = OmegaConf.create(parse_config.initial_global_config_dict or dict())
@@ -1062,14 +1119,15 @@ Pass each config with --config (it builds the list for you), e.g.:
         almost_servers = self.detect_and_report_almost_servers(global_config_dict)
 
         if almost_servers:
-            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]")
-            rich.print("[yellow]Configuration Warnings: Almost-Servers Detected[/yellow]")
-            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]")
+            # Diagnostics go to stderr so that `--json` output on stdout stays machine-readable.
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]", file=sys.stderr)
+            rich.print("[yellow]Configuration Warnings: Almost-Servers Detected[/yellow]", file=sys.stderr)
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]", file=sys.stderr)
 
             for server_name, error in almost_servers:
-                rich.print(format_almost_server_warning(server_name, error))
+                rich.print(format_almost_server_warning(server_name, error), file=sys.stderr)
 
-            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]\n")
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]\n", file=sys.stderr)
 
             error_on_almost_servers = global_config_dict.get("error_on_almost_servers", True)
             if error_on_almost_servers:

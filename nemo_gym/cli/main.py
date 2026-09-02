@@ -134,6 +134,23 @@ def _csv_list_flag(name: str, hydra_key: str, flag_help: str) -> Flag:
     )
 
 
+def _comma_list_flag(name: str, hydra_key: str, flag_help: str, *, metavar: str) -> Flag:
+    """A `--name "A,B"` flag that maps to the Hydra override `+<hydra_key>=["A","B"]`"""
+    dest = name.replace("-", "_")
+
+    def to_hydra(args: argparse.Namespace) -> list[str]:
+        raw = getattr(args, dest)
+        if raw is None:
+            return []
+        items = [item.strip() for item in raw.split(",") if item.strip()]
+        return [f"+{hydra_key}=[{','.join(json.dumps(item) for item in items)}]"]
+
+    return Flag(
+        register=lambda p: p.add_argument(f"--{name}", dest=dest, metavar=metavar, help=flag_help),
+        translate_to_hydra=to_hydra,
+    )
+
+
 # Shared flag: load Gym config files. Reused by every command that reads server/benchmark configs.
 CONFIG = Flag(
     register=lambda p: p.add_argument(
@@ -424,20 +441,36 @@ def _asset_config_path(flag: str, value: str) -> str:
     )
 
 
-def _asset_selector(flag: str) -> Flag:
-    """A `--<flag> NAME` selector that resolves the named asset to a config and adds it to +config_paths."""
+def _asset_selector(flag: str, *, repeatable: bool = False) -> Flag:
+    """A `--<flag> NAME` selector that resolves the named asset to a config and adds it to +config_paths.
+
+    Repeatable selectors accumulate, composing several components the way `--config` does.
+    """
     dest = flag.replace("-", "_")
+
+    def translate_to_hydra(args: argparse.Namespace) -> list[str]:
+        selected = getattr(args, dest)
+        if not selected:
+            return []
+        names = selected if isinstance(selected, list) else [selected]
+        return [f"+config_paths=[{','.join(_asset_config_path(flag, name) for name in names)}]"]
+
     return Flag(
-        register=lambda p: p.add_argument(f"--{flag}", metavar="NAME", help=f"Load the named {flag} config."),
-        translate_to_hydra=lambda args: (
-            [f"+config_paths=[{_asset_config_path(flag, getattr(args, dest))}]"] if getattr(args, dest) else []
+        register=lambda p: p.add_argument(
+            f"--{flag}",
+            metavar="NAME",
+            action="append" if repeatable else "store",
+            help=f"Load the named {flag} config." + (" Repeatable." if repeatable else ""),
         ),
+        translate_to_hydra=translate_to_hydra,
     )
 
 
-BENCHMARK = _asset_selector("benchmark")
-ENVIRONMENT = _asset_selector("environment")
-RESOURCES_SERVER_CONFIG = _asset_selector("resources-server")
+# Selecting several environments or benchmarks composes their configs, so these accumulate. A model type
+# names the one policy model a run serves, so it does not.
+BENCHMARK = _asset_selector("benchmark", repeatable=True)
+ENVIRONMENT = _asset_selector("environment", repeatable=True)
+RESOURCES_SERVER_CONFIG = _asset_selector("resources-server", repeatable=True)
 MODEL_TYPE = _asset_selector("model-type")
 
 # Override for the verifier-side `allowed_agents` guard. Offered wherever --agent-type composes.
@@ -774,6 +807,7 @@ COMMANDS = {
             CATALOG_KIND,
             _value_flag("manifest", "manifest_path", "Manifest path to validate.", quote=True),
             _bool_flag("sync", "sync", "Synchronize composition mirrors after validation."),
+            _bool_flag("strict", "strict", "Fail instead of warning when model values are left undefined."),
             JSON,
             CONFIG,
             BENCHMARK,
@@ -1033,6 +1067,57 @@ COMMANDS = {
                 register=lambda p: p.add_argument(
                     "--dry-run", action="store_true", help="Print generated job scripts without submitting."
                 ),
+            ),
+        ),
+    ),
+    "eval compare": Command(
+        target="nemo_gym.cli.eval:compare",
+        summary="Compare a baseline eval run against candidate runs.",
+        flags=(
+            _value_flag(
+                "baseline",
+                "baseline_rollouts_jsonl_fpath",
+                "Baseline run's rollouts JSONL (its *_aggregate_metrics.json sibling is what gets read today).",
+                quote=True,
+            ),
+            _comma_list_flag(
+                "candidates",
+                "candidate_rollouts_jsonl_fpaths",
+                "Candidate run's rollouts JSONL. Comma-separated list; one candidate is supported today.",
+                metavar="PATH[,PATH...]",
+            ),
+            _value_flag(
+                "baseline-agg-metrics",
+                "baseline_aggregate_metrics_fpath",
+                "Baseline's aggregate-metrics JSON, when it is not the sibling of --baseline.",
+                quote=True,
+            ),
+            _comma_list_flag(
+                "candidates-agg-metrics",
+                "candidate_aggregate_metrics_fpaths",
+                "Candidates' aggregate-metrics JSON, in --candidates order, when not siblings of --candidates.",
+                metavar="PATH[,PATH...]",
+            ),
+            _value_flag("agent", "agent_name", "Agent to compare on both sides (default: all shared agents)."),
+            _value_flag("baseline-agent", "baseline_agent_name", "Agent to read from the baseline's metrics."),
+            _comma_list_flag(
+                "candidate-agents",
+                "candidate_agent_names",
+                "Agent to read from each candidate's metrics, in --candidates order.",
+                metavar="NAME[,NAME...]",
+            ),
+            _value_flag(
+                "output-dir",
+                "output_dirpath",
+                "Where to write the report (default: the candidate run's own directory).",
+                aliases=("-o",),
+                quote=True,
+            ),
+            _value_flag(
+                "report-format",
+                "report_format",
+                "Report artifacts to write (default: both).",
+                choices=("md", "json", "both"),
             ),
         ),
     ),
