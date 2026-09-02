@@ -1417,6 +1417,31 @@ class TestCollateTaskSourceStamping:
         paths = self._collate(tmp_path, monkeypatch, [a])
         assert len(paths) == len(set(paths)) == 4
 
+    def test_num_repeats_validates_each_source_row_once_with_jsonl_index(self, tmp_path, monkeypatch, capsys) -> None:
+        # num_repeats duplicates every line; validation must still count each source row once
+        # and report its index in the jsonl file, not the post-repeat stream index.
+        schema_dir = tmp_path / "resources_servers" / "impl"
+        schema_dir.mkdir(parents=True)
+        (schema_dir / "task_data.py").write_text(
+            "from pydantic import BaseModel, ConfigDict\n"
+            "class TaskData(BaseModel):\n"
+            "    model_config = ConfigDict(extra='allow')\n"
+            "    question: str\n"
+        )
+        rows = [
+            {"responses_create_params": {"input": []}, "question": "good"},
+            {"responses_create_params": {"input": []}, "question": 123},
+        ]
+        d = _dataset(tmp_path, "rep", rows) | {"num_repeats": 3}
+        rs = _instance("rep_rs", "resources_servers", {"entrypoint": "app.py", "domain": "math", "datasets": [d]})
+        monkeypatch.chdir(tmp_path)
+        TrainDataProcessor()._collate_samples_single_type(
+            type="example", server_instance_configs=[rs], task_data_validation="warn"
+        )
+        summary = capsys.readouterr().out
+        assert "1/2 rows failed" in summary
+        assert "row 1:" in summary
+
 
 class TestDeclaringInstanceValidation:
     def _validate(self, configs_dict):

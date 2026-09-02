@@ -11,6 +11,8 @@ export FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED=1
 # Inkling's upstream tokenizer path so its effect can be measured separately.
 unset VLLM_USE_FASTOKENS
 
+GYM_MODEL_PARAMS=()
+
 VLLM_COMMON_ARGS=(
     --trust-remote-code
     --dtype bfloat16

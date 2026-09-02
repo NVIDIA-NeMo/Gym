@@ -16,7 +16,7 @@
 This file contains patches copied from https://github.com/SWE-bench/SWE-bench/pull/630
 """
 
-from typing import Any, Dict, Optional
+from typing import Optional
 
 # @bxyu-nvidia: We import wildcard because there are a million imports otherwise...
 from swebench.harness.constants import END_TEST_OUTPUT, MAP_REPO_TO_EXT, START_TEST_OUTPUT
@@ -303,17 +303,6 @@ def patch_swebench_multilingual_golden_patch_pass(eval_sh: str, instance_id: str
         )
 
     return eval_sh
-
-
-def patch_swebench_multilingual_resources_request(resources: Dict[str, Any], instance_id: str) -> None:
-    high_resource_repos = {
-        "preactjs__preact",
-        "axios__axios",
-        "valkey-io__valkey",
-    }
-    if any(r in instance_id for r in high_resource_repos):
-        resources["cpu"] = max(resources.get("cpu", 0), 8)
-        resources["memory_mib"] = max(resources.get("memory_mib", 0), 16 * 1024)
 
 
 async def patch_swebench_multilingual_sandbox(repo: str, instance_id: str, sandbox: AsyncSandbox) -> None:

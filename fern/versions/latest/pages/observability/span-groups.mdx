@@ -1,0 +1,99 @@
+---
+title: "Span Groups"
+description: ""
+position: 4
+---
+A span group is a named switch that decides whether a set of spans exists at all. Groups
+let you trade detail against volume without changing code, and they are checked before any
+instrumentation work happens, so a disabled group costs almost nothing.
+
+## Presets
+
+Set `span_groups` to a preset name:
+
+```yaml
+telemetry:
+  enabled: true
+  span_groups: per_rollout
+```
+
+| Preset | Groups | Use When |
+| --- | --- | --- |
+| `default` | `job`, `server`, `http_client`, `rollout` | You want the shape of a run and the cross-process trace, without per-request detail. |
+| `per_rollout` | `server`, `http_client`, `rollout`, `verify`, `agent`, `model_call` | You are debugging where a rollout spends its time. Each rollout is its own trace. |
+| `all` | Every group, including `sandbox` | You are debugging something specific and volume does not matter. |
+
+`default` is deliberately enough on its own to produce one trace per rollout across the
+agent, model, and resources server processes. You do not have to tune anything to get the
+headline behavior.
+
+`per_rollout` omits `job` on purpose. `job` wraps a whole rollout-collection run, so
+including it nests every rollout of that run under one span. That is useful for seeing a
+run's overall shape and unusable for a run with thousands of rollouts.
+
+## Groups
+
+| Group | Spans | Emitted By |
+| --- | --- | --- |
+| `job` | `gym.job` | Rollout collection, once per run |
+| `server` | `GET /...`, `POST /...` | FastAPI auto-instrumentation on every server |
+| `http_client` | `HTTP POST`, `HTTP GET` | `server_utils.request()`, once per outbound call |
+| `rollout` | `gym.rollout` | The agent server's `/run` endpoint |
+| `agent` | `gym.agent.responses` | The agent server's `/v1/responses` endpoint |
+| `model_call` | `gym.model.chat_completions`, `gym.model.responses`, `gym.model.messages` | Model servers |
+| `verify` | `gym.verify` | Resources servers' `/verify` endpoint |
+| `sandbox` | `gym.sandbox.start`, `gym.sandbox.exec` | Any sandbox provider |
+
+### Groups You Should Not Disable
+
+`server` and `http_client` are the two halves of cross-process propagation. `http_client`
+writes the `traceparent` header and `server` reads it. Disabling either breaks trace
+joining: you still get spans, but each process produces its own disconnected trace. Both
+are in every preset for this reason.
+
+## Custom Selections
+
+`span_groups` also accepts a comma-separated list, and mixes presets with individual
+names:
+
+```yaml
+telemetry:
+  span_groups: "default,sandbox"
+```
+
+```yaml
+telemetry:
+  span_groups: "server,http_client,verify"
+```
+
+Names are case-insensitive and surrounding whitespace is ignored. An unknown name raises
+an error listing the valid options rather than silently resolving to nothing — a typo in
+`span_groups` would otherwise look identical to telemetry being broken.
+
+## Cost
+
+The gate is a frozenset membership test, and nothing runs above it — not attribute
+construction, not string formatting, and not imports. A disabled site costs less than
+entering an empty `contextlib.nullcontext`, because it does not enter a context manager
+at all.
+
+An enabled span costs orders of magnitude more than the gate that guards it. That is the
+trade you make when you widen `span_groups`, and it is why `all` is a debugging setting
+rather than a default.
+
+To measure the disabled-path cost on your own hardware, run
+`pytest tests/unit_tests/telemetry/test_overhead.py -s`, which reports the figures it
+compares.
+
+## Groups NeMo Gym Does Not Have
+
+There is no `tool_call` group. A resources-server tool call already appears as a SERVER
+span named after its route, such as `POST /get_weather`, which answers the same questions
+without a second layer.
+
+There is no `dataset` group. NeMo Gym's dataset code is command-line upload and download
+tooling rather than a runtime path, so there is nothing worth tracing.
+
+Span groups inherited from `nemo-lens` that relate to training, such as `checkpoint`,
+`step`, and `optimizer`, remain resolvable and are reachable through `all`, but no NeMo
+Gym code emits under them.

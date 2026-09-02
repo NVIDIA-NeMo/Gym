@@ -107,7 +107,7 @@ Hydra overrides work the same as in other `gym eval` commands:
 ```bash
 gym eval reverify \
   --config my_resources_server.yaml \
-  "++mcqa_resources_server.resources_servers.mcqa.grading_mode=strict_single_letter_boxed" \
+  "++mcqa.resources_servers.mcqa.grading_mode=strict_single_letter_boxed" \
   --inputs results/rollouts_materialized_inputs.jsonl \
   --rollouts results/rollouts.jsonl \
   --output results/rollouts_strict_reverified.jsonl

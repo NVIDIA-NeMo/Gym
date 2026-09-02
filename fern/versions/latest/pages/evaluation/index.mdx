@@ -18,10 +18,11 @@ NeMo Gym evaluation is environment-native: the same dataset, resources server, v
 2. **Configure** — choose a model and agent harness; pre-flight check your config with `gym env validate`.
 3. **Run** — collect rollouts with fixed sampling settings and an explicit repeat count: `gym eval run`. Resume an interrupted run with `--resume`.
 4. **Scale** — shard across jobs and merge outputs with `gym eval aggregate`.
-5. **Profile** — compute pass@1, pass@k, and per-task variance: `gym eval profile`.
-6. **Diagnose** — inspect failures, sometimes-pass tasks, and missing rows with BLADE.
-7. **Decide** — use results to determine whether the next action is model training, harness work, verifier repair, prompt change, or skill improvement.
-8. **Reverify** — if you change a verifier parameter (grading mode, threshold, judge prompt), recompute rewards on the same rollouts without re-running inference: `gym eval reverify`.
+5. **Verify health** — confirm that rollout records contain complete, internally consistent trajectory and model-call evidence.
+6. **Profile** — compute pass@1, pass@k, and per-task variance: `gym eval profile`.
+7. **Diagnose** — inspect failures, sometimes-pass tasks, and missing rows with BLADE.
+8. **Decide** — use results to determine whether the next action is model training, harness work, verifier repair, prompt change, or skill improvement.
+9. **Reverify** — if you change a verifier parameter (grading mode, threshold, judge prompt), recompute rewards on the same rollouts without re-running inference: `gym eval reverify`.
 
 The most important rule: vary one thing at a time. Changing the model, harness, prompt, verifier, and dataset together can still produce a useful release-gate score — but it cannot explain what caused the difference.
 
@@ -91,6 +92,10 @@ Step-by-step walkthroughs for specific benchmarks and evaluation workflows.
 
 <Card title="Aggregate Metrics" href="/evaluation/aggregate-metrics">
 Customize metrics and key metrics for an environment.
+</Card>
+
+<Card title="Rollout Health Checks" href="/main/evaluation/rollout-health">
+Verify that saved rollout evidence is complete and internally consistent.
 </Card>
 
 <Card title="Diagnose Results" href="/evaluation/diagnose-results">

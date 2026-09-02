@@ -27,7 +27,7 @@ import traceback
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from io import StringIO
+from io import BytesIO, StringIO
 
 # from pyext import RuntimeModule
 from types import ModuleType
@@ -118,13 +118,26 @@ class MockStdinWithBuffer:
 class MockBuffer:
     def __init__(self, inputs: str):
         self.inputs = inputs.encode("utf-8")  # Convert to bytes
+        self._bytesio = BytesIO(self.inputs)
 
     def read(self, *args):
         # Return as byte strings that can be split
-        return self.inputs
+        return self._bytesio.read(*args)
 
     def readline(self, *args):
-        return self.inputs.split(b"\n")[0] + b"\n"
+        return self._bytesio.readline(*args)
+
+    def readlines(self, *args):
+        return self._bytesio.readlines(*args)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._bytesio)
+
+    def __getattr__(self, name):
+        return getattr(self._bytesio, name)
 
 
 def clean_if_name(code: str) -> str:

@@ -13,7 +13,8 @@ After rollout collection, NeMo Gym computes **aggregate metrics** for each agent
 2. **Group by agent** — responses are partitioned by agent name.
 3. **Call `/aggregate_metrics`** — for each agent, the stripped verify responses are POSTed to the agent's `/aggregate_metrics` endpoint.
 4. **Compute stats** — per-task and overall statistics (`mean`, `max`, `min`, `median`, `std`) are computed for every numeric field. If the resources server overrides `compute_metrics()` or `get_key_metrics()`, those are called to add additional metrics.
-5. **Write results** — all per-agent metrics are written to `<output>_aggregate_metrics.json`.
+5. **Compute variability stats** — when an agent has two or more repeats, per-repeat statistics are computed for every numeric field and summarized across repeats. See [Repeat-Level Metrics](#repeat-level-metrics).
+6. **Write results** — all per-agent metrics are written to `<output>_aggregate_metrics.json`.
 
 ## Output Format
 
@@ -28,7 +29,13 @@ The output file is a JSON array with one entry per agent:
       "max/reward": 1.0,
       "min/reward": 0.0,
       "median/reward": 1.0,
-      "std/reward": 0.433
+      "std/reward": 0.433,
+
+      "mean_across_repeats/mean/reward": 0.75,
+      "median_across_repeats/mean/reward": 0.75,
+      "se_across_repeats/mean/reward": 0.042,
+      "ci_low_95_across_repeats/mean/reward": 0.66,
+      "ci_high_95_across_repeats/mean/reward": 0.84
     },
     "key_metrics": {
       "mean/reward": 0.75
@@ -36,6 +43,10 @@ The output file is a JSON array with one entry per agent:
     "group_level_metrics": [
       {"mean/reward": 1.0, "sample": {"...": "..."}},
       {"mean/reward": 0.5, "sample": {"...": "..."}}
+    ],
+    "repeat_level_metrics": [
+      {"_ng_rollout_index": 0, "mean/reward": 0.72, "sem/reward": 0.09, "...": "..."},
+      {"_ng_rollout_index": 1, "mean/reward": 0.78, "sem/reward": 0.09, "...": "..."}
     ]
   }
 ]
@@ -44,9 +55,90 @@ The output file is a JSON array with one entry per agent:
 | Field | Description |
 |---|---|
 | `agent_ref` | Agent identity (`{"name": "..."}`) |
-| `agent_metrics` | Overall stats across all rollouts, plus any custom metrics from `compute_metrics()` |
+| `agent_metrics` | Overall stats across all rollouts, plus any custom metrics from `compute_metrics()`, plus cross-repeat aggregates |
 | `key_metrics` | Headline numbers (default: all `mean/*` entries from `agent_metrics`) |
 | `group_level_metrics` | Per-task breakdown — one entry per task with stats across that task's rollouts |
+| `repeat_level_metrics` | Per-repeat breakdown — one entry per `_ng_rollout_index` with stats across that repeat's tasks. Empty unless the agent has two or more repeats |
+
+---
+
+## Repeat-Level Metrics
+
+A single run is a point estimate. Collecting repeats (`--num-repeats`) lets you separate a real score difference from sampling noise, and NeMo Gym reports that variability at three levels.
+
+### Within a repeat, across tasks
+
+`repeat_level_metrics` holds one entry per `(agent, repeat)`. It is produced **only for agents with two or more repeats** — an agent with a single repeat has nothing to compare against and is skipped. When no agent qualifies, the list is empty.
+
+Each entry carries:
+
+| Field | Description |
+|---|---|
+| `agent_ref` | Agent identity |
+| `_ng_rollout_index` | Which repeat this entry summarizes |
+| `sample_count` | Tasks with a completed rollout in this repeat |
+| `missing_count` | Tasks present in some **other** repeat but not this one — see the caveat below |
+
+plus, for **every numeric field** (`reward`, token usage, and any numeric field your verifier returns):
+
+| Key | Description |
+|---|---|
+| `mean/{field}`, `median/{field}` | Central tendency across this repeat's tasks |
+| `std/{field}` | Sample standard deviation (`ddof=1`) |
+| `sem/{field}` | Standard error of the mean — `std / sqrt(n)` |
+| `min/{field}`, `max/{field}` | Range |
+| `p25/{field}`, `p75/{field}` | Quartiles |
+| `ci_low_95/{field}`, `ci_high_95/{field}` | 95% confidence interval (Student's t). Omitted when `n <= 1` |
+
+<Warning>
+`missing_count` is **not** measured against the expected task list. Its denominator is the set of tasks that completed in at least one repeat, so it only catches tasks that succeeded somewhere else and are absent here.
+
+A task that fails in *every* repeat never appears in any repeat, so it is counted nowhere and `missing_count` stays `0` for it. Those rollouts are in `<output>_failures.jsonl` — or, for `kill_shaped` failures (Slurm SIGTERM, Ray actor died, OOM), nowhere at all, since the absence of a row is itself the signal.
+
+To check real coverage, use the numbers that *are* measured against the materialized inputs: `expected_num_rollouts` and `missing_num_rollouts` in `group_level_metrics`, and the completion summary `gym eval profile` prints at the end of a run.
+</Warning>
+
+### Across repeats
+
+The per-repeat `mean/{field}` values are themselves summarized and merged into `agent_metrics`, treating each repeat as one observation. This answers a different question than the keys above: not "how much do tasks vary within a repeat" but "how much does the headline score move if I run the whole benchmark again."
+
+| Key | Description |
+|---|---|
+| `mean_across_repeats/mean/{field}` | Mean of the per-repeat means |
+| `median_across_repeats/mean/{field}` | Median of the per-repeat means |
+| `se_across_repeats/mean/{field}` | Standard error across repeats  |
+| `ci_low_95_across_repeats/mean/{field}`, `ci_high_95_across_repeats/mean/{field}` | 95% confidence interval of that mean |
+
+
+<Note>
+`mean_across_repeats/mean/{field}` and the per-rollout `mean/{field}` answer different questions but coincide numerically when every repeat covers the same tasks. 
+</Note>
+
+### Per task, across repeats
+
+`group_level_metrics` reports `num_rollouts`, `mean`, `median`, and `std` per task. It deliberately carries **no confidence interval**: a CI here would require assuming a distribution for a single task's repeated outcomes, which are frequently binomial rather than normal, and the Central Limit Theorem does not rescue it because these are raw outcomes rather than averages.
+
+### Two cases worth knowing about
+
+Both emit a `UserWarning`, so you will see them in your terminal:
+
+- **Unequal sample counts across repeats.** If a task is missing from some repeats (a crashed rollout, an interrupted run), each repeat's statistics are computed over a different task set, so they are not directly comparable — and `agent_metrics` skews toward whichever tasks happened to complete. Collect the missing rollouts before drawing conclusions. Note this fires off `missing_count`, so it inherits the blind spot above: tasks that failed in *every* repeat do not trigger it.
+- **Zero standard error.** If every value in a sample is identical, the confidence interval collapses to the single point `(mean, mean)`. This is reported rather than left null, because SciPy's `t.interval` computes an indeterminate `±inf * 0` at `scale=0` and returns `NaN`.
+
+<Tip>
+Confidence intervals are unbounded, so on a small number of tasks a 95% CI for a 0–1 reward can extend below 0 or above 1. That is expected for a t-interval and is a signal that you need more tasks or repeats, not a bug.
+</Tip>
+
+### Where it lands on disk
+
+The same statistics are laid out differently depending on which command produced them:
+
+| Command | File | Layout |
+|---|---|---|
+| `gym eval run`, `gym eval aggregate` | `<output>_aggregate_metrics.json` | `repeat_level_metrics` nested inside each agent's object |
+| `gym eval profile` | `<rollouts>_repeat_level_metrics.json` | A separate flat list, each entry carrying its own `agent_ref` |
+
+`gym eval profile` always writes its file, containing `[]` when there is only one repeat. Either way, the cross-repeat aggregates (`mean_across_repeats/mean/*`, `se_across_repeats/mean/*`, and the CI bounds) live in `agent_metrics`.
 
 ---
 

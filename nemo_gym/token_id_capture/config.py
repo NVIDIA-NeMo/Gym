@@ -20,8 +20,11 @@ env:
   nemo_gym:
     token_id_capture:
       enabled: true
-      dir: /tmp/ng_tokcap                  # The writer and consumer share this node-local directory.
+      dir: /tmp/nemo_gym_token_id_captures  # The writer and consumer share this node-local directory.
       sink: my_pkg.sinks:MyDataPlaneSink   # This optional sink replaces the file store.
+      lineage_store: my_pkg.sinks:MyResolver  # Required with a custom sink (same backend namespace).
+      delta_records: true                  # Store RESOLVED continuations as parent-relative suffixes.
+      max_mask_fraction: 0.5               # Abort a run that is mostly producing masked rollouts.
 ```
 
 Evaluation capture uses ``/ng-rollout/<id>/...``.
@@ -43,7 +46,6 @@ A configured sink replaces the file store.
 Consumers construct and inject their ``TokenSource`` in their own process.
 Consumers call ``TokenSource.freeze`` to obtain an atomic snapshot.
 Consumers retire that exact snapshot with its ``snapshot_id`` and version.
-There is no HTTP token reader.
 Uvicorn workers use spawned processes.
 They do not inherit a sink installed by a launcher.
 Configure the sink here so each worker builds its own.
@@ -73,7 +75,9 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym.token_id_capture.protocols import (
+    LineageStore,
     TokenSink,
+    installed_lineage_store,
     installed_token_sink,
 )
 
@@ -101,12 +105,25 @@ class TokenIdCaptureSettings(BaseModel):
     # A real transport needs explicit endpoint, client, or credential wiring.
     # Use ``${oc.env:VAR}`` for secrets instead of writing them here.
     sink_kwargs: dict[str, Any] = Field(default_factory=dict)
+    # Optional process-shared resolver over entries committed by the sink.
+    # Both clients must use the same backend namespace.
+    lineage_store: str | None = None
+    lineage_store_kwargs: dict[str, Any] = Field(default_factory=dict)
     # Whether Gym freezes capture records and rebuilds the response.
     # Finalization does not retire the frozen snapshot.
     # Durable delivery permits retirement by snapshot id and version.
     rebuild_response: bool = True
-    # Abort once enough finalized rollouts exceed this masked fraction.
-    # ``None`` disables the limit.
+    # A custom sink normally needs a resolver over the same backend namespace.
+    # Without one, every multi-call continuation is unresolved and masked.
+    # This flag permits that degraded behavior explicitly.
+    allow_unresolved_continuations: bool = False
+    # Store resolved prompts as suffixes of their verified parent tokens.
+    # This avoids repeatedly storing the growing full prompt.
+    # Root and unresolved records remain full-prompt reconstruction anchors.
+    delta_records: bool = False
+    # Abort when the finalized-rollout masked fraction exceeds this limit.
+    # Enforcement begins after ``mask_fraction_min_samples`` observations.
+    # ``None`` disables the kill switch.
     max_mask_fraction: float | None = None
     mask_fraction_min_samples: int = 50
 
@@ -136,12 +153,14 @@ class TokenIdCaptureConfig(BaseModel):
                     "the file store, so %s will not be written to.",
                     block.dir,
                 )
+            self._require_resolver(block)
             return self
         directory = self.resolved_dir()
         if directory is None:
             # A programmatic sink replaces the file store.
             # That process does not need a directory.
             if installed_token_sink() is not None:
+                self._require_resolver(block)
                 return self
             if not block.rebuild_response:
                 return self
@@ -149,6 +168,28 @@ class TokenIdCaptureConfig(BaseModel):
         if not directory.is_absolute():
             raise ValueError("training-token capture directory must be an absolute path")
         return self
+
+    @staticmethod
+    def _require_resolver(block: TokenIdCaptureSettings) -> None:
+        """Require a resolver whenever a custom sink stores lineage.
+
+        A missing resolver makes every continuation unresolved.
+        Current reconstruction refuses to guess across that boundary.
+        """
+        if block.lineage_store is not None or installed_lineage_store() is not None:
+            return
+        if block.allow_unresolved_continuations:
+            logger.warning(
+                "token_id_capture has a custom sink and no lineage_store: every continuation "
+                "will resolve UNRESOLVED and multi-call rollouts will be masked."
+            )
+            return
+        raise ValueError(
+            "token_id_capture has a custom sink but no lineage_store, so no continuation can "
+            "resolve its parent and every multi-call rollout will be masked. Configure "
+            "token_id_capture.lineage_store on the same backend as the sink, or set "
+            "token_id_capture.allow_unresolved_continuations: true to accept the loss."
+        )
 
     @property
     def enabled(self) -> bool:
@@ -168,6 +209,18 @@ class TokenIdCaptureConfig(BaseModel):
         if not self.token_id_capture.enabled or target is None:
             return None
         return self._build_endpoint(target, self.token_id_capture.sink_kwargs, TokenSink, "sink")
+
+    def build_lineage_store(self) -> LineageStore | None:
+        """Construct the configured request-time lineage store."""
+        target = self.token_id_capture.lineage_store
+        if not self.token_id_capture.enabled or target is None:
+            return None
+        return self._build_endpoint(
+            target,
+            self.token_id_capture.lineage_store_kwargs,
+            LineageStore,
+            "lineage_store",
+        )
 
     @staticmethod
     def _build_endpoint(target: str, kwargs: dict[str, Any], protocol: type, kind: str):

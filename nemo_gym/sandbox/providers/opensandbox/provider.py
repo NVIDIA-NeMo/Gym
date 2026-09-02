@@ -32,6 +32,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
+    SandboxPtyError,
     SandboxPtySession,
     SandboxPtySpec,
     SandboxResources,
@@ -1489,18 +1490,31 @@ class OpenSandboxProvider:
         since: int | None = None,
     ) -> SandboxPtySession:
         """Re-attach to an existing execd PTY session by id."""
-        from nemo_gym.sandbox.providers.opensandbox.pty import attach_pty_session
+        from nemo_gym.sandbox.providers.opensandbox.pty import _PTY_TAKEOVER_RETRY_DELAYS, attach_pty_session
 
         base_url, headers, request_timeout_s = await self._pty_target(handle)
-        session = await attach_pty_session(
-            client=self._pty_http_client(),
-            base_url=base_url,
-            headers=headers,
-            session_id=session_id,
-            takeover=takeover,
-            since=since,
-            request_timeout_s=request_timeout_s,
-        )
+        # A takeover evicts the attached client, and execd waits for that
+        # client to acknowledge. A half-open peer (silently dropped along the
+        # proxy path) cannot answer, so execd's eviction times out and the
+        # attach comes back as a policy-violation close — reported as "already
+        # has an attached client" — while the stale client is torn down in the
+        # background. A fresh attempt then lands, so retry exactly that case.
+        for delay in (*_PTY_TAKEOVER_RETRY_DELAYS, None):
+            try:
+                session = await attach_pty_session(
+                    client=self._pty_http_client(),
+                    base_url=base_url,
+                    headers=headers,
+                    session_id=session_id,
+                    takeover=takeover,
+                    since=since,
+                    request_timeout_s=request_timeout_s,
+                )
+                break
+            except SandboxPtyError as e:
+                if not takeover or delay is None or "already has an attached client" not in str(e):
+                    raise
+            await asyncio.sleep(delay)
         await self._retire_closed_pty_sessions()
         self._pty_sessions.add(session)
         return session

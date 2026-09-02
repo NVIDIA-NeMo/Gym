@@ -125,8 +125,10 @@ class FakeHttpClient:
         self.delete_calls.append((url, headers))
         return FakeResponse(200)
 
-    async def ws_connect(self, url: str, *, headers: dict[str, str]) -> FakeWs:
+    async def ws_connect(self, url: str, *, headers: dict[str, str], heartbeat: float | None = None) -> FakeWs:
         self.ws_calls.append((url, headers))
+        self.ws_heartbeats: list[float | None] = getattr(self, "ws_heartbeats", [])
+        self.ws_heartbeats.append(heartbeat)
         if isinstance(self._ws_error, list):
             if self._ws_error:
                 raise self._ws_error.pop(0)
@@ -582,6 +584,78 @@ async def test_provider_attach_pty_reuses_endpoint(monkeypatch: pytest.MonkeyPat
     session = await provider.attach_pty(handle, "s-7", takeover=True, since=10)
     assert client.ws_calls[0][0] == "wss://server/v1/sandboxes/sb-1/proxy/44772/pty/s-7/ws?takeover=1&since=10"
     await session.close()
+
+
+async def test_pty_sockets_dial_with_heartbeat() -> None:
+    # Silent half-open sockets are what takeover timeouts are made of; every
+    # PTY dial requests websocket heartbeats so a dead peer is detected and
+    # re-dialed instead of dangling until the next takeover.
+    from nemo_gym.sandbox.providers.opensandbox.pty import attach_pty_session
+
+    client = FakeHttpClient(ws=FakeWs([CONNECTED]))
+    session = await attach_pty_session(
+        client=client,  # type: ignore[arg-type]
+        base_url="http://server/base",
+        headers={},
+        session_id="s-1",
+        request_timeout_s=5.0,
+    )
+    assert client.ws_heartbeats == [pty_module._PTY_WS_HEARTBEAT_S]
+    await session.close()
+
+
+async def test_provider_attach_pty_retries_timed_out_takeover(monkeypatch: pytest.MonkeyPatch) -> None:
+    # execd waits for the evicted client to acknowledge a takeover; a
+    # half-open peer cannot, so the first attach closes 1008 while the stale
+    # client is torn down in the background. The provider re-dials and lands.
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    class FakeRaw:
+        async def get_endpoint(self, port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint="server/v1/sandboxes/sb-1/proxy/44772", headers={})
+
+    provider = OpenSandboxProvider(connection={"domain": "server", "api_key": "k", "protocol": "https"})
+    rejected = FakeWs([], close_code=1008)
+    rejected.closed = True
+    clients = [FakeHttpClient(ws=rejected), FakeHttpClient(ws=FakeWs([CONNECTED]))]
+    handed_out: list[FakeHttpClient] = []
+    monkeypatch.setattr(
+        provider, "_pty_http_client", lambda: handed_out.append(clients[len(handed_out)]) or handed_out[-1]
+    )
+    monkeypatch.setattr(pty_module, "_PTY_TAKEOVER_RETRY_DELAYS", (0.0,))
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
+    session = await provider.attach_pty(handle, "s-7", takeover=True)
+    assert len(handed_out) == 2, "the timed-out takeover must be re-dialed once"
+    assert handed_out[0].closed, "the failed attempt's client must be released"
+    await session.close()
+
+
+async def test_provider_attach_pty_does_not_retry_without_takeover(monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    class FakeRaw:
+        async def get_endpoint(self, port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint="server/v1/sandboxes/sb-1/proxy/44772", headers={})
+
+    provider = OpenSandboxProvider(connection={"domain": "server", "api_key": "k", "protocol": "https"})
+    rejected = FakeWs([], close_code=1008)
+    rejected.closed = True
+    clients_handed = 0
+
+    def _client() -> FakeHttpClient:
+        nonlocal clients_handed
+        clients_handed += 1
+        return FakeHttpClient(ws=rejected)
+
+    monkeypatch.setattr(provider, "_pty_http_client", _client)
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
+    with pytest.raises(SandboxPtyError, match="already has an attached client"):
+        await provider.attach_pty(handle, "s-7", takeover=False)
+    assert clients_handed == 1, "without takeover the rejection is definitive"
 
 
 async def test_create_rejected_before_connected_raises_and_cleans_up() -> None:
@@ -1065,12 +1139,11 @@ async def test_run_detached_polls_and_returns_marker_delimited_output() -> None:
     await session.close()
 
 
-async def test_run_detached_raises_on_evicted_output() -> None:
+async def test_run_detached_doesnt_raise_on_evicted_output() -> None:
     # The replay frame starts past everything we received: bytes were evicted
     # from the server's retained window while detached.
     session, _, _ = await _detached_session_over(reply_offset=4096)
-    with pytest.raises(SandboxPtyError, match="retained window"):
-        await session.run_detached("chatty", poll_interval_s=0.01)
+    await session.run_detached("chatty", poll_interval_s=0.01)
     await session.close()
 
 

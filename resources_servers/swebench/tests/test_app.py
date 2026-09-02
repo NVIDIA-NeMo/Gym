@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -20,6 +22,7 @@ from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
+from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
 from nemo_gym.server_utils import ServerClient
 from resources_servers.swebench.app import (
     DockerContainer,
@@ -116,6 +119,42 @@ class TestApp:
             "resource_usage_source": None,
             "error_type": None,
         }
+
+    async def test_create_sandbox_derives_cpu_cap_env_from_cpu_limit(self, monkeypatch: MonkeyPatch) -> None:
+        sandbox = MagicMock()
+        sandbox.start = AsyncMock()
+        monkeypatch.setattr("resources_servers.swebench.app.get_global_config_dict", lambda: {})
+        monkeypatch.setattr("resources_servers.swebench.app.resolve_provider_config", lambda *_: MagicMock())
+        monkeypatch.setattr("resources_servers.swebench.app.resolve_provider_metadata", lambda *_: {})
+        monkeypatch.setattr("resources_servers.swebench.app.AsyncSandbox", MagicMock(return_value=sandbox))
+        monkeypatch.setattr("resources_servers.swebench.app.patch_swebench_multilingual_sandbox", AsyncMock())
+        test_spec = SimpleNamespace(
+            instance_image_key="img:key", instance_id="astropy__astropy-12907", repo="astropy/astropy"
+        )
+
+        async def created_spec(sandbox_config: dict[str, Any]) -> Any:
+            config = SwebenchResourcesServerConfig(
+                host="0.0.0.0",
+                port=8080,
+                entrypoint="",
+                name="",
+                sandbox_provider="test",
+                sandbox_config=sandbox_config,
+                is_verifying_golden_patch=True,
+            )
+            server = SwebenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+            await server._create_sandbox(test_spec)
+            return sandbox.start.await_args.args[0]
+
+        # Floored to whole cores; explicit sandbox_config.env keys win over the derived caps.
+        spec = await created_spec({"resources": {"cpu": 2.7}, "env": {"OMP_NUM_THREADS": "16"}})
+        assert spec.env["OMP_NUM_THREADS"] == "16"
+        derived = [name for name in CPU_CAP_ENV_VARS if name != "OMP_NUM_THREADS"]
+        assert {name: spec.env[name] for name in derived} == {name: "2" for name in derived}
+
+        # Opt-out and no-cpu-limit paths keep env untouched.
+        assert (await created_spec({"resources": {"cpu": 2}, "derive_cpu_env": False})).env == {}
+        assert (await created_spec({"resources": {"memory_mib": 1024}})).env == {}
 
     def test_unobserved_response_omits_optional_field(self) -> None:
         response = SWEBenchVerifyResponse.model_construct(verifier_sandbox_observation=None)

@@ -1,6 +1,7 @@
 deepswe_resources_server:
   resources_servers:
     deepswe:
+      allowed_agents: [opencode_sandboxed_agent]
       entrypoint: app.py
       domain: coding
       verified: false

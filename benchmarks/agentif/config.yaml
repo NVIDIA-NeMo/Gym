@@ -1,0 +1,19 @@
+config_paths:
+  - resources_servers/agentif/configs/agentif.yaml
+
+# Gym-native AgentIF benchmark. Inherits the resources server + judge/policy
+# wiring from agentif_simple_agent (resources_servers/agentif/configs/agentif.yaml)
+# and points it at the whole-dataset JSONL built by prepare.py.
+# Rows already carry a fully-built responses_create_params.input, so
+# prompt_config is null (no template applied).
+agentif_benchmark_simple_agent:
+  _inherit_from: agentif_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: agentif
+        type: benchmark
+        jsonl_fpath: benchmarks/agentif/data/agentif_benchmark.jsonl
+        prepare_script: benchmarks/agentif/prepare.py
+        prompt_config: null
+        license: Creative Commons Attribution 4.0 International

@@ -1,5 +1,5 @@
 config_paths:
-- responses_api_agents/opencode_sandboxed_agent/configs/opencode_agent.yaml
+- responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
 - resources_servers/swebench/configs/swebench.yaml
 
 opencode_swebench_multilingual_resources_server:
