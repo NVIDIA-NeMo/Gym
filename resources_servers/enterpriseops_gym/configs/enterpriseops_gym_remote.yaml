@@ -1,0 +1,13 @@
+# Provider-neutral EnterpriseOps overlay for a provider that publishes service
+# endpoints remotely (for example Docker, OpenSandbox, or Kubernetes).
+#
+# Compose this after the EnterpriseOps config and the chosen provider config.
+# It changes only the process bind address; endpoint publishing and routing
+# remain provider responsibilities.
+enterpriseops_gym:
+  resources_servers:
+    enterpriseops_gym:
+      # Provider configs use this standard profile name. The default local
+      # Apptainer profile has a unique name so it does not merge into this one.
+      sandbox_provider: sandbox
+      service_bind_host: 0.0.0.0

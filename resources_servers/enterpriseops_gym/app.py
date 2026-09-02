@@ -50,7 +50,9 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
 from resources_servers.enterpriseops_gym.mcp_client import MCPGymClient, load_seed_sql
 from resources_servers.enterpriseops_gym.runtime import EnterpriseOpsAssets, EnterpriseOpsServiceRuntime
@@ -64,13 +66,20 @@ RESERVED_ROUTES = {"seed_session", "verify", "aggregate_metrics"}
 
 
 class EnterpriseOpsGymResourcesServerConfig(BaseResourcesServerConfig):
-    # Shared cache for the pinned EnterpriseOps checkout, database archive, and SIF images.
+    # Shared cache for the pinned EnterpriseOps checkout and database archive.
     # Set this to a shared HPC filesystem path when several Gym resource-server processes
     # run on the same cluster.
     cache_dir: str = "~/.cache/nemo_gym/enterpriseops_gym"
-    # Directory containing the verified native ARM64 service SIFs produced by
-    # `python -m resources_servers.enterpriseops_gym.arm64_images`.
-    native_sif_dir: Optional[str] = None
+    # Named sandbox profile or inline provider mapping. The default benchmark config
+    # supplies the named Apptainer profile; tests and custom deployments may inject one.
+    sandbox_provider: str | Dict[str, Any] = "sandbox"
+    # Native image references selected on ARM64. The Apptainer profile uses local SIFs;
+    # other providers may use multi-architecture OCI references.
+    native_service_images: Dict[str, str] = Field(default_factory=dict)
+    # The Apptainer profile keeps host-network services private; remote profiles bind all interfaces.
+    service_bind_host: str = "127.0.0.1"
+    # Provider-neutral settings merged into every managed service SandboxSpec.
+    sandbox_spec: Dict[str, Any] = Field(default_factory=dict)
     service_start_timeout_seconds: float = 60.0
 
     # Database seeding executes a full SQL dump on the gym server; bound concurrent seeds
@@ -104,6 +113,7 @@ class SessionGym(BaseModel):
     database_id: Optional[str] = None
     context: Dict[str, Any] = Field(default_factory=dict)
     auth_config: Optional[Dict[str, Any]] = None
+    endpoint_headers: Dict[str, str] = Field(default_factory=dict)
 
 
 class SessionState(BaseModel):
@@ -165,12 +175,15 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
     def model_post_init(self, __context: Any) -> None:
         self.gym_clients = {}
         self.seed_semaphores = {}
+        global_config_dict = get_global_config_dict()
         self._managed_runtime = EnterpriseOpsServiceRuntime(
-            assets=EnterpriseOpsAssets(
-                Path(self.config.cache_dir).expanduser(),
-                Path(self.config.native_sif_dir).expanduser() if self.config.native_sif_dir else None,
-            ),
+            assets=EnterpriseOpsAssets(Path(self.config.cache_dir).expanduser()),
+            sandbox_provider=resolve_provider_config(self.config.sandbox_provider, global_config_dict),
+            sandbox_metadata=resolve_provider_metadata(self.config.sandbox_provider, global_config_dict),
             readiness_timeout_seconds=self.config.service_start_timeout_seconds,
+            native_service_images=self.config.native_service_images,
+            service_bind_host=self.config.service_bind_host,
+            sandbox_spec=self.config.sandbox_spec,
         )
 
     def setup_webserver(self) -> FastAPI:
@@ -199,12 +212,13 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
     # ------------------------------------------------------------------
 
     def _get_gym_client(self, gym: SessionGym) -> MCPGymClient:
-        key = json.dumps([gym.base_url, gym.mcp_endpoint, gym.auth_config], sort_keys=True)
+        key = json.dumps([gym.base_url, gym.mcp_endpoint, gym.auth_config, gym.endpoint_headers], sort_keys=True)
         client = self.gym_clients.get(key)
         if client is None:
             client = MCPGymClient(
                 base_url=gym.base_url,
                 auth_config=gym.auth_config,
+                endpoint_headers=gym.endpoint_headers,
                 mcp_endpoint=gym.mcp_endpoint,
                 tool_call_timeout_seconds=self.config.tool_call_timeout_seconds,
                 sql_timeout_seconds=self.config.sql_timeout_seconds,
@@ -250,6 +264,7 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
                 mcp_endpoint=server_config.get("mcp_endpoint", "/mcp"),
                 context=server_config.get("context") or {},
                 auth_config=server_config.get("auth_config"),
+                endpoint_headers=self._managed_runtime.endpoint_headers.get(gym_name, {}),
             )
         return gyms
 

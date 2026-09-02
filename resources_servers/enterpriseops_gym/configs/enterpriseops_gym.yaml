@@ -1,17 +1,28 @@
+config_paths:
+  - nemo_gym/sandbox/providers/apptainer/configs/apptainer.yaml
+
 enterpriseops_gym:
   resources_servers:
     enterpriseops_gym:
       entrypoint: app.py
       domain: agent
       verified: false
-      description: EnterpriseOps-Gym enterprise tool-use benchmark with managed Apptainer MCP services + SQL/judge verifiers
+      description: EnterpriseOps-Gym enterprise tool-use benchmark with managed sandbox MCP services + SQL/judge verifiers
       value: Improve stateful multi-step enterprise planning and tool use
 
-      # Shared cache for the pinned EnterpriseOps source checkout, gym_dbs.zip, and
-      # digest-named Apptainer SIF images. Set to a shared HPC filesystem if needed.
+      # Shared cache for the pinned EnterpriseOps source checkout and gym_dbs.zip.
+      # Set to a shared HPC filesystem if needed.
       cache_dir: ~/.cache/nemo_gym/enterpriseops_gym
-      # Required on ARM64 hosts: a directory of rebuilt <domain>-arm64.sif files.
-      native_sif_dir: ${oc.env:ENTERPRISEOPS_NATIVE_SIF_DIR,null}
+      # Default provider profile: local Apptainer, selected by the included config path.
+      # Swap that provider config path without modifying this resources server.
+      sandbox_provider: enterpriseops_apptainer_sandbox
+      # Apptainer uses host networking and returns loopback endpoints.
+      service_bind_host: 127.0.0.1
+      # On ARM64, set a native image reference for each EOps domain. For Apptainer
+      # these are prebuilt local SIF paths; OCI-native providers may use OCI refs.
+      native_service_images: {}
+      sandbox_spec:
+        workdir: /app
       service_start_timeout_seconds: 60
 
       max_concurrent_seeds: 4

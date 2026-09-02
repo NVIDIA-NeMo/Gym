@@ -2,9 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import socket
 import time
-from dataclasses import replace
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -35,6 +33,11 @@ class FakeSandbox:
 
     async def stop(self) -> None:
         self.stopped = True
+
+
+class HeaderEndpointSandbox(FakeSandbox):
+    async def endpoint(self, port: int) -> SandboxEndpoint:
+        return SandboxEndpoint(endpoint=f"https://sandbox.example/services/{port}", headers={"X-Provider": "token"})
 
 
 class TimeoutLaunchingSandbox(FakeSandbox):
@@ -72,7 +75,7 @@ def test_drive_uses_its_package_main_module() -> None:
     assert SERVICES["drive"].app_target == "app.main:app"
 
 
-def test_managed_services_use_a_clean_contained_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_managed_services_use_the_selected_sandbox_provider(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     captured = {}
 
     class CapturingSandbox:
@@ -82,24 +85,13 @@ def test_managed_services_use_a_clean_contained_sandbox(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(runtime_module, "AsyncSandbox", CapturingSandbox)
     spec = SandboxSpec(image="service.sif", ports=(8001,))
+    provider = {"test-provider": {"connection": {"url": "https://sandbox.example"}}}
+    runtime = EnterpriseOpsServiceRuntime(assets=EnterpriseOpsAssets(cache_dir=tmp_path), sandbox_provider=provider)
 
-    EnterpriseOpsServiceRuntime._create_sandbox(spec)
+    runtime._create_sandbox(spec)
 
     assert captured["spec"] is spec
-    assert captured["provider"] == {
-        "apptainer": {
-            "create": {
-                "extra_start_args": [
-                    "--writable-tmpfs",
-                    "--contain",
-                    "--cleanenv",
-                    "--no-home",
-                    "--no-mount",
-                    "hostfs,bind-paths",
-                ]
-            }
-        }
-    }
+    assert captured["provider"] == provider
 
 
 def test_services_keep_their_internal_api_urls_on_the_sandbox_port() -> None:
@@ -117,50 +109,7 @@ def test_services_keep_their_internal_api_urls_on_the_sandbox_port() -> None:
 
 
 @pytest.mark.asyncio
-async def test_existing_digest_named_sif_is_reused_without_pulling(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    assets = EnterpriseOpsAssets(cache_dir=tmp_path)
-    service = SERVICES["csm"]
-    sif_path = assets.sif_path(service)
-    sif_path.parent.mkdir(parents=True)
-    sif_path.write_bytes(b"cached-sif")
-
-    async def unexpected_pull(*args: object, **kwargs: object) -> None:
-        raise AssertionError("existing SIF must be reused")
-
-    monkeypatch.setattr(assets, "_pull_sif", unexpected_pull)
-
-    assert await assets.ensure_sif(service) == sif_path
-
-
-@pytest.mark.asyncio
-async def test_native_arm64_sif_is_used_without_pulling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    native_sif_dir = tmp_path / "native"
-    native_sif_dir.mkdir()
-    native_sif = native_sif_dir / "csm-arm64.sif"
-    native_sif.write_bytes(b"native-arm64-sif")
-    assets = EnterpriseOpsAssets(cache_dir=tmp_path / "cache", native_sif_dir=native_sif_dir)
-
-    async def unexpected_pull(*args: object, **kwargs: object) -> None:
-        raise AssertionError("native ARM64 mode must not pull an upstream image")
-
-    monkeypatch.setattr(assets, "_pull_sif", unexpected_pull)
-
-    assert await assets.ensure_sif(SERVICES["csm"]) == native_sif
-
-
-def test_native_sif_directory_does_not_override_amd64_images(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(runtime_module.platform, "machine", lambda: "x86_64")
-    assets = EnterpriseOpsAssets(cache_dir=tmp_path / "cache", native_sif_dir=tmp_path / "native")
-
-    assert assets.sif_path(SERVICES["csm"]) == tmp_path / "cache" / "images" / (
-        "csm-eaa456ac9aa85728426e7d3813a0bbca0949d6a8695be30e26f03894e6e6b189.sif"
-    )
-
-
-@pytest.mark.asyncio
-async def test_arm64_missing_cached_sifs_fail_before_downloading_or_starting(
+async def test_arm64_missing_native_images_fail_before_asset_materialization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(runtime_module.platform, "machine", lambda: "aarch64")
@@ -168,7 +117,7 @@ async def test_arm64_missing_cached_sifs_fail_before_downloading_or_starting(
     created = []
 
     async def unexpected_seed_root() -> Path:
-        raise AssertionError("ARM64 SIF validation must happen before downloading the seed archive")
+        raise AssertionError("ARM64 native-image validation must happen before downloading the seed archive")
 
     monkeypatch.setattr(assets, "ensure_seed_root", unexpected_seed_root)
 
@@ -176,14 +125,170 @@ async def test_arm64_missing_cached_sifs_fail_before_downloading_or_starting(
         created.append(spec)
         return FakeSandbox(spec)
 
-    runtime = EnterpriseOpsServiceRuntime(assets=assets, sandbox_factory=sandbox_factory)
-    monkeypatch.setattr(runtime, "_reserve_service_ports", lambda: None)
+    runtime = EnterpriseOpsServiceRuntime(
+        assets=assets,
+        sandbox_provider={"test-provider": {}},
+        sandbox_factory=sandbox_factory,
+    )
 
-    with pytest.raises(RuntimeError, match="missing native ARM64 EnterpriseOps SIFs") as error:
+    with pytest.raises(RuntimeError, match="missing native ARM64 EnterpriseOps service image") as error:
         await runtime.start()
 
-    assert "csm-arm64.sif" in str(error.value)
+    assert "csm" in str(error.value)
     assert created == []
+
+
+@pytest.mark.asyncio
+async def test_managed_services_declare_oci_images_and_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runtime_module.platform, "machine", lambda: "x86_64")
+    assets = EnterpriseOpsAssets(cache_dir=tmp_path)
+    created = []
+
+    async def seed_root() -> Path:
+        return tmp_path
+
+    monkeypatch.setattr(assets, "ensure_seed_root", seed_root)
+
+    def sandbox_factory(spec):
+        sandbox = FakeSandbox(spec)
+        created.append(sandbox)
+        return sandbox
+
+    runtime = EnterpriseOpsServiceRuntime(
+        assets=assets,
+        sandbox_provider={"test-provider": {}},
+        sandbox_factory=sandbox_factory,
+        readiness_probe=lambda _url: asyncio.sleep(0),
+    )
+
+    await runtime.start()
+
+    csm = next(sandbox for sandbox in created if sandbox.spec.ports == (SERVICES["csm"].port,))
+    assert csm.spec.image == SERVICES["csm"].image
+    assert csm.spec.env["API_BASE_URL"] == "http://127.0.0.1:8001"
+    assert csm.spec.env["NEMO_GYM_SERVICE_BIND_HOST"] == "127.0.0.1"
+
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_managed_services_preserve_provider_endpoint_headers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runtime_module.platform, "machine", lambda: "x86_64")
+    assets = EnterpriseOpsAssets(cache_dir=tmp_path)
+
+    async def seed_root() -> Path:
+        return tmp_path
+
+    monkeypatch.setattr(assets, "ensure_seed_root", seed_root)
+    runtime = EnterpriseOpsServiceRuntime(
+        assets=assets,
+        sandbox_provider={"test-provider": {}},
+        sandbox_factory=HeaderEndpointSandbox,
+        readiness_probe=lambda _url: asyncio.sleep(0),
+    )
+
+    await runtime.start()
+
+    assert runtime.endpoint_headers["sn-csm-server"] == {"X-Provider": "token"}
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_endpoint_readiness_uses_https_default_port(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    class Writer:
+        def close(self) -> None:
+            pass
+
+        async def wait_closed(self) -> None:
+            pass
+
+    async def open_connection(host: str, port: int):
+        calls.append((host, port))
+        return object(), Writer()
+
+    monkeypatch.setattr(runtime_module.asyncio, "open_connection", open_connection)
+    runtime = EnterpriseOpsServiceRuntime(
+        assets=EnterpriseOpsAssets(cache_dir=tmp_path),
+        sandbox_provider={"test-provider": {}},
+    )
+
+    await runtime._wait_for_endpoint("https://sandbox.example/services/8001")
+
+    assert calls == [("sandbox.example", 443)]
+
+
+def test_arm64_runtime_uses_configured_native_service_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime_module.platform, "machine", lambda: "aarch64")
+    native_image = tmp_path / "csm-arm64.sif"
+    native_image.write_bytes(b"native-arm64-sif")
+    runtime = EnterpriseOpsServiceRuntime(
+        assets=EnterpriseOpsAssets(cache_dir=tmp_path),
+        sandbox_provider={"test-provider": {}},
+        native_service_images={"csm": str(native_image)},
+    )
+
+    assert runtime.service_image(SERVICES["csm"]) == str(native_image)
+
+
+@pytest.mark.asyncio
+async def test_managed_services_merge_generic_sandbox_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runtime_module.platform, "machine", lambda: "x86_64")
+    assets = EnterpriseOpsAssets(cache_dir=tmp_path)
+    created = []
+
+    async def seed_root() -> Path:
+        return tmp_path
+
+    monkeypatch.setattr(assets, "ensure_seed_root", seed_root)
+
+    def sandbox_factory(spec):
+        sandbox = FakeSandbox(spec)
+        created.append(sandbox)
+        return sandbox
+
+    runtime = EnterpriseOpsServiceRuntime(
+        assets=assets,
+        sandbox_provider={"test-provider": {}},
+        sandbox_factory=sandbox_factory,
+        readiness_probe=lambda _url: asyncio.sleep(0),
+        sandbox_spec={
+            "resources": {"cpu": 2, "memory_mib": 1024},
+            "provider_options": {"resource_class": "small"},
+            "workdir": "/app",
+            "files": {"/sandbox/config.json": "{}"},
+        },
+    )
+
+    await runtime.start()
+
+    csm = next(sandbox for sandbox in created if sandbox.spec.ports == (SERVICES["csm"].port,))
+    assert csm.spec.resources.cpu == 2
+    assert csm.spec.resources.memory_mib == 1024
+    assert csm.spec.provider_options == {"resource_class": "small"}
+    assert csm.spec.workdir == "/app"
+    assert csm.spec.files == {"/sandbox/config.json": "{}"}
+
+    await runtime.stop()
+
+
+def test_managed_services_reject_custom_sandbox_entrypoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime_module.platform, "machine", lambda: "x86_64")
+    runtime = EnterpriseOpsServiceRuntime(
+        assets=EnterpriseOpsAssets(cache_dir=tmp_path),
+        sandbox_provider={"test-provider": {}},
+        sandbox_spec={"entrypoint": ["/bin/sh"]},
+    )
+
+    with pytest.raises(ValueError, match="entrypoint"):
+        runtime._build_sandbox_spec(SERVICES["csm"])
 
 
 @pytest.mark.asyncio
@@ -227,36 +332,6 @@ async def test_seed_root_materialization_is_serialized_across_concurrent_callers
     await asyncio.gather(assets.ensure_seed_root(), assets.ensure_seed_root())
 
     assert checkouts == 1
-
-
-@pytest.mark.asyncio
-async def test_managed_services_reject_an_occupied_port_before_asset_setup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind(("127.0.0.1", 0))
-        listener.listen()
-        port = listener.getsockname()[1]
-        service = replace(SERVICES["csm"], port=port)
-        monkeypatch.setattr(runtime_module, "SERVICES", {"csm": service})
-        assets = EnterpriseOpsAssets(cache_dir=tmp_path)
-        created = []
-
-        def unexpected_asset_setup() -> None:
-            raise AssertionError("port availability must be checked before asset setup")
-
-        monkeypatch.setattr(assets, "ensure_native_arm64_sifs", unexpected_asset_setup)
-
-        def sandbox_factory(spec):
-            created.append(spec)
-            return FakeSandbox(spec)
-
-        runtime = EnterpriseOpsServiceRuntime(assets=assets, sandbox_factory=sandbox_factory)
-
-        with pytest.raises(RuntimeError, match=f"port {port} is already in use"):
-            await runtime.start()
-
-    assert created == []
 
 
 @pytest.mark.asyncio
@@ -311,18 +386,15 @@ async def test_managed_services_finish_stops_before_propagating_cancellation(tmp
 
 
 @pytest.mark.asyncio
-async def test_managed_services_start_from_cached_sifs_and_stop_cleanly(
+async def test_managed_services_start_from_provider_images_and_stop_cleanly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(runtime_module, "is_arm64_host", lambda: False)
+    monkeypatch.setattr(runtime_module.platform, "machine", lambda: "x86_64")
     assets = EnterpriseOpsAssets(cache_dir=tmp_path)
     created = []
 
     async def seed_root() -> Path:
         return tmp_path / "source"
-
-    async def sif_path(service) -> Path:
-        return tmp_path / "images" / f"{service.domain}.sif"
 
     ready_urls = []
 
@@ -330,7 +402,6 @@ async def test_managed_services_start_from_cached_sifs_and_stop_cleanly(
         ready_urls.append(url)
 
     monkeypatch.setattr(assets, "ensure_seed_root", seed_root)
-    monkeypatch.setattr(assets, "ensure_sif", sif_path)
 
     def sandbox_factory(spec):
         sandbox = FakeSandbox(spec)
@@ -339,30 +410,21 @@ async def test_managed_services_start_from_cached_sifs_and_stop_cleanly(
 
     runtime = EnterpriseOpsServiceRuntime(
         assets=assets,
+        sandbox_provider={"test-provider": {}},
         sandbox_factory=sandbox_factory,
         readiness_probe=readiness_probe,
     )
-    monkeypatch.setattr(runtime, "_reserve_service_ports", lambda: None)
 
     await runtime.start()
 
     assert runtime.seed_root == tmp_path / "source"
     assert runtime.urls == {service.gym_name: f"http://127.0.0.1:{service.port}" for service in SERVICES.values()}
     assert [sandbox.spec.ports for sandbox in created] == [(service.port,) for service in SERVICES.values()]
-    expected_environment = {
-        "csm": "API_BASE_URL=http://127.0.0.1:8001",
-        "teams": "API_PORT=8002",
-        "calendar": "API_PORT=8003",
-        "email": "API_PORT=8004",
-        "itsm": "ITSM_API_BASE_URL=http://127.0.0.1:8006",
-        "hr": "HR_API_BASE_URL=http://127.0.0.1:8008",
-        "drive": "FASTAPI_BASE_URL=http://127.0.0.1:8009 MCP_SERVER_HOST=127.0.0.1 MCP_SERVER_PORT=8009",
-    }
     assert [sandbox.commands for sandbox in created] == [
         [
             (
-                f"nohup env {expected_environment[service.domain]} python -m uvicorn "
-                f"{service.app_target} --host 127.0.0.1 --port {service.port} "
+                f"nohup python -m uvicorn {service.app_target} "
+                "--host $NEMO_GYM_SERVICE_BIND_HOST --port $NEMO_GYM_SERVICE_PORT "
                 + f">/sandbox/{service.domain}.log 2>&1 &",
                 "/app",
                 30.0,
@@ -382,27 +444,23 @@ async def test_managed_services_start_from_cached_sifs_and_stop_cleanly(
 async def test_managed_services_accept_a_daemon_launch_timeout_when_the_endpoint_is_ready(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(runtime_module, "is_arm64_host", lambda: False)
+    monkeypatch.setattr(runtime_module.platform, "machine", lambda: "x86_64")
     assets = EnterpriseOpsAssets(cache_dir=tmp_path)
 
     async def seed_root() -> Path:
         return tmp_path / "source"
 
-    async def sif_path(service) -> Path:
-        return tmp_path / "images" / f"{service.domain}.sif"
-
     monkeypatch.setattr(assets, "ensure_seed_root", seed_root)
-    monkeypatch.setattr(assets, "ensure_sif", sif_path)
 
     async def readiness_probe(_url: str) -> None:
         return None
 
     runtime = EnterpriseOpsServiceRuntime(
         assets=assets,
+        sandbox_provider={"test-provider": {}},
         sandbox_factory=TimeoutLaunchingSandbox,
         readiness_probe=readiness_probe,
     )
-    monkeypatch.setattr(runtime, "_reserve_service_ports", lambda: None)
 
     await runtime.start()
 
@@ -413,26 +471,25 @@ async def test_managed_services_accept_a_daemon_launch_timeout_when_the_endpoint
 async def test_managed_services_stop_the_current_sandbox_when_service_launch_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(runtime_module, "is_arm64_host", lambda: False)
+    monkeypatch.setattr(runtime_module.platform, "machine", lambda: "x86_64")
     assets = EnterpriseOpsAssets(cache_dir=tmp_path)
     created = []
 
     async def seed_root() -> Path:
         return tmp_path / "source"
 
-    async def sif_path(service) -> Path:
-        return tmp_path / "images" / f"{service.domain}.sif"
-
     monkeypatch.setattr(assets, "ensure_seed_root", seed_root)
-    monkeypatch.setattr(assets, "ensure_sif", sif_path)
 
     def sandbox_factory(spec):
         sandbox = FailingLaunchingSandbox(spec)
         created.append(sandbox)
         return sandbox
 
-    runtime = EnterpriseOpsServiceRuntime(assets=assets, sandbox_factory=sandbox_factory)
-    monkeypatch.setattr(runtime, "_reserve_service_ports", lambda: None)
+    runtime = EnterpriseOpsServiceRuntime(
+        assets=assets,
+        sandbox_provider={"test-provider": {}},
+        sandbox_factory=sandbox_factory,
+    )
 
     with pytest.raises(RuntimeError, match="failed to start EnterpriseOps service csm"):
         await runtime.start()

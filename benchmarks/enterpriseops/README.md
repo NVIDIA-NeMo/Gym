@@ -7,10 +7,11 @@ HR, ITSM, Teams, Hybrid), graded by SQL verifiers on final database state. See
 
 ## Prerequisites
 
-1. Apptainer on the evaluation host. Gym owns the seven domain services and materializes
-   the pinned EnterpriseOps-Gym checkout and `gym_dbs.zip` itself; no external Docker
-   containers or `seed_sql_root` setting are needed. On ARM64, build the seven native SIFs
-   first as described in the resources-server README and set `ENTERPRISEOPS_NATIVE_SIF_DIR`.
+1. The default Sandbox API provider (Apptainer) on the evaluation host. Gym owns the seven
+   domain services and materializes the pinned EnterpriseOps-Gym checkout and `gym_dbs.zip`
+   itself; no external Docker containers or `seed_sql_root` setting are needed. The runtime can
+   use another Sandbox API provider by composing its config. On ARM64, build the seven native
+   SIFs and compose the ARM64 overlay as described in the resources-server README.
 2. Hub egress at prepare time (`huggingface.co`) for two datasets: the task split
    (`ServiceNow-AI/EnterpriseOps-Gym`) and the tool schemas
    (`nvidia/NeMo-Gym-EnterpriseOps-Assets`, fetched by the resources server's

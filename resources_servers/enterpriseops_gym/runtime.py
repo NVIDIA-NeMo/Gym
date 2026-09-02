@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pinned EnterpriseOps service artifacts for the managed Apptainer runtime."""
+"""Pinned EnterpriseOps service assets and provider-configured service runtime."""
 
 import asyncio
 import contextlib
@@ -10,12 +10,11 @@ import hashlib
 import os
 import platform
 import shutil
-import socket
 import subprocess
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator, TextIO
+from typing import Any, Callable, Iterator, Mapping, TextIO
 from urllib.parse import urlparse
 from zipfile import ZipFile
 
@@ -108,39 +107,14 @@ def is_arm64_host() -> bool:
 
 
 class EnterpriseOpsAssets:
-    """Materialize digest-pinned EnterpriseOps images as reusable SIF files."""
+    """Materialize the pinned EnterpriseOps source checkout and seed archive."""
 
     repository = ENTERPRISEOPS_REPOSITORY
     revision = ENTERPRISEOPS_REVISION
     database_archive_sha256: str | None = DATABASE_ARCHIVE_SHA256
 
-    def __init__(self, cache_dir: Path | str, native_sif_dir: Path | str | None = None) -> None:
+    def __init__(self, cache_dir: Path | str) -> None:
         self.cache_dir = Path(cache_dir)
-        self.native_sif_dir = Path(native_sif_dir) if native_sif_dir is not None else None
-
-    def sif_path(self, service: EnterpriseOpsService) -> Path:
-        if is_arm64_host() and self.native_sif_dir is not None:
-            return self.native_sif_dir / f"{service.domain}-arm64.sif"
-        if is_arm64_host():
-            return self.cache_dir / "images" / f"{service.domain}-arm64.sif"
-        digest = service.image.rsplit("@", 1)[1].removeprefix("sha256:")
-        return self.cache_dir / "images" / f"{service.domain}-{digest}.sif"
-
-    def ensure_native_arm64_sifs(self) -> None:
-        """Fail before downloads when a native host lacks its prebuilt service images."""
-        if not is_arm64_host():
-            return
-        missing = [self.sif_path(service) for service in SERVICES.values() if not self.sif_path(service).is_file()]
-        if not missing:
-            return
-        cache_dir = self.native_sif_dir or self.cache_dir / "images"
-        missing_paths = "\n".join(f"  - {path}" for path in missing)
-        raise RuntimeError(
-            "missing native ARM64 EnterpriseOps SIFs before startup. "
-            f"Expected cache directory: {cache_dir}\n{missing_paths}\n"
-            "Build them with: python -m resources_servers.enterpriseops_gym.arm64_images "
-            f"--all --output-dir {cache_dir}"
-        )
 
     @property
     def source_root(self) -> Path:
@@ -202,36 +176,6 @@ class EnterpriseOpsAssets:
                     raise RuntimeError(f"unsafe path in EnterpriseOps database archive: {member.filename}")
             zip_file.extractall(destination)
 
-    async def ensure_sif(self, service: EnterpriseOpsService) -> Path:
-        target = self.sif_path(service)
-        if target.is_file():
-            return target
-        if is_arm64_host():
-            raise RuntimeError(f"native ARM64 EnterpriseOps SIF is missing: {target}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        await self._pull_sif(service, target)
-        return target
-
-    async def _pull_sif(self, service: EnterpriseOpsService, target: Path) -> None:
-        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-        try:
-            process = await asyncio.create_subprocess_exec(
-                "apptainer",
-                "pull",
-                str(temporary),
-                f"docker://{service.image}",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _stdout, stderr = await process.communicate()
-            if process.returncode != 0:
-                raise RuntimeError(
-                    f"failed to pull EnterpriseOps image {service.image}: {stderr.decode(errors='replace')}"
-                )
-            os.replace(temporary, target)
-        finally:
-            temporary.unlink(missing_ok=True)
-
 
 class EnterpriseOpsServiceRuntime:
     """Own the fixed EnterpriseOps service set for one resources-server process."""
@@ -239,51 +183,100 @@ class EnterpriseOpsServiceRuntime:
     def __init__(
         self,
         assets: EnterpriseOpsAssets,
+        sandbox_provider: Mapping[str, Any] | None = None,
         sandbox_factory: Callable[[SandboxSpec], Any] | None = None,
         readiness_probe: Callable[[str], Any] | None = None,
         readiness_timeout_seconds: float = 60.0,
+        native_service_images: Mapping[str, str] | None = None,
+        service_bind_host: str = "127.0.0.1",
+        sandbox_metadata: Mapping[str, str] | None = None,
+        sandbox_spec: Mapping[str, Any] | None = None,
     ) -> None:
         self.assets = assets
+        self.sandbox_provider = dict(sandbox_provider) if sandbox_provider is not None else None
         self.sandbox_factory = sandbox_factory or self._create_sandbox
         self.readiness_probe = readiness_probe or self._wait_for_endpoint
         self.readiness_timeout_seconds = readiness_timeout_seconds
+        self.native_service_images = dict(native_service_images or {})
+        self.service_bind_host = service_bind_host
+        self.sandbox_metadata = dict(sandbox_metadata or {})
+        self.sandbox_spec = dict(sandbox_spec or {})
         self.seed_root: Path | None = None
         self.urls: dict[str, str] = {}
+        self.endpoint_headers: dict[str, dict[str, str]] = {}
         self.sandboxes: list[Any] = []
-        self._port_locks: list[TextIO] = []
 
-    @staticmethod
-    def _create_sandbox(spec: SandboxSpec) -> AsyncSandbox:
-        return AsyncSandbox(
-            {
-                "apptainer": {
-                    "create": {
-                        "extra_start_args": [
-                            "--writable-tmpfs",
-                            "--contain",
-                            "--cleanenv",
-                            "--no-home",
-                            "--no-mount",
-                            "hostfs,bind-paths",
-                        ]
-                    }
-                }
-            },
-            spec,
+    def _create_sandbox(self, spec: SandboxSpec) -> AsyncSandbox:
+        if self.sandbox_provider is None:
+            raise RuntimeError("EnterpriseOps requires an explicit sandbox_provider configuration")
+        return AsyncSandbox(self.sandbox_provider, spec)
+
+    def service_image(self, service: EnterpriseOpsService) -> str:
+        if not is_arm64_host():
+            return service.image
+        image = self.native_service_images.get(service.domain)
+        if image is None:
+            raise RuntimeError(
+                "missing native ARM64 EnterpriseOps service image for "
+                f"{service.domain!r}; configure native_service_images for every domain"
+            )
+        if "://" not in image and (image.startswith(("/", ".")) or image.endswith(".sif")):
+            image_path = Path(image).expanduser()
+            if not image_path.is_file():
+                raise RuntimeError(f"native EnterpriseOps service image does not exist: {image_path}")
+        return image
+
+    def _validate_service_images(self) -> None:
+        """Fail before source checkout when this host lacks a usable image set."""
+        for service in SERVICES.values():
+            self.service_image(service)
+
+    def _build_sandbox_spec(self, service: EnterpriseOpsService) -> SandboxSpec:
+        options = dict(self.sandbox_spec)
+        if options.get("entrypoint") is not None:
+            raise ValueError("EnterpriseOps managed services do not support sandbox_spec.entrypoint")
+        environment = dict(options.pop("env", {})) | dict(service.environment)
+        environment["NEMO_GYM_SERVICE_BIND_HOST"] = self.service_bind_host
+        environment["NEMO_GYM_SERVICE_PORT"] = str(service.port)
+        metadata = (
+            self.sandbox_metadata
+            | dict(options.pop("metadata", {}))
+            | {
+                "benchmark": "enterpriseops",
+                "domain": service.domain,
+            }
         )
+        known = SandboxSpec(
+            image=self.service_image(service),
+            ttl_s=options.pop("ttl_s", None),
+            ready_timeout_s=options.pop("ready_timeout_s", None),
+            workdir=options.pop("workdir", "/app"),
+            env=environment,
+            files=options.pop("files", {}),
+            metadata=metadata,
+            resources=options.pop("resources", {}),
+            provider_options=options.pop("provider_options", {}),
+            ports=(service.port,),
+        )
+        if options:
+            raise ValueError(f"unknown EnterpriseOps sandbox_spec keys: {', '.join(sorted(options))}")
+        return known
 
     async def _wait_for_endpoint(self, url: str) -> None:
         parsed = urlparse(url)
-        if parsed.hostname is None or parsed.port is None:
-            raise ValueError(f"EnterpriseOps service endpoint must include a host and port: {url}")
+        if parsed.hostname is None:
+            raise ValueError(f"EnterpriseOps service endpoint must include a host: {url}")
+        port = parsed.port
+        if port is None:
+            port = {"http": 80, "https": 443}.get(parsed.scheme)
+        if port is None:
+            raise ValueError(f"EnterpriseOps service endpoint must use HTTP(S) or include a port: {url}")
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.readiness_timeout_seconds
         while True:
             try:
-                _reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(parsed.hostname, parsed.port), timeout=3.0
-                )
+                _reader, writer = await asyncio.wait_for(asyncio.open_connection(parsed.hostname, port), timeout=3.0)
                 writer.close()
                 await writer.wait_closed()
                 return
@@ -295,25 +288,19 @@ class EnterpriseOpsServiceRuntime:
     async def start(self) -> None:
         if self.sandboxes:
             return
-        self._reserve_service_ports()
         try:
-            self.assets.ensure_native_arm64_sifs()
+            self._validate_service_images()
             self.seed_root = await self.assets.ensure_seed_root()
             for service in SERVICES.values():
-                sif_path = await self.assets.ensure_sif(service)
-                sandbox = self.sandbox_factory(
-                    SandboxSpec(
-                        image=str(sif_path),
-                        ports=(service.port,),
-                    )
-                )
+                sandbox_spec = self._build_sandbox_spec(service)
+                sandbox = self.sandbox_factory(sandbox_spec)
                 await sandbox.start()
                 self.sandboxes.append(sandbox)
-                environment = " ".join(f"{name}={value}" for name, value in service.environment)
                 start_result = await sandbox.exec(
-                    f"nohup env {environment} python -m uvicorn {service.app_target} --host 127.0.0.1 --port {service.port} "
+                    f"nohup python -m uvicorn {service.app_target} --host $NEMO_GYM_SERVICE_BIND_HOST "
+                    f"--port $NEMO_GYM_SERVICE_PORT "
                     f">/sandbox/{service.domain}.log 2>&1 &",
-                    cwd="/app",
+                    cwd=sandbox_spec.workdir or "/app",
                     timeout_s=30.0,
                 )
                 launch_timed_out = getattr(start_result, "error_type", None) == "timeout"
@@ -323,6 +310,7 @@ class EnterpriseOpsServiceRuntime:
                     )
                 endpoint = await sandbox.endpoint(service.port)
                 self.urls[service.gym_name] = endpoint.endpoint.rstrip("/")
+                self.endpoint_headers[service.gym_name] = dict(endpoint.headers)
                 await self.readiness_probe(self.urls[service.gym_name])
         except BaseException:
             with contextlib.suppress(Exception):
@@ -332,51 +320,18 @@ class EnterpriseOpsServiceRuntime:
     async def stop(self) -> None:
         sandboxes, self.sandboxes = self.sandboxes, []
         self.urls = {}
+        self.endpoint_headers = {}
         errors = []
+        stopping = asyncio.gather(
+            *(sandbox.stop() for sandbox in reversed(sandboxes)),
+            return_exceptions=True,
+        )
         try:
-            stopping = asyncio.gather(
-                *(sandbox.stop() for sandbox in reversed(sandboxes)),
-                return_exceptions=True,
-            )
-            try:
-                results = await asyncio.shield(stopping)
-            except asyncio.CancelledError:
-                await stopping
-                raise
-            errors = [result for result in results if isinstance(result, Exception)]
-        finally:
-            self._release_service_ports()
+            results = await asyncio.shield(stopping)
+        except asyncio.CancelledError:
+            await stopping
+            raise
+        errors = [result for result in results if isinstance(result, Exception)]
         if errors:
             failures = "; ".join(str(error) for error in errors)
             raise RuntimeError(f"failed to stop EnterpriseOps services: {failures}")
-
-    def _reserve_service_ports(self) -> None:
-        try:
-            for service in SERVICES.values():
-                lock_path = self.assets.cache_dir / ".locks" / f"service-{service.port}.lock"
-                lock_path.parent.mkdir(parents=True, exist_ok=True)
-                lock_file = lock_path.open("a+")
-                try:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError as error:
-                    lock_file.close()
-                    raise RuntimeError(f"EnterpriseOps service port {service.port} is already reserved") from error
-                try:
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-                        probe.bind(("127.0.0.1", service.port))
-                except OSError as error:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-                    lock_file.close()
-                    raise RuntimeError(f"EnterpriseOps service port {service.port} is already in use") from error
-                self._port_locks.append(lock_file)
-        except Exception:
-            self._release_service_ports()
-            raise
-
-    def _release_service_ports(self) -> None:
-        port_locks, self._port_locks = self._port_locks, []
-        for lock_file in reversed(port_locks):
-            with contextlib.suppress(OSError):
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            with contextlib.suppress(OSError):
-                lock_file.close()

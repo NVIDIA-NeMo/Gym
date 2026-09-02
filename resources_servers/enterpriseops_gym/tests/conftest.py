@@ -51,6 +51,7 @@ class StaticManagedRuntime:
     def __init__(self) -> None:
         self.seed_root = FIXTURES_DIR
         self.urls = TEST_SERVICE_URLS
+        self.endpoint_headers: dict[str, dict[str, str]] = {}
         self.started = False
         self.stopped = False
 
@@ -131,6 +132,7 @@ def make_server() -> Callable[..., EnterpriseOpsGymResourcesServer]:
                     port=8080,
                     entrypoint="",
                     name="enterpriseops_gym",
+                    sandbox_provider={"test-provider": {}},
                     janitor_interval_seconds=0,  # tests drive cleanup_expired_sessions directly
                 )
                 | config_overrides

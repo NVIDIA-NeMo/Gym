@@ -1,0 +1,14 @@
+# ARM64 overlay for the default local Apptainer EnterpriseOps profile.
+# Build these seven SIFs with arm64_images.py, set ENTERPRISEOPS_NATIVE_SIF_DIR,
+# then compose this config after the normal EnterpriseOps config.
+enterpriseops_gym:
+  resources_servers:
+    enterpriseops_gym:
+      native_service_images:
+        csm: ${oc.env:ENTERPRISEOPS_NATIVE_SIF_DIR}/csm-arm64.sif
+        teams: ${oc.env:ENTERPRISEOPS_NATIVE_SIF_DIR}/teams-arm64.sif
+        calendar: ${oc.env:ENTERPRISEOPS_NATIVE_SIF_DIR}/calendar-arm64.sif
+        email: ${oc.env:ENTERPRISEOPS_NATIVE_SIF_DIR}/email-arm64.sif
+        itsm: ${oc.env:ENTERPRISEOPS_NATIVE_SIF_DIR}/itsm-arm64.sif
+        hr: ${oc.env:ENTERPRISEOPS_NATIVE_SIF_DIR}/hr-arm64.sif
+        drive: ${oc.env:ENTERPRISEOPS_NATIVE_SIF_DIR}/drive-arm64.sif

@@ -431,6 +431,87 @@ async def test_create_rejects_unshared_network_environment_for_declared_service_
         await provider.create(SandboxSpec(image="docker://img", ports=[8001]))
 
 
+async def test_create_reserves_declared_service_port_until_close(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if "exec" in argv:
+            return (0, apptainer_provider.READY_PROBE_EXPECTED, "")
+        return (0, "", "")
+
+    first, _first_rec = _make_provider(monkeypatch, responder, create={"port_lock_dir": str(tmp_path / "locks")})
+    second, second_rec = _make_provider(monkeypatch, responder, create={"port_lock_dir": str(tmp_path / "locks")})
+    sandbox = await first.create(SandboxSpec(image="docker://img", ports=[8001]))
+
+    with pytest.raises(apptainer_provider.ApptainerCreateError, match="already reserved"):
+        await second.create(SandboxSpec(image="docker://img", ports=[8001]))
+    assert second_rec.calls == []
+
+    await first.close(sandbox)
+    second_sandbox = await second.create(SandboxSpec(image="docker://img", ports=[8001]))
+    await second.close(second_sandbox)
+
+
+async def test_create_releases_declared_service_port_when_readiness_fails(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def failed_probe(argv: list[str]) -> tuple[int, str, str]:
+        if "exec" in argv:
+            return (1, "", "probe failed")
+        return (0, "", "")
+
+    first, _first_rec = _make_provider(
+        monkeypatch,
+        failed_probe,
+        create={"port_lock_dir": str(tmp_path / "locks")},
+    )
+    released = []
+    release_ports = first._release_service_ports
+
+    def track_release(locks):
+        released.extend(locks)
+        release_ports(locks)
+
+    monkeypatch.setattr(first, "_release_service_ports", track_release)
+    with pytest.raises(apptainer_provider.ApptainerCreateVerificationError):
+        await first.create(SandboxSpec(image="docker://img", ports=[8001]))
+    assert released
+
+    second, _second_rec = _make_provider(
+        monkeypatch,
+        lambda _argv: (0, apptainer_provider.READY_PROBE_EXPECTED, ""),
+        create={"port_lock_dir": str(tmp_path / "locks")},
+    )
+    sandbox = await second.create(SandboxSpec(image="docker://img", ports=[8001]))
+    await second.close(sandbox)
+
+
+async def test_create_releases_declared_service_port_when_staging_setup_fails(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider, _rec = _make_provider(
+        monkeypatch,
+        lambda _argv: (0, apptainer_provider.READY_PROBE_EXPECTED, ""),
+        create={"port_lock_dir": str(tmp_path / "locks")},
+    )
+    released = []
+    release_ports = provider._release_service_ports
+
+    def track_release(locks):
+        released.extend(locks)
+        release_ports(locks)
+
+    monkeypatch.setattr(provider, "_release_service_ports", track_release)
+    monkeypatch.setattr(
+        apptainer_provider.tempfile, "mkdtemp", lambda **_kwargs: (_ for _ in ()).throw(OSError("full"))
+    )
+
+    with pytest.raises(OSError, match="full"):
+        await provider.create(SandboxSpec(image="docker://img", ports=[8001]))
+
+    assert released
+
+
 async def test_create_start_failure_cleans_up(
     fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

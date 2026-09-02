@@ -19,10 +19,10 @@ import contextlib
 import json
 import logging
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 from httpx import Cookies
 
@@ -138,10 +138,15 @@ def run_agent_flow(client: TestClient, row: Dict[str, Any], do_tool_call: bool =
 
 
 class TestSeedToolVerify:
-    def test_native_sif_directory_is_passed_to_the_managed_runtime(self) -> None:
+    def test_named_sandbox_provider_is_passed_to_the_managed_runtime(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from resources_servers.enterpriseops_gym.app import (
             EnterpriseOpsGymResourcesServer,
             EnterpriseOpsGymResourcesServerConfig,
+        )
+
+        monkeypatch.setattr(
+            "resources_servers.enterpriseops_gym.app.get_global_config_dict",
+            lambda: {"enterpriseops_sandbox": {"test-provider": {"endpoint": "https://sandbox.example"}}},
         )
 
         config = EnterpriseOpsGymResourcesServerConfig(
@@ -149,11 +154,13 @@ class TestSeedToolVerify:
             port=8080,
             entrypoint="",
             name="enterpriseops_gym",
-            native_sif_dir="/shared/enterpriseops-arm64",
+            sandbox_provider="enterpriseops_sandbox",
+            sandbox_spec={"resources": {"cpu": 2}},
         )
         server = EnterpriseOpsGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
-        assert server._managed_runtime.assets.native_sif_dir == Path("/shared/enterpriseops-arm64")
+        assert server._managed_runtime.sandbox_provider == {"test-provider": {"endpoint": "https://sandbox.example"}}
+        assert server._managed_runtime.sandbox_spec == {"resources": {"cpu": 2}}
 
     def test_lifespan_starts_managed_services_and_uses_their_endpoints(self, gym_env, make_server) -> None:
         stub_url, state = gym_env
@@ -326,6 +333,22 @@ class TestToolProxy:
             recorded = state.tool_calls[-1]
             assert recorded["database_id"] == database_id
             assert recorded["headers"].get("x-user-email") == "joanne@example.com"
+
+    def test_tool_calls_preserve_provider_endpoint_headers(self, gym_env, make_server) -> None:
+        stub_url, state = gym_env
+        server = make_server()
+        server._managed_runtime.endpoint_headers = {GYM_NAME: {"X-Provider": "token"}}
+        row = make_row(stub_url, [V_COUNT])
+        row["verifier_metadata"]["gym_servers_config"][0]["auth_config"] = {
+            "type": "api_key",
+            "token": "task-token",
+            "header_name": "X-Provider",
+        }
+
+        with TestClient(server.setup_webserver()) as client:
+            run_agent_flow(client, row)
+
+        assert state.tool_calls[-1]["headers"].get("x-provider") == "token"
 
     def test_tool_call_without_session_is_400(self, gym_env, make_server) -> None:
         stub_url, _ = gym_env

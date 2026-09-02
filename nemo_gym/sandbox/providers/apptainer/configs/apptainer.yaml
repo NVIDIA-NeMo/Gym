@@ -1,0 +1,24 @@
+# Apptainer sandbox provider config.
+#
+# EnterpriseOps uses this uniquely named default profile so a composed remote
+# provider can keep its standard `sandbox` name without merging two providers.
+enterpriseops_apptainer_sandbox:
+  default_metadata:
+    sandbox-api: apptainer-cli
+  apptainer:
+    create:
+      # EOps services share Apptainer's host network, so their provider-owned
+      # endpoint is loopback and the provider reserves declared service ports.
+      port_lock_dir: ~/.cache/nemo_gym/apptainer/locks
+      extra_start_args:
+        - --writable-tmpfs
+        - --contain
+        - --cleanenv
+        - --no-home
+        - --no-mount
+        - hostfs,bind-paths
+    probe:
+      command: printf apptainer-sandbox-ready
+      expected_stdout: apptainer-sandbox-ready
+      timeout_s: 30
+      deadline_s: 60

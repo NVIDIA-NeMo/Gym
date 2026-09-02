@@ -98,6 +98,7 @@ class MCPGymClient:
         self,
         base_url: str,
         auth_config: Optional[Dict[str, Any]] = None,
+        endpoint_headers: Optional[Dict[str, str]] = None,
         mcp_endpoint: str = "/mcp",
         tool_call_timeout_seconds: float = 30.0,
         sql_timeout_seconds: float = 30.0,
@@ -105,6 +106,7 @@ class MCPGymClient:
         self.base_url = base_url.rstrip("/")
         self.mcp_endpoint = mcp_endpoint
         self.auth_config = auth_config
+        self.endpoint_headers = dict(endpoint_headers or {})
         self.tool_call_timeout_seconds = tool_call_timeout_seconds
         self.sql_timeout_seconds = sql_timeout_seconds
 
@@ -132,6 +134,10 @@ class MCPGymClient:
 
         return {}
 
+    def _get_request_headers(self) -> Dict[str, str]:
+        """Merge provider endpoint routing/auth headers with task authentication."""
+        return self._get_auth_headers() | self.endpoint_headers
+
     async def _send_jsonrpc(
         self,
         method: str,
@@ -145,8 +151,8 @@ class MCPGymClient:
         if not is_notification:
             payload["id"] = self._next_request_id()
 
-        headers = {"Accept": "application/json, text/event-stream"}
-        headers.update(self._get_auth_headers())
+        headers = self._get_request_headers()
+        headers["Accept"] = "application/json, text/event-stream"
         if self.mcp_session_id:
             headers["mcp-session-id"] = self.mcp_session_id
         if extra_headers:
@@ -236,8 +242,8 @@ class MCPGymClient:
         context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Execute a SQL query via the gym's /api/sql-runner endpoint (EOG verifier transport)."""
-        headers = {"x-database-id": database_id}
-        headers.update(self._get_auth_headers())
+        headers = self._get_request_headers()
+        headers["x-database-id"] = database_id
         headers.update(context_to_headers(context))
 
         try:
@@ -289,7 +295,7 @@ class MCPGymClient:
                 method="POST",
                 url=f"{self.base_url}/api/seed-database",
                 json=payload,
-                headers=self._get_auth_headers(),
+                headers=self._get_request_headers(),
                 timeout=ClientTimeout(total=timeout_seconds),
             )
             if response.status != 200:
@@ -312,7 +318,7 @@ class MCPGymClient:
                 method="DELETE",
                 url=f"{self.base_url}/api/delete-database",
                 json={"database_id": database_id},
-                headers=self._get_auth_headers(),
+                headers=self._get_request_headers(),
                 timeout=ClientTimeout(total=30),
             )
         except Exception as e:
