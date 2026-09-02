@@ -1089,6 +1089,29 @@ class TestAssetSelectors:
         _, overrides = _dispatch_for(monkeypatch, argv)
         assert overrides == [f"+config_paths=[{WORKING_DIR / (expected_config)}]"]
 
+    @pytest.mark.parametrize(
+        "argv, expected_configs",
+        [
+            (
+                # multi-environment-training.mdx: start two training environments together.
+                ["env", "start", "--resources-server", "example_single_tool_call", "--resources-server", "mcqa"],
+                [
+                    "resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml",
+                    "resources_servers/mcqa/configs/mcqa.yaml",
+                ],
+            ),
+            (
+                ["eval", "run", "--benchmark", "gsm8k", "--benchmark", "gpqa"],
+                ["benchmarks/gsm8k/config.yaml", "benchmarks/gpqa/config.yaml"],
+            ),
+        ],
+    )
+    def test_composable_selector_accumulates(self, monkeypatch: MonkeyPatch, argv, expected_configs) -> None:
+        # These feed the same +config_paths list as --config, so repeating one composes rather than replaces.
+        _, overrides = _dispatch_for(monkeypatch, argv)
+        paths, _ = _split_overrides(overrides)
+        assert paths == {str(WORKING_DIR / config) for config in expected_configs}
+
     def test_quickstart_resource_server_plus_model(self, monkeypatch: MonkeyPatch) -> None:
         # README.md / quickstart.mdx:
         #   ng_run "+config_paths=[resources_servers/mcqa/configs/mcqa.yaml,
