@@ -12,103 +12,98 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import asyncio
-import difflib
 import importlib
 import json
+import logging
+from collections.abc import Sequence
 from copy import deepcopy
-from glob import glob
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import rich
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import Field
 from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym.benchmarks import (
-    BENCHMARKS_DIR,
     BenchmarkConfig,
-    _load_benchmarks_from_config_paths,
-    _parse_no_environment_tolerating_unset_values,
+    discover_benchmarks,
 )
 from nemo_gym.cli.env import RunHelper
-from nemo_gym.cli.utils import exit_cleanly_on_config_error, print_rich_table
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, BenchmarkDatasetConfig, ConfigError, ConfigPathNotFoundError
+from nemo_gym.cli.utils import (
+    exit_cleanly_on_config_error,
+    exit_unknown_component,
+    fuzzy_matches,
+    print_no_matches,
+    print_rich_table,
+    render_component_inspection,
+)
+from nemo_gym.config_types import (
+    BaseNeMoGymCLIConfig,
+    BenchmarkDatasetConfig,
+    ConfigError,
+    ConfigPathNotFoundError,
+    ServerInstanceConfig,
+)
+from nemo_gym.discovery import read_config_metadata
 from nemo_gym.global_config import (
+    COMPONENT_NAME_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
-    POLICY_MODEL_KEY_NAME,
     QUERY_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
     get_global_config_dict,
+    resolve_dataset_agent,
 )
-from nemo_gym.reward_profile import RewardProfileConfig, RewardProfiler
-from nemo_gym.rollout_collection import (
-    E2ERolloutCollectionConfig,
-    RolloutAggregationConfig,
-    RolloutAggregationHelper,
-    RolloutCollectionConfig,
-    RolloutCollectionHelper,
-    loads_jsonl_line,
-)
-from nemo_gym.train_data_utils import TrainDataProcessor
 
 
-def _fuzzy_matches(query: str, *fields: str) -> bool:
-    """Whether `query` fuzzily matches any of `fields`: a substring or a close difflib match (token-aware)."""
-    needle = query.lower()
-    for field in fields:
-        if not field:
-            continue
-        haystack = field.lower()
-        if needle in haystack:
-            return True
-        tokens = haystack.replace("_", " ").replace("-", " ").split()
-        if difflib.get_close_matches(needle, [haystack, *tokens], n=1, cutoff=0.70):
-            return True
-    return False
+logger = logging.getLogger(__name__)
 
 
-def _benchmark_domain(bench: BenchmarkConfig) -> str:
-    """Resolve a benchmark's config to its `domain` (for the domain column and `gym search`).
+# NOTE: `reward_profile`, `rollout_collection`, `rollout_reverification` and `train_data_utils` are imported lazily inside the run/aggregate/
+# profile commands below: they pull in heavy deps (wandb, mlflow, anthropic) that the fast `list`/`search`
+# commands in this module must not pay for on every invocation.
 
-    `BenchmarkConfig` flattens away the `domain`, so we re-resolve the config with the tolerant listing
-    parser (so chained `config_paths` / `_inherit_from` are applied) and read the field back out. `domain`
-    may be declared on any server config — a resources server (e.g. `aime24`) or an agent (e.g. `tau2`) —
-    so we scan every server group.
-    """
-    initial_config_dict = OmegaConf.load(bench.path)
-    if POLICY_MODEL_KEY_NAME not in initial_config_dict:
-        initial_config_dict = OmegaConf.merge(
-            initial_config_dict, GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT
-        )
-    resolved = _parse_no_environment_tolerating_unset_values(initial_config_dict)
 
-    for instance_name in resolved:
-        instance = resolved[instance_name]
-        if not isinstance(instance, (dict, DictConfig)):
-            continue
+def _inspect_benchmark(name: str, benchmarks: dict, global_config_dict) -> None:
+    """Render the ``gym list benchmarks <name>`` inspect view for one benchmark."""
+    bench = benchmarks.get(name)
+    if bench is None:
+        exit_unknown_component(name, benchmarks, "benchmark")
+        return
 
-        for group_key in ("resources_servers", "responses_api_agents", "responses_api_models"):
-            servers = instance.get(group_key)
-            if not servers:
-                continue
-            for server_config in servers.values():
-                found_domain = (server_config or {}).get("domain")
-                if found_domain:
-                    return str(found_domain)
-
-    return ""
+    domain, description = read_config_metadata(bench.path)
+    details = {
+        "config": str(bench.path.resolve()),
+        "agent": bench.agent_name,
+        "num repeats": str(bench.num_repeats),
+        "dataset": str(bench.dataset.jsonl_fpath),
+        "prepare script": str(bench.dataset.prepare_script),
+    }
+    render_component_inspection(
+        json_output=global_config_dict.get(JSON_OUTPUT_KEY_NAME, False),
+        name=name,
+        type_noun="benchmark",
+        domain=domain,
+        description=description,
+        details=details,
+        usage=f"gym eval prepare --benchmark {name}\ngym eval run --benchmark {name} --model-type vllm_model",
+    )
 
 
 def list_benchmarks() -> None:
-    """CLI command: list available benchmarks, optionally filtered by a `query` (the `gym search` entry point)."""
+    """List available benchmarks, or inspect one by name (``gym list benchmarks <name>``). Optionally filtered
+    by a `query` (the `gym search` entry point).
+
+    A benchmark is a specific kind of environment, so it shares `gym list environments`' columns (name,
+    domain, description) and reads them through the same `read_config_metadata` helper. ``--search-dir``
+    adds extra roots to scan on top of the cwd and built-ins.
+    """
     global_config_dict = get_global_config_dict(
         global_config_dict_parser_config=GlobalConfigDictParserConfig(
             initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
@@ -116,34 +111,35 @@ def list_benchmarks() -> None:
     )
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    assert BENCHMARKS_DIR.exists(), "Missing benchmarks directory"
+    benchmarks = discover_benchmarks()
 
-    # A config defines a benchmark iff it declares a `type: benchmark` dataset (see `BenchmarkConfig`),
-    # regardless of its filename. So discovery is content-based: scan every yaml and keep the ones that
-    # literally declare such a dataset. That text check is a cheap prefilter so we only pay the resolve
-    # cost on real candidates (not every prompt/endpoint yaml), and it finds benchmarks whose config
-    # isn't named `config.yaml` — e.g. tau2's `configs/*.yaml` and livecodebench's `cascade.yaml`.
-    config_paths = [BENCHMARKS_DIR / p for p in glob("**/*.yaml", root_dir=BENCHMARKS_DIR, recursive=True)]
-    config_paths = sorted(p for p in config_paths if "type: benchmark" in p.read_text(errors="ignore"))
+    name = global_config_dict.get(COMPONENT_NAME_KEY_NAME)
+    if name:
+        _inspect_benchmark(name, benchmarks, global_config_dict)
+        return
 
-    benchmarks = _load_benchmarks_from_config_paths(config_paths)
-
-    # Resolve the domain once per benchmark, for the domain column and `gym search`.
-    domains = {name: _benchmark_domain(bench) for name, bench in benchmarks.items()}
+    # Resolve domain + description once per benchmark, via the shared component-metadata reader —
+    # the same one `gym list environments` uses — for the columns and `gym search`.
+    metadata = {name: read_config_metadata(bench.path) for name, bench in benchmarks.items()}
 
     # `gym search <query>` reuses this command, narrowing the listing to fuzzy matches
-    # across the benchmark name and domain.
+    # across the benchmark config name, its dataset name, domain, and description.
     query = global_config_dict.get(QUERY_KEY_NAME)
     if query:
-        benchmarks = {name: bench for name, bench in benchmarks.items() if _fuzzy_matches(query, name, domains[name])}
+        benchmarks = {
+            name: bench
+            for name, bench in benchmarks.items()
+            if fuzzy_matches(query, name, bench.name, metadata[name][0] or "", metadata[name][1] or "")
+        }
 
     if global_config_dict.get(JSON_OUTPUT_KEY_NAME, False):
         payload = [
             {
                 "name": name,
                 "agent_name": bench.agent_name,
-                "domain": domains[name],
+                "domain": metadata[name][0] or "",
                 "num_repeats": bench.num_repeats,
+                "description": metadata[name][1] or "",
             }
             for name, bench in benchmarks.items()
         ]
@@ -151,11 +147,7 @@ def list_benchmarks() -> None:
         return
 
     if not benchmarks:
-        if query:
-            rich.print(f"[yellow]No benchmarks match '{query}'.[/yellow]")
-            return
-        rich.print("[yellow]No benchmarks found.[/yellow]")
-        rich.print(f"Expected benchmarks directory: {BENCHMARKS_DIR}")
+        print_no_matches("benchmarks", query)
         return
 
     title = (
@@ -164,13 +156,16 @@ def list_benchmarks() -> None:
         else f"Available benchmarks in NeMo Gym ({len(benchmarks)})"
     )
     table = Table(title=title)
-    table.add_column("Benchmark name")
+    # Shared environment columns first (name, domain, description), then benchmark-specific ones.
+    table.add_column("Name")
     table.add_column("Domain")
+    table.add_column("Description")
     table.add_column("Agent name")
     table.add_column("Num repeats")
 
     for name, bench in benchmarks.items():
-        table.add_row(name, domains[name], bench.agent_name, str(bench.num_repeats))
+        domain, description = metadata[name]
+        table.add_row(name, domain or "", description or "", bench.agent_name, str(bench.num_repeats))
 
     print_rich_table(table)
 
@@ -227,11 +222,17 @@ def prepare_benchmark() -> None:
     )
     prepare_benchmark_config = PrepareBenchmarkConfig.model_validate(global_config_dict)
 
+    # A benchmark dataset may be declared by an agent block (legacy) or a resources server
+    # block (decoupled layout). `resolve_dataset_agent` is the same resolver rollout dispatch
+    # uses, so preparation and rollout always agree.
     benchmarks_dict: Dict[str, BenchmarkConfig] = dict()
     inspected_server_instances: List[str] = []
     for server_instance_name in global_config_dict:
         server_config = global_config_dict[server_instance_name]
-        if not isinstance(server_config, (dict, DictConfig)) or "responses_api_agents" not in server_config:
+        if not isinstance(server_config, (dict, DictConfig)):
+            continue
+        is_agent = "responses_api_agents" in server_config
+        if not is_agent and "resources_servers" not in server_config:
             continue
 
         inspected_server_instances.append(server_instance_name)
@@ -256,10 +257,17 @@ def prepare_benchmark() -> None:
 
         dataset = datasets[0]
 
-        benchmarks_dict[server_instance_name] = BenchmarkConfig(
+        try:
+            agent_name = resolve_dataset_agent(global_config_dict, str(server_instance_name), pin=dataset.agent)
+        except ConfigError as e:
+            raise ConfigError(f"Benchmark dataset {dataset.name!r}: {e}") from e
+
+        # Keyed by the declaring instance: two declarations may resolve to the same agent, and
+        # keying by agent would silently drop all but the last.
+        benchmarks_dict[str(server_instance_name)] = BenchmarkConfig(
             name=dataset.name,
             path=Path(""),
-            agent_name=server_instance_name,
+            agent_name=agent_name,
             num_repeats=dataset.num_repeats,
             dataset=dataset,
         )
@@ -336,8 +344,64 @@ def prepare_benchmark() -> None:
         list(tqdm(results, total=len(validated)))
 
 
+def _validate_split_datasets_declared(split: str, server_instance_configs: Sequence[ServerInstanceConfig]) -> None:
+    """Fail fast when no config declares a dataset of the requested split's type.
+
+    Data preparation silently produces nothing for such a split, so without this check the run
+    walks the entire preparation sequence (including its success banners) and only dies later
+    trying to read the collated split file.
+    """
+    declared_lines: List[str] = []
+    declared_types: set = set()
+    example_fpaths: List[str] = []
+    for c in server_instance_configs:
+        if c.SERVER_TYPE not in ("responses_api_agents", "resources_servers"):
+            continue
+        for d in c.datasets or []:
+            declared_types.add(d.type)
+            declared_lines.append(f"- {c.name}: {d.name} (type: {d.type})")
+            if d.type == "example":
+                example_fpaths.append(str(d.jsonl_fpath))
+    if split in declared_types:
+        return
+
+    declared_str = "\n".join(declared_lines) if declared_lines else "- (none)"
+    message = (
+        f"No dataset of type `{split}` is declared in this config, so `--split {split}` has nothing to run.\n"
+        f"Declared datasets:\n{declared_str}"
+    )
+    if example_fpaths:
+        example_fpaths_str = "\n".join(
+            f"  gym eval run --no-serve --input {fpath} --output <out>.jsonl" for fpath in example_fpaths
+        )
+        message += (
+            "\nExample datasets are committed smoke-test samples and are not runnable via --split. "
+            "To run one, start the servers (gym env start ...) and collect against the file directly:\n"
+            f"{example_fpaths_str}"
+        )
+    raise ConfigError(message)
+
+
+def _validate_prepared_split_file_exists(input_jsonl_fpath: Path, split: str, output_dirpath: Path) -> None:
+    """Explicit check (not an assert: user-facing, and must survive `python -O`)."""
+    if input_jsonl_fpath.exists():
+        return
+    prepared = sorted(p.name for p in output_dirpath.glob("*.jsonl")) if output_dirpath.exists() else []
+    raise ConfigError(
+        f"Data preparation did not produce `{input_jsonl_fpath}` for split `{split}`. "
+        f"Files prepared under `{output_dirpath}`: {prepared if prepared else 'none'}."
+    )
+
+
 @exit_cleanly_on_config_error
 def e2e_rollout_collection():  # pragma: no cover
+    from nemo_gym.rollout_collection import (
+        E2ERolloutCollectionConfig,
+        RolloutCollectionConfig,
+        RolloutCollectionHelper,
+    )
+    from nemo_gym.train_data_utils import TrainDataProcessor
+
     global_config_dict = get_global_config_dict()
 
     # Ensure we have the right config first thing
@@ -350,8 +414,11 @@ def e2e_rollout_collection():  # pragma: no cover
         data_processor_config_dict["mode"] = "train_preparation"
 
         output_fpath = Path(e2e_rollout_collection_config.output_jsonl_fpath)
-        data_process_output_dir = output_fpath.parent / "preprocessed_datasets"
+        data_process_output_dir = output_fpath.with_suffix("") / "preprocessed_datasets"
         data_processor_config_dict["output_dirpath"] = str(data_process_output_dir)
+
+    server_instance_configs = GlobalConfigDictParser().filter_for_server_instance_configs(global_config_dict)
+    _validate_split_datasets_declared(e2e_rollout_collection_config.split, server_instance_configs)
 
     input_jsonl_fpath = data_process_output_dir / f"{e2e_rollout_collection_config.split}.jsonl"
     should_skip_data_processing = (
@@ -373,7 +440,9 @@ def e2e_rollout_collection():  # pragma: no cover
     # Convert to RolloutCollectionConfig
     rollout_collection_config_dict = deepcopy(global_config_dict)
     with open_dict(rollout_collection_config_dict):
-        assert input_jsonl_fpath.exists(), input_jsonl_fpath
+        _validate_prepared_split_file_exists(
+            input_jsonl_fpath, e2e_rollout_collection_config.split, data_process_output_dir
+        )
         rollout_collection_config_dict["input_jsonl_fpath"] = str(input_jsonl_fpath)
 
     rollout_collection_config = RolloutCollectionConfig.model_validate(
@@ -389,6 +458,12 @@ def e2e_rollout_collection():  # pragma: no cover
     # ``rollout_collection_driver`` config field (a ``module.path:function``).
     # The default path runs the built-in single-pass helper.
     driver_path = e2e_rollout_collection_config.rollout_collection_driver
+    health_check_enabled = (
+        not rollout_collection_config.disable_aggregation and not rollout_collection_config.disable_health_check
+    )
+    # This E2E entry point prints health only after its server-shutdown phase.
+    # The no-serve entry point calls the collection helper directly.
+    rollout_collection_config.disable_health_check = True
 
     print(
         f"""Output artifacts:
@@ -398,6 +473,7 @@ def e2e_rollout_collection():  # pragma: no cover
 {f"Rollout collection driver: {driver_path}" if driver_path else ""}
 """
     )
+    collection_completed = False
     try:
         if driver_path:
             module_name, _, fn_name = driver_path.partition(":")
@@ -408,14 +484,31 @@ def e2e_rollout_collection():  # pragma: no cover
             asyncio.run(driver_fn(rollout_collection_config, resolved_config))
         else:
             asyncio.run(rch.run_from_config(rollout_collection_config))
+        collection_completed = True
     except KeyboardInterrupt:
         pass
     finally:
         rh.shutdown()
 
+    if health_check_enabled and collection_completed:
+        from nemo_gym.rollout_health import format_health_report, run_health_checks
+
+        try:
+            health_result = run_health_checks(
+                output_fpath,
+                workers=rollout_collection_config.health_check_workers,
+                ignored_checks=rollout_collection_config.health_check_ignored_checks,
+            )
+        except Exception:
+            logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
+        else:
+            print(format_health_report(health_result))
+
 
 @exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
+    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+
     config = RolloutCollectionConfig.model_validate(get_global_config_dict())
     rch = RolloutCollectionHelper()
 
@@ -424,14 +517,53 @@ def collect_rollouts():  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def aggregate_rollouts():  # pragma: no cover
-    config = RolloutAggregationConfig.model_validate(get_global_config_dict())
+    from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+
+    global_config = get_global_config_dict()
+    config = RolloutAggregationConfig.model_validate(global_config)
     rah = RolloutAggregationHelper()
 
     asyncio.run(rah.run_from_config(config))
 
 
+def health_check_rollouts(
+    run_dir: str | Path,
+    *,
+    rollout_file: str | Path | None = None,
+    workers: int | None = None,
+    ignored_checks: Sequence[str] = (),
+    json_output: bool = False,
+):
+    """Run rollout quality verification for an existing run directory."""
+    from nemo_gym.rollout_health import health_check_run_dir
+
+    return health_check_run_dir(
+        run_dir,
+        rollout_file=rollout_file,
+        workers=workers,
+        ignored_checks=ignored_checks,
+        json_output=json_output,
+    )
+
+
+@exit_cleanly_on_config_error
+def reverify_rollouts():  # pragma: no cover
+    from nemo_gym.rollout_reverification import RolloutReverificationConfig, RolloutReverificationHelper
+
+    rh = RunHelper()
+    rh.start(None)
+
+    config = RolloutReverificationConfig.model_validate(get_global_config_dict())
+    rrh = RolloutReverificationHelper()
+
+    asyncio.run(rrh.run_from_config(config))
+
+
 @exit_cleanly_on_config_error
 def reward_profile():  # pragma: no cover
+    from nemo_gym.reward_profile import RewardProfileConfig, RewardProfiler
+    from nemo_gym.rollout_collection import loads_jsonl_line
+
     config = RewardProfileConfig.model_validate(get_global_config_dict())
 
     if not Path(config.materialized_inputs_jsonl_fpath).exists():
@@ -454,16 +586,32 @@ def reward_profile():  # pragma: no cover
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
 
     rp = RewardProfiler()
-    group_level_metrics, agent_level_metrics = rp.profile_from_data(
+    group_level_metrics, agent_level_metrics, repeat_level_metrics = rp.profile_from_data(
         rows, results, allow_partial_rollouts=config.allow_partial_rollouts
     )
     completion_summary = rp.profile_completion_summary(rows, results)
-    reward_profiling_fpath, agent_level_metrics_fpath = rp.write_to_disk(
-        group_level_metrics, agent_level_metrics, Path(config.rollouts_jsonl_fpath)
+    reward_profiling_fpath, agent_level_metrics_fpath, repeat_level_metrics_fpath = rp.write_to_disk(
+        group_level_metrics, agent_level_metrics, repeat_level_metrics, Path(config.rollouts_jsonl_fpath)
     )
 
     print(f"""Profiling outputs:
 Reward profile completion: {completion_summary["completed_rollout_rows"]}/{completion_summary["expected_rollout_rows"]} rollout rows ({completion_summary["reward_profile_completion_pct"]:.2f}%)
 Input rows: {completion_summary["total_input_rows"]} total; {completion_summary["complete_input_rows"]} complete; {completion_summary["partial_input_rows"]} partial; {completion_summary["missing_input_rows"]} without rollouts dropped from output.
 Reward profiling outputs: {reward_profiling_fpath}
-Agent-level metrics: {agent_level_metrics_fpath}""")
+Agent-level metrics: {agent_level_metrics_fpath}
+Repeat-level metrics: {repeat_level_metrics_fpath}""")
+
+
+@exit_cleanly_on_config_error
+def compare() -> None:  # pragma: no cover
+    from nemo_gym.comparison.report import render_key_metrics_tables, summary_lines
+    from nemo_gym.comparison.runner import invoked_command, run_comparison
+    from nemo_gym.comparison.schema import ComparisonConfig
+
+    config = ComparisonConfig.model_validate(get_global_config_dict())
+
+    result, written = run_comparison(config, invoked_command())
+
+    for table in render_key_metrics_tables(result):
+        print_rich_table(table)
+    print("\n".join(summary_lines(result, written)))

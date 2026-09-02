@@ -20,10 +20,12 @@ gym --version [--json]        # print version and system info
 ng ...                        # 'ng' is an alias for 'gym'
 
 # Discover
-gym list benchmarks [--json]    # list available benchmarks
-gym list environments [--json]  # list available environments by name
-gym list agents [--json]        # list agent harnesses and how each composes
-gym search <query> [--json]     # filter the benchmark list by name
+gym list benchmarks [<name>] [--json]         # list benchmarks (or inspect one), by their --benchmark value
+gym list environments [<name>] [--json]       # list the unified environment and benchmark catalog
+gym list agents [<name>] [--json]             # list agent harnesses and how each composes
+gym list models [<name>] [--json]             # list --model-type values (or inspect a model)
+gym list resources-servers [<name>] [--json]  # list --resources-server values (or inspect one)
+gym search [<type>] <query> [--json]          # search the unified environment catalog, or one component type
 
 # Datasets
 gym dataset upload            # upload a prepared dataset to HF (default) or GitLab
@@ -34,11 +36,12 @@ gym dataset render            # generate a dataset preview (materialize prompts)
 gym dataset collate           # validate and collate a dataset
 
 # Environments
-gym env init                  # scaffold a new resources server
+gym env init                  # scaffold a resources server, environment, or benchmark
 gym env resolve               # resolve and print the final merged config
-gym env validate              # validate a config (no Ray, no servers) — fast pre-flight check
+gym env validate              # validate a manifest-backed workload or legacy config without services
 gym env packages              # list packages in a server's virtual environment
-gym env test                  # test resources server(s); all of them if none is given
+gym env test                  # run resources-server tests
+gym env publish               # finalize readiness and confirm registry discovery
 gym env start                 # start the servers
 gym env status                # show running servers
 
@@ -46,7 +49,10 @@ gym env status                # show running servers
 gym eval prepare              # prepare benchmark data and dump it to disk
 gym eval run                  # collate data, start servers, and collect rollouts
 gym eval aggregate            # merge sharded rollout results
+gym eval health-check         # verify rollout artifact quality for an existing run
 gym eval profile              # compute a reward profile from rollouts
+gym eval reverify             # recompute rewards from existing rollouts without re-running inference
+gym eval compare              # compare a baseline eval run against a candidate run
 
 # Contributor helpers
 gym dev test                  # run NeMo Gym's unit tests
@@ -62,8 +68,8 @@ These options are shared across many commands.
 | `--benchmark NAME` | Select a registered benchmark by name instead of a config path. |
 | `--resources-server NAME` | Select a registered resources server by name. |
 | `--model-type NAME` | Select a registered model server type by name (such as `openai_model` or `vllm_model`). |
-| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. Lets you register your own benchmarks, resources servers, and models. |
-| `--json` | Emit machine-readable JSON instead of human-readable output (reporting commands only). |
+| `--search-dir DIR` | Extra root directory to search for components and configs. Repeatable. Applies everywhere Gym resolves paths — discovery, the `--<component>` selectors, `config_paths`, prompt configs, and data files — and is inherited by spawned servers. Equivalent to the `NEMO_GYM_EXTRA_ROOTS` environment variable; see [Configuration](/reference/configuration). |
+| `--json` | Emit machine-readable JSON instead of human-readable output (reporting commands only). Accepted before or after the subcommand; commands that emit no JSON reject it. |
 | `-v`, `--verbose` | Set the logging level to DEBUG. Flows through to spun-up servers. |
 | `-h`, `--help` | Show help for any group or command. |
 
@@ -129,18 +135,27 @@ gym --version --json
 
 ## Discovery
 
-Commands for discovering what you can evaluate against.
+Commands for discovering benchmarks, environments, model servers, agent harnesses, and resources servers.
+
+`gym list <type>` lists all components of that type; `gym list <type> <name>` inspects that one.
+All commands accept:
+ * `--json` which prints machine-readable output instead of a human-readable table.
+ * `--search-dir` which allows you to surface your own Gym-compatible components alongside the built-ins.
 
 ### `gym list benchmarks`
 
-List the benchmarks available in NeMo Gym, with their domain, agent, and configured number of repeats.
+List the benchmarks available in NeMo Gym, with their kind, manifest status, domain, and description.
+The value in the **Name** column is the benchmark identifier and can be passed to `--benchmark`.
+To see which agent harness a benchmark composes with, inspect it with `gym list benchmarks <name>`.
 
 | Option | Description |
 | --- | --- |
+| `[<name>]` | Inspect a single benchmark (config path, manifest status, agent, datasets) instead of listing all. |
 | `--json` | Output the benchmark list as JSON. |
 
 ```bash
 gym list benchmarks
+gym list benchmarks aime24            # inspect one benchmark
 
 # Machine-readable output for scripting
 gym list benchmarks --json | jq '.[].name'
@@ -148,14 +163,21 @@ gym list benchmarks --json | jq '.[].name'
 
 ### `gym list environments`
 
-List the environments available under `environments/`, by short name (with their domain and description). The names map to `environments/<name>/config.yaml` and can be passed to `--environment` on commands like `gym env start` / `gym eval run`.
+List the manifest-first catalog unioned with legacy environment and benchmark configs. Manifest-backed entries expose their declared metadata; unmigrated entries remain visible with `no-manifest` status.
 
 | Option | Description |
 | --- | --- |
-| `--json` | Output the environment list as JSON. |
+| `[<name>]` | Inspect one environment or benchmark. |
+| `--kind environment\|benchmark` | Filter the list or resolve an ambiguous name. |
+| `--domain`, `--modality`, `--licensing` | Filter by catalog metadata. |
+| `--status experimental\|no-manifest` | Filter by manifest coverage status. |
+| `--lifecycle active\|deprecated` | Filter by lifecycle. |
+| `--json` | Output catalog entries as JSON. |
 
 ```bash
 gym list environments
+gym list environments calendar        # inspect one environment
+gym list environments --kind benchmark --domain math
 gym list environments --json | jq '.[].name'
 ```
 
@@ -165,25 +187,63 @@ List the agent harnesses under `responses_api_agents/`, with each one's composit
 
 | Option | Description |
 | --- | --- |
+| `[<name>]` | Inspect a single agent (composition pattern and config variants). |
 | `--json` | Output the agent list as JSON (includes the `self_contained` flag). |
 
 ```bash
 gym list agents
+gym list agents simple_agent          # inspect one agent
 gym list agents --json | jq '.[] | {name, self_contained}'
+```
+
+### `gym list models`
+
+List the model servers under `responses_api_models/`.
+The value in the **Model** column corresponds to a config flavor and can be passed as the `--model-type` flag to other commands.
+
+| Option | Description |
+| --- | --- |
+| `[<name>]` | Inspect a single model instead of listing all. |
+| `--json` | Output the rows as JSON. |
+
+```bash
+gym list models
+gym list models vllm_model            # inspect one model
+gym list models --json | jq '.[].model'
+```
+
+### `gym list resources-servers`
+
+List the resources servers under `resources_servers/`.
+The value in the **Name** column corresponds to the config flavor and can be passed as `--resources-server`.
+
+| Option | Description |
+| --- | --- |
+| `[<name>]` | Inspect a single resources server (config path, domain, description). |
+| `--json` | Output the list as JSON. |
+
+```bash
+gym list resources-servers
+gym list resources-servers mcqa       # inspect one resources server
+gym list resources-servers --json | jq '.[].name'
 ```
 
 ### `gym search`
 
-List benchmarks whose name, agent, resources server, dataset, or domain matches a query.
+Filter a listing to fuzzy matches on a query (against each component's name/value, description, domain, and type-specific fields).
+Without a type, the command searches the unified environment and benchmark catalog.
 
-| Argument / Option | Description |
+| Option | Description |
 | --- | --- |
-| `QUERY` | Query to match against component names (positional, required). |
+| `[<type>]` | Optional component type: `benchmarks`, `environments`, `agents`, `models`, or `resources-servers`. |
+| `QUERY` | Text matched (substring or fuzzy) against a component's name, description, and key metadata (positional, required). |
 | `--json` | Output matches as JSON. |
 
 ```bash
-gym search math
-gym search aime --json
+gym search math                       # environments and benchmarks matching "math"
+gym search benchmarks math            # only benchmarks matching "math"
+gym search environments calendar      # environments matching "calendar"
+gym search models vllm --json
 ```
 
 ---
@@ -312,6 +372,7 @@ Each input row must **not** already have a populated `responses_create_params.in
 | `--input`, `-i` | Raw input JSONL file (rows without `responses_create_params.input`). |
 | `--prompt-config` | Prompt template YAML to apply. |
 | `--output`, `-o` | Output JSONL file. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 
 ```bash
 gym dataset render \
@@ -331,54 +392,82 @@ gym dataset render \
 
 ## Environments
 
-Commands for developing, running, and inspecting environments (a dataset + agent harness + resources server + model server).
+Commands for developing, running, and inspecting environments. An environment defines tasks, verification, and its interaction surface; Gym config composes it with agent, model, and runtime components.
 
 ### `gym env init`
 
-Scaffold a new resources server with template files (config, app, tests, README, data directory).
+Scaffold a resources server, or create a manifest-backed environment or benchmark skeleton. Workload scaffolds include a manifest, Gym config, sample data, and the extension points selected by the integration profile.
 
 | Option | Description |
 | --- | --- |
 | `--resources-server NAME` | Name of the resources server to create. |
+| `--environment NAME` / `--benchmark NAME` | Create a manifest-backed environment or benchmark. |
+| `--profile PROFILE` | Integration profile: `custom-gym-verifier`, `custom-gym-agent-loop`, `external-agent-loop`, or `external-rollout-driver`. |
+| `--reuse-verifier NAME` | Reuse an existing resources server that exports `VERIFIER_FIXTURE`. |
+| `--reward-range LOW HIGH` | Reward endpoints required when reusing a verifier. |
+| `--higher-is-better` / `--lower-is-better` | Reward direction required when reusing a verifier. |
 
 ```bash
 gym env init --resources-server my_server
+gym env init --environment my_eval --profile custom-gym-verifier
+gym env init --benchmark my_benchmark --reuse-verifier existing_scorer \
+    --reward-range 0 1 --higher-is-better
 ```
 
 ### `gym env resolve`
 
 Resolve the configs, flags, and overrides into a final merged config and print it. Useful for debugging configuration. Secrets are hidden.
 
+Unlike `gym env validate`, `resolve` substitutes no dummy model, so a model config's `policy_*` values must be supplied for its interpolations to resolve.
+
 | Option | Description |
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 
 ```bash
 # Merge a resources-server config with a model config, apply an override, and print the result
 gym env resolve \
     --config resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml \
     --config responses_api_models/openai_model/configs/openai_model.yaml \
-    ++responses_create_params.temperature=0.6
+    ++responses_create_params.temperature=0.6 \
+    ++policy_base_url=https://api.openai.com/v1 \
+    ++policy_api_key=sk-example \
+    ++policy_model_name=gpt-4o-mini
 ```
 
 ### `gym env validate`
 
-Validate a config without starting Ray or any server subprocess — a fast pre-flight check that catches config mistakes (missing/malformed `config_paths`, unknown server cross-references, unset mandatory `???` values, schema errors) in well under a second instead of after a Ray bootstrap. Exits `0` when valid, or `1` with a clean message (no traceback) when not. A model config is **not** required — model interpolations resolve against a dummy model; pass one (or `--model-type`) if you want it validated too.
+Validate a manifest-backed workload or legacy config without starting Ray or server subprocesses. Manifest validation resolves the Gym config offline, checks composition mirrors and datasets, and reports the resolved components. Legacy validation retains the existing config pre-flight behavior. Exits `0` when valid, or `1` with a clean message when not.
+
+By default, values a run needs but the config leaves undefined (such as `policy_base_url` from `env.yaml`) are filled with placeholders so the rest can still be checked, and reported as a warning. Pass `--strict` to fail on them instead.
 
 | Option | Description |
 | --- | --- |
+| `NAME` | Manifest-backed catalog entry to validate. |
+| `--kind environment\|benchmark` | Resolve an ambiguous catalog name. |
+| `--manifest PATH` | Validate a manifest directly instead of selecting by name. |
+| `--sync` | Atomically synchronize config-owned composition mirrors after all checks pass. |
+| `--strict` | Resolve the config exactly as a run would, with no placeholder model values. An undefined value fails instead of warning. |
+| `--json` | Output the manifest validation report as JSON. |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--environment NAME` / `--benchmark NAME` | Validate a named environment / benchmark config. |
 | `--resources-server NAME` | Validate a named resources server config. |
 | `--model-type NAME` | Also load a named model config (otherwise a dummy `policy_model` is used). |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--model` / `--model-url` / `--model-api-key` | Override model name, base URL, and API key. |
 
 ```bash
+gym env validate my_eval
+gym env validate --sync my_eval
 gym env validate --environment workplace_assistant
 gym env validate --benchmark gsm8k
 
 # or explicit config path(s)
 gym env validate --config resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml
+
+# fail unless everything a run needs is defined, credentials included
+gym env validate --resources-server example_single_tool_call --model-type openai_model --strict
 ```
 
 ### `gym env packages`
@@ -388,6 +477,7 @@ Each server has its own isolated virtual environment. List the packages installe
 | Option | Description |
 | --- | --- |
 | `--resources-server NAME` | Name of the resources server. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--outdated` | List only outdated packages. |
 | `--json` | Output the package list as JSON. |
 
@@ -402,18 +492,42 @@ gym env packages \
 
 ### `gym env test`
 
-Test resource server(s) by running their pytest suite. If no resources server is given, all of them are tested.
+Exercise a manifest-backed workload's verifier fixture in its resources-server environment, or run the existing pytest suite for one or all resources servers.
 
 | Option | Description |
 | --- | --- |
-| `--resources-server NAME` | Resources server to test. Omit to test all servers. |
+| `NAME` | Manifest-backed catalog entry whose verifier fixture should run. |
+| `--kind environment\|benchmark` | Resolve an ambiguous catalog name. |
+| `--update-expected` | Atomically update fixture rewards after every behavioral check passes. |
+| `--json` | Output the verifier report as JSON. |
+| `--resources-server NAME` | Resources server to test. |
+| `--all` | Test every resources server. Slow: builds one venv per server, so it must be requested explicitly. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 
 ```bash
+# Exercise a manifest-backed workload verifier
+gym env test my_eval
+
 # Test a single server
 gym env test --resources-server example_single_tool_call
 
-# Test all servers
-gym env test
+# Test all servers. Slow: builds one venv per server, so it needs an explicit opt-in.
+gym env test --all
+```
+
+### `gym env publish`
+
+Run the local publication check for a manifest-backed workload. The command runs static validation and the verifier fixture, rejects manifest metadata placeholders, and confirms that the exact manifest is visible as `experimental`. It does not assess implementation quality, require a full evaluation or training run, commit, or push changes.
+
+| Option | Description |
+| --- | --- |
+| `NAME` | Manifest-backed catalog entry to publish. |
+| `--kind environment\|benchmark` | Resolve an ambiguous catalog name. |
+| `--json` | Output the publication result as JSON. |
+
+```bash
+gym env publish my_eval
+gym env publish my_benchmark --kind benchmark --json
 ```
 
 ### `gym env start`
@@ -474,7 +588,8 @@ NeMo Gym Server Status:
 
 ## Evaluation
 
-Commands for running evaluations end to end: prepare data, collect rollouts, aggregate for sharded runs, and profile.
+Commands for running evaluations end to end: prepare data, collect rollouts, aggregate sharded runs, verify rollout health, and
+profile results.
 
 ### `gym eval prepare`
 
@@ -510,13 +625,17 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | `--num-repeats` | Rollouts per task (for mean@k metrics). Pass an int to apply to every task, or a dict keyed by `agent_ref.name` for per-agent counts (e.g. `'{simple_agent: 32, swe_agent: 1}'`) when one input file mixes agents. In dict form, the special key `_default` is the fallback for agents not explicitly listed; without it, any unlisted row's agent raises a single consolidated error. |
 | `--prompt-config` | Prompt template YAML to apply. |
 | `--concurrency` | Maximum number of concurrent samples. |
-| `--split` | Dataset split to use (`train`, `validation`, or `benchmark`). |
+| `--split` | Dataset split to use (`train`, `validation`, or `benchmark`). A dataset of the matching `type` must be declared in the loaded configs. `example` datasets are smoke-test samples, not a runnable split — run them with `--no-serve` and `--input` as shown in the [Quickstart](/get-started/quickstart). |
 | `--model`, `-m` | Served model identifier. |
 | `--model-url` | Model server base URL. |
 | `--model-api-key` | Model server API key. |
 | `--temperature` | Sampling temperature. |
 | `--top-p` | Nucleus sampling top-p. |
 | `--max-output-tokens` | Maximum output tokens. |
+| `--disable-aggregation` | Skip aggregate metrics and the automatic health check. Use for shards that will be combined with `gym eval aggregate`. |
+| `--no-health-check` | Skip the automatic post-run health check. |
+| `--health-check-workers` | Number of rollout-health worker processes. Defaults to the smaller of the CPU count and 8. |
+| `--health-check-ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
 
 ```bash
 # End-to-end: spin up servers, then collect rollouts for a benchmark
@@ -575,6 +694,8 @@ How it works:
 
 - **Materialized inputs.** On the first run, the fully expanded input rows (after `--num-repeats`, `--limit`, `--prompt-config`, and any overrides) are written to a sidecar file next to your output. The path is derived from `--output` by appending `_materialized_inputs` to the stem — so `rollouts.jsonl` produces `rollouts_materialized_inputs.jsonl`.
 - **Incremental output.** Successful rollouts are flushed to the main output JSONL after each completion; retriable failures go to a `<stem>_failures.jsonl` sidecar, so partial progress survives a crash.
+- **Failed agent calls.** By default a failed agent `/run` ends the run, because the alternative is a score reported over fewer rollouts than were asked for. Pass `+route_failures_to_sidecar=true` to let the run continue instead: the call is then recorded in the same sidecar as one attempt, with no reward. Every rollout that leaves the score is logged as it happens, whichever layer classified it, and the totals appear with the closing artifact paths. The class says whether the rollout ran: `agent_run_error` when the agent itself answered, since a NeMo Gym agent returns 500 when its handler raises, and `agent_request_failed` for a gateway status (429, 502, 503, 504) or no usable reply, neither of which says anything about the rollout. Other rollouts keep running, the score is computed over completed rollouts only, and resume re-dispatches the row up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`. A run in which nothing produced a result fails instead of reporting an empty score.
+- **Counting failures in the score.** Metrics are computed over completed rollouts only. `+count_failure_classes_as_zero=[<class>]` includes the named sidecar rows in `/aggregate_metrics` so they land in the denominator: `[agent_run_error]` counts the rollouts that reached the agent and broke, which is what a model emitting unparsable tool calls looks like from here, and needs `+route_failures_to_sidecar=true` to have anything to count. A row that carries no reward is scored zero for the metric input only, so neither the sidecar nor the rollouts JSONL records a verdict that no verifier gave. It works the same in `gym eval run` and `gym eval aggregate`.
 - **Matching.** On resume, completed work is matched by `(task_index, rollout_index)` against the materialized inputs, and already-completed rows are skipped. The run prints a summary such as the number of original input rows, rows already done, and rows that still need to be run.
 - **Fallback.** If either the materialized inputs or the output file is missing, resume is skipped and the run starts fresh. Without `--resume`, existing output is cleared before the run.
 
@@ -584,13 +705,16 @@ If you change the config, schema, or data between runs, the materialized inputs 
 
 ### `gym eval aggregate`
 
-Merge sharded rollout results into a single rollouts file with aggregate metrics. Reads every JSONL file matching `--input-glob`, recomputes aggregate metrics over the global union of records, and writes a `<output stem>_aggregate_metrics.json` next to the merged rollouts. Use this to combine shards produced by `gym eval run --no-serve +disable_aggregation=true`.
+Merge sharded rollout results into a single rollouts file with aggregate metrics. Reads every JSONL file matching `--input-glob`, recomputes aggregate metrics over the global union of records, and writes a `<output stem>_aggregate_metrics.json` next to the merged rollouts. Use this to combine shards produced by `gym eval run --no-serve --disable-aggregation`.
 
 | Option | Description |
 | --- | --- |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--input-glob`, `-i` | Glob (or comma-separated globs) matching the rollout shards to aggregate. |
 | `--output`, `-o` | Path for the merged rollouts and aggregate-metrics file. |
+| `--no-health-check` | Skip the automatic post-aggregation health check. |
+| `--health-check-workers` | Number of rollout-health worker processes. Defaults to the smaller of the CPU count and 8. |
+| `--health-check-ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
 
 ```bash
 gym eval aggregate \
@@ -599,6 +723,30 @@ gym eval aggregate \
     --input-glob 'results/rollouts-rs*-chunk*.jsonl' \
     --output results/rollouts.jsonl
 ```
+
+### `gym eval health-check`
+
+Verify rollout quality for an existing run directory. The command reads `<run-dir>/rollouts.jsonl` by default and writes
+`quality_summary.json` and `rollout_verdicts.jsonl` in the run directory.
+
+| Option | Description |
+| --- | --- |
+| `RUN_DIR` | Directory in which to write the health reports. |
+| `--rollouts-file PATH` | Rollout JSONL path. Relative paths resolve under `RUN_DIR`; absolute paths are used as written. Defaults to `rollouts.jsonl`. |
+| `--workers` | Number of worker processes. Defaults to the smaller of the CPU count and 8. |
+| `--ignore-checks`, `--ignore` | Comma-separated health-check IDs to exclude from execution and verdict derivation. |
+
+```bash
+gym eval health-check results/my-run
+
+# Select a nonstandard rollout filename and exclude one known check
+gym eval health-check results/my-run \
+    --rollouts-file evaluator_rollouts.jsonl \
+    --ignore-checks model_call_missing_token_counts
+```
+
+Refer to [Rollout Health Checks](/main/evaluation/rollout-health) for verdict semantics, evidence requirements, the complete check
+catalog, and report schemas.
 
 ### `gym eval profile`
 
@@ -614,6 +762,115 @@ gym eval profile \
     --inputs materialized_inputs.jsonl \
     --rollouts rollouts.jsonl
 ```
+
+Writes three files next to the rollouts, named from its stem:
+
+| File | Contents |
+| --- | --- |
+| `<rollouts>_reward_profiling.jsonl` | One row per task. |
+| `<rollouts>_agent_metrics.json` | One entry per agent. |
+| `<rollouts>_repeat_level_metrics.json` | One entry per repeat. |
+
+See [Repeat-Level Metrics](/evaluation/aggregate-metrics#repeat-level-metrics) for the full field list and how to read the variability statistics.
+
+### `gym eval compare`
+
+Compare a baseline eval run against a candidate run and write a report.
+
+The report contains a metric table (the change, plus each side's value and confidence interval), split into key metrics and all other metrics, and a per-task sample-flips table. Confidence intervals are read from what each run recorded; this command does not yet perform statistical tests or issue a pass/fail verdict.
+
+| Option | Description |
+| --- | --- |
+| `--baseline PATH` | Baseline run's rollouts JSONL. Its `*_aggregate_metrics.json` sibling is what gets read. |
+| `--candidates PATH[,PATH...]` | Candidate run's rollouts JSONL. Comma-separated; one candidate is supported today. |
+| `--baseline-agg-metrics PATH` | Baseline's aggregate-metrics JSON, when it is not the sibling of `--baseline`. |
+| `--candidates-agg-metrics PATH[,PATH...]` | Candidates' aggregate-metrics JSON, in `--candidates` order, when not siblings of `--candidates`. |
+| `--agent NAME` | Agent to compare on both sides. Defaults to every agent present in both runs. |
+| `--baseline-agent NAME` | Agent to read from the baseline. Takes precedence over `--agent`. |
+| `--candidate-agents NAME[,NAME...]` | Agent to read from each candidate, in `--candidates` order. Takes precedence over `--agent`. |
+| `--output-dir DIR`, `-o` | Where to write the report. Defaults to the directory containing the candidate rollouts JSONL. |
+| `--report-format` | `md`, `json`, or `both` (default). |
+
+```bash
+gym eval compare \
+    --baseline runs/baseline/rollouts.jsonl \
+    --candidates runs/candidate/rollouts.jsonl
+```
+
+Writes into the output directory:
+
+| File | Contents |
+| --- | --- |
+| `compare_report.md` | Human-readable report. |
+| `compare_report.json` | Machine-readable result (`schema_version` `"1"`). |
+
+If a run was collected with `--disable-aggregation` it has no `*_aggregate_metrics.json`; run [`gym eval aggregate`](#gym-eval-aggregate) first, or point at the file directly with `--baseline-agg-metrics` / `--candidates-agg-metrics`.
+
+### `gym eval reverify`
+
+Recompute rewards from existing rollouts by replaying them through a resources server's `/verify` endpoint — without re-running model inference. Starts the resources server automatically from the provided config. Requires the `*_materialized_inputs.jsonl` and `rollouts.jsonl` artifacts produced by `gym eval run`.
+
+Before starting, the command checks each resources server's `GET /reverify_mode` response. Resources servers report one of three modes:
+
+| Mode | Meaning |
+| --- | --- |
+| `stateless` | Reverification is safe. The verifier is a pure function of `(request body, server config)`. |
+| `unsupported` | Reverification is not safe. The verifier reads per-rollout session state that is no longer present. |
+| `unknown` | The server has not declared its reverification behaviour. **This is the default.** Treated as potentially unsafe. |
+
+Servers that report `unsupported` or `unknown` cause the command to abort unless `--force` is passed.
+
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Config file for the resources server. Repeatable. |
+| `--benchmark NAME` | Load the named benchmark config. |
+| `--resources-server NAME` | Load the named resources server config. |
+| `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
+| `--inputs PATH` | `*_materialized_inputs.jsonl` from `gym eval run`. |
+| `--rollouts PATH` | `rollouts.jsonl` from `gym eval run`. |
+| `--output PATH`, `-o` | Output JSONL for recomputed rollouts. |
+| `--force` | Override the `UNSUPPORTED` or `UNKNOWN` reverify mode guard; output is prefixed with `unsafe_`. |
+| `--overwrite` | Delete an existing output file instead of raising an error. |
+| `--resume` | Resume a partial run: skip rows already in the output and re-verify only the rest. |
+| `--judge-failed-only` | Recover only the rollouts whose judge call failed in the original run (from `<rollouts>_failures.jsonl`), reusing the stored responses. Skips the reverify-mode guard. |
+| `--append` | With `--judge-failed-only`: append recovered rows to an existing `--output` instead of a fresh file. Mutually exclusive with `--overwrite`. |
+| `--disable-aggregation` | Skip aggregate-metrics computation (use when combining shards with `gym eval aggregate` afterward). |
+
+```bash
+# Recompute rewards with an updated verifier config (no model server needed)
+gym eval reverify \
+    --config my_resources_server.yaml \
+    "++head_server.host=127.0.0.1" \
+    "++head_server.port=9500" \
+    --inputs results/rollouts_materialized_inputs.jsonl \
+    --rollouts results/rollouts.jsonl \
+    --output results/rollouts_reverified.jsonl
+
+# Override a verifier hyperparameter inline
+gym eval reverify \
+    --config my_resources_server.yaml \
+    "++mcqa.resources_servers.mcqa.grading_mode=lenient_boxed" \
+    --inputs results/rollouts_materialized_inputs.jsonl \
+    --rollouts results/rollouts.jsonl \
+    --output results/rollouts_lenient.jsonl
+
+# Re-run the judge on only the rollouts whose judge failed (reuses stored responses; no inference)
+gym eval reverify --judge-failed-only \
+    --config my_resources_server.yaml \
+    --inputs results/rollouts_materialized_inputs.jsonl \
+    --rollouts results/rollouts.jsonl \
+    --output results/rollouts_recovered.jsonl
+
+# Force through an UNSUPPORTED or UNKNOWN server (output prefixed with unsafe_)
+gym eval reverify \
+    --config my_stateful_server.yaml \
+    --inputs results/rollouts_materialized_inputs.jsonl \
+    --rollouts results/rollouts.jsonl \
+    --output results/rollouts_reverified.jsonl \
+    --force
+```
+
+See [Reverify Rollouts](/tutorials/evaluation-tutorials/reverify-rollouts) for a full walkthrough.
 
 ---
 
@@ -647,7 +904,7 @@ Use the tables below to find their `gym` replacement and update your scripts and
 | `ng_pip_list` | `gym env packages` |
 | `ng_init_resources_server` | `gym env init` |
 | `ng_test` | `gym env test` |
-| `ng_test_all` | `gym env test` (no `--resources-server`) |
+| `ng_test_all` | `gym env test --all` |
 | `ng_prepare_benchmark` | `gym eval prepare` |
 | `ng_e2e_collect_rollouts` | `gym eval run` |
 | `ng_collect_rollouts` | `gym eval run --no-serve` |
@@ -662,7 +919,7 @@ Use the tables below to find their `gym` replacement and update your scripts and
 | `ng_gitlab_to_hf_dataset` | `gym dataset migrate` |
 | `ng_delete_dataset_from_gitlab` | `gym dataset rm` |
 | `ng_dev_test` | `gym dev test` |
-| `ng_reinstall` | `uv sync --extra dev --group docs` |
+| `ng_reinstall` | `uv sync --extra dev` |
 
 ### Replacing Hydra overrides with flags
 

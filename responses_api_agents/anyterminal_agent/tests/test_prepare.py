@@ -16,7 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from responses_api_agents.anyterminal_agent.prepare import IMAGE_BUILD_ATTEMPTS, _build_one_sif
+from responses_api_agents.anyterminal_agent.prepare import IMAGE_BUILD_ATTEMPTS, _build_one_image
 
 
 def _staged_path(command: list[str]) -> Path:
@@ -37,7 +37,7 @@ def test_build_retries_then_atomically_installs_image(tmp_path: Path) -> None:
         patch("responses_api_agents.anyterminal_agent.prepare.subprocess.run", side_effect=run),
         patch("responses_api_agents.anyterminal_agent.prepare.time.sleep") as sleep,
     ):
-        name, ok, detail = _build_one_sif("task", "example/image:tag", tmp_path, force=False)
+        name, ok, detail = _build_one_image("task", "example/image:tag", tmp_path, force=False)
 
     assert (name, ok, detail) == ("task", True, "built after 2 attempts")
     assert attempts == 2
@@ -55,7 +55,7 @@ def test_build_removes_intermediate_output_after_three_failures(tmp_path: Path) 
         patch("responses_api_agents.anyterminal_agent.prepare.subprocess.run", side_effect=run) as run_mock,
         patch("responses_api_agents.anyterminal_agent.prepare.time.sleep"),
     ):
-        name, ok, detail = _build_one_sif("task", "example/image:tag", tmp_path, force=False)
+        name, ok, detail = _build_one_image("task", "example/image:tag", tmp_path, force=False)
 
     assert (name, ok) == ("task", False)
     assert run_mock.call_count == IMAGE_BUILD_ATTEMPTS
@@ -76,7 +76,7 @@ def test_failed_forced_rebuild_preserves_existing_image(tmp_path: Path) -> None:
         patch("responses_api_agents.anyterminal_agent.prepare.subprocess.run", side_effect=run),
         patch("responses_api_agents.anyterminal_agent.prepare.time.sleep"),
     ):
-        _name, ok, _detail = _build_one_sif("task", "example/image:tag", tmp_path, force=True)
+        _name, ok, _detail = _build_one_image("task", "example/image:tag", tmp_path, force=True)
 
     assert not ok
     assert image.read_text() == "known-good"

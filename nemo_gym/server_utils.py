@@ -20,14 +20,13 @@ import socket
 import sys
 import time
 from abc import abstractmethod
+from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
-from logging import Filter as LoggingFilter
-from logging import LogRecord, getLogger
 from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import Any, List, Literal, Optional, TextIO, Tuple, Type, Union, Unpack
+from typing import Any, List, Literal, NamedTuple, Optional, TextIO, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import orjson
@@ -49,32 +48,47 @@ from fastapi import FastAPI, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from multidict import CIMultiDict
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import (
     ROLLOUT_PATH_PREFIX,
+    TOKEN_CAPTURE_PATH_SEGMENT,
     BaseRunServerInstanceConfig,
     BaseServerConfig,
 )
 from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
+    NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+    OBSERVABILITY_ENABLED_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
+    UVICORN_TIMEOUT_WORKER_HEALTHCHECK,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
     get_global_config_dict,
 )
 from nemo_gym.profiling import Profiler
+from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_from_run_body
+from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
+from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
+
+
+class _PickleSafeRequestInfo(NamedTuple):
+    url: str
+    method: str
+    headers: CIMultiDict[str]
+    real_url: str
 
 
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
@@ -204,14 +218,99 @@ DISCONNECTED_CLIENT_OS_HELP_TEXT = """We've run into this issue in two different
 
 
 async def request(
-    method: str, url: str, _internal: bool = False, **kwargs: Unpack[_RequestOptions]
+    method: str,
+    url: str,
+    _internal: bool = False,
+    _max_connection_retries: Optional[int] = None,
+    **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
+    """Make an outbound HTTP call through Gym's shared aiohttp client.
+
+    This is the only place Gym talks to another server, so it is also the only place
+    trace context has to be injected: every agent -> model and agent -> resources hop goes
+    through here. `CLAUDE.md` bans httpx precisely to keep it that way.
+    """
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
         kwargs["data"] = orjson.dumps(kwargs.pop("json"))
         kwargs.setdefault("headers", dict())
         kwargs["headers"]["Content-Type"] = "application/json"
 
+    # Gate first: a disabled site costs one frozenset lookup and nothing else. Gym runs at
+    # 16k+ concurrency, so this is a hot path (kb/knowledge/conventions/hot-path-overhead.md).
+    if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT):
+        return await _traced_request(
+            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+        )
+    return await _request_with_retries(
+        method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+    )
+
+
+async def _traced_request(
+    method: str,
+    url: str,
+    _internal: bool = False,
+    _max_connection_retries: Optional[int] = None,
+    **kwargs: Unpack[_RequestOptions],
+) -> ClientResponse:  # pragma: no cover
+    """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
+
+    Uses `nemo_gym.telemetry.spans.client_span` rather than nemo-lens's `managed_span`
+    because the latter cannot set `SpanKind` — see that module for why an INTERNAL span
+    is wrong on a cross-service hop.
+
+    Injection happens inside the span so the header carries *this* span as the parent —
+    the receiving server's FastAPI instrumentation extracts it and its SERVER span becomes
+    our child. That edge is what makes one rollout a single trace across three processes.
+
+    Retries reuse the same span rather than starting one per attempt: the caller asked for
+    one logical request, and the retry count is recorded as an attribute instead.
+    """
+    from nemo_gym.telemetry.contrib import inject_trace_context
+    from nemo_gym.telemetry.spans import client_span
+
+    with client_span(f"HTTP {method.upper()}") as span:
+        headers = kwargs.get("headers")
+        # aiohttp accepts several mapping types here; normalise to a dict we can inject into
+        # without mutating a caller's object.
+        headers = dict(headers) if headers else {}
+        inject_trace_context(headers)
+        kwargs["headers"] = headers
+
+        if span is not None:
+            attributes = {
+                "http.request.method": method.upper(),
+                "url.full": _redacted_url(url),
+                "nemo.gym.rollout.id": current_rollout_id(),
+            }
+            safe_set_span_attributes(span, attributes)
+
+        response = await _request_with_retries(
+            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+        )
+
+        if span is not None:
+            safe_set_span_attributes(span, {"http.response.status_code": response.status})
+        return response
+
+
+def _redacted_url(url: str) -> str:
+    """Strip the query string from a URL before it becomes a span attribute.
+
+    Query strings in Gym carry API keys and, on rollout-prefixed routes, task content.
+    The path is the useful part for a trace; the query is a leak waiting to happen.
+    """
+    return url.split("?", 1)[0]
+
+
+async def _request_with_retries(
+    method: str,
+    url: str,
+    _internal: bool = False,
+    _max_connection_retries: Optional[int] = None,
+    **kwargs: Unpack[_RequestOptions],
+) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()
     num_tries = 1
     retries = 0
@@ -230,6 +329,10 @@ async def request(
                     flush=True,
                 )
 
+            # Retrying forever is wrong if the endpoint is expected to sometimes die and move.
+            if _max_connection_retries is not None and retries >= _max_connection_retries:
+                raise
+
             await asyncio.sleep(0.5)
         except ClientOSError:
             global _NUM_CLIENT_OS_ERROR
@@ -241,6 +344,9 @@ async def request(
                     f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
                     flush=True,
                 )
+
+            if _max_connection_retries is not None and retries >= _max_connection_retries:
+                raise
 
             await asyncio.sleep(0.5)
         except Exception as e:
@@ -274,6 +380,18 @@ Response content: {content}""")
         except ClientResponseError as e:
             # Set the response content here so we have access to it down the line.
             e.response_content = content
+            # aiohttp stores unpicklable multidict proxies in this exception.
+            # Preserve request details as pickle-safe values for cross-process propagation.
+            request_info = e.request_info
+            e.request_info = _PickleSafeRequestInfo(
+                url=str(request_info.url),
+                method=request_info.method,
+                headers=CIMultiDict(request_info.headers),
+                real_url=str(request_info.real_url),
+            )
+            e.history = ()
+            e.headers = CIMultiDict(e.headers) if e.headers is not None else None
+            e.args = (e.request_info, e.history)
             raise e
 
 
@@ -293,6 +411,9 @@ class ServerClient(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    # Resolved base URLs, cached by server name.
+    _server_base_urls: dict[str, str] = PrivateAttr(default_factory=dict)
+
     @classmethod
     def load_head_server_config(cls) -> BaseServerConfig:
         global_config_dict = get_global_config_dict()
@@ -302,8 +423,19 @@ class ServerClient(BaseModel):
 
     @classmethod
     def load_from_global_config(cls, head_server_config: Optional[BaseServerConfig] = None) -> "ServerClient":
+        """Build a client from the fully resolved global config.
+
+        Gym-launched server processes reuse the config injected by their parent.
+        Other processes fetch the config from the head server.
+        """
         if head_server_config is None:
             head_server_config = cls.load_head_server_config()
+
+        if _has_injected_global_config_env():
+            return cls(
+                head_server_config=head_server_config,
+                global_config_dict=get_global_config_dict(),
+            )
 
         # It's critical we use requests here instead of the global httpx client since a FastAPI server may be run downstream of this function call.
         head_server_url = f"http://{head_server_config.host}:{head_server_config.port}"
@@ -321,19 +453,35 @@ class ServerClient(BaseModel):
 
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
-    def _build_server_base_url(self, server_config_dict: OmegaConf) -> str:
-        return f"http://{server_config_dict.host}:{server_config_dict.port}"
-
     async def request(
         self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
     ) -> ClientResponse:
-        server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
-        base_url = self._build_server_base_url(server_config_dict)
+        base_url = self._resolve_base_url(server_name)
 
+        json_obj = kwargs.get("json")
         if "json" in kwargs:
-            json_obj = kwargs["json"]
             if isinstance(json_obj, BaseModel):
-                kwargs["json"] = json_obj.model_dump(exclude_unset=True)
+                json_obj = json_obj.model_dump(exclude_unset=True)
+                kwargs["json"] = json_obj
+
+        observability_enabled = self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False)
+        server_entry = self.global_config_dict.get(server_name)
+        rollout_id = current_rollout_id()
+        if observability_enabled and server_entry is not None and "resources_servers" in server_entry:
+            if url_path == "/verify":
+                rollout_id = rollout_id or maybe_rollout_id_from_run_body(json_obj)
+            if rollout_id is not None and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/"):
+                url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
+
+        if (
+            rollout_id is not None
+            and observability_enabled
+            and server_entry is not None
+            and "responses_api_models" in server_entry
+            and url_path.partition("?")[0] in {"/v1/responses", "/v1/chat/completions", "/v1/messages"}
+            and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/")
+        ):
+            url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
 
         return await request(method=method, url=f"{base_url}{url_path}", _internal=True, **kwargs)
 
@@ -395,6 +543,22 @@ class ServerClient(BaseModel):
             return "timeout"
         except Exception:
             return "unknown_error"
+
+    def _resolve_base_url(self, server_name: str) -> str:
+        cached = self._server_base_urls.get(server_name)
+        if cached is not None:
+            return cached
+        server_config_dict = get_first_server_config_dict(self.global_config_dict, server_name)
+        base_url = self._build_server_base_url(server_config_dict)
+        self._server_base_urls[server_name] = base_url
+        return base_url
+
+    def _build_server_base_url(self, server_config_dict: OmegaConf) -> str:
+        return f"http://{server_config_dict.host}:{server_config_dict.port}"
+
+
+def _has_injected_global_config_env() -> bool:
+    return getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME) is not None
 
 
 SESSION_ID_KEY = "session_id"
@@ -520,6 +684,24 @@ def set_nemo_gym_fastapi_num_workers(num_workers: int) -> None:  # pragma: no co
     environ[NEMO_GYM_FASTAPI_NUM_WORKERS] = str(num_workers)
 
 
+#: Base class name -> the Gym server-type directory it lives in. Matched against the MRO
+#: rather than imported, because base_resources_server and friends import *this* module.
+_TELEMETRY_SERVER_TYPE_BY_BASE = {
+    "SimpleResourcesServer": "resources_servers",
+    "SimpleResponsesAPIAgent": "responses_api_agents",
+    "SimpleResponsesAPIModel": "responses_api_models",
+}
+
+
+def _telemetry_server_type(server_cls: Type) -> Optional[str]:
+    """Return the Gym server-type name for *server_cls*, or None if it is not one."""
+    for base in server_cls.__mro__:
+        server_type = _TELEMETRY_SERVER_TYPE_BY_BASE.get(base.__name__)
+        if server_type is not None:
+            return server_type
+    return None
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
@@ -527,12 +709,54 @@ class SimpleServer(BaseServer):
     def setup_webserver(self) -> FastAPI:
         pass
 
+    def setup_telemetry(self) -> None:
+        """Initialise this process's nemo-lens telemetry. Idempotent, once per process.
+
+        Every Gym server is its own process with its own providers — there is no parent
+        handle to inherit, only the `NEMO_GYM_OTEL_*` environment the orchestrator
+        exported before spawning it. A failure here is logged and swallowed: telemetry
+        must never stop a server from serving.
+        """
+        from nemo_gym.telemetry.setup import init_telemetry
+
+        init_telemetry(
+            server_name=self.config.name,
+            server_type=_telemetry_server_type(type(self)),
+        )
+
+    def instrument_app_for_telemetry(self, app: FastAPI) -> None:
+        """Apply OTel FastAPI auto-instrumentation to *app*, if telemetry is exporting.
+
+        Gives every server the inbound half of context propagation plus dimensioned
+        `http.server.*` metrics, which is why Gym does not use nemo-lens's undimensioned
+        `gym.server.request_duration_ms` (see `nemo_gym/telemetry/metrics.py`).
+
+        A server whose instrumentation could not be applied keeps serving; it just does not
+        extract inbound trace context.
+        """
+        from nemo_gym.telemetry.contrib import instrument_fastapi_app
+        from nemo_gym.telemetry.setup import get_telemetry
+
+        telemetry = get_telemetry()
+        if telemetry is None or not telemetry.is_exporting:
+            return
+        # Gated on the span group like every other site, so `server` actually controls
+        # something. Checked here rather than per request because the instrumentor is
+        # installed once at startup, by which point init_telemetry has resolved the groups.
+        if not is_span_group_enabled(GymSpanGroup.SERVER):
+            return
+        instrument_fastapi_app(app)
+
     def get_session_middleware_key(self) -> str:
         # This method is here to override in case we want to ever use an actual session middleware secret key.
         # e.g. for an actual product.
         return f"{self.__class__.__name__}___{self.config.name}"
 
     def setup_session_middleware(self, app: FastAPI) -> None:
+        if getattr(app.state, "nemo_gym_session_middleware_installed", False):
+            return
+        app.state.nemo_gym_session_middleware_installed = True
+
         # The multiple middleware execution order described in https://fastapi.tiangolo.com/tutorial/middleware/#multiple-middleware-execution-order
         # Says that if you register middlewares A and then B,
         # - at request time: They execute B first then A
@@ -565,6 +789,8 @@ class SimpleServer(BaseServer):
                     print(response_content)
 
                 return JSONResponse(content=response_content, status_code=500)
+            except CancelledError:
+                return JSONResponse(content="An unknown error occurred", status_code=500)
             except Exception as e:
                 print(
                     f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
@@ -673,11 +899,29 @@ repr(e): {repr(e)}"""
         if global_config_dict[DRY_RUN_KEY_NAME]:
             return
 
+        # Before setup_webserver so the OTel providers exist by the time the app is
+        # instrumented below: FastAPIInstrumentor captures the tracer provider at
+        # instrument time, and a no-op provider captured here would stay no-op forever.
+        # Once per process — uvicorn's multi-worker path re-enters run_webserver in each
+        # worker via the module import, and init_telemetry is idempotent.
+        server.setup_telemetry()
+
         app = server.setup_webserver()
+        # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
+        # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
+        if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
+            from nemo_gym.mcp_auto_exposure import maybe_auto_expose
+
+            maybe_auto_expose(server, app)
         server.setup_liveness(app)
         server.set_ulimit()
         server.prefix_server_logs()
         server.setup_exception_middleware(app)
+        # Must precede uvicorn.run: Starlette refuses add_middleware once the app has
+        # started. This is the ingress half of cross-process propagation — the instrumentor
+        # extracts an inbound `traceparent` and parents this server's SERVER span to the
+        # caller's CLIENT span.
+        server.instrument_app_for_telemetry(app)
 
         @app.exception_handler(RequestValidationError)
         async def validation_exception_handler(request: Request, exc):
@@ -693,20 +937,10 @@ Full body: {json.dumps(exc.body, indent=4)}
             server.setup_profiling(app, profiling_config)
 
         uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
-        if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok:
-
-            class No200Filter(LoggingFilter):
-                def filter(self, record: LogRecord) -> bool:
-                    msg = record.getMessage()
-                    return not msg.strip().endswith("200")
-
-            uvicorn_logger = getLogger("uvicorn.access")
-            uvicorn_logger.addFilter(No200Filter())
-
-            if is_main_fastapi_proc:
-                print(
-                    "Adding a uvicorn logging filter so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
-                )
+        if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok and is_main_fastapi_proc:
+            print(
+                "Disabling a uvicorn access logging so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
+            )
 
         uvicorn_kwargs = dict(
             host=server.config.host,
@@ -714,9 +948,14 @@ Full body: {json.dumps(exc.body, indent=4)}
             # We add a very small graceful shutdown timeout so when we shutdown we cancel all inflight requests and there are no lingering requests (requests are cancelled)
             timeout_graceful_shutdown=0.5,
             # Some workers may take a while for imports and setup_webserver.
-            timeout_worker_healthcheck=30,
+            timeout_worker_healthcheck=global_config_dict.get(UVICORN_TIMEOUT_WORKER_HEALTHCHECK, 30),
             # Ensure server keepalive > client keepalive
             timeout_keep_alive=30,
+            # Parse HTTP with httptools instead of pure-Python h11.
+            # Explicit selection prevents Uvicorn from silently falling back to h11.
+            # A missing or incompatible httptools wheel now fails during startup.
+            http="httptools",
+            access_log=uvicorn_logging_cfg.uvicorn_logging_show_200_ok,
         )
 
         if server.config.num_workers and server.config.num_workers > 1:
@@ -737,7 +976,15 @@ Full body: {json.dumps(exc.body, indent=4)}
             uvicorn_kwargs["app"] = app
 
         if is_main_fastapi_proc:
-            uvicorn.run(**uvicorn_kwargs)
+            try:
+                uvicorn.run(**uvicorn_kwargs)
+            finally:
+                # BatchSpanProcessor only exports on a timer, so without an explicit flush
+                # the last seconds of a run — including the spans of whatever was in
+                # flight at shutdown — are silently dropped.
+                from nemo_gym.telemetry.setup import shutdown_telemetry
+
+                shutdown_telemetry()
 
         return app
 
@@ -745,6 +992,8 @@ Full body: {json.dumps(exc.body, indent=4)}
 class HeadServer(BaseServer):
     config: BaseServerConfig
     _server_instances: List[dict] = []
+    # Serialized global config returned to clients.
+    _cached_yaml: Optional[str] = None
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -760,6 +1009,10 @@ class HeadServer(BaseServer):
 
     def set_server_instances(self, instances: List) -> None:
         self._server_instances = instances
+
+    def invalidate_global_config_dict_yaml_cache(self) -> None:
+        """Clear the serialized global config cache."""
+        self._cached_yaml = None
 
     @classmethod
     def run_webserver(cls) -> Tuple[uvicorn.Server, Thread, "HeadServer"]:  # pragma: no cover
@@ -781,7 +1034,9 @@ class HeadServer(BaseServer):
         return uvicorn_server, thread, server
 
     async def global_config_dict_yaml(self) -> str:
-        return OmegaConf.to_yaml(get_global_config_dict())
+        if self._cached_yaml is None:
+            self._cached_yaml = OmegaConf.to_yaml(get_global_config_dict())
+        return self._cached_yaml
 
 
 class ServerInstanceDisplayConfig(BaseModel):
@@ -811,13 +1066,26 @@ def get_server_url(server_name: str) -> str:
     return f"http://{model_server_config['host']}:{model_server_config['port']}"
 
 
-def rollout_path_prefix(rollout_id: Optional[str]) -> str:
+def rollout_path_prefix(rollout_id: Optional[str], *, token_capture: bool = False) -> str:
     """Return the leading model-server path prefix for a rollout, if available."""
-    return f"/{ROLLOUT_PATH_PREFIX}/{rollout_id}" if rollout_id else ""
+    if not rollout_id:
+        return ""
+    capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
+    return f"/{ROLLOUT_PATH_PREFIX}/{rollout_id}{capture_segment}"
 
 
-def apply_rollout_prefix(base_url: str, rollout_id: Optional[str]) -> str:
+def apply_rollout_prefix(base_url: str, rollout_id: Optional[str], *, token_capture: bool = False) -> str:
     """Append a rollout prefix to a model-server root URL."""
     if not rollout_id:
         return base_url
-    return base_url.rstrip("/") + rollout_path_prefix(rollout_id)
+    return base_url.rstrip("/") + rollout_path_prefix(rollout_id, token_capture=token_capture)
+
+
+def setup_server_client(head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:  # pragma: no cover
+    server_client = ServerClient.load_from_global_config(head_server_config)
+
+    # We set this rollout global aiohttp client to use the same max connections as the underlying head server global config.
+    if not is_global_aiohttp_client_setup():
+        set_global_aiohttp_client(cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict))
+
+    return server_client

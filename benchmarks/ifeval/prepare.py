@@ -19,15 +19,12 @@ Downloads the original IFEval test data from the google-research GitHub repo
 and converts it to Gym JSONL format compatible with the
 `instruction_following` resources server.
 
-Mirrors `nemo_skills/dataset/ifeval/prepare.py` exactly, with two
-benchmark-output renames so the resulting JSONL matches the existing
-`instruction_following` server's `verify()` schema:
+Each output row has two keys:
+  responses_create_params  — the agent input (user message with the prompt)
+  verifier_metadata        — scoring fields read by the resources server
 
-* `prompt` (server input) is the original `prompt` field — same value Skills
-  also stores under `question`. Both are kept on the row so the data is a
-  superset of Skills' output.
-* `grading_mode="binary"` is added to align with Skills'
-  `prompt_strict_accuracy` (1 if all instructions pass, 0 otherwise).
+grading_mode is set to "binary" to align with the original paper's
+prompt-level strict accuracy metric (1 if all instructions pass, 0 otherwise).
 """
 
 import json
@@ -56,15 +53,22 @@ def prepare() -> Path:
     with open(RAW_FPATH, "rt", encoding="utf-8") as fin:
         for idx, line in enumerate(fin):
             entry = json.loads(line)
-            # Skills prepare.py also writes `question = prompt`; keep it so
-            # the Gym JSONL is a strict superset of Skills'. The existing
-            # `instruction_following` server reads `prompt`.
-            entry["question"] = entry["prompt"]
-            entry["id"] = idx
-            # `binary` aligns the per-rollout reward with Skills' headline
-            # `prompt_strict_accuracy` (1 if all instructions pass, else 0).
-            entry["grading_mode"] = "binary"
-            rows.append(entry)
+            prompt = entry["prompt"]
+            row = {
+                "id": idx,
+                "responses_create_params": {
+                    "input": [{"role": "user", "content": prompt}],
+                    "tools": [],
+                    "parallel_tool_calls": False,
+                },
+                "verifier_metadata": {
+                    "prompt": prompt,
+                    "instruction_id_list": entry["instruction_id_list"],
+                    "kwargs": entry["kwargs"],
+                    "grading_mode": "binary",
+                },
+            }
+            rows.append(row)
 
     with open(OUTPUT_FPATH, "wt", encoding="utf-8") as fout:
         for row in rows:
