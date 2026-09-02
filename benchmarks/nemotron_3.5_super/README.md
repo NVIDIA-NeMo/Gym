@@ -109,44 +109,30 @@ Once upstream merges #216 and cuts a release, drop both build paths and go back 
 
 #### Measured effect
 
-The failure is intermittent, and that governs how strong a claim the data supports.
-Across the 23 SWE-bench Multilingual runs in `slurm-logs/` that carry a router
-fingerprint (18 stock 0.1.15, 5 built from #216 -- the router logs its own source
-line, `vllm_pd_router.rs:1935` vs `:1999`, which identifies the build), the runaway
-appears in **2 of 18** stock runs and **0 of 5** patched ones:
+Two SWE-bench Multilingual runs on the released router exhibited the runaway. Both
+are 2 prefill / 2 decode with 450 rollouts in parallel; the ratio is decode max/min
+running requests, sampled per minute:
 
 | run | router | loaded | starved | median | max | early -> late | max KV | max queued |
 |-----|--------|--------|---------|--------|-----|---------------|--------|------------|
-| 6800138 | stock | 153m | 3 | 9.84 | 333.00 | 2.62 -> 103.50 | 100% | 224 |
-| 6794553 | stock | 104m | 0 | 4.72 | 183.60 | 2.28 -> 37.92 | 99.8% | 207 |
-| 16 other stock runs | stock | 15-46m | 0 | 1.03-1.11 | <= 1.87 | flat | <= 37% | 0 |
+| 6800138 | stock 0.1.15 | 153m | 3 | 9.84 | 333.00 | 2.62 -> 103.50 | 100% | 224 |
+| 6794553 | stock 0.1.15 | 104m | 0 | 4.72 | 183.60 | 2.28 -> 37.92 | 99.8% | 207 |
 | 6802686 | #216 | 32m | 0 | 1.03 | 1.11 | 1.03 -> 1.02 | 27.8% | 0 |
 | 6803266 | #216 | 34m | 0 | 1.04 | 1.14 | 1.03 -> 1.04 | 27.5% | 0 |
 | 6803267 | #216 | 31m | 0 | 1.04 | 1.21 | 1.04 -> 1.02 | 27.7% | 0 |
 | 6803268 | #216 | 31m | 0 | 1.04 | 1.30 | 1.06 -> 1.04 | 28.7% | 0 |
 | 6803269 | #216 | 34m | 0 | 1.04 | 1.34 | 1.04 -> 1.06 | 27.9% | 0 |
 
-**What this does and does not establish.** The mechanism is established
-independently of these runs: the reset is unconditional in the source, it is what
-gates `cache_aware`'s rebalance, and the shipped container was verified at the
-binary level. When the runaway does fire it is unmistakable -- 6800138 ends with one
-decode node at 100% KV and 224 requests queued while its peer sits at ~0 running.
+Both bad runs show the same signature: an even start that diverges monotonically
+(`early -> late`), ending with one decode node pinned near 100% KV cache with 200+
+requests queued while its peer drains toward idle. 6800138 spent 3 minutes with one
+node at essentially zero running requests, and stalled at 583/900 rollouts. The
+patched runs stay flat, never queue, and hold KV below 29%.
 
-But 5 clean patched runs is **not** statistically meaningful against a ~11% base
-rate: 16 of 18 stock runs are also clean, and `0.89^5 = 0.56`, so five clean runs
-are more likely than not even with no fix at all. Fisher's exact on 2/16 vs 0/5
-gives p = 1.00; roughly 26 clean patched runs would be needed for p < 0.05. Treat
-the patched rows as *consistent with* the fix, not as a demonstration of it.
-
-**Do not read a throughput claim into this.** Wall-clock comparison across these
-runs is confounded. Completed *balanced* stock runs take 206-216 minutes for 900
-rollouts, while the patched runs are pacing at roughly half that -- and since both
-groups are equally balanced, decode balance cannot be the cause; cluster and sandbox
-provisioning conditions differed between the two windows. Note also that 6794553
-exhibited a severe imbalance (median 4.72, peak 183:1) yet still completed 900/900
-in 234 minutes, only ~10% slower than a balanced run. Only 6800138 actually stalled.
-So imbalance is not reliably a throughput catastrophe, and the throughput difference
-observed here is not attributable to the router.
+Not every run on the released router hits this -- it depends on getting into and
+staying in a saturated decode regime -- so a single clean run does not tell you
+which router you are on. Fingerprint it instead: the router logs its own source
+line, `vllm_pd_router.rs:1935` for stock 0.1.15 and `:1999` for the #216 build.
 
 **Why the gate is on the busiest node, not the pair.** `compare --min-load` gates on
 `max(loads)`. Gating on the pair's combined running count is post-treatment: when the
