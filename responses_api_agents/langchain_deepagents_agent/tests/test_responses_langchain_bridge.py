@@ -51,12 +51,31 @@ def test_to_langchain_round_trip_against_typed_items():
     items = [
         NeMoGymEasyInputMessage(role="user", content="hi"),
         NeMoGymEasyInputMessage(role="system", content="be nice"),
-        NeMoGymFunctionCallOutput(call_id="c1", output="ignored, not a message type"),
     ]
     messages = to_langchain(items)
-    assert len(messages) == 2  # non-message item filtered out
+    assert len(messages) == 2
     assert isinstance(messages[0], HumanMessage) and messages[0].content == "hi"
     assert isinstance(messages[1], SystemMessage) and messages[1].content == "be nice"
+
+
+def test_to_langchain_converts_prior_function_call_history_instead_of_dropping_it():
+    items = [
+        NeMoGymResponseFunctionToolCall(call_id="call_1", name="search", arguments='{"q": "x"}'),
+        NeMoGymFunctionCallOutput(call_id="call_1", output="result text"),
+    ]
+    messages = to_langchain(items)
+    assert len(messages) == 2
+    assert isinstance(messages[0], AIMessage)
+    assert messages[0].tool_calls == [{"name": "search", "args": {"q": "x"}, "id": "call_1", "type": "tool_call"}]
+    assert isinstance(messages[1], ToolMessage)
+    assert messages[1].content == "result text"
+    assert messages[1].tool_call_id == "call_1"
+
+
+def test_to_langchain_function_call_malformed_args_falls_back_to_empty_dict():
+    items = [NeMoGymResponseFunctionToolCall(call_id="call_1", name="search", arguments="not json")]
+    (message,) = to_langchain(items)
+    assert message.tool_calls[0]["args"] == {}
 
 
 def test_to_responses_uses_last_ai_message_with_content():

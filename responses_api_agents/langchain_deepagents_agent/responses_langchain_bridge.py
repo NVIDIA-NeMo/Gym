@@ -69,16 +69,23 @@ def to_langchain(input_items: list) -> list:
     which run once per internal model call inside GymResponsesChatModel._agenerate()."""
     # "developer" is an OpenAI Responses API role with no LangChain equivalent; map it to SystemMessage.
     roles = {"user": HumanMessage, "assistant": AIMessage, "system": SystemMessage, "developer": SystemMessage}
-    # Only "message" items are kept — function_call/function_call_output items in input_items are
-    # silently dropped. Currently safe because deepagents' tools run internally (params["tools"] is
-    # ignored, see below) so no function_call items ever appear in input_items today. Would need
-    # handling if this agent is ever wired to a resources-server-mediated tool loop or fed
-    # pre-seeded multi-turn tool-call history.
-    return [
-        roles.get(item.role, HumanMessage)(content=_text(item.content))
-        for item in input_items
-        if getattr(item, "type", None) == "message"
-    ]
+    messages: list = []
+    for item in input_items:
+        item_type = getattr(item, "type", None)
+        if item_type == "message":
+            messages.append(roles.get(item.role, HumanMessage)(content=_text(item.content)))
+        elif item_type == "function_call":
+            try:
+                args = json.loads(item.arguments)
+            except (json.JSONDecodeError, TypeError):
+                # Malformed args from the caller. Same graceful-degradation choice as
+                # to_langchain_ai_message()'s identical guard on the model-output side: pass through {}
+                # rather than crashing the request.
+                args = {}
+            messages.append(AIMessage(content="", tool_calls=[tool_call(name=item.name, args=args, id=item.call_id)]))
+        elif item_type == "function_call_output":
+            messages.append(ToolMessage(content=_text(item.output), tool_call_id=item.call_id))
+    return messages
 
 
 def to_responses(new_messages: list, model_name: str) -> dict:
