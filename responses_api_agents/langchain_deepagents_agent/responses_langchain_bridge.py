@@ -89,21 +89,29 @@ def to_langchain(input_items: list) -> list:
 
 
 def to_responses(new_messages: list, model_name: str) -> dict:
-    final_text = next((m.content for m in reversed(new_messages) if isinstance(m, AIMessage) and m.content), "")
+    """LangChain messages -> a Gym Responses API response dict, preserving the full tool-call/tool-result
+    trace (not just the final assistant text). Reuses to_gym_input()'s message-type mapping: its
+    function_call/function_call_output dicts already satisfy NeMoGymResponseOutputItem's required fields
+    (NeMoGymResponseFunctionToolCall and NeMoGymFunctionCallOutput are the same classes on the input and
+    output sides), but its message dicts need an `id` and output_text-shaped `content` added, since
+    NeMoGymResponseOutputMessage (output-only) requires both and to_gym_input()'s input-side message dicts
+    don't carry them."""
+    output_items = []
+    for item in to_gym_input(new_messages):
+        if item["type"] == "message":
+            item = {
+                **item,
+                "id": f"msg_{uuid.uuid4().hex}",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": item["content"], "annotations": []}],
+            }
+        output_items.append(item)
     return {
         "id": f"resp_{uuid.uuid4().hex}",
         "created_at": time.time(),
         "model": model_name,
         "object": "response",
-        "output": [
-            {
-                "type": "message",
-                "id": f"msg_{uuid.uuid4().hex}",
-                "role": "assistant",
-                "status": "completed",
-                "content": [{"type": "output_text", "text": _text(final_text), "annotations": []}],
-            }
-        ],
+        "output": output_items,
         "parallel_tool_calls": False,
         "tools": [],
         "tool_choice": "auto",

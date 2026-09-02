@@ -85,6 +85,28 @@ def test_to_responses_uses_last_ai_message_with_content():
     assert result["model"] == "policy_model"
 
 
+def test_to_responses_preserves_full_tool_call_trace_not_just_final_text():
+    messages = [
+        AIMessage(content="", tool_calls=[{"name": "search", "args": {"q": "x"}, "id": "call_1"}]),
+        ToolMessage(content="result text", tool_call_id="call_1"),
+        AIMessage(content="final answer"),
+    ]
+    result = to_responses(messages, "policy_model")
+    response = NeMoGymResponse.model_validate(result)
+
+    call, call_output, message = response.output
+    assert isinstance(call, NeMoGymResponseFunctionToolCall)
+    assert call.call_id == "call_1"
+    assert call.name == "search"
+    assert call.arguments == '{"q": "x"}'
+    assert isinstance(call_output, NeMoGymFunctionCallOutput)
+    assert call_output.call_id == "call_1"
+    assert call_output.output == "result text"
+    assert isinstance(message, NeMoGymResponseOutputMessage)
+    assert isinstance(message.content[0], NeMoGymResponseOutputText)
+    assert message.content[0].text == "final answer"
+
+
 # --- to_gym_input / to_langchain_ai_message ---------------------------------------------------------
 
 
