@@ -58,11 +58,11 @@ build. The wheel is built inside the eval base image, so its extension module ma
 the Python that runs `vllm-router` at eval time:
 
 ```bash
-SBATCH_ACCOUNT=nemotron_n3_post \
+SBATCH_ACCOUNT=my-slurm-account \
 SBATCH_PARTITION=batch \
 SBATCH_QOS=interactive \
 SBATCH_GRES=gpu:4 \
-CONTAINER=$(pwd)/results/vllm/vllm-openai:v0.27.1___tomer.sqsh \
+CONTAINER=/path/to/vllm/container \
 sbatch benchmarks/nemotron_3.5_super/build_vllm_router_wheel.sh
 # -> results/vllm_router/wheels/vllm_router-*.whl
 ```
