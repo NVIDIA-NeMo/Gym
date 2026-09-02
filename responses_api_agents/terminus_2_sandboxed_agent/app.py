@@ -85,6 +85,11 @@ class Terminus2AgentVerifyResponse(BaseVerifyResponse):
     model_call_times: List[float]
     average_command_exec_time: float
     average_model_call_time: float
+    total_command_exec_time: float
+    total_model_call_time: float
+    command_exec_time_pct: float
+    model_call_time_pct: float
+    terminus2_time_taken: float
 
 
 class NeMoGymSandboxEnvironment:
@@ -264,6 +269,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         sandbox: AsyncSandbox,
     ) -> Tuple[NeMoGymResponse, Dict[str, Any]]:
+        start_time = perf_counter()
         instruction = _instruction(body.input)
 
         model_base_url = (
@@ -342,12 +348,21 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=usage,
         )
+
+        total_time = perf_counter() - start_time
+        total_command_exec_time = sum(agent._times_spent)
+        total_model_call_time = sum(llm._times_spent)
         metrics = {
             "terminus2_completed": terminus2_completed,
             "command_exec_times": agent._times_spent,
             "model_call_times": llm._times_spent,
-            "average_command_exec_time": sum(agent._times_spent) / max(len(agent._times_spent), 1),
-            "average_model_call_time": sum(llm._times_spent) / max(len(llm._times_spent), 1),
+            "average_command_exec_time": total_command_exec_time / max(len(agent._times_spent), 1),
+            "average_model_call_time": total_model_call_time / max(len(llm._times_spent), 1),
+            "total_command_exec_time": total_command_exec_time,
+            "total_model_call_time": total_model_call_time,
+            "command_exec_time_pct": 100 * total_command_exec_time / total_time,
+            "model_call_time_pct": 100 * total_model_call_time / total_time,
+            "terminus2_time_taken": total_time,
         }
         return response, metrics
 
