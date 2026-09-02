@@ -92,8 +92,14 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     # the system prompt already promise the model. On the exa path that promise was false:
     # zero of 1,239 exa search outputs in a reference run contained "[Saved to]", so the
     # workspace/bash_command affordance covered `browse` only.
-    # Default false: enabling it changes what is asked of the provider on EVERY query,
-    # which is a real cost and latency change, not just a formatting one.
+    # Default false: enabling it changes what is asked of the provider on EVERY query.
+    # MEASURED 2026-09-02, live against the exa API: this is NOT a dollar cost. Exa
+    # reports costDollars per response and it is identical with and without text —
+    # {"total": 0.007, "search": {"neural": 0.007}} either way, with no `contents` line
+    # item, because exa bills per QUERY not per result. The real cost is latency and
+    # response size: ~243k characters per 10-result query versus ~19k for highlights
+    # alone. Full text is 2.9-12.9x the highlight text and is genuine extra page content,
+    # not the same snippet with markup left in.
     exa_search_writes_pages: bool = False
 
     @model_validator(mode="after")
@@ -416,7 +422,9 @@ class ExaAIOHTTPClient(BaseModel):
         contents: Dict[str, Any] = {"highlights": True}
         if include_text:
             # Full page text per result, so search hits can be written to pages/ the way
-            # the tavily disk path writes raw_content. Opt-in: it is billed per result.
+            # the tavily disk path writes raw_content. Opt-in for response size and
+            # latency, not for price: exa bills per query, and costDollars is unchanged
+            # by this field (measured 2026-09-02).
             contents["text"] = True
         body: Dict[str, Any] = {
             "query": query,

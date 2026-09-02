@@ -26,7 +26,10 @@ alongside highlights, writes each result to pages/, and returns the same
 title/url/snippet/[Saved to] shape the tavily disk path already returns.
 
 Default stays False because turning it on changes what the provider is asked for on
-every query, which is a real cost and latency change, not just a formatting one.
+every query. MEASURED 2026-09-02 against the live exa API: the change is NOT a dollar
+cost — costDollars is {"total": 0.007, "search": {"neural": 0.007}} with and without
+text, since exa bills per query, not per result. What it costs is response size and
+latency: ~243k characters per 10-result query versus ~19k for highlights alone.
 """
 
 import os
@@ -94,7 +97,7 @@ class TestExaSearchPages:
         assert not list(tmp_path.rglob("*_search_*.txt"))
 
     async def test_default_does_not_request_text_from_the_provider(self, req: MagicMock, tmp_path) -> None:
-        """Asking for text costs money and latency on every query; keep it opt-in."""
+        """Asking for text multiplies response size ~13x on every query; keep it opt-in."""
         server = self._server(ws_root=str(tmp_path))
         mock = MagicMock()
         mock.search = AsyncMock(return_value={"results": [_result("a")]})
