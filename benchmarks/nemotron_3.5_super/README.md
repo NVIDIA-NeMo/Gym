@@ -2,9 +2,9 @@
 - [Nemotron 3.5 Super Evaluation setup](#nemotron-35-super-evaluation-setup)
   - [Run production evals](#run-production-evals)
   - [Development commands](#development-commands)
-    - [Build eval container](#build-eval-container)
     - [vllm-router patch (decode-node cache imbalance)](#vllm-router-patch-decode-node-cache-imbalance)
       - [Measured effect](#measured-effect)
+    - [Build eval container](#build-eval-container)
     - [Launch vLLM](#launch-vllm)
     - [Interactive development on GPUs with Ray cluster](#interactive-development-on-gpus-with-ray-cluster)
     - [Run eval against external vLLM endpoint](#run-eval-against-external-vllm-endpoint)
@@ -17,19 +17,6 @@ Results will appear in that checkpoint folder.
 
 
 ## Development commands
-### Build eval container
-Example run:
-```bash
-SBATCH_ACCOUNT=my-slurm-account \
-SBATCH_PARTITION=batch \
-INPUT_CONTAINER=/path/to/vllm/container \
-OUTPUT_CONTAINER=/path/to/vllm/container___with_gym.sqsh \
-MOUNTS=/path/to/env.yaml:/opt/Gym/env.yaml:x-create=file,/path/to/config.yaml:/opt/Gym/config.yaml:x-create=file \
-GYM_CONFIG=benchmarks/nemotron_3.5_super/eval_container_config.yaml \
-sbatch --gres=gpu:4 \
-  benchmarks/nemotron_3.5_super/build_eval_container.sh
-```
-
 
 ### vllm-router patch (decode-node cache imbalance)
 `build_eval_container.sh` requires `VLLM_ROUTER_WHEEL` and does **not** fall back to
@@ -96,6 +83,20 @@ rollouts. The patched runs stay flat, never queue, and hold KV below 29%.
 Not every run on the released router hits this -- it needs a sustained saturated
 decode regime -- so a clean run does not tell you which router you are on. Use the
 fingerprint above instead.
+
+
+### Build eval container
+Example run:
+```bash
+SBATCH_ACCOUNT=my-slurm-account \
+SBATCH_PARTITION=batch \
+INPUT_CONTAINER=/path/to/vllm/container \
+OUTPUT_CONTAINER=/path/to/vllm/container___with_gym.sqsh \
+MOUNTS=/path/to/env.yaml:/opt/Gym/env.yaml:x-create=file,/path/to/config.yaml:/opt/Gym/config.yaml:x-create=file \
+GYM_CONFIG=benchmarks/nemotron_3.5_super/eval_container_config.yaml \
+sbatch --gres=gpu:4 \
+  benchmarks/nemotron_3.5_super/build_eval_container.sh
+```
 
 
 ### Launch vLLM
