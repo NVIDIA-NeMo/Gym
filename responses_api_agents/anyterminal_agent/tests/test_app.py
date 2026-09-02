@@ -612,10 +612,24 @@ class TestProcessSingleDatapoint:
 
     async def test_stops_sandbox_even_on_eval_timeout(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
-        # First exec (agent) succeeds, second exec (eval) times out.
+
+        def cgroup(cpu_usec: int, throttled_usec: int, mem_bytes: int) -> SimpleNamespace:
+            return SimpleNamespace(
+                stdout=f"CG {cpu_usec} {throttled_usec} {mem_bytes}", stderr="", return_code=0, error_type=None
+            )
+
+        # Exec order: cgroup snapshot, agent (succeeds), cgroup snapshot, eval (times out), cgroup snapshot.
         sandbox = SimpleNamespace(
             start=AsyncMock(),
-            exec=AsyncMock(side_effect=[_sandbox_result(), _sandbox_result(return_code=124, error_type="timeout")]),
+            exec=AsyncMock(
+                side_effect=[
+                    cgroup(1_000_000, 0, 100 * 1024 * 1024),
+                    _sandbox_result(),
+                    cgroup(3_000_000, 0, 200 * 1024 * 1024),
+                    _sandbox_result(return_code=124, error_type="timeout"),
+                    cgroup(4_000_000, 500_000, 300 * 1024 * 1024),
+                ]
+            ),
             stop=AsyncMock(),
         )
         with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
@@ -625,6 +639,12 @@ class TestProcessSingleDatapoint:
         metrics = json.loads(cfg.metrics_fpath.read_text())
         assert metrics["container_timed_out"] is True
         sandbox.stop.assert_awaited_once()
+        # Resource metrics are deltas between the cgroup snapshots around each phase.
+        assert metrics["cpu_solve_sec"] == pytest.approx(2.0)
+        assert metrics["cpu_verify_sec"] == pytest.approx(1.0)
+        assert metrics["cpu_total_sec"] == pytest.approx(3.0)
+        assert metrics["cpu_throttled_sec"] == pytest.approx(0.5)
+        assert metrics["mem_peak_mib"] == pytest.approx(300.0)
 
 
 # ── RunTerminalAgent._stage_tests ────────────────────────────────────────────────

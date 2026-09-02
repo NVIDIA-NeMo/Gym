@@ -1,0 +1,129 @@
+# Terminal-Bench 2.1 ORACLE (gold-solution) verification on a remote OpenSandbox
+# cluster using arm64 mirror images. No model server is required or started:
+# oracle_mode replays each task's solution/solve.sh and scores tests/test.sh.
+#
+# Prerequisites
+# -------------
+# 1. env.yaml at the repo root (gitignored, auto-loaded; cwd-resolved, so run
+#    from the checkout that holds it) must define:
+#      sandbox.opensandbox.connection.domain / .api_key   (the OpenSandbox cluster)
+#      gitlab_registry_username / gitlab_registry_password (pull auth for the
+#        private arm64 mirror gitlab-master.nvidia.com:5005/adasif/nemo-gym/tb21-arm)
+# 2. Prepare the dataset (auto-clones the pinned TB2.1 tasks repo into
+#    responses_api_agents/anyterminal_agent/data/ and bakes absolute task_dir
+#    paths -- keep the checkout in place):
+#      gym eval prepare \
+#        --config responses_api_agents/anyterminal_agent/configs/anyterminal_oracle_opensandbox_arm.yaml
+#
+# Run (from the repo root; RAY_TMPDIR guards against long-cwd AF_UNIX socket paths)
+# ----------------------------------------------------------------------------------
+#   export RAY_TMPDIR=/tmp
+#   gym env start \
+#     --config responses_api_agents/anyterminal_agent/configs/anyterminal_oracle_opensandbox_arm.yaml \
+#     --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+#   # in a second shell:
+#   export RAY_TMPDIR=/tmp
+#   gym eval run --no-serve \
+#     --config responses_api_agents/anyterminal_agent/configs/anyterminal_oracle_opensandbox_arm.yaml \
+#     --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+#     --agent anyterminal_oracle \
+#     --input responses_api_agents/anyterminal_agent/data/terminal_bench_2_1.jsonl \
+#     --output results/tb21_oracle_arm/rollouts.jsonl \
+#     --concurrency 89
+#
+# The opensandbox.yaml --config is load-bearing: without it the provider still
+# constructs from env.yaml's connection block alone, but with untuned library
+# defaults (no server proxy, httpx transport, 2 create retries).
+#
+# Pass criterion per task: reward == 1.0 (tests/test.sh wrote reward.txt > 0).
+# Expect 89/89. Note: the OpenSandbox exec path never reports error_type ==
+# "timeout", so mask_sample stays false even for budget-killed commands; when
+# auditing a reward-0 row, compare agent/eval run time against the task's
+# timeout budget instead.
+anyterminal_oracle:
+  responses_api_agents:
+    anyterminal_agent:
+      entrypoint: app.py
+      domain: coding
+      description: Terminal Bench 2.1 gold-solution (oracle) verification on OpenSandbox with arm64 mirror images.
+      value: Validate that every TB2.1 task's oracle solution passes its verifier on the arm64 image mirror.
+
+      oracle_mode: true
+
+      # Required-but-unused in oracle mode (harness setup is skipped entirely).
+      # Point at a real agent so an accidental oracle_mode=false still resolves.
+      agent_server_module: responses_api_agents.hermes_agent.app
+      agent_server_class: HermesAgent
+      agent_config_class: HermesAgentConfig
+
+      # No model_server: the field is Optional and absent fields are never
+      # ref-validated, so the run needs no model server process at all.
+
+      # Every task maps to its arm64 mirror tag by task name; {task_name} comes
+      # from responses_create_params.metadata.task_name in the dataset. The
+      # dataset's docker_image (Docker Hub amd64) is deliberately ignored.
+      container_formatter: "docker://gitlab-master.nvidia.com:5005/adasif/nemo-gym/tb21-arm:{task_name}"
+
+      # anyterminal passes this dict straight to create_provider(), which
+      # requires exactly one key (the provider name). The shipped opensandbox.yaml
+      # sandbox: block wraps the provider kwargs with default_metadata, so we
+      # interpolate only the .opensandbox subtree (connection/create/probe/
+      # operations/attribution, with env.yaml's domain/api_key merged in).
+      sandbox_provider:
+        opensandbox: ${sandbox.opensandbox}
+
+      # Forwarded to SandboxSpec.provider_options; the private registry needs auth.
+      # platform pins pod scheduling to arm64 nodes -- without it a mixed-arch
+      # cluster places pods on amd64 nodes, where the arm64 image dies instantly
+      # (container exit 255 at creation).
+      sandbox_provider_options:
+        image_auth:
+          username: ${gitlab_registry_username}
+          password: ${gitlab_registry_password}
+        platform:
+          os: linux
+          arch: arm64
+
+      # Size in-sandbox thread pools to the cgroup CPU quota and pin execs to
+      # allowed CPUs (PR #2601): without this, build tools see the ARM host's
+      # full core count, fan out to nproc workers, and get CFS-throttled.
+      cpu_pin_enabled: true
+
+      # Uniform sandbox sizing for every task, replacing each task.toml's own
+      # cpus/memory_mb. Escalation policy: tasks that fail at this size are
+      # rerun with doubled resources until they pass.
+      override_cpus: 2
+      override_memory_mb: 4096
+
+      # Local-only Ray reservation: the work is I/O-bound orchestration of
+      # remote sandboxes, so a fractional CPU per task lets all 89 dispatch in
+      # one wave instead of queueing behind the driver's core count.
+      ray_task_num_cpus: 0.25
+
+      # Fallbacks only: per-task agent_timeout_sec / verifier_timeout_sec from
+      # the dataset metadata (sourced from each task.toml) override these
+      # unconditionally, in oracle mode too. TB2.1 verifier timeouts are
+      # commonly > 600s, hence generous floors for tasks without metadata.
+      tb_agent_timeout: 3600 # solve.sh budget
+      tb_eval_timeout: 1800 # test.sh budget
+      # Server-side expiry whose clock also covers image pull and staging;
+      # sandboxes are closed explicitly when done. Sized above the worst-case
+      # task budget (build-pov-ray: 12000s solve + 12000s verify).
+      tb_sandbox_ttl: 26400
+
+      # Oracle mode stages no in-container agent runtime, so no memory overhead
+      # on top of each task's memory_mb (the 4096 MiB SandboxSpec floor still
+      # applies). Also shrinks the local Ray per-task memory reservation.
+      agent_overhead_mb: 0
+
+      # One slot per TB2.1 task so the whole suite runs in a single wave on the
+      # remote cluster. Local Ray cpu/memory reservations may still queue tasks
+      # on small login nodes; that only serializes, it never fails.
+      concurrency: 89
+
+      datasets:
+        - name: terminal_bench_2_1
+          type: benchmark
+          jsonl_fpath: responses_api_agents/anyterminal_agent/data/terminal_bench_2_1.jsonl
+          prepare_script: responses_api_agents/anyterminal_agent/prepare.py
+          prompt_config: null

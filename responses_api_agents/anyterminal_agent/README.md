@@ -110,3 +110,32 @@ either:
 | `tb_eval_timeout` | `300` | Seconds for `test.sh` to complete |
 | `apptainer_memory_limit_mb` | `32768` | Per-container memory cap via `ulimit -v` |
 | `concurrency` | `256` | Max concurrent tasks dispatched to Ray |
+| `oracle_mode` | `false` | Run each task's gold `solution/solve.sh` instead of an agent, then verify (environment/gold validation; no model calls) |
+| `cpu_pin_enabled` | `false` | Wrap agent/oracle/verifier execs with the sandbox CPU-pinning preamble (thread pools sized to the cgroup quota) |
+| `override_cpus` / `override_memory_mb` | `null` | Uniform sandbox size for every task, replacing each `task.toml`'s own values |
+| `ray_task_num_cpus` | `null` | Local Ray CPU reservation per rollout (e.g. `0.25` for remote sandboxes; otherwise each rollout reserves the task's cpus and concurrency is capped by the driver's core count) |
+| `sandbox_provider_options` | `{}` | Passed to `SandboxSpec.provider_options` (e.g. OpenSandbox `image_auth`, `platform`) |
+| `sandbox_metadata` | `{}` | Extra `SandboxSpec.metadata` entries (OpenSandbox propagates them as pod labels) |
+
+## Gold verification on a remote sandbox cluster (Terminal-Bench 2.1)
+
+`configs/anyterminal_oracle_opensandbox_arm.yaml` runs every TB 2.1 task's gold solution on an
+OpenSandbox cluster with arm64 task images, and is the template for any oracle/environment check:
+
+```bash
+# one-time: clones the pinned TB 2.1 tasks repo into data/ and writes data/terminal_bench_2_1.jsonl
+gym eval prepare --config responses_api_agents/anyterminal_agent/configs/anyterminal_oracle_opensandbox_arm.yaml
+
+gym env start \
+  --config responses_api_agents/anyterminal_agent/configs/anyterminal_oracle_opensandbox_arm.yaml \
+  --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+gym eval run --no-serve --agent anyterminal_oracle \
+  --config responses_api_agents/anyterminal_agent/configs/anyterminal_oracle_opensandbox_arm.yaml \
+  --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+  --input responses_api_agents/anyterminal_agent/data/terminal_bench_2_1.jsonl \
+  --output results/tb21_oracle/rollouts.jsonl
+```
+
+Each rollout row also reports in-sandbox resource usage read from cgroup counters at phase boundaries:
+`cpu_solve_sec`, `cpu_verify_sec`, `cpu_total_sec`, `cpu_util_solve`/`cpu_util_verify` (fraction of the
+CPU limit), `cpu_throttled_sec`, and `mem_peak_mib`. Solve/verify wall times exclude sandbox creation.

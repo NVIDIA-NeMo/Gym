@@ -40,6 +40,7 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxPtyAttach,
     create_provider,
 )
+from nemo_gym.sandbox.utils import wrap_command_with_cpu_pin
 
 
 T = TypeVar("T")
@@ -335,10 +336,12 @@ class AsyncSandbox:
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
+        cpu_pin_enabled: bool = False,
     ) -> SandboxExecResult:
+        """Run a command, optionally sizing and pinning it to the cgroup CPU quota."""
         return await self._provider.exec(
             self._require_handle(),
-            command,
+            wrap_command_with_cpu_pin(command) if cpu_pin_enabled else command,
             cwd=cwd if cwd is not None else self._spec.workdir if self._spec is not None else None,
             env=env,
             timeout_s=timeout_s,
@@ -550,6 +553,7 @@ class Sandbox:
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = 180,
         user: str | int | None = None,
+        cpu_pin_enabled: bool = False,
     ) -> SandboxExecResult:
         return self._runner.run(
             "exec",
@@ -559,6 +563,7 @@ class Sandbox:
                 env=env,
                 timeout_s=timeout_s,
                 user=user,
+                cpu_pin_enabled=cpu_pin_enabled,
             ),
         )
 
