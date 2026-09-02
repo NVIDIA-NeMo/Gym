@@ -129,10 +129,19 @@ class LLMJudgeVerifyRequest(LLMJudgeRunRequest, BaseVerifyRequest):
     pass
 
 
+# Marks a rollout whose verdict is absent because the judge service failed,
+# as distinct from a judge that ran and returned no parseable verdict.
+JUDGE_ERROR_LABEL = "JUDGE_ERROR"
+
+
 class JudgeEvaluation(BaseModel):
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    response: NeMoGymResponse
-    # Extracted verdict token from judge output, e.g., "[[A=B]]" or "[[A!=B]]".
+    # None when the judge could not be reached or returned an unusable payload.
+    # The rollout is still recorded so the failure is visible in the artifacts
+    # rather than taking down the run that produced it.
+    response: Optional[NeMoGymResponse] = None
+    # Extracted verdict token from judge output, e.g., "[[A=B]]" or "[[A!=B]]",
+    # or JUDGE_ERROR_LABEL when the judge itself failed.
     verdict_label: Optional[str] = None
 
 
@@ -482,7 +491,18 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
                     f"DEBUG: LLMJudgeResourcesServer: judge model server HTTP POST error: {e}",
                     flush=True,
                 )
-                raise
+                # Do not re-raise. The judge is a separate service, and a
+                # transient failure from it is not a failure of the rollout:
+                # propagating here aborts the whole evaluation and discards every
+                # rollout already generated, which can be many hours of work.
+                # Record the failure on the rollout and score it not-equal, so
+                # the run completes and a downstream check can decide whether the
+                # judge-error rate makes the score untrustworthy.
+                return False, JudgeEvaluation(
+                    responses_create_params=responses_create_params,
+                    response=None,
+                    verdict_label=JUDGE_ERROR_LABEL,
+                )
 
         eval_record = JudgeEvaluation(
             responses_create_params=responses_create_params,
