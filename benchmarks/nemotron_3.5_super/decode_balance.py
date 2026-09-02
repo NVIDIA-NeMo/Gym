@@ -25,9 +25,14 @@ Three views, each taking `LABEL=LOG` pairs (the label is cosmetic; a bare path w
     compare      decode max/min ratio across runs, gated on actual saturation
     throughput   rollout completion rate, by wall clock and by matched completion
 
-Read `compare` before `workers`: imbalance only develops while the decode nodes are
-saturated, so a run whose queue drains early looks perfectly balanced no matter what
-the router did. `--min-load` is what keeps that from reading as a clean result.
+Read `compare` before `workers`: imbalance only develops under load, so a run whose
+queue drains early looks perfectly balanced no matter what the router did.
+`--min-load` gates on the BUSIEST decode node, deliberately. Gating on the pair's
+combined running count would be post-treatment: when the router hot-spots, the cold
+node's slots go unused and work piles into the hot node's *waiting* queue rather
+than the pair's *running* count, so combined load falls exactly when imbalance is
+worst (Spearman -0.77 on a known-bad run). That gate drops the most diagnostic
+minutes and flatters the broken case.
 
 Examples:
     decode_balance.py workers slurm-logs/<jobid>-gym-<exp>/<bench>/<model>.log
@@ -162,10 +167,10 @@ def cmd_workers(args):
 def cmd_compare(args):
     print(
         "decode max/min running-request ratio, sampled per minute, "
-        f"only while combined decode load >= {args.min_load}\n"
+        f"only while the busiest decode node has >= {args.min_load} running\n"
     )
     print(
-        f"{'run':<22} {'loaded':>6}  {'median':>7} {'max':>7} {'early':>7} {'late':>7} "
+        f"{'run':<22} {'loaded':>6} {'starved':>7}  {'median':>7} {'max':>7} {'early':>7} {'late':>7} "
         f"{'maxKV%':>7} {'maxWait':>7}  decode nodes"
     )
     for spec in args.logs:
@@ -175,33 +180,44 @@ def cmd_compare(args):
             print(f"{label:<22} no decode pair found yet in {path}")
             continue
         grid = decode_grid(rows, decode_pids)
-        loaded = []
+        loaded, starved = [], 0
         for _, per_pid in grid:
             loads = [per_pid[pid][0] for pid in decode_pids]
-            if sum(loads) >= args.min_load and min(loads) > 0:
-                loaded.append(
-                    (
-                        max(loads) / min(loads),
-                        max(per_pid[pid][2] for pid in decode_pids),
-                        max(per_pid[pid][1] for pid in decode_pids),
-                    )
+            if max(loads) < args.min_load:
+                continue
+            # A node at ~0 while its peer is busy is total starvation, not a ratio.
+            # Counting it separately keeps the worst minutes visible instead of
+            # silently dropping them for having a zero denominator.
+            if min(loads) < 0.5:
+                starved += 1
+                continue
+            loaded.append(
+                (
+                    max(loads) / min(loads),
+                    max(per_pid[pid][2] for pid in decode_pids),
+                    max(per_pid[pid][1] for pid in decode_pids),
                 )
+            )
         if not loaded:
-            peak = max((sum(p[pid][0] for pid in decode_pids) for _, p in grid), default=0)
-            print(f"{label:<22} never reached combined load {args.min_load} (peak {peak:.0f}) - inconclusive")
+            peak = max((max(p[pid][0] for pid in decode_pids) for _, p in grid), default=0)
+            note = f", {starved} starved" if starved else ""
+            print(f"{label:<22} busiest decode node never reached {args.min_load} (peak {peak:.0f}){note}")
             continue
         ratios = [entry[0] for entry in loaded]
         third = max(1, len(loaded) // 3)
         nodes = "/".join(hosts.get(pid, pid).split("-")[-1] for pid in decode_pids)
         print(
-            f"{label:<22} {len(loaded):>5}m  {statistics.median(ratios):>7.2f} {max(ratios):>7.2f} "
+            f"{label:<22} {len(loaded):>5}m {starved:>7}  {statistics.median(ratios):>7.2f} {max(ratios):>7.2f} "
             f"{statistics.median(r for r, _, _ in loaded[:third]):>7.2f} "
             f"{statistics.median(r for r, _, _ in loaded[-third:]):>7.2f} "
             f"{max(e[1] for e in loaded):>7.1f} {max(e[2] for e in loaded):>7.0f}  {nodes}"
         )
     print(
-        "\nearly/late are the median ratio over the first and last third of the saturated\n"
-        "window. A rising early->late is the vllm-project/router#197 runaway."
+        "\nearly/late are the median ratio over the first and last third of the loaded\n"
+        "window. A rising early->late is the vllm-project/router#197 runaway.\n"
+        "starved counts loaded minutes where one decode node sat at ~0 running while its\n"
+        "peer was busy - total starvation, excluded from the ratio for lack of a\n"
+        "denominator, so a high count matters more than the median next to it."
     )
 
 
@@ -280,8 +296,9 @@ def main(argv=None):
     compare.add_argument(
         "--min-load",
         type=int,
-        default=200,
-        help="only count minutes where combined decode running requests reach this (default 200)",
+        default=100,
+        help="only count minutes where the BUSIEST decode node has this many running requests "
+        "(default 100). Deliberately not the pair's combined load, which is post-treatment.",
     )
     compare.set_defaults(func=cmd_compare)
 

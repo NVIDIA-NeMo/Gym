@@ -26,6 +26,15 @@ set -euo pipefail
 
 INPUT_CONTAINER=$INPUT_CONTAINER
 OUTPUT_CONTAINER=$OUTPUT_CONTAINER
+# Resolve before srun so a bad path fails here with a message, rather than as a
+# bare `readlink -f` non-zero under `set -e` with an empty log. The wheel must be on
+# shared storage: its directory is bind-mounted into the step, so a node-local path
+# like /tmp/... exists on the submit host but not on the compute node.
+if [[ ! -f "$VLLM_ROUTER_WHEEL" ]]; then
+    echo "VLLM_ROUTER_WHEEL not found: $VLLM_ROUTER_WHEEL" >&2
+    echo "It must be readable from the compute node (Lustre, not node-local /tmp)." >&2
+    exit 1
+fi
 VLLM_ROUTER_WHEEL=$(readlink -f "$VLLM_ROUTER_WHEEL")
 # Recorded in the image so a later "uv pip show vllm-router" (which still reports
 # the upstream 0.1.15) can be traced back to the tree it was built from.
