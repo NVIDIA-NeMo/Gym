@@ -35,6 +35,24 @@ def _converter() -> AnthropicConverter:
     return AnthropicConverter()
 
 
+class TestErrorResponse:
+    def test_context_overflow_uses_claude_code_compatible_message(self) -> None:
+        content = b'{"error":{"message":"This model maximum context length is 512 tokens"}}'
+        result = json.loads(_converter().error_response(content, 400))
+
+        assert result == {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "prompt is too long: This model maximum context length is 512 tokens",
+            },
+        }
+
+    def test_non_context_error_preserves_message(self) -> None:
+        result = json.loads(_converter().error_response('{"message":"invalid temperature"}', 400))
+        assert result["error"] == {"type": "invalid_request_error", "message": "invalid temperature"}
+
+
 class TestAnthropicRequestToResponses:
     def test_system_string_and_user_text(self) -> None:
         params = _converter().anthropic_request_to_responses(

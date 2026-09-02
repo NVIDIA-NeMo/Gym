@@ -18,11 +18,13 @@ import logging
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
+from aiohttp.client_exceptions import ClientResponseError, TooManyRedirects
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch, mark, raises
 
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
+from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
@@ -178,6 +180,35 @@ OPENAI_2_44_OPTIONAL_CHAT_FIELDS = {
     "safety_identifier",
     "verbosity",
 }
+
+UPSTREAM_CONTEXT_LENGTH_ERROR = {
+    "object": "error",
+    "message": "This model's maximum context length is 32768 tokens.",
+    "type": "BadRequestError",
+    "param": None,
+    "code": 400,
+}
+
+
+def _upstream_http_error(
+    body: dict, *, status: int = 400, upstream_path: str = "/v1/chat/completions"
+) -> ClientResponseError:
+    request_info = MagicMock()
+    request_info.url = f"http://vllm.test{upstream_path}"
+    request_info.real_url = request_info.url
+    error = ClientResponseError(
+        request_info=request_info,
+        history=(),
+        status=status,
+        message="Bad Request",
+    )
+    error.response_content = json.dumps(body).encode()
+    return error
+
+
+def _upstream_context_length_error() -> ClientResponseError:
+    return _upstream_http_error(UPSTREAM_CONTEXT_LENGTH_ERROR)
+
 
 PARAMETERIZE_DATA = [
     # ----- EasyInputMessageParam: content as a list, id: "ez_list" -----
@@ -782,6 +813,186 @@ class TestApp:
 
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._setup_server(monkeypatch)
+
+    @mark.parametrize("stream", [False, True])
+    def test_upstream_context_length_error_propagates_from_chat_completions(
+        self, monkeypatch: MonkeyPatch, stream: bool
+    ) -> None:
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=_upstream_context_length_error())
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={
+                "model": "dummy_model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": stream,
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json() == UPSTREAM_CONTEXT_LENGTH_ERROR
+
+    @mark.parametrize("stream", [False, True])
+    def test_upstream_context_length_error_propagates_from_responses(
+        self, monkeypatch: MonkeyPatch, stream: bool
+    ) -> None:
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=_upstream_context_length_error())
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/responses",
+            json={"input": "hello", "model": "dummy_model", "stream": stream},
+        )
+
+        assert response.status_code == 400
+        assert response.json() == UPSTREAM_CONTEXT_LENGTH_ERROR
+
+    def test_internal_streaming_responses_error_remains_response_failed(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=RuntimeError("backend exploded"))
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/responses",
+            json={"input": "hello", "model": "dummy_model", "stream": True},
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert "event: response.failed" in response.text
+        assert "backend exploded" in response.text
+
+    def test_native_streaming_responses_propagates_upstream_context_length_error(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        server = self._setup_server(monkeypatch)
+        server.config.is_responses_native = True
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_response = AsyncMock(side_effect=_upstream_context_length_error())
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/responses",
+            json={"input": "hello", "model": "dummy_model", "stream": True},
+        )
+
+        assert response.status_code == 400
+        assert response.json() == UPSTREAM_CONTEXT_LENGTH_ERROR
+
+    @mark.parametrize("stream", [False, True])
+    def test_messages_translates_upstream_error_to_anthropic_shape(
+        self, monkeypatch: MonkeyPatch, stream: bool
+    ) -> None:
+        server = self._setup_server(monkeypatch)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=_upstream_context_length_error())
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/messages",
+            json={
+                "model": "dummy_model",
+                "max_tokens": 8,
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": stream,
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": f"prompt is too long: {UPSTREAM_CONTEXT_LENGTH_ERROR['message']}",
+            },
+        }
+
+    def test_bodyless_client_error_remains_streaming_response_failed(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        redirect_error = TooManyRedirects(request_info=MagicMock(), history=(), status=0)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=redirect_error)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/responses",
+            json={"input": "hello", "model": "dummy_model", "stream": True},
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert "event: response.failed" in response.text
+        assert "server_error" in response.text
+
+    def test_transport_client_response_error_without_body_becomes_internal_error_and_is_logged(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        log_path = tmp_path / "transport.jsonl"
+        monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))
+        server = self._setup_server(monkeypatch)
+        redirect_error = TooManyRedirects(request_info=MagicMock(), history=(), status=0)
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=redirect_error)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"model": "dummy_model", "messages": [{"role": "user", "content": "hello"}]},
+        )
+
+        assert response.status_code == 500
+        assert "TooManyRedirects did not include response content" in response.json()
+        events = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+        assert events[-1]["event"] == "transport_error_response"
+        assert events[-1]["raw_response_body"] == ""
+
+    def test_upstream_context_length_error_is_captured_before_propagation(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        server = self._setup_server(monkeypatch)
+        server.server_client.global_config_dict = {
+            "observability_enabled": True,
+            "model_call_capture_dir": str(tmp_path),
+        }
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=_upstream_context_length_error())
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/ng-rollout/context-error/v1/chat/completions",
+            json={
+                "model": "dummy_model",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+        assert response.status_code == 400
+        [exchange] = CaptureStore(tmp_path).read("context-error")
+        assert exchange["status_code"] == 400
+        assert exchange["error_category"] == "client_error"
+        assert json.loads(exchange["response_raw"]) == UPSTREAM_CONTEXT_LENGTH_ERROR
 
     def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
         workers = [self._setup_server(monkeypatch) for _ in range(2)]
@@ -4192,6 +4403,27 @@ class TestCompletionsBackendEndToEnd:
         # Server-config model wins over whatever the caller put in "model".
         assert captured["kwargs"]["model"] == "base-model"
 
+    def test_upstream_context_length_error_propagates(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=dict()))
+
+        model = _make_completions_backend_model()
+        fake_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        fake_client.create_completion = AsyncMock(side_effect=_upstream_context_length_error())
+        model._clients = [fake_client]
+
+        app = model.setup_webserver()
+        model.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={
+                "model": "ignored-by-server",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json() == UPSTREAM_CONTEXT_LENGTH_ERROR
+
     def test_responses_with_string_input_routes_to_completions(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=dict()))
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
@@ -4797,6 +5029,64 @@ class TestTopLogprobsHandling:
         assert message["generation_token_ids"] == [123, 456]
         assert message["generation_log_probs"] == [-0.1, -0.2]
         assert message["prompt_token_ids"] == [10, 20, 30]
+
+    def test_auxiliary_tokenize_error_is_not_exposed_as_generation_response(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+        model.setup_exception_middleware(app)
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(
+            return_value=self._capture_chat_completion_dict(
+                logprobs={"content": [{"token": "token_id:123", "logprob": -0.1, "bytes": None, "top_logprobs": []}]}
+            )
+        )
+        mock_client.create_tokenize = AsyncMock(
+            side_effect=_upstream_http_error(
+                {"detail": "tokenize route unavailable"},
+                status=404,
+                upstream_path="/tokenize",
+            )
+        )
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 500
+        assert "tokenize route unavailable" in response.json()
+
+    def test_auxiliary_tokenize_error_remains_streaming_response_failed(self) -> None:
+        model = _make_top_logprobs_model(return_token_id_information=True)
+        app = model.setup_webserver()
+        model.setup_exception_middleware(app)
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(
+            return_value=self._capture_chat_completion_dict(
+                logprobs={"content": [{"token": "token_id:123", "logprob": -0.1, "bytes": None, "top_logprobs": []}]}
+            )
+        )
+        mock_client.create_tokenize = AsyncMock(
+            side_effect=_upstream_http_error(
+                {"detail": "tokenize route unavailable"},
+                status=404,
+                upstream_path="/tokenize",
+            )
+        )
+        model._clients = [mock_client]
+
+        response = TestClient(app).post(
+            "/v1/responses",
+            json={"input": "hi", "stream": True},
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert "event: response.failed" in response.text
+        assert "vllm.test/tokenize" in response.text
 
     def test_capture_path_prefers_vllm_response_token_ids(self) -> None:
         model = _make_top_logprobs_model(

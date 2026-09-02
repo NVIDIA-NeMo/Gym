@@ -23,7 +23,8 @@ from time import time
 from unittest.mock import MagicMock
 from uuid import uuid4
 
-from fastapi import Body, Request
+from aiohttp import ClientResponseError
+from fastapi import Body, Request, Response
 from fastapi.testclient import TestClient
 
 from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
@@ -93,6 +94,11 @@ class _RequestAwareModel(SimpleResponsesAPIModel):
         raise NotImplementedError
 
 
+class _ErrorPreservingModel(_BodyOnlyModel):
+    def _model_client_response_error_response(self, request, exc):
+        return Response(content=exc.response_content, status_code=exc.status, media_type="application/json")
+
+
 def _config() -> BaseResponsesAPIModelConfig:
     return BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name="")
 
@@ -150,3 +156,18 @@ class TestDefaultMessagesRoute:
         assert "event: message_start" in body
         assert "event: content_block_delta" in body
         assert "event: message_stop" in body
+
+    def test_shared_messages_boundary_translates_preserved_provider_error(self) -> None:
+        server = _ErrorPreservingModel(
+            config=_config(), server_client=MagicMock(spec=ServerClient, global_config_dict={})
+        )
+        request = MagicMock()
+        request.url.path = "/v1/messages"
+        exc = ClientResponseError(MagicMock(), (), status=400, message="Bad Request")
+        exc.response_content = b'{"message":"maximum context length is 512 tokens"}'
+
+        response = server._client_response_error_response(request, exc)
+
+        assert response.status_code == 400
+        assert response.media_type == "application/json"
+        assert b'"message":"prompt is too long: maximum context length is 512 tokens"' in response.body

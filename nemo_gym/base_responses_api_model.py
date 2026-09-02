@@ -41,6 +41,7 @@ from typing import Any, Mapping, Optional
 from uuid import uuid4
 
 import orjson
+from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
@@ -215,6 +216,24 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         return app
 
+    def _model_client_response_error_response(self, request: Request, exc: ClientResponseError) -> Optional[Response]:
+        """Let a model adapter expose a downstream HTTP response on its public API."""
+
+        return None
+
+    def _client_response_error_response(self, request: Request, exc: ClientResponseError) -> Optional[Response]:
+        """Apply shared API-dialect translation to an adapter-preserved HTTP error."""
+
+        response = self._model_client_response_error_response(request, exc)
+        if response is None or not request.url.path.rstrip("/").endswith("/v1/messages"):
+            return response
+
+        return Response(
+            content=_ANTHROPIC_CONVERTER.error_response(response.body, response.status_code),
+            status_code=response.status_code,
+            media_type="application/json",
+        )
+
     @abstractmethod
     async def chat_completions(
         self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
@@ -235,9 +254,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         always do), the request is first sanitized from the streaming wire dialect (extra
         bookkeeping fields, ``namespace`` tool specs — see ``nemo_gym.responses_streaming``),
         delegated to the same ``responses()``, and the complete response is re-emitted as a
-        synthesized Responses SSE event stream. A ``responses()`` failure on this path is turned
-        into a terminal ``response.failed`` event rather than an HTTP 500 (bad-request validation
-        still fails eagerly, before the stream is committed).
+        synthesized Responses SSE event stream. By default, a ``responses()`` failure on this path
+        becomes a terminal ``response.failed`` event rather than an HTTP 500. A model adapter may
+        instead preserve an explicit downstream HTTP error raised before synthesized SSE starts.
+        Bad-request validation still fails eagerly.
         """
         if not body.get("stream"):
             params = _validate_responses_params(body)
@@ -253,8 +273,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             response = await self._invoke_responses(request, params)
             response_json = response.model_dump(mode="json") if isinstance(response, BaseModel) else dict(response)
         except Exception as exc:
-            # The streaming contract is already the response's shape, so a backend failure must be a
-            # terminal response.failed event, not an HTTP 500 the client would see as a broken stream.
+            if self._should_propagate_streaming_responses_exception(exc):
+                raise
+            # Preserve the established streaming shape for internal backend failures. Model adapters
+            # can opt explicit downstream HTTP errors out before StreamingResponse commits headers.
             logger.exception("responses() failed while serving a streaming /v1/responses request")
             return StreamingResponse(
                 synthesize_responses_failure_sse(str(exc)),
@@ -264,6 +286,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             synthesize_responses_sse(response_json, ns_map),
             media_type="text/event-stream",
         )
+
+    def _should_propagate_streaming_responses_exception(self, exc: Exception) -> bool:
+        """Whether an error raised before synthesized SSE starts should retain its HTTP response."""
+
+        return False
 
     async def chat_completions_dispatch(self, request: Request, body: dict = Body()):
         """Default ``/v1/chat/completions`` entrypoint shared by every Gym model server.

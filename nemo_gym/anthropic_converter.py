@@ -53,6 +53,7 @@ from uuid import uuid4
 from anthropic.types.message_create_params import MessageCreateParams
 
 from nemo_gym.anthropic_utils import NeMoGymAnthropicMessage
+from nemo_gym.context_errors import is_context_overflow_error
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -71,8 +72,45 @@ from nemo_gym.openai_utils import (
 
 SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
+_ANTHROPIC_ERROR_TYPES = {
+    400: "invalid_request_error",
+    401: "authentication_error",
+    403: "permission_error",
+    404: "not_found_error",
+    413: "request_too_large",
+    429: "rate_limit_error",
+    529: "overloaded_error",
+}
+
 
 class AnthropicConverter:
+    def error_response(self, content: bytes | str, status: int) -> bytes:
+        """Translate an OpenAI-compatible provider error to Anthropic's envelope."""
+
+        try:
+            payload = json.loads(content)
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            message = content.decode(errors="replace") if isinstance(content, bytes) else content
+        else:
+            error = payload.get("error", payload) if isinstance(payload, dict) else {}
+            message = error.get("message") if isinstance(error, dict) else None
+            if not message:
+                message = json.dumps(payload, ensure_ascii=False)
+        if not isinstance(message, str):
+            message = json.dumps(message, ensure_ascii=False)
+
+        # Claude Code recognizes this wording and invokes its context-compaction path.
+        # Retain the provider's original detail after the compatibility prefix.
+        if is_context_overflow_error(content) and "prompt is too long" not in message.lower():
+            message = f"prompt is too long: {message}"
+
+        error_type = _ANTHROPIC_ERROR_TYPES.get(status, "api_error" if status >= 500 else "invalid_request_error")
+        return json.dumps(
+            {"type": "error", "error": {"type": error_type, "message": message}},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+
     ############################################################################
     # Egress: NeMo Gym Responses  ->  Anthropic Messages request
     ############################################################################

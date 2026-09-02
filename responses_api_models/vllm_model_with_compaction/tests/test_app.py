@@ -5,6 +5,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp.client_exceptions import ClientResponseError
 from fastapi.testclient import TestClient
 
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
@@ -34,6 +35,34 @@ def _make_model() -> VLLMModelWithCompaction:
         config=config,
         server_client=MagicMock(spec=ServerClient, global_config_dict={}),
     )
+
+
+def _upstream_context_length_error() -> ClientResponseError:
+    request_info = MagicMock()
+    request_info.url = "http://vllm.test/v1/chat/completions"
+    request_info.real_url = request_info.url
+    error = ClientResponseError(
+        request_info=request_info,
+        history=(),
+        status=400,
+        message="Bad Request",
+    )
+    error.response_content = b'{"error":{"message":"maximum context length","code":400}}'
+    return error
+
+
+def _upstream_tokenize_error() -> ClientResponseError:
+    request_info = MagicMock()
+    request_info.url = "http://vllm.test/tokenize"
+    request_info.real_url = request_info.url
+    error = ClientResponseError(
+        request_info=request_info,
+        history=(),
+        status=400,
+        message="Bad Request",
+    )
+    error.response_content = b'{"error":{"message":"invalid tokenize input","code":400}}'
+    return error
 
 
 def test_base_vllm_model_has_no_compaction_routes() -> None:
@@ -124,6 +153,23 @@ def test_plain_responses_endpoint_forwards_exact_prefix() -> None:
     assert captured_kwargs["return_token_ids"] is True
 
 
+def test_streaming_responses_propagates_upstream_context_length_error() -> None:
+    model = _make_model()
+    mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+    mock_client.create_chat_completion = AsyncMock(side_effect=_upstream_context_length_error())
+    model._clients = [mock_client]
+
+    app = model.setup_webserver()
+    model.setup_exception_middleware(app)
+    response = TestClient(app).post(
+        "/v1/responses",
+        json={"input": "hi", "required_prefix_token_ids": [10, 11], "stream": True},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": {"message": "maximum context length", "code": 400}}
+
+
 def test_generation_fails_closed_instead_of_retokenizing_missing_exact_ids() -> None:
     model = _make_model()
 
@@ -190,3 +236,20 @@ def test_tokenize_endpoint_forwards_exact_prefix_without_sampling() -> None:
     assert captured_kwargs["required_prefix_token_ids"] == [10, 11]
     assert "logprobs" not in captured_kwargs
     assert "return_token_ids" not in captured_kwargs
+
+
+def test_direct_tokenize_endpoint_preserves_upstream_http_error() -> None:
+    model = _make_model()
+    mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+    mock_client.create_tokenize = AsyncMock(side_effect=_upstream_tokenize_error())
+    model._clients = [mock_client]
+
+    app = model.setup_webserver()
+    model.setup_exception_middleware(app)
+    response = TestClient(app).post(
+        "/tokenize",
+        json={"input": "hi", "required_prefix_token_ids": [10, 11]},
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"error": {"message": "invalid tokenize input", "code": 400}}

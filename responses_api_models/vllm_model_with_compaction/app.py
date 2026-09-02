@@ -89,6 +89,8 @@ class VLLMModelWithCompaction(VLLMModel):
             response = await self._invoke_responses(request, params)
             response_json = response.model_dump(mode="json") if isinstance(response, BaseModel) else dict(response)
         except Exception as exc:
+            if self._should_propagate_streaming_responses_exception(exc):
+                raise
             LOG.exception("responses() failed while serving a streaming /v1/responses request")
             return StreamingResponse(
                 synthesize_responses_failure_sse(str(exc)),
