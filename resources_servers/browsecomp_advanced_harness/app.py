@@ -86,6 +86,15 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     # 92.5% of all tool-output characters. The tool schema does not expose the field, so
     # this config value applies to every real call; an explicit request value still wins.
     search_max_total_length: int = 30000
+    # When true (and workspace="per_session"), exa search asks for full text alongside
+    # highlights, writes each result to pages/, and returns a [Saved to] path — the same
+    # shape the tavily disk path returns, and the shape the `search` tool description and
+    # the system prompt already promise the model. On the exa path that promise was false:
+    # zero of 1,239 exa search outputs in a reference run contained "[Saved to]", so the
+    # workspace/bash_command affordance covered `browse` only.
+    # Default false: enabling it changes what is asked of the provider on EVERY query,
+    # which is a real cost and latency change, not just a formatting one.
+    exa_search_writes_pages: bool = False
 
     @model_validator(mode="after")
     def _check_provider_key(self) -> "TavilySearchResourcesServerConfig":
@@ -398,13 +407,22 @@ class ExaAIOHTTPClient(BaseModel):
         await raise_for_status(response)
 
     async def search(
-        self, query: str, num_results: int, exclude_domains: Optional[List[str]] = None
+        self,
+        query: str,
+        num_results: int,
+        exclude_domains: Optional[List[str]] = None,
+        include_text: bool = False,
     ) -> Dict[str, Any]:
+        contents: Dict[str, Any] = {"highlights": True}
+        if include_text:
+            # Full page text per result, so search hits can be written to pages/ the way
+            # the tavily disk path writes raw_content. Opt-in: it is billed per result.
+            contents["text"] = True
         body: Dict[str, Any] = {
             "query": query,
             "numResults": num_results,
             "type": "auto",
-            "contents": {"highlights": True},
+            "contents": contents,
         }
         if exclude_domains:
             body["excludeDomains"] = list(exclude_domains)
@@ -984,17 +1002,28 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             )
         )
 
-    async def _exa_search_one(self, query: str, max_length: int, metrics: "TavilySearchMetrics") -> str:
-        """Exa search: highlight snippets returned INLINE (never written to pages/, even in
-        terminal mode). Mirrors the reference Exa harness formatting exactly."""
+    async def _exa_search_one(
+        self, query: str, max_length: int, metrics: "TavilySearchMetrics", page_writer: Optional["_PageWriter"] = None
+    ) -> str:
+        """Exa search: highlight snippets returned INLINE. Mirrors the reference Exa
+        harness formatting exactly.
+
+        When exa_search_writes_pages is on AND a page_writer is available, each result's
+        full text is also written to pages/ and the entry carries a [Saved to] path — the
+        shape the tool description and system prompt already promise. Snippets stay inline
+        either way; the page is additional, never a substitute."""
         if len(query) > 400:
             return "Query is too long"
 
+        write_pages = self.config.exa_search_writes_pages and page_writer is not None
         client = self._select_exa_client()
         call_start = time()
         try:
             results = await client.search(
-                query, num_results=self.config.max_results, exclude_domains=self._exclude_domains
+                query,
+                num_results=self.config.max_results,
+                exclude_domains=self._exclude_domains,
+                include_text=write_pages,
             )
         except Exception as e:
             self._record_call(metrics, "search", "exa", "error", call_start)
@@ -1004,12 +1033,20 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
         returned = 0
-        for result in offered:
+        for ri, result in enumerate(offered, start=1):
             title = result.get("title", "") or ""
             url = result.get("url", "") or ""
             highlights = result.get("highlights") or []
             snippet = " ... ".join(h for h in highlights if h)
-            entry = f"[Title]: {title}\n[URL]: {url}\n[Snippet]: {snippet}\n"
+            saved_line = ""
+            if write_pages:
+                text = result.get("text") or ""
+                if text:
+                    if len(text) > self.config.max_page_bytes:
+                        text = text[: self.config.max_page_bytes]
+                    saved = page_writer.write_search_result(query, ri, title, url, text)
+                    saved_line = f"[Saved to]: {saved} ({len(text)} bytes)\n"
+            entry = f"[Title]: {title}\n[URL]: {url}\n[Snippet]: {snippet}\n{saved_line}"
             if running_len + len(entry) > max_length:
                 break
             blocks.append(entry)
@@ -1133,9 +1170,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         )
         max_per_query_length = total_length // len(body.queries)
         if self.config.search_provider == "exa":
-            # Exa: highlights-only, always inline (no disk pages, even in terminal mode).
+            # Exa: highlight snippets inline. Pages are written only when
+            # exa_search_writes_pages is on and the session has a workspace; otherwise the
+            # historical highlights-only behaviour is unchanged.
+            exa_page_writer = self._get_page_writer(sid) if self.config.exa_search_writes_pages else None
             results = await asyncio.gather(
-                *[self._exa_search_one(q, max_per_query_length, metrics) for q in body.queries]
+                *[self._exa_search_one(q, max_per_query_length, metrics, exa_page_writer) for q in body.queries]
             )
         else:
             page_writer = self._get_page_writer(sid)

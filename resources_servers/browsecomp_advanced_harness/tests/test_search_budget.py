@@ -67,7 +67,7 @@ class TestSearchBudget:
         """Record the per-query max_length each _exa_search_one call receives."""
         seen: List[int] = []
 
-        async def fake_search_one(query, max_length, metrics):
+        async def fake_search_one(query, max_length, metrics, page_writer=None):
             seen.append(max_length)
             return f"[Search Query]: {query}"
 
