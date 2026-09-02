@@ -108,6 +108,49 @@ def _bool_flag(name: str, hydra_key: str, flag_help: str) -> Flag:
     )
 
 
+def _split_comma_separated(value: str) -> list[str]:
+    values = [item.strip() for item in value.split(",")]
+    if not all(values):
+        raise argparse.ArgumentTypeError("check IDs must be a comma-separated list without empty entries")
+    return values
+
+
+def _csv_list_flag(name: str, hydra_key: str, flag_help: str) -> Flag:
+    """A comma-separated CLI value translated to a Hydra list override."""
+    dest = name.replace("-", "_")
+    return Flag(
+        register=lambda p: p.add_argument(
+            f"--{name}",
+            dest=dest,
+            type=_split_comma_separated,
+            metavar="CHECK[,CHECK...]",
+            help=flag_help,
+        ),
+        translate_to_hydra=lambda args: (
+            [f"+{hydra_key}={json.dumps(getattr(args, dest), separators=(',', ':'))}"]
+            if getattr(args, dest) is not None
+            else []
+        ),
+    )
+
+
+def _comma_list_flag(name: str, hydra_key: str, flag_help: str, *, metavar: str) -> Flag:
+    """A `--name "A,B"` flag that maps to the Hydra override `+<hydra_key>=["A","B"]`"""
+    dest = name.replace("-", "_")
+
+    def to_hydra(args: argparse.Namespace) -> list[str]:
+        raw = getattr(args, dest)
+        if raw is None:
+            return []
+        items = [item.strip() for item in raw.split(",") if item.strip()]
+        return [f"+{hydra_key}=[{','.join(json.dumps(item) for item in items)}]"]
+
+    return Flag(
+        register=lambda p: p.add_argument(f"--{name}", dest=dest, metavar=metavar, help=flag_help),
+        translate_to_hydra=to_hydra,
+    )
+
+
 # Shared flag: load Gym config files. Reused by every command that reads server/benchmark configs.
 CONFIG = Flag(
     register=lambda p: p.add_argument(
@@ -150,7 +193,13 @@ RESOURCES_SERVER = Flag(
 # Shared flag: emit machine-readable JSON instead of human output. Reused by reporting commands (version, list,
 # env status). Each command reads the reserved `json` config key ad hoc via
 # global_config_dict.get(JSON_OUTPUT_KEY_NAME) (see general.py, eval.py, env.py).
-JSON = _bool_flag("json", "json", "Output as machine-readable JSON.")
+# SUPPRESS so an absent trailing `--json` can't overwrite one given before the subcommand (see build_parser).
+JSON = Flag(
+    register=lambda p: p.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS, help="Output as machine-readable JSON."
+    ),
+    translate_to_hydra=lambda args: ["+json=true"] if getattr(args, "json", False) else [],
+)
 
 # `gym list <type> [<name>]`: an optional component name. When given, the listing command inspects that one
 # component (surfaced as the reserved `component_name` config key) instead of listing all.
@@ -292,6 +341,7 @@ _ASSETS = {
     "environment": ("environments", "", "config"),
     "resources-server": ("resources_servers", "configs", None),
     "model-type": ("responses_api_models", "configs", None),
+    "agent-type": ("responses_api_agents", "configs", None),
 }
 
 
@@ -391,21 +441,67 @@ def _asset_config_path(flag: str, value: str) -> str:
     )
 
 
-def _asset_selector(flag: str) -> Flag:
-    """A `--<flag> NAME` selector that resolves the named asset to a config and adds it to +config_paths."""
+def _asset_selector(flag: str, *, repeatable: bool = False) -> Flag:
+    """A `--<flag> NAME` selector that resolves the named asset to a config and adds it to +config_paths.
+
+    Repeatable selectors accumulate, composing several components the way `--config` does.
+    """
     dest = flag.replace("-", "_")
+
+    def translate_to_hydra(args: argparse.Namespace) -> list[str]:
+        selected = getattr(args, dest)
+        if not selected:
+            return []
+        names = selected if isinstance(selected, list) else [selected]
+        return [f"+config_paths=[{','.join(_asset_config_path(flag, name) for name in names)}]"]
+
     return Flag(
-        register=lambda p: p.add_argument(f"--{flag}", metavar="NAME", help=f"Load the named {flag} config."),
-        translate_to_hydra=lambda args: (
-            [f"+config_paths=[{_asset_config_path(flag, getattr(args, dest))}]"] if getattr(args, dest) else []
+        register=lambda p: p.add_argument(
+            f"--{flag}",
+            metavar="NAME",
+            action="append" if repeatable else "store",
+            help=f"Load the named {flag} config." + (" Repeatable." if repeatable else ""),
         ),
+        translate_to_hydra=translate_to_hydra,
     )
 
 
-BENCHMARK = _asset_selector("benchmark")
-ENVIRONMENT = _asset_selector("environment")
-RESOURCES_SERVER_CONFIG = _asset_selector("resources-server")
+# Selecting several environments or benchmarks composes their configs, so these accumulate. A model type
+# names the one policy model a run serves, so it does not.
+BENCHMARK = _asset_selector("benchmark", repeatable=True)
+ENVIRONMENT = _asset_selector("environment", repeatable=True)
+RESOURCES_SERVER_CONFIG = _asset_selector("resources-server", repeatable=True)
 MODEL_TYPE = _asset_selector("model-type")
+
+# Override for the verifier-side `allowed_agents` guard. Offered wherever --agent-type composes.
+ALLOW_UNSUPPORTED_PAIRING = _bool_flag(
+    "allow-unsupported-pairing",
+    "allow_unsupported_pairing",
+    "Run even if the environment's resources server does not declare support for the selected agent.",
+)
+
+AGENT_TYPE = Flag(
+    register=lambda p: p.add_argument(
+        "--agent-type",
+        metavar="NAME",
+        help="Agent (NAME or NAME/FLAVOR) to run the selected environment or benchmark.",
+    ),
+    translate_to_hydra=lambda args: _translate_agent_type(args),
+)
+
+
+def _translate_agent_type(args: argparse.Namespace) -> list[str]:
+    """`--agent-type` picks the harness to compose, which is already fixed once the servers are up."""
+    name = getattr(args, "agent_type", None)
+    if not name:
+        return []
+    if getattr(args, "no_serve", False):
+        raise ValueError(
+            "`--agent-type` chooses which agent runs the task, which is settled once the servers are "
+            "running, so it cannot be combined with `--no-serve`. Use `--agent` to name one of them."
+        )
+    return [f"+config_paths=[{_asset_config_path('agent-type', name)}]"]
+
 
 # `--search-dir`: extra component-search roots. `main()` folds these into the `NEMO_GYM_EXTRA_ROOTS` env
 # var before dispatch (see there), so a single register-only flag suffices for every command — the roots
@@ -452,6 +548,26 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     dispatch(target, overrides)
 
 
+def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
+    expected_overrides = ["+verbose=true"] if args.verbose else []
+    if args.json:
+        expected_overrides.append("+json=true")
+    if overrides != expected_overrides:
+        args._parser.error("health-check does not accept Hydra overrides")
+    from nemo_gym.cli.eval import health_check_rollouts
+
+    try:
+        health_check_rollouts(
+            args.run_dir,
+            rollout_file=args.rollout_file,
+            workers=args.workers,
+            ignored_checks=args.ignore_checks or (),
+            json_output=args.json,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        args._parser.error(str(exc))
+
+
 def _has_override(overrides: list[str], key: str) -> bool:
     return any(override.lstrip("+").split("=", 1)[0] == key for override in overrides)
 
@@ -478,6 +594,8 @@ def _env_test(args: argparse.Namespace, overrides: list[str]) -> None:
     manifest_options = any(_has_override(overrides, key) for key in ("catalog_kind", "update_expected", "json"))
     if manifest_selected and legacy_selected:
         args._parser.error("select a workload name or --resources-server, not both")
+    if args.all and (manifest_selected or legacy_selected):
+        args._parser.error("--all tests every resources server, so it cannot be combined with a named target")
     if manifest_options and not manifest_selected:
         args._parser.error("--kind, --update-expected, and --json require a workload name")
     if manifest_selected:
@@ -486,9 +604,15 @@ def _env_test(args: argparse.Namespace, overrides: list[str]) -> None:
 
     # Run a single server's tests if +entrypoint was passed. No need to check for
     # --resources-server because it is translated to +entrypoint in the flag definition.
-    dispatch(
-        "nemo_gym.cli.env:test" if _has_override(overrides, "entrypoint") else "nemo_gym.cli.env:test_all", overrides
-    )
+    if _has_override(overrides, "entrypoint"):
+        dispatch("nemo_gym.cli.env:test", overrides)
+        return
+
+    if not args.all:
+        args._parser.error(
+            "requires a target: a workload name, --resources-server NAME, or --all to test every resources server."
+        )
+    dispatch("nemo_gym.cli.env:test_all", overrides)
 
 
 def _dataset_upload(args: argparse.Namespace, overrides: list[str]) -> None:
@@ -670,6 +794,11 @@ COMMANDS = {
         summary="Resolve the final config from configs, flags, and overrides.",
         flags=(CONFIG, SEARCH_DIR),
     ),
+    "env schema": Command(
+        target="nemo_gym.cli.env:show_schema",
+        summary="Print a resources server's task-data schema as JSON Schema.",
+        flags=(RESOURCES_SERVER, SEARCH_DIR),
+    ),
     "env validate": Command(
         target="nemo_gym.cli.env:validate",
         summary="Validate a manifest-backed workload or config without starting services.",
@@ -678,12 +807,15 @@ COMMANDS = {
             CATALOG_KIND,
             _value_flag("manifest", "manifest_path", "Manifest path to validate.", quote=True),
             _bool_flag("sync", "sync", "Synchronize composition mirrors after validation."),
+            _bool_flag("strict", "strict", "Fail instead of warning when model values are left undefined."),
             JSON,
             CONFIG,
             BENCHMARK,
             ENVIRONMENT,
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
+            AGENT_TYPE,
+            ALLOW_UNSUPPORTED_PAIRING,
             SEARCH_DIR,
             MODEL,
             MODEL_URL,
@@ -699,9 +831,9 @@ COMMANDS = {
             _bool_flag("outdated", "outdated", "List only outdated packages."),
             Flag(
                 register=lambda p: p.add_argument(
-                    "--json", action="store_true", help="Output the package list as JSON."
+                    "--json", action="store_true", default=argparse.SUPPRESS, help="Output the package list as JSON."
                 ),
-                translate_to_hydra=lambda args: ["+format=json"] if args.json else [],
+                translate_to_hydra=lambda args: ["+format=json"] if getattr(args, "json", False) else [],
             ),
         ),
     ),
@@ -715,6 +847,13 @@ COMMANDS = {
             JSON,
             RESOURCES_SERVER,
             SEARCH_DIR,
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--all",
+                    action="store_true",
+                    help="Test every resources server. Slow: builds one venv per server.",
+                )
+            ),
         ),
     ),
     "env publish": Command(
@@ -731,6 +870,8 @@ COMMANDS = {
             ENVIRONMENT,
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
+            AGENT_TYPE,
+            ALLOW_UNSUPPORTED_PAIRING,
             SEARCH_DIR,
             MODEL,
             MODEL_URL,
@@ -746,6 +887,8 @@ COMMANDS = {
             ENVIRONMENT,
             RESOURCES_SERVER_CONFIG,
             MODEL_TYPE,
+            AGENT_TYPE,
+            ALLOW_UNSUPPORTED_PAIRING,
             SEARCH_DIR,
         ),
     ),
@@ -773,6 +916,8 @@ COMMANDS = {
                 )
             ),
             _bool_flag("resume", "resume_from_cache", "Resume from cached rollouts instead of recollecting."),
+            AGENT_TYPE,
+            ALLOW_UNSUPPORTED_PAIRING,
             _value_flag("agent", "agent_name", "Agent to collect rollouts with.", aliases=("-a",)),
             _value_flag("input", "input_jsonl_fpath", "Input tasks JSONL file.", aliases=("-i",)),
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
@@ -791,6 +936,13 @@ COMMANDS = {
                 "disable-aggregation",
                 "disable_aggregation",
                 "Skip post-run aggregate-metrics computation. Use with gym eval aggregate for sharded jobs.",
+            ),
+            _bool_flag("no-health-check", "disable_health_check", "Skip post-run rollout health checks."),
+            _value_flag("health-check-workers", "health_check_workers", "Number of rollout-health worker processes."),
+            _csv_list_flag(
+                "health-check-ignore",
+                "health_check_ignored_checks",
+                "Comma-separated rollout-health check IDs to exclude from verdict derivation.",
             ),
         ),
     ),
@@ -811,6 +963,40 @@ COMMANDS = {
                 "Path for the merged rollouts and aggregate-metrics file.",
                 aliases=("-o",),
             ),
+            _bool_flag("no-health-check", "disable_health_check", "Skip post-aggregation rollout health checks."),
+            _value_flag("health-check-workers", "health_check_workers", "Number of rollout-health worker processes."),
+            _csv_list_flag(
+                "health-check-ignore",
+                "health_check_ignored_checks",
+                "Comma-separated rollout-health check IDs to exclude from verdict derivation.",
+            ),
+        ),
+    ),
+    "eval health-check": Command(
+        target=_eval_health_check,
+        summary="Verify rollout quality for an existing run directory.",
+        flags=(
+            Flag(register=lambda p: p.add_argument("run_dir", metavar="RUN_DIR")),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--rollouts-file",
+                    dest="rollout_file",
+                    type=Path,
+                    metavar="PATH",
+                    help="Rollout JSONL path; relative paths resolve under RUN_DIR (default: rollouts.jsonl).",
+                )
+            ),
+            Flag(register=lambda p: p.add_argument("--workers", type=int, help="Number of worker processes.")),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--ignore-checks",
+                    "--ignore",
+                    type=_split_comma_separated,
+                    metavar="CHECK[,CHECK...]",
+                    help="Comma-separated check IDs to exclude from verdict derivation.",
+                )
+            ),
+            JSON,
         ),
     ),
     "eval reverify": Command(
@@ -884,8 +1070,63 @@ COMMANDS = {
             ),
         ),
     ),
+    "eval compare": Command(
+        target="nemo_gym.cli.eval:compare",
+        summary="Compare a baseline eval run against candidate runs.",
+        flags=(
+            _value_flag(
+                "baseline",
+                "baseline_rollouts_jsonl_fpath",
+                "Baseline run's rollouts JSONL (its *_aggregate_metrics.json sibling is what gets read today).",
+                quote=True,
+            ),
+            _comma_list_flag(
+                "candidates",
+                "candidate_rollouts_jsonl_fpaths",
+                "Candidate run's rollouts JSONL. Comma-separated list; one candidate is supported today.",
+                metavar="PATH[,PATH...]",
+            ),
+            _value_flag(
+                "baseline-agg-metrics",
+                "baseline_aggregate_metrics_fpath",
+                "Baseline's aggregate-metrics JSON, when it is not the sibling of --baseline.",
+                quote=True,
+            ),
+            _comma_list_flag(
+                "candidates-agg-metrics",
+                "candidate_aggregate_metrics_fpaths",
+                "Candidates' aggregate-metrics JSON, in --candidates order, when not siblings of --candidates.",
+                metavar="PATH[,PATH...]",
+            ),
+            _value_flag("agent", "agent_name", "Agent to compare on both sides (default: all shared agents)."),
+            _value_flag("baseline-agent", "baseline_agent_name", "Agent to read from the baseline's metrics."),
+            _comma_list_flag(
+                "candidate-agents",
+                "candidate_agent_names",
+                "Agent to read from each candidate's metrics, in --candidates order.",
+                metavar="NAME[,NAME...]",
+            ),
+            _value_flag(
+                "output-dir",
+                "output_dirpath",
+                "Where to write the report (default: the candidate run's own directory).",
+                aliases=("-o",),
+                quote=True,
+            ),
+            _value_flag(
+                "report-format",
+                "report_format",
+                "Report artifacts to write (default: both).",
+                choices=("md", "json", "both"),
+            ),
+        ),
+    ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),
 }
+
+
+def _accepts_json(parser: argparse.ArgumentParser) -> bool:
+    return any("--json" in action.option_strings for action in parser._actions)
 
 
 def _add_leaf(subparsers: argparse._SubParsersAction, name: str, command: Command) -> None:
@@ -904,7 +1145,10 @@ def build_parser() -> argparse.ArgumentParser:
     # _GymArgumentParser propagates to every subparser (argparse defaults parser_class to type(self)).
     parser = _GymArgumentParser(prog="gym", add_help=True)
     parser.add_argument("--version", action="store_true", help="Show the NeMo Gym version and exit.")
-    parser.add_argument("--json", action="store_true", help="With --version, output as JSON.")
+    # Also registered on every command that emits JSON, so `--json` is accepted before or after the subcommand.
+    parser.add_argument(
+        "--json", action="store_true", help="Output as machine-readable JSON (--version and reporting commands)."
+    )
     # Also registered on every leaf, so `-v` is accepted before or after the subcommand.
     parser.add_argument("-v", "--verbose", action="store_true", help="Set logging level to DEBUG.")
     parser.set_defaults(_parser=parser)
@@ -1028,6 +1272,14 @@ def main() -> None:
         if command is None:
             args._parser.print_help()
             sys.exit(1)
+
+        # A pre-subcommand `--json` reaches commands that emit no JSON, where it would otherwise be dropped
+        # without a word. Reject it instead of pretending it applied.
+        if getattr(args, "json", False) and not _accepts_json(args._parser):
+            args._parser.error(
+                "--json is not supported by this command; it applies to --version and to reporting commands "
+                "such as `gym list benchmarks`, `gym search`, and `gym env status`"
+            )
 
         try:
             translated = [token for flag in command.flags for token in flag.translate_to_hydra(args)]

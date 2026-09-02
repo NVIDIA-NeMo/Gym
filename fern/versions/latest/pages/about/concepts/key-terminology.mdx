@@ -21,10 +21,10 @@ Two compositions matter:
 
 | | Built from | Notes |
 | --- | --- | --- |
-| **Agent** | **Model** + **Agent harness** | The harness owns the loop, context, and stop conditions, and routes calls to environment-owned tools. |
-| **Environment** | **Dataset** + **Verifier** + **State** (+ env tools) | The task world the agent acts on and is scored against. The **model is outside** the environment. |
+| **Agent** | **Model** + **Agent harness** | The harness owns the loop, tools, context, and stop conditions. |
+| **Environment** | **Dataset** + **Agent harness** + **Verifier** + **State** | Everything required for an agent to complete a task. The **model is outside** the environment. |
 
-The **agent harness** belongs to the agent, not the environment. In Gym packaging, an environment *config* still names which agent server to run — that is a wiring reference, not ownership of the harness.
+The **agent harness** belongs to the agent and is part of the environment definition. In Gym packaging, an environment *config* names which agent server to run.
 
 The **model** (also called the **policy**) is what you call for generation — local weights or a remote API endpoint. In Gym it is usually exposed by the **Model server** (or your harness can call an endpoint directly). The same environment shape can be used for **benchmark** eval (fixed taskset / protocol) or for **training** (rewards or synthetic data); the main differences are task split and contamination controls, not a different environment type.
 
@@ -54,13 +54,11 @@ The **model** (also called the **policy**) is what you call for generation — l
 
 | Term | Definition |
 | --- | --- |
-| **Environment** | The task world an agent runs against, excluding the model: `Dataset + Verifier + State` (plus environment tools). Gym configs also reference an **agent harness** for packaging. See [Environments](/about/concepts/environments) and [Build Environments](/environment-tutorials). |
+| **Environment** | Everything required for an agent to complete a task, excluding the model: `Dataset + Agent Harness + Verifier + State`. See [Environments](/about/concepts/environments) and [Build Environments](/environment-tutorials). |
 | **State** | Per-attempt mutable world (files, DB, tool results, and so on). `seed_session()` starts a clean session; tools update that session; it is not a snapshot of the whole environment config. |
 | **Verifier** | Scores a task attempt into a **reward** (typically 0–1) via `verify()` on the resources server. Also called scorer or grader. See [Build Verifiers](/build-verifiers). |
 | **Reward** | Numerical score (typically 0.0–1.0) for how well the attempt did — used as eval metrics and as the RL learning signal. |
 | **Sandbox** | Runtime with isolated execution per attempt (e.g. one container). Broader runtimes (local process, Docker, Apptainer) host execution. See [Sandboxes](/infrastructure/sandbox). |
-| **Environment surface** | The tools and per-task state the agent acts on. |
-| **Environment runtime** | Where and how the environment surface executes, such as a local process, Kubernetes service, or sandbox pool. |
 
 ### Agent & model
 

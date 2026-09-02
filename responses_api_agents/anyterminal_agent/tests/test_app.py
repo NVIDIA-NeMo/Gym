@@ -77,6 +77,7 @@ class TestRunnerTemplate:
         # Must be syntactically valid Python and reference the agent class.
         compile(rendered, "<runner>", "exec")
         assert "HermesAgent(config=config" in rendered
+        assert 'Request({"type": "http", "path_params": {}})' in rendered
         assert 'object.__setattr__(agent, "resolve_model_base_url"' in rendered
 
     def test_response_is_written_back(self) -> None:
@@ -296,11 +297,44 @@ class TestSafeConfigJson:
         assert result["agent_kwargs"]["api_key"] == "***"
         assert result["agent_kwargs"]["model"] == "gpt-4"
 
-    def test_secret_token_password_redacted(self, tmp_path: Path) -> None:
-        cfg = _make_instance_config(tmp_path, agent_kwargs={"my_secret": "x", "auth_token": "y", "password": "z"})
+    def test_secret_key_variants_redacted(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(
+            tmp_path,
+            agent_kwargs={
+                "my_secret": "x",
+                "auth_token": "y",
+                "hf_token": "hf",
+                "password": "z",
+                "anthropic_api_key": "a",
+                "apiKey": "b",
+                "aws_secret_access_key": "c",
+                "password_hash": "d",
+                "api_key_id": "e",
+            },
+        )
         result = json.loads(_safe_config_json(cfg))
-        for key in ("my_secret", "auth_token", "password"):
+        secret_keys = (
+            "my_secret",
+            "auth_token",
+            "hf_token",
+            "password",
+            "anthropic_api_key",
+            "apiKey",
+            "aws_secret_access_key",
+            "password_hash",
+            "api_key_id",
+        )
+        for key in secret_keys:
             assert result["agent_kwargs"][key] == "***"
+
+    def test_max_output_tokens_preserved_for_round_trip(self, tmp_path: Path) -> None:
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input=[{"role": "user", "content": "solve this"}], model="test-model", max_output_tokens=12288
+        )
+        cfg = _make_instance_config(tmp_path, body=body)
+
+        roundtripped = AnyTerminalInstanceConfig.model_validate_json(_safe_config_json(cfg))
+        assert roundtripped.body.max_output_tokens == 12288
 
     def test_nested_provider_api_key_redacted(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(
@@ -310,9 +344,22 @@ class TestSafeConfigJson:
         result = json.loads(_safe_config_json(cfg))
         assert result["sandbox_provider"]["opensandbox"]["connection"]["api_key"] == "***"
 
+    def test_token_count_fields_are_not_redacted(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path, body=_make_body().model_copy(update={"max_output_tokens": 123}))
+        result = json.loads(_safe_config_json(cfg))
+        assert result["body"]["max_output_tokens"] == 123
+
     def test_agent_command_str_excluded(self, tmp_path: Path) -> None:
-        cfg = _make_instance_config(tmp_path, agent_command_str="/agent_deps_mount/bin/python ...")
-        assert "agent_command_str" not in json.loads(_safe_config_json(cfg))
+        cfg = _make_instance_config(
+            tmp_path,
+            agent_command_str="/agent_deps_mount/bin/python ...",
+            agent_runtime_source="https://example.test/runtime?token=secret",
+            agent_deps_url="https://example.test/runtime?token=secret",
+        )
+        result = json.loads(_safe_config_json(cfg))
+        assert "agent_command_str" not in result
+        assert "agent_runtime_source" not in result
+        assert "agent_deps_url" not in result
 
     def test_indent_produces_multiline(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
@@ -354,7 +401,7 @@ class TestBuildProvider:
     @pytest.fixture(autouse=True)
     def _fake_apptainer_binary(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Constructing ApptainerProvider hard-errors if the real binary isn't on PATH.
-        monkeypatch.setattr(apptainer_provider, "_require_apptainer", lambda: "/usr/bin/apptainer")
+        monkeypatch.setattr(apptainer_provider, "_require_apptainer", lambda _bin_path=None: "/usr/bin/apptainer")
 
     def test_default_is_docker(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
@@ -609,6 +656,26 @@ class TestProcessSingleDatapoint:
         assert "/tmp/anyterminal-agent-deps.tar.gz" in uploaded
         stage_tests.assert_awaited_once()
         collect.assert_awaited_once()
+
+    async def test_remote_runtime_can_be_fetched_from_url(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(
+            tmp_path,
+            sandbox_provider={"opensandbox": {}},
+            agent_runtime_source="https://relay.example/runtime.tar.gz",
+            agent_deps_url="https://relay.example/runtime.tar.gz",
+        )
+        sandbox = SimpleNamespace(
+            exec=AsyncMock(return_value=_sandbox_result()),
+            upload=AsyncMock(),
+        )
+
+        await RunTerminalAgent(config=cfg)._stage_remote_runtime(sandbox, cfg)
+
+        uploaded = {call.args[1] for call in sandbox.upload.await_args_list}
+        assert "/tmp/anyterminal-agent-deps.tar.gz" not in uploaded
+        commands = [call.args[0] for call in sandbox.exec.await_args_list]
+        assert any("curl -fsSL" in command and "relay.example/runtime.tar.gz" in command for command in commands)
+        assert any("tar -xzf" in command for command in commands)
 
     async def test_stops_sandbox_even_on_eval_timeout(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)

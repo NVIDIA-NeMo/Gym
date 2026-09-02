@@ -72,6 +72,7 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.registry import (
     EnvironmentCatalogEntry,
+    RegistryError,
     discover_environment_catalog,
     read_environment_details,
     resolve_catalog_entry,
@@ -84,6 +85,13 @@ from nemo_gym.server_utils import (
     ServerInstanceDisplayConfig,
     ServerStatus,
     initialize_ray,
+)
+from nemo_gym.telemetry.metrics import record_active_servers
+from nemo_gym.telemetry.setup import (
+    configure_telemetry_env,
+    init_telemetry,
+    shutdown_telemetry,
+    telemetry_config_from_global_config,
 )
 
 
@@ -372,6 +380,13 @@ class RunHelper:  # pragma: no cover
         # e2e rollout-collection path, which both start servers via this method).
         GlobalConfigDictParser().raise_on_no_server_instances(global_config_dict)
 
+        # Translate the `telemetry:` block into NEMO_GYM_OTEL_* env vars *before* anything is
+        # spawned. run_command copies os.environ into every server process, and that copy is
+        # the only channel these settings have — the servers share no memory with this one.
+        # Also mints the run id they all report, so a backend can group one run's processes.
+        configure_telemetry_env(telemetry_config_from_global_config(global_config_dict))
+        init_telemetry(server_name="orchestrator", server_type="orchestrator")
+
         # Initialize Ray cluster in the main process
         # Note: This function will modify the global config dict - update `ray_head_node_address`
         initialize_ray()
@@ -451,6 +466,11 @@ class RunHelper:  # pragma: no cover
         self._head_server_instance.set_server_instances(
             [inst.model_dump(mode="json") for inst in self._server_instance_display_configs]
         )
+
+        # `gym.servers.active` is a gauge, so exactly one process may write it or the
+        # exported value is just whoever wrote last. The orchestrator is the only process
+        # that knows the fleet size, so it is the only writer (see telemetry/metrics.py).
+        record_active_servers(len(self._server_instance_display_configs))
 
         self._server_client = ServerClient(
             head_server_config=ServerClient.load_head_server_config(),
@@ -584,6 +604,11 @@ Process `{process_name}` stderr:
             sleep(sleep_interval)
 
     def shutdown(self) -> None:
+        # Before the servers go: the gauge should read zero once the fleet is torn down,
+        # and a BatchSpanProcessor needs an explicit flush or the last interval is lost.
+        record_active_servers(0)
+        shutdown_telemetry()
+
         print("Sending interrupt signals to servers...")
         for process in self._processes.values():
             process.send_signal(SIGINT)
@@ -929,7 +954,7 @@ class TestAllConfig(BaseNeMoGymCLIConfig):
     Examples:
 
     ```bash
-    gym env test
+    gym env test --all
     ```
     """
 
@@ -1252,12 +1277,29 @@ def validate() -> None:
     if unsupported:
         raise ConfigError("The following options require a workload name or --manifest: " + ", ".join(unsupported))
 
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=GlobalConfigDictParserConfig(
-            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        ),
-    )
+    # Resolve what a run resolves. Falling back to the stand-ins keeps a config that needs no model
+    # checkable, but only an error the stand-ins account for is downgraded: any other still propagates.
+    try:
+        global_config_dict = get_global_config_dict()
+        incomplete_config_error = None
+    except ConfigError as error:
+        if command_dict.get("strict", False):
+            raise
+        incomplete_config_error = error
+        global_config_dict = get_global_config_dict(
+            global_config_dict_parser_config=GlobalConfigDictParserConfig(
+                initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            ),
+        )
+
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+    if incomplete_config_error is not None:
+        rich.print(
+            "[yellow]Warning:[/yellow] this config does not define model server configuration "
+            "and will not start as-is. Re-run with [bold]--strict[/bold] to fail on this "
+            f"instead of warning.\n{incomplete_config_error}",
+            file=sys.stderr,
+        )
     rich.print("[green]✓[/green] Config is valid.")
 
 
@@ -1370,9 +1412,20 @@ def _inspect_environment(
 ) -> None:
     """Render one entry from the unified environment catalog."""
     kind = global_config_dict.get("catalog_kind")
-    matching_names = {entry.name: entry for entry in entries}
+    if kind not in (None, "environment", "benchmark"):  # else a bogus kind renders as the error noun
+        raise RegistryError(f"Unknown catalog kind '{kind}'.")
+    # Scope the did-you-mean pool to the requested kind so it never suggests the kind the user did not ask for.
+    matching_names = {entry.name: entry for entry in entries if kind is None or entry.kind == kind}
     if name not in matching_names:
-        exit_unknown_component(name, matching_names, "environment")
+        # A `kind` is always set here when the name exists at all, since an unset one matches everything.
+        known = next((entry for entry in entries if entry.name == name), None)
+        if known is not None:
+            article = "an" if known.kind.startswith(("a", "e", "i", "o", "u")) else "a"
+            rich.print(
+                f"[red]'{name}' is {article} {known.kind}, not a {kind}.[/red] Try `gym list {known.kind}s {name}`."
+            )
+            sys.exit(1)
+        exit_unknown_component(name, matching_names, kind or "environment")
         return
     entry = resolve_catalog_entry(name, kind, entries=entries)
     parsed = read_environment_details(entry.config_path)
@@ -1558,3 +1611,38 @@ def pip_list():  # pragma: no cover
     proc = run_command(command, dir_path)
     return_code = proc.wait()
     exit(return_code)
+
+
+class SchemaConfig(RunConfig):
+    """
+    Print a resources server's task-data schema as JSON Schema.
+
+    Examples:
+
+    ```bash
+    gym env schema --resources-server example_multi_step
+    ```
+    """
+
+
+@exit_cleanly_on_config_error
+def show_schema():  # pragma: no cover
+    """Print the selected server's ``TaskData`` schema (see ``nemo_gym/task_data.py``)."""
+    from nemo_gym.task_data import TaskDataSchemaError, load_task_data_schema
+
+    global_config_dict = get_global_config_dict()
+    config = SchemaConfig.model_validate(global_config_dict)
+
+    dir_path = _resolve_server_dir(Path(config.entrypoint))
+    try:
+        adapter = load_task_data_schema(dir_path)
+    except TaskDataSchemaError as e:
+        print(str(e))
+        exit(1)
+    if adapter is None:
+        print(
+            f"{config.entrypoint} does not ship a task_data.py schema yet. "
+            "Add one exporting `TaskData` (see nemo_gym/task_data.py for the protocol)."
+        )
+        exit(1)
+    print(json.dumps(adapter.json_schema(), indent=2))
