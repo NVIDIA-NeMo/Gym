@@ -20,6 +20,12 @@ deepswe_resources_server:
         metadata:
           benchmark: deepswe-v1-1
           istio.io/dataplane-mode: none
+      provider_options:
+          # Scheduling requests, kept below the limits so sandboxes pack densely.
+          resource_requests:
+            cpu: 2
+            memory_mib: 2048
+            disk_gib: 30
 
       logs_dir: resources_servers/deepswe/logs
       clear_verifier_logs: true
