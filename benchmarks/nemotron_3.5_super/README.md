@@ -92,6 +92,7 @@ SBATCH_ACCOUNT=my-slurm-account \
 SBATCH_PARTITION=batch \
 INPUT_CONTAINER=/path/to/vllm/container \
 OUTPUT_CONTAINER=/path/to/vllm/container___with_gym.sqsh \
+VLLM_ROUTER_WHEEL=/path/to/vllm_router/whl \
 MOUNTS=/path/to/env.yaml:/opt/Gym/env.yaml:x-create=file,/path/to/config.yaml:/opt/Gym/config.yaml:x-create=file \
 GYM_CONFIG=benchmarks/nemotron_3.5_super/eval_container_config.yaml \
 sbatch --gres=gpu:4 \
