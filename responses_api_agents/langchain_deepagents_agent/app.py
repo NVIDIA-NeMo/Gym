@@ -95,7 +95,10 @@ class DeepAgentsAgent(SimpleAgent):
             input_items = body.input
         input_messages = to_langchain(input_items)
 
-        token = _request_context.set({"rollout_id": rollout_id, "cookies": request.cookies})
+        model_url_path = self.url_path_for_request("/v1/responses", request)
+        token = _request_context.set(
+            {"rollout_id": rollout_id, "cookies": request.cookies, "model_url_path": model_url_path}
+        )
         try:
             final_state = await self.agent.ainvoke({"messages": input_messages})
         finally:

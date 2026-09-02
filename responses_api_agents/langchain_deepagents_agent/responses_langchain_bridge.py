@@ -21,9 +21,12 @@ concurrency). `GymResponsesChatModel` below reimplements the minimum LangChain m
 deepagents needs (`bind_tools()` + `_agenerate()`) on top of `server_client.post()`.
 
 `GymResponsesChatModel` is a singleton bound to the owning agent (constructed once, in the owning
-`DeepAgentsAgent.__init__`), and gets its per-request `rollout_id`/cookies from `_request_context`, a
-`ContextVar` set once per request by `DeepAgentsAgent.responses()`, rather than being rebuilt per request.
-This is safe under concurrent in-flight requests: `ContextVar` values are asyncio-task-local.
+`DeepAgentsAgent.__init__`), and gets its per-request `rollout_id`/`model_url_path`/cookies from
+`_request_context`, a `ContextVar` set once per request by `DeepAgentsAgent.responses()`, rather than being
+rebuilt per request. Cookies specifically evolve within that: `_agenerate()` updates them from each model
+response before the next internal call, so a multi-turn rollout chains model-server session state instead
+of resending the original inbound cookies on every turn. This is safe under concurrent in-flight requests:
+`ContextVar` values are asyncio-task-local.
 """
 
 import json
@@ -40,7 +43,7 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import Field
 
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputText
-from nemo_gym.server_utils import get_response_json, raise_for_status, rollout_path_prefix
+from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 _request_context: ContextVar[dict] = ContextVar("langchain_deepagents_agent_request_context")
@@ -184,7 +187,6 @@ class GymResponsesChatModel(BaseChatModel):
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
         ctx = _request_context.get()
-        url_path = f"{rollout_path_prefix(ctx['rollout_id'])}/v1/responses"
         request_body: dict[str, Any] = {"input": to_gym_input(messages)}
         if "tools" in kwargs:
             request_body["tools"] = kwargs["tools"]
@@ -192,10 +194,14 @@ class GymResponsesChatModel(BaseChatModel):
             request_body["tool_choice"] = kwargs["tool_choice"]
         resp = await self.agent.server_client.post(
             server_name=self.agent.config.model_server.name,
-            url_path=url_path,
+            url_path=ctx["model_url_path"],
             json=request_body,
             cookies=ctx["cookies"],
         )
         await raise_for_status(resp)
+        # `ctx` is the same dict object stored in `_request_context` (not a copy), so this mutation is
+        # visible to the next `_agenerate()` call for this rollout without a redundant `.set()` — matches
+        # `simple_agent`'s pattern of chaining model-server cookies from each response into the next call.
+        ctx["cookies"] = resp.cookies
         gym_response = NeMoGymResponse.model_validate(await get_response_json(resp))
         return ChatResult(generations=[ChatGeneration(message=to_langchain_ai_message(gym_response))])
