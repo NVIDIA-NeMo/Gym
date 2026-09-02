@@ -7,10 +7,10 @@ import logging
 import sys
 import tempfile
 from pathlib import Path
-from time import time
+from time import perf_counter, time
 from traceback import format_exc
 from types import SimpleNamespace
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from fastapi import Request
@@ -81,6 +81,10 @@ class Terminus2AgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
     terminus2_completed: bool
+    command_exec_times: List[float]
+    model_call_times: List[float]
+    average_command_exec_time: float
+    average_model_call_time: float
 
 
 class NeMoGymSandboxEnvironment:
@@ -149,6 +153,7 @@ class NeMoGymLLM(BaseLLM):
         self._model_context_limit = model_context_limit
         self._model_output_limit = model_output_limit
         self.trajectory: list[NeMoGymResponseOutputItem] = []
+        self._times_spent = []
 
     @staticmethod
     def _input_items(message_history: list[dict[str, Any]], prompt: str) -> list[NeMoGymEasyInputMessage]:
@@ -177,12 +182,14 @@ class NeMoGymLLM(BaseLLM):
             raise NotImplementedError(f"NeMoGymLLM does not support call options: {sorted(kwargs)}")
 
         input_items = self._input_items(message_history, prompt)
+        start_time = perf_counter()
         response = NeMoGymResponse.model_validate(
             await self._client.create_response(
                 model=self._model_name,
                 input=[item.model_dump(mode="json", exclude_none=True) for item in input_items],
             )
         )
+        self._times_spent.append(perf_counter() - start_time)
         self.trajectory.extend([*input_items, *response.output])
         usage = response.usage
         usage_info = None
@@ -215,6 +222,7 @@ class NeMoGymTerminus2(Terminus2):
     def __init__(self, *args: Any, llm: NeMoGymLLM, dump_trajectory: bool, **kwargs: Any):
         self._nemo_gym_llm = llm
         self._dump_trajectory_enabled = dump_trajectory
+        self._times_spent = []
         super().__init__(*args, **kwargs)
 
     def _init_llm(self, *args: Any, **kwargs: Any) -> BaseLLM:
@@ -226,6 +234,13 @@ class NeMoGymTerminus2(Terminus2):
     def _dump_trajectory_with_continuation_index(self, continuation_index: int) -> None:
         if self._dump_trajectory_enabled:
             super()._dump_trajectory_with_continuation_index(continuation_index)
+
+    async def _execute_commands(self, *args, **kwargs):
+        start_time = perf_counter()
+        res = await super()._execute_commands(*args, **kwargs)
+        self._times_spent.append(perf_counter() - start_time)
+
+        return res
 
 
 class Terminus2Agent(SimpleResponsesAPIAgent):
@@ -248,7 +263,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming,
         sandbox: AsyncSandbox,
-    ) -> Tuple[NeMoGymResponse, bool]:
+    ) -> Tuple[NeMoGymResponse, Dict[str, Any]]:
         instruction = _instruction(body.input)
 
         model_base_url = (
@@ -316,7 +331,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
             total_tokens=(context.n_input_tokens or 0) + (context.n_output_tokens or 0),
         )
-        return NeMoGymResponse(
+        response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=self.config.model_server.name,
@@ -326,7 +341,15 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
             usage=usage,
-        ), terminus2_completed
+        )
+        metrics = {
+            "terminus2_completed": terminus2_completed,
+            "command_exec_times": agent._times_spent,
+            "model_call_times": llm._times_spent,
+            "average_command_exec_time": sum(agent._times_spent) / max(len(agent._times_spent), 1),
+            "average_model_call_time": sum(llm._times_spent) / max(len(llm._times_spent), 1),
+        }
+        return response, metrics
 
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         session_key = request.session[SESSION_ID_KEY]
@@ -352,7 +375,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         session_key = request.session[SESSION_ID_KEY]
         self._session_sandboxes[session_key] = sandbox
 
-        response, terminus2_completed = await self._execute(request, body.responses_create_params, sandbox)
+        response, metrics = await self._execute(request, body.responses_create_params, sandbox)
 
         verification = await self.server_client.post(
             server_name=self.config.resources_server.name,
@@ -369,7 +392,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             print("Failed to stop sandbox", format_exc(), file=sys.stderr)
 
         result = await get_response_json(verification)
-        result["terminus2_completed"] = terminus2_completed
+        result.update(metrics)
         return Terminus2AgentVerifyResponse.model_validate(result)
 
 
