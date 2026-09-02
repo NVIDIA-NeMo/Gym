@@ -274,7 +274,7 @@ def patch_swebench_verified_env_vars(repo: str, env: Dict[str, Any]) -> None:
         env["CONDA_PYTHON_EXE"] = "/opt/miniconda3/bin/python"
         env["CONDA_DEFAULT_ENV"] = "testbed"
         env["PATH"] = (
-            "opt/miniconda3/envs/testbed/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            "/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/condabin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         )
         env["CONDA_PREFIX_1"] = "/opt/miniconda3"
 
