@@ -1,0 +1,2 @@
+*.jsonl
+!primevul_example.jsonl

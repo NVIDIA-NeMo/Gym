@@ -1,0 +1,8 @@
+primevul:
+  resources_servers:
+    primevul:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: Paired vulnerability classification over PrimeVul C/C++ functions
+      value: Evaluate vulnerability detection on real-world C/C++ function pairs

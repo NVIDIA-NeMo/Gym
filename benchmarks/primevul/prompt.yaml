@@ -1,0 +1,19 @@
+# Copyright (c) 2024 DLVulDet
+# SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Adapted from PrimeVul's MIT-licensed openai_expr/utils.py:
+# https://github.com/DLVulDet/PrimeVul/blob/main/openai_expr/utils.py
+
+system: You are a security expert that is good at static program analysis.
+
+user: |-
+  Please analyze the following code:
+  ```
+  {code}
+  ```
+  Please indicate your analysis result with one of the options:
+  (1) YES: A security vulnerability detected.
+  (2) NO: No security vulnerability.
+
+  Only reply with one of the options above. Do not include any further information.
