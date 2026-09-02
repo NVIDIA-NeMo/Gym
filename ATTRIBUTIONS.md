@@ -10,6 +10,8 @@ All third-party software is used as obtained, without modification, unless other
 | Component | Type | License | Author / Copyright | URL |
 |------------|------|----------|--------------------|-----|
 | **Datasets** | Dataset loading library | Apache-2.0 | Hugging Face | https://github.com/huggingface/datasets |
+| **deepagents** | Deep agent framework (`create_deep_agent`), used as obtained via pip | MIT | LangChain, Inc. | https://github.com/langchain-ai/deepagents |
+| **langchain-tavily** | Tavily web-search tool integration (`TavilySearch`), used as obtained via pip | MIT | LangChain, Inc. | https://github.com/langchain-ai/langchain-tavily |
 | **FastAPI** | Python web framework | MIT | Sebastián Ramírez | https://github.com/tiangolo/fastapi |
 | **Hydra-core** | Configuration management | MIT | Facebook Research | https://github.com/facebookresearch/hydra |
 | **Harvey LAB** | Legal agent benchmark and document skills (modified runtime, pinned at `f46ef86e4788545622db25dcffa3aebb7a139929`) | MIT | Harvey AI | https://github.com/harveyai/harvey-labs |

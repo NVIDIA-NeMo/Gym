@@ -1,0 +1,52 @@
+# tavily_search (LLM-judged web research) + remote_agent, pointed at a deepagents service you run
+# yourself. reward is judged purely on the final answer text (body.response.output_text) against
+# `ground_truth` — it doesn't matter that deepagents uses its own internal Tavily tool instead of
+# calling this resources server's Gym-hosted web_search/find_in_page/scroll_page tools; nothing
+# about the reward depends on which tool produced the answer.
+#
+#   gym env start "+config_paths=[examples/langchain_deepagent/configs/config_tavily_search.yaml]"
+#
+# Requires TAVILY_API_KEY (the resources server's own key, separate from the agent's) and
+# OPENROUTER_API_KEY (reused here as the judge model's key) in the environment.
+
+tavily_search_resources_server:   # server_id — your name for this instance (differs from the
+                                   # implementation below on purpose, to show they don't have to match)
+  resources_servers:
+    tavily_search:                   # implementation — must match resources_servers/tavily_search/
+      entrypoint: app.py
+      domain: agent
+      tavily_api_key: ${oc.env:TAVILY_API_KEY,null}
+      # Path is resolved relative to resources_servers/tavily_search/ (that server's own process
+      # cwd) — reusing its own test fixture rather than maintaining a duplicate file here.
+      exclude_domains_file_path: tests/dummy_exclude_domains_file.json
+      use_judge: true
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+      verified: false
+      description: Model uses search tools to satisfy a user query.
+      value: Measure agentic search capability
+
+judge_model:                  # server_id — your name for this instance
+  responses_api_models:
+    openai_model:                # implementation — must match responses_api_models/openai_model/
+      entrypoint: app.py
+      openai_base_url: https://openrouter.ai/api/v1
+      openai_api_key: ${oc.env:OPENROUTER_API_KEY,null}
+      # Deliberately different from (and stronger than) the agent's own free default model — a
+      # judge generally shouldn't share the model it's judging. See .env.example.
+      openai_model: ${oc.env:SEARCH_JUDGE_MODEL,anthropic/claude-sonnet-4.5}
+
+remote_agent:                 # server_id — your name for this instance
+  responses_api_agents:
+    remote_agent:                # implementation — must match responses_api_agents/remote_agent/
+      entrypoint: app.py
+      agent_base_url: http://localhost:9000
+      resources_server:
+        type: resources_servers
+        name: tavily_search_resources_server   # the server_id above, not the implementation
+      concurrency: 8
+      # deepagents runs its own tools internally and answers in a single call.
+      max_steps: 1

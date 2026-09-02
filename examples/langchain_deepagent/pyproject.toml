@@ -1,0 +1,16 @@
+[project]
+name = "deepagents-remote-agent"
+version = "0.1.0"
+description = "NeMo Gym remote_agent wrapper around the ./langchain_agent deepagents example."
+requires-python = ">=3.11"
+dependencies = [
+    "deepagents-langchain-agent",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]
+
+[tool.uv.sources]
+deepagents-langchain-agent = { path = "./langchain_agent", editable = true }
+
+[tool.uv]
+package = false
