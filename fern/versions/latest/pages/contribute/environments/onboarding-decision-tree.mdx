@@ -1,0 +1,58 @@
+---
+title: "Onboarding decision tree"
+description: "Choose whether to reuse a scorer, create a new one, or add a different agent."
+position: 1
+---
+import { NavButton } from "../../../../../components/NavButton";
+
+<NavButton href="/contribute/environments" label="Contribute environments" direction="back" />
+
+<Info>
+You have a benchmark to contribute. First decide whether Gym already has a **scorer** — the program that grades the model's answer.
+
+**Before you start:** [Development Setup](/contribute/development-setup) and the [Quickstart](/get-started/quickstart) (create root `env.yaml` with your model API key).
+</Info>
+
+A **scorer** lives under `resources_servers/` and implements `verify()`. An **overlay** is a folder under `benchmarks/` that reuses a scorer (new dataset and prompt; no new scoring code). Gym's default agent is `simple_agent` (one turn, no GUI or sandbox).
+
+Search for an existing scorer. A bare `gym search "…"` searches environments, not scorers — include the type:
+
+```bash
+gym search resources-servers "grade school math"
+gym list resources-servers
+gym search benchmarks math
+```
+
+Pick the row that matches what you need to add, then open that guide:
+
+| You need | You create | Open this guide |
+| --- | --- | --- |
+| Same scorer, new dataset | Folder under `benchmarks/` | [Add a benchmark](/contribute/environments/adding-a-benchmark) |
+| New scoring code | Folder under `resources_servers/` | [New Environment](/contribute/environments/new-environment) |
+| GUI, sandbox, or external runner | A different agent, or wrap a library | [Complex benchmarks](/contribute/environments/adding-a-benchmark#complex-benchmarks) |
+
+<Cards>
+  <Card title="Reuse a scorer" href="/contribute/environments/adding-a-benchmark">
+    Copy `benchmarks/gsm8k` (math), `benchmarks/gpqa` (multiple choice), or `benchmarks/livecodebench/v5_2408_2502` (code). You will not write `app.py`.
+
+    <Badge intent="success" minimal outlined>most common</Badge>
+  </Card>
+  <Card title="Create a new scorer" href="/contribute/environments/new-environment">
+    Add scoring code, tests, and five example tasks.
+
+    <Badge minimal outlined>new resources server</Badge>
+  </Card>
+  <Card title="Different agent or wrap a library" href="/environment-tutorials/integrate-external-environments">
+    The scorer exists, but the model must use a GUI, sandbox, or third-party runner.
+
+    <Badge minimal outlined>advanced</Badge>
+  </Card>
+</Cards>
+
+<Note>
+If an existing scorer can grade the task, add an overlay. Create a new resources server only when you must change how the score is computed. `gym env init --benchmark` exists in the CLI but is not how catalog entries are added today — see [Add a benchmark](/contribute/environments/adding-a-benchmark#2-copy-the-overlay).
+</Note>
+
+The YAML reuse pattern is also documented for readers on [How Benchmarks Relate to Environments](/evaluation/benchmarks).
+
+**Next:** open the matching card. If you are unsure, start with [Add a benchmark](/contribute/environments/adding-a-benchmark).

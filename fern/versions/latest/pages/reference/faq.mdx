@@ -462,6 +462,57 @@ For models with a chat template that drops previous reasoning traces: modify the
 
 For agents with non-monotonic trajectoires, the asserts may need to be disabled. This is not currently supported, but can be experimented with.  
 
+# How do I choose an onboarding path?
+
+Copy an existing folder under `benchmarks/` unless you need new scoring code. Start at the [onboarding decision tree](/contribute/environments/onboarding-decision-tree).
+
+- Same scorer, new data or prompt → [Add a benchmark](/contribute/environments/adding-a-benchmark) (copy `gsm8k`, `gpqa`, or `livecodebench/v5_2408_2502`).
+- New `verify()` → [New Environment](/contribute/environments/new-environment).
+- GUI, sandbox, or a third-party runner → [Complex benchmarks](/contribute/environments/adding-a-benchmark#complex-benchmarks).
+
+# Which scorers can I reuse?
+
+Run `gym search resources-servers "math"` or `gym list resources-servers`. That lists scorer configs under `resources_servers/*/configs/`. `gym search` with no type searches environments instead.
+
+Most overlays reuse `math_with_judge`, `mcqa`, `code_gen`, `asr_with_pc`, `instruction_following`, or `swebench`. For search or GUI, look at `tavily_search`, `benchmarks/browsecomp`, `gui_coordinate`, and `benchmarks/osworld`. Terminal Bench uses `responses_api_agents/harbor_agent`, not a folder under `benchmarks/`.
+
+# How do I make my benchmark show up in the CLI?
+
+Add `benchmarks/<name>/config.yaml` with a dataset of `type: benchmark` and a `prepare_script`. Then `gym list benchmarks` will list it. Run:
+
+```bash
+gym eval prepare --benchmark <name>
+gym eval run --benchmark <name> \
+  --model-type openai_model \
+  --split benchmark \
+  --output results/<name>_rollouts.jsonl \
+  --limit 2
+```
+
+Do not pass `--resources-server` unless you added a new scorer. Full flags: [Add a benchmark](/contribute/environments/adding-a-benchmark#4-prepare-and-run).
+
+# Where do example_rollouts go?
+
+Only new scorers need this file: `resources_servers/<name>/data/example_rollouts.jsonl`, exactly five lines, each a full `gym eval run` record including `reward`. CI checks it when `+should_validate_data=true`. Overlay-only PRs under `benchmarks/` do not add it. See [New Environment](/contribute/environments/new-environment#4-example-data-and-rollouts).
+
+# When is my PR done?
+
+- **New scorer:** `verify()`, tests, five example tasks + metrics + rollouts, `domain`, README, license.
+- **Named benchmark:** overlay with canonical split, prompt, `prepare.py`, and documented repeats. Score checks come before `verified: true`.
+- An **environment** is that scorer plus an agent, a model, and datasets.
+
+# Should I use --reuse-verifier?
+
+No, not for pull requests to this repository. It needs `VERIFIER_FIXTURE`, which shipped scorers do not export. Copy `benchmarks/gsm8k` and use `config_paths` plus `_inherit_from`.
+
+# Should I use gym env init --benchmark?
+
+Not for a catalog PR. That command writes `manifest.yaml`. No shipped benchmark uses that layout, and `--reuse-verifier` fails on in-tree scorers. Copy an overlay instead. Details: [Add a benchmark](/contribute/environments/adding-a-benchmark#2-copy-the-overlay).
+
+# I am not an NVIDIA employee. Do I need GitLab?
+
+No. Prefer Hugging Face `source:` or commit small `example.jsonl`. The GitLab dataset registry in some READMEs and the add-benchmark skill is an internal option. For search smoke tests, use your own Tavily key and an empty exclude-domains JSON.
+
 # FAQ: Model responses from inference.nvidia.com have no diversity
 `inference.nvidia.com` uses LiteLLM caching by default which leads to no diversity in model responses (pass@1 similar to pass@5). Please set something like the following flags in order to enable diverse responses:
 ```yaml

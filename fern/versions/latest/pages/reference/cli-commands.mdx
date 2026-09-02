@@ -163,7 +163,7 @@ gym list benchmarks --json | jq '.[].name'
 
 ### `gym list environments`
 
-List the manifest-first catalog unioned with legacy environment and benchmark configs. Manifest-backed entries expose their declared metadata; unmigrated entries remain visible with `no-manifest` status.
+List the catalog of environments and benchmarks. Manifest-backed entries expose their declared metadata. Shipped overlays currently list as `no-manifest` — that is expected; overlay PRs do not add `manifest.yaml`.
 
 | Option | Description |
 | --- | --- |
@@ -398,6 +398,10 @@ Commands for developing, running, and inspecting environments. An environment de
 
 Scaffold a resources server, or create a manifest-backed environment or benchmark skeleton. Workload scaffolds include a manifest, Gym config, sample data, and the extension points selected by the integration profile.
 
+<Note>
+`--environment` / `--benchmark` / `--reuse-verifier` create a manifest layout. Scorers in this repository do not export `VERIFIER_FIXTURE`. To contribute a catalog benchmark, copy `benchmarks/gsm8k` or run `gym env init --resources-server`. See [Add a benchmark](/contribute/environments/adding-a-benchmark).
+</Note>
+
 | Option | Description |
 | --- | --- |
 | `--resources-server NAME` | Name of the resources server to create. |
@@ -438,7 +442,7 @@ gym env resolve \
 
 ### `gym env validate`
 
-Validate a manifest-backed workload or legacy config without starting Ray or server subprocesses. Manifest validation resolves the Gym config offline, checks composition mirrors and datasets, and reports the resolved components. Legacy validation retains the existing config pre-flight behavior. Exits `0` when valid, or `1` with a clean message when not.
+Validate a named config or a manifest-backed workload without starting Ray or server subprocesses. Overlay and resources-server configs use `--benchmark` / `--resources-server` / `--config`. Manifest-backed names (no flag) resolve `manifest.yaml` and composition mirrors. Exits `0` when valid, or `1` with a clean message when not.
 
 By default, values a run needs but the config leaves undefined (such as `policy_base_url` from `env.yaml`) are filled with placeholders so the rest can still be checked, and reported as a warning. Pass `--strict` to fail on them instead.
 
@@ -505,15 +509,22 @@ Exercise a manifest-backed workload's verifier fixture in its resources-server e
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 
 ```bash
-# Exercise a manifest-backed workload verifier
+# Exercise a manifest-backed workload verifier (experimental; requires VERIFIER_FIXTURE)
 gym env test my_eval
 
-# Test a single server
+# Test a single server (pytest only)
 gym env test --resources-server example_single_tool_call
+
+# Same, plus example.jsonl / example_metrics.json / example_rollouts.jsonl (CI always does this)
+gym env test --resources-server example_single_tool_call +should_validate_data=true
 
 # Test all servers. Slow: builds one venv per server, so it needs an explicit opt-in.
 gym env test --all
 ```
+
+<Note>
+`gym env test --resources-server NAME` runs pytest in the server venv. The five-row `example.jsonl`, `example_metrics.json`, and `example_rollouts.jsonl` checks run only when `+should_validate_data=true`. Pull-request CI always sets that flag. Overlay-only changes under `benchmarks/**` skip the server unit-test suite. See [New Environment](/contribute/environments/new-environment#4-example-data-and-rollouts).
+</Note>
 
 ### `gym env publish`
 

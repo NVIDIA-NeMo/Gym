@@ -1,27 +1,326 @@
 ---
 title: "Add a benchmark"
-description: ""
-position: 3
+description: "Reuse an existing scorer: copy an overlay, prepare data, and run gym eval."
+position: 2
 ---
-The most important principle when adding benchmarks into NeMo Gym is ensuring the fidelity of the benchmark. As a result, there are additional steps and best practices to adding a benchmark that are required on top of adding just a training environment (although the steps below are still suggested for training environments).
+import { NavButton } from "../../../../../components/NavButton";
 
-## Reward profiling
+<Info>
+**Goal:** Add a folder under `benchmarks/<name>/` that reuses an existing scorer. You will not write scoring code (`app.py`).
 
-In order to ensure the rough software correctness of your benchmark, baseline against publicly available models including a mixture of open-source and closed-source models. This process is also known as reward profiling.
+A **scorer** (resources server) grades the model's answer. An **overlay** is a small config folder that points at that scorer and supplies your dataset. A **rollout** is one model run on one task, with a numeric score (`reward`).
 
-1. Typically any open-source model, even smaller ones such as [Qwen 3 30B A3B Instruct 2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507), will suffice as long as the resulting performance of running that model on the benchmark is in a meaningful range such as 30% or higher. Otherwise you should run a larger model that attains a meaningful score. If no open model is able to achieve meaningful performance, this may indicate that you have a software bug or indeed your benchmark is quite difficult.  
-2. For closed-source models, as of February 11, 2026, it is typically fine to run just OpenAI models (rather than Anthropic or Gemini models) for a variety of reasons.  
-   1. Typically OpenAI models are the most affordable and have good robustness over various benchmarks, while the same cannot be currently said for Anthropic or Gemini models.  
-   2. These closed-source models should reach at least the same scores as open-source models, if not significantly better. It is rare that open-source models outperform closed-source models. If this is not the case, your benchmark may have a software bug.
+**Time:** About 30–60 minutes after Gym is installed, plus model API time for a two-task smoke run.
 
-As of February 11, 2026, an example suite of models to reward profile on your benchmark is: your policy model of interest, GPT 5 Nano, GPT 5, [Qwen 3 30B A3B Instruct 2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507), and [Qwen 3 30B A3B Thinking2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Thinking-2507). If the 30B-level Qwen models are not strong enough, consider [Qwen 3 235B A22B Instruct 2507](https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507) and [Qwen 3 235B A22B Thinking 2507](https://huggingface.co/Qwen/Qwen3-235B-A22B-Thinking-2507). If those models are also not enough, consider models such as [Kimi K2 Instruct](https://huggingface.co/moonshotai/Kimi-K2-Instruct) or [GLM-4.7](https://huggingface.co/zai-org/GLM-4.7). 
+**In this guide you will:**
 
-## Best practices
+1. Confirm Gym already has a scorer for this task
+2. Copy a working overlay and rename it
+3. Write `prepare.py` and the dataset JSONL
+4. Run `gym eval prepare` and `gym eval run`
+5. Open a pull request
+6. Optionally measure score stability before maintainers mark it verified
 
-After running on a variety of models, you should do a quick analysis of some of each model's failure cases. It is critical to look at the actual results and rollouts produced by your benchmark because it will help catch many software bugs and issues that may lead to unexpectedly low or high scores.
+Need new scoring code instead? Go to [New Environment](/contribute/environments/new-environment).
+</Info>
 
-In order to ensure infra robustness, also run your benchmark on a mixture of instruct and thinking models. We want to make our benchmark code model-agnostic, and leave the model-specific logic to things like Responses API Model servers in Gym. It should be as simple as tweaking the config of the model server you are using to switch between instruct and thinking models and achieve reasonable and expected scores for both types.
+<NavButton href="/contribute/environments/onboarding-decision-tree" label="Onboarding decision tree" direction="back" />
 
-For integrating existing benchmarks into Gym, you must first use the original repository to reproduce the publicly reported numbers first and achieve reproduction success there. In case we run into reproduction issues down the line, this helps decouple the possible causes of our issues. Then, you can integrate the existing benchmark into Gym and rerun against those same models and reproduce the same scores again.
+<Tip>
+The same YAML pattern (`config_paths` + `_inherit_from`) is how GSM8K, AIME, and GPQA ship. See [How Benchmarks Relate to Environments](/evaluation/benchmarks).
+</Tip>
 
-Once you have a stable setup to run your benchmark, run it a few times on the highest scoring open source model to understand the variance. We want to increase the number of repeats of the benchmark (that is, average @ k, where k is the number of repeats) so that the variance is less than 1%.
+**Before you start**
+
+1. [Development setup](/contribute/development-setup): `uv sync --extra dev` and `pre-commit install`.
+2. [Quickstart](/get-started/quickstart): create gitignored `env.yaml` in the repo root with `policy_base_url`, `policy_api_key`, and `policy_model_name`.
+3. Run every command from the repository root (the directory that contains `pyproject.toml`).
+
+---
+
+## 1. Confirm you can reuse a scorer
+
+Search for a program that can grade this task. A bare `gym search "…"` searches environments, not scorers:
+
+```bash
+gym search resources-servers "math word problems"
+gym list resources-servers
+gym search benchmarks math
+```
+
+| Task | Copy this overlay | Scorer |
+| --- | --- | --- |
+| Math / short answer | [`benchmarks/gsm8k`](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/gsm8k) | `math_with_judge` |
+| Multiple choice | [`benchmarks/gpqa`](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/gpqa) | `mcqa` |
+| Unit-test code | [`benchmarks/livecodebench/v5_2408_2502`](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/livecodebench/v5_2408_2502) | `code_gen` |
+| Speech, instruction following, or SWE | Search the catalog | `asr_with_pc`, `instruction_following`, `swebench` |
+
+If none of those scorers can grade the task, stop and follow [New Environment](/contribute/environments/new-environment).
+
+<Warning>
+Most overlays use Gym's default one-turn agent (`simple_agent`). If the task needs a repo sandbox, GUI VM, search loop, or Harbor, pick that agent **before** you copy GSM8K — see [Complex benchmarks](#complex-benchmarks).
+</Warning>
+
+**Next:** copy the closest overlay in the table.
+
+---
+
+## 2. Copy the overlay
+
+`--benchmark <name>` is the name printed by `gym list benchmarks`. For `benchmarks/gsm8k/config.yaml` that name is `gsm8k`. Nested configs do **not** shorten: `gym list` prints `livecodebench/v5_2408_2502/config`. `--benchmark livecodebench/v5_2408_2502` also resolves (it looks up `…/v5_2408_2502/config.yaml`). Copy the folder `benchmarks/livecodebench/v5_2408_2502`.
+
+Copy a working example. Do not start from an empty folder.
+
+<Warning>
+Catalog benchmarks in this repository are YAML overlays. Do not run `gym env init --benchmark` for a PR here — that command writes a `manifest.yaml` layout that no shipped benchmark uses, and `--reuse-verifier` fails because shipped scorers do not export `VERIFIER_FIXTURE`.
+</Warning>
+
+```bash
+cp -r benchmarks/gsm8k benchmarks/my_bench
+```
+
+```text
+benchmarks/my_bench/
++-- __init__.py      # gsm8k has this; not required (prepare import uses the file path)
++-- config.yaml      # points at the existing scorer
++-- prepare.py       # writes the JSONL that jsonl_fpath points at
++-- README.md        # license (code vs data) and run commands
++-- data/            # generated JSONL (gitignored)
+|   +-- .gitignore   # gsm8k uses *benchmark.jsonl
+```
+
+Do not copy prompt YAML files. Reuse the shared ones in place. Math overlays use [`benchmarks/prompts/generic/math.yaml`](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/prompts/generic/math.yaml).
+
+Rename overlay identity in the copied folder only (YAML block names, `resources_server.name`, dataset `name` / `jsonl_fpath` / `prepare_script`, `OUTPUT_FPATH`, README). Leave `config_paths` and `_inherit_from` pointing at the scorer you copied.
+
+Do **not** rewrite tokens that point outside the folder: shared `prompt_config` paths under `benchmarks/prompts/`, sibling imports such as `from benchmarks.livecodebench.prepare_utils import`, or HuggingFace / URL source ids in `prepare.py` (for example `Idavidrein/gpqa`). Keep scorer overrides that came with the copy (`grading_mode`, `allowed_agents`).
+
+Do not add `app.py` or copy `verify()`. Do not paste a math `config.yaml` over a GPQA or LiveCodeBench copy.
+
+<Accordion title="What gym env init --benchmark actually does">
+The CLI can scaffold a manifest-backed benchmark. That path is implemented and tested in the library, but **the catalog has not migrated**: there are no `manifest.yaml` files under `benchmarks/` or `environments/`, and no production scorer exports `VERIFIER_FIXTURE`.
+
+```bash
+gym env init --benchmark my_benchmark --profile custom-gym-verifier
+gym env init --benchmark my_benchmark --profile custom-gym-verifier \
+  --reuse-verifier math_with_judge --reward-range 0 1 --higher-is-better
+```
+
+Without `--reuse-verifier`, init generates a **new** resources server plus a manifest — the wrong shape for “new dataset, same scorer.” With `--reuse-verifier math_with_judge` (or `mcqa`, `code_gen`), scaffold fails until that server exports `VERIFIER_FIXTURE`.
+
+`gym env validate NAME`, `gym env test NAME`, and `gym env publish NAME` (no `--benchmark` flag) also require a manifest. Overlay PRs use `gym env validate --benchmark NAME` instead. See [CLI: gym env init](/reference/cli-commands#gym-env-init).
+</Accordion>
+
+**Next:** edit `benchmarks/my_bench/config.yaml` and `prepare.py`.
+
+---
+
+## 3. Wire config, prepare, and data
+
+Open `benchmarks/my_bench/config.yaml` and set these fields:
+
+| Field | What to put |
+| --- | --- |
+| `config_paths` | Path to the existing scorer YAML |
+| `_inherit_from` | The scorer and agent to clone, so you do not start the shared parent instance |
+| `resources_server.name` | The **new** YAML block name (must match the inherited resources-server block) |
+| Agent `datasets` | JSONL path, prompt file, and `prepare.py` |
+
+```yaml
+# benchmarks/my_bench/config.yaml
+config_paths:
+  - resources_servers/math_with_judge/configs/math_with_judge.yaml
+
+my_bench_math_with_judge_resources_server:
+  _inherit_from: math_with_judge
+
+my_bench_math_with_judge_simple_agent:
+  _inherit_from: math_with_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: my_bench_math_with_judge_resources_server
+      datasets:
+      - name: my_bench
+        type: benchmark
+        jsonl_fpath: benchmarks/my_bench/data/my_bench_benchmark.jsonl
+        prompt_config: benchmarks/prompts/generic/math.yaml
+        prepare_script: benchmarks/my_bench/prepare.py
+        num_repeats: 1
+```
+
+`gym list benchmarks` will show `my_bench` once this file exists. `--agent` is the YAML block name ending in `_simple_agent`. `num_repeats` documents how many times each task is run; GSM8K itself omits it — set it when you care about variance.
+
+<Warning>
+`gym eval prepare` imports `prepare.py` and calls `prepare()`. The `Path` you return **must** equal `jsonl_fpath`. Keep that generated file out of git (`data/.gitignore`, usually `*benchmark.jsonl`).
+</Warning>
+
+### Dataset shape
+
+Each line of the JSONL is one task. Row shape follows the overlay you copied — do not invent a schema.
+
+When `prompt_config` is set, do **not** put chat messages in the file. Gym fills `responses_create_params` from the prompt at run time. You cannot use both a prompt file and pre-written messages — see [Prompt Config](/data/prompt-config). When `prompt_config` is missing or `null`, keep that overlay's baked `responses_create_params` / `verifier_metadata` shape.
+
+For `math_with_judge` each line needs at least:
+
+```json
+{"question": "Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?", "expected_answer": 72}
+```
+
+The math prompt inserts `{question}` and asks the model to put the answer in `\boxed{}`.
+
+### `prepare.py`
+
+```python
+from pathlib import Path
+
+OUTPUT = Path(__file__).parent / "data" / "my_bench_benchmark.jsonl"
+
+def prepare() -> Path:
+    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    # Fetch upstream data, write one JSON object per line to OUTPUT
+    return OUTPUT
+```
+
+Copy field names from GSM8K's [`prepare.py`](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/gsm8k/prepare.py) only if you are on `math_with_judge`. Other scorers use different keys.
+
+<Accordion title="Multiple choice, code, and other scorers">
+Copy the overlay that already uses your scorer, then match **that** `prepare.py` and the server README — not GSM8K.
+
+| Scorer | Copy | Row fields (with `prompt_config`) |
+| --- | --- | --- |
+| `mcqa` | [`benchmarks/gpqa`](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/gpqa) | `question`, `problem` (question + options text), `options` (`[{"A": "..."}]`), `expected_answer` (letter). Prompt placeholder is `{problem}`. |
+| `code_gen` | [`benchmarks/livecodebench/v5_2408_2502`](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/livecodebench/v5_2408_2502) | Follow that prepare script and `resources_servers/code_gen/README.md`. |
+| Other | `gym search resources-servers` / server README | Whatever `verify()` reads (`verifier_metadata`, expected strings, and so on). |
+
+GPQA also sets `grading_mode` on the inherited scorer so extraction matches the prompt (`Answer: A/B/C/D`). Keep that kind of override when you copy.
+</Accordion>
+
+**Next:** validate the YAML and run two tasks.
+
+---
+
+## 4. Prepare and run
+
+Check the config, write the JSONL, then run two tasks. `--output` is required. `--split benchmark` selects the dataset with `type: benchmark`. `--limit` is tasks; copied `num_repeats` still applies.
+
+```bash
+gym env validate --benchmark my_bench
+gym eval prepare --benchmark my_bench
+gym eval run --benchmark my_bench \
+  --model-type openai_model \
+  --split benchmark \
+  --output results/my_bench_rollouts.jsonl \
+  --limit 2
+```
+
+If servers are already running, pass **agent, input, prompt, and output**. Prepared overlay rows do not include those fields:
+
+```bash
+gym env start --benchmark my_bench --model-type openai_model
+gym eval run --no-serve \
+  --agent my_bench_math_with_judge_simple_agent \
+  --input benchmarks/my_bench/data/my_bench_benchmark.jsonl \
+  --prompt-config benchmarks/prompts/generic/math.yaml \
+  --output results/my_bench_rollouts.jsonl \
+  --limit 2
+```
+
+<Tip>
+**Success:** the terminal prints `Key metrics for …` with `mean/reward`, and writes `results/my_bench_rollouts.jsonl` plus `results/my_bench_rollouts_aggregate_metrics.json`. Then drop `--limit` to run the full dataset.
+</Tip>
+
+`--agent` is the YAML block name (`my_bench_…_simple_agent`). Put the **`--benchmark`** run commands in `README.md`. Do not copy the source overlay's `--no-serve` snippet unless you also pass `--agent`, `--input`, and `--prompt-config` when the dataset uses a prompt file.
+
+<Note>
+If your PR only adds files under `benchmarks/`, you do not need `example_rollouts.jsonl` or `gym env test --resources-server`. CI still runs copyright and pre-commit checks. New scorers do need five example tasks — see [New Environment](/contribute/environments/new-environment#4-example-data-and-rollouts) and [CONTRIBUTING.md](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md).
+</Note>
+
+**Next:** open a pull request.
+
+---
+
+## 5. Open a PR
+
+- [ ] `prepare.py` writes the JSONL (`returned Path` matches `jsonl_fpath`)
+- [ ] `gym eval prepare --benchmark <name>` and a short `gym eval run` succeed
+- [ ] `README.md` lists the **code** license (Apache-2.0) and the **data** license plus upstream URL
+- [ ] SPDX copyright header on new source files (`__init__.py`, `prepare.py`)
+- [ ] `git commit -s` (Developer Certificate of Origin — required; cryptographic `-S` signing is optional)
+- [ ] `pre-commit run --files benchmarks/<name>/**/*`
+- [ ] `num_repeats` set in `config.yaml` (or explained in the README if you omit it)
+- [ ] Leave `verified: false` — maintainers flip it after score checks
+
+If you wrap a public benchmark, reproduce the upstream numbers with the original repo first, then again after the Gym overlay.
+
+README stub:
+
+```markdown
+## Data
+- Source: <URL>
+- License: <SPDX or name + link>
+
+## Code
+Apache-2.0 (NeMo Gym contribution)
+```
+
+If you copy upstream source into this repo, add an `ATTRIBUTIONS.md` entry. See [CONTRIBUTING.md](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md).
+
+**Next:** you can open the PR now. Step 6 is optional until maintainers mark the benchmark verified.
+
+---
+
+## 6. Reward profiling
+
+Do this before maintainers set `verified: true`. You do not need it to open the first PR.
+
+Open the rollout JSONL and inspect failures. Run at least one instruct model and one thinking model. Increase `num_repeats` until score variance is under 1%. Commands: [gym eval profile](/reference/cli-commands#gym-eval-profile). How-to: [reward-profiling skill](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/nemo-gym-reward-profiling).
+
+<Accordion title="Suggested model suite">
+Open-source models should score in a meaningful range (about 30% or higher). Closed-source models should match or beat that. Include your policy model, one small closed model, one larger closed model, and a matched instruct / thinking pair (for example [Qwen 3 30B A3B Instruct 2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507) and [Qwen 3 30B A3B Thinking 2507](https://huggingface.co/Qwen/Qwen3-30B-A3B-Thinking-2507)). Scale up if 30B is too weak to separate signal from noise.
+</Accordion>
+
+---
+
+<Accordion title="Need a new scorer instead?">
+Create a resources server, then come back and add this overlay pointing at it:
+
+```bash
+gym env init --resources-server my_scorer
+```
+
+Follow [New Environment](/contribute/environments/new-environment) for `verify()`, tests, and the five example tasks.
+</Accordion>
+
+## Complex benchmarks
+
+When you compare **models**, keep the agent the same. Default: inherit `simple_agent`. In the agent YAML, `resources_server.name` must match the inherited **block name** (for example `my_bench_math_with_judge_resources_server`).
+
+<Accordion title="GUI, sandbox, search, and other agents">
+
+| Need | Reuse | Example |
+| --- | --- | --- |
+| Math / short answer | `math_with_judge` | `benchmarks/gsm8k`, `benchmarks/aime24` |
+| Multiple choice | `mcqa` | `benchmarks/gpqa`, `benchmarks/mmlu` |
+| Unit-test code exec | `code_gen` | `benchmarks/livecodebench` |
+| Repo patch in a sandbox | `swebench` plus Mini-SWE or OpenCode | `benchmarks/swebench/verified/opencode.yaml` |
+| Desktop GUI / VM | OSWorld agent, not `simple_agent` | `benchmarks/osworld` |
+| GUI pointing | `gui_coordinate` | `resources_servers/gui_coordinate` |
+| Search / browse | Tavily or Exa | `benchmarks/browsecomp`, `tavily_search` |
+| Stateful tool user-sim | `toolsandbox` plus `toolsandbox_agent` | `benchmarks/toolsandbox` |
+| Terminal Bench (Harbor) | `harbor_agent` — not under `benchmarks/` | `responses_api_agents/harbor_agent` |
+
+If verification is still "run the tests in the repo," a new coding agent is usually a new **agent** server, not a new scorer. See [Integrate external libraries](/environment-tutorials/integrate-external-environments).
+</Accordion>
+
+## Related Topics
+
+- [Onboarding decision tree](/contribute/environments/onboarding-decision-tree)
+- [New Environment](/contribute/environments/new-environment)
+- [How Benchmarks Relate to Environments](/evaluation/benchmarks)
+- [Prompt Config](/data/prompt-config)
+- [Prepare Data](/data)
+- [CONTRIBUTING.md](https://github.com/NVIDIA-NeMo/Gym/blob/main/CONTRIBUTING.md)
+- [FAQ](/reference/faq#how-do-i-choose-an-onboarding-path)
+
+<NavButton href="/contribute/environments/new-environment" label="Need a new scorer? New Environment" direction="next" />
