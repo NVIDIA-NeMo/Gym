@@ -56,6 +56,20 @@ from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status, request
 from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 
+# Exa /search "type" values. The deep variants run Exa's multi-step research path:
+# they also return a per-result `summary` and, when an outputSchema is supplied, a
+# top-level `output.content` synthesis — so the deep request asks for both.
+# Default stays "auto". On an internal eval of a reasoning model, deep scored
+# 77.8% vs a 74.3% auto reference — NOT significant, 9 samples of 397 — at +36.7% search
+# spend, because $0.012/deep vs $0.007/auto is a 71% premium against only 21% fewer calls.
+_EXA_DEEP_TYPES = ("deep-lite", "deep", "deep-reasoning")
+_EXA_SEARCH_TYPES = ("instant", "fast", "auto") + _EXA_DEEP_TYPES
+
+# Fraction of a query's render budget the [Deep Answer] block may take. Without a
+# cap a long synthesis crowds out the per-URL entries the model needs to browse.
+_EXA_DEEP_ANSWER_MAX_FRACTION = 0.5
+
+
 class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     # Search/browse backend. "tavily" (default) or "exa". The chosen provider's
     # key must be present (validated below). exclude_domains are honored by both.
@@ -101,6 +115,11 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     # alone. Full text is 2.9-12.9x the highlight text and is genuine extra page content,
     # not the same snippet with markup left in.
     exa_search_writes_pages: bool = False
+    # Exa /search "type". "auto" is the reference default. The deep variants run
+    # Exa's multi-step research + synthesis path; see _EXA_DEEP_TYPES for what that
+    # changes in the request/response. Validated at config load so a typo dies at
+    # startup rather than 400-ing every live query mid-run.
+    exa_search_type: str = "auto"
 
     @model_validator(mode="after")
     def _check_provider_key(self) -> "TavilySearchResourcesServerConfig":
@@ -110,6 +129,10 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
             raise ValueError("exa_api_key is required when search_provider='exa'")
         if self.search_provider not in ("tavily", "exa"):
             raise ValueError(f"search_provider must be 'tavily' or 'exa', got {self.search_provider!r}")
+        if self.exa_search_type not in _EXA_SEARCH_TYPES:
+            raise ValueError(
+                f"exa_search_type must be one of {sorted(_EXA_SEARCH_TYPES)}, got {self.exa_search_type!r}"
+            )
         return self
 
 
@@ -418,6 +441,7 @@ class ExaAIOHTTPClient(BaseModel):
         num_results: int,
         exclude_domains: Optional[List[str]] = None,
         include_text: bool = False,
+        search_type: str = "auto",
     ) -> Dict[str, Any]:
         contents: Dict[str, Any] = {"highlights": True}
         if include_text:
@@ -429,9 +453,13 @@ class ExaAIOHTTPClient(BaseModel):
         body: Dict[str, Any] = {
             "query": query,
             "numResults": num_results,
-            "type": "auto",
+            "type": search_type,
             "contents": contents,
         }
+        if search_type in _EXA_DEEP_TYPES:
+            # Deep search only pays off if we ask for what it synthesizes.
+            contents["summary"] = True
+            body["outputSchema"] = {"type": "text"}
         if exclude_domains:
             body["excludeDomains"] = list(exclude_domains)
         return await self._post("/search", body)
@@ -1032,6 +1060,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 num_results=self.config.max_results,
                 exclude_domains=self._exclude_domains,
                 include_text=write_pages,
+                search_type=self.config.exa_search_type,
             )
         except Exception as e:
             self._record_call(metrics, "search", "exa", "error", call_start)
@@ -1041,6 +1070,22 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
         returned = 0
+
+        # Deep-search synthesis (outputSchema), when present. Rendered FIRST — it is the
+        # highest-value part — but capped so the per-URL entries still fit; the model
+        # needs those URLs for browse/bash follow-up. Deliberately NOT counted in the
+        # yield counters below: it is a synthesis, not a result.
+        answer = (results.get("output") or {}).get("content")
+        if answer is not None and not isinstance(answer, str):
+            answer = json.dumps(answer, ensure_ascii=False)
+        if answer:
+            cap = int(max_length * _EXA_DEEP_ANSWER_MAX_FRACTION)
+            if len(answer) > cap:
+                answer = f"{answer[:cap]}\n[...deep answer truncated...]"
+            entry = f"[Deep Answer]: {answer}\n"
+            if running_len + len(entry) <= max_length:
+                blocks.append(entry)
+                running_len += len(entry)
         for ri, result in enumerate(offered, start=1):
             title = result.get("title", "") or ""
             url = result.get("url", "") or ""
@@ -1055,6 +1100,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                     saved = page_writer.write_search_result(query, ri, title, url, text)
                     saved_line = f"[Saved to]: {saved} ({len(text)} bytes)\n"
             entry = f"[Title]: {title}\n[URL]: {url}\n[Snippet]: {snippet}\n{saved_line}"
+            summary = result.get("summary") or ""
+            if summary:
+                entry += f"[Summary]: {summary}\n"
             if running_len + len(entry) > max_length:
                 break
             blocks.append(entry)
