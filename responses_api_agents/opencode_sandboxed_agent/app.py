@@ -712,10 +712,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && {install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
         && echo "Installed OpenCode" \
-        && OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} \
-            OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 \
-            {xdg_home_str} \
-            OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS=600000 \
+        && OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
             opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
         && echo "OpenCode run finished"
         """
