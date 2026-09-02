@@ -14,6 +14,7 @@ import base64
 import json
 import logging
 import os
+import time
 from typing import Any
 
 from fastapi import Request, Response
@@ -52,6 +53,9 @@ _CC_ROLLOUT_ID_COOKIE = "_nemo_gym_osworld_cc_rollout_id"
 
 class NemotronOSWorldCCAgentConfig(NemotronOSWorldAgentConfig):
     visual_history: VisualHistoryConfig = Field(default_factory=VisualHistoryConfig)
+    rollout_timeout_s: float = Field(default=1200.0, gt=0)
+    action_timeout_s: float = Field(default=60.0, gt=0)
+    llm_timeout_s: float = Field(default=900.0, gt=0)
 
 
 class NemotronOSWorldCCRunRequest(BaseRunRequest):
@@ -212,6 +216,7 @@ class NemotronOSWorldCCAgent(NemotronOSWorldAgent):
         usage = None
         last_response: NeMoGymResponse | None = None
         context_session: ContextCompactionSession | None = None
+        rollout_started_at = time.monotonic()
 
         debug_dir = None
         if self.config.debug_trajectory_dir:
@@ -255,14 +260,40 @@ class NemotronOSWorldCCAgent(NemotronOSWorldAgent):
 
         terminal = False
         for step_idx in range(self.config.max_steps):
-            shot_response = await self.server_client.post(
-                server_name=resources_name,
-                url_path="/screenshot",
-                cookies=resources_cookies,
-            )
-            await raise_for_status(shot_response)
-            resources_cookies = shot_response.cookies
-            shot_payload = await get_response_json(shot_response)
+            elapsed_s = time.monotonic() - rollout_started_at
+            if elapsed_s >= self.config.rollout_timeout_s:
+                logger.warning(
+                    "OSWorld rollout exceeded %.1fs at step %d; marking rollout as FAIL",
+                    self.config.rollout_timeout_s,
+                    step_idx + 1,
+                )
+                action_history.append("FAIL")
+                terminal = True
+                break
+            try:
+                shot_response = await self.server_client.post(
+                    server_name=resources_name,
+                    url_path="/screenshot",
+                    cookies=resources_cookies,
+                )
+                await raise_for_status(shot_response)
+                resources_cookies = shot_response.cookies
+                shot_payload = await get_response_json(shot_response)
+            except Exception:
+                if last_response is None:
+                    raise
+                # A guest can disappear or return a transient 502 after several
+                # successful actions. This is one rollout's infrastructure
+                # outcome; preserve its completed trace and score it as FAIL
+                # instead of aborting every other rollout in the Eval shard.
+                logger.warning(
+                    "OSWorld screenshot failed at step %d; marking rollout as FAIL",
+                    step_idx + 1,
+                    exc_info=True,
+                )
+                action_history.append("FAIL")
+                terminal = True
+                break
             image_base64 = shot_payload.get("image_base64")
             if not isinstance(image_base64, str) or not image_base64:
                 raise RuntimeError("OSWorld screenshot response has no image_base64")
@@ -298,11 +329,28 @@ class NemotronOSWorldCCAgent(NemotronOSWorldAgent):
             legacy_request_input = [*agent_input, *transcript]
             prepared_call = None
             if context_session is not None:
-                prepared_call = await context_session.prepare_model_call(
-                    legacy_request_input=legacy_request_input,
-                    turn_id=step_idx + 1,
-                    measure_context=measure_context,
-                )
+                try:
+                    prepared_call = await context_session.prepare_model_call(
+                        legacy_request_input=legacy_request_input,
+                        turn_id=step_idx + 1,
+                        measure_context=measure_context,
+                    )
+                except RuntimeError as exc:
+                    if not str(exc).startswith(
+                        "Context guard rejected model call at complete action boundary:"
+                    ):
+                        raise
+                    # Exhausting the context budget is a policy-trajectory
+                    # outcome, not an infrastructure failure. Preserve the
+                    # completed exact trace and fail only this rollout instead
+                    # of returning HTTP 500 and aborting the entire eval batch.
+                    logger.warning(
+                        "Context budget exhausted at step %d; marking rollout as FAIL",
+                        step_idx + 1,
+                    )
+                    action_history.append("FAIL")
+                    terminal = True
+                    break
                 request_input = list(prepared_call.request_input)
                 required_prefix_token_ids = (
                     list(prepared_call.required_prefix_token_ids)
@@ -323,6 +371,7 @@ class NemotronOSWorldCCAgent(NemotronOSWorldAgent):
                 url_path="/v1/responses",
                 json=model_body,
                 cookies=model_cookies,
+                timeout=self.config.llm_timeout_s,
             )
             await raise_for_status(model_http_response)
             model_payload = await get_response_json(model_http_response)
@@ -430,6 +479,7 @@ class NemotronOSWorldCCAgent(NemotronOSWorldAgent):
                         "shell": False,
                     },
                     cookies=resources_cookies,
+                    timeout=self.config.action_timeout_s,
                 )
                 resources_cookies = execute_response.cookies
                 await asyncio.sleep(self.config.sleep_after_execution_s)

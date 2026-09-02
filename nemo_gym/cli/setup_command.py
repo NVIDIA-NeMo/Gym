@@ -135,6 +135,15 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     if should_skip_venv_setup:
         env_setup_cmd = f"source {venv_activate_fpath}"
     else:
+        # Editable component dependencies can invoke setuptools in the same
+        # shared source tree. Concurrent component/job startup otherwise races
+        # while removing that tree's build/ directory (Errno 39). Serialize
+        # setup across the shared Gym checkout; the descriptor is released
+        # automatically if any setup command exits early.
+        setup_lock_fpath = PARENT_DIR / ".nemo_gym_component_setup.lock"
+        serialize_shared_setup = dir_path.resolve().is_relative_to(
+            PARENT_DIR.resolve()
+        )
         has_pyproject_toml = (dir_path / "pyproject.toml").exists()
         has_requirements_txt = (dir_path / "requirements.txt").exists()
         if has_pyproject_toml and has_requirements_txt:
@@ -173,7 +182,16 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
 
         prefix_cmd = f" > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
-        env_setup_cmd = f"{uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && {install_cmd}{prefix_cmd}"
+        lock_prefix = (
+            f"exec 9>{setup_lock_fpath} && flock 9 && "
+            if serialize_shared_setup
+            else ""
+        )
+        env_setup_cmd = (
+            f"{lock_prefix}{uv_venv_cmd}{prefix_cmd}"
+            f" && source {venv_activate_fpath}"
+            f" && {install_cmd}{prefix_cmd}"
+        )
 
     # OSWorld imports EasyOCR while loading its evaluator registry. Some
     # headless NeMo-RL containers do not provide libGL.so.1, so the regular
@@ -184,11 +202,15 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
         env_setup_cmd += (
             f" && (uv pip uninstall --python {venv_python_fpath}"
             " opencv-python opencv-contrib-python || true)"
-            f" && uv pip install --python {venv_python_fpath} --reinstall opencv-python-headless"
+            f" && uv pip install --no-config --python {venv_python_fpath}"
+            " --reinstall 'opencv-python-headless>=4.12.0.88'"
         )
 
     if bool(skip_venv_if_present) and not should_skip_venv_setup:
         env_setup_cmd += f" && touch {venv_ready_fpath}"
+
+    if not should_skip_venv_setup and serialize_shared_setup:
+        env_setup_cmd += " && flock -u 9"
 
     return f"cd {dir_path} && {env_setup_cmd}"
 
