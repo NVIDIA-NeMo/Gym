@@ -136,6 +136,12 @@ left a `CHANGES_REQUESTED` review on PR #2929 that independently confirms the sh
 "training-eligible in principle" caveat: as submitted, the in-tree agent is not actually training-eligible
 in practice, for reasons that are fixable but currently real.
 
+All four have since been fixed (`b08abefb2`, `ec3390aa8`, `e2aaa04aa`), along with the structural split
+below; they're recorded here as-found because the *shape* of them is the durable finding — every one
+failed silently, and none would have been caught by a passing test suite. They are now encoded as the
+core of the `add-agent-server` agent skill (`.agents/skills/add-agent-server/`), so the next agent
+server doesn't rediscover them.
+
 Four base-PR-blocking findings, all pointing at `GymResponsesChatModel._agenerate()`
 (`responses_api_agents/langchain_deepagents_agent/app.py`):
 
@@ -157,10 +163,10 @@ Four base-PR-blocking findings, all pointing at `GymResponsesChatModel._agenerat
   `final_state["messages"]` is discarded. This is a permanent, unrecoverable loss of the agent trace for
   every rollout, independent of whether structured `TrajectoryRecord` support exists yet.
 
-cwing also asked for a structural split — `app.py` currently mixes endpoint orchestration, the LangChain
-model bridge, message conversion, and request-scoped transport state in one file; the ask is to keep only
+cwing also asked for a structural split — `app.py` mixed endpoint orchestration, the LangChain model
+bridge, message conversion, and request-scoped transport state in one file; the ask was to keep only
 `DeepAgentsAgent` there and move `GymResponsesChatModel` plus the conversion functions into a separate
-package-local module.
+package-local module. Done in `b18ab90fa` (`responses_langchain_bridge.py`).
 
 The one piece of this doc's "what it buys you" list that cwing explicitly *confirmed* is fine to defer:
 full `TrajectoryRecord` support (model response IDs/usage, `TrajectoryTurn`, `TrajectoryToolCall`) can ship
@@ -170,22 +176,24 @@ observability — they're about not silently corrupting/dropping data that alrea
 not about adding new structured capture — which is exactly why cwing treats them as base-PR-required
 rather than stackable alongside `TrajectoryRecord`.
 
-Net effect on this doc's framing: "on-policy, training-eligible in principle" undersells the gap. The
-architecture doesn't block training eligibility, but the current implementation actively breaks it
-(dropped capture path, dropped token metadata) in a way that fails silently rather than loudly — worse than
-simply "not implemented yet," since a training run against this agent today would proceed without any
-error and produce data with no token IDs.
+Net effect on this doc's framing: "on-policy, training-eligible in principle" undersold the gap as
+originally submitted. The architecture never blocked training eligibility, but the implementation
+actively broke it (dropped capture path, dropped token metadata) in a way that failed silently rather
+than loudly — worse than simply "not implemented yet," since a training run against that version would
+have proceeded without any error and produced data with no token IDs. That's the generalizable lesson,
+and it survives the fix: for an agent server, "it runs and scores rewards" is not evidence of
+correctness, because every one of these defects is invisible from the outside.
 
 ## What it buys you
 
 - **On-policy, training-eligible in principle** — the whole reason `remote_agent` is explicitly documented
-  as eval-only. See "Confirmed by real review" above: currently true architecturally, not yet true in this
-  implementation.
+  as eval-only. See "Confirmed by real review" above: true architecturally all along, and true of the
+  implementation as of `e2aaa04aa`.
 - **Trajectory/tool-call observability is possible in principle**, unlike `remote_agent`: its own
   `service.py` docstring calls out that its bare-minimum response means deepagents' internal tool calls are
-  invisible to `gym eval profile` entirely, by design. The in-tree agent doesn't currently capture that
-  detail either (see above), but nothing about its architecture rules it out — reinstating the stripped
-  event-streaming path is the only work required.
+  invisible to `gym eval profile` entirely, by design. The in-tree agent now preserves the raw
+  function-call/tool-result sequence in its Responses output (`e2aaa04aa`); structured `TrajectoryRecord`
+  capture remains the stacked follow-up cwing signed off on deferring.
 - **Reachable from inside Gym's own network**, without the "how does an externally-hosted `remote_agent`
   process reach `model_server`" problem that prompted this whole comparison in the first place.
 
