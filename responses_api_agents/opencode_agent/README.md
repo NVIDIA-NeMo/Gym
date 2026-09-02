@@ -64,6 +64,17 @@ Alternatively, set `model_server` to a Gym model server and set `model` to its s
 agent creates the OpenCode provider entry automatically. Without `model_server`, the existing URL,
 key, and provider configuration are unchanged.
 
+## Context overflow
+
+OpenCode handles context limits through the standard OpenAI-compatible error contract. When the
+model endpoint rejects an overlong request with HTTP 400 and a context-length error body, OpenCode
+records an overflow compaction, summarizes the retained conversation, and continues the session.
+The model server must preserve that HTTP error; returning an empty HTTP 200 completion prevents
+OpenCode from starting its recovery flow.
+
+`tests/test_context_overflow.py` exercises this path with the pinned OpenCode CLI and a local
+OpenAI-compatible skeleton endpoint. The test does not download or run a model.
+
 ## Config fields
 
 - `concurrency`: max simultaneous `run()` calls

@@ -665,12 +665,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                             ObservationGap(code="model_call_ownership_unavailable"),
                         ],
                     )
-            run_status = "incomplete" if timed_out else "completed" if proc.returncode == 0 else "failed"
+            fallback_run_status = "incomplete" if timed_out else "completed" if proc.returncode == 0 else "failed"
             for invocation in observations.records:
                 if not isinstance(invocation, AgentInvocation):
                     continue
                 if invocation.parent_invocation_id is None:
-                    invocation.status = run_status
+                    # OpenCode can recover from a provider 400, persist a completed continuation,
+                    # and still exit nonzero because the initial error was printed. Prefer the
+                    # artifact's terminal status; use the process only when it is unavailable.
+                    if timed_out or invocation.status == "unknown":
+                        invocation.status = fallback_run_status
             if timed_out:
                 observations.gaps.append(ObservationGap(code="agent_run_timeout"))
             return output_items, usage, self.config.model, observations
