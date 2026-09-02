@@ -548,7 +548,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         return {
             "model": "nemo_gym/dummy_model",
             "$schema": "https://opencode.ai/config.json",
-            "agent": {"title": {"disable": True}},
             "provider": {
                 "nemo_gym": {
                     # TODO @bxyu-nvidia: We should use @ai-sdk/openai here but there is some /v1/responses streaming error.

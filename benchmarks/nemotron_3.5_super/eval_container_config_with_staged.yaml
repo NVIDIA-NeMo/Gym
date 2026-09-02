@@ -32,9 +32,9 @@ opencode_sandboxed_agent_deepswe:
           prepare_script: benchmarks/deepswe/prepare.py
           num_repeats: 5
 
-opencode_sandboxed_agent_terminal_bench_2_1:
+terminus_2_sandboxed_agent_terminal_bench_2_1:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    terminus_2_sandboxed_agent:
       datasets:
         - name: terminal_bench_2_1
           type: benchmark

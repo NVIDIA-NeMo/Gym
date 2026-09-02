@@ -1277,12 +1277,29 @@ def validate() -> None:
     if unsupported:
         raise ConfigError("The following options require a workload name or --manifest: " + ", ".join(unsupported))
 
-    global_config_dict = get_global_config_dict(
-        global_config_dict_parser_config=GlobalConfigDictParserConfig(
-            initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-        ),
-    )
+    # Resolve what a run resolves. Falling back to the stand-ins keeps a config that needs no model
+    # checkable, but only an error the stand-ins account for is downgraded: any other still propagates.
+    try:
+        global_config_dict = get_global_config_dict()
+        incomplete_config_error = None
+    except ConfigError as error:
+        if command_dict.get("strict", False):
+            raise
+        incomplete_config_error = error
+        global_config_dict = get_global_config_dict(
+            global_config_dict_parser_config=GlobalConfigDictParserConfig(
+                initial_global_config_dict=GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            ),
+        )
+
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+    if incomplete_config_error is not None:
+        rich.print(
+            "[yellow]Warning:[/yellow] this config does not define model server configuration "
+            "and will not start as-is. Re-run with [bold]--strict[/bold] to fail on this "
+            f"instead of warning.\n{incomplete_config_error}",
+            file=sys.stderr,
+        )
     rich.print("[green]✓[/green] Config is valid.")
 
 

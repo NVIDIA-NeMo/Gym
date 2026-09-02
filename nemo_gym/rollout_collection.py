@@ -90,7 +90,6 @@ _failures_path_for = failures_path_for  # Backwards-compatible alias
 from nemo_gym.server_utils import (
     ServerClient,
     get_response_json,
-    is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
 )
 from nemo_gym.server_utils import (
@@ -1890,13 +1889,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     result[_NG_ROLLOUT_LATENCY_MS_KEY] = (time() - started_at) * 1000
                     return row, result
                 except Exception as e:
-                    if is_global_aiohttp_client_request_debug_enabled():
-                        print(
-                            "[rollout_collection] /run failed "
-                            f"status={getattr(res, 'status', None)} "
-                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                            flush=True,
-                        )
+                    print(
+                        "[rollout_collection] /run failed "
+                        f"status={getattr(res, 'status', None)} "
+                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                        flush=True,
+                    )
                     if not route_failures_to_sidecar or not isinstance(e, _RUN_FAILURE_ERRORS):
                         raise
                     if res is not None:

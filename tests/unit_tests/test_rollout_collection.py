@@ -749,12 +749,10 @@ class TestRolloutCollection:
         assert NG_PERF_KEY not in result
         assert "_ng_rollout_latency_ms" not in result
 
-    @pytest.mark.parametrize("request_debug_enabled", [True, False])
-    async def test_run_examples_logs_failed_run_when_request_debug_enabled(
+    async def test_run_examples_logs_failed_run(
         self,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
-        request_debug_enabled: bool,
     ) -> None:
         row = {
             AGENT_REF_KEY_NAME: {"name": "my_agent"},
@@ -778,27 +776,20 @@ class TestRolloutCollection:
             raise RuntimeError("boom")
 
         monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", fail_raise_for_status)
-        monkeypatch.setattr(
-            nemo_gym.rollout_collection,
-            "is_global_aiohttp_client_request_debug_enabled",
-            lambda: request_debug_enabled,
-        )
 
         with pytest.raises(RuntimeError, match="boom"):
             await next(RolloutCollectionHelper().run_examples([row]))
 
         captured = capsys.readouterr()
-        if request_debug_enabled:
-            assert "[rollout_collection] /run failed status=500" in captured.out
-            assert '"_ng_task_index": 7' in captured.out
-            assert '"_ng_rollout_index": 0' in captured.out
-            assert '"agent_name": "my_agent"' in captured.out
-            assert "env_specific_metadata" not in captured.out
-            assert "do not log this either" not in captured.out
-            assert "responses_create_params" not in captured.out
-            assert "do not log this" not in captured.out
-        else:
-            assert "[rollout_collection] /run failed" not in captured.out
+        assert "[rollout_collection] /run failed status=500" in captured.out
+        assert '"_ng_task_index": 7' in captured.out
+        assert '"_ng_rollout_index": 0' in captured.out
+        assert '"agent_name": "my_agent"' in captured.out
+        assert "env_specific_metadata" not in captured.out
+        assert "do not log this either" not in captured.out
+        assert "responses_create_params" not in captured.out
+        assert "do not log this" not in captured.out
+        assert "[rollout_collection] /run failed" in captured.out
 
     async def test_run_examples_records_agent_http_failure_as_a_failure_row(
         self, monkeypatch: pytest.MonkeyPatch

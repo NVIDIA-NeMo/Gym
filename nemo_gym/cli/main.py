@@ -791,6 +791,7 @@ COMMANDS = {
             CATALOG_KIND,
             _value_flag("manifest", "manifest_path", "Manifest path to validate.", quote=True),
             _bool_flag("sync", "sync", "Synchronize composition mirrors after validation."),
+            _bool_flag("strict", "strict", "Fail instead of warning when model values are left undefined."),
             JSON,
             CONFIG,
             BENCHMARK,
