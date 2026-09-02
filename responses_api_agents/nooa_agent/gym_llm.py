@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 from nooa.unifiedllm import LLMResponse, Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel
@@ -91,7 +91,10 @@ def _tool_schema(tool: Tool) -> dict[str, Any]:
         "name": tool.name,
         "description": tool.description,
         "parameters": schema,
-        "strict": set(schema.get("required", [])) == set(schema.get("properties", {})),
+        "strict": (
+            schema.get("additionalProperties") is False
+            and set(schema.get("required", [])) == set(schema.get("properties", {}))
+        ),
     }
 
 
@@ -101,6 +104,14 @@ def _output_text(response: NeMoGymResponse) -> str:
         if isinstance(item, NeMoGymResponseOutputMessage):
             parts.extend(part.text for part in item.content if part.type == "output_text")
     return "\n".join(parts)
+
+
+def _finish_reason(response: NeMoGymResponse) -> Literal["stop", "length", "error"]:
+    if response.incomplete_details is None:
+        return "stop"
+    if response.incomplete_details.reason == "max_output_tokens":
+        return "length"
+    return "error"
 
 
 class GymResponsesLLM(UnifiedLLM):
@@ -222,7 +233,7 @@ class GymResponsesLLM(UnifiedLLM):
             raw_response=response,
             content=content,
             tool_calls=[],
-            finish_reason="length" if response.incomplete_details else "stop",
+            finish_reason=_finish_reason(response),
             assistant_message={"role": "assistant", "content": _output_text(response)},
             reasoning=json.dumps(reasoning) if reasoning else None,
             usage=usage,
