@@ -1,0 +1,53 @@
+enterpriseops_gym:
+  resources_servers:
+    enterpriseops_gym:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: EnterpriseOps-Gym enterprise tool-use benchmark with managed Apptainer MCP services + SQL/judge verifiers
+      value: Improve stateful multi-step enterprise planning and tool use
+
+      # Shared cache for the pinned EnterpriseOps source checkout, gym_dbs.zip, and
+      # digest-named Apptainer SIF images. Set to a shared HPC filesystem if needed.
+      cache_dir: ~/.cache/nemo_gym/enterpriseops_gym
+      # Required on ARM64 hosts: a directory of rebuilt <domain>-arm64.sif files.
+      native_sif_dir: ${oc.env:ENTERPRISEOPS_NATIVE_SIF_DIR,null}
+      service_start_timeout_seconds: 60
+
+      max_concurrent_seeds: 4
+      session_ttl_seconds: 3600
+      janitor_interval_seconds: 300
+
+      # false = EOG leaderboard parity reward (name-collapsed verifiers, all must pass).
+      # true = strict RL reward (every defined verifier must pass).
+      strict_verifiers: false
+
+      tool_call_timeout_seconds: 30
+      sql_timeout_seconds: 30
+
+      # EOG judges response_check verifiers with the policy model itself; keep that
+      # default for parity. Pin a fixed judge model here for RL runs.
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      # Parity pin: EOG's judge runs on the policy client's temperature (0.0 in eval
+      # configs); without this, judge calls fall through to the provider default (1.0).
+      judge_responses_create_params:
+        temperature: 0.0
+
+enterpriseops_gym_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      # EOG's ReAct orchestrator runs up to 50 reason-act iterations.
+      max_steps: 50
+      resources_server:
+        type: resources_servers
+        name: enterpriseops_gym
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/enterpriseops_gym/data/example.jsonl

@@ -10,6 +10,7 @@ All third-party software is used as obtained, without modification, unless other
 | Component | Type | License | Author / Copyright | URL |
 |------------|------|----------|--------------------|-----|
 | **Datasets** | Dataset loading library | Apache-2.0 | Hugging Face | https://github.com/huggingface/datasets |
+| **EnterpriseOps-Gym** | Enterprise tool-use benchmark — `resources_servers/enterpriseops_gym/verifier_engine.py` ports its scoring semantics bug-for-bug; the tool-schema snapshots redistributed at `nvidia/NeMo-Gym-EnterpriseOps-Assets` are captured from its public Docker containers. | Apache-2.0 | ServiceNow | https://github.com/ServiceNow/EnterpriseOps-Gym |
 | **FastAPI** | Python web framework | MIT | Sebastián Ramírez | https://github.com/tiangolo/fastapi |
 | **Hydra-core** | Configuration management | MIT | Facebook Research | https://github.com/facebookresearch/hydra |
 | **Harvey LAB** | Legal agent benchmark and document skills (modified runtime, pinned at `f46ef86e4788545622db25dcffa3aebb7a139929`) | MIT | Harvey AI | https://github.com/harveyai/harvey-labs |
