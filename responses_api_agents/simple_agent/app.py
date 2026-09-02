@@ -286,23 +286,19 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
 
-        response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path=self.url_path_for_run("/v1/responses", body),
-            json=body.responses_create_params,
-            cookies=cookies,
-        )
-        await raise_for_status(response)
-        model_response_json = await get_response_json(response)
-        cookies = response.cookies
-
-        trajectory = None
         expected_rollout_id = self.rollout_id_from_run(body)
-        raw_trajectory = (
-            model_response_json.pop(_INTERNAL_TRAJECTORY_KEY, None) if expected_rollout_id is not None else None
+        collect_trajectory = self._model_call_capture_enabled() and expected_rollout_id is not None
+        inproc_response, trajectory, model_server_cookies, resources_server_cookies = await self._create_episode(
+            body.responses_create_params,
+            model_url_path=self.url_path_for_run("/v1/responses", body),
+            resources_server_cookies=cookies,
+            rollout_id=expected_rollout_id or "unscoped",
+            collect_trajectory=collect_trajectory,
         )
-        if isinstance(raw_trajectory, dict):
-            trajectory = TrajectoryRecord.model_validate(raw_trajectory)
+        model_response_json = inproc_response.model_dump(mode="json")
+        cookies = dict(resources_server_cookies)
+        cookies.update(model_server_cookies)
+        if trajectory is not None:
             extra = body.model_extra or {}
             task_id = next(
                 (

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import json
 import signal
 from pathlib import Path
 from types import SimpleNamespace
@@ -89,7 +88,7 @@ def test_trajectory_preserves_reasoning_and_tools() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_skips_verification() -> None:
+async def test_run_skips_verification(monkeypatch: pytest.MonkeyPatch) -> None:
     config = SimpleStrandsAgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -102,21 +101,10 @@ async def test_run_skips_verification() -> None:
     )
     client = MagicMock(spec=ServerClient)
     seed_response = AsyncMock(cookies={"session": "seeded"})
-    agent_response = AsyncMock(cookies={"session": "agent"})
-    agent_response.read.return_value = json.dumps(
-        {
-            "id": "response_id",
-            "created_at": 1,
-            "model": "model",
-            "object": "response",
-            "output": [],
-            "parallel_tool_calls": True,
-            "tool_choice": "auto",
-            "tools": [],
-        }
-    ).encode()
-    client.post = AsyncMock(side_effect=[seed_response, agent_response])
+    client.post = AsyncMock(return_value=seed_response)
     agent = SimpleStrandsAgent(config=config, server_client=client)
+    monkeypatch.setattr(SimpleStrandsAgent, "resolve_model_base_url", MagicMock(return_value="http://policy/v1"))
+    agent._run_ssa = AsyncMock(return_value={"messages": [], "usage": {}})
 
     result = await agent.run(
         SimpleNamespace(cookies={}),
@@ -125,10 +113,7 @@ async def test_run_skips_verification() -> None:
 
     assert result.reward == 0.25
     assert result.model_extra["verification_skipped"] is True
-    assert [call.kwargs["url_path"] for call in client.post.call_args_list] == [
-        "/seed_session",
-        "/v1/responses",
-    ]
+    assert [call.kwargs["url_path"] for call in client.post.call_args_list] == ["/seed_session"]
 
 
 @pytest.mark.asyncio

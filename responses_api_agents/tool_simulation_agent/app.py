@@ -47,9 +47,17 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
+        return await self._responses(body, model_url_path=self.url_path_for_request("/v1/responses", request))
+
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        model_url_path: str,
+    ) -> NeMoGymResponse:
         model_response = await self.server_client.post(
             server_name=self.config.model_server.name,
-            url_path=self.url_path_for_request("/v1/responses", request),
+            url_path=model_url_path,
             json=body,
         )
 
@@ -66,14 +74,12 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
 
     async def run(self, body: ToolSimulationAgentRunRequest = Body()) -> ToolSimulationAgentVerifyResponse:
         config = self.config
-        response = await self.server_client.post(
-            server_name=config.name,
-            url_path=self.url_path_for_run("/v1/responses", body),
-            json=body.responses_create_params,
+        response = await self._responses(
+            body.responses_create_params,
+            model_url_path=self.url_path_for_run("/v1/responses", body),
         )
-        await raise_for_status(response)
 
-        response_json = await response.json()
+        response_json = response.model_dump(mode="json")
         if config.skip_verification:
             result = body.model_dump() | {
                 "response": response_json,

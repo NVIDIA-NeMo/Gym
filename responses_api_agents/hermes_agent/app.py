@@ -487,21 +487,14 @@ class HermesAgent(SimpleResponsesAPIAgent):
             cookies = seed_resp.cookies
 
             rollout_id = self.rollout_id_from_run(body)
-            agent_resp = await self.server_client.post(
-                server_name=self.config.name,
-                url_path=self.url_path_for_run("/v1/responses", body),
-                json=body.responses_create_params,
-                cookies=cookies,
-            )
-            await raise_for_status(agent_resp)
-            cookies = agent_resp.cookies
-            agent_resp_json = await get_response_json(agent_resp)
-            raw_observations = (
-                agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None) if rollout_id is not None else None
-            )
-            observations = (
-                AgentObservationBundle.model_validate(raw_observations) if isinstance(raw_observations, dict) else None
-            )
+            if rollout_id is not None:
+                episode = await self._create_episode(body.responses_create_params, rollout_id=rollout_id)
+                agent_resp = episode.response
+                observations = episode.observations
+            else:
+                agent_resp = await self._create_response(body.responses_create_params)
+                observations = None
+            agent_resp_json = agent_resp.model_dump(mode="json")
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,

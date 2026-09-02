@@ -44,7 +44,7 @@ model call (same shape as simple_agent).
 
 import json
 import logging
-from typing import List
+from typing import List, Mapping, Optional, Tuple
 
 from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
@@ -120,6 +120,23 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        result, set_cookies = await self._responses(
+            body,
+            model_url_path=self.url_path_for_request("/v1/responses", request),
+            cookies=request.cookies,
+        )
+        for k, v in set_cookies.items():
+            response.set_cookie(k, v)
+        return result
+
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        model_url_path: str,
+        cookies: Optional[Mapping[str, str]] = None,
+    ) -> Tuple[NeMoGymResponse, dict]:
+        """Implementation of `/v1/responses`; `run` invokes this in-process."""
         body = body.model_copy(deep=True)
 
         if isinstance(body.input, str):
@@ -158,13 +175,13 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
         usage = None
         last_response: NeMoGymResponse = None
         model_server_cookies = None
-        resources_server_cookies = request.cookies
+        resources_server_cookies = dict(cookies) if cookies else {}
 
         async def _call_model(turn_input):
             new_body = body.model_copy(update={"input": turn_input})
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
-                url_path=self.url_path_for_request("/v1/responses", request),
+                url_path=model_url_path,
                 json=new_body,
                 cookies=model_server_cookies,
             )
@@ -208,12 +225,13 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
             last_response.usage = None
 
         # Propagate any cookies the resources server set so /verify sees them.
+        set_cookies: dict[str, str] = {}
         for k, v in (*resources_server_cookies.items(), *(model_server_cookies or {}).items()):
-            response.set_cookie(k, v)
+            set_cookies[k] = v
 
         last_response.output = accumulated_outputs
         last_response.usage = usage
-        return last_response
+        return last_response, set_cookies
 
     async def run(self, request: Request, body: SpeedBenchAgentRunRequest) -> SpeedBenchAgentVerifyResponse:
         cookies = request.cookies
@@ -227,17 +245,15 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
         await raise_for_status(seed_session_response)
         cookies = seed_session_response.cookies
 
-        api_response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path=self.url_path_for_run("/v1/responses", body),
-            json=body.responses_create_params,
+        inproc_response, set_cookies = await self._responses(
+            body.responses_create_params,
+            model_url_path=self.url_path_for_run("/v1/responses", body),
             cookies=cookies,
         )
-        await raise_for_status(api_response)
-        cookies = api_response.cookies
+        cookies = set_cookies
 
         verify_request = SpeedBenchAgentVerifyRequest.model_validate(
-            body.model_dump() | {"response": await get_response_json(api_response)}
+            body.model_dump() | {"response": inproc_response.model_dump()}
         )
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,

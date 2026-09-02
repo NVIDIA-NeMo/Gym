@@ -314,11 +314,11 @@ class TestRunHappyPath:
         result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(row))
 
         paths = [c["url_path"] for c in server_client.calls]
-        assert paths == ["/seed_session", "/v1/responses", "/verify"]
+        assert paths == ["/seed_session", "/verify"]
         # Seeded cookies reach the loop and verify; verify carries the trajectory + row keys
         assert server_client.calls[1]["cookies"] == {"session": "s1"}
-        assert server_client.calls[2]["json"]["response"]["id"] == "traj_1"
-        assert server_client.calls[2]["json"]["verifier_metadata"] == {"expected_answer": "42"}
+        assert server_client.calls[1]["json"]["response"]["id"] == "traj_1"
+        assert server_client.calls[1]["json"]["verifier_metadata"] == {"expected_answer": "42"}
 
         # The remote service receives ONLY create-params: no verifier_metadata, no row keys
         assert service.received[0]["payload"] == row["responses_create_params"]
@@ -526,7 +526,7 @@ class TestRemoteFailuresBecomeSentinelRows:
         assert result[NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS
         assert "Is your service running at http://localhost:9000?" in result["error"]
         # verify is never reached on a failed loop
-        assert [c["url_path"] for c in server_client.calls] == ["/seed_session", "/v1/responses"]
+        assert [c["url_path"] for c in server_client.calls] == ["/seed_session"]
 
     async def test_disconnect_then_success_retries(self, monkeypatch: pytest.MonkeyPatch) -> None:
         request_mock = AsyncMock(
@@ -578,10 +578,10 @@ class TestRemoteFailuresBecomeSentinelRows:
             monkeypatch, AsyncMock(return_value=FakeRemoteResponse(200, orjson.dumps(bad)))
         )
         assert result[NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS
-        # Terminal classification survives the HTTP self-post boundary (exception-name match)
+        # Terminal classification survives in-process delegation.
         assert result[NG_TERMINAL_KEY] is True
         assert "invalid Responses API object" in result["error"]
-        assert [c["url_path"] for c in server_client.calls] == ["/seed_session", "/v1/responses"]
+        assert [c["url_path"] for c in server_client.calls] == ["/seed_session"]
 
     async def test_mid_loop_failure_becomes_sentinel(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Turn 1 succeeds with a tool ask; turn 2 the service dies — the whole rollout

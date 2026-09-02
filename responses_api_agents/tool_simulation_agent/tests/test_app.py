@@ -234,7 +234,7 @@ class TestApp:
             "id": "no_model",
         }
         self._set_server_client_post_responses(server_client_post_mock, no_model_response_object)
-        with raises(ValidationError, match="ToolSimulationAgentVerifyRequest"):
+        with raises(RuntimeError, match="Received an invalid response from the model server"):
             test_client.post(
                 "/run",
                 json={
@@ -245,7 +245,7 @@ class TestApp:
             )
 
         server_client_post_mock.assert_called_once_with(
-            server_name="tool_agent",
+            server_name="model_server",
             url_path="/v1/responses",
             json=NeMoGymResponseCreateParamsNonStreaming(
                 input=[],
@@ -343,7 +343,7 @@ class TestApp:
         }
         expected_invalid_verify_response_calls = [
             call(
-                server_name="tool_agent",
+                server_name="model_server",
                 url_path="/v1/responses",
                 json=NeMoGymResponseCreateParamsNonStreaming(
                     input=[
@@ -519,7 +519,7 @@ class TestApp:
         assert response_json["verification_skipped"] is True
         assert response_json["response"]["id"] == "chat_response_id"
         server_client_post_mock.assert_called_once_with(
-            server_name="tool_agent",
+            server_name="model_server",
             url_path="/v1/responses",
             json=NeMoGymResponseCreateParamsNonStreaming(
                 input=[

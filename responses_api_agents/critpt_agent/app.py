@@ -68,16 +68,30 @@ class CritPtAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        model_response = await self.server_client.post(
-            server_name=self.config.model_server.name,
-            url_path=self.url_path_for_request("/v1/responses", request),
-            json=body,
+        result, cookies = await self._responses(
+            body,
+            model_url_path=self.url_path_for_request("/v1/responses", request),
             cookies=request.cookies,
         )
+        for key, value in cookies.items():
+            response.set_cookie(key, value)
+        return result
+
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        model_url_path: str,
+        cookies: Any = None,
+    ) -> tuple[NeMoGymResponse, Any]:
+        model_response = await self.server_client.post(
+            server_name=self.config.model_server.name,
+            url_path=model_url_path,
+            json=body,
+            cookies=cookies,
+        )
         await raise_for_status(model_response)
-        for k, v in model_response.cookies.items():
-            response.set_cookie(k, v)
-        return NeMoGymResponse.model_validate(await get_response_json(model_response))
+        return NeMoGymResponse.model_validate(await get_response_json(model_response)), model_response.cookies
 
     async def run(self, request: Request, body: CritPtAgentRunRequest) -> CritPtAgentVerifyResponse:
         cookies = request.cookies
@@ -94,15 +108,12 @@ class CritPtAgent(SimpleResponsesAPIAgent):
         self_responses_url_path = self.url_path_for_run("/v1/responses", body)
 
         # Turn 1: solve the problem
-        turn1_response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path=self_responses_url_path,
-            json=body.responses_create_params,
+        turn1_response, cookies = await self._responses(
+            body.responses_create_params,
+            model_url_path=self_responses_url_path,
             cookies=cookies,
         )
-        await raise_for_status(turn1_response)
-        cookies = turn1_response.cookies
-        turn1_json = await get_response_json(turn1_response)
+        turn1_json = turn1_response.model_dump(mode="json")
         # Strip reasoning blocks: the Turn 2 user message asks the model not to reason again, so
         # the Turn 2 assistant context should contain only the conclusion, not the thinking trace.
         turn1_text = _strip_thinking_blocks(_extract_output_text(turn1_json))
@@ -115,15 +126,12 @@ class CritPtAgent(SimpleResponsesAPIAgent):
         ]
         turn2_params = body.responses_create_params.model_copy(update={"input": turn2_input})
 
-        turn2_response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path=self_responses_url_path,
-            json=turn2_params,
+        turn2_response, cookies = await self._responses(
+            turn2_params,
+            model_url_path=self_responses_url_path,
             cookies=cookies,
         )
-        await raise_for_status(turn2_response)
-        cookies = turn2_response.cookies
-        turn2_json = await get_response_json(turn2_response)
+        turn2_json = turn2_response.model_dump(mode="json")
 
         # Verify Turn 2 output against the Artificial Analysis API
         verify_request_data = body.model_dump() | {"response": turn2_json}

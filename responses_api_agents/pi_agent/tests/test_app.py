@@ -454,7 +454,7 @@ class TestRolloutObservability:
         assert tool.tool_call_id == "call-1"
         assert tool.status == "incomplete"
 
-    def test_run_uses_prefixed_response_boundary(self) -> None:
+    def test_run_preserves_rollout_identity_in_process(self) -> None:
         agent = _make_agent()
         agent.server_client.global_config_dict = {"observability_enabled": True}
         agent._run_pi = AsyncMock(return_value=([], {"input_tokens": 0, "output_tokens": 0}, "model", []))
@@ -484,9 +484,8 @@ class TestRolloutObservability:
         result = asyncio.run(agent.run(MagicMock(cookies={}), body))
 
         assert result.ng_agent_observations is not None
-        assert agent.server_client.post.await_args_list[1].kwargs["url_path"] == "/ng-rollout/1-2/v1/responses"
         assert agent._run_pi.await_args.kwargs["rollout_id"] == "1-2"
-        verify_json = agent.server_client.post.await_args_list[2].kwargs["json"]
+        verify_json = agent.server_client.post.await_args_list[1].kwargs["json"]
         assert "_ng_agent_observations" not in verify_json["response"]
 
     def test_prefixed_responses_preserves_observations_through_fastapi(self) -> None:

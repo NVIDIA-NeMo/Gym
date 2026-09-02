@@ -421,6 +421,14 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        return await self._responses(body, rollout_id=self._rollout_id(request))
+
+    async def _responses(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        rollout_id: Optional[str] = None,
+    ) -> NeMoGymResponse:
         body = body.model_copy(deep=True)
         if body.temperature is None:
             body.temperature = self.config.temperature
@@ -433,7 +441,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
         api_base = self.resolve_model_base_url(
             self.config.model_server.name,
-            self._rollout_id(request),
+            rollout_id,
         )
         async with self.sem:
             trajectory, context, flags, timed_out, finished_naturally = await self._run_terminus(
@@ -509,15 +517,11 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         await raise_for_status(seed_response)
         cookies = seed_response.cookies
 
-        agent_response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path=self.url_path_for_run("/v1/responses", body),
-            json=body.responses_create_params,
-            cookies=cookies,
+        agent_response = await self._responses(
+            body.responses_create_params,
+            rollout_id=self.rollout_id_from_run(body),
         )
-        await raise_for_status(agent_response)
-        cookies = agent_response.cookies
-        response_json = await get_response_json(agent_response)
+        response_json = agent_response.model_dump(mode="json")
 
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
