@@ -19,7 +19,7 @@ from abc import abstractmethod
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from pydantic import BaseModel
 
 
@@ -36,7 +36,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
-from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.server_utils import SESSION_ID_KEY, BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 
 
@@ -142,7 +142,10 @@ class BaseSeedSessionResponse(BaseModel):
 
 
 class BaseCloseSessionRequest(BaseModel):
-    pass
+    # Which session to release. Served over HTTP the caller identifies itself by cookie and
+    # the route fills this in; the sweeper has no request to read a cookie from and sets it
+    # directly. Either way an override receives it, so both paths reach the same code.
+    session_id: Optional[str] = None
 
 
 class BaseCloseSessionResponse(BaseModel):
@@ -182,7 +185,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 asyncio.create_task(self._sweep_idle_sessions())
 
         app.post("/seed_session")(self.seed_session)
-        app.post("/close_session")(self.close_session)
+        app.post("/close_session")(self._close_session_endpoint)
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
         app.post("/verify")(
             traced_verify_endpoint(
@@ -245,11 +248,23 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 for session_id in expired:
                     self.forget_session(session_id)
                     logger.warning("reclaiming environment session %s after %.0fs idle", session_id, ttl)
-                    await self.close_session(BaseCloseSessionRequest())
+                    await self.close_session(BaseCloseSessionRequest(session_id=session_id))
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("environment session sweep failed")
+
+    async def _close_session_endpoint(
+        self, request: Request, body: BaseCloseSessionRequest
+    ) -> BaseCloseSessionResponse:
+        """Resolve the cookie session before delegating, so ``close_session`` has one signature.
+
+        Without this the sweeper, which holds a session id but no request, could not tell an
+        override which session to release.
+        """
+        if body.session_id is None:
+            body.session_id = request.session.get(SESSION_ID_KEY)
+        return await self.close_session(body)
 
     async def close_session(self, body: BaseCloseSessionRequest) -> BaseCloseSessionResponse:
         """Release whatever this session allocated. Default no-op.
