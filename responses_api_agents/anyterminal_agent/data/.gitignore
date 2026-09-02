@@ -1,3 +1,5 @@
 sifs/
 *.sif
 terminal_bench*
+# pinned Terminal-Bench 2.1 checkout cloned by prepare.py
+terminal-bench-2-1/

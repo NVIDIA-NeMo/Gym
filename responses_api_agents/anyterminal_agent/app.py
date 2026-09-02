@@ -41,6 +41,7 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.docker import DockerCreateConfig, DockerProvider
+from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import apply_rollout_prefix
 
 
@@ -112,6 +113,55 @@ class TerminalBenchMetrics(BaseModel):
     agent_run_time: Optional[float] = None
     eval_run_time: Optional[float] = None
     total_run_time: Optional[float] = None
+
+    # In-sandbox resource usage from cgroup v2 counters (v1 fallback), read at
+    # phase boundaries; None when the sandbox exposes neither hierarchy.
+    cpu_solve_sec: Optional[float] = None
+    cpu_verify_sec: Optional[float] = None
+    cpu_total_sec: Optional[float] = None
+    cpu_util_solve: Optional[float] = None  # cpu_solve_sec / wall / limit-cores
+    cpu_util_verify: Optional[float] = None
+    cpu_throttled_sec: Optional[float] = None  # CFS throttle over the full run
+    mem_peak_mib: Optional[float] = None  # sandbox-lifetime peak
+
+
+# Reads cumulative CPU usage (usec), CFS throttled time (usec), and peak memory
+# (bytes) from cgroup v2, falling back to v1; prints "-" for missing values.
+_CGROUP_STAT_CMD = (
+    "u=$(grep -m1 '^usage_usec' /sys/fs/cgroup/cpu.stat 2>/dev/null | awk '{print $2}'); "
+    "[ -n \"$u\" ] || u=$(awk '{print int($1/1000)}' /sys/fs/cgroup/cpuacct/cpuacct.usage 2>/dev/null); "
+    "t=$(grep -m1 '^throttled_usec' /sys/fs/cgroup/cpu.stat 2>/dev/null | awk '{print $2}'); "
+    "[ -n \"$t\" ] || t=$(grep -m1 '^throttled_time' /sys/fs/cgroup/cpu/cpu.stat 2>/dev/null | awk '{print int($2/1000)}'); "
+    "m=$(cat /sys/fs/cgroup/memory.peak 2>/dev/null); "
+    '[ -n "$m" ] || m=$(cat /sys/fs/cgroup/memory/memory.max_usage_in_bytes 2>/dev/null); '
+    'echo "CG ${u:--} ${t:--} ${m:--}"'
+)
+
+
+def _sandbox_cpu_limit(cfg: "AnyTerminalInstanceConfig") -> float:
+    """CPU limit the sandbox is created with (uniform override, else the task's cpus floored at 2)."""
+    if cfg.override_cpus is not None:
+        return float(cfg.override_cpus)
+    return max(2.0, float(cfg.problem_info.get("cpus") or 1))
+
+
+def _cpu_cap_env_for(cfg: "AnyTerminalInstanceConfig") -> Dict[str, str]:
+    """Thread-pool cap env vars for the sandbox's CPU limit; empty unless cpu_pin_enabled."""
+    return cpu_cap_env(_sandbox_cpu_limit(cfg)) if cfg.cpu_pin_enabled else {}
+
+
+def _parse_cgroup_stat(stdout: Optional[str]) -> Optional[Dict[str, float]]:
+    for line in (stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) == 4 and parts[0] == "CG":
+            out = {}
+            for key, raw in zip(("cpu_usec", "throttled_usec", "mem_peak_bytes"), parts[1:]):
+                try:
+                    out[key] = float(raw)
+                except ValueError:
+                    out[key] = None
+            return out
+    return None
 
 
 def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
@@ -356,6 +406,29 @@ class AnyTerminalAgentConfig(BaseResponsesAPIAgentConfig):
         description="Per-sandbox provider options forwarded via SandboxSpec.provider_options "
         "(e.g. OpenSandbox image_auth / platform).",
     )
+    cpu_pin_enabled: bool = Field(
+        default=False,
+        description="Inject nemo_gym.sandbox.utils.cpu_cap_env (OMP_NUM_THREADS, PYTHON_CPU_COUNT, "
+        "GOMAXPROCS, ...) derived from the sandbox CPU limit into the agent/oracle and verifier "
+        "execs, so thread pools size to the cgroup quota instead of the host's core count.",
+    )
+    override_cpus: Optional[float] = Field(
+        default=None,
+        description="Uniform sandbox CPU count replacing each task's own cpus (task.toml values "
+        "are ignored when set).",
+    )
+    override_memory_mb: Optional[int] = Field(
+        default=None,
+        description="Uniform sandbox memory in MiB replacing each task's own memory_mb + "
+        "agent_overhead_mb (task.toml values are ignored when set).",
+    )
+    ray_task_num_cpus: Optional[float] = Field(
+        default=None,
+        description="Local Ray CPU reservation per task, replacing the task's own cpus (e.g. "
+        "0.25 for I/O-bound remote-sandbox runs; Ray's default of task-cpus would cap "
+        "concurrency at the driver's core count). When set, the local memory reservation is "
+        "dropped too. Only affects local scheduling, never the sandbox's resources.",
+    )
     # Docker network for the agent container. "host" lets the in-container agent reach a
     # model server on host loopback; None uses the docker default (e.g. for a remote server).
     docker_network: Optional[str] = "host"
@@ -596,7 +669,7 @@ class RunTerminalAgent(BaseModel):
             _apt_root_sandbox(cfg) + (cfg.agent_command_str or ""),
             timeout_s=cfg.tb_agent_timeout,
             user="root",
-            env=self._agent_env(cfg),
+            env=_cpu_cap_env_for(cfg) | self._agent_env(cfg),
         )
         (cfg.persistent_dir / "agent_result.json").write_text(
             json.dumps(
@@ -636,10 +709,19 @@ class RunTerminalAgent(BaseModel):
             _apt_root_sandbox(cfg) + prefix + solve,
             timeout_s=cfg.tb_agent_timeout,
             user="root",
+            env=_cpu_cap_env_for(cfg) or None,
         )
         if result.return_code != 0:
             print(f"[{cfg.task_name}] oracle exit {result.return_code}: {(result.stderr or '')[-2000:]}", flush=True)
         return time.time() - t0, result.error_type == "timeout"
+
+    async def _read_cgroup_stat(self, sandbox: AsyncSandbox) -> Optional[Dict[str, float]]:
+        """Best-effort snapshot of the sandbox's cgroup CPU/memory counters."""
+        try:
+            result = await sandbox.exec(_CGROUP_STAT_CMD, timeout_s=30, user="root")
+            return _parse_cgroup_stat(result.stdout)
+        except Exception:
+            return None
 
     async def _stage_tests(self, cfg: AnyTerminalInstanceConfig) -> None:
         """Copy the task's test files into the staging dir, visible to the sandbox at /tests."""
@@ -658,7 +740,12 @@ class RunTerminalAgent(BaseModel):
             "printf '[pytest]\\naddopts =\\n' > /pytest.ini && "
             "mkdir -p /logs/verifier && bash /tests/test.sh > /logs/verifier/test-stdout.txt 2>&1"
         )
-        result = await sandbox.exec(_apt_root_sandbox(cfg) + test_cmd, timeout_s=cfg.tb_eval_timeout, user="root")
+        result = await sandbox.exec(
+            _apt_root_sandbox(cfg) + test_cmd,
+            timeout_s=cfg.tb_eval_timeout,
+            user="root",
+            env=_cpu_cap_env_for(cfg) or None,
+        )
         if result.return_code != 0:
             print(f"[{cfg.task_name}] eval exit {result.return_code}: {(result.stderr or '')[-2000:]}", flush=True)
         return time.time() - t0, result.error_type in ("timeout", "sandbox")
@@ -678,25 +765,31 @@ class RunTerminalAgent(BaseModel):
                 metadata=cfg.sandbox_default_metadata,
                 provider_options=cfg.sandbox_provider_options,
                 resources={
-                    "cpu": max(2.0, float(cfg.problem_info.get("cpus") or 1)),
-                    "memory_mib": max(
-                        4096, int(float(cfg.problem_info.get("memory_mb") or 2048)) + cfg.agent_overhead_mb
-                    ),
+                    "cpu": float(cfg.override_cpus)
+                    if cfg.override_cpus is not None
+                    else max(2.0, float(cfg.problem_info.get("cpus") or 1)),
+                    "memory_mib": int(cfg.override_memory_mb)
+                    if cfg.override_memory_mb is not None
+                    else max(4096, int(float(cfg.problem_info.get("memory_mb") or 2048)) + cfg.agent_overhead_mb),
                 },
             ),
         )
         agent_timed_out = container_timed_out = False
         sandbox_failed = False
         agent_run_time = eval_run_time = None
+        cg0 = cg1 = cg2 = None
         try:
             await sandbox.start()
             if not self._uses_bind_mounts(cfg) and not cfg.oracle_mode:
                 await self._stage_remote_runtime(sandbox, cfg)
+            cg0 = await self._read_cgroup_stat(sandbox)
             agent_run_time, agent_timed_out = await self._run_agent(sandbox, cfg)
+            cg1 = await self._read_cgroup_stat(sandbox)
             await self._stage_tests(cfg)
             if not self._uses_bind_mounts(cfg):
                 await self._stage_remote_tests(sandbox, cfg)
             eval_run_time, container_timed_out = await self._run_eval(sandbox, cfg)
+            cg2 = await self._read_cgroup_stat(sandbox)
             if not self._uses_bind_mounts(cfg):
                 await self._collect_remote_outputs(sandbox, cfg)
         except Exception as e:
@@ -720,6 +813,28 @@ class RunTerminalAgent(BaseModel):
             except (ValueError, OSError):
                 pass
 
+        limit_cores = (
+            float(cfg.override_cpus)
+            if cfg.override_cpus is not None
+            else max(2.0, float(cfg.problem_info.get("cpus") or 1))
+        )
+
+        def _delta(a, b, key):
+            if a and b and a.get(key) is not None and b.get(key) is not None:
+                return max(0.0, (b[key] - a[key]) / 1e6)
+            return None
+
+        cpu_solve_sec = _delta(cg0, cg1, "cpu_usec")
+        cpu_verify_sec = _delta(cg1, cg2, "cpu_usec")
+        cpu_total_sec = _delta(cg0, cg2, "cpu_usec")
+        cpu_throttled_sec = _delta(cg0, cg2, "throttled_usec")
+        mem_peak_mib = cg2["mem_peak_bytes"] / (1024 * 1024) if cg2 and cg2.get("mem_peak_bytes") is not None else None
+
+        def _util(cpu_sec, wall):
+            if cpu_sec is not None and wall and wall > 0 and limit_cores > 0:
+                return cpu_sec / wall / limit_cores
+            return None
+
         metrics = TerminalBenchMetrics(
             ray_queue_time=time.time() - cfg.ray_queue_timestamp,
             resolved=resolved,
@@ -730,6 +845,13 @@ class RunTerminalAgent(BaseModel):
             agent_run_time=agent_run_time,
             eval_run_time=eval_run_time,
             total_run_time=total_run_time,
+            cpu_solve_sec=cpu_solve_sec,
+            cpu_verify_sec=cpu_verify_sec,
+            cpu_total_sec=cpu_total_sec,
+            cpu_util_solve=_util(cpu_solve_sec, agent_run_time),
+            cpu_util_verify=_util(cpu_verify_sec, eval_run_time),
+            cpu_throttled_sec=cpu_throttled_sec,
+            mem_peak_mib=mem_peak_mib,
         )
         update_metrics(cfg.metrics_fpath, metrics.model_dump())
         return resolved
@@ -846,6 +968,8 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             except (TypeError, ValueError):
                 return None
 
+        if params.ray_task_num_cpus is not None:
+            return {"num_cpus": params.ray_task_num_cpus}
         cpus = _f("cpus")
         mem_mb = _f("memory_mb")
         opts: dict = {"num_cpus": cpus if (cpus and cpus > 0) else 1}
