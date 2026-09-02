@@ -824,8 +824,10 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         return await self._request_with_retry(**request_kwargs)
 
     async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
+        # Bounded backoff below is opt-out via `_internal`.
+        bounded = not request_kwargs.get("_internal", False)
         max_num_tries = MAX_NUM_TRIES
-        max_end_time = time.monotonic() + MAX_SECONDS_TRIES
+        max_end_time = time.monotonic() + MAX_SECONDS_TRIES if bounded else float("inf")
         sleep_time = 0.5
         tries = 0
         while tries < max_num_tries and time.monotonic() < max_end_time:
@@ -845,27 +847,28 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 )
 
                 retry_delay = sleep_time
-                retry_after = response.headers.get("Retry-After")
-                if retry_after is not None:
-                    try:
-                        retry_delay = float(retry_after)
-                        if not math.isfinite(retry_delay) or retry_delay < 0:
-                            raise ValueError("Retry-After delay must be a non-negative finite number")
-                    except ValueError:
+                if bounded:
+                    retry_after = response.headers.get("Retry-After")
+                    if retry_after is not None:
                         try:
-                            retry_at = parsedate_to_datetime(retry_after)
-                            if retry_at.tzinfo is None:
-                                retry_at = retry_at.replace(tzinfo=timezone.utc)
-                            retry_delay = max(
-                                0.0,
-                                (retry_at - datetime.now(timezone.utc)).total_seconds(),
-                            )
-                        except (TypeError, ValueError, OverflowError):
-                            retry_delay = sleep_time
+                            retry_delay = float(retry_after)
+                            if not math.isfinite(retry_delay) or retry_delay < 0:
+                                raise ValueError("Retry-After delay must be a non-negative finite number")
+                        except ValueError:
+                            try:
+                                retry_at = parsedate_to_datetime(retry_after)
+                                if retry_at.tzinfo is None:
+                                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                                retry_delay = max(
+                                    0.0,
+                                    (retry_at - datetime.now(timezone.utc)).total_seconds(),
+                                )
+                            except (TypeError, ValueError, OverflowError):
+                                retry_delay = sleep_time
 
-                sleep_time *= 2
-                if time.monotonic() + retry_delay >= max_end_time:
-                    break
+                    sleep_time *= 2
+                    if time.monotonic() + retry_delay >= max_end_time:
+                        break
 
                 await sleep(retry_delay)
                 continue

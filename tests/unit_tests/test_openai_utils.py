@@ -196,6 +196,37 @@ class TestOpenAIUtils:
         assert response is success
         assert sleep_delays == [45.0]
 
+    async def test_internal_requests_skip_bounded_backoff(self) -> None:
+        rate_limited = self._response(429, retry_after="999")
+        success = self._response(200)
+        now = 0.0
+        sleep_delays = []
+
+        async def fake_sleep(delay: float) -> None:
+            nonlocal now
+            sleep_delays.append(delay)
+            now += delay
+
+        with (
+            patch(
+                "nemo_gym.openai_utils.request",
+                new=AsyncMock(side_effect=[rate_limited] * 10 + [success]),
+            ) as request_mock,
+            patch("nemo_gym.openai_utils.raise_for_status", new=AsyncMock()),
+            patch("nemo_gym.openai_utils.time.monotonic", side_effect=lambda: now),
+            patch("nemo_gym.openai_utils.sleep", side_effect=fake_sleep),
+        ):
+            client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+            response = await client._request_with_retry(
+                method="POST",
+                url="https://api.openai.com/v1/chat/completions",
+                _internal=True,
+            )
+
+        assert response is success
+        assert request_mock.await_count == 11
+        assert sleep_delays == [0.5] * 10
+
     async def test_retry_after_past_deadline_is_not_slept(self) -> None:
         response = self._response(429, retry_after="120")
 
