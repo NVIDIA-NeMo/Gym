@@ -3,16 +3,9 @@
     "type": "validation",
     "jsonl_fpath": "resources_servers/indian_banking/data/validation.jsonl",
     "num_repeats": 1,
-    "source": {
-        "type": "huggingface",
-        "repo_id": "NPCI/nemo-gym-indian-banking",
-        "artifact_fpath": "validation.jsonl"
-    },
+    "source": null,
     "gitlab_identifier": null,
-    "huggingface_identifier": {
-        "repo_id": "NPCI/nemo-gym-indian-banking",
-        "artifact_fpath": "validation.jsonl"
-    },
+    "huggingface_identifier": null,
     "license": "Apache 2.0",
     "Number of examples": 50,
     "Number of tools": {
@@ -24,9 +17,9 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 50,
-        "Average": 2354.0,
-        "Min": 2354.0,
-        "Max": 2354.0,
+        "Average": 2379.0,
+        "Min": 2379.0,
+        "Max": 2379.0,
         "Standard deviation": 0.0
     },
     "Number of turns": {

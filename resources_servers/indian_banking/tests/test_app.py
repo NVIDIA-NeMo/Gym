@@ -404,3 +404,96 @@ class TestArgCoercion:
         from resources_servers.indian_banking.app import IndianBankingResourcesServerConfig
 
         assert IndianBankingResourcesServerConfig.model_fields["strict_turn_protocol"].default is False
+
+
+class TestReviewFixes:
+    """Regression tests for the PR-review findings (C1-C3 + smaller items)."""
+
+    @staticmethod
+    def _server(configured_engine):
+        config = _config(db_fpath=configured_engine._DB_PATH, kb_fpath=configured_engine._KB_PATH)
+        return IndianBankingResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    @staticmethod
+    def _response(output):
+        from nemo_gym.openai_utils import NeMoGymResponse
+
+        return NeMoGymResponse.model_validate(
+            {
+                "id": "r",
+                "created_at": 0.0,
+                "model": "m",
+                "object": "response",
+                "output": output,
+                "parallel_tool_calls": False,
+                "tool_choice": "none",
+                "tools": [],
+            }
+        )
+
+    def test_errored_call_does_not_satisfy_action_check(self, configured_engine) -> None:
+        gold = [{"name": "create_fd", "arguments": {"principal": 50000}}]
+        calls = [{"name": "create_fd", "arguments": {"principal": 50000}, "error": True}]
+        a = reward_mod._action_reward(calls, gold, gold_errors=[False])
+        assert a["strict"] == 0.0 and a["action_frac"] == 0.0
+        a = reward_mod._action_reward(calls, gold, gold_errors=[True])
+        assert a["strict"] == 1.0
+        a = reward_mod._action_reward(calls, [{"name": "show_mandates", "arguments": {}}], gold_errors=[False])
+        assert a["bad_writes"] == 0
+
+    async def test_init_actions_do_not_pollute_calls(self, configured_engine) -> None:
+        server = self._server(configured_engine)
+        meta = {
+            "task_id": "t-init",
+            "customer": CUSTOMER,
+            "opening_message": "hi",
+            "evaluation_criteria": {"actions": [], "reward_basis": ["ACTION"]},
+            "initial_state": {"initialization_actions": [{"name": "show_mandates", "arguments": {}}]},
+        }
+        await server.reset(meta, session_id="s-init")
+        world = server.session_state["s-init"][reward_mod.WORLD_KEY]
+        assert world["calls"] == [] and world["transferred"] is False
+        engine.configure()
+
+    async def test_lenient_mixed_turn_keeps_text_in_history(self, configured_engine) -> None:
+        server = self._server(configured_engine)
+        meta = {
+            "task_id": "t-mix",
+            "customer": CUSTOMER,
+            "opening_message": "hi",
+            "evaluation_criteria": {"actions": [], "reward_basis": ["ACTION"]},
+        }
+        await server.reset(meta, session_id="s-mix")
+        resp = self._response(
+            [
+                {
+                    "type": "message",
+                    "id": "m1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "Let me check that for you.", "annotations": []}],
+                },
+                {"type": "function_call", "call_id": "c1", "name": "show_mandates", "arguments": "{}"},
+            ]
+        )
+        await server.step(resp, meta, session_id="s-mix")
+        hist = server.session_state["s-mix"]["nl_history"]
+        assert {"role": "assistant", "content": "Let me check that for you."} in hist
+        engine.configure()
+
+    def test_args_match_numeric_coercion(self) -> None:
+        from resources_servers.indian_banking.core.action_compare import args_match
+
+        assert args_match({"amount": 50000}, {"amount": "50000"})
+        assert args_match({"ids": [1, "2"]}, {"ids": ["1", 2]})
+        assert not args_match({"amount": 50000}, {"amount": "50001"})
+
+    def test_judge_cache_bounded_and_lru(self) -> None:
+        from resources_servers.indian_banking.core import judge
+
+        judge._cache.clear()
+        for i in range(judge._CACHE_MAX + 10):
+            judge.cache_put(f"m:{i}", 1.0)
+        assert len(judge._cache) == judge._CACHE_MAX
+        assert judge.cache_get("m:0") is None and judge.cache_get(f"m:{judge._CACHE_MAX + 9}") == 1.0
+        judge._cache.clear()

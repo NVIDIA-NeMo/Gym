@@ -91,7 +91,19 @@ def _dict_hash(obj: Any) -> str:
 
 
 # ---- ACTION -----------------------------------------------------------------
-def _action_reward(calls: list[dict], gold_actions: list[dict]) -> dict:
+def _replay_gold(customer, gold_actions: list[dict]) -> tuple[dict, list[bool]]:
+    """Replay gold actions on a fresh seed; returns (gold_world, per-action error flags).
+
+    Both the DB hash comparison and errored-call matching read this one replay."""
+    gold_world = engine.seed_world(customer)
+    errors = []
+    for a in gold_actions:
+        engine.apply_tool(gold_world, a["name"], dict(a.get("arguments") or {}))
+        errors.append(bool(gold_world["calls"][-1].get("error")))
+    return gold_world, errors
+
+
+def _action_reward(calls: list[dict], gold_actions: list[dict], gold_errors: list[bool] | None = None) -> dict:
     """Score ACTION. Returns strict, action_frac, name_frac, seq_frac, purity_ok, bad_writes, n_writes."""
     if not gold_actions:
         return {
@@ -104,8 +116,15 @@ def _action_reward(calls: list[dict], gold_actions: list[dict]) -> dict:
             "n_writes": 0,
         }
 
+    errs = gold_errors if gold_errors and len(gold_errors) == len(gold_actions) else [False] * len(gold_actions)
+    gidx = {id(g): i for i, g in enumerate(gold_actions)}
+
     def matches(gold: dict, call: dict) -> bool:
         if gold["name"] != call["name"]:
+            return False
+        # An errored call satisfies a gold action only if that gold action also
+        # errors on its own replay (some tasks deliberately exercise error paths).
+        if call.get("error") and not errs[gidx[id(gold)]]:
             return False
         return args_match(
             gold.get("arguments") or {},
@@ -145,6 +164,8 @@ def _action_reward(calls: list[dict], gold_actions: list[dict]) -> dict:
     for c in calls:
         if c["name"] not in engine.WRITE_TOOLS:
             continue
+        if c.get("error"):
+            continue  # an errored write mutated nothing; retry-after-error is not a wrong write
         n_writes += 1
         if not any(matches(g, c) for g in gold_writes):
             bad_writes += 1
@@ -224,13 +245,10 @@ def _efficiency_cost(
 
 
 # ---- DB ---------------------------------------------------------------------
-def _db_reward(world: dict, gold_actions: list[dict], customer: str) -> float:
-    """Replay gold actions on a fresh seed, hash, compare to the agent's live world DB.
+def _db_reward(world: dict, gold_world: dict) -> float:
+    """Hash the replayed gold world's DB and compare to the agent's live world DB.
     Both run under the same frozen clock and id seed (engine.SIM_CLOCK / SIM_SEED)
     so generated ids and timestamps match."""
-    gold_world = engine.seed_world(customer)
-    for a in gold_actions:
-        engine.apply_tool(gold_world, a["name"], dict(a.get("arguments") or {}))
     gold_hash = _dict_hash(normalize_state(gold_world["db"]))
     pred_hash = _dict_hash(normalize_state(world["db"]))
     return 1.0 if gold_hash == pred_hash else 0.0
@@ -344,8 +362,11 @@ def score_trajectory(store: dict, judge_score: float | None = None) -> dict:
     seq_frac = 1.0
     purity_ok = True
     bad_writes = n_writes = 0
+    gold_world = gold_errors = None
+    if gold_actions and ("ACTION" in basis or "DB" in basis):
+        gold_world, gold_errors = _replay_gold(customer, gold_actions)
     if "ACTION" in basis:
-        a = _action_reward(calls, gold_actions)
+        a = _action_reward(calls, gold_actions, gold_errors)
         action_frac, name_frac = a["action_frac"], a["name_frac"]
         seq_frac = a["seq_frac"]
         purity_ok, bad_writes, n_writes = a["purity_ok"], a["bad_writes"], a["n_writes"]
@@ -355,7 +376,7 @@ def score_trajectory(store: dict, judge_score: float | None = None) -> dict:
             arg_frac = (1.0 - A_SEQ) * action_frac + A_SEQ * seq_frac
         task_parts.append((W_ACTION, A_NAME * name_frac + (1.0 - A_NAME) * arg_frac))
     if "DB" in basis:
-        components["DB"] = _db_reward(world, gold_actions, customer)
+        components["DB"] = _db_reward(world, gold_world if gold_world is not None else engine.seed_world(customer))
         # Read-only-gold tasks: gate dense DB credit on engagement (a do-nothing agent trivially leaves the DB unchanged).
         gold_has_write = any(g["name"] in engine.WRITE_TOOLS for g in gold_actions)
         if gold_actions and not gold_has_write:

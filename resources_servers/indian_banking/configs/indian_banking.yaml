@@ -44,26 +44,17 @@ indian_banking_agent:
         name: policy_model
       # Keep >= ~25: dialogs run 22-25 steps (tool rounds + user turns combined).
       max_steps: 25
-      # The dataset repository (placeholder below until the upload lands) also carries
-      # db.json and kb.json — the synthetic customer DB and knowledge base the server
-      # loads at startup. Download them next to the splits and place them in
-      # resources_servers/indian_banking/data/ before serving.
+      # db.json and kb.json — the synthetic customer DB and knowledge base the
+      # server loads at startup — ship in-tree under
+      # resources_servers/indian_banking/data/ alongside the splits.
       datasets:
       - name: train
         type: train
         jsonl_fpath: resources_servers/indian_banking/data/train.jsonl
-        source:
-          type: huggingface
-          repo_id: NPCI/nemo-gym-indian-banking
-          artifact_fpath: train.jsonl
         license: Apache 2.0
       - name: validation
         type: validation
         jsonl_fpath: resources_servers/indian_banking/data/validation.jsonl
-        source:
-          type: huggingface
-          repo_id: NPCI/nemo-gym-indian-banking
-          artifact_fpath: validation.jsonl
         license: Apache 2.0
       - name: example
         type: example

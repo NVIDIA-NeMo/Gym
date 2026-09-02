@@ -20,7 +20,7 @@ The assistant sees 34 function-calling tools: 33 servicing tools implemented in-
 | Insurance and products | `get_insurance_details`, `get_products_and_offers` |
 | Handoff | `transfer_to_human_agents` |
 
-Read tools never change state. Write tools (`create_fd`, `create_rd`, `close_deposit`, `update_deposit_renewal`, `toggle_card_freeze`, `block_card`, `set_card_controls`, `cancel_mandate`, `stop_cheque_payment`, `request_cheque_book`, `request_duplicate_statement`, `update_address`, `raise_request`) mutate the episode's database copy and are the only calls that can count as "wrong writes" in the reward. Some writes fail deliberately when the customer's KYC is pending or expired; the assistant is expected to surface the returned message rather than retry.
+Read tools never change state. Write tools (`create_fd`, `create_rd`, `close_deposit`, `update_deposit_renewal`, `toggle_card_freeze`, `block_card`, `set_card_controls`, `cancel_mandate`, `stop_cheque_payment`, `update_address`, `raise_request`) mutate the episode's database copy and are the only calls that can count as "wrong writes" in the reward; `request_cheque_book` and `request_duplicate_statement` are soft writes, excluded from the wrong-write count. Some writes fail deliberately when the customer's KYC is pending or expired; the assistant is expected to surface the returned message rather than retry.
 
 `transfer_to_human_agents` ends the episode. Tasks whose gold trajectory includes a handoff (out-of-scope requests, disputes that need a human) expect the assistant to call it exactly once after explaining why; tasks that do not expect it treat a spurious handoff as a failed ACTION check.
 
@@ -54,7 +54,7 @@ Each task's `evaluation_criteria` specifies `actions` (gold tool calls, optional
 
 The shaping constant is below the smallest increment a true pass earns, so a partial-credit trajectory can never outscore a pass. The judge score never enters `strict`, is capped at a small share of `dense`, sees only the customer-facing transcript (no tool calls, DB state, or gold actions), and fails open (the judge is left out rather than scored as zero) on an endpoint error.
 
-**Call-order strictness.** `core/reward.py` exposes a module constant `SEQ_STRICT` (default `False`). With it off, the ACTION check is set-based, matching the tau2-bench evaluator. With it on, the order of gold tool calls becomes load-bearing for ACTION: `strict` additionally requires that the matched gold calls appear in canonical order (`seq_frac == 1.0`, computed as the longest common subsequence between gold actions and the assistant's calls divided by the number of gold actions), and half of the ACTION argument credit in `dense` is reserved for in-order matches. Pass rates scored with the flag on and off are not comparable, so state which setting was used when reporting results. The `seq_frac` value is always reported in `info`, and out-of-order gold calls always feed the efficiency cost on passing trajectories.
+**Call-order strictness.** `core/reward.py` exposes a module constant `SEQ_STRICT`, shipped as `True` (order-strict, the setting used for every number reported for this environment: the 300/300 gold replay, the example rollouts, and the reference GRPO run). Set it to `False` for tau2-comparable set-based scoring. With it off, the ACTION check is set-based, matching the tau2-bench evaluator. With it on, the order of gold tool calls becomes load-bearing for ACTION: `strict` additionally requires that the matched gold calls appear in canonical order (`seq_frac == 1.0`, computed as the longest common subsequence between gold actions and the assistant's calls divided by the number of gold actions), and half of the ACTION argument credit in `dense` is reserved for in-order matches. Pass rates scored with the flag on and off are not comparable, so state which setting was used when reporting results. The `seq_frac` value is always reported in `info`, and out-of-order gold calls always feed the efficiency cost on passing trajectories.
 
 Every terminal step returns the full reward breakdown (`reward`, `strict`, `dense`, per-component values, `action_frac`, `seq_frac`, `bad_writes`, `judge`) in `info`, so aggregation across rollouts works without a separate verify pass.
 
@@ -71,7 +71,7 @@ Every row is one task, and every task seeds one conversation.
 
 All customer, account, transaction, and merchant data is synthetic, and every bank, brand, and merchant name in the data is fictional; any resemblance to real entities is coincidental.
 
-Train and validation splits — together with `db.json` (customer database) and `kb.json` (knowledge base) — are hosted in the dataset repository [`NPCI/nemo-gym-indian-banking`](https://huggingface.co/datasets/NPCI/nemo-gym-indian-banking); place `db.json` and `kb.json` in `data/` before serving. `gym dataset collate` downloads the splits; `data/example.jsonl` (5 rows drawn from the validation split) ships in-tree along with `data/db.json`, `data/kb.json`, `data/agent_instruction.txt`, and `data/policy.md`.
+All data ships in-tree under `data/`: `train.jsonl` (250), `validation.jsonl` (50), `example.jsonl` (5 rows drawn from the validation split), `db.json` (customer database), `kb.json` (knowledge base), `agent_instruction.txt`, and `policy.md`. Nothing needs to be downloaded before serving.
 
 A row looks like this (long fields elided):
 
@@ -146,7 +146,7 @@ gym env start \
     --resources-server indian_banking
 ```
 
-Download the hosted splits and produce the collated dataset used for training:
+Produce the collated dataset used for training (all splits ship in-tree; nothing to download):
 
 ```bash
 gym dataset collate \
@@ -154,7 +154,6 @@ gym dataset collate \
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \
     --output-dir data/indian_banking_trajectory_collection \
     --mode train_preparation \
-    --download
 ```
 
 Collect rollouts on the example rows (this is also how `data/example_rollouts.jsonl` is produced):

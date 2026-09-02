@@ -3,16 +3,9 @@
     "type": "train",
     "jsonl_fpath": "resources_servers/indian_banking/data/train.jsonl",
     "num_repeats": 1,
-    "source": {
-        "type": "huggingface",
-        "repo_id": "NPCI/nemo-gym-indian-banking",
-        "artifact_fpath": "train.jsonl"
-    },
+    "source": null,
     "gitlab_identifier": null,
-    "huggingface_identifier": {
-        "repo_id": "NPCI/nemo-gym-indian-banking",
-        "artifact_fpath": "train.jsonl"
-    },
+    "huggingface_identifier": null,
     "license": "Apache 2.0",
     "Number of examples": 250,
     "Number of tools": {
@@ -24,9 +17,9 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 250,
-        "Average": 2354.0,
-        "Min": 2354.0,
-        "Max": 2354.0,
+        "Average": 2379.0,
+        "Min": 2379.0,
+        "Max": 2379.0,
         "Standard deviation": 0.0
     },
     "Number of turns": {

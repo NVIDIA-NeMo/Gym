@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import OrderedDict
 from typing import NamedTuple, Optional
 
 
@@ -56,8 +57,24 @@ FORMAT
   ]
 }"""
 
-# Verdict cache keyed by (prompt version, task, transcript hash).
-_cache: dict[str, float] = {}
+# Verdict cache keyed by (judge model, prompt version, task, transcript hash);
+# bounded LRU so long RL runs cannot grow it without limit.
+_CACHE_MAX = 4096
+_cache: "OrderedDict[str, float]" = OrderedDict()
+
+
+def cache_get(key: str) -> Optional[float]:
+    if key in _cache:
+        _cache.move_to_end(key)
+        return _cache[key]
+    return None
+
+
+def cache_put(key: str, score: float) -> None:
+    _cache[key] = score
+    _cache.move_to_end(key)
+    while len(_cache) > _CACHE_MAX:
+        _cache.popitem(last=False)
 
 
 def _plain(x):

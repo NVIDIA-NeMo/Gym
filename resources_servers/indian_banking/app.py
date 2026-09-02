@@ -136,11 +136,21 @@ class IndianBankingResourcesServer(GymnasiumServer):
         world = engine.seed_world(customer)
 
         initial_state = metadata.get("initial_state") or {}
+        init_errors = []
         for action in initial_state.get("initialization_actions") or []:
             name = action.get("name")
             if not name:
                 continue
             engine.apply_tool(world, name, dict(action.get("arguments") or {}))
+            if world["calls"][-1].get("error"):
+                init_errors.append(f"{name}: {world['calls'][-1].get('result')}")
+        if init_errors:
+            # A broken initial world would make the task silently unpassable.
+            raise RuntimeError(f"initialization_actions failed: {init_errors}")
+        # Init actions are scene-setting, not agent behaviour: they must not count
+        # against the ACTION check or write purity.
+        world["calls"].clear()
+        world["transferred"] = False
 
         scenario = metadata.get("user_scenario") or {}
         task = {
@@ -184,6 +194,11 @@ class IndianBankingResourcesServer(GymnasiumServer):
             return None, scores["score"], False, True, _reward_info(scores)
 
         if function_calls:
+            mixed_text = extract_text(action).strip()
+            if mixed_text:
+                # Lenient mode: the accompanying text is still customer-facing —
+                # keep it visible to the simulator, COMMUNICATE check and judge.
+                state.setdefault("nl_history", []).append({"role": "assistant", "content": mixed_text})
             world = state[WORLD_KEY]
             tool_outputs = []
             for call in function_calls:
@@ -277,8 +292,11 @@ class IndianBankingResourcesServer(GymnasiumServer):
         if request is None:
             return direct_score  # None (gated out) or 0.0 (empty transcript)
 
-        if request.cache_key in judge._cache:
-            return judge._cache[request.cache_key]
+        judge_model = str(getattr(self.config.judge_responses_create_params, "model", "") or "")
+        key = f"{judge_model}:{request.cache_key}"
+        cached = judge.cache_get(key)
+        if cached is not None:
+            return cached
 
         create_params = self.config.judge_responses_create_params.model_copy(deep=True)
         create_params.input = [
@@ -298,7 +316,7 @@ class IndianBankingResourcesServer(GymnasiumServer):
                 await raise_for_status(resp)
                 content = self._response_text(NeMoGymResponse.model_validate(await get_response_json(resp)))
                 score = judge.parse_verdict(content, request.num_assertions)
-                judge._cache[request.cache_key] = score
+                judge.cache_put(key, score)
                 return score
             except Exception as exc:  # noqa: BLE001 - judge must never break scoring
                 logger.warning("judge call failed: %s", exc)

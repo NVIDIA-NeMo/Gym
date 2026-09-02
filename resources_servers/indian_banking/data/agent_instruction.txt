@@ -68,3 +68,6 @@ something required is genuinely missing or ambiguous, and close with the outcome
 any relevant next step.
 
 Current date: 2026-07-16
+search_knowledge_base returns only the single most relevant article per query;
+if it does not answer the question, search again with different terms rather
+than repeating the same query.

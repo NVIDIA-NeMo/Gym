@@ -105,6 +105,22 @@ def args_match(
                 continue
         if gold_v is _MISSING:
             continue
-        if pred_v is _MISSING or gold_v != pred_v:
+        if pred_v is _MISSING or not _values_equal(gold_v, pred_v):
             return False
     return True
+
+
+def _values_equal(gold_v: Any, pred_v: Any) -> bool:
+    """Equality with numeric coercion: "50000" == 50000 == 50000.0 (recursing into lists)."""
+    if gold_v == pred_v:
+        return True
+    if isinstance(gold_v, list) and isinstance(pred_v, list):
+        return len(gold_v) == len(pred_v) and all(_values_equal(g, p) for g, p in zip(gold_v, pred_v))
+    if isinstance(gold_v, (int, float, str)) and isinstance(pred_v, (int, float, str)):
+        if isinstance(gold_v, bool) or isinstance(pred_v, bool):
+            return False
+        try:
+            return float(gold_v) == float(pred_v)
+        except (TypeError, ValueError):
+            return False
+    return False
