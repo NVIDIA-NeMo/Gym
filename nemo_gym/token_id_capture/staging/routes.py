@@ -1,7 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Portable validation and decoding for staged routed-expert envelopes."""
+"""Portable validation, encoding, and decoding for staged routed-expert envelopes.
+
+The envelope wire format and its codec live here because ``extras_digest`` is
+computed over the *encoded* payload: whoever defines what staged route bytes
+mean also defines what makes them authentic. The span-classification decision
+table (:func:`classify_route_span`) is the pure-metadata rule for how one
+staged fragment contributes to a linearized row; frameworks apply it instead
+of mirroring it.
+"""
 
 from __future__ import annotations
 
@@ -9,12 +17,14 @@ import base64
 import binascii
 import struct
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, Sequence
 
 
 ROUTED_EXPERTS_ENVELOPE_VERSION = 1
 ROUTED_EXPERTS_MAGIC = "nrlre1"
 MISSING_ROUTE_SENTINEL = -1
+
+RouteSpanMode = Literal["full", "tail", "sentinel"]
 
 _DTYPE_FORMATS = {
     "int8": ("b", 1),
@@ -114,6 +124,52 @@ def decode_routed_experts(payload: Any) -> RoutedExpertsFragment:
         num_layers=num_layers,
         topk=topk,
     )
+
+
+def encode_routed_experts(values: Sequence[Sequence[Sequence[int]]], *, dtype: str = "int16") -> str:
+    """Encode a ``[tokens][layers][topk]`` nested list as the v1 base64 envelope.
+
+    This is the reference inverse of :func:`decode_routed_experts` for the
+    ``nrlre1`` wire format; array-backed producers may emit the same envelope
+    from contiguous little-endian buffers without round-tripping through
+    nested lists.
+    """
+    dtype_info = _DTYPE_FORMATS.get(dtype)
+    if dtype_info is None:
+        raise ValueError(f"unsupported routed_experts dtype {dtype!r}")
+    fragment = _validate_nested_routes(list(values))
+    format_code, _ = dtype_info
+    flat = [expert for token_row in fragment.values for layer_row in token_row for expert in layer_row]
+    try:
+        raw = struct.pack(f"<{len(flat)}{format_code}", *flat)
+    except struct.error as error:
+        raise ValueError(f"routed_experts values do not fit dtype {dtype!r}") from error
+    encoded = base64.b64encode(raw).decode("ascii")
+    shape_text = f"{len(fragment.values)}x{fragment.num_layers}x{fragment.topk}"
+    return f"{ROUTED_EXPERTS_MAGIC}:{dtype}:{shape_text}:{encoded}"
+
+
+def classify_route_span(*, carry_len: int, generation_len: int, staged_route_len: int) -> RouteSpanMode:
+    """Classify how one staged fragment contributes to a linearized row.
+
+    ``full``: the fragment covers the span's whole carry+generation token
+    range. ``tail``: the fragment covers at least the generated suffix, whose
+    last ``generation_len`` rows are used. ``sentinel``: no usable fragment —
+    the consumer fills the span with :data:`MISSING_ROUTE_SENTINEL`.
+    """
+    for name, value in (
+        ("carry_len", carry_len),
+        ("generation_len", generation_len),
+        ("staged_route_len", staged_route_len),
+    ):
+        if type(value) is not int or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
+    expected = carry_len + generation_len
+    if staged_route_len > 0 and staged_route_len == expected:
+        return "full"
+    if staged_route_len > 0 and 0 < generation_len <= staged_route_len:
+        return "tail"
+    return "sentinel"
 
 
 def routed_experts_token_count(payload: Any) -> int:
