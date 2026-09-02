@@ -95,6 +95,7 @@ class TestApp:
                 name="",
             ),
         )
+        assert config.max_steps == 3
         SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
     async def test_responses(self, monkeypatch: MonkeyPatch) -> None:
@@ -684,7 +685,7 @@ class TestApp:
         }
         assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
 
-    async def test_usage_sanity(self, monkeypatch: MonkeyPatch) -> None:
+    async def test_default_max_steps_bounds_reasoning_only_usage(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",
             port=8080,
@@ -698,7 +699,6 @@ class TestApp:
                 type="resources_servers",
                 name="",
             ),
-            max_steps=3,
         )
         server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
         app = server.setup_webserver()
@@ -766,6 +766,7 @@ class TestApp:
             "total_tokens": 303,
         }
         assert expected_usage_dict == actual_usage_dict
+        assert server.server_client.post.call_count == 3
 
     async def test_incomplete_details(self, monkeypatch: MonkeyPatch) -> None:
         await self._test_incomplete_details_helper(monkeypatch, {"reason": "max_output_tokens"})
