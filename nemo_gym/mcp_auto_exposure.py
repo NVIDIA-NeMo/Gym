@@ -116,8 +116,15 @@ _MCP_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 # Path-template params from the public route.path string ("/{tool_name}", "/items/{id:int}").
 _PATH_PARAM_RE = re.compile(r"{([^}:]+)(?::[^}]*)?}")
 
-# Gym's function-based middleware (add_session_id + exception middleware); SessionMiddleware is matched by class name.
-_GYM_MIDDLEWARE_MODULES = frozenset({"nemo_gym.server_utils"})
+# Direct dispatch may skip only these known middleware classes.
+_DIRECT_DISPATCH_MIDDLEWARE = frozenset(
+    {
+        "nemo_gym.server_utils.ExceptionHandlingMiddleware",
+        "nemo_gym.server_utils.SessionIDMiddleware",
+        "nemo_gym.rollout_correlation.RolloutContextMiddleware",
+        "starlette.middleware.sessions.SessionMiddleware",
+    }
+)
 
 
 # ==================================================================================================
@@ -283,12 +290,10 @@ class DirectDispatchError(Exception):
 async def call_direct(
     app: FastAPI, binding: DirectBinding, session_id: str, arguments: dict, path_value: Optional[str] = None
 ) -> Any:
-    """Invoke the handler resolved at startup once and return its JSON-able payload.
+    """Invoke a bound handler with the supplied session ID.
 
-    Replicates what skipping Gym's own stack would otherwise lose: SessionMiddleware + add_session_id
-    become ``scope["session"] = {SESSION_ID_KEY: sid}`` (handlers only read request.session); the
-    exception middleware's status-carrying text is reproduced by pre-formatting HTTPException /
-    ValidationError / ClientResponseError into DirectDispatchError.
+    The fabricated request exposes the session ID without running the HTTP middleware stack.
+    Handler-visible failures retain their HTTP status and detail in ``DirectDispatchError``.
     """
     kwargs: dict[str, Any] = {}
     if binding.path_param is not None:
@@ -436,14 +441,10 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
     custom_middleware: list[str] = []
     for m in app.user_middleware:
         cls = m.cls
-        if f"{cls.__module__}.{cls.__name__}" == "starlette.middleware.sessions.SessionMiddleware":
-            continue  # Gym's SessionMiddleware — replaced by a materialized session on direct dispatch
-        if f"{cls.__module__}.{cls.__name__}" == "nemo_gym.rollout_correlation.RolloutContextMiddleware":
-            continue  # Correlation prefixes are handled before resource routes; direct MCP dispatch has no prefix.
-        dispatch = m.kwargs.get("dispatch")
-        if dispatch is not None and getattr(dispatch, "__module__", None) in _GYM_MIDDLEWARE_MODULES:
-            continue  # Gym's add_session_id / exception middleware
-        custom_middleware.append(f"{cls.__module__}.{cls.__name__}")
+        middleware_name = f"{cls.__module__}.{cls.__name__}"
+        if middleware_name in _DIRECT_DISPATCH_MIDDLEWARE:
+            continue
+        custom_middleware.append(middleware_name)
     if custom_middleware:
         raise ValueError(
             f"{type(server).__name__} installs non-Gym middleware {custom_middleware}, which direct MCP "
