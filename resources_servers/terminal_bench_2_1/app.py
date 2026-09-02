@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from asyncio import Semaphore
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from glob import glob
 from pathlib import Path
@@ -41,7 +41,7 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
 
-    max_concurrency: int
+    max_concurrency: Optional[int] = None
 
     debug: bool = False
 
@@ -130,7 +130,9 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         super().model_post_init(context)
 
         self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
-        self._semaphore = Semaphore(value=self.config.max_concurrency)
+        self._semaphore = (
+            Semaphore(value=self.config.max_concurrency) if self.config.max_concurrency else nullcontext()
+        )
 
     def _patch_sandbox_provider_options_for_instances(
         self, task_name: str, resources: SandboxResources, provider_options: Dict[str, Any]
