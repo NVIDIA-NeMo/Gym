@@ -199,8 +199,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         eval_sandbox = await self._create_sandbox(body)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
 
-        async with self._semaphore:
-            pass
+        await self._semaphore.acquire()
 
         return TerminalBench21SeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
@@ -246,6 +245,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 await sandbox.upload(local_path=new_local_fpath, remote_path=target_fpath)
 
     async def verify(self, request: Request, body: TerminalBench21VerifyRequest) -> TerminalBench21VerifyResponse:
+        self._semaphore.release()
+
         task_folder = Path(body.task_folder)
 
         if self.config.is_verifying_golden_patch:
