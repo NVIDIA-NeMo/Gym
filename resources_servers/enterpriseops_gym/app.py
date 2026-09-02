@@ -37,10 +37,9 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
 from resources_servers.enterpriseops_gym.mcp_client import MCPGymClient, load_seed_sql
+from resources_servers.enterpriseops_gym.runtime import EnterpriseOpsRuntime
 from resources_servers.enterpriseops_gym.verifier_engine import VerifierEngine
 
 
@@ -48,56 +47,6 @@ logger = logging.getLogger(__name__)
 
 
 RESERVED_ROUTES = {"seed_session", "verify", "aggregate_metrics"}
-
-# Digest-pinned images per EOG domain: (image@digest, python app module).
-_DOMAIN_GYMS: Dict[str, Tuple[str, str]] = {
-    "gym-calendar": (
-        "shivakrishnareddyma225/enterpriseops-gym-mcp-calendar@sha256:994c5421a6dd065861bc7f813a177f6d408875e9df60fe8d012959bc4510da02",  # pragma: allowlist secret
-        "main",
-    ),
-    "sn-csm-server": (
-        "shivakrishnareddyma225/enterpriseops-gym-mcp-csm@sha256:eaa456ac9aa85728426e7d3813a0bbca0949d6a8695be30e26f03894e6e6b189",  # pragma: allowlist secret
-        "main",
-    ),
-    "gym-google-drive-mcp": (
-        "shivakrishnareddyma225/enterpriseops-gym-mcp-drive@sha256:3475962fcf6da7675e194dbf138de01fa3e96134a302ad47316e4111a5e63f32",  # pragma: allowlist secret
-        "app.main",
-    ),
-    "gym-email-mcp": (
-        "shivakrishnareddyma225/enterpriseops-gym-mcp-email@sha256:69c2081fe4ab0962b86233f9fb52b307b8ad0019f6746ba64ce75851036201cd",  # pragma: allowlist secret
-        "main",
-    ),
-    "sn-hr-internal": (
-        "shivakrishnareddyma225/enterpriseops-gym-mcp-hr@sha256:1ea1c1d64d4be35e8062e56f00b8318e9e6c09289cfa56bcfd0595bfa59ac64d",  # pragma: allowlist secret
-        "main",
-    ),
-    "gym-itsm-mcp": (
-        "shivakrishnareddyma225/enterpriseops-gym-mcp-itsm@sha256:a234ae3fb7cee196ba25e6b9957969dea829919b6e8271dddae128f065aaf39f",  # pragma: allowlist secret
-        "main",
-    ),
-    "gym-teams-mcp": (
-        "shivakrishnareddyma225/enterpriseops-gym-mcp-teams@sha256:602655e46f6501885540c36dc9b12114cb173c75063d7f25c17ed0652695fa78",  # pragma: allowlist secret
-        "main",
-    ),
-}
-
-_EOG_PORT = 8000  # fixed port per container (isolation is at the network namespace level)
-
-# Injected into each container and run as a background process to start the EOG uvicorn app.
-_SERVICE_LAUNCHER = """\
-import importlib, os, sys, uvicorn
-
-os.chdir("/app")
-sys.path.insert(0, "/app")
-port = os.environ["EOG_PORT"]
-base_url = f"http://127.0.0.1:{port}"
-for key in ("API_BASE_URL", "FASTAPI_BASE_URL", "HR_API_BASE_URL", "ITSM_API_BASE_URL", "GOOGLEDRIVE_API_BASE_URL"):
-    os.environ[key] = base_url
-os.environ["API_PORT"] = port
-os.environ["MCP_SERVER_PORT"] = port
-uvicorn.run(importlib.import_module(os.environ["EOG_APP"]).app, host="0.0.0.0", port=int(port), log_level="warning")
-"""
-_LAUNCHER_PATH = "/tmp/eog_service.py"
 
 
 class EnterpriseOpsGymResourcesServerConfig(BaseResourcesServerConfig):
@@ -129,7 +78,8 @@ class EnterpriseOpsGymResourcesServerConfig(BaseResourcesServerConfig):
     judge_responses_create_params: Dict[str, Any] = Field(default_factory=dict)
 
     # Named sandbox provider (e.g. "sandbox"). When set, the server starts EOG containers
-    # per session. Leave empty to use pre-running containers via mcp_server_url in dataset rows.
+    # at startup (one per domain, shared across sessions). Leave empty to use pre-running
+    # containers via mcp_server_url in dataset rows.
     sandbox_provider: str = ""
 
 
@@ -196,13 +146,13 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
     seed_semaphores: Dict[str, asyncio.Semaphore] = None
     replica_counters: Dict[str, int] = None
     janitor_task: Optional[asyncio.Task] = None
-    _sandbox_sessions: Dict[str, Dict[str, Any]] = None
+    _runtime: Optional[Any] = None
 
     def model_post_init(self, __context: Any) -> None:
         self.gym_clients = {}
         self.seed_semaphores = {}
         self.replica_counters = {}
-        self._sandbox_sessions = {}
+        self._runtime = None
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -210,7 +160,19 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
         # Registered last so base routes (/seed_session, /verify, /aggregate_metrics) take precedence.
         app.post("/{tool_name}")(self.call_tool)
 
+        if self.config.sandbox_provider:
+            app.add_event_handler("startup", self._on_startup)
+            app.add_event_handler("shutdown", self._on_shutdown)
+
         return app
+
+    async def _on_startup(self) -> None:
+        self._runtime = EnterpriseOpsRuntime(self.config.sandbox_provider, get_global_config_dict())
+        await self._runtime.start()
+
+    async def _on_shutdown(self) -> None:
+        if self._runtime is not None:
+            await self._runtime.stop()
 
     def _get_gym_client(self, gym: SessionGym) -> MCPGymClient:
         key = json.dumps([gym.base_url, gym.mcp_endpoint, gym.auth_config], sort_keys=True)
@@ -290,42 +252,6 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
             sql_content, seed_semaphore=self._get_seed_semaphore(gym.base_url)
         )
 
-    async def _start_gym_sandbox(self, gym_name: str) -> Tuple[str, AsyncSandbox]:
-        """Start an EOG container for gym_name and return (base_url, sandbox)."""
-        gym_def = _DOMAIN_GYMS.get(gym_name)
-        if gym_def is None:
-            raise ValueError(
-                f"No pinned image for EOG gym '{gym_name}'. "
-                "Add it to _DOMAIN_GYMS or set gym_url_overrides to point at a running container."
-            )
-        image, app_module = gym_def
-        provider_config = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
-        spec = SandboxSpec(
-            image=image,
-            ports=[_EOG_PORT],
-            files={_LAUNCHER_PATH: _SERVICE_LAUNCHER},
-            env={"EOG_APP": app_module, "EOG_PORT": str(_EOG_PORT)},
-            ttl_s=int(self.config.session_ttl_seconds) + 120,
-        )
-        sandbox = AsyncSandbox(provider_config, spec)
-        try:
-            await sandbox.start()
-        except SandboxCreateError as e:
-            raise RuntimeError(f"Failed to create sandbox for EOG gym '{gym_name}': {e}") from e
-        # Run the launcher in the background then poll /openapi.json for up to 120s.
-        await sandbox.exec(f"nohup python {_LAUNCHER_PATH} >/tmp/eog.log 2>&1 &", timeout_s=5.0)
-        health = await sandbox.exec(
-            f"sh -c 'i=0; until curl -fsS http://127.0.0.1:{_EOG_PORT}/openapi.json >/dev/null 2>&1; "
-            f"do i=$((i+1)); [ $i -ge 120 ] && exit 1; sleep 1; done'",
-            timeout_s=180.0,
-        )
-        if health.return_code != 0:
-            logs = (await sandbox.exec("tail -c 2000 /tmp/eog.log", timeout_s=10.0)).stdout or ""
-            await sandbox.stop()
-            raise RuntimeError(f"EOG service '{gym_name}' did not start in sandbox. Logs: {logs.strip()}")
-        endpoint = await sandbox.endpoint(_EOG_PORT)
-        return endpoint.endpoint, sandbox
-
     async def _delete_session_dbs(self, state: SessionState, session_id: Optional[str] = None) -> None:
         if state.dbs_deleted:
             return
@@ -336,12 +262,6 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
                     await self._get_gym_client(gym).delete_database(gym.database_id)
                 except Exception as e:
                     logger.error(f"Failed to delete database {gym.database_id} for gym '{gym.gym_name}': {e}")
-        # Stop containers after DB deletion so /api/delete-database can still reach the server.
-        for sandbox in self._sandbox_sessions.pop(session_id or "", {}).values():
-            try:
-                await sandbox.stop()
-            except Exception as e:
-                logger.error(f"Failed to stop sandbox for session {session_id}: {e}")
 
     def _ensure_janitor(self) -> None:
         # janitor_interval_seconds <= 0 disables the janitor so tests can call cleanup directly
@@ -380,21 +300,12 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
         gyms = self._parse_session_gyms(body.verifier_metadata)
         gym_servers_config = body.verifier_metadata.get("gym_servers_config") or []
 
-        if self.config.sandbox_provider:
-            gyms_for_sandbox = [
-                gym
-                for gym in gyms.values()
-                if gym.gym_name not in self.config.gym_url_overrides and gym.gym_name not in self.config.gym_url_pools
-            ]
-            if gyms_for_sandbox:
-                sandbox_results = await asyncio.gather(
-                    *(self._start_gym_sandbox(gym.gym_name) for gym in gyms_for_sandbox)
-                )
-                session_sandboxes: Dict[str, Any] = {}
-                for gym, (url, sandbox) in zip(gyms_for_sandbox, sandbox_results):
-                    gym.base_url = url
-                    session_sandboxes[gym.gym_name] = sandbox
-                self._sandbox_sessions[session_id] = session_sandboxes
+        if self.config.sandbox_provider and self._runtime is not None:
+            for gym in gyms.values():
+                if gym.gym_name not in self.config.gym_url_overrides and gym.gym_name not in self.config.gym_url_pools:
+                    url = self._runtime.urls.get(gym.gym_name)
+                    if url is not None:
+                        gym.base_url = url
 
         await asyncio.gather(
             *(
