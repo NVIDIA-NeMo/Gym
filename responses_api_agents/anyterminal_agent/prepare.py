@@ -17,12 +17,12 @@ Prepare the anyterminal_agent input dataset from Terminal Bench tasks.
     python prepare.py                                              # download tasks + build dataset
     python prepare.py --limit 5                                    # first 5 tasks (smoke test)
     python prepare.py --task-name gpt2-codegolf                    # single task
-    python prepare.py --build-image --sandbox-provider PROVIDER  # run provider image preparation
-    python prepare.py --build-image --sandbox-provider PROVIDER --image-dir PATH
+    python prepare.py --build-image                                # build Apptainer SIFs
+    python prepare.py --build-image --image-dir PATH               # build images into a custom directory
 
 Prerequisites:
   - Harbor CLI on PATH (for dataset download).
-  - Provider-specific image build dependencies when using --build-image.
+  - `apptainer` on PATH for image builds (skip with --no-build-image).
 
 Schema anyterminal_agent expects: each row has the task prompt in
 `responses_create_params.input` (as a user message) and `responses_create_params.metadata`
@@ -31,34 +31,19 @@ with `instance_id`, `task_name`, `docker_image`, and `task_dir`
 """
 
 import argparse
+import asyncio
 import json
+import logging
 import os
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-
-from nemo_gym.sandbox.providers import SandboxImagePrepareRequest, create_provider, prepare_provider_image
 
 
 _THIS_DIR = Path(__file__).parent
 
 DEFAULT_TASKS_CACHE = Path.home() / ".cache" / "harbor" / "tasks"
 DEFAULT_DATASET_NAME = "terminal-bench@2.0"
-IMAGE_BUILD_ATTEMPTS = 3
-IMAGE_BUILD_RETRY_DELAY_SECONDS = 2
-
-
-def _parse_provider_config(raw: str) -> dict:
-    value = raw.strip()
-    if not value:
-        raise ValueError("sandbox provider must be a provider name or JSON object")
-    if value.startswith("{"):
-        parsed = json.loads(value)
-        if not isinstance(parsed, dict):
-            raise ValueError("sandbox provider JSON must be an object")
-        return parsed
-    return {value: {}}
 
 
 def _load_task_config(task_dir: Path) -> dict:
@@ -247,57 +232,47 @@ def build_dataset(
     return ids
 
 
-def _build_one_image(
-    provider: object,
-    task_name: str,
-    docker_image: str,
-    image_dir: Path,
-    force: bool,
-) -> tuple[str, bool, str]:
-    result = prepare_provider_image(
-        provider,
-        SandboxImagePrepareRequest(
-            image=docker_image,
-            target_dir=image_dir,
-            target_name=task_name,
-            force=force,
-            attempts=IMAGE_BUILD_ATTEMPTS,
-            retry_delay_s=IMAGE_BUILD_RETRY_DELAY_SECONDS,
-        ),
-    )
-    return task_name, result.ok, result.detail
+def build_images(task_rows: list[dict], image_dir: Path, jobs: int, force: bool) -> None:
+    # Lazy so the dataset-only path does not need nemo_gym installed.
+    from nemo_gym.sandbox.providers.apptainer.build import build_sifs
 
-
-def build_images(task_rows: list[dict], image_dir: Path, jobs: int, force: bool, provider: object) -> None:
-    image_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Preparing {len(task_rows)} image(s) into {image_dir} with {jobs} worker(s)...", flush=True)
-    failures: list[str] = []
-    with ThreadPoolExecutor(max_workers=jobs) as pool:
-        futures = {
-            pool.submit(
-                _build_one_image,
-                provider,
-                r["responses_create_params"]["metadata"]["task_name"],
-                r["responses_create_params"]["metadata"]["docker_image"],
+    # Keyed by task_name to preserve the `{task_name}.sif` layout the
+    # container_formatter below depends on.
+    wanted = {
+        r["responses_create_params"]["metadata"]["task_name"]: r["responses_create_params"]["metadata"]["docker_image"]
+        for r in task_rows
+    }
+    print(f"Building {len(wanted)} sif(s) into {image_dir} with {jobs} worker(s)...", flush=True)
+    try:
+        built = asyncio.run(
+            build_sifs(
+                wanted,
                 image_dir,
-                force,
-            ): r
-            for r in task_rows
-        }
-        for done in as_completed(futures):
-            name, ok, detail = done.result()
-            print(f"  [{'ok' if ok else 'FAIL'}] {name}: {detail}", flush=True)
-            if not ok:
-                failures.append(name)
+                concurrency=jobs,
+                continue_on_error=True,
+                skip_existing=not force,
+            )
+        )
+    except RuntimeError as exc:
+        # apptainer missing: one clean line, not a traceback.
+        sys.exit(f"{exc} Omit --build-image to skip image builds.")
+    for name in wanted:
+        print(f"  [{'ok' if name in built else 'FAIL'}] {name}", flush=True)
+
+    failures = [name for name in wanted if name not in built]
     if failures:
-        print(f"\n{len(failures)} image preparation(s) failed:", flush=True)
+        print(f"\n{len(failures)} image build(s) failed:", flush=True)
         for name in failures:
             print(f"  - {name}", flush=True)
         sys.exit(1)
-    print("Image preparation complete.", flush=True)
+    print(f"All images ready. Use: container_formatter='{image_dir}/{{task_name}}.sif'", flush=True)
 
 
 def main() -> None:
+    # Surfaces build.py's per-image progress, which is otherwise dropped by
+    # logging.lastResort and leaves a long batch silent for hours.
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--output", type=Path, default=_THIS_DIR / "data" / "terminal_bench.jsonl")
     p.add_argument("--tasks-cache", type=Path, default=DEFAULT_TASKS_CACHE)
@@ -314,11 +289,6 @@ def main() -> None:
     p.add_argument("--task-name", nargs="+", default=None, metavar="TASK")
     p.add_argument("--image-dir", type=Path, default=_THIS_DIR / "data" / "images")
     p.add_argument("--build-image", action=argparse.BooleanOptionalAction, default=False)
-    p.add_argument(
-        "--sandbox-provider",
-        default=None,
-        help="Provider name or single-key provider config JSON used for image preparation.",
-    )
     p.add_argument("--jobs", type=int, default=4)
     p.add_argument("--force", action="store_true", help="Rebuild images that already exist")
     args = p.parse_args()
@@ -329,17 +299,10 @@ def main() -> None:
     # Build the dataset JSONL
     build_dataset(args.output, args.tasks_cache, args.dataset_name, args.limit, args.task_name)
 
-    # Prepare provider images
+    # Build the container images
     if args.build_image:
-        if args.sandbox_provider is None:
-            sys.exit("--sandbox-provider is required when --build-image is set")
-        try:
-            provider_config = _parse_provider_config(args.sandbox_provider)
-        except (ValueError, json.JSONDecodeError) as exc:
-            sys.exit(str(exc))
-        provider = create_provider(provider_config)
         task_rows = [json.loads(line) for line in args.output.read_text().splitlines() if line.strip()]
-        build_images(task_rows, args.image_dir, args.jobs, args.force, provider)
+        build_images(task_rows, args.image_dir, args.jobs, args.force)
 
 
 if __name__ == "__main__":
