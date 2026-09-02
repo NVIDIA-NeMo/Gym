@@ -141,6 +141,9 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
         # setup across the shared Gym checkout; the descriptor is released
         # automatically if any setup command exits early.
         setup_lock_fpath = PARENT_DIR / ".nemo_gym_component_setup.lock"
+        serialize_shared_setup = dir_path.resolve().is_relative_to(
+            PARENT_DIR.resolve()
+        )
         has_pyproject_toml = (dir_path / "pyproject.toml").exists()
         has_requirements_txt = (dir_path / "requirements.txt").exists()
         if has_pyproject_toml and has_requirements_txt:
@@ -179,9 +182,13 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
 
         prefix_cmd = f" > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
+        lock_prefix = (
+            f"exec 9>{setup_lock_fpath} && flock 9 && "
+            if serialize_shared_setup
+            else ""
+        )
         env_setup_cmd = (
-            f"exec 9>{setup_lock_fpath} && flock 9"
-            f" && {uv_venv_cmd}{prefix_cmd}"
+            f"{lock_prefix}{uv_venv_cmd}{prefix_cmd}"
             f" && source {venv_activate_fpath}"
             f" && {install_cmd}{prefix_cmd}"
         )
@@ -202,7 +209,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     if bool(skip_venv_if_present) and not should_skip_venv_setup:
         env_setup_cmd += f" && touch {venv_ready_fpath}"
 
-    if not should_skip_venv_setup:
+    if not should_skip_venv_setup and serialize_shared_setup:
         env_setup_cmd += " && flock -u 9"
 
     return f"cd {dir_path} && {env_setup_cmd}"
