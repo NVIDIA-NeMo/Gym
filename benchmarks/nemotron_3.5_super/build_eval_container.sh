@@ -10,6 +10,14 @@ INPUT_CONTAINER=$INPUT_CONTAINER
 OUTPUT_CONTAINER=$OUTPUT_CONTAINER
 MOUNTS=$MOUNTS
 GYM_CONFIG=$GYM_CONFIG
+# Required. The released vllm-router wheel resets every worker's in-flight load
+# counter from its health checker, every 10 cycles, which disables the cache_aware
+# policy's rebalance and lets one decode node hot-spot under P/D disaggregation
+# (https://github.com/vllm-project/router/issues/197). Build a fixed wheel with
+# build_vllm_router_wheel.sh and pass it here; there is deliberately no fallback to
+# `uv pip install vllm-router`, so a container cannot be built with the bad router
+# by omission.
+VLLM_ROUTER_WHEEL=$VLLM_ROUTER_WHEEL
 NEMO_GYM_GIT_URL=${NEMO_GYM_GIT_URL:-https://github.com/NVIDIA-NeMo/Gym}
 NEMO_GYM_GIT_REF=${NEMO_GYM_GIT_REF:-main}
 TAU_2_MOUNT_BASE_GYM_DIR=${TAU_2_MOUNT_BASE_GYM_DIR:-""}
@@ -19,18 +27,50 @@ if [[ -n "$TAU_2_MOUNT_BASE_GYM_DIR" ]]; then
     MOUNTS="$MOUNTS,$TAU_2_MOUNT_BASE_GYM_DIR:$TAU_2_MOUNT_BASE_GYM_DIR"
 fi
 
+if [[ ! -f "$VLLM_ROUTER_WHEEL" ]]; then
+    echo "VLLM_ROUTER_WHEEL not found: $VLLM_ROUTER_WHEEL" >&2
+    echo "Build one with benchmarks/nemotron_3.5_super/build_vllm_router_wheel.sh." >&2
+    echo "It must be readable from the compute node (shared storage, not node-local /tmp)." >&2
+    exit 1
+fi
+VLLM_ROUTER_WHEEL=$(readlink -f "$VLLM_ROUTER_WHEEL")
+# Mounted at its own path so the value stays valid inside the container.
+MOUNTS="$MOUNTS,$(dirname "$VLLM_ROUTER_WHEEL"):$(dirname "$VLLM_ROUTER_WHEEL")"
+
+# pyxis --container-save exports the image when the step tears down, whatever the
+# inner script exited with, and it overwrites whatever already sits at the target.
+# So stage the build and publish only on success; otherwise a failed build silently
+# replaces a good container with a broken one.
+staged_container="$OUTPUT_CONTAINER.partial"
+rm -f "$staged_container"
+save_status=0
+
 srun --nodes=1 --ntasks=1 \
     --container-image=$INPUT_CONTAINER \
     --container-mounts=$MOUNTS \
     --no-container-mount-home \
-    --container-save=$OUTPUT_CONTAINER \
-    bash -s <<INNER_BUILD
+    --container-save="$staged_container" \
+    bash -s <<INNER_BUILD || save_status=$?
 set -xeuo pipefail
 
 # Hardlink, not clone to save space
 export UV_LINK_MODE=hardlink
 
-uv pip install --system vllm-router
+uv pip install --system --reinstall-package vllm-router "$VLLM_ROUTER_WHEEL"
+uv pip show --system vllm-router
+# PR #216 does not bump the version, so pip metadata cannot tell a fixed router from
+# the stock 0.1.15 wheel. The compiled extension can: stock carries the periodic-reset
+# log line, and only the fix carries the clamped-decrement warning.
+router_so=\$(python3 -c "import vllm_router_rs; print(vllm_router_rs.__file__)")
+if grep -aqF "Resetting worker loads (cycle" "\$router_so"; then
+    echo "ERROR: this wheel still resets worker loads periodically; see issue #197" >&2
+    exit 1
+fi
+if ! grep -aqF "Attempted to decrement load counter that is already at 0" "\$router_so"; then
+    echo "ERROR: this wheel is missing the #216 load-guard changes" >&2
+    exit 1
+fi
+echo ">>> vllm-router carries vllm-project/router#216"
 
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -81,3 +121,11 @@ gym env start \
 
 echo ">>> Inner build complete. Container will now be packed into sqsh."
 INNER_BUILD
+
+if (( save_status != 0 )); then
+    rm -f "$staged_container"
+    echo "Build failed (exit $save_status). $OUTPUT_CONTAINER left untouched." >&2
+    exit "$save_status"
+fi
+mv -f "$staged_container" "$OUTPUT_CONTAINER"
+echo ">>> Published $OUTPUT_CONTAINER"
