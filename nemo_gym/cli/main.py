@@ -441,20 +441,36 @@ def _asset_config_path(flag: str, value: str) -> str:
     )
 
 
-def _asset_selector(flag: str) -> Flag:
-    """A `--<flag> NAME` selector that resolves the named asset to a config and adds it to +config_paths."""
+def _asset_selector(flag: str, *, repeatable: bool = False) -> Flag:
+    """A `--<flag> NAME` selector that resolves the named asset to a config and adds it to +config_paths.
+
+    Repeatable selectors accumulate, composing several components the way `--config` does.
+    """
     dest = flag.replace("-", "_")
+
+    def translate_to_hydra(args: argparse.Namespace) -> list[str]:
+        selected = getattr(args, dest)
+        if not selected:
+            return []
+        names = selected if isinstance(selected, list) else [selected]
+        return [f"+config_paths=[{','.join(_asset_config_path(flag, name) for name in names)}]"]
+
     return Flag(
-        register=lambda p: p.add_argument(f"--{flag}", metavar="NAME", help=f"Load the named {flag} config."),
-        translate_to_hydra=lambda args: (
-            [f"+config_paths=[{_asset_config_path(flag, getattr(args, dest))}]"] if getattr(args, dest) else []
+        register=lambda p: p.add_argument(
+            f"--{flag}",
+            metavar="NAME",
+            action="append" if repeatable else "store",
+            help=f"Load the named {flag} config." + (" Repeatable." if repeatable else ""),
         ),
+        translate_to_hydra=translate_to_hydra,
     )
 
 
-BENCHMARK = _asset_selector("benchmark")
-ENVIRONMENT = _asset_selector("environment")
-RESOURCES_SERVER_CONFIG = _asset_selector("resources-server")
+# Selecting several environments or benchmarks composes their configs, so these accumulate. A model type
+# names the one policy model a run serves, so it does not.
+BENCHMARK = _asset_selector("benchmark", repeatable=True)
+ENVIRONMENT = _asset_selector("environment", repeatable=True)
+RESOURCES_SERVER_CONFIG = _asset_selector("resources-server", repeatable=True)
 MODEL_TYPE = _asset_selector("model-type")
 
 # Override for the verifier-side `allowed_agents` guard. Offered wherever --agent-type composes.
