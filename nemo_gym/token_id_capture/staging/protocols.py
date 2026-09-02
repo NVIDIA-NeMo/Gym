@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-from nemo_gym.token_id_capture.staging.records import StagedCallRecord, StagedCallSnapshot, StageResult
+from nemo_gym.token_id_capture.staging.records import StagedCallBaseSnapshot, StagedCallRecord, StageResult
 
 
 @runtime_checkable
@@ -37,9 +37,13 @@ class StagingSink(Protocol):
 
 @runtime_checkable
 class StagingSource(Protocol):
-    """Fetch exactly one snapshot per requested opaque staging key, in order."""
+    """Fetch exactly one base snapshot per requested opaque staging key, in order.
 
-    def fetch(self, staging_keys: list[str]) -> list[StagedCallSnapshot]: ...
+    Sources return metadata-only base rows; extras payloads stay behind the
+    staging key for consumers to fetch and digest-verify at point of use.
+    """
+
+    def fetch(self, staging_keys: list[str]) -> list[StagedCallBaseSnapshot]: ...
 
 
 @runtime_checkable

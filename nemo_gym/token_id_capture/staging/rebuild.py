@@ -1,7 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Verify sealed receipts and rebuild only their declared terminal ancestry."""
+"""Verify sealed receipts and rebuild only their declared terminal ancestry.
+
+The verifier is metadata-only: it consumes :class:`StagedCallBaseSnapshot`
+rows and never fetches, digests, or decodes extras payloads. Extras stay a
+committed, externally deferred payload — the returned
+:class:`ExtrasCommitment` list tells consumers which digests to verify at
+their own point of use (see ``staging.routes`` for the route envelope codec
+and span decision table).
+"""
 
 from __future__ import annotations
 
@@ -13,19 +21,13 @@ from nemo_gym.token_id_capture.staging.digest import (
     STAGING_DIGEST_VERSION,
     STAGING_SCHEMA_VERSION,
     compute_chain_hash,
-    compute_extras_digest,
     compute_staging_digest,
     hash_token_ids,
 )
 from nemo_gym.token_id_capture.staging.records import (
     CallRecord,
     RolloutReceipt,
-    StagedCallSnapshot,
-)
-from nemo_gym.token_id_capture.staging.routes import (
-    MISSING_ROUTE_SENTINEL,
-    RoutedExpertsFragment,
-    decode_routed_experts,
+    StagedCallBaseSnapshot,
 )
 
 
@@ -52,8 +54,27 @@ class WeightVersionSpan:
 
 
 @dataclass(frozen=True)
+class ExtrasCommitment:
+    """The receipt-bound extras digest for one selected call.
+
+    A commitment proves what the extras payload must hash to — not that the
+    payload was fetched or valid. Consumers verify deferred extras bytes
+    against it with ``compute_extras_digest`` at their own point of use.
+    """
+
+    model_call_id: str
+    extras_digest_version: int
+    extras_digest: str
+
+
+@dataclass(frozen=True)
 class LinearizedRow:
-    """One verified terminal chain ready for framework publication."""
+    """One verified terminal chain ready for framework publication.
+
+    This is a proof that the base training row was verified. It carries no
+    extras payloads; ``extras_commitments`` lists the selected calls'
+    receipt-bound digests root-to-terminal for point-of-use verification.
+    """
 
     rollout_id: str
     token_ids: list[int]
@@ -63,9 +84,8 @@ class LinearizedRow:
     prompt_len: int
     weight_versions: list[int]
     weight_version_spans: list[WeightVersionSpan]
-    routed_experts: list[list[list[int]]] | None = None
-    routed_experts_dtype: str | None = None
     link_spans: list[tuple[str, int, int]] = field(default_factory=list)
+    extras_commitments: list[ExtrasCommitment] = field(default_factory=list)
 
     @property
     def call_ids(self) -> list[str]:
@@ -92,7 +112,7 @@ def _verify_versions(receipt: RolloutReceipt) -> None:
 def _compare_manifest_fields(
     receipt: RolloutReceipt,
     record: CallRecord,
-    snapshot: StagedCallSnapshot,
+    snapshot: StagedCallBaseSnapshot,
 ) -> None:
     call_id = record.model_call_id
     if snapshot.rollout_id != receipt.rollout_id:
@@ -127,10 +147,11 @@ def _compare_manifest_fields(
             )
 
 
-def _recompute_integrity(snapshot: StagedCallSnapshot) -> None:
+def _recompute_integrity(snapshot: StagedCallBaseSnapshot) -> None:
+    # Recomputed from the *committed* extras digest: the base row's
+    # authenticity never depends on extras bytes being present.
     call_id = snapshot.model_call_id
     try:
-        extras_digest = compute_extras_digest(snapshot.extras)
         digest = compute_staging_digest(
             schema_version=snapshot.schema_version,
             digest_version=snapshot.digest_version,
@@ -146,14 +167,12 @@ def _recompute_integrity(snapshot: StagedCallSnapshot) -> None:
             token_ids_delta=snapshot.token_ids_delta,
             token_mask_delta=snapshot.token_mask_delta,
             generation_log_probs_delta=snapshot.generation_log_probs_delta,
-            extras_digest=extras_digest,
+            extras_digest=snapshot.extras_digest,
             chain_hash=snapshot.chain_hash,
             cumulative_hash=snapshot.cumulative_hash,
         )
     except (TypeError, ValueError, OverflowError) as error:
         raise _fail("invalid_snapshot", f"call {call_id}: {error}") from error
-    if extras_digest != snapshot.extras_digest:
-        raise _fail("corrupt_extras", f"call {call_id}: extras digest mismatch")
     if digest != snapshot.digest:
         raise _fail("corrupt_digest", f"call {call_id}: staged digest mismatch")
 
@@ -199,7 +218,7 @@ def _terminal_chain(
     return chain
 
 
-def _carry_boundary(snapshot: StagedCallSnapshot) -> int:
+def _carry_boundary(snapshot: StagedCallBaseSnapshot) -> int:
     boundary = 0
     for mask in snapshot.token_mask_delta:
         if mask != 0.0:
@@ -218,52 +237,16 @@ def _carry_boundary(snapshot: StagedCallSnapshot) -> int:
     return boundary
 
 
-def _decode_selected_routes(
-    chain: Sequence[CallRecord],
-    snapshots: dict[str, StagedCallSnapshot],
-) -> tuple[list[list[list[int]]] | None, str | None]:
-    decoded: dict[str, RoutedExpertsFragment] = {}
-    for record in chain:
-        payload = (snapshots[record.model_call_id].extras or {}).get("routed_experts")
-        if payload is None:
-            continue
-        try:
-            fragment = decode_routed_experts(payload)
-        except ValueError as error:
-            raise RebuildError(
-                "invalid_routes",
-                f"call {record.model_call_id}: {error}",
-            ) from error
-        if len(fragment.values) != record.delta_len:
-            raise RebuildError(
-                "route_length_mismatch",
-                f"call {record.model_call_id}: {len(fragment.values)} routes for {record.delta_len} tokens",
-            )
-        decoded[record.model_call_id] = fragment
-    if not decoded:
-        return None, None
-    template = next(iter(decoded.values()))
-    for call_id, fragment in decoded.items():
-        if (fragment.num_layers, fragment.topk) != (template.num_layers, template.topk):
-            raise RebuildError("route_shape_mismatch", f"call {call_id} route shape changed")
-        if fragment.dtype != template.dtype:
-            raise RebuildError("route_dtype_mismatch", f"call {call_id} route dtype changed")
-    sentinel = [[MISSING_ROUTE_SENTINEL] * template.topk for _ in range(template.num_layers)]
-    routes: list[list[list[int]]] = []
-    for record in chain:
-        fragment = decoded.get(record.model_call_id)
-        if fragment is None:
-            routes.extend([[list(layer) for layer in sentinel] for _ in range(record.delta_len)])
-        else:
-            routes.extend(fragment.values)
-    return routes, template.dtype
-
-
 def verify_and_linearize(
     receipt: RolloutReceipt,
-    snapshots: Sequence[StagedCallSnapshot],
+    snapshots: Sequence[StagedCallBaseSnapshot],
 ) -> LinearizedRow:
-    """Verify an untrusted staged set and linearize the declared terminal chain."""
+    """Verify an untrusted staged base set and linearize the declared terminal chain.
+
+    Metadata-only: extras payloads are never read. The returned row's
+    ``extras_commitments`` carry the selected calls' receipt-bound digests for
+    consumers to verify fetched extras against at their own point of use.
+    """
     if not isinstance(receipt, RolloutReceipt):
         raise TypeError("receipt must be a RolloutReceipt")
     _verify_versions(receipt)
@@ -287,8 +270,8 @@ def verify_and_linearize(
         )
 
     for snapshot in snapshots:
-        if not isinstance(snapshot, StagedCallSnapshot):
-            raise TypeError("snapshots must contain StagedCallSnapshot values")
+        if not isinstance(snapshot, StagedCallBaseSnapshot):
+            raise TypeError("snapshots must contain StagedCallBaseSnapshot values")
 
     snapshot_ids = [snapshot.model_call_id for snapshot in snapshots]
     if len(snapshot_ids) != len(set(snapshot_ids)):
@@ -363,12 +346,14 @@ def verify_and_linearize(
             f"terminal call {chain[-1].model_call_id} cumulative hash does not cover the linearized tokens",
         )
 
-    routed_experts, routed_experts_dtype = _decode_selected_routes(chain, snapshots_by_id)
-    if routed_experts is not None and len(routed_experts) != len(token_ids):
-        raise RebuildError(
-            "route_length_mismatch",
-            f"{len(routed_experts)} route rows for {len(token_ids)} tokens",
+    extras_commitments = [
+        ExtrasCommitment(
+            model_call_id=record.model_call_id,
+            extras_digest_version=record.extras_digest_version,
+            extras_digest=record.extras_digest,
         )
+        for record in chain
+    ]
     return LinearizedRow(
         rollout_id=receipt.rollout_id,
         token_ids=token_ids,
@@ -378,15 +363,14 @@ def verify_and_linearize(
         prompt_len=prompt_len,
         weight_versions=weight_versions,
         weight_version_spans=weight_version_spans,
-        routed_experts=routed_experts,
-        routed_experts_dtype=routed_experts_dtype,
         link_spans=link_spans,
+        extras_commitments=extras_commitments,
     )
 
 
 def linearize(
     rollout_id: str,
-    snapshots: list[StagedCallSnapshot],
+    snapshots: list[StagedCallBaseSnapshot],
     manifest: list[CallRecord],
     *,
     terminal_hint: str | None = None,

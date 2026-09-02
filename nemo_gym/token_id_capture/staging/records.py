@@ -130,8 +130,16 @@ class CaptureAdmission(_WireModel):
         return self
 
 
-class StagedCallRecord(_DigestWireModel):
-    """One normalized token delta made durable by a framework staging sink."""
+class StagedCallBaseSnapshot(_DigestWireModel):
+    """The extras-free part of a staged call that verifies without extras bytes.
+
+    Carries every custody-critical scalar and token column plus the *committed*
+    ``extras_digest``. Validation recomputes the call digest from the committed
+    extras digest, so a valid instance proves the base row is authentic — it
+    deliberately does NOT claim the extras payload was fetched or verified.
+    Consumers verify deferred extras against ``extras_digest`` at their own
+    point of use.
+    """
 
     rollout_id: Identifier
     model_call_id: Identifier
@@ -145,7 +153,6 @@ class StagedCallRecord(_DigestWireModel):
     token_ids_delta: list[StrictInt]
     token_mask_delta: list[StrictFloat]
     generation_log_probs_delta: list[StrictFloat]
-    extras: dict[str, Any] | None = None
     extras_digest: DigestHex = EMPTY_EXTRAS_DIGEST
     chain_hash: DigestHex | None = None
     cumulative_hash: DigestHex | None = None
@@ -155,7 +162,7 @@ class StagedCallRecord(_DigestWireModel):
         return staging_key(self.rollout_id, self.model_call_id)
 
     @model_validator(mode="after")
-    def _validate_integrity(self) -> Self:
+    def _validate_base_integrity(self) -> Self:
         if self.parent_call_id is None and self.prev_len != 0:
             raise ValueError("a parentless staged call must have prev_len == 0")
         if self.parent_call_id is not None and self.prev_len == 0:
@@ -175,9 +182,6 @@ class StagedCallRecord(_DigestWireModel):
             for mask, log_prob in zip(self.token_mask_delta, self.generation_log_probs_delta)
         ):
             raise ValueError("prompt-carry log probabilities must be 0.0")
-        actual_extras_digest = compute_extras_digest(self.extras)
-        if self.extras_digest != actual_extras_digest:
-            raise ValueError("extras_digest does not match extras")
         actual_digest = compute_staging_digest(
             schema_version=self.schema_version,
             digest_version=self.digest_version,
@@ -199,6 +203,19 @@ class StagedCallRecord(_DigestWireModel):
         )
         if self.digest != actual_digest:
             raise ValueError("digest does not match staged call contents")
+        return self
+
+
+class StagedCallRecord(StagedCallBaseSnapshot):
+    """One normalized token delta made durable by a framework staging sink."""
+
+    extras: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _validate_extras_integrity(self) -> Self:
+        actual_extras_digest = compute_extras_digest(self.extras)
+        if self.extras_digest != actual_extras_digest:
+            raise ValueError("extras_digest does not match extras")
         return self
 
 
