@@ -19,6 +19,11 @@ These synchronous interfaces are intentional: the first consumer is an
 inference worker whose capture hook is synchronous. Implementations must not
 hide an asynchronous network client behind these methods; a serving host must
 move a blocking implementation off its event loop explicitly.
+
+The capture host does not serialize sink access: ``StagingSink.stage`` may be
+invoked concurrently from multiple threads (one per in-flight completion).
+Implementations must be safe under concurrent invocation; one that requires
+serialization must synchronize internally rather than rely on the host.
 """
 
 from __future__ import annotations
@@ -30,7 +35,11 @@ from nemo_gym.token_id_capture.staging.records import StagedCallBaseSnapshot, St
 
 @runtime_checkable
 class StagingSink(Protocol):
-    """Make one normalized staged call durable before returning success."""
+    """Make one normalized staged call durable before returning success.
+
+    ``stage`` must be thread-safe: the capture host invokes it concurrently
+    from multiple completion threads without serializing calls.
+    """
 
     def stage(self, record: StagedCallRecord) -> StageResult: ...
 

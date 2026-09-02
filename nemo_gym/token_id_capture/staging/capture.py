@@ -73,7 +73,9 @@ class RolloutTokenCapture:
         self._sink = sink
         self._weight_version_fn = weight_version_fn
         self._adapter = adapter
-        self._lock = threading.Lock()
+        # Guards only the per-call single-completion transition. Sink writes
+        # run unlocked and may overlap across calls (StagingSink contract).
+        self._completion_lock = threading.Lock()
 
     @property
     def adapter(self) -> CaptureAdapter | None:
@@ -170,8 +172,12 @@ class RolloutTokenCapture:
             )
             return self._failed_coords(call)
         try:
-            with self._lock:
-                result = self._sink.stage(record)
+            # Unlocked: the completion claim above already made this call the
+            # sole stager, and cross-call ordering comes from stage-before-ack
+            # (a child is only admitted after its parent's coords returned).
+            # Serializing here would head-of-line block every concurrent
+            # completion on the worker behind one sink round trip.
+            result = self._sink.stage(record)
             if not isinstance(result, StageResult):
                 raise TypeError(f"StagingSink.stage returned {type(result).__name__}, expected StageResult")
         except Exception:
@@ -250,7 +256,7 @@ class RolloutTokenCapture:
         return self._failed_coords(call)
 
     def _claim_completion(self, call: ActiveCall) -> None:
-        with self._lock:
+        with self._completion_lock:
             if call.completed:
                 raise CaptureError(f"rollout {call.rollout_id} call {call.model_call_id} was already completed")
             call.completed = True

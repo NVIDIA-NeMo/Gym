@@ -4,6 +4,7 @@
 """Worker-custody tests for typed staging admission and vLLM extraction."""
 
 import asyncio
+import threading
 from typing import Any
 
 import pytest
@@ -223,6 +224,62 @@ def test_child_rejects_a_generation_prompt_with_the_wrong_parent_prefix() -> Non
     )
     assert coords.disposition == "capture_failed"
     assert sink.events == []
+
+
+def test_slow_sink_write_does_not_serialize_other_completions() -> None:
+    """One call's in-flight stage() must not block unrelated completions.
+
+    The completion lock covers only the single-completion claim; sink writes
+    overlap across calls (the StagingSink thread-safety contract).
+    """
+    first_staging = threading.Event()
+    release_first = threading.Event()
+
+    class _BlockingSink(_MemorySink):
+        def stage(self, record: StagedCallRecord) -> StageResult:
+            if record.model_call_id == "c1":
+                first_staging.set()
+                assert release_first.wait(timeout=10.0), "test deadlocked releasing the first stage"
+            return super().stage(record)
+
+    capture, sink = _capture(_BlockingSink())
+    first_call = capture.begin_call(_root("c1"))
+    first_coords: list[Any] = []
+
+    def _complete_first() -> None:
+        first_coords.append(
+            capture.complete_call(
+                first_call,
+                prompt_token_ids=[1],
+                generated_token_ids=[2],
+                generated_logprobs=[-0.1],
+            )
+        )
+
+    first_thread = threading.Thread(target=_complete_first)
+    first_thread.start()
+    try:
+        assert first_staging.wait(timeout=10.0), "first call never reached the sink"
+
+        # While c1 is mid-stage, an unrelated call completes end to end...
+        second_coords = capture.complete_call(
+            capture.begin_call(_root("c2")),
+            prompt_token_ids=[3],
+            generated_token_ids=[4],
+            generated_logprobs=[-0.2],
+        )
+        assert second_coords.disposition == "staged"
+
+        # ...and an unrelated failure path claims and poisons without waiting.
+        third_coords = capture.fail_call(capture.begin_call(_root("c3")), reason="engine error")
+        assert third_coords.disposition == "capture_failed"
+    finally:
+        release_first.set()
+        first_thread.join(timeout=10.0)
+
+    assert not first_thread.is_alive()
+    assert first_coords and first_coords[0].disposition == "staged"
+    assert [record.model_call_id for record in sink.records] == ["c2", "c1"]
 
 
 def test_duplicate_completion_and_failure_are_rejected() -> None:
