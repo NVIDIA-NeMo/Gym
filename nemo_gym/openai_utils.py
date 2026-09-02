@@ -31,7 +31,6 @@ from openai.types.chat import (
     ChatCompletion,
     ChatCompletionAssistantMessageParam,
     ChatCompletionContentPartImageParam,
-    ChatCompletionContentPartInputAudioParam,
     ChatCompletionContentPartTextParam,
     ChatCompletionDeveloperMessageParam,
     ChatCompletionMessage,
@@ -889,8 +888,18 @@ class NeMoGymChatCompletionContentPartImageParam(ChatCompletionContentPartImageP
     pass
 
 
-class NeMoGymChatCompletionContentPartInputAudioParam(ChatCompletionContentPartInputAudioParam):
-    pass
+class _NeMoGymInputAudio(TypedDict, total=False):
+    data: Required[str]
+    # Open token rather than the SDK's Literal["wav", "mp3"]: that literal is an
+    # OpenAI-cloud restriction. vLLM and the inference gateway build a
+    # ``data:audio/<format>`` URL and decode by content, and Gym's own media
+    # conversion emits m4a/flac/ogg/aac/aiff for self-hosted audio judges.
+    format: Required[str]
+
+
+class NeMoGymChatCompletionContentPartInputAudioParam(TypedDict, total=False):
+    type: Required[Literal["input_audio"]]
+    input_audio: Required[_NeMoGymInputAudio]
 
 
 class NeMoGymChatCompletionContentPartFileParam(ChatCompletionContentPartFileParam):

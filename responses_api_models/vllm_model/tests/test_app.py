@@ -3237,8 +3237,8 @@ class TestVLLMConverter:
         """Config baseline -> direct request field -> metadata override.
 
         Stirrup sends ``chat_template_kwargs`` as a body field; the strict
-        schema must accept it and the proxy must merge it above the configured
-        baseline and below per-request metadata.
+        schema must accept it, and when forwarding is opted in the proxy merges
+        it above the configured baseline and below per-request metadata.
         """
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -3251,6 +3251,7 @@ class TestVLLMConverter:
             return_token_id_information=False,
             uses_reasoning_parser=False,
             chat_template_kwargs={"enable_thinking": False, "baseline_only": 1},
+            forward_request_chat_template_kwargs=True,
         )
         server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         app = server.setup_webserver()
@@ -3308,6 +3309,60 @@ class TestVLLMConverter:
             json={"messages": [{"role": "user", "content": "hi"}], "chat_template_kwargs": "not-a-mapping"},
         )
         assert rejected.status_code == 422
+
+    def test_request_chat_template_kwargs_dropped_by_default(self, monkeypatch: MonkeyPatch):
+        """Default parity with validated campaigns: accepted at ingress, not forwarded.
+
+        Agents attach ``enable_thinking`` on every call; honoring it silently
+        would change the policy's generation regime relative to every run
+        judged so far, so the default keeps the historical drop behavior.
+        """
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            chat_template_kwargs={"enable_thinking": True},
+        )
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        app = server.setup_webserver()
+        captured_kwargs = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.update(kwargs)
+            return NeMoGymChatCompletion(
+                id="chtcmpl",
+                object="chat.completion",
+                created=FIXED_TIME,
+                model="dummy_model",
+                choices=[
+                    NeMoGymChoice(
+                        index=0,
+                        finish_reason="stop",
+                        message=NeMoGymChatCompletionMessage(role="assistant", content="response", tool_calls=[]),
+                    )
+                ],
+            ).model_dump()
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        server._clients = [mock_client]
+        client = TestClient(app)
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "hi"}],
+                "chat_template_kwargs": {"enable_thinking": False, "request_only": 2},
+            },
+        )
+        assert response.status_code == 200
+        assert captured_kwargs["chat_template_kwargs"] == {"enable_thinking": True}
 
     def test_metadata_chat_template_kwargs_override(self, monkeypatch: MonkeyPatch):
         config = VLLMModelConfig(
