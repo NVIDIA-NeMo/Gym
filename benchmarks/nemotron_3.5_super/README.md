@@ -4,6 +4,7 @@
   - [Development commands](#development-commands)
     - [Build eval container](#build-eval-container)
     - [vllm-router patch (decode-node cache imbalance)](#vllm-router-patch-decode-node-cache-imbalance)
+      - [Measured effect](#measured-effect)
     - [Launch vLLM](#launch-vllm)
     - [Interactive development on GPUs with Ray cluster](#interactive-development-on-gpus-with-ray-cluster)
     - [Run eval against external vLLM endpoint](#run-eval-against-external-vllm-endpoint)
@@ -57,42 +58,17 @@ build. The wheel is built inside the eval base image, so its extension module ma
 the Python that runs `vllm-router` at eval time:
 
 ```bash
-SBATCH_ACCOUNT=my-slurm-account \
-SBATCH_PARTITION=cpu \
-SBATCH_QOS=cpu-normal \
-CONTAINER=/path/to/vllm/container \
-sbatch --nodes=1 --ntasks=1 --cpus-per-task=96 --mem=0 --time=03:00:00 --gpus-per-node=0 \
-  benchmarks/nemotron_3.5_super/build_vllm_router_wheel.sh
+SBATCH_ACCOUNT=nemotron_n3_post \
+SBATCH_PARTITION=batch \
+SBATCH_QOS=interactive \
+SBATCH_GRES=gpu:4 \
+CONTAINER=$(pwd)/results/vllm/vllm-openai:v0.27.1___tomer.sqsh \
+sbatch benchmarks/nemotron_3.5_super/build_vllm_router_wheel.sh
 # -> results/vllm_router/wheels/vllm_router-*.whl
-
-VLLM_ROUTER_WHEEL=results/vllm_router/wheels/vllm_router-0.1.15-cp38-abi3-linux_aarch64.whl \
-INPUT_CONTAINER=... OUTPUT_CONTAINER=... MOUNTS=... GYM_CONFIG=... \
-sbatch benchmarks/nemotron_3.5_super/build_eval_container.sh
 ```
 
 The wheel's directory is mounted into the build automatically; it only has to live on
 storage the compute node can read.
-
-PR #216 does not bump the version -- a fixed router and the stock 0.1.15 wheel both
-report `0.1.15` -- so the container build asserts on the compiled extension instead:
-stock carries the string `Resetting worker loads (cycle`, and only the fix carries
-`Attempted to decrement load counter that is already at 0`. A wheel built from the
-wrong commit fails the build rather than shipping silently.
-
-To check an image after the fact, boot it and grep the extension:
-
-```bash
-srun --container-image=/path/to/image.sqsh --no-container-mount-home bash -c '
-  so=$(python3 -c "import vllm_router_rs; print(vllm_router_rs.__file__)")
-  grep -aqF "Resetting worker loads (cycle" "$so" && { echo "STOCK - unpatched"; exit 1; }
-  grep -aqF "Attempted to decrement load counter that is already at 0" "$so" || { echo "missing #216"; exit 1; }
-  echo "OK: carries vllm-project/router#216"'
-```
-
-The same one-liner works against a *running* job with
-`srun --overlap --jobid=<id> --container-name=container-on-node`. From a finished
-job's Slurm log, the router's own source line identifies the build:
-`vllm_pd_router.rs:1935` for stock 0.1.15, `:1999` for the #216 build.
 
 #### Measured effect
 
@@ -120,33 +96,6 @@ rollouts. The patched runs stay flat, never queue, and hold KV below 29%.
 Not every run on the released router hits this -- it needs a sustained saturated
 decode regime -- so a clean run does not tell you which router you are on. Use the
 fingerprint above instead.
-
-#### What the fix does not cover
-
-Neither of these is reachable with the flags `sbatch_external_vllm.sh` uses today,
-and neither is a regression -- v0.1.15 behaved the same way. They matter only if the
-deployment changes.
-
-- **Streaming.** `process_vllm_two_stage_request` releases the decode load guard as
-  soon as the decode response *headers* arrive, before the body is forwarded. For a
-  streaming request Starlette emits `http.response.start` before iterating the body
-  generator, so the decode counter returns to 0 at request acceptance and the whole
-  generation runs uncounted -- reproducing #197 at full strength. NeMo Gym pins
-  `stream: Literal[False]`, so we never hit it. Applies to `/v1/responses` too, which
-  funnels into the same handler via `route_transparent`.
-- **Service-discovery mode.** `process_vllm_two_stage_request_discovered` performs no
-  load accounting at all, so `cache_aware` sees `min_load == max_load == 0` forever
-  and degenerates to pure prefix affinity with no load ceiling. Only reachable via
-  `--vllm-discovery-address`; we pass explicit `--prefill`/`--decode` URLs.
-
-Also worth knowing: with the CLI defaults `--balance-abs-threshold 64` and
-`--balance-rel-threshold 1.5`, cache affinity can hold a sustained ~64-request or
-1.5x decode split indefinitely without ever tripping shortest-queue. That is the
-ceiling the fix leaves in place.
-
-Once upstream merges #216 and cuts a release, drop `build_vllm_router_wheel.sh` and
-the `VLLM_ROUTER_WHEEL` requirement and go back to `uv pip install --system
-vllm-router`.
 
 
 ### Launch vLLM
