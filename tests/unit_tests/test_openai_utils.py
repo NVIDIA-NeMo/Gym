@@ -1329,3 +1329,53 @@ def test_response_field_set_is_pinned() -> None:
         f"openai {openai.__version__} changed Response's field set: added={added} removed={removed}.\n"
         f"Decide what Gym does with each, then update this list."
     )
+
+
+def test_tool_message_accepts_the_name_field() -> None:
+    """Real clients label tool results with the tool's name, and real servers accept it.
+
+    The field is absent from OpenAI's type, so a request schema that forbids extras drops the
+    whole conversation and an agent that calls a tool never receives the result.
+    """
+    body = {
+        "model": "policy_model",
+        "messages": [
+            {"role": "user", "content": "do the task"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {"name": "terminal", "arguments": '{"command": "ls"}'},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "name": "terminal",
+                "tool_call_id": "call_abc",
+                "content": '{"output": "ok"}',
+            },
+        ],
+    }
+    parsed = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(body)
+    assert parsed.messages[-1]["name"] == "terminal"
+
+
+def test_tool_message_still_rejects_unknown_fields() -> None:
+    body = {
+        "model": "policy_model",
+        "messages": [
+            {
+                "role": "tool",
+                "name": "terminal",
+                "tool_call_id": "call_abc",
+                "content": "ok",
+                "not_a_real_field": 1,
+            }
+        ],
+    }
+    with pytest.raises(ValidationError):
+        NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(body)

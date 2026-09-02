@@ -963,6 +963,10 @@ class NeMoGymChatCompletionAssistantMessageForTrainingParam(
 class NeMoGymChatCompletionToolMessageParam(ChatCompletionToolMessageParam):
     # Override the iterable which is annoying to work with.
     content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
+    # Absent from the OpenAI type but sent by real clients and accepted by real servers.
+    # Without it the request schema rejects the whole conversation, so an agent that calls a
+    # tool cannot receive the result.
+    name: NotRequired[str]
 
 
 class NeMoGymFunctionToolParam(FunctionToolParam):
