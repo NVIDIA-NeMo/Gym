@@ -27,7 +27,7 @@ import traceback
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from io import BytesIO, StringIO
+from io import BytesIO, StringIO, TextIOWrapper
 
 # from pyext import RuntimeModule
 from types import ModuleType
@@ -38,7 +38,7 @@ from unittest.mock import mock_open, patch
 import numpy as np
 
 
-import_string = "from string import *\nfrom re import *\nfrom datetime import *\nfrom collections import *\nfrom heapq import *\nfrom bisect import *\nfrom copy import *\nfrom math import *\nfrom random import *\nfrom statistics import *\nfrom itertools import *\nfrom functools import *\nfrom operator import *\nfrom io import *\nfrom sys import *\nfrom json import *\nfrom builtins import *\nfrom typing import *\nimport string\nimport re\nimport datetime\nimport collections\nimport heapq\nimport bisect\nimport copy\nimport math\nimport random\nimport statistics\nimport itertools\nimport functools\nimport operator\nimport io\nimport sys\nimport json\nsys.setrecursionlimit(50000)\n"
+import_string = "from string import *\nfrom re import *\nfrom datetime import *\nfrom collections import *\nfrom heapq import *\nfrom bisect import *\nfrom copy import *\nfrom math import *\nfrom random import *\nfrom statistics import *\nfrom itertools import *\nfrom functools import *\nfrom operator import *\nfrom io import *\nfrom sys import *\nfrom json import *\nfrom builtins import *\nfrom typing import *\nimport string\nimport re\nimport datetime\nimport collections\nimport heapq\nimport bisect\nimport copy\nimport math\nimport random\nimport statistics\nimport itertools\nimport functools\nimport operator\nimport io\nimport sys\nimport json\nsys.setrecursionlimit(50000)\nsys.set_int_max_str_digits(1 << 20)\n"
 
 
 def truncatefn(s, length=300):
@@ -77,15 +77,24 @@ def timeout_handler_factory(debug: bool):
 class Capturing(list):
     def __enter__(self):
         self._stdout = sys.stdout
-        sys.stdout = self._stringio = StringIO()
-        # Make closing the StringIO a no-op
-        self._stringio.close = lambda x: 1
+        self._bytes_buffer = BytesIO()
+        self._stringio = TextIOWrapper(
+            self._bytes_buffer,
+            encoding="utf-8",
+            newline="",
+            write_through=True,
+        )
+        # Make closing the stream a no-op
+        self._stringio.close = lambda *args, **kwargs: None
+        sys.stdout = self._stringio
         return self
 
     def __exit__(self, *args):
-        self.append(self._stringio.getvalue())
-        del self._stringio  # free up some memory
+        self._stringio.flush()
+        self.append(self._bytes_buffer.getvalue().decode("utf-8", errors="replace"))
         sys.stdout = self._stdout
+        del self._stringio  # free up some memory
+        del self._bytes_buffer
 
 
 # Custom mock for sys.stdin that supports buffer attribute
@@ -343,6 +352,15 @@ def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: st
                 tmp_result = tmp_result or (np.allclose(float(prediction), float(gt_out)))
             except Exception:
                 pass
+
+            if not tmp_result and isinstance(prediction, list) and isinstance(gt_out, list):
+                try:
+                    tmp_result = len(prediction) == len(gt_out) and all(
+                        np.allclose(float(predicted_item), float(expected_item))
+                        for predicted_item, expected_item in zip(prediction, gt_out)
+                    )
+                except Exception:
+                    pass
 
             all_results.append(tmp_result)
 
