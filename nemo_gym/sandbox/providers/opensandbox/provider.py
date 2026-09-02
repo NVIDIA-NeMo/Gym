@@ -47,6 +47,21 @@ logging.getLogger("opensandbox").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
+class _MissingSandboxTerminateFilter(logging.Filter):
+    """Hide the SDK warning emitted when terminate reaches its desired state."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not (
+            record.levelno == logging.WARNING
+            and message.startswith("Failed to terminate sandbox ")
+            and "[KUBERNETES::SANDBOX_NOT_FOUND]" in message
+        )
+
+
+logging.getLogger("opensandbox.adapters.sandboxes_adapter").addFilter(_MissingSandboxTerminateFilter())
+
+
 class OpenSandboxCreateError(SandboxCreateError):
     """Raised when OpenSandbox cannot create a sandbox."""
 
