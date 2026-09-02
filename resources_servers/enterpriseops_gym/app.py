@@ -227,46 +227,40 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
 
     async def _start_sandboxes(self) -> None:
         provider_config = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
-        await asyncio.gather(
-            *(
-                self._start_sandbox(name, img, mod, port, provider_config)
-                for name, (img, mod, port) in _SERVICES.items()
-            )
-        )
 
-    async def _start_sandbox(
-        self, gym_name: str, image: str, app_module: str, port: int, provider_config: Any
-    ) -> None:
-        spec = SandboxSpec(
-            image=image,
-            ports=[port],
-            files={_LAUNCHER_PATH: _LAUNCHER},
-            env={"EOG_APP": app_module, "EOG_PORT": str(port)},
-        )
-        sandbox = AsyncSandbox(provider_config, spec)
-        try:
-            await sandbox.start()
-        except SandboxCreateError as e:
-            raise RuntimeError(f"Failed to start sandbox for EOG gym '{gym_name}': {e}") from e
-        log_path = f"/tmp/eog_{gym_name}.log"
-        await sandbox.exec(f"nohup python {_LAUNCHER_PATH} >{log_path} 2>&1 &", timeout_s=5.0)
-        health = await sandbox.exec(
-            f"sh -c 'i=0; until curl -fsS http://127.0.0.1:{port}/openapi.json >/dev/null 2>&1; "
-            f"do i=$((i+1)); [ $i -ge 120 ] && exit 1; sleep 1; done'",
-            timeout_s=180.0,
-        )
-        if health.return_code != 0:
-            logs = (await sandbox.exec(f"tail -c 2000 {log_path}", timeout_s=10.0)).stdout or ""
-            await sandbox.stop()
-            raise RuntimeError(f"EOG service '{gym_name}' did not start in sandbox. Logs: {logs.strip()}")
-        try:
-            endpoint = await sandbox.endpoint(port)
-            url = endpoint.endpoint
-        except NotImplementedError:
-            # Apptainer/enroot share the host network; the service is reachable at localhost.
-            url = f"http://127.0.0.1:{port}"
-        self._sandboxes[gym_name] = sandbox
-        self._sandbox_urls[gym_name] = url
+        async def start_one(gym_name: str, image: str, app_module: str, port: int) -> None:
+            spec = SandboxSpec(
+                image=image,
+                ports=[port],
+                files={_LAUNCHER_PATH: _LAUNCHER},
+                env={"EOG_APP": app_module, "EOG_PORT": str(port)},
+            )
+            sandbox = AsyncSandbox(provider_config, spec)
+            try:
+                await sandbox.start()
+            except SandboxCreateError as e:
+                raise RuntimeError(f"Failed to start sandbox for EOG gym '{gym_name}': {e}") from e
+            log_path = f"/tmp/eog_{gym_name}.log"
+            await sandbox.exec(f"nohup python {_LAUNCHER_PATH} >{log_path} 2>&1 &", timeout_s=5.0)
+            health = await sandbox.exec(
+                f"sh -c 'i=0; until curl -fsS http://127.0.0.1:{port}/openapi.json >/dev/null 2>&1; "
+                f"do i=$((i+1)); [ $i -ge 120 ] && exit 1; sleep 1; done'",
+                timeout_s=180.0,
+            )
+            if health.return_code != 0:
+                logs = (await sandbox.exec(f"tail -c 2000 {log_path}", timeout_s=10.0)).stdout or ""
+                await sandbox.stop()
+                raise RuntimeError(f"EOG service '{gym_name}' did not start in sandbox. Logs: {logs.strip()}")
+            try:
+                endpoint = await sandbox.endpoint(port)
+                url = endpoint.endpoint
+            except NotImplementedError:
+                # Apptainer/enroot share the host network; the service is reachable at localhost.
+                url = f"http://127.0.0.1:{port}"
+            self._sandboxes[gym_name] = sandbox
+            self._sandbox_urls[gym_name] = url
+
+        await asyncio.gather(*(start_one(n, i, m, p) for n, (i, m, p) in _SERVICES.items()))
 
     async def _stop_sandboxes(self) -> None:
         for name, sb in list(self._sandboxes.items()):
