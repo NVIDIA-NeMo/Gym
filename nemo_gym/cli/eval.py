@@ -417,6 +417,9 @@ def e2e_rollout_collection():  # pragma: no cover
         data_process_output_dir = output_fpath.with_suffix("") / "preprocessed_datasets"
         data_processor_config_dict["output_dirpath"] = str(data_process_output_dir)
 
+    server_instance_configs = GlobalConfigDictParser().filter_for_server_instance_configs(global_config_dict)
+    _validate_split_datasets_declared(e2e_rollout_collection_config.split, server_instance_configs)
+
     input_jsonl_fpath = data_process_output_dir / f"{e2e_rollout_collection_config.split}.jsonl"
     should_skip_data_processing = (
         e2e_rollout_collection_config.reuse_existing_data_preparation and input_jsonl_fpath.exists()
@@ -426,9 +429,6 @@ def e2e_rollout_collection():  # pragma: no cover
             print(
                 f"Even though the `reuse_existing_data_preparation=true` flag was set, we will still do data preparation since the final input jsonl fpath `{input_jsonl_fpath}` does not exist yet"
             )
-
-        server_instance_configs = GlobalConfigDictParser().filter_for_server_instance_configs(global_config_dict)
-        _validate_split_datasets_declared(e2e_rollout_collection_config.split, server_instance_configs)
 
         data_processor = TrainDataProcessor()
         data_processor.run(data_processor_config_dict)
