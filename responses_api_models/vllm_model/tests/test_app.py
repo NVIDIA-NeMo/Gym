@@ -18,6 +18,7 @@ import logging
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
+from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch, mark, raises
 
@@ -761,7 +762,7 @@ PARAMETERIZE_DATA = [
 
 
 class TestApp:
-    def _setup_server(self, monkeypatch: MonkeyPatch):
+    def _setup_server(self, monkeypatch: MonkeyPatch, *, propagate_context_overflow_errors: bool = False):
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
@@ -772,6 +773,7 @@ class TestApp:
             name="",
             return_token_id_information=False,
             uses_reasoning_parser=False,
+            propagate_context_overflow_errors=propagate_context_overflow_errors,
         )
 
         get_global_config_dict_mock = MagicMock()
@@ -782,6 +784,30 @@ class TestApp:
 
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._setup_server(monkeypatch)
+
+    @mark.parametrize("propagate", [False, True])
+    def test_context_overflow_propagation_flag(self, monkeypatch: MonkeyPatch, propagate: bool) -> None:
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=propagate)
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = b'{"error":{"message":"maximum context length","code":400}}'
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+
+        if propagate:
+            assert response.status_code == 400
+            assert response.json() == {"error": {"message": "maximum context length", "code": 400}}
+        else:
+            assert response.status_code == 200
+            assert '"finish_reason": "length"' in response.text
 
     def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
         workers = [self._setup_server(monkeypatch) for _ in range(2)]

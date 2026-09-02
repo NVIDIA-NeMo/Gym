@@ -562,6 +562,7 @@ def _has_injected_global_config_env() -> bool:
 
 
 SESSION_ID_KEY = "session_id"
+PROPAGATE_HTTP_ERROR_ATTRIBUTE = "nemo_gym_propagate_http_error"
 
 
 class BaseServer(BaseModel):
@@ -780,6 +781,8 @@ class SimpleServer(BaseServer):
             try:
                 return await call_next(request)
             except ClientResponseError as e:
+                if getattr(e, PROPAGATE_HTTP_ERROR_ATTRIBUTE, False):
+                    return Response(content=e.response_content, status_code=e.status, media_type="application/json")
                 assert hasattr(e, "response_content"), (
                     "Please use `nemo_gym.server_utils.raise_for_status` for HTTP exceptions!"
                 )
