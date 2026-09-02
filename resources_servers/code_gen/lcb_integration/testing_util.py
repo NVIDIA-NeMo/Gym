@@ -304,6 +304,21 @@ def get_stripped_lines(val: str):
     return [val_line.strip() for val_line in val.split("\n")]
 
 
+def values_are_close(expected, predicted) -> bool:
+    if expected == predicted:
+        return True
+    if isinstance(expected, bool) or isinstance(predicted, bool):
+        return False
+    if not (isinstance(expected, float) or isinstance(predicted, float)):
+        return False
+    if not isinstance(expected, (int, float, str)) or not isinstance(predicted, (int, float, str)):
+        return False
+    try:
+        return bool(np.allclose(float(predicted), float(expected)))
+    except (TypeError, ValueError):
+        return False
+
+
 def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: str, timeout: int):
     # call-based clean up logic
     # need to wrap in try-catch logic after to catch the correct errors, but for now this is fine.
@@ -348,19 +363,14 @@ def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: st
             except Exception:
                 pass
 
-            try:
-                tmp_result = tmp_result or (np.allclose(float(prediction), float(gt_out)))
-            except Exception:
-                pass
+            if not tmp_result:
+                tmp_result = values_are_close(gt_out, prediction)
 
             if not tmp_result and isinstance(prediction, list) and isinstance(gt_out, list):
-                try:
-                    tmp_result = len(prediction) == len(gt_out) and all(
-                        np.allclose(float(predicted_item), float(expected_item))
-                        for predicted_item, expected_item in zip(prediction, gt_out)
-                    )
-                except Exception:
-                    pass
+                tmp_result = len(prediction) == len(gt_out) and all(
+                    values_are_close(expected_item, predicted_item)
+                    for predicted_item, expected_item in zip(prediction, gt_out)
+                )
 
             all_results.append(tmp_result)
 

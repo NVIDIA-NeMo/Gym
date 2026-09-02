@@ -13,7 +13,12 @@ from __future__ import annotations
 import sys
 
 import pytest
-from lcb_integration.testing_util import Capturing, grade_call_based, import_string
+from lcb_integration.testing_util import (
+    Capturing,
+    grade_call_based,
+    import_string,
+    values_are_close,
+)
 
 
 class TestStdoutCaptureSupportsBuffer:
@@ -102,3 +107,49 @@ class TestCallBasedFloatLists:
             code=code, all_inputs=["[1]"], all_outputs=["[1, 2, 3]"], fn_name="f", timeout=10
         )
         assert results == [True]
+
+
+class TestCallBasedIntegersStayExact:
+    """Tolerance must never apply to integers, in either the scalar or the list case."""
+
+    def test_large_int_list_off_by_one_fails(self):
+        code = "class Solution:\n    def f(self, n):\n        return [50000000000000001]\n"
+        results, _metadata = grade_call_based(
+            code=code,
+            all_inputs=["[1]"],
+            all_outputs=["[50000000000000000]"],
+            fn_name="f",
+            timeout=10,
+        )
+        assert results != [True]
+
+    def test_large_scalar_int_off_by_one_fails(self):
+        code = "class Solution:\n    def f(self, n):\n        return 50000000000000001\n"
+        results, _metadata = grade_call_based(
+            code=code,
+            all_inputs=["[1]"],
+            all_outputs=["50000000000000000"],
+            fn_name="f",
+            timeout=10,
+        )
+        assert results != [True]
+
+    def test_small_int_list_off_by_one_fails(self):
+        code = "class Solution:\n    def f(self, n):\n        return [1, 2, 4]\n"
+        results, _metadata = grade_call_based(
+            code=code, all_inputs=["[1]"], all_outputs=["[1, 2, 3]"], fn_name="f", timeout=10
+        )
+        assert results != [True]
+
+    def test_values_are_close_gates_on_float_type(self):
+        assert not values_are_close(50000000000000000, 50000000000000001)
+        assert not values_are_close(41, 42)
+        assert values_are_close(50000000000000000, 50000000000000000)
+        assert values_are_close(0.1, 0.1000000001)
+        assert not values_are_close(0.1, 0.5)
+
+    def test_booleans_never_get_tolerance(self):
+        assert not values_are_close(True, 0.9999999999)
+        assert not values_are_close(1.0, False)
+        assert values_are_close(True, True)
+        assert values_are_close(1.0, True)
