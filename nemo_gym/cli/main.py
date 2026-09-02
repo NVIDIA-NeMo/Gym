@@ -921,6 +921,11 @@ COMMANDS = {
             _value_flag("agent", "agent_name", "Agent to collect rollouts with.", aliases=("-a",)),
             _value_flag("input", "input_jsonl_fpath", "Input tasks JSONL file.", aliases=("-i",)),
             _value_flag("output", "output_jsonl_fpath", "Output rollouts JSONL file.", aliases=("-o",)),
+            _value_flag(
+                "progress-file",
+                "progress_file_fpath",
+                "Machine-readable completed-attempt counter (default: <output stem>_progress).",
+            ),
             _value_flag("limit", "limit", "Maximum number of tasks to run."),
             _value_flag("num-repeats", "num_repeats", "Number of rollouts per task."),
             _value_flag("prompt-config", "prompt_config", "Prompt template YAML to apply."),

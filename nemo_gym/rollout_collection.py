@@ -17,6 +17,7 @@ import glob as glob_module
 import json
 import logging
 import os
+import tempfile
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
@@ -26,7 +27,7 @@ from datetime import timedelta
 from difflib import get_close_matches
 from itertools import repeat
 from pathlib import Path
-from time import time
+from time import monotonic, time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
@@ -68,7 +69,7 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
-from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
+from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for, progress_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
@@ -155,6 +156,66 @@ _NG_ROLLOUT_LATENCY_MS_KEY = "_ng_rollout_latency_ms"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+_PROGRESS_UPDATE_INTERVAL_SECONDS = 5.0
+
+
+class _RolloutProgressWriter:
+    """Best-effort, atomic publisher for machine-readable rollout progress."""
+
+    def __init__(self, fpath: Path, min_interval_seconds: float = _PROGRESS_UPDATE_INTERVAL_SECONDS):
+        self._fpath = fpath
+        self._min_interval_seconds = min_interval_seconds
+        self._last_write_time: Optional[float] = None
+        self._latest_completed: Optional[int] = None
+        self._disabled = False
+        self._closed = False
+
+    def update(self, completed: int, *, force: bool = False) -> None:
+        self._latest_completed = completed
+        if self._disabled:
+            return
+
+        now = monotonic()
+        if (
+            not force
+            and self._last_write_time is not None
+            and now - self._last_write_time < self._min_interval_seconds
+        ):
+            return
+
+        tmp_fpath: Optional[Path] = None
+        try:
+            self._fpath.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self._fpath.parent,
+                prefix=f".{self._fpath.name}.",
+                delete=False,
+            ) as tmp_file:
+                tmp_file.write(f"{completed}\n")
+                tmp_fpath = Path(tmp_file.name)
+            os.replace(tmp_fpath, self._fpath)
+            self._last_write_time = now
+        except Exception:
+            self._disabled = True
+            logger.debug(
+                "Could not update rollout progress file %s; disabling progress updates.",
+                self._fpath,
+                exc_info=True,
+            )
+            if tmp_fpath is not None:
+                try:
+                    tmp_fpath.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._latest_completed is not None:
+            self.update(self._latest_completed, force=True)
 
 
 def _nonnegative_int(value: Any) -> Optional[int]:
@@ -562,6 +623,14 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
 
 class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
+    progress_file_fpath: Optional[str] = Field(
+        default=None,
+        description=(
+            "Path for the built-in collector's machine-readable completed-attempt counter. "
+            "Defaults to '<output_jsonl_fpath stem>_progress' alongside output_jsonl_fpath. "
+            "An explicitly configured path must have a single writer."
+        ),
+    )
     num_samples_in_parallel: Optional[int] = Field(
         default=None, description="Limit the number of concurrent samples running at once."
     )
@@ -619,10 +688,17 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
             "Optional dotted ``module.path:function`` to run rollout collection instead of the "
             "built-in helper. Lets a benchmark plug in a custom procedure (e.g. an adaptive, "
             "multi-pass run) while still producing the standard rollout + aggregate-metrics "
-            "artifacts. The function is awaited with (rollout_collection_config, global_config_dict). "
+            "artifacts. "
+            "The function is awaited with (rollout_collection_config, global_config_dict). "
             "When unset, the standard single-pass collection runs."
         ),
     )
+
+    @property
+    def resolved_progress_file_fpath(self) -> Path:
+        if self.progress_file_fpath is not None:
+            return Path(self.progress_file_fpath)
+        return progress_path_for(Path(self.output_jsonl_fpath))
 
 
 class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -1236,12 +1312,21 @@ class RolloutCollectionHelper(BaseModel):
         preset but deliberately not in `per_rollout`, where each rollout is meant to be
         its own bounded root trace.
         """
-        if not is_span_group_enabled(GymSpanGroup.JOB):
-            return await self._run_from_config(config)
-        with managed_span(GymSpanGroup.JOB, "gym.job"):
-            return await self._run_from_config(config)
+        progress_writer = _RolloutProgressWriter(
+            config.resolved_progress_file_fpath,
+            min_interval_seconds=_PROGRESS_UPDATE_INTERVAL_SECONDS,
+        )
+        try:
+            if not is_span_group_enabled(GymSpanGroup.JOB):
+                return await self._run_from_config(config, progress_writer)
+            with managed_span(GymSpanGroup.JOB, "gym.job"):
+                return await self._run_from_config(config, progress_writer)
+        finally:
+            progress_writer.close()
 
-    async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
+    async def _run_from_config(
+        self, config: RolloutCollectionConfig, progress_writer: _RolloutProgressWriter
+    ) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
         failures_fpath = failures_path_for(output_fpath)
 
@@ -1296,6 +1381,8 @@ class RolloutCollectionHelper(BaseModel):
 
             output_fpath.unlink(missing_ok=True)
             failures_fpath.unlink(missing_ok=True)
+
+        progress_writer.update(len(results), force=True)
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
@@ -1493,6 +1580,8 @@ class RolloutCollectionHelper(BaseModel):
                     os.fsync(results_file.fileno())
                     await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
 
+            progress_writer.update(len(results))
+
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
                 counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
@@ -1546,6 +1635,8 @@ class RolloutCollectionHelper(BaseModel):
 
         results_file.close()
         failures_file.close()
+
+        progress_writer.close()
 
         if input_rows and not persisted_results:
             raise RuntimeError(
@@ -1609,6 +1700,7 @@ class RolloutCollectionHelper(BaseModel):
         print(f"""Finished rollout collection! View results at:
 Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
+Progress: {config.resolved_progress_file_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         if not config.disable_aggregation and not config.disable_health_check:

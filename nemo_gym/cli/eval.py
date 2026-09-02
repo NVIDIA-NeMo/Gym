@@ -70,6 +70,10 @@ logger = logging.getLogger(__name__)
 # commands in this module must not pay for on every invocation.
 
 
+def _progress_artifact_display(progress_fpath: Path, driver_path: str | None) -> str | None:
+    return None if driver_path else str(progress_fpath)
+
+
 def _inspect_benchmark(name: str, benchmarks: dict, global_config_dict) -> None:
     """Render the ``gym list benchmarks <name>`` inspect view for one benchmark."""
     bench = benchmarks.get(name)
@@ -464,13 +468,18 @@ def e2e_rollout_collection():  # pragma: no cover
     # This E2E entry point prints health only after its server-shutdown phase.
     # The no-serve entry point calls the collection helper directly.
     rollout_collection_config.disable_health_check = True
+    progress_artifact = _progress_artifact_display(
+        rollout_collection_config.resolved_progress_file_fpath,
+        driver_path,
+    )
+    progress_artifact_line = f"4. Rollout progress file: {progress_artifact}\n" if progress_artifact else ""
 
     print(
         f"""Output artifacts:
 1. Preprocessed datasets: {data_processor_config_dict["output_dirpath"]}
 2. Dataset file used for rollout collection: {rollout_collection_config_dict["input_jsonl_fpath"]}
 3. Rollout collection results file: {output_fpath}
-{f"Rollout collection driver: {driver_path}" if driver_path else ""}
+{progress_artifact_line}{f"Rollout collection driver: {driver_path}" if driver_path else ""}
 """
     )
     collection_completed = False
