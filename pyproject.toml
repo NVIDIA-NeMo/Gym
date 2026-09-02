@@ -278,20 +278,20 @@ sandbox = [
     # SandboxTimeoutException, and opensandbox.transport.RetryPolicy exists. 0.1.15 was the first
     # version exposing separate `resource_requests` on Sandbox.create. The SDK's optional aiohttp
     # HTTP backend (ConnectionConfig.http_backend="aiohttp", AiohttpOptions, aiohttp_session) that
-    # the shipped `connection.transport_backend: aiohttp-native` selects is NOT in any PyPI release
-    # up to 0.1.16 (upstream OSEP-0023); the provider falls back to the `aiohttp` bridge mode with
-    # a warning until an SDK that ships it is installed. The backend needs aiohttp, already a core
-    # dependency, so the `opensandbox[aiohttp]` extra is not required.
+    # the opt-in `connection.transport_backend: aiohttp-native` selects is NOT in any PyPI release
+    # up to 0.1.16 (upstream OSEP-0023); with an older SDK the provider falls back to the `aiohttp`
+    # bridge mode with a warning. The backend needs aiohttp, already a core dependency, so the
+    # `opensandbox[aiohttp]` extra is not required.
     # Updated: Tue Sep 01, 2026 with opensandbox>=0.1.16
     # License: Apache 2.0
     "opensandbox>=0.1.16",
 
     # httpx-aiohttp: aiohttp-backed httpx transport. Used by the E2B provider
     # (nemo_gym/sandbox/providers/e2b/_sdk.py) to route the E2B SDK through Gym's
-    # global aiohttp client, and by the OpenSandbox provider's legacy
-    # `connection.transport_backend: aiohttp` bridge mode (the shipped config uses
-    # `aiohttp-native`, which needs only the SDK and aiohttp). Without it the
-    # OpenSandbox bridge mode falls back to the httpx transport with a warning.
+    # global aiohttp client, and by the OpenSandbox provider's shipped
+    # `connection.transport_backend: aiohttp` bridge mode (`aiohttp-native` is
+    # opt-in and needs only the SDK and aiohttp). Without it the OpenSandbox
+    # bridge mode falls back to the httpx transport with a warning.
     # Pulls in aiohttp (aiohttp<4,>=3.10).
     # Updated: Tue Aug 11, 2026 with httpx-aiohttp>=0.2.0
     # License: BSD 3-Clause https://github.com/karpetrosyan/httpx-aiohttp/blob/master/LICENSE

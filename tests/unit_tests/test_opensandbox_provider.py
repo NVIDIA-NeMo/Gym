@@ -2050,9 +2050,8 @@ async def test_shipped_config_builds_a_connection_config_with_the_installed_sdk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The shipped yaml, loaded as the CLI would, against whatever SDK is
-    # installed: native when the SDK ships the aiohttp backend, bridge mode
-    # otherwise. Never skipped, so a default config that fails on first use
-    # cannot slip past CI.
+    # installed: the httpx-aiohttp bridge (native stays opt-in). Never skipped,
+    # so a default config that fails on first use cannot slip past CI.
     from omegaconf import OmegaConf  # noqa: PLC0415
     from opensandbox.config import ConnectionConfig  # noqa: PLC0415
 
@@ -2063,7 +2062,8 @@ async def test_shipped_config_builds_a_connection_config_with_the_installed_sdk(
     shipped = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
     assert isinstance(shipped, dict)
     block = shipped["sandbox"]["opensandbox"]
-    assert block["connection"]["transport_backend"] == "aiohttp-native"
+    assert block["connection"]["transport_backend"] == "aiohttp"
+    assert block["create"]["execd_env"] == {"EXECD_API_GRACE_SHUTDOWN": "50ms"}
 
     provider = opensandbox_provider.OpenSandboxProvider(**block)
     try:
@@ -2071,24 +2071,14 @@ async def test_shipped_config_builds_a_connection_config_with_the_installed_sdk(
         assert isinstance(config, ConnectionConfig)
         # (The SDK may add a best-effort OPEN-SANDBOX-CLIENT-IP header of its own.)
         assert config.headers["OPEN-SANDBOX-API-KEY"] == "shipped-key"  # pragma: allowlist secret
-        sdk_has_native_backend = "http_backend" in ConnectionConfig.model_fields
-        if sdk_has_native_backend:
-            assert provider._transport_backend() == "aiohttp-native"
-            assert config.http_backend == "aiohttp"
-            assert config.transport is None
-            assert config.aiohttp_session is provider._aiohttp_session
-            assert config.retry_policy.max_retries == 0
-        else:
-            assert provider._transport_backend() == "aiohttp"
-            assert config.transport is provider._transport
+        assert provider._transport_backend() == "aiohttp"
+        # Bridge mode: the provider injects its own transport, so the SDK adds no
+        # retry wrapper and never closes it (Gym owns retries and lifecycle).
+        assert config.transport is provider._transport
+        if "http_backend" in ConnectionConfig.model_fields:
+            assert config.http_backend == "httpx"
         materialized = config.with_transport_if_missing()
-        assert materialized.transport is not None
-        if sdk_has_native_backend:
-            from opensandbox.aiohttp_backend.transport import AiohttpTransport  # noqa: PLC0415
-
-            # RetryPolicy.disabled(): no RetryAsyncTransport in the stack.
-            assert isinstance(materialized.transport, AiohttpTransport)
-        await materialized.close_transport_if_owned()
+        assert materialized.transport is provider._transport
     finally:
         await provider.aclose()
 

@@ -46,7 +46,7 @@ sandbox:
       max_keepalive_connections: 20
       max_connections: null
       connect_retries: 2
-      transport_backend: aiohttp-native
+      transport_backend: aiohttp
       tls_verify: true
     create:
       request_timeout_s: 1200
@@ -100,8 +100,8 @@ The provider talks to the OpenSandbox server (and, through its proxy, to each sa
 
 | Value | Behavior |
 | --- | --- |
-| `aiohttp-native` (shipped default) | The SDK's own aiohttp backend (`ConnectionConfig(http_backend="aiohttp")`). The provider owns a single `aiohttp.ClientSession` built from `max_connections` (`null` means no cap), `keepalive_expiry_s` (`null` falls back to the SDK's 15 s), `disable_connection_pooling`, `connect_retries`, and `tls_verify`; it hands that session to the SDK as caller-owned and closes it in `aclose()`. PTY sessions reuse the same session instead of opening a client each. The SDK's own retry policy is disabled underneath it (the provider owns retries and timeouts). Requires an SDK that ships the backend, which no PyPI release up to `0.1.16` does; with an older SDK the provider logs a warning once and behaves as `aiohttp`. |
-| `aiohttp` | The SDK's httpx client layer over the optional `httpx-aiohttp` bridge transport. Falls back to `httpx` with a warning when the bridge is not installed. |
+| `aiohttp-native` (opt-in) | The SDK's own aiohttp backend (`ConnectionConfig(http_backend="aiohttp")`). The provider owns a single `aiohttp.ClientSession` built from `max_connections` (`null` means no cap), `keepalive_expiry_s` (`null` falls back to the SDK's 15 s), `disable_connection_pooling`, `connect_retries`, and `tls_verify`; it hands that session to the SDK as caller-owned and closes it in `aclose()`. PTY sessions reuse the same session instead of opening a client each. The SDK's own retry policy is disabled underneath it (the provider owns retries and timeouts). Requires an SDK that ships the backend, which no PyPI release up to `0.1.16` does; with an older SDK the provider logs a warning once and behaves as `aiohttp`. |
+| `aiohttp` (shipped default) | The SDK's httpx client layer over the optional `httpx-aiohttp` bridge transport. Falls back to `httpx` with a warning when the bridge is not installed. |
 | `httpx` | The SDK's default httpx transport with the configured `httpx.Limits`. |
 
 Pool settings apply to every backend. `keepalive_expiry_s` must stay below the server's keep-alive idle timeout so pooled sockets are not reused after the server has closed them, and `max_connections` also caps in-flight sandbox operations per process. `disable_connection_pooling` opens a fresh connection per request (`force_close` on aiohttp), for load balancers that silently reap idle pooled connections.

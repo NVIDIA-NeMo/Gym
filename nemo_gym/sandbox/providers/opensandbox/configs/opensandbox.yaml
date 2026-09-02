@@ -34,14 +34,15 @@ sandbox:
       # null for no cap.
       max_connections: null
       connect_retries: 2
-      # "aiohttp-native" selects the OpenSandbox SDK's own aiohttp backend on one
-      # provider-owned aiohttp session shared by every SDK call and PTY socket.
-      # It needs an SDK that ships the backend (no PyPI release up to 0.1.16
-      # does); with an older SDK the provider logs a warning and uses "aiohttp"
-      # instead. "aiohttp" keeps the SDK's httpx client layer over the optional
+      # "aiohttp" keeps the SDK's httpx client layer over the optional
       # httpx-aiohttp bridge (falls back to httpx with a warning when absent);
-      # "httpx" is the SDK's default transport.
-      transport_backend: aiohttp-native
+      # "httpx" is the SDK's default transport. "aiohttp-native" (opt-in) selects
+      # the OpenSandbox SDK's own aiohttp backend on one provider-owned aiohttp
+      # session shared by every SDK call and PTY socket; it needs an SDK that
+      # ships the backend (no PyPI release up to 0.1.16 does) and, measured at
+      # eval scale, saves CPU per exec but no wall-clock time over the bridge,
+      # so the bridge stays the default for now.
+      transport_backend: aiohttp
       # Verify TLS certificates on https endpoints. OPENSANDBOX_INSECURE_TLS=1
       # forces this off for validation cells with certificates the client cannot
       # verify; never disable it for production endpoints.
