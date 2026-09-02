@@ -253,6 +253,41 @@ def convert_line_to_decimals(line: str) -> tuple[bool, list[Decimal]]:
     return True, decimal_line
 
 
+FLOAT_ERROR_TOLERANCE = Decimal("1e-6")
+
+
+def token_is_floating_point(token: str) -> bool:
+    return "." in token or "e" in token.lower()
+
+
+def decimal_tokens_match(expected_token: str, predicted_token: str, expected: Decimal, predicted: Decimal) -> bool:
+    if expected == predicted:
+        return True
+    if not (token_is_floating_point(expected_token) or token_is_floating_point(predicted_token)):
+        return False
+    if not (expected.is_finite() and predicted.is_finite()):
+        return False
+    absolute_error = abs(expected - predicted)
+    relative_scale = max(abs(expected), Decimal(1))
+    return absolute_error <= FLOAT_ERROR_TOLERANCE or absolute_error / relative_scale <= FLOAT_ERROR_TOLERANCE
+
+
+def decimal_lines_match(
+    expected_tokens: list[str],
+    predicted_tokens: list[str],
+    expected_line: list[Decimal],
+    predicted_line: list[Decimal],
+) -> bool:
+    if len(expected_line) != len(predicted_line):
+        return False
+    return all(
+        decimal_tokens_match(expected_token, predicted_token, expected, predicted)
+        for expected_token, predicted_token, expected, predicted in zip(
+            expected_tokens, predicted_tokens, expected_line, predicted_line
+        )
+    )
+
+
 def get_stripped_lines(val: str):
     ## you don't want empty lines to add empty list after splitlines!
     val = val.strip()
@@ -455,7 +490,12 @@ def grade_stdio(
                 all_results.append(-2)
                 return all_results, WA_send_args
 
-            if decimal_prediction_line == decimal_gtout_line:
+            if decimal_lines_match(
+                stripped_gt_out_line.split(),
+                stripped_prediction_line.split(),
+                decimal_gtout_line,
+                decimal_prediction_line,
+            ):
                 continue
 
             all_results.append(-2)
