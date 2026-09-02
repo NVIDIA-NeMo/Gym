@@ -447,10 +447,14 @@ Check the path is spelled correctly and is relative to your working directory, a
 
         if duplicate_config_paths:
             duplicate_config_paths_str = "".join(f"- {p}\n" for p in duplicate_config_paths)
-            print(f"""Found configs that reference the same source config path. You may want to double check whether the configs you have need to use different configs for the same server.
+            # Diagnostics go to stderr so that `--json` output on stdout stays machine-readable.
+            print(
+                f"""Found configs that reference the same source config path. You may want to double check whether the configs you have need to use different configs for the same server.
 In cases like these, you may want to consider using the `inherit_from` OmegaConf directive e.g. '++my_specific_server=${{inherit_from:generic_server}}' and then overriding config parameters in `my_specific_server`.
 Duplicate config paths:
-{duplicate_config_paths_str}""")
+{duplicate_config_paths_str}""",
+                file=sys.stderr,
+            )
 
         # Flatten the include tree so that every config merges after -- and therefore
         # overrides -- the ones it pulled in, and each subtree stays contiguous in
@@ -1115,14 +1119,15 @@ Pass each config with --config (it builds the list for you), e.g.:
         almost_servers = self.detect_and_report_almost_servers(global_config_dict)
 
         if almost_servers:
-            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]")
-            rich.print("[yellow]Configuration Warnings: Almost-Servers Detected[/yellow]")
-            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]")
+            # Diagnostics go to stderr so that `--json` output on stdout stays machine-readable.
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]", file=sys.stderr)
+            rich.print("[yellow]Configuration Warnings: Almost-Servers Detected[/yellow]", file=sys.stderr)
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]", file=sys.stderr)
 
             for server_name, error in almost_servers:
-                rich.print(format_almost_server_warning(server_name, error))
+                rich.print(format_almost_server_warning(server_name, error), file=sys.stderr)
 
-            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]\n")
+            rich.print("[yellow]═══════════════════════════════════════════════════[/yellow]\n", file=sys.stderr)
 
             error_on_almost_servers = global_config_dict.get("error_on_almost_servers", True)
             if error_on_almost_servers:
