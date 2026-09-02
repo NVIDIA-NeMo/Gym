@@ -205,6 +205,14 @@ class TavilySearchSingleAsyncTavilyMetrics(BaseModel):
     # separately — never conflated.
     num_429_retries: int = 0
     num_other_retries: int = 0
+    # Per-query search yield. None = not applicable / never reached (a failed call, or a
+    # browse record) — deliberately NOT 0, which would read as "the provider had nothing".
+    # These separate the three cases the old records conflated: provider returned nothing,
+    # the character budget dropped results, and everything asked for came back.
+    num_results_offered: Optional[int] = None  # results the provider handed us
+    num_results_returned: Optional[int] = None  # results that fit the budget
+    num_results_truncated: Optional[int] = None  # offered - returned
+    chars_returned: Optional[int] = None  # size of the block handed to the model
 
     @model_validator(mode="after")
     def compute_time_taken(self):
@@ -937,12 +945,29 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return client
 
     def _record_call(
-        self, metrics: "TavilySearchMetrics", function: str, provider: str, status: str, start: float
+        self,
+        metrics: "TavilySearchMetrics",
+        function: str,
+        provider: str,
+        status: str,
+        start: float,
+        num_results_offered: Optional[int] = None,
+        num_results_returned: Optional[int] = None,
+        chars_returned: Optional[int] = None,
     ) -> None:
         """Append one per-API-call metering record (provider, function, latency).
-        One record per provider HTTP request: per query for search, per call for browse."""
+        One record per provider HTTP request: per query for search, per call for browse.
+
+        The yield arguments are optional and default to None, which means "not applicable
+        or never reached" — a failed call or a browse record. They must NOT default to 0,
+        because 0 offered is a real and different observation: the provider had nothing."""
         retry_counts = _PROVIDER_RETRY_COUNTS.get() or {}
         _PROVIDER_RETRY_COUNTS.set(None)  # next call in this task starts from zero
+        truncated = (
+            num_results_offered - num_results_returned
+            if num_results_offered is not None and num_results_returned is not None
+            else None
+        )
         metrics.async_tavily_calls.append(
             TavilySearchSingleAsyncTavilyMetrics(
                 function=function,
@@ -952,6 +977,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 end_time=time(),
                 num_429_retries=retry_counts.get("num_429_retries", 0),
                 num_other_retries=retry_counts.get("num_other_retries", 0),
+                num_results_offered=num_results_offered,
+                num_results_returned=num_results_returned,
+                num_results_truncated=truncated,
+                chars_returned=chars_returned,
             )
         )
 
@@ -971,11 +1000,11 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             self._record_call(metrics, "search", "exa", "error", call_start)
             print(f"[browsecomp][tool_fail][exa_search] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"
-        self._record_call(metrics, "search", "exa", "success", call_start)
-
+        offered = results.get("results", []) or []
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
-        for result in results.get("results", []):
+        returned = 0
+        for result in offered:
             title = result.get("title", "") or ""
             url = result.get("url", "") or ""
             highlights = result.get("highlights") or []
@@ -985,7 +1014,29 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 break
             blocks.append(entry)
             running_len += len(entry)
-        return "\n".join(blocks)
+            returned += 1
+        results_string = "\n".join(blocks)
+        # Recorded AFTER the block is built so the yield counters are real. Nothing awaits
+        # in between, so the retry contextvar _record_call reads is still this call's.
+        self._record_call(
+            metrics,
+            "search",
+            "exa",
+            "success",
+            call_start,
+            num_results_offered=len(offered),
+            num_results_returned=returned,
+            chars_returned=len(results_string),
+        )
+        if returned < len(offered):
+            print(
+                f"[browsecomp][search_truncated][exa] query={query[:120]!r} "
+                f"returned={returned}/{len(offered)} budget={max_length}",
+                flush=True,
+            )
+        elif not offered:
+            print(f"[browsecomp][search_empty][exa] query={query[:120]!r} provider returned 0 results", flush=True)
+        return results_string
 
     async def _search_one(self, query: str, max_length: int, metrics: "TavilySearchMetrics") -> str:
         if len(query) > 400:
