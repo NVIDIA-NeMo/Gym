@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nemo_gym.config_types import ResourcesServerRef
-from nemo_gym.rollout_observability import ContextCompactionObservation
+from nemo_gym.rollout_observability import AgentInvocation, ContextCompactionObservation
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig
 
@@ -130,9 +130,11 @@ async def test_opencode_compacts_after_openai_compatible_context_error(tmp_path:
         await asyncio.to_thread(thread.join, 5)
 
     output_text = [part.text for item in output for part in getattr(item, "content", [])]
+    root = next(record for record in observations.records if isinstance(record, AgentInvocation))
     compactions = [record for record in observations.records if isinstance(record, ContextCompactionObservation)]
 
     assert _OpenAICompatibleHandler.overflow_sent
     assert output_text[-1] == "Recovered after context compaction."
+    assert root.status == "completed"
     assert [(record.trigger, record.outcome) for record in compactions] == [("overflow", "completed")]
     assert len(_OpenAICompatibleHandler.requests) >= 4
