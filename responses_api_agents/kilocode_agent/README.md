@@ -53,10 +53,10 @@ The shipped `context_window` (32768) and `max_output_tokens` (8192) assume a 32k
 Both need to match whatever you actually serve, and `max_output_tokens` is the one that bites: Kilo's
 system prompt and tool definitions run to roughly 10k tokens, so a large output budget pushes
 `prompt + max_tokens` past `max_model_len`. vLLM rejects that with a 400, which the Gym model server
-converts into an empty completion with `finish_reason: length` rather than an error. The run then
-produces no assistant message and scores zero, with nothing in the CLI's own output to say why. The
-agent logs a warning when it sees that shape; the fix is to lower `max_output_tokens` (or serve a
-larger window), not to raise it.
+preserves for the caller. Kilo logs the provider error and exits nonzero; the Gym agent currently pads
+the missing assistant output and returns a completed response, so evaluation typically records an empty
+answer and a zero rather than an HTTP failure. Lower `max_output_tokens` (or serve a larger window) to
+avoid that outcome.
 
 ### Calling a provider directly
 

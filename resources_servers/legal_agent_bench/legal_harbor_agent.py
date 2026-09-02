@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from nemo_gym.context_errors import is_context_overflow_error
 from resources_servers.legal_agent_bench.prepare import (
     DEFAULT_SKILLS_DIR,
     discover_harness_skills,
@@ -404,7 +405,7 @@ async def _run_agent_async(
             except Exception as exc:
                 err_msg = str(exc)
                 _log_model_error(transcript_file, turn_count, exc)
-                if _is_context_overflow_error(err_msg):
+                if is_context_overflow_error(exc):
                     context_overflow = True
                     break
                 model_error = err_msg
@@ -546,20 +547,6 @@ def _reasoning_effort(params: dict) -> str | None:
         effort = reasoning.get("effort")
         return str(effort) if effort else None
     return None
-
-
-def _is_context_overflow_error(message: str) -> bool:
-    lower = message.lower()
-    return any(
-        phrase in lower
-        for phrase in (
-            "prompt is too long",
-            "context_length_exceeded",
-            "context length",
-            "maximum input length",
-            "too many tokens",
-        )
-    )
 
 
 def _log_model_input(

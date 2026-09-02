@@ -310,6 +310,11 @@ class TestContextOverflowDetection:
     def test_ignores_non_overflow(self, msg: str) -> None:
         assert not FinanceAgent._is_context_overflow_error(Exception(msg))
 
+    def test_detects_overflow_in_aiohttp_response_content(self) -> None:
+        exc = RuntimeError("400, message='Bad Request'")
+        exc.response_content = b'{"error":{"message":"maximum context length is 512 tokens"}}'
+        assert FinanceAgent._is_context_overflow_error(exc)
+
 
 # ---------------------------------------------------------------------------
 # Tests: _is_model_output

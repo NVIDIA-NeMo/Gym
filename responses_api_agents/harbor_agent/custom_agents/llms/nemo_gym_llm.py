@@ -31,20 +31,13 @@ from tenacity import (
     wait_exponential,
 )
 
+from nemo_gym.context_errors import is_context_overflow_error
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 
 
 _RoutedExperts = list[list[list[int]]] | str
 _RolloutDetailsKey = tuple[tuple[int, ...], tuple[int, ...], tuple[float, ...] | None]
 
-
-# Phrases in vLLM / OpenAI error bodies that signal context-length overflow.
-_CONTEXT_LENGTH_ERROR_PHRASES = (
-    "context length exceeded",
-    "context_length_exceeded",
-    "maximum context length",
-    "`inputs` tokens + `max_new_tokens`",
-)
 
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"
@@ -143,15 +136,6 @@ class NemoGymLLM(BaseLLM):
         payload.update(self._extra_chat_params)
 
         response_dict = await self._post_chat_completions(payload)
-
-        # Detect silently-swallowed context-length errors from the Gym proxy.
-        # When vLLM returns 400 "maximum context length", the proxy catches it
-        # and returns a fake 200 with id="chtcmpl-123" and content=None.
-        if response_dict.get("id") == "chtcmpl-123":
-            self.context_length_exceeded = True
-            raise ContextLengthExceededError(
-                f"Model {self._model_name} context length exceeded (detected fake response id='chtcmpl-123')"
-            )
 
         choices = response_dict.get("choices", [])
         choice = choices[0] if isinstance(choices, list) and choices else {}
@@ -284,8 +268,7 @@ class NemoGymLLM(BaseLLM):
         response = await self._http_client.post(endpoint, json=payload, timeout=timeout)
 
         if response.status_code >= 400:
-            error_text = response.text.lower()
-            if any(phrase in error_text for phrase in _CONTEXT_LENGTH_ERROR_PHRASES):
+            if is_context_overflow_error(response.text):
                 self.context_length_exceeded = True
                 raise ContextLengthExceededError(f"Model {self._model_name} context length exceeded: {response.text}")
             response.raise_for_status()

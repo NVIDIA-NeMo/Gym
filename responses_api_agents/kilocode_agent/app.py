@@ -115,9 +115,8 @@ def parse_kilo_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
             input_tokens += int(tokens.get("input") or 0) + int(cache.get("read") or 0)
             step_output = int(tokens.get("output") or 0)
             output_tokens += step_output
-            # Stopping on "length" with nothing generated is what an over-window request looks like by
-            # the time it reaches kilo; see KiloCodeAgentConfig.max_output_tokens. Warn once: the run
-            # is otherwise silent about why it produced no answer.
+            # Some providers report an exhausted output budget as a zero-output length stop instead
+            # of an HTTP error. Keep a diagnostic for that provider-side shape.
             if part.get("reason") == "length" and not step_output and not warned_empty_length:
                 warned_empty_length = True
                 LOG.warning(
@@ -243,12 +242,10 @@ class KiloCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # `max_output_tokens` is the per-request output budget; kilo asks the model server for
     # min(this, its own OUTPUT_TOKEN_MAX of 32000), so values above 32000 have no effect.
     #
-    # Setting it too high fails silently, which is why the default is conservative. Kilo's system
-    # prompt and tool definitions run to ~10k tokens, and vLLM rejects prompt + max_tokens >
-    # max_model_len with a 400 that the Gym model server turns into an empty completion with
-    # finish_reason "length" (vllm_model/app.py `is_out_of_context_length`) rather than an error, so
-    # the run yields no assistant message at all. Raise it only alongside a model server whose window
-    # has room for it. Verified against @kilocode/cli 7.4.15 and vLLM serving a 32768-token window.
+    # Setting it too high causes vLLM to reject prompt + max_tokens > max_model_len with a 400.
+    # Keep the default conservative so Kilo's ~10k tokens of system prompt and tool definitions leave
+    # enough room for generation. Raise it only alongside a model server whose window has room for it.
+    # Verified against @kilocode/cli 7.4.15 and vLLM serving a 32768-token window.
     max_output_tokens: int = 8192
     # Response field carrying reasoning text, for kilo's `interleaved.field`. Gym model servers write
     # `reasoning_content` (vLLM >= 0.16 also sends `reasoning`, which is why this is configurable).
