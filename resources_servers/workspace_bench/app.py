@@ -83,9 +83,11 @@ class WorkspaceBenchResourcesServer(SimpleResourcesServer):
             workdir="/workspace",
             env={},
             files={},
-            metadata=resolve_provider_metadata(self.config.sandbox_provider, get_global_config_dict())
-            | sandbox_config.get("metadata", {})
-            | {"task-id": body.task_id[:63]},
+            metadata={
+                **resolve_provider_metadata(self.config.sandbox_provider, get_global_config_dict()),
+                **sandbox_config.get("metadata", {}),
+                "task-id": body.task_id[:63],
+            },
             resources=SandboxResources.from_mapping(sandbox_config.get("resources", {})),
             provider_options=sandbox_config.get("provider_options", {}),
         )
