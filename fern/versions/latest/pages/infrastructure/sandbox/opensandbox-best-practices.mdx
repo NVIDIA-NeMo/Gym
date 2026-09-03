@@ -122,13 +122,6 @@ command and survives any idle timeout.
 
 `connection.request_timeout_s` still governs the submit and the final output fetch.
 
-<Warning>
-Creates failing every ~20 minutes with `Timeout on reading data from socket` is
-`create.request_timeout_s` (1200 s) echoing back: the cluster has no capacity, each create hangs
-for the full budget, and each retry adds another. Check cluster load; more retries or longer
-timeouts do not help a full cluster.
-</Warning>
-
 ### Which timeout you are waiting on
 
 Create is synchronous on the server: schedule the pod, lazy-load the image, start the exec daemon.
@@ -138,6 +131,13 @@ On a healthy cluster that is p50 ≈ 7 s, p90 ≈ 20 s, p99 ≈ 2 min. On a full
 - `create.timeout_s` must exceed `ready_timeout_s`; it bounds the whole create including the
   readiness wait (the shipped config: 1500 s over 1200 s).
 - `ttl_s` is the server-side backstop if your client dies. Set it above your longest rollout.
+
+<Warning>
+Creates failing every ~20 minutes with `Timeout on reading data from socket` is
+`create.request_timeout_s` (1200 s) echoing back: the cluster has no capacity, each create hangs
+for the full budget, and each retry adds another. Check cluster load; more retries or longer
+timeouts do not help a full cluster.
+</Warning>
 
 ## Retries: creates yes, commands no
 
