@@ -152,7 +152,6 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
     ]
     assert [item.content for item in llm.trajectory if isinstance(item, NeMoGymEasyInputMessage)] == [
         "first",
-        "answer 1",
         "second",
         "compacted summary",
         "third",
