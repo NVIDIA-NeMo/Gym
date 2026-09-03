@@ -90,6 +90,7 @@ class Terminus2AgentVerifyResponse(BaseVerifyResponse):
     command_exec_time_pct: float
     model_call_time_pct: float
     terminus2_time_taken: float
+    model_calls_gt_10min: int
 
 
 class NeMoGymSandboxEnvironment:
@@ -160,6 +161,7 @@ class NeMoGymLLM(BaseLLM):
         self.trajectory: list[NeMoGymResponseOutputItem] = []
         self._times_spent = []
         self._last_input_items = []
+        self._model_calls_gt_10min = 0
 
     @staticmethod
     def _input_items(message_history: list[dict[str, Any]], prompt: str) -> list[NeMoGymEasyInputMessage]:
@@ -202,6 +204,7 @@ class NeMoGymLLM(BaseLLM):
                     )
                     break
             except TimeoutError:
+                self._model_calls_gt_10min += 1
                 print(f"Hit 10min timeout on model call, attempt {attempt + 1} / {max_attempts}", file=sys.stderr)
         self._times_spent.append(perf_counter() - start_time)
         if not response:
@@ -381,6 +384,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             "command_exec_time_pct": 100 * total_command_exec_time / total_time,
             "model_call_time_pct": 100 * total_model_call_time / total_time,
             "terminus2_time_taken": total_time,
+            "model_calls_gt_10min": llm._model_calls_gt_10min,
         }
         return response, metrics
 
