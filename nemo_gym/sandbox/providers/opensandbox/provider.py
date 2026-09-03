@@ -133,15 +133,21 @@ STATUS_CODE_RE = re.compile(r"(?:status code|http)\D+(\d{3})", re.IGNORECASE)
 SERVER_PROXY_API_KEY_HEADER = "OPEN-SANDBOX-API-KEY"  # pragma: allowlist secret
 
 
-def _normalize_domain_protocol(domain: str | None, protocol: str | None) -> tuple[str | None, str | None]:
-    """Let an explicit HTTP(S) domain scheme override the separate protocol setting."""
+def _normalize_domain_protocol(
+    domain: str | None,
+    protocol: str | None,
+    *,
+    use_server_proxy: bool,
+) -> tuple[str | None, str | None]:
+    """Use an explicit management URL scheme for proxied execd routes only."""
     if domain is None:
         return None, protocol
     value = domain.rstrip("/")
-    if value.startswith("http://"):
-        protocol = "http"
-    elif value.startswith("https://"):
-        protocol = "https"
+    if use_server_proxy:
+        if value.startswith("http://"):
+            protocol = "http"
+        elif value.startswith("https://"):
+            protocol = "https"
     return value, protocol
 
 
@@ -690,7 +696,11 @@ class OpenSandboxProvider:
     ) -> Any:
         _, ConnectionConfig, _, _, _ = _require_opensandbox_sdk()
         kwargs: dict[str, Any] = {}
-        domain, protocol = _normalize_domain_protocol(self._connection.domain, self._connection.protocol)
+        domain, protocol = _normalize_domain_protocol(
+            self._connection.domain,
+            self._connection.protocol,
+            use_server_proxy=self._connection.use_server_proxy,
+        )
         if domain is not None:
             kwargs["domain"] = domain
         if self._connection.api_key is not None:
@@ -1501,7 +1511,12 @@ class OpenSandboxProvider:
         headers = dict(endpoint.headers)
         if self._connection.api_key:
             headers["OPEN-SANDBOX-API-KEY"] = self._connection.api_key
-        return f"{self._connection.protocol}://{endpoint.endpoint}", headers, request_timeout_s
+        _, protocol = _normalize_domain_protocol(
+            self._connection.domain,
+            self._connection.protocol,
+            use_server_proxy=self._connection.use_server_proxy,
+        )
+        return f"{protocol or 'http'}://{endpoint.endpoint}", headers, request_timeout_s
 
     async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> SandboxPtySession:
         """Open an interactive execd PTY session inside a sandbox."""

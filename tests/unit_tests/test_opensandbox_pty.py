@@ -435,6 +435,42 @@ async def test_provider_create_pty_resolves_endpoint(monkeypatch: pytest.MonkeyP
     await session.close()
 
 
+@pytest.mark.parametrize(
+    ("use_server_proxy", "expected_scheme"),
+    [(False, "http"), (True, "https")],
+)
+async def test_provider_pty_protocol_matches_commands_and_files(
+    monkeypatch: pytest.MonkeyPatch,
+    use_server_proxy: bool,
+    expected_scheme: str,
+) -> None:
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    class FakeRaw:
+        async def get_endpoint(self, _port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint="10.0.0.8:44772", headers={})
+
+    provider = OpenSandboxProvider(
+        connection={
+            "domain": "https://management.example",
+            "protocol": "http",
+            "use_server_proxy": use_server_proxy,
+        }
+    )
+    client = FakeHttpClient(ws=FakeWs([CONNECTED]))
+    monkeypatch.setattr(provider, "_pty_http_client", lambda: client)
+
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
+    session = await provider.create_pty(handle, SandboxPtySpec())
+
+    connection_config = provider._connection_config()
+    assert connection_config.protocol == expected_scheme
+    assert client.post_calls[0][0] == f"{expected_scheme}://10.0.0.8:44772/pty"
+    await session.close()
+
+
 async def test_open_pty_session_invalid_spec_closes_client() -> None:
     client = FakeHttpClient()
     with pytest.raises(ValueError, match="user name"):

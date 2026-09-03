@@ -588,13 +588,19 @@ def test_connection_domain_url_normalization_and_proxy_secret_boundary(fake_open
     assert "headers" not in direct.kwargs
 
     url_scheme_wins = opensandbox_provider.OpenSandboxProvider(
-        connection={"domain": "https://sandbox.example", "protocol": "http"}
+        connection={"domain": "https://sandbox.example", "protocol": "http", "use_server_proxy": True}
     )._connection_config()
     assert url_scheme_wins.kwargs["domain"] == "https://sandbox.example"
     assert url_scheme_wins.kwargs["protocol"] == "https"
 
+    direct_protocol_wins = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "https://sandbox.example", "protocol": "http", "use_server_proxy": False}
+    )._connection_config()
+    assert direct_protocol_wins.kwargs["domain"] == "https://sandbox.example"
+    assert direct_protocol_wins.kwargs["protocol"] == "http"
+
     base_path = opensandbox_provider.OpenSandboxProvider(
-        connection={"domain": "https://sandbox.example/prefix", "protocol": "http"}
+        connection={"domain": "https://sandbox.example/prefix", "protocol": "http", "use_server_proxy": True}
     )._connection_config()
     assert base_path.kwargs["domain"] == "https://sandbox.example/prefix"
     assert base_path.kwargs["protocol"] == "https"
