@@ -2,6 +2,7 @@ policy_model:
   responses_api_models:
     vllm_model:
       sampling_overrides:
+        num_workers: 16
         max_output_tokens: null
         max_tokens: null
         max_completion_tokens: null

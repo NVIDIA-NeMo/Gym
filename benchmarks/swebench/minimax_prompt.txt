@@ -1,8 +1,3 @@
-Implement the necessary changes to the repository ( {{ workspace_path }} ) so that the requirements specified in the <issue_details> are satisfied.
-The environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
-
-I've uploaded a {{ instance.repo_language ~ ' ' if instance.repo_language else '' }}code repository in the directory {{ workspace_path }}
-
 <issue_details>
 {{ instance.problem_statement }}
 </issue_details>
@@ -12,9 +7,8 @@ I've uploaded a {{ instance.repo_language ~ ' ' if instance.repo_language else '
 </workspace_path>
 
 Can you help me implement the necessary changes to the repository so that the requirements specified in the <issue_details> are met?
-I've already taken care of all changes to any of the test files described in the <issue_details>. This means you DON'T have to modify the testing logic or any of the tests in any way!
 Also the development environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
-Your task is to make the minimal changes to non-test files in the {{ workspace_path }} directory to ensure the <issue_details> is satisfied.
+Your task is to make the changes to non-test files in the {{ workspace_path }} directory to ensure the <issue_details> is satisfied.
 
 When solving bugs, follow these steps:
 ## 1. Explore the codebase and understand the relevant code
