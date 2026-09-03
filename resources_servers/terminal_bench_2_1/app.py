@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from asyncio import Semaphore
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from copy import deepcopy
 from glob import glob
 from pathlib import Path
@@ -130,9 +129,6 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         super().model_post_init(context)
 
         self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
-        self._semaphore = (
-            Semaphore(value=self.config.max_concurrency) if self.config.max_concurrency else nullcontext()
-        )
 
     def _patch_sandbox_provider_options_for_instances(
         self, task_name: str, resources: SandboxResources, provider_options: Dict[str, Any]
@@ -193,7 +189,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
         result = await eval_sandbox.exec("apt-get update", timeout_s=self.config.evaluation_timeout)
         if result.return_code != 0:
-            print(f"Failed to apt-get-update: {result}")
+            print(f"Failed to apt-get update: {result}")
 
         return eval_sandbox
 
@@ -202,8 +198,6 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
     ) -> TerminalBench21SeedSessionResponse:
         eval_sandbox = await self._create_sandbox(body)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
-
-        await self._semaphore.acquire()
 
         return TerminalBench21SeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
@@ -249,8 +243,6 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 await sandbox.upload(local_path=new_local_fpath, remote_path=target_fpath)
 
     async def verify(self, request: Request, body: TerminalBench21VerifyRequest) -> TerminalBench21VerifyResponse:
-        self._semaphore.release()
-
         task_folder = Path(body.task_folder)
 
         if self.config.is_verifying_golden_patch:

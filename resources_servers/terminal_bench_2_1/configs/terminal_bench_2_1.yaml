@@ -9,7 +9,6 @@ terminal_bench_2_1_resources_server:          # instance name — how agents/CLI
 
       evaluation_timeout: 1800
       is_verifying_golden_patch: false
-      max_concurrency: null
 
       sandbox_provider: sandbox
       sandbox_config:
