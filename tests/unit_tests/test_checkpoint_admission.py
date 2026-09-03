@@ -76,6 +76,7 @@ def test_new_root_operation_parks_while_draining() -> None:
     limiter.close()
     with pytest.raises(AdmissionParkedError):
         limiter.admit(rollout_id="9-9", attempt_index=0)
+    assert ("9-9", 0) not in limiter.seen_attempts()
     limiter.release(held)
 
 
@@ -131,6 +132,73 @@ async def test_abort_cancels_request_task_before_drain_completes() -> None:
         await task
     assert limiter.state == AdmissionState.PAUSED
     assert limiter.counts()["inflight_total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_abort_before_response_start_returns_stale_attempt_response() -> None:
+    limiter = AdmissionLimiter()
+    entered = asyncio.Event()
+
+    async def app(scope, receive, send) -> None:
+        entered.set()
+        await asyncio.Event().wait()
+
+    middleware = AdmissionMiddleware(app, limiter, GATED_MODEL_ROUTE_SUFFIXES)
+    messages = []
+
+    async def send(message) -> None:
+        messages.append(message)
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/v1/responses",
+        "headers": [
+            (ROLLOUT_ID_HEADER.encode(), b"rollout-a"),
+            (ATTEMPT_INDEX_HEADER.encode(), b"0"),
+        ],
+    }
+    task = asyncio.create_task(middleware(scope, None, send))
+    await entered.wait()
+    limiter.close()
+    limiter.abort_inflight("rollout-a", 0)
+    await task
+    assert messages[0]["status"] == 409
+    assert b"stale_attempt" in messages[1]["body"]
+
+
+@pytest.mark.asyncio
+async def test_abort_after_response_start_closes_transport_without_success_body() -> None:
+    limiter = AdmissionLimiter()
+    started = asyncio.Event()
+
+    async def app(scope, receive, send) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        started.set()
+        await asyncio.Event().wait()
+
+    middleware = AdmissionMiddleware(app, limiter, GATED_MODEL_ROUTE_SUFFIXES)
+    messages = []
+
+    async def send(message) -> None:
+        messages.append(message)
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/v1/responses",
+        "headers": [
+            (ROLLOUT_ID_HEADER.encode(), b"rollout-a"),
+            (ATTEMPT_INDEX_HEADER.encode(), b"0"),
+        ],
+    }
+    task = asyncio.create_task(middleware(scope, None, send))
+    await started.wait()
+    limiter.close()
+    limiter.abort_inflight("rollout-a", 0)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert messages == [{"type": "http.response.start", "status": 200, "headers": []}]
 
 
 @pytest.mark.asyncio

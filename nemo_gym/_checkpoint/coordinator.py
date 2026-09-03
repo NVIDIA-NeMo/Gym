@@ -44,7 +44,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Header, Query
 
 from nemo_gym._checkpoint.admission import AdmissionLimiter
 from nemo_gym._checkpoint.control import (
@@ -62,6 +62,7 @@ from nemo_gym._checkpoint.model_control_contracts import (
     ModelAdmissionPauseRequest,
     ModelAdmissionResumeRequest,
 )
+from nemo_gym.token_id_capture.control_routes import require_control_auth
 
 
 class MissingWorkersError(ControlError):
@@ -314,6 +315,7 @@ def build_coordinator_control_app(
     coordinator: AdmissionCoordinator,
     *,
     capabilities: ControlCapabilities,
+    auth_token: str,
     fence: Optional[ControlFence] = None,
     ack_timeout_s: float = 10.0,
 ) -> FastAPI:
@@ -344,7 +346,11 @@ def build_coordinator_control_app(
         return status
 
     @app.post(f"{MODEL_ADMISSION_URL_PREFIX}/pause")
-    async def coordinator_pause(body: ModelAdmissionPauseRequest) -> dict[str, Any]:
+    async def coordinator_pause(
+        body: ModelAdmissionPauseRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, Any]:
+        require_control_auth(authorization, auth_token)
         deadline = Deadline(deadline_ts=body.deadline_ts)
 
         async def run() -> dict[str, Any]:
@@ -382,21 +388,38 @@ def build_coordinator_control_app(
         checkpoint_id: str = Query(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"),
         wait_state: Optional[str] = None,
         timeout_s: float = 0.0,
+        authorization: Optional[str] = Header(default=None),
     ) -> dict[str, Any]:
+        require_control_auth(authorization, auth_token)
         fence.require_phase(
             checkpoint_id,
-            frozenset({CheckpointPhase.PREPARING, CheckpointPhase.PREPARED}),
+            frozenset(
+                {
+                    CheckpointPhase.PREPARING,
+                    CheckpointPhase.PREPARED,
+                    CheckpointPhase.COMMITTING,
+                    CheckpointPhase.COMMITTED_PAUSED,
+                    CheckpointPhase.RESTORING,
+                    CheckpointPhase.RESTORE_FAILED_PAUSED,
+                    CheckpointPhase.RESTORED_PAUSED,
+                }
+            ),
         )
         if wait_state == "paused" and timeout_s > 0:
             status = await coordinator.wait_until(lambda s: s["state"] == "paused", timeout_s=timeout_s)
         else:
             status = coordinator.status()
-        if status["state"] == AdmissionState.PAUSED.value:
+        if status["state"] == AdmissionState.PAUSED.value and fence.phase == CheckpointPhase.PREPARING:
             fence.mark_prepared(checkpoint_id)
         return status
 
     @app.post(f"{MODEL_ADMISSION_URL_PREFIX}/resume")
-    async def coordinator_resume(body: ModelAdmissionResumeRequest) -> dict[str, Any]:
+    async def coordinator_resume(
+        body: ModelAdmissionResumeRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, Any]:
+        require_control_auth(authorization, auth_token)
+
         async def run() -> dict[str, Any]:
             await coordinator.resume_admission()
             status = await _await_worker_acks(ack_timeout_s)
@@ -413,16 +436,27 @@ def build_coordinator_control_app(
             body.checkpoint_id,
             "model-admission/resume",
             allowed_phases=frozenset(
-                {CheckpointPhase.PREPARED, CheckpointPhase.COMMITTED_PAUSED, CheckpointPhase.RESTORED_PAUSED}
+                {
+                    CheckpointPhase.PREPARING,
+                    CheckpointPhase.PREPARED,
+                    CheckpointPhase.COMMITTED_PAUSED,
+                    CheckpointPhase.RESTORE_FAILED_PAUSED,
+                    CheckpointPhase.RESTORED_PAUSED,
+                }
             ),
-            phase_during=CheckpointPhase.PREPARED,
+            phase_during=fence.phase,
             phase_after=CheckpointPhase.IDLE,
             run=run,
             retire_outcome="resumed",
         )
 
     @app.post(f"{MODEL_ADMISSION_URL_PREFIX}/abort_inflight")
-    async def coordinator_abort_inflight(body: ModelAbortInflightRequest) -> dict[str, Any]:
+    async def coordinator_abort_inflight(
+        body: ModelAbortInflightRequest,
+        authorization: Optional[str] = Header(default=None),
+    ) -> dict[str, Any]:
+        require_control_auth(authorization, auth_token)
+
         async def run() -> dict[str, Any]:
             await coordinator.add_tombstone(body.rollout_id, body.attempt_index)
             status = await _await_worker_acks(ack_timeout_s)
@@ -431,9 +465,9 @@ def build_coordinator_control_app(
         return await fence.run_operation(
             body.checkpoint_id,
             f"model-admission/abort_inflight:{body.rollout_id}:{body.attempt_index}",
-            allowed_phases=frozenset({CheckpointPhase.PREPARED}),
-            phase_during=CheckpointPhase.PREPARED,
-            phase_after=CheckpointPhase.PREPARED,
+            allowed_phases=frozenset({CheckpointPhase.PREPARING, CheckpointPhase.PREPARED}),
+            phase_during=fence.phase,
+            phase_after=fence.phase,
             run=run,
         )
 
