@@ -1,0 +1,24 @@
+job_bench_resources_server:
+  resources_servers:
+    job_bench:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      allowed_agents: [opencode_sandboxed_agent]
+      judge_base_url: ${oc.env:JOB_BENCH_JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      judge_api_key: ${oc.env:JOB_BENCH_JUDGE_API_KEY,${oc.env:NVIDIA_API_KEY,''}}
+      judge_model: ${oc.env:JOB_BENCH_JUDGE_MODEL,nvidia/openai/gpt-oss-20b}
+      max_judge_workers: 10
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: ${oc.env:JOB_BENCH_SANDBOX_IMAGE,python:3.13-bookworm}
+        ttl_s: 10800
+        ready_timeout_s: 1200
+        resources:
+          cpu: 1
+          memory_mib: 2048
+          disk_gib: 30
+        provider_options: {}
+        metadata:
+          benchmark: job-bench
+          harness: opencode

@@ -1,0 +1,32 @@
+config_paths:
+  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+  - resources_servers/job_bench/configs/job_bench.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+policy_model:
+  responses_api_models:
+    inference_provider:
+      uses_reasoning_parser: true
+
+job_bench_opencode_agent:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      opencode_version: 1.14.18
+      resources_server:
+        type: resources_servers
+        name: job_bench_resources_server
+      opencode_max_context_window: 131072
+      sandbox_timeout: 7200
+      opencode_config:
+        permission:
+          "*": allow
+        tools:
+          webfetch: true
+          websearch: true
+      datasets:
+        - name: job_bench
+          type: benchmark
+          jsonl_fpath: benchmarks/job_bench/data/job_bench.jsonl
+          prepare_script: benchmarks/job_bench/prepare.py
+          num_repeats: 1
