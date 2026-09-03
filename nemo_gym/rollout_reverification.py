@@ -20,14 +20,21 @@ from collections import Counter, defaultdict
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
 from omegaconf import DictConfig
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_validator
 from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
+from nemo_gym.atif_json import strict_json_loads
+from nemo_gym.atif_reverification import (
+    AtifProjectionError,
+    index_materialized_inputs,
+    load_atif_manifest,
+    project_atif_manifest_entries,
+)
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError, UploadRolloutsConfigMixin
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
@@ -59,6 +66,8 @@ from nemo_gym.server_utils import (
 
 # Todo after merging branch `edobrowolska/judge_failures_v2`: replace this by importing from judge.py
 JUDGE_FAILED_FAILURE_CLASS = "judge_failed"
+ATIF_PROVENANCE_KEY = "_ng_atif_provenance"
+_CONFIG_BOOL_ADAPTER = TypeAdapter(bool)
 
 # Printed at the start of a `--judge-failed-only` run.
 _RECOVERY_TWO_SOURCES_WARNING = (
@@ -71,11 +80,24 @@ _RECOVERY_TWO_SOURCES_WARNING = (
 
 
 class RolloutReverificationConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
+    input_format: Literal["gym", "atif"] = Field(
+        default="gym",
+        description=(
+            "Input format: native Gym rollout JSONL, or a manifest for the initial "
+            "Relay-exported ATIF v1.7 text-only/stateless subset."
+        ),
+    )
     materialized_inputs_jsonl_fpath: str = Field(
         description="The file path of the materialized inputs as output by `gym eval run`."
     )
-    rollouts_jsonl_fpath: str = Field(
-        description="The file path of the rollouts to re-verify, as output by `gym eval run`."
+    rollouts_jsonl_fpath: Optional[str] = Field(
+        default=None, description="The file path of the rollouts to re-verify, as output by `gym eval run`."
+    )
+    atif_manifest_jsonl_fpath: Optional[str] = Field(
+        default=None,
+        description=(
+            "A JSONL manifest explicitly mapping each ATIF trajectory path to a materialized Gym task and rollout."
+        ),
     )
     output_jsonl_fpath: str = Field(description="The output data jsonl file path with recomputed rewards.")
     force: bool = Field(
@@ -142,6 +164,24 @@ class RolloutReverificationConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfi
             raise ValueError("`append` is only valid together with `judge_failed_only` (pass --judge-failed-only).")
         if self.append and self.overwrite:
             raise ValueError("`append` and `overwrite` are mutually exclusive: one appends, the other clears.")
+        if self.input_format == "gym":
+            if not self.rollouts_jsonl_fpath:
+                raise ValueError("native Gym reverification requires `rollouts_jsonl_fpath` (pass --rollouts).")
+            if self.atif_manifest_jsonl_fpath is not None:
+                raise ValueError("`atif_manifest_jsonl_fpath` is only valid with input_format=atif.")
+        else:
+            if not self.atif_manifest_jsonl_fpath:
+                raise ValueError("ATIF reverification requires `atif_manifest_jsonl_fpath` (pass --atif-manifest).")
+            if self.rollouts_jsonl_fpath is not None:
+                raise ValueError("`rollouts_jsonl_fpath` cannot be combined with input_format=atif.")
+            if self.judge_failed_only or self.append:
+                raise ValueError("ATIF reverification does not support judge-failure recovery or append mode.")
+            if self.force:
+                raise ValueError("ATIF reverification requires a stateless verifier; --force is not supported.")
+            if self.resume_from_cache:
+                raise ValueError(
+                    "ATIF reverification does not support --resume until cache keys include source hashes."
+                )
         return self
 
 
@@ -246,6 +286,50 @@ def _build_agent_to_resources_server_mapping(
     if mapping:
         return mapping
     return _agent_to_rs_mapping_from_resources_only_config(global_config_dict)
+
+
+def _selected_atif_resources_server_routes(
+    global_config_dict: Union[Dict[str, Any], "DictConfig"],
+    payloads: List[Dict[str, Any]],
+) -> List[str]:
+    """Resolve each ATIF row through the same routing policy used by ``/verify``."""
+
+    configured_mapping = _build_agent_to_resources_server_mapping(global_config_dict)
+    return [_rs_for_row(row, configured_mapping, global_config_dict) for row in payloads]
+
+
+def _resources_server_exposes_tools_over_mcp(
+    global_config_dict: Union[Dict[str, Any], "DictConfig"],
+    resources_server_name: str,
+) -> bool:
+    """Read the selected resources server's MCP exposure flag from Gym config."""
+
+    block = global_config_dict.get(resources_server_name)
+    if not isinstance(block, (dict, DictConfig)):
+        raise ConfigError(f"reverify: resources server {resources_server_name!r} is missing from the config.")
+    implementations = block.get("resources_servers")
+    if not isinstance(implementations, (dict, DictConfig)) or len(implementations) != 1:
+        raise ConfigError(
+            f"reverify: resources server {resources_server_name!r} must contain exactly one resources_servers entry."
+        )
+    implementation = next(iter(implementations.values()))
+    if not isinstance(implementation, (dict, DictConfig)):
+        raise ConfigError(f"reverify: resources server {resources_server_name!r} has an invalid config entry.")
+    exposes_tools = implementation.get("expose_tools_over_mcp", False)
+    try:
+        return _CONFIG_BOOL_ADAPTER.validate_python(exposes_tools)
+    except ValidationError as exc:
+        raise ConfigError(
+            f"reverify: resources server {resources_server_name!r} has an invalid expose_tools_over_mcp value."
+        ) from exc
+
+
+def _response_has_function_calls(row: Dict[str, Any]) -> bool:
+    response = row.get("response")
+    output = response.get("output") if isinstance(response, dict) else None
+    return isinstance(output, list) and any(
+        isinstance(item, dict) and item.get("type") == "function_call" for item in output
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +560,59 @@ def _prepare_payloads(
     return prepared_payloads
 
 
+def _prepare_atif_payloads(
+    materialized_inputs_jsonl_fpath: Path,
+    atif_manifest_jsonl_fpath: Path,
+    limit: Optional[int] = None,
+) -> List[Dict]:
+    """Build verifier payloads from an explicit ATIF-to-materialized-task manifest."""
+
+    materialized_rows: list[Dict[str, Any]] = []
+    try:
+        materialized_inputs = materialized_inputs_jsonl_fpath.open("rb")
+    except OSError as exc:
+        raise AtifProjectionError(
+            f"could not read materialized inputs {materialized_inputs_jsonl_fpath}: {exc}"
+        ) from exc
+    with materialized_inputs:
+        for line_number, line in enumerate(materialized_inputs, start=1):
+            if not line.strip():
+                continue
+            try:
+                row = strict_json_loads(line)
+            except ValueError as exc:
+                raise AtifProjectionError(
+                    f"invalid materialized input row {line_number} in {materialized_inputs_jsonl_fpath}: {exc}"
+                ) from exc
+            if not isinstance(row, dict):
+                raise AtifProjectionError(
+                    f"materialized input row {line_number} in {materialized_inputs_jsonl_fpath} is not an object"
+                )
+            materialized_rows.append(row)
+
+    entries = load_atif_manifest(atif_manifest_jsonl_fpath)
+    if limit is not None:
+        entries = entries[:limit]
+    projected = project_atif_manifest_entries(
+        entries,
+        index_materialized_inputs(materialized_rows),
+        manifest_directory=atif_manifest_jsonl_fpath.parent,
+    )
+    return [
+        item.payload
+        | {
+            ATIF_PROVENANCE_KEY: {
+                "trajectory_id": item.trajectory_id,
+                "session_id": item.session_id,
+                "source_sha256": item.source_sha256,
+                "schema_version": item.schema_version,
+                "projection_status": item.projection_status,
+            }
+        }
+        for item in projected
+    ]
+
+
 def _run_verification_payloads(
     payloads: List[Dict],
     semaphore: Semaphore | nullcontext[None] | None = None,
@@ -487,7 +624,8 @@ def _run_verification_payloads(
     async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
         async with semaphore:
             rs_name = _rs_for_row(row, agent_to_rs, server_client.global_config_dict)
-            res = await server_client.post(server_name=rs_name, url_path="/verify", json=row)
+            request_row = {key: value for key, value in row.items() if key != ATIF_PROVENANCE_KEY}
+            res = await server_client.post(server_name=rs_name, url_path="/verify", json=request_row)
             try:
                 await raise_for_status(
                     res
@@ -571,6 +709,33 @@ async def _guard_reverify_mode(config: RolloutReverificationConfig) -> Optional[
     )
 
 
+async def _guard_atif_preflight(payloads: List[Dict[str, Any]]) -> None:
+    """Validate selected routes before ATIF reverification touches output paths."""
+
+    server_client = setup_server_client()
+    selected_routes = _selected_atif_resources_server_routes(
+        server_client.global_config_dict,
+        payloads,
+    )
+    selected_mapping = {str(index): route for index, route in enumerate(selected_routes)}
+    non_stateless_rs = await _check_reverify_mode(server_client, selected_mapping)
+    if non_stateless_rs:
+        raise ConfigError(
+            f"ATIF reverification requires stateless verifiers; resource server(s) {non_stateless_rs} "
+            "reported reverify_mode=UNSUPPORTED or UNKNOWN."
+        )
+    for row, resources_server_name in zip(payloads, selected_routes, strict=True):
+        if _response_has_function_calls(row) and _resources_server_exposes_tools_over_mcp(
+            server_client.global_config_dict, resources_server_name
+        ):
+            raise AtifProjectionError(
+                "Relay ATIF tool calls cannot be reverified against MCP-exposed resources server "
+                f"{resources_server_name!r}: ATIF proves call/result correlation but does not carry Gym's "
+                "canonical (server_name, tool_name) provenance. Use a non-MCP stateless verifier or a "
+                "text-only trajectory."
+            )
+
+
 # ---------------------------------------------------------------------------
 # Function used to compute the aggregate metrics after the reverification process
 # Very similar to the rollout collection code, but we need to send the request to
@@ -607,7 +772,9 @@ async def _call_aggregate_metrics(
         # Strip heavyweight fields before sending, but preserve response.usage
         stripped = []
         for r in agent_result_list:
-            entry = {k: v for k, v in r.items() if k not in ("response", "responses_create_params")}
+            entry = {
+                k: v for k, v in r.items() if k not in ("response", "responses_create_params", ATIF_PROVENANCE_KEY)
+            }
             usage = (r.get("response") or {}).get("usage")
             if usage:
                 entry["response"] = {"usage": usage}
@@ -717,39 +884,59 @@ def _load_reverified_results(output_fpath: Path) -> Tuple[List[Dict], List[Dict]
 
 class RolloutReverificationHelper(BaseModel):
     async def run_from_config(self, config: RolloutReverificationConfig) -> List[Dict]:
-        force_warning = await _guard_reverify_mode(config)
-        if force_warning:
-            print(force_warning)
-            output_name_prefix = "unsafe_"
-        else:
-            output_name_prefix = ""
+        force_warning: Optional[str] = None
+        output_name_prefix = ""
+        if config.input_format != "atif":
+            force_warning = await _guard_reverify_mode(config)
+            if force_warning:
+                print(force_warning)
+                output_name_prefix = "unsafe_"
 
-        output_fpaths = _prepare_output_fpaths(
-            output_name_prefix, config.output_jsonl_fpath, config.resume_from_cache, config.overwrite, config.append
-        )
         materialized_inputs_jsonl_fpath = _resolve_under_cwd_or_install(config.materialized_inputs_jsonl_fpath)
-        rollouts_jsonl_fpath = _resolve_under_cwd_or_install(
-            config.rollouts_jsonl_fpath
-        )  # rollouts are inputs for the verification
+        if config.input_format == "atif":
+            assert config.atif_manifest_jsonl_fpath is not None
+            atif_manifest_jsonl_fpath = _resolve_under_cwd_or_install(config.atif_manifest_jsonl_fpath)
+            payloads_to_reverify = _prepare_atif_payloads(
+                materialized_inputs_jsonl_fpath,
+                atif_manifest_jsonl_fpath,
+                config.limit,
+            )
+            await _guard_atif_preflight(payloads_to_reverify)
+            output_fpaths = _prepare_output_fpaths(
+                output_name_prefix,
+                config.output_jsonl_fpath,
+                config.resume_from_cache,
+                config.overwrite,
+                config.append,
+            )
+        else:
+            output_fpaths = _prepare_output_fpaths(
+                output_name_prefix,
+                config.output_jsonl_fpath,
+                config.resume_from_cache,
+                config.overwrite,
+                config.append,
+            )
+            assert config.rollouts_jsonl_fpath is not None
+            rollouts_jsonl_fpath = _resolve_under_cwd_or_install(config.rollouts_jsonl_fpath)
+            reverify_source_fpath = rollouts_jsonl_fpath
+            rollout_predicate = None
 
-        reverify_source_fpath = rollouts_jsonl_fpath
-        rollout_predicate = None
+            if config.judge_failed_only:
+                print(_RECOVERY_TWO_SOURCES_WARNING)
+                reverify_source_fpath = failures_path_for(rollouts_jsonl_fpath)
+                # Seed the successes and dedup so the re-verification doesn't judge successes again.
+                skip_keys = _seed_output_with_successes(rollouts_jsonl_fpath, output_fpaths.output)
+                rollout_predicate = _recovery_rollout_predicate(skip_keys)
 
-        if config.judge_failed_only:
-            print(_RECOVERY_TWO_SOURCES_WARNING)
-            reverify_source_fpath = failures_path_for(rollouts_jsonl_fpath)
-            # Seed the successes and dedup so the re-verification doesn't judge successes again.
-            skip_keys = _seed_output_with_successes(rollouts_jsonl_fpath, output_fpaths.output)
-            rollout_predicate = _recovery_rollout_predicate(skip_keys)
-
-        payloads_to_reverify = _prepare_payloads(
-            materialized_inputs_jsonl_fpath,
-            reverify_source_fpath,
-            output_fpaths,
-            config.resume_from_cache,
-            config.limit,
-            rollout_predicate=rollout_predicate,
-        )
+            payloads_to_reverify = _prepare_payloads(
+                materialized_inputs_jsonl_fpath,
+                reverify_source_fpath,
+                output_fpaths,
+                config.resume_from_cache,
+                config.limit,
+                rollout_predicate=rollout_predicate,
+            )
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel is not None:
@@ -775,6 +962,8 @@ class RolloutReverificationHelper(BaseModel):
                     result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
                 if SKILLS_REF_KEY_NAME in row:
                     result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
+                if ATIF_PROVENANCE_KEY in row:
+                    result[ATIF_PROVENANCE_KEY] = row[ATIF_PROVENANCE_KEY]
 
                 no_persist = bool(result.get(NG_NO_PERSIST_KEY))
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)
