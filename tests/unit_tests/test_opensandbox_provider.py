@@ -592,10 +592,24 @@ def test_connection_domain_url_normalization_and_proxy_secret_boundary(fake_open
     )._connection_config()
     assert url_scheme_wins.kwargs["domain"] == "https://sandbox.example"
     assert url_scheme_wins.kwargs["protocol"] == "https"
-    with pytest.raises(ValueError, match="must not contain a path"):
-        opensandbox_provider.OpenSandboxProvider(
-            connection={"domain": "http://sandbox.example/api", "protocol": "http"}
-        )._connection_config()
+
+    base_path = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "https://sandbox.example/prefix", "protocol": "http"}
+    )._connection_config()
+    assert base_path.kwargs["domain"] == "https://sandbox.example/prefix"
+    assert base_path.kwargs["protocol"] == "https"
+
+    bare_base_path = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "sandbox.example/prefix", "protocol": "http"}
+    )._connection_config()
+    assert bare_base_path.kwargs["domain"] == "sandbox.example/prefix"
+    assert bare_base_path.kwargs["protocol"] == "http"
+
+    empty_domain = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "", "protocol": "http"}
+    )._connection_config()
+    assert empty_domain.kwargs["domain"] == ""
+    assert empty_domain.kwargs["protocol"] == "http"
 
 
 def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -21,8 +21,8 @@ sandbox:
     sandbox-api: opensandbox-sdk
   opensandbox:
     connection:
-      # A bare host[:port] or full http(s) URL is accepted. An explicit URL
-      # scheme takes precedence over `protocol`; the URL must not include a path.
+      # A bare host[:port] or SDK-supported service URL is accepted. An explicit
+      # http(s) URL scheme takes precedence over `protocol`.
       domain: ${oc.env:OPENSANDBOX_DOMAIN,opensandbox-server.opensandbox-system.svc.cluster.local}
       api_key: ${oc.env:OPENSANDBOX_API_KEY}
       protocol: http

@@ -134,28 +134,15 @@ SERVER_PROXY_API_KEY_HEADER = "OPEN-SANDBOX-API-KEY"  # pragma: allowlist secret
 
 
 def _normalize_domain_protocol(domain: str | None, protocol: str | None) -> tuple[str | None, str | None]:
-    """Validate bare domains and HTTP(S) service URLs without changing SDK semantics."""
+    """Let an explicit HTTP(S) domain scheme override the separate protocol setting."""
     if domain is None:
         return None, protocol
-    value = domain.strip().rstrip("/")
-    if not value:
-        raise ValueError("OpenSandbox connection domain must not be empty")
-    if "://" not in value:
-        if "/" in value:
-            raise ValueError("OpenSandbox connection domain must not contain a path")
-        return value, protocol
-
-    parsed = urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("OpenSandbox connection domain URL must use http or https")
-    if parsed.username or parsed.password:
-        raise ValueError("OpenSandbox connection domain URL must not contain credentials")
-    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
-        raise ValueError("OpenSandbox connection domain URL must not contain a path, query, or fragment")
-    # ConnectionConfig natively accepts a URL-form domain and lets its scheme
-    # override ``protocol``. Preserve that public SDK behavior for existing Gym
-    # consumers while still validating ambiguous or credential-bearing URLs.
-    return f"{parsed.scheme}://{parsed.netloc}", parsed.scheme
+    value = domain.rstrip("/")
+    if value.startswith("http://"):
+        protocol = "http"
+    elif value.startswith("https://"):
+        protocol = "https"
+    return value, protocol
 
 
 def validate_image_pull_policy(image_pull_policy: str) -> str:
