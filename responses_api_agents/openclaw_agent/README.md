@@ -1,10 +1,24 @@
 # OpenClaw Agent
 
 Runs OpenClaw CLI (`openclaw agent --local --json`).
-OpenClaw runs its own tools internally.
-Resources server is used for verifier.
 
-Minimal, meant to be extended, and currently eval-only. 
+Minimal, meant to be extended, and currently eval-only.
+
+## Tool sources
+
+OpenClaw can use three kinds of tools:
+
+- built-in OpenClaw tools;
+- static MCP servers configured under `openclaw_config.mcp.servers`;
+- rollout-scoped tools from a Gym resources server with `expose_tools_over_mcp: true`.
+
+For the Gym MCP path, `/seed_session` returns the resources-server endpoint and a signed header. The
+agent adds that server to the temporary `openclaw.json` used by only that rollout. Static MCP servers
+with other names remain available; the rollout-scoped Gym server wins a same-name collision. The
+temporary config and signed header are deleted with the rollout workspace after success or failure.
+
+If `/seed_session` does not return MCP metadata, the resources server remains verifier-only and
+OpenClaw continues to use its built-in and statically configured tools.
 
 ## Quick start
 
@@ -59,7 +73,8 @@ provider configuration is unchanged.
 - `timeout`: seconds for the `openclaw agent` run
 - `extra_args`: extra flags appended to `openclaw agent`
 - `env`: extra env vars for the subprocess (e.g. provider API keys)
-- `openclaw_config`: deep-merged into the generated `openclaw.json`
+- `openclaw_config`: deep-merged into the generated `openclaw.json`; static `mcp.servers` entries are
+  preserved unless the rollout-specific Gym server uses the same name
 - `openclaw_version`: npm version to pin on install (null means latest)
 
 See `configs/openclaw_agent.yaml`.
