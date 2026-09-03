@@ -57,7 +57,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from nemo_gym import WORKING_DIR
-from nemo_gym.checkpoint.control import (
+from nemo_gym._checkpoint.control import (
     ControlCapabilities,
     ControlFence,
     install_control_plane,
