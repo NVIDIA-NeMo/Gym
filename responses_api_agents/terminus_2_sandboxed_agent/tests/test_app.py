@@ -198,6 +198,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
             self.kwargs = kwargs
             self._session = SimpleNamespace(stop=self.stop)
             self._times_spent = [1.0, 3.0]
+            self._num_compactions = 2
 
         async def stop(self):
             return None
@@ -256,6 +257,8 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         "command_exec_time_pct": 40.0,
         "model_call_time_pct": 60.0,
         "terminus2_time_taken": 10.0,
+        "model_calls_gt_10min": 0,
+        "num_compactions": 2,
     }
     assert response.output[-1].content[0].text == "done"
     assert response.usage.input_tokens == 4
