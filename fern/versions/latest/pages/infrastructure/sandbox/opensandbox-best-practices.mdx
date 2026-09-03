@@ -27,6 +27,9 @@ correctly; if you copy or override it, keep them.
 
 `resources` becomes the pod's **limits**. Scheduling **requests** are a separate map under
 `provider_options.resource_requests`. If you set only `resources`, the server uses it as both.
+These are Kubernetes
+[requests and limits](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#requests-and-limits)
+applied to the sandbox container.
 
 ```yaml
 sandbox_config:
