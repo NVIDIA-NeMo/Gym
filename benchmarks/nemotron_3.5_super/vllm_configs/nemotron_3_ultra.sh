@@ -29,6 +29,7 @@ ULTRA_DECODE_CUDAGRAPH_CAPTURE_SIZES="${ULTRA_DECODE_CUDAGRAPH_CAPTURE_SIZES:-}"
 ULTRA_DISABLE_DECODE_CUSTOM_ALL_REDUCE="${ULTRA_DISABLE_DECODE_CUSTOM_ALL_REDUCE:-0}"
 ULTRA_DECODE_ALL2ALL_BACKEND="${ULTRA_DECODE_ALL2ALL_BACKEND:-}"
 ULTRA_DECODE_ENFORCE_EAGER="${ULTRA_DECODE_ENFORCE_EAGER:-1}"
+ULTRA_NUM_SPECULATIVE_TOKENS="${ULTRA_NUM_SPECULATIVE_TOKENS:-5}"
 export SAFETENSORS_FAST_GPU=1
 
 case "$ULTRA_DECODE_CUDAGRAPH_MODE" in
@@ -105,6 +106,11 @@ case "$ULTRA_DECODE_ENFORCE_EAGER" in
         exit 2
         ;;
 esac
+
+if [[ ! "$ULTRA_NUM_SPECULATIVE_TOKENS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: ULTRA_NUM_SPECULATIVE_TOKENS must be a positive integer; got '$ULTRA_NUM_SPECULATIVE_TOKENS'." >&2
+    exit 2
+fi
 
 VLLM_COMMON_ARGS=(
     --disable-uvicorn-access-log
@@ -184,6 +190,7 @@ fi
 
 if [[ "${ULTRA_ENABLE_MTP:-1}" == "1" ]]; then
     # Producer and consumer must expose matching cache layouts for NIXL KV transfer.
-    VLLM_PREFILL_ARGS+=(--speculative-config '{"method":"nemotron_h_mtp","num_speculative_tokens":5}')
-    VLLM_DECODE_ARGS+=(--speculative-config '{"method":"nemotron_h_mtp","num_speculative_tokens":5}')
+    ULTRA_SPECULATIVE_CONFIG="{\"method\":\"nemotron_h_mtp\",\"num_speculative_tokens\":$ULTRA_NUM_SPECULATIVE_TOKENS}"
+    VLLM_PREFILL_ARGS+=(--speculative-config "$ULTRA_SPECULATIVE_CONFIG")
+    VLLM_DECODE_ARGS+=(--speculative-config "$ULTRA_SPECULATIVE_CONFIG")
 fi
