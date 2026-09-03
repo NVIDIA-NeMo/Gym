@@ -4,7 +4,7 @@
 
 Reads a JSON request on stdin and writes a JSON result on stdout:
 
-    stdin:  {"setup_code", "code", "test", "entry_point", "timeout", "max_as_limit"}
+    stdin:  {"setup_code", "code", "test", "entry_point", "max_as_limit", "workdir"}
     stdout: {"status": "pass"|"fail"|"entry_point_missing"|"error"|"timeout", "details": {...}}
 
 The task's own ``test`` field defines ``check(candidate)``; the runner executes
@@ -48,6 +48,37 @@ def _apply_limits(max_as_limit_mb: int) -> None:
             resource.setrlimit(resource.RLIMIT_AS, (nbytes, nbytes))
         except Exception:
             # Best effort: an unsettable rlimit must not fail the task.
+            pass
+
+
+@contextlib.contextmanager
+def _working_directory(workdir):
+    """Run the task in a throwaway CWD, restoring the original on the way out.
+
+    Several tasks write files relative to the CWD (observed: bioinformatics tasks
+    emitting .fasta/.a3m/.pdb), which would otherwise litter the repository, let
+    concurrent tasks collide on identical filenames, and leak state into later runs
+    so a task could pass only because an earlier one left a file behind.
+
+    When the parent supplies ``workdir`` it also owns the cleanup, because a timed-out
+    task is SIGKILLed and a task can call ``os._exit`` — neither runs anything here.
+    The server always supplies one. Standalone invocations fall back to a self-managed
+    temp directory, which is best-effort for that same reason: cleanup is skipped if the
+    task exits the process abruptly.
+    """
+    origin = os.getcwd()
+    try:
+        if workdir:
+            os.chdir(workdir)
+            yield
+        else:
+            with tempfile.TemporaryDirectory(prefix="scicodepile_") as owned:
+                os.chdir(owned)
+                yield
+    finally:
+        try:
+            os.chdir(origin)
+        except OSError:
             pass
 
 
@@ -113,25 +144,13 @@ def main() -> None:
     os.dup2(devnull_fd, 1)
     os.close(devnull_fd)
 
-    # Run inside a throwaway working directory. Several tasks write files relative
-    # to the CWD (observed: bioinformatics tasks emitting .fasta/.a3m/.pdb), which
-    # would otherwise litter the repository, let concurrent tasks collide on
-    # identical filenames, and leak state into later runs so a task could pass only
-    # because an earlier one left a file behind.
-    origin = os.getcwd()
     try:
-        with tempfile.TemporaryDirectory(prefix="scicodepile_") as workdir:
-            os.chdir(workdir)
+        with _working_directory(req.get("workdir")):
             # Task code prints freely; stdout is the result channel, so capture both streams.
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 result = run_task(req)
     except BaseException as exc:  # pragma: no cover - defensive
         result = {"status": "error", "details": {"reason": "runner_crashed", "message": str(exc)[:500]}}
-    finally:
-        try:
-            os.chdir(origin)
-        except OSError:
-            pass
 
     # Written to the private duplicate, not fd 1. A task that calls `os._exit`
     # skips this entirely, leaving the parent an empty read that it reports as

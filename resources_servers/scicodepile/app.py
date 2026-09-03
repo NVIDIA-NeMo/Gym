@@ -3,8 +3,10 @@
 
 import asyncio
 import json
-import os
+import shutil
 import sys
+import tempfile
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -31,6 +33,29 @@ class SciCodePileResourcesServerConfig(BaseResourcesServerConfig):
     max_as_limit: int = 8 * 1024
 
 
+class FailureCode(str, Enum):
+    """Failures owned by the harness or the dataset rather than by the model.
+
+    Set only where ``reward=0.0`` does not reflect policy quality, so these rollouts
+    can be filtered out of an accuracy figure instead of being counted as wrong
+    answers. Genuine model errors (``fail``, ``entry_point_missing``, ``syntax_error``,
+    ``exec_failed``) deliberately leave ``failure_reason`` unset.
+    """
+
+    TIMEOUT = "timeout"
+    UNPARSEABLE_RUNNER_OUTPUT = "unparseable_runner_output"
+    RUNNER_CRASHED = "runner_crashed"
+    TEST_DEFINES_NO_CHECK = "test_defines_no_check"
+
+
+# `details.reason` values that mean the harness or the task's own test is at fault.
+_HARNESS_FAILURE_REASONS = {
+    "unparseable_runner_output": FailureCode.UNPARSEABLE_RUNNER_OUTPUT,
+    "runner_crashed": FailureCode.RUNNER_CRASHED,
+    "test_defines_no_check": FailureCode.TEST_DEFINES_NO_CHECK,
+}
+
+
 class SciCodePileVerifyRequest(BaseVerifyRequest):
     verifier_metadata: Optional[Dict[str, Any]] = None
 
@@ -41,6 +66,7 @@ class SciCodePileVerifyResponse(BaseVerifyResponse):
     status: Optional[str] = None
     details: Optional[Dict[str, Any]] = None
     task_id: Optional[str] = None
+    failure_reason: Optional[FailureCode] = None
 
 
 class SciCodePileResourcesServer(SimpleResourcesServer):
@@ -110,17 +136,38 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
             )
 
         status = result.get("status")
+        details = result.get("details")
         return SciCodePileVerifyResponse(
             **body.model_dump(),
             reward=1.0 if status == "pass" else 0.0,
             extracted_model_output=model_out,
             extracted_model_code=extracted,
             status=status,
-            details=result.get("details"),
+            details=details,
             task_id=task_id,
+            failure_reason=self._failure_reason(status, details),
         )
 
+    @staticmethod
+    def _failure_reason(status: Optional[str], details: Optional[Dict[str, Any]]) -> Optional[FailureCode]:
+        if status == "timeout":
+            return FailureCode.TIMEOUT
+        return _HARNESS_FAILURE_REASONS.get((details or {}).get("reason"))
+
     async def _run_task(self, setup_code: str, code: str, test: str, entry_point: str) -> Dict[str, Any]:
+        # The scratch CWD is created and removed here, not in the runner: a task that
+        # hangs is SIGKILLed below and a task can call `os._exit`, and neither path
+        # runs cleanup inside the child. Owning it in the parent is what keeps timed-out
+        # tasks from leaving their `.fasta`/`.a3m`/`.pdb` output behind for good.
+        workdir = await asyncio.to_thread(tempfile.mkdtemp, prefix="scicodepile_")
+        try:
+            return await self._run_task_in(workdir, setup_code, code, test, entry_point)
+        finally:
+            await asyncio.to_thread(shutil.rmtree, workdir, True)
+
+    async def _run_task_in(
+        self, workdir: str, setup_code: str, code: str, test: str, entry_point: str
+    ) -> Dict[str, Any]:
         payload = json.dumps(
             {
                 "setup_code": setup_code,
@@ -128,6 +175,7 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
                 "test": test,
                 "entry_point": entry_point,
                 "max_as_limit": self.config.max_as_limit,
+                "workdir": workdir,
             }
         )
 
@@ -137,7 +185,6 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env={**os.environ},
         )
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -149,15 +196,16 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
             await proc.wait()
             return {"status": "timeout", "details": {"reason": "subprocess_timeout"}}
 
+        stdout_text = stdout.decode("utf-8", errors="replace")
         try:
-            return json.loads(stdout.decode("utf-8", errors="replace"))
+            return json.loads(stdout_text)
         except json.JSONDecodeError:
             return {
                 "status": "error",
                 "details": {
                     "reason": "unparseable_runner_output",
                     "stderr": stderr.decode("utf-8", errors="replace")[:2000],
-                    "stdout": stdout.decode("utf-8", errors="replace")[:2000],
+                    "stdout": stdout_text[:2000],
                 },
             }
 

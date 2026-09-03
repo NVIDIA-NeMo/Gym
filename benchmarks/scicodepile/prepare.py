@@ -22,6 +22,7 @@ that choice are in this benchmark's README.
 """
 
 import argparse
+import ast
 from pathlib import Path
 
 import orjson
@@ -66,6 +67,7 @@ def prepare(output_path: Path = OUTPUT_FPATH) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     n_written = 0
+    n_meta_unparsed = 0
     with open(output_path, "wb") as f:
         for row in dataset:
             if not row["runnable"]:
@@ -75,12 +77,15 @@ def prepare(output_path: Path = OUTPUT_FPATH) -> Path:
 
             meta = row.get("benchmark_meta") or {}
             if isinstance(meta, str):
-                import ast
-
                 try:
                     meta = ast.literal_eval(meta)
                 except (ValueError, SyntaxError):
+                    # Upstream ships a Python repr today. If that ever becomes JSON
+                    # (bare true/false/null), every row would silently lose its
+                    # provenance fields, so count it and report below rather than
+                    # emitting `audit_flags: null` with no explanation.
                     meta = {}
+                    n_meta_unparsed += 1
 
             out = {
                 "question": _build_question(row["prompt"]),
@@ -96,6 +101,12 @@ def prepare(output_path: Path = OUTPUT_FPATH) -> Path:
             f.write(orjson.dumps(out) + b"\n")
             n_written += 1
 
+    if n_meta_unparsed:
+        print(
+            f"WARNING: could not parse `benchmark_meta` on {n_meta_unparsed} of {n_written} rows; "
+            "their `audit_flags` and `primary_score_eligible` are null. Upstream may have changed "
+            "serialization format."
+        )
     print(f"Wrote {n_written} problems to {output_path}")
     return output_path
 
