@@ -193,7 +193,7 @@ class NeMoGymLLM(BaseLLM):
         input_items = self._input_items(message_history, prompt)
         response = None
         start_time = perf_counter()
-        max_attempts = 3  # Hardcode 3 attempts for now
+        max_attempts = 10  # Hardcode 10 attempts for now
         for attempt in range(max_attempts):
             try:
                 async with asyncio.timeout(delay=60 * 10):  # Hardcoded to match litellm default timeout
