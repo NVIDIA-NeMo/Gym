@@ -15,6 +15,7 @@
 """Checkpoint token-free model custody without copying staged token arrays."""
 
 import json
+import shutil
 
 import pytest
 from fastapi import FastAPI
@@ -147,6 +148,7 @@ def _participant(root) -> tuple[TestClient, AdmissionLimiter]:
         ledger_provider=lambda: ledger,
         file_ledger_root_provider=lambda: ledger.checkpoint_root,
         instance_role="policy",
+        server_name="policy",
         auth_token=AUTH_TOKEN,
     )
     return TestClient(app), limiter
@@ -186,6 +188,19 @@ def test_commit_requires_completed_drain_and_restore_stays_paused(tmp_path) -> N
         headers=AUTH_HEADERS,
     )
     assert commit.status_code == 200
+    retry = source_client.post(
+        f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
+        json=commit_body,
+        headers=AUTH_HEADERS,
+    )
+    assert retry.json() == commit.json()
+    committed_status = source_client.get(
+        f"{MODEL_ADMISSION_URL_PREFIX}/status",
+        params=pause_body,
+        headers=AUTH_HEADERS,
+    )
+    assert committed_status.status_code == 200
+    assert committed_status.json()["state"] == "paused"
 
     restored_client, restored_limiter = _participant(tmp_path / "ledger-b")
     restore = restored_client.post(
@@ -199,6 +214,15 @@ def test_commit_requires_completed_drain_and_restore_stays_paused(tmp_path) -> N
     )
     assert restore.status_code == 200
     assert restored_limiter.counts()["state"] == "paused"
+    restored_status = restored_client.get(
+        f"{MODEL_ADMISSION_URL_PREFIX}/status",
+        params={"checkpoint_id": "restore-1", "deadline_ts": 4e9},
+        headers=AUTH_HEADERS,
+    )
+    assert restored_status.status_code == 200
+    assert restored_status.json()["state"] == "paused"
+    with pytest.raises(StaleAttemptError):
+        restored_limiter.admit(rollout_id="rollout-a", attempt_index=0)
 
 
 def test_restored_tombstone_fences_exact_attempt(tmp_path) -> None:
@@ -247,3 +271,161 @@ def test_manifest_is_published_last(tmp_path, monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="injected"):
         CaptureLedgerCheckpointer(source).commit(checkpoint, checkpoint_id="checkpoint-1", tombstones=[])
     assert not (checkpoint / MODEL_LEDGER_SUBDIR / LEDGER_MANIFEST_NAME).exists()
+
+
+def test_model_checkpoint_artifacts_are_namespaced_by_server(tmp_path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _write_custody(first, "rollout-a")
+    _write_custody(second, "rollout-b")
+    checkpoint = tmp_path / "checkpoint"
+
+    CaptureLedgerCheckpointer(first, server_name="policy-a").commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+    )
+    CaptureLedgerCheckpointer(second, server_name="policy-b").commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+    )
+
+    root = checkpoint / MODEL_LEDGER_SUBDIR
+    assert (root / "policy-a" / "rollout-a.lineage.jsonl").exists()
+    assert (root / "policy-b" / "rollout-b.lineage.jsonl").exists()
+    with pytest.raises(ValueError, match="model server name"):
+        CaptureLedgerCheckpointer(first, server_name="../policy")
+
+    shutil.copytree(root / "policy-a", root / "policy-copy")
+    with pytest.raises(LedgerMismatchError, match="different model server"):
+        CaptureLedgerCheckpointer(tmp_path / "restore-copy", server_name="policy-copy").restore(checkpoint)
+
+
+@pytest.mark.parametrize(
+    ("retry_tombstones", "retry_source_attempts", "message"),
+    [
+        ([("rollout-b", 1)], [("rollout-a", 0)], "abort exclusions"),
+        ([], [("rollout-a", 0), ("rollout-c", 2)], "source attempts"),
+    ],
+)
+def test_commit_retry_rejects_changed_semantic_sets_after_final_fsync_failure(
+    tmp_path,
+    monkeypatch,
+    retry_tombstones,
+    retry_source_attempts,
+    message,
+) -> None:
+    source = tmp_path / "source"
+    _write_custody(source, "rollout-a")
+    checkpoint = tmp_path / "checkpoint"
+    checkpointer = CaptureLedgerCheckpointer(source, server_name="policy")
+
+    import nemo_gym._checkpoint.ledger as ledger_module
+
+    real_fsync_dir = ledger_module._fsync_dir
+    calls = 0
+
+    def fail_final_fsync(path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected final directory fsync failure")
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(ledger_module, "_fsync_dir", fail_final_fsync)
+    with pytest.raises(OSError, match="injected"):
+        checkpointer.commit(
+            checkpoint,
+            checkpoint_id="checkpoint-1",
+            tombstones=[],
+            source_attempts=[("rollout-a", 0)],
+        )
+    assert (checkpoint / MODEL_LEDGER_SUBDIR / "policy" / LEDGER_MANIFEST_NAME).exists()
+
+    with pytest.raises(LedgerMismatchError, match=message):
+        checkpointer.commit(
+            checkpoint,
+            checkpoint_id="checkpoint-1",
+            tombstones=retry_tombstones,
+            source_attempts=retry_source_attempts,
+        )
+
+
+def test_restored_source_ledger_survives_the_next_commit(tmp_path) -> None:
+    source_client, source_limiter = _participant(tmp_path / "source")
+    expected = _write_custody(tmp_path / "source", "rollout-a")
+    source_limiter.release(source_limiter.admit(rollout_id="rollout-a", attempt_index=0))
+    pause = {"checkpoint_id": "checkpoint-1", "deadline_ts": 4e9}
+    source_client.post(f"{MODEL_ADMISSION_URL_PREFIX}/pause", json=pause, headers=AUTH_HEADERS)
+    first_checkpoint = tmp_path / "checkpoint-1"
+    assert (
+        source_client.post(
+            f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
+            json={**pause, "checkpoint_dir": str(first_checkpoint)},
+            headers=AUTH_HEADERS,
+        ).status_code
+        == 200
+    )
+
+    restored_client, restored_limiter = _participant(tmp_path / "restored")
+    restore = {"checkpoint_id": "restore-1", "deadline_ts": 4e9}
+    assert (
+        restored_client.post(
+            f"{MODEL_CHECKPOINT_URL_PREFIX}/restore",
+            json={**restore, "checkpoint_dir": str(first_checkpoint)},
+            headers=AUTH_HEADERS,
+        ).status_code
+        == 200
+    )
+    assert (
+        restored_client.post(
+            f"{MODEL_ADMISSION_URL_PREFIX}/resume",
+            json=restore,
+            headers=AUTH_HEADERS,
+        ).status_code
+        == 200
+    )
+    with pytest.raises(StaleAttemptError):
+        restored_limiter.admit(rollout_id="rollout-a", attempt_index=0)
+
+    second = {"checkpoint_id": "checkpoint-2", "deadline_ts": 4e9}
+    restored_client.post(f"{MODEL_ADMISSION_URL_PREFIX}/pause", json=second, headers=AUTH_HEADERS)
+    second_checkpoint = tmp_path / "checkpoint-2"
+    assert (
+        restored_client.post(
+            f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
+            json={**second, "checkpoint_dir": str(second_checkpoint)},
+            headers=AUTH_HEADERS,
+        ).status_code
+        == 200
+    )
+    assert (second_checkpoint / MODEL_LEDGER_SUBDIR / "policy" / "rollout-a.lineage.jsonl").read_bytes() == expected
+
+
+def test_failed_restore_is_paused_observable_and_recoverable(tmp_path) -> None:
+    client, limiter = _participant(tmp_path / "restored")
+    body = {
+        "checkpoint_id": "restore-1",
+        "deadline_ts": 4e9,
+        "checkpoint_dir": str(tmp_path / "missing"),
+    }
+    failed = client.post(f"{MODEL_CHECKPOINT_URL_PREFIX}/restore", json=body, headers=AUTH_HEADERS)
+    assert failed.status_code == 409
+    assert limiter.state.value == "paused"
+    capabilities = client.get("/ng-control/v1/capabilities").json()
+    assert capabilities["phase"] == "restore_failed_paused"
+    status = client.get(
+        f"{MODEL_ADMISSION_URL_PREFIX}/status",
+        params={"checkpoint_id": "restore-1", "deadline_ts": 4e9},
+        headers=AUTH_HEADERS,
+    )
+    assert status.status_code == 200
+    assert status.json()["state"] == "paused"
+    resumed = client.post(
+        f"{MODEL_ADMISSION_URL_PREFIX}/resume",
+        json={"checkpoint_id": "restore-1", "deadline_ts": 4e9},
+        headers=AUTH_HEADERS,
+    )
+    assert resumed.status_code == 200
+    assert limiter.state.value == "accepting"

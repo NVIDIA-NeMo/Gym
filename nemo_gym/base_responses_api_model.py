@@ -47,7 +47,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
 
 from nemo_gym._checkpoint.admission import GATED_MODEL_ROUTE_SUFFIXES, AdmissionLimiter, AdmissionMiddleware
-from nemo_gym._checkpoint.control import AdmissionState, ControlCapabilities
+from nemo_gym._checkpoint.control import (
+    AdmissionState,
+    ControlCapabilities,
+)
+from nemo_gym._checkpoint.control import (
+    checkpoint_control_auth_token as resolve_checkpoint_control_auth_token,
+)
 from nemo_gym._checkpoint.ledger import install_model_checkpoint
 from nemo_gym._checkpoint.model_admission import install_model_admission
 from nemo_gym.anthropic_converter import AnthropicConverter
@@ -67,7 +73,13 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import MODEL_CALL_ID_HEADER, maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import (
+    LOGICAL_REQUEST_HEADER,
+    MODEL_CALL_ID_HEADER,
+    PARENT_MODEL_CALL_ID_HEADER,
+    SOURCE_CAPTURE_KEY_HEADER,
+    maybe_rollout_id_from_run_body,
+)
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -280,6 +292,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 else None
             ),
             instance_role=self.config.instance_role,
+            server_name=self.config.name,
             auth_token=auth_token,
         )
         if self.config.instance_role == "policy":
@@ -290,10 +303,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             )
 
     def checkpoint_control_auth_token(self) -> Optional[str]:
-        settings = token_id_capture_config(self.server_client.global_config_dict)
-        if settings is None or not settings.token_id_capture.external_staging:
-            return None
-        return settings.token_id_capture.resolve_control_auth_token()
+        return resolve_checkpoint_control_auth_token(getattr(self.server_client, "global_config_dict", None))
 
     def control_capabilities(self) -> ControlCapabilities:
         capabilities = super().control_capabilities()
@@ -969,6 +979,19 @@ def _unique_request_header(headers: list, name: bytes) -> Optional[str]:
     return values.pop() if len(values) == 1 else None
 
 
+def _scope_header(scope: dict[str, Any], name: str) -> str | None:
+    """Read one unambiguous ASGI header value."""
+    encoded_name = name.lower().encode("ascii")
+    values = {value.decode("latin-1") for key, value in scope.get("headers", []) if key.lower() == encoded_name}
+    if not values:
+        return None
+    if len(values) == 1:
+        return values.pop()
+    # A joined value cannot authenticate.
+    # Logical ID validation rejects the comma.
+    return ",".join(sorted(values))
+
+
 def _consume_terminal_sse_event(buffer: bytearray, dialect: str) -> Optional[str]:
     blocks = re.split(rb"\r?\n\r?\n", bytes(buffer))
     buffer[:] = blocks.pop()
@@ -1439,6 +1462,9 @@ class _CaptureMiddleware:
                 lineage_store=self._capture_ledger if self._external_staging else self._lineage_store,
                 delta_records=self._delta_records,
                 external_staging=self._external_staging,
+                logical_request_id=_scope_header(scope, LOGICAL_REQUEST_HEADER),
+                source_capture_key=_scope_header(scope, SOURCE_CAPTURE_KEY_HEADER),
+                explicit_parent_call_id=_scope_header(scope, PARENT_MODEL_CALL_ID_HEADER),
                 admitted_at=time.time(),
             )
             sink_token = set_token_sink(capture_context)
