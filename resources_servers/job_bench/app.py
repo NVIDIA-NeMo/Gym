@@ -87,9 +87,11 @@ class JobBenchResourcesServer(SimpleResourcesServer):
             workdir="/workspace",
             env={},
             files={},
-            metadata=resolve_provider_metadata(self.config.sandbox_provider, global_config)
-            | self.config.sandbox_config.get("metadata", {})
-            | {"task_id": body.task_id[:63]},
+            metadata={
+                **resolve_provider_metadata(self.config.sandbox_provider, global_config),
+                **self.config.sandbox_config.get("metadata", {}),
+                "task_id": body.task_id[:63],
+            },
             resources=resources,
             entrypoint=None,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
