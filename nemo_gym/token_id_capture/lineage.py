@@ -414,6 +414,7 @@ def assistant_fingerprint(messages: list[dict]) -> str:
 @dataclass
 class LineageNode:
     call_id: str
+    fingerprint: str
     # ``None`` means the index is metadata-only.
     # A resolved match loads tokens from ``entry_offset``.
     cum_tokens: list[int] | None
@@ -531,6 +532,7 @@ class RolloutLineage:
             raise ValueError("delta records require a durable-log-backed lineage store")
         node = LineageNode(
             call_id=entry.model_call_id,
+            fingerprint=entry.continuation_fingerprint,
             cum_tokens=cumulative_tokens(entry) if store_tokens else None,
             cum_len=entry.cum_len if entry.cum_len is not None else len(cumulative_tokens(entry)),
             digest=entry.digest or "",
@@ -539,6 +541,9 @@ class RolloutLineage:
             context_digest=entry.continuation_context_digest,
             parent_call_id=entry.parent_call_id,
             prompt_is_delta=entry.prompt_is_delta,
+            staging_key=str(getattr(entry, "staging_key", "") or ""),
+            staging_chain=list(getattr(entry, "staging_chain", None) or []),
+            chain_hash=str(getattr(entry, "chain_hash", "") or ""),
         )
         previous = self.by_call_id.get(entry.model_call_id)
         if previous is not None:
@@ -571,6 +576,7 @@ class RolloutLineage:
         """
         node = LineageNode(
             call_id=call_id,
+            fingerprint=assistant_fingerprint(messages),
             cum_tokens=list(cum_tokens),
             cum_len=cum_len if cum_len is not None else len(cum_tokens),
             digest=digest,
@@ -666,6 +672,32 @@ class InMemoryLineageStore:
 
     async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
         return self.index.for_rollout(rollout_id).resolve(request_items)
+
+    async def resolve_explicit(
+        self,
+        source_capture_key: str,
+        parent_call_id: str,
+        request_items: list[dict],
+    ) -> LineageResolution:
+        lineage = self.index.for_rollout(source_capture_key)
+        node = lineage.by_call_id.get(parent_call_id)
+        if node is None:
+            return LineageResolution(ParentResolutionStatus.UNRESOLVED, reason="explicit_parent_missing")
+        if node.fingerprint != assistant_fingerprint(request_items) or not lineage._continues(node, request_items):
+            return LineageResolution(ParentResolutionStatus.UNRESOLVED, reason="explicit_parent_fingerprint_mismatch")
+        if node.cum_tokens is None:
+            return LineageResolution(ParentResolutionStatus.UNRESOLVED, reason="explicit_parent_tokens_missing")
+        return LineageResolution(
+            ParentResolutionStatus.RESOLVED,
+            match=LineageMatch(
+                model_call_id=node.call_id,
+                cumulative_token_ids=tuple(node.cum_tokens),
+                digest=node.digest,
+                staging_chain=tuple(node.staging_chain),
+                prev_len=node.cum_len,
+                chain_hash=node.chain_hash,
+            ),
+        )
 
     async def put(self, entry: TokenEntry) -> None:
         """Publish one committed entry to the worker-local index."""
@@ -946,6 +978,52 @@ class IncrementalLineageStore:
     async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
         return await asyncio.to_thread(self._resolve, rollout_id, request_items)
 
+    async def resolve_explicit(
+        self,
+        source_capture_key: str,
+        parent_call_id: str,
+        request_items: list[dict],
+    ) -> LineageResolution:
+        return await asyncio.to_thread(
+            self._resolve_explicit,
+            source_capture_key,
+            parent_call_id,
+            request_items,
+        )
+
+    def _resolve_explicit(
+        self,
+        source_capture_key: str,
+        parent_call_id: str,
+        request_items: list[dict],
+    ) -> LineageResolution:
+        with self._rollout_lock(source_capture_key), self._read_locked(source_capture_key):
+            refs, lineage = self._refresh(source_capture_key)
+            node = lineage.by_call_id.get(parent_call_id)
+            if node is None:
+                return LineageResolution(ParentResolutionStatus.UNRESOLVED, reason="explicit_parent_missing")
+            if node.fingerprint != assistant_fingerprint(request_items) or not lineage._continues(node, request_items):
+                return LineageResolution(
+                    ParentResolutionStatus.UNRESOLVED,
+                    reason="explicit_parent_fingerprint_mismatch",
+                )
+            tokens = (
+                node.cum_tokens
+                if node.cum_tokens is not None
+                else self._materialize(source_capture_key, node, refs, lineage)
+            )
+            return LineageResolution(
+                ParentResolutionStatus.RESOLVED,
+                match=LineageMatch(
+                    model_call_id=node.call_id,
+                    cumulative_token_ids=tuple(tokens),
+                    digest=node.digest,
+                    staging_chain=tuple(node.staging_chain),
+                    prev_len=node.cum_len,
+                    chain_hash=node.chain_hash,
+                ),
+            )
+
     def _resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
         with self._rollout_lock(rollout_id), self._read_locked(rollout_id):
             refs, lineage = self._refresh(rollout_id)
@@ -961,6 +1039,9 @@ class IncrementalLineageStore:
                     model_call_id=node.call_id,
                     cumulative_token_ids=tuple(tokens),
                     digest=node.digest,
+                    staging_chain=tuple(node.staging_chain),
+                    prev_len=node.cum_len,
+                    chain_hash=node.chain_hash,
                 ),
             )
 
@@ -1117,6 +1198,51 @@ class FileLineageStore(IncrementalLineageStore):
         if match is not None:
             return LineageResolution(ParentResolutionStatus.RESOLVED, match=match)
         return resolution
+
+    def _resolve_explicit(
+        self,
+        source_capture_key: str,
+        parent_call_id: str,
+        request_items: list[dict],
+    ) -> LineageResolution:
+        resolution = super()._resolve_explicit(source_capture_key, parent_call_id, request_items)
+        if resolution.status == ParentResolutionStatus.RESOLVED:
+            return resolution
+        with self._locked(source_capture_key):
+            records = [
+                record
+                for record in self._read(source_capture_key)
+                if record.get("model_call_id") == parent_call_id and record.get("failure_reason") is None
+            ]
+        if len(records) != 1:
+            return LineageResolution(ParentResolutionStatus.UNRESOLVED, reason="explicit_parent_missing")
+        record = records[0]
+        fingerprint = assistant_fingerprint(request_items)
+        if record.get("fingerprint") != fingerprint:
+            return LineageResolution(
+                ParentResolutionStatus.UNRESOLVED,
+                reason="explicit_parent_fingerprint_mismatch",
+            )
+        context_len = int(record["context_len"])
+        if (
+            len(request_items) < context_len
+            or conversation_digest(request_items[:context_len]) != record["context_digest"]
+        ):
+            return LineageResolution(
+                ParentResolutionStatus.UNRESOLVED,
+                reason="explicit_parent_fingerprint_mismatch",
+            )
+        return LineageResolution(
+            ParentResolutionStatus.RESOLVED,
+            match=LineageMatch(
+                model_call_id=str(record["model_call_id"]),
+                cumulative_token_ids=tuple(int(token) for token in record.get("cumulative_token_ids") or ()),
+                digest=str(record["digest"]),
+                staging_chain=tuple(record.get("staging_chain") or []),
+                prev_len=int(record.get("cum_len") or 0),
+                chain_hash=str(record.get("chain_hash") or ""),
+            ),
+        )
 
     def _resolve_row(self, rollout_id: str, request_items: list[dict]) -> LineageMatch | None:
         fingerprint = assistant_fingerprint(request_items)

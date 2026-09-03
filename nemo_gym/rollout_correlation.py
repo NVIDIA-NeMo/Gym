@@ -14,8 +14,9 @@
 # limitations under the License.
 import re
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from pydantic import BaseModel
@@ -34,12 +35,27 @@ _ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_rollout_id", defau
 _LOGICAL_ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_logical_rollout_id", default=None)
 _ATTEMPT_INDEX: ContextVar[Optional[int]] = ContextVar("nemo_gym_attempt_index", default=None)
 
+
+@dataclass
+class _CheckpointParentState:
+    source_capture_key: str
+    parent_model_call_id: str
+    consumed: bool = False
+
+
+_CHECKPOINT_PARENT: ContextVar[Optional[_CheckpointParentState]] = ContextVar(
+    "nemo_gym_checkpoint_parent",
+    default=None,
+)
+
 # These headers propagate execution identity independently of capture.
 # The rollout header is the stable logical ID.
 # The attempt header identifies one dispatch of that rollout.
 ROLLOUT_ID_HEADER = "x-nemo-gym-rollout-id"
 ATTEMPT_INDEX_HEADER = "x-nemo-gym-attempt-index"
 MODEL_CALL_ID_HEADER = "x-nemo-gym-model-call-id"
+SOURCE_CAPTURE_KEY_HEADER = "x-nemo-gym-source-capture-key"
+PARENT_MODEL_CALL_ID_HEADER = "x-nemo-gym-parent-model-call-id"
 
 # The transport id appends ``-a{n}`` for re-dispatch attempts. The suffix is a
 # capture and routing key, never the logical identity. This pattern recovers
@@ -186,6 +202,34 @@ def current_execution_identity() -> tuple[Optional[str], Optional[int]]:
     return current_logical_rollout_id(), current_attempt_index()
 
 
+def take_checkpoint_parent() -> tuple[Optional[str], Optional[str]]:
+    """Consume the restored parent for the first policy model request."""
+    state = _CHECKPOINT_PARENT.get()
+    if state is None or state.consumed:
+        return None, None
+    state.consumed = True
+    return state.source_capture_key, state.parent_model_call_id
+
+
+@contextmanager
+def checkpoint_parent_context(source_capture_key: str, parent_model_call_id: str) -> Iterator[None]:
+    """Propagate an explicit cross-attempt parent to downstream model calls."""
+    if ROLLOUT_ID_PATTERN.fullmatch(source_capture_key) is None:
+        raise ValueError("invalid source capture key")
+    if not parent_model_call_id or "\r" in parent_model_call_id or "\n" in parent_model_call_id:
+        raise ValueError("invalid parent model-call ID")
+    token = _CHECKPOINT_PARENT.set(
+        _CheckpointParentState(
+            source_capture_key=source_capture_key,
+            parent_model_call_id=parent_model_call_id,
+        )
+    )
+    try:
+        yield
+    finally:
+        _CHECKPOINT_PARENT.reset(token)
+
+
 @contextmanager
 def rollout_context(
     rollout_id: Optional[str],
@@ -218,31 +262,50 @@ class RolloutContextMiddleware:
         self._app = app
 
     @staticmethod
-    def _identity_from_headers(scope: dict[str, Any]) -> tuple[Optional[str], Optional[int], Optional[str]]:
-        values: dict[str, set[str]] = {ROLLOUT_ID_HEADER: set(), ATTEMPT_INDEX_HEADER: set()}
+    def _identity_from_headers(
+        scope: dict[str, Any],
+    ) -> tuple[Optional[str], Optional[int], Optional[str], Optional[str], Optional[str]]:
+        values: dict[str, set[str]] = {
+            ROLLOUT_ID_HEADER: set(),
+            ATTEMPT_INDEX_HEADER: set(),
+            SOURCE_CAPTURE_KEY_HEADER: set(),
+            PARENT_MODEL_CALL_ID_HEADER: set(),
+        }
         for name, value in scope.get("headers") or ():
             key = name.decode("latin-1").lower()
             if key in values:
                 values[key].add(value.decode("latin-1"))
         if any(len(entries) > 1 for entries in values.values()):
-            return None, None, "conflicting duplicate execution identity headers"
+            return None, None, None, None, "conflicting duplicate correlation headers"
+        source_values = values[SOURCE_CAPTURE_KEY_HEADER]
+        parent_values = values[PARENT_MODEL_CALL_ID_HEADER]
+        if bool(source_values) != bool(parent_values):
+            return None, None, None, None, "source capture key and parent model-call ID must be sent together"
+        source_capture_key = next(iter(source_values), None)
+        parent_model_call_id = next(iter(parent_values), None)
+        if source_capture_key is not None and ROLLOUT_ID_PATTERN.fullmatch(source_capture_key) is None:
+            return None, None, None, None, "invalid source capture key header"
+        if parent_model_call_id is not None and (
+            not parent_model_call_id or "\r" in parent_model_call_id or "\n" in parent_model_call_id
+        ):
+            return None, None, None, None, "invalid parent model-call ID header"
         rollout_values = values[ROLLOUT_ID_HEADER]
         attempt_values = values[ATTEMPT_INDEX_HEADER]
         if bool(rollout_values) != bool(attempt_values):
-            return None, None, "rollout ID and attempt index headers must be sent together"
+            return None, None, None, None, "rollout ID and attempt index headers must be sent together"
         if not rollout_values:
-            return None, None, None
+            return None, None, source_capture_key, parent_model_call_id, None
         rollout_id = next(iter(rollout_values))
         attempt_raw = next(iter(attempt_values))
         if ROLLOUT_ID_PATTERN.fullmatch(rollout_id) is None:
-            return None, None, "invalid logical rollout ID header"
+            return None, None, None, None, "invalid logical rollout ID header"
         try:
             attempt_index = int(attempt_raw)
         except ValueError:
-            return None, None, "invalid attempt index header"
+            return None, None, None, None, "invalid attempt index header"
         if attempt_index < 0:
-            return None, None, "attempt index must be non-negative"
-        return rollout_id, attempt_index, None
+            return None, None, None, None, "attempt index must be non-negative"
+        return rollout_id, attempt_index, source_capture_key, parent_model_call_id, None
 
     @staticmethod
     async def _reject(scope: dict[str, Any], receive: Any, send: Any, detail: str) -> None:
@@ -258,22 +321,31 @@ class RolloutContextMiddleware:
             return
 
         match = self._PREFIX.match(scope.get("path", ""))
-        logical_rollout_id, attempt_index, identity_error = self._identity_from_headers(scope)
+        logical_rollout_id, attempt_index, source_capture_key, parent_model_call_id, identity_error = (
+            self._identity_from_headers(scope)
+        )
         if identity_error is not None:
             await self._reject(scope, receive, send, identity_error)
             return
 
+        parent_context = (
+            checkpoint_parent_context(source_capture_key, parent_model_call_id)
+            if source_capture_key is not None and parent_model_call_id is not None
+            else nullcontext()
+        )
         if match is None:
             if logical_rollout_id is None or attempt_index is None:
-                await self._app(scope, receive, send)
+                with parent_context:
+                    await self._app(scope, receive, send)
                 return
             capture_key = capture_key_for(logical_rollout_id, attempt_index)
-            with rollout_context(
-                capture_key,
-                attempt_index=attempt_index,
-                logical_rollout_id=logical_rollout_id,
-            ):
-                await self._app(scope, receive, send)
+            with parent_context:
+                with rollout_context(
+                    capture_key,
+                    attempt_index=attempt_index,
+                    logical_rollout_id=logical_rollout_id,
+                ):
+                    await self._app(scope, receive, send)
             return
 
         capture_key = match.group("rollout_id")
@@ -290,9 +362,10 @@ class RolloutContextMiddleware:
 
         path = match.group("rest")
         scope = {**scope, "path": path, "raw_path": path.encode()}
-        with rollout_context(
-            capture_key,
-            attempt_index=attempt_index,
-            logical_rollout_id=logical_rollout_id,
-        ):
-            await self._app(scope, receive, send)
+        with parent_context:
+            with rollout_context(
+                capture_key,
+                attempt_index=attempt_index,
+                logical_rollout_id=logical_rollout_id,
+            ):
+                await self._app(scope, receive, send)

@@ -56,6 +56,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym import WORKING_DIR
 from nemo_gym._checkpoint.control import (
+    CONTROL_URL_PREFIX,
     ControlCapabilities,
     ControlFence,
     install_control_plane,
@@ -83,12 +84,15 @@ from nemo_gym.global_config import (
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import (
     ATTEMPT_INDEX_HEADER,
+    PARENT_MODEL_CALL_ID_HEADER,
     ROLLOUT_ID_HEADER,
+    SOURCE_CAPTURE_KEY_HEADER,
     current_attempt_index,
     current_logical_rollout_id,
     current_rollout_id,
     execution_identity_from_run_body,
     maybe_rollout_id_from_run_body,
+    take_checkpoint_parent,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -474,6 +478,7 @@ class ServerClient(BaseModel):
     async def request(
         self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
     ) -> ClientResponse:
+        request_path = url_path.partition("?")[0]
         model_server_name = getenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME)
         model_server_base_url = getenv(NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME)
         if model_server_base_url and server_name == model_server_name:
@@ -533,6 +538,31 @@ class ServerClient(BaseModel):
                 raise ValueError("caller-supplied attempt index header disagrees with the active execution")
             headers[ROLLOUT_ID_HEADER] = logical_rollout_id
             headers[ATTEMPT_INDEX_HEADER] = str(attempt_index)
+            kwargs["headers"] = headers
+
+        is_policy_generation = (
+            server_entry is not None
+            and "responses_api_models" in server_entry
+            and request_path.endswith(("/v1/responses", "/v1/chat/completions", "/v1/messages"))
+            and get_first_server_config_dict(self.global_config_dict, server_name).get("instance_role", "policy")
+            == "policy"
+        )
+        is_agent_parent_relay = (
+            server_entry is not None
+            and "responses_api_agents" in server_entry
+            and request_path.endswith("/v1/responses")
+        )
+        source_capture_key, parent_model_call_id = (
+            take_checkpoint_parent() if is_policy_generation or is_agent_parent_relay else (None, None)
+        )
+        if source_capture_key is not None and parent_model_call_id is not None:
+            headers = dict(kwargs.get("headers") or {})
+            if headers.get(SOURCE_CAPTURE_KEY_HEADER, source_capture_key) != source_capture_key:
+                raise ValueError("caller-supplied source capture key disagrees with the restored continuation")
+            if headers.get(PARENT_MODEL_CALL_ID_HEADER, parent_model_call_id) != parent_model_call_id:
+                raise ValueError("caller-supplied parent model-call ID disagrees with the restored continuation")
+            headers[SOURCE_CAPTURE_KEY_HEADER] = source_capture_key
+            headers[PARENT_MODEL_CALL_ID_HEADER] = parent_model_call_id
             kwargs["headers"] = headers
 
         return await request(method=method, url=f"{base_url}{url_path}", _internal=True, **kwargs)
@@ -1049,6 +1079,9 @@ repr(e): {repr(e)}"""
         server.setup_telemetry()
 
         app = server.setup_webserver()
+        capabilities_path = f"{CONTROL_URL_PREFIX}/capabilities"
+        if not any(getattr(route, "path", None) == capabilities_path for route in app.routes):
+            server.setup_control_plane(app)
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):

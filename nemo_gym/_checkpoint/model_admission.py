@@ -121,13 +121,23 @@ def install_model_admission(
         require_control_auth(authorization, auth_token)
         fence.require_phase(
             checkpoint_id,
-            frozenset({CheckpointPhase.PREPARING, CheckpointPhase.PREPARED}),
+            frozenset(
+                {
+                    CheckpointPhase.PREPARING,
+                    CheckpointPhase.PREPARED,
+                    CheckpointPhase.COMMITTING,
+                    CheckpointPhase.COMMITTED_PAUSED,
+                    CheckpointPhase.RESTORING,
+                    CheckpointPhase.RESTORE_FAILED_PAUSED,
+                    CheckpointPhase.RESTORED_PAUSED,
+                }
+            ),
         )
         deadline = Deadline(deadline_ts=deadline_ts)
         if wait_state == "paused" and timeout_s > 0:
             await limiter.wait_for_drained(min(timeout_s, deadline.remaining()))
         counts = limiter.counts()
-        if counts["state"] == AdmissionState.PAUSED.value:
+        if counts["state"] == AdmissionState.PAUSED.value and fence.phase == CheckpointPhase.PREPARING:
             fence.mark_prepared(checkpoint_id)
         return {
             "checkpoint_id": checkpoint_id,
@@ -161,10 +171,11 @@ def install_model_admission(
                     CheckpointPhase.PREPARING,
                     CheckpointPhase.PREPARED,
                     CheckpointPhase.COMMITTED_PAUSED,
+                    CheckpointPhase.RESTORE_FAILED_PAUSED,
                     CheckpointPhase.RESTORED_PAUSED,
                 }
             ),
-            phase_during=CheckpointPhase.PREPARED,
+            phase_during=fence.phase,
             phase_after=CheckpointPhase.IDLE,
             run=run,
             retire_outcome="resumed",
