@@ -22,9 +22,8 @@ Each run writes its own `_aggregate_metrics.json` next to its rollouts file. Com
 
 | Harness | Pass rate |
 |---|---|
-| `simple_agent` | 41% |
-| `hermes_agent` | 68% |
-| `openclaw_agent` | 35% |
+| `opencode_sandboxed_agent` | 41% |
+| `terminus_2_sandboxed_agent` | 68% |
 
 A spread this size, with the model and dataset held identical, means the harness — not the model — is the lever to pull. Refer to [Diagnose Results](/evaluation/diagnose-results) to have an agent explain *why* the harnesses diverged, or [Aggregate Metrics](/evaluation/aggregate-metrics) to build your own comparison across shards. For the flag reference itself, see
 [Swapping the agent](/reference/cli-commands#swapping-the-agent).
@@ -32,14 +31,18 @@ A spread this size, with the model and dataset held identical, means the harness
 ## The composed instance is renamed
 
 Composition replaces the environment's agent and renames the server instance after the harness that
-runs it, so metrics and `gym env status` report what actually ran. Composing `hermes_agent` onto
-`gpqa_mcqa_simple_agent` produces `gpqa_mcqa_hermes_agent`.
+runs it, so metrics and `gym env status` report what actually ran. Composing
+`terminus_2_sandboxed_agent` onto `terminal_bench_2_1_opencode_sandboxed_agent` produces
+`terminal_bench_2_1_terminus_2_sandboxed_agent`.
 
 That name is what you use to route rollouts when the servers are already up:
 
 ```bash
-gym env start --agent-type hermes_agent --benchmark gpqa --model-type vllm_model
-gym eval run --no-serve --agent gpqa_mcqa_hermes_agent --input rows.jsonl
+gym env start \
+    --benchmark terminal_bench_2_1/opencode \
+    --agent-type terminus_2_sandboxed_agent \
+    --model-type vllm_model
+gym eval run --no-serve --agent terminal_bench_2_1_terminus_2_sandboxed_agent --input rows.jsonl
 ```
 
 End-to-end rollouts collection (without the `--no-serve` flag) keeps working — rows stamped with the
@@ -53,12 +56,13 @@ which harnesses are compatible with it in
 pairing before any server starts:
 
 ```text
-'hermes_agent' is not declared compatible with 1 of the agent instance(s) it would replace,
+'simple_agent' is not declared compatible with 1 of the agent instance(s) it would replace,
 so it cannot be scored correctly:
-  - gsm8k_aviary_agent uses gsm8k_aviary_resources_server and accepts aviary_agent
+  - terminal_bench_2_1_opencode_sandboxed_agent uses terminal_bench_2_1_opencode_resources_server
+    and accepts opencode_sandboxed_agent, terminus_2_sandboxed_agent
 
-Select one of: aviary_agent. Or pass --allow-unsupported-pairing (or set
-NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING=1) to bypass the check.
+Select one of: opencode_sandboxed_agent, terminus_2_sandboxed_agent. Or pass
+--allow-unsupported-pairing (or set NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING=1) to bypass the check.
 ```
 
 <Warning>

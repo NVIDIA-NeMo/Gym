@@ -98,23 +98,30 @@ config. It resolves to `responses_api_agents/NAME/configs/NAME.yaml`; use `NAME/
 non-default config in that directory.
 
 ```bash
-# Run GPQA with the Hermes harness instead of the one its config names
-gym eval run --agent-type hermes_agent --benchmark gpqa --model-type vllm_model
+# Run Terminal-Bench 2.1 under Terminus 2 instead of the OpenCode harness its config names
+gym eval run \
+    --benchmark terminal_bench_2_1/opencode \
+    --agent-type terminus_2_sandboxed_agent \
+    --model-type vllm_model
 ```
 
 Available on `gym env start`, `gym env validate`, `gym env prefetch`, and `gym eval run`. Like the other
-selectors it is pure shorthand, so `--agent-type hermes_agent` and `--config <that file>` behave
-identically.
+selectors it is pure shorthand, so `--agent-type terminus_2_sandboxed_agent` and `--config <that file>`
+behave identically.
 
 Run `gym list agents` to see the harnesses you can pass.
 
 **The composed server instance is renamed after the agent that runs it**, so metrics and `gym env status`
-report the harness actually used: composing `hermes_agent` onto `gpqa_mcqa_simple_agent` produces
-`gpqa_mcqa_hermes_agent`. `gym env start` prints the instance list, which matters for the two-step flow:
+report the harness actually used: composing `terminus_2_sandboxed_agent` onto
+`terminal_bench_2_1_opencode_sandboxed_agent` produces `terminal_bench_2_1_terminus_2_sandboxed_agent`.
+`gym env start` prints the instance list, which matters for the two-step flow:
 
 ```bash
-gym env start --agent-type hermes_agent --benchmark gpqa --model-type vllm_model
-gym eval run --no-serve --agent gpqa_mcqa_hermes_agent --input rows.jsonl
+gym env start \
+    --benchmark terminal_bench_2_1/opencode \
+    --agent-type terminus_2_sandboxed_agent \
+    --model-type vllm_model
+gym eval run --no-serve --agent terminal_bench_2_1_terminus_2_sandboxed_agent --input rows.jsonl
 ```
 
 <Note>
@@ -128,7 +135,8 @@ instance, and Gym says so rather than failing later:
 
 ```text
 Routing names agent instances that no longer exist once the agent is swapped:
-  - agent_name: 'gpqa_mcqa_simple_agent' is now 'gpqa_mcqa_hermes_agent'
+  - agent_name: 'terminal_bench_2_1_opencode_sandboxed_agent' is now
+    'terminal_bench_2_1_terminus_2_sandboxed_agent'
 
 Use the name the composed config reports.
 ```
@@ -141,12 +149,13 @@ required for the task with [`allowed_agents`](/reference/configuration#resources
 Gym refuses a pairing it does not list, before any server starts:
 
 ```text
-'hermes_agent' is not declared compatible with 1 of the agent instance(s) it would replace,
+'simple_agent' is not declared compatible with 1 of the agent instance(s) it would replace,
 so it cannot be scored correctly:
-  - gsm8k_aviary_agent uses gsm8k_aviary_resources_server and accepts aviary_agent
+  - terminal_bench_2_1_opencode_sandboxed_agent uses terminal_bench_2_1_opencode_resources_server
+    and accepts opencode_sandboxed_agent, terminus_2_sandboxed_agent
 
-Select one of: aviary_agent. Or pass --allow-unsupported-pairing (or set
-NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING=1) to bypass the check.
+Select one of: opencode_sandboxed_agent, terminus_2_sandboxed_agent. Or pass
+--allow-unsupported-pairing (or set NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING=1) to bypass the check.
 ```
 
 Results from an undeclared pairing might not be valid.
