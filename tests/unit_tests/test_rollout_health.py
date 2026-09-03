@@ -856,6 +856,25 @@ def test_correspondence_reports_only_explicit_canonical_contradictions(tmp_path:
     assert health_checks._call_identity({}) is None
 
 
+def test_correspondence_deduplicates_findings_for_one_call_identity(tmp_path: Path) -> None:
+    record = _record(
+        0,
+        0,
+        refs=[
+            {"model_call_id": "c1", "response_id": "stale-1"},
+            {"model_call_id": "c1", "response_id": "stale-2"},
+        ],
+    )
+    rollout_path = _write_fixture(tmp_path, [(record, [_call()])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    mismatches = [finding for finding in digest.findings if finding.check == "trajectory_capture_mismatch"]
+    assert len(mismatches) == 1
+    assert mismatches[0].locator == {"call_id": "c1"}
+    assert mismatches[0].detail == {"kind": "missing_captured_call"}
+
+
 def test_correspondence_uses_bound_calls_and_gym_ids_for_replay(tmp_path: Path) -> None:
     record = _record(0, 0, usage={"input_tokens": 3, "output_tokens": 2})
     rollout_path = _write_fixture(
@@ -1042,6 +1061,23 @@ def test_current_capture_length_limit_reasons_trigger_runaway_generation(
 
     assert call["finish_reason"] == expected_reason
     assert finding.detail == {"finish_reason": expected_reason}
+
+
+def test_runaway_generation_is_unobserved_without_a_saved_response(tmp_path: Path) -> None:
+    rollout_path = _write_fixture(
+        tmp_path,
+        [
+            (
+                _record(0, 0, usage={"input_tokens": 3, "output_tokens": 2}),
+                [_call(finish_reason="length", response=None)],
+            )
+        ],
+    )
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert "model_call_runaway_generation" in digest.unobserved
+    assert not any(finding.check == "model_call_runaway_generation" for finding in digest.findings)
 
 
 def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
