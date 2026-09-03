@@ -26,6 +26,7 @@ import json
 import logging
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -42,6 +43,7 @@ from starlette.routing import Mount
 
 pytest.importorskip("mcp")
 
+from nemo_gym._checkpoint import CHECKPOINT_CONTROL_TOKEN_ENV, ResourceSnapshot  # noqa: E402
 from nemo_gym.base_resources_server import (  # noqa: E402
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -54,6 +56,11 @@ from nemo_gym.mcp_auto_exposure import (  # noqa: E402
     bind_route,
     install_auto_exposure,
     maybe_auto_expose,
+)
+from nemo_gym.rollout_correlation import (  # noqa: E402
+    ATTEMPT_INDEX_HEADER,
+    ROLLOUT_ID_HEADER,
+    current_execution_identity,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, SimpleServer  # noqa: E402
 
@@ -105,6 +112,34 @@ class Store(SimpleResourcesServer):
 
     def mcp_tools(self, harvested, catchall):
         return harvested + [catchall.tool("lookup", {"type": "object", "additionalProperties": True})]
+
+
+class CheckpointStore(Store):
+    execution_to_session: dict[tuple[str, int], str] = {}
+
+    async def seed_session(self, request: Request):
+        identity = current_execution_identity()
+        assert identity[0] is not None and identity[1] is not None
+        self.execution_to_session[(identity[0], identity[1])] = request.session[SESSION_ID_KEY]
+        return {}
+
+    def checkpoint_state_enabled(self) -> bool:
+        return True
+
+    def checkpoint_route_kind(self, path: str, method: str):
+        kind = super().checkpoint_route_kind(path, method)
+        if kind is not None:
+            return kind
+        if method == "POST" and path in {"/append", "/raw_step", "/lookup"}:
+            return "mutation"
+        return None
+
+    async def export_checkpoint_state(self, rollout_id: str, attempt_index: int):
+        session_id = self.execution_to_session[(rollout_id, attempt_index)]
+        return {"values": self.session_state.get(session_id, [])}
+
+    async def restore_checkpoint_states(self, snapshots: list[ResourceSnapshot]) -> None:
+        return None
 
 
 class Shapes(SimpleResourcesServer):
@@ -217,6 +252,34 @@ def test_flag_off_does_not_mount_mcp():
     app = server.setup_webserver()
     assert maybe_auto_expose(server, app) is None
     assert "/mcp" not in {getattr(r, "path", None) for r in app.routes}
+
+
+def test_stateful_mcp_dispatch_uses_signed_execution_identity(monkeypatch):
+    monkeypatch.setenv(CHECKPOINT_CONTROL_TOKEN_ENV, "checkpoint-secret")
+    server = _server(CheckpointStore)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    identity_headers = {ROLLOUT_ID_HEADER: "rollout-a", ATTEMPT_INDEX_HEADER: "0"}
+
+    with TestClient(app) as client:
+        seed = client.post("/seed_session", headers=identity_headers, json={})
+        assert seed.status_code == 200
+        token = seed.json()["mcp"]["headers"][TOKEN_HEADER]
+        _handshake(client)
+        assert _payload(_call(client, "append", {"value": "one"}, token=token)) == {"values": ["one"]}
+        prepare = client.post(
+            "/ng-control/v1/resources-checkpoint/prepare",
+            headers={"authorization": "Bearer checkpoint-secret"},
+            json={"checkpoint_id": "checkpoint-1", "deadline_ts": time.time() + 2},
+        )
+        assert prepare.status_code == 200
+        blocked = _call(client, "append", {"value": "two"}, token=token)
+        assert blocked["isError"] is True
+        assert "admission is closed" in blocked["content"][0]["text"].lower()
+
+    participant = server.checkpoint_participant()
+    assert participant.is_bound("rollout-a", 0)
+    assert participant.revision_for("rollout-a", 0) == 2
 
 
 def test_flag_on_mounts_mcp_and_harvests_tools():

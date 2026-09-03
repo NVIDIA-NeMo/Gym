@@ -35,6 +35,11 @@ middleware, or a handler uses a shape direct dispatch does not reproduce — Fas
 injection, multiple body models, ...), exposure refuses loudly at startup, naming the route and the
 reason: a wrong dispatch would corrupt rollouts silently, while a startup error is a small fix.
 
+Checkpoint-enabled dispatch is manually fenced by the resources participant.
+Signed rollout and attempt claims select the bound session lock.
+Successful declared mutations advance the resources revision.
+That revision is not currently propagated into an agent boundary over MCP.
+
 MCP-side engine: the official SDK's public low-level ``mcp.server.lowlevel.Server`` +
 ``StreamableHTTPSessionManager`` — no private-attribute access.
 
@@ -95,6 +100,12 @@ from nemo_gym.base_resources_server import (
     NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
     RESERVED_MCP_TOOL_NAMES,
     MCPServerMetadata,
+)
+from nemo_gym.rollout_correlation import (
+    capture_key_for,
+    current_attempt_index,
+    current_logical_rollout_id,
+    rollout_context,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
 
@@ -440,6 +451,8 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
             continue  # Gym's SessionMiddleware — replaced by a materialized session on direct dispatch
         if f"{cls.__module__}.{cls.__name__}" == "nemo_gym.rollout_correlation.RolloutContextMiddleware":
             continue  # Correlation prefixes are handled before resource routes; direct MCP dispatch has no prefix.
+        if f"{cls.__module__}.{cls.__name__}" == "nemo_gym._checkpoint.resources.ResourcesSessionMiddleware":
+            continue  # Stateful MCP dispatch enters the same participant explicitly in call_tool.
         dispatch = m.kwargs.get("dispatch")
         if dispatch is not None and getattr(dispatch, "__module__", None) in _GYM_MIDDLEWARE_MODULES:
             continue  # Gym's add_session_id / exception middleware
@@ -456,7 +469,11 @@ def harvest_tools(app: FastAPI, server: Any) -> dict[str, MCPTool]:
         if not isinstance(route, APIRoute) or "POST" not in (route.methods or set()):
             continue
         # Never tools. GET docs/openapi are excluded by the POST filter above; /mcp by path.
-        if route.path.lstrip("/") in RESERVED_MCP_TOOL_NAMES or route.path == MCP_URL_PATH:
+        if (
+            route.path.startswith("/ng-control/")
+            or route.path.lstrip("/") in RESERVED_MCP_TOOL_NAMES
+            or route.path == MCP_URL_PATH
+        ):
             continue
         if "{" in route.path:
             catchall_routes.append(route)
@@ -690,7 +707,14 @@ def _mint_session_metadata(server: Any, serializer: URLSafeSerializer, request: 
         request.session[SESSION_ID_KEY] = session_id
     # A raising hook propagates and fails the seed request — no token is minted past a broken hook.
     session_allowed = server.mcp_allowed_tools_for_session(seed_body)
-    payload = {"sid": session_id, "tools": session_allowed}
+    rollout_id = current_logical_rollout_id()
+    attempt_index = current_attempt_index()
+    payload = {
+        "sid": session_id,
+        "tools": session_allowed,
+        "rollout_id": rollout_id,
+        "attempt_index": attempt_index,
+    }
     return MCPServerMetadata(
         server_name=server.config.name or type(server).__name__,
         url_path=MCP_URL_PATH,
@@ -701,7 +725,7 @@ def _mint_session_metadata(server: Any, serializer: URLSafeSerializer, request: 
 
 def _parse_session_token(
     serializer: URLSafeSerializer, token: Optional[str], required: bool
-) -> tuple[Optional[str], Optional[frozenset]]:
+) -> tuple[Optional[str], Optional[frozenset], Optional[str], Optional[int]]:
     """Decode a Gym MCP session token into ``(session id, token allow-list)``.
 
     ``required`` callers (tools/call) raise on a missing/forged token; optional callers (tools/list)
@@ -710,16 +734,21 @@ def _parse_session_token(
     if not token:
         if required:
             raise ValueError(f"Missing {NEMO_GYM_MCP_SESSION_TOKEN_HEADER} for Gym MCP tool call.")
-        return None, None
+        return None, None, None, None
     try:
         # Verified per call: caching claims per token would grow one entry per rollout with nothing to evict it.
         payload = serializer.loads(token)
     except BadSignature:
         if required:
             raise ValueError("Invalid Gym MCP session token.")
-        return None, None
+        return None, None, None, None
     allowed = payload.get("tools")
-    return payload["sid"], None if allowed is None else frozenset(allowed)
+    return (
+        payload["sid"],
+        None if allowed is None else frozenset(allowed),
+        payload.get("rollout_id"),
+        payload.get("attempt_index"),
+    )
 
 
 def _to_result(payload: Any):
@@ -771,14 +800,16 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
 
     # mcp_server.request_context is a contextvar the SDK populates only while one of the handlers
     # below is on the stack — exactly when session_claims runs, which is why it stays local.
-    def session_claims(required: bool = True) -> tuple[Optional[str], Optional[frozenset]]:
+    def session_claims(
+        required: bool = True,
+    ) -> tuple[Optional[str], Optional[frozenset], Optional[str], Optional[int]]:
         ctx_request = mcp_server.request_context.request  # the POST /mcp starlette Request
         token = ctx_request.headers.get(NEMO_GYM_MCP_SESSION_TOKEN_HEADER) if ctx_request is not None else None
         return _parse_session_token(serializer, token, required)
 
     @mcp_server.list_tools()
     async def list_tools() -> list[types.Tool]:
-        _, allowed = session_claims(required=False)
+        _, allowed, _, _ = session_claims(required=False)
         return [t.tool for t in tools.values() if allowed is None or t.name in allowed]
 
     @mcp_server.call_tool(validate_input=False)
@@ -794,11 +825,51 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
                 ],
                 isError=True,
             )
-        session_id, allowed = session_claims(required=True)
+        session_id, allowed, rollout_id, attempt_index = session_claims(required=True)
         if allowed is not None and name not in allowed:
             raise ValueError(f"Tool {name!r} is not allowed for this session.")
         try:
-            payload = await call_direct(app, tool.binding, session_id, arguments, path_value=tool.path_value)
+            participant = getattr(server, "_checkpoint_participant", None)
+            if participant is None:
+                payload = await call_direct(app, tool.binding, session_id, arguments, path_value=tool.path_value)
+            else:
+                dispatch_path = tool.binding.path if tool.path_value is None else f"/{tool.path_value}"
+                route_kind = server.checkpoint_route_kind(dispatch_path, "POST")
+                if route_kind is None:
+                    raise ValueError(f"Stateful MCP tool {name!r} has no checkpoint read/mutation route declaration.")
+                if rollout_id is None or attempt_index is None:
+                    raise ValueError("Stateful MCP tool call token has no execution identity.")
+                if participant.is_tombstoned(rollout_id, attempt_index):
+                    raise ValueError(f"Rollout {rollout_id!r} attempt {attempt_index} is stale.")
+                if not participant.accepting:
+                    raise ValueError("Resources mutation admission is closed.")
+                if not participant.is_bound(rollout_id, attempt_index):
+                    raise ValueError(
+                        f"Rollout {rollout_id!r} attempt {attempt_index} has no successful seed/reset binding."
+                    )
+                async with participant.mutation_lock(rollout_id, attempt_index):
+                    if participant.is_tombstoned(rollout_id, attempt_index):
+                        raise ValueError(f"Rollout {rollout_id!r} attempt {attempt_index} is stale.")
+                    if not participant.accepting:
+                        raise ValueError("Resources mutation admission is closed.")
+                    if not participant.is_bound(rollout_id, attempt_index):
+                        raise ValueError(
+                            f"Rollout {rollout_id!r} attempt {attempt_index} has no successful seed/reset binding."
+                        )
+                    with rollout_context(
+                        capture_key_for(rollout_id, attempt_index),
+                        logical_rollout_id=rollout_id,
+                        attempt_index=attempt_index,
+                    ):
+                        payload = await call_direct(
+                            app,
+                            tool.binding,
+                            session_id,
+                            arguments,
+                            path_value=tool.path_value,
+                        )
+                    if route_kind != "read":
+                        participant.record_mutation(rollout_id, attempt_index)
         except DirectDispatchError as exc:
             raise ValueError(f"HTTP {exc.status} from POST /{name}: {exc.detail}")
         return _to_result(payload)
