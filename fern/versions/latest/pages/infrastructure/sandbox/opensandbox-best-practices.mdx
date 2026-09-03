@@ -110,6 +110,49 @@ provably idempotent workloads.
 Keep `create.skip_health_check: false`. Skipping it lets your first command race a pod whose exec
 daemon is not listening yet, and the resulting 502 kills the rollout.
 
+## Egress controls are off by default
+
+Without a network policy the server creates **no egress sidecar**, and the sandbox has
+unrestricted internet access. For benchmarks that means an agent can `pip install` its way around
+a task, fetch the upstream fix from GitHub, or exfiltrate the test set. Harness-level deny lists
+(such as opencode's `git fetch` / `curl github.com` permission rules) are advisory; the network
+policy is the enforced layer.
+
+Enable it per sandbox with `provider_options.network_policy`. Rules are evaluated in order, match
+FQDNs or wildcard domains, and fall through to `default_action`:
+
+```yaml
+sandbox_config:
+  provider_options:
+    network_policy:
+      default_action: deny
+      egress:
+        - action: allow
+          target: pypi.org
+        - action: allow
+          target: "*.pythonhosted.org"
+        - action: allow
+          target: "*.internal.example.com"   # the hosts the harness itself must reach
+```
+
+What happens on create: the server injects the egress sidecar, drops `NET_ADMIN` from the sandbox
+container so only the sidecar can touch the network stack, and routes DNS through the sidecar.
+Things to know:
+
+- **`dns` vs `dns+nft` is a server setting, not yours.** In `dns` mode only name resolution is
+  filtered — a hard-coded IP bypasses it. `dns+nft` also enforces at the IP layer with nftables
+  (resolved IPs of allowed domains are admitted with a TTL), which is what a real default-deny
+  needs. Ask which mode your cluster runs before relying on the policy for anti-cheating.
+- **Allow what the harness needs, then test with one rollout.** Under `default_action: deny`,
+  anything the agent process calls out to — the Gym model server, a package index, an internal
+  artifact host — must be listed, or the first model call fails inside the sandbox with a
+  connection error that looks like an infrastructure outage.
+- A create with `network_policy` is rejected if the server has no egress image configured; that
+  is a cluster setup gap, not a config typo.
+- `OPENSANDBOX_EGRESS_*` variables in the sandbox `env` configure the sidecar (proxy behavior,
+  nameserver exemptions). Without a `network_policy` they are silently dropped, because there is
+  no sidecar to read them.
+
 ## Failure signatures that are not what they look like
 
 | What you see | What it is | What to do |
