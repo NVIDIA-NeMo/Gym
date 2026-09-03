@@ -1372,7 +1372,10 @@ class RolloutCollectionHelper(BaseModel):
         failures_file = failures_fpath.open("ab")
         failure_counts: Counter = Counter()
         for future in self.run_examples(
-            input_rows, semaphore=semaphore, route_failures_to_sidecar=config.route_failures_to_sidecar
+            input_rows,
+            semaphore=semaphore,
+            route_failures_to_sidecar=config.route_failures_to_sidecar,
+            include_rollout_latency=True,
         ):
             row, result = await future
 
@@ -1879,6 +1882,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
         route_failures_to_sidecar: bool = False,
+        include_rollout_latency: bool = False,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -1890,6 +1894,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
         that ends every rollout still in flight. It defaults off because those rollouts then leave
         the score.
+
+        ``include_rollout_latency`` stamps the private ``_ng_rollout_latency_ms`` timing key onto
+        successful results, for callers that will feed the result through ``_attach_ng_perf`` (which
+        consumes and removes it). It defaults off so direct callers get exactly the `/run` result,
+        with no Gym-private fields.
         """
         server_client = self.setup_server_client(head_server_config)
         self.resolve_task_sources(examples, server_client.global_config_dict)
@@ -1905,9 +1914,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                     await raise_for_status(res)
                     result = await get_response_json(res)
-                    # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
-                    # from summed model-call/tool latencies to account for additional overhead.
-                    result[_NG_ROLLOUT_LATENCY_MS_KEY] = (time() - started_at) * 1000
+                    if include_rollout_latency:
+                        # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
+                        # from summed model-call/tool latencies to account for additional overhead.
+                        result[_NG_ROLLOUT_LATENCY_MS_KEY] = (time() - started_at) * 1000
                     return row, result
                 except Exception as e:
                     print(

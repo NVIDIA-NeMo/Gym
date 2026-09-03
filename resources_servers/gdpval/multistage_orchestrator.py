@@ -859,7 +859,7 @@ async def run_e2e_multistage(
 
             semaphore = Semaphore(semaphore_size)
         results: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
-        for future in helper.run_examples(rows, semaphore=semaphore or nullcontext()):
+        for future in helper.run_examples(rows, semaphore=semaphore or nullcontext(), include_rollout_latency=True):
             row, result = await future
             _attach_ng_perf(result, observability_enabled=observability_enabled)
             results.append((row, result))

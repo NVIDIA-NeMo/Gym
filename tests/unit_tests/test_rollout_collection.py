@@ -1219,10 +1219,29 @@ class TestRolloutCollection:
         monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
         monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"response": {}}))
 
-        _, result = await next(RolloutCollectionHelper().run_examples([row]))
+        _, result = await next(RolloutCollectionHelper().run_examples([row], include_rollout_latency=True))
 
         assert isinstance(result["_ng_rollout_latency_ms"], float)
         assert result["_ng_rollout_latency_ms"] >= 0
+
+    async def test_run_examples_does_not_stamp_latency_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Direct callers (e.g. NeMo-RL) get the raw /run result, with no Gym-private fields."""
+        row = {AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        response = MagicMock()
+        response.status = 200
+
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+        mock_server_client.global_config_dict = OmegaConf.create({"my_agent": {"responses_api_agents": {"impl": {}}}})
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: mock_server_client
+        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", AsyncMock(return_value={"response": {}}))
+
+        _, result = await next(RolloutCollectionHelper().run_examples([row]))
+
+        assert "_ng_rollout_latency_ms" not in result
 
     async def test_run_from_config_does_not_route_failures_unless_asked(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
