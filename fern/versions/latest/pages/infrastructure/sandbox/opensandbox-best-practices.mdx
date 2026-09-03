@@ -69,7 +69,11 @@ and runs 10× slower. It depends on each repo's tooling, so it looks random.
 Two things it cannot fix:
 
 - Runners that ignore the environment: old `jest`, plain `make`, `ninja`, and Python
-  `multiprocessing` before 3.13. Cap these in the task's setup command or the image.
+  `multiprocessing` before 3.13. Cap these in the task's setup command or the image. Some
+  clusters run [LXCFS](https://linuxcontainers.org/lxcfs/introduction/), which overlays
+  `/proc/cpuinfo`, `/proc/meminfo`, and `/sys/devices/system/cpu/online` with cgroup-aware
+  values so these tools see the limit instead of the host — check `nproc` inside a sandbox to
+  find out; where it is present, this class of fan-out disappears.
 - Agent-written runaway code. This is the majority of OOMs on coding benchmarks, and Kubernetes
   group-OOM kills the **whole sandbox**, ending the rollout. Give agents a bash timeout (2 minutes
   is the validated default; 8 minutes measured quality-negative) so runaway commands fail fast and
