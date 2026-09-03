@@ -233,10 +233,12 @@ must thread the id through multiple layers can use `rollout_id_from_run(body)` w
 
 ## Agent observations
 
-Currently, only `claude_code_agent` emits `ng_agent_observations`. This attachment is available when
-observability is enabled and is collected independently from model-call capture. It contains typed
-agent invocations, model-visible conversation items, tool-call intervals, context-compaction events,
-sandbox observations, and `gaps` for unavailable evidence.
+Several built-in harnesses emit `ng_agent_observations`, including Claude Code, Hermes, OpenClaw,
+OpenCode, and Pi. This attachment is available when observability is enabled and is collected
+independently from model-call capture. It contains typed agent invocations, model-visible conversation
+items, tool-call intervals, context-compaction events, sandbox observations, and `gaps` for unavailable
+evidence. See the [trajectory capability matrix](/reference/trajectory-capabilities) for evaluated
+producer coverage.
 
 ### Advanced: correlation, compaction, and sandbox evidence
 
@@ -262,8 +264,9 @@ calls cannot share sandbox-level CPU or memory usage as if it were per-call usag
 
 When observability is enabled and at least one agent invocation was observed, `rollout_collection`
 assembles a per-rollout `ng_perf` field from `ng_trajectory`: reasoning-turn count, tool-call count,
-prompt/completion/reasoning/cached-prompt token totals (summed only over calls owned by a reasoning
-turn, excluding compaction), and an independently measured wall-clock `total_latency_ms`. Like
+prompt/completion/reasoning/cached-prompt token totals summed over calls referenced by a reasoning-turn
+`AgentInvocation`, and an independently measured wall-clock `total_latency_ms`. The totals include a
+compaction call when the harness also lists it in `AgentInvocation.model_calls`. Like
 `ng_model_call_capture`, each field is present only when the underlying data was collected; `ng_perf`
 itself is entirely absent, not null, when observability is disabled.
 
