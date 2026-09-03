@@ -90,13 +90,25 @@ On a healthy cluster that is p50 ≈ 7 s, p90 ≈ 20 s, p99 ≈ 2 min. On a full
 
 - `create.timeout_s` must exceed `ready_timeout_s`; it bounds the whole create including the
   readiness wait (the shipped config: 1500 s over 1200 s).
-- `operations.status_poll_timeout_s` (default 10 s) gives status polls their own short budget.
-  Without it, each poll against an unreachable sandbox hangs for the full
-  `connection.request_timeout_s` per retry.
 - `ttl_s` is the server-side backstop if your client dies. Set it above your longest rollout.
-- Keep `operations.background_exec: true`: short polls instead of one long stream, so multi-minute
-  commands survive load balancers with fixed idle timeouts. Keep `background_poll_interval_s` in
-  the tens of seconds — at 1,500 sandboxes a 1 s poll is 1,500 requests/s on the shared server.
+
+### How background execution works
+
+With `operations.background_exec: false`, `exec()` holds one streaming response open for the
+whole command; any load balancer with a fixed idle timeout drops that stream mid-command and the
+client hangs. With `background_exec: true` (the shipped setting) the provider instead submits the
+command with `background=true`, gets an execution id back, polls its status with short GETs, and
+fetches the output once when the status reports finished. It costs a few extra round trips per
+command and survives any idle timeout.
+
+| Knob | Shipped | What it does |
+| --- | --- | --- |
+| `background_poll_initial_s` | `1.0` | Delay before the first status poll. Short, so the many sub-second commands an agent issues are detected promptly. |
+| `background_poll_interval_s` | `30.0` | Ceiling for the poll delay. Each idle poll multiplies the delay by 1.5 until it reaches this, so a long-running command settles at one poll per interval. Steady-state load on the shared server is roughly *running commands ÷ interval*: 1,500 sandboxes at 30 s is ~50 requests/s; at 1 s it would be 1,500. |
+| `status_poll_timeout_s` | `10.0` | Per-poll budget. A status poll is an idempotent GET, so a timed-out poll is retried under `operations.retries` instead of failing the command. Without this knob each poll against an unreachable sandbox hangs for the full `connection.request_timeout_s`, which is sized for long submits. |
+| `exec(timeout_s=...)` | per call | The command timeout is enforced by the server. The client keeps polling until the status reports finished or `timeout_s` + 60 s headroom passes, then raises `TimeoutError`. |
+
+`connection.request_timeout_s` still governs the submit and the final output fetch.
 
 <Warning>
 Creates failing every ~20 minutes with `Timeout on reading data from socket` is
