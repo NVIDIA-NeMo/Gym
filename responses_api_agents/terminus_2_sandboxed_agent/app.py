@@ -336,7 +336,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 terminus2_completed = False
                 print(f"Hit exception while running Terminus2: {format_exc()}", file=sys.stderr)
             finally:
-                await agent._session.stop()
+                pass
 
         usage = NeMoGymResponseUsage(
             input_tokens=context.n_input_tokens or 0,
