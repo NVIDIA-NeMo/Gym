@@ -138,7 +138,7 @@ from openai.types.responses.response_usage import OutputTokensDetails as Respons
 from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.chat_model import ChatModel
 from openai.types.shared_params import FunctionDefinition
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 from typing_extensions import TypedDict
 
 from nemo_gym.server_utils import (
@@ -149,6 +149,7 @@ from nemo_gym.server_utils import (
     raise_for_status,
     request,
 )
+from nemo_gym.token_metadata_codec import F64_DTYPE, I32_DTYPE, token_envelope_dtype
 
 
 ########################################
@@ -162,17 +163,35 @@ from nemo_gym.server_utils import (
 RoutedExperts: TypeAlias = Union[str, List[List[List[int]]]]
 
 
+# Token metadata accepts plain lists and versioned envelopes.
+# Consumers must decode an envelope before reading individual values.
+def _validate_token_id_envelope(value: str) -> str:
+    token_envelope_dtype(value, (I32_DTYPE,))
+    return value
+
+
+def _validate_log_prob_envelope(value: str) -> str:
+    token_envelope_dtype(value, (F64_DTYPE,))
+    return value
+
+
+TokenIDEnvelope: TypeAlias = Annotated[str, AfterValidator(_validate_token_id_envelope)]
+LogProbEnvelope: TypeAlias = Annotated[str, AfterValidator(_validate_log_prob_envelope)]
+TokenIDsWire: TypeAlias = Union[List[int], TokenIDEnvelope]
+LogProbsWire: TypeAlias = Union[List[float], LogProbEnvelope]
+
+
 class TokenIDLogProbMixin(BaseModel):
-    prompt_token_ids: List[int]
-    generation_token_ids: List[int]
-    generation_log_probs: List[float]
+    prompt_token_ids: TokenIDsWire
+    generation_token_ids: TokenIDsWire
+    generation_log_probs: LogProbsWire
     routed_experts: Optional[RoutedExperts] = None
 
 
 class TokenIDLogProbTypedDictMixin(TypedDict):
-    prompt_token_ids: List[int]
-    generation_token_ids: List[int]
-    generation_log_probs: List[float]
+    prompt_token_ids: TokenIDsWire
+    generation_token_ids: TokenIDsWire
+    generation_log_probs: LogProbsWire
     routed_experts: NotRequired[RoutedExperts]
 
 
@@ -202,6 +221,15 @@ def _validate_atomic_token_metadata(value: Any) -> Any:
 
     TokenIDLogProbMixin.model_validate({field: value[field] for field in present_fields})
     return value
+
+
+def _validate_atomic_token_envelopes(value: Any) -> Any:
+    """Validate envelope metadata before an output union can discard it."""
+    if not isinstance(value, dict):
+        return value
+    if not any(isinstance(value.get(field), str) for field in REQUIRED_TOKEN_METADATA_FIELDS):
+        return value
+    return _validate_atomic_token_metadata(value)
 
 
 ########################################
@@ -728,6 +756,7 @@ NeMoGymResponseOutputItem = Annotated[
         NeMoGymResponseReasoningItemForTraining,
     ],
     BeforeValidator(_require_response_output_item_type),
+    BeforeValidator(_validate_atomic_token_envelopes),
 ]
 
 

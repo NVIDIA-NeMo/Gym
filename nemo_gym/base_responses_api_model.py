@@ -37,7 +37,7 @@ import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Iterator, Literal, Mapping, Optional
 from uuid import uuid4
 
 import orjson
@@ -87,6 +87,12 @@ from nemo_gym.token_id_capture import (
 from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.lineage import FileLineageStore
 from nemo_gym.token_id_capture.store import make_token_store
+from nemo_gym.token_metadata_codec import (
+    F64_DTYPE,
+    I32_DTYPE,
+    encode_output_item_token_fields,
+    encode_token_list,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -172,8 +178,49 @@ def _orjson_dispatch_response(content: Any) -> Any:
     return Response(content=orjson.dumps(content), media_type="application/json")
 
 
+def _token_bearing_items(response: Any) -> Iterator[Any]:
+    """Yield the response parts that may carry token metadata.
+
+    Responses payloads carry ``output`` items; Chat payloads carry ``choices[*].message``.
+    Accept Pydantic models and plain dictionaries alike.
+    """
+    getter = response.get if isinstance(response, dict) else lambda key: getattr(response, key, None)
+    for item in getter("output") or []:
+        if item is not None:
+            yield item
+    for choice in getter("choices") or []:
+        message = choice.get("message") if isinstance(choice, dict) else getattr(choice, "message", None)
+        if message is not None:
+            yield message
+
+
+def _encode_token_metadata_in_place(response: Any, encoding: str) -> None:
+    """Encode token metadata after capture and before transport."""
+    if encoding == "json":
+        return
+    if encoding != "base64":
+        raise ValueError(f"unsupported token metadata encoding {encoding!r}")
+    for item in _token_bearing_items(response):
+        if isinstance(item, dict):
+            encode_output_item_token_fields(item)
+            continue
+        for field, dtype in (
+            ("prompt_token_ids", I32_DTYPE),
+            ("generation_token_ids", I32_DTYPE),
+            ("generation_log_probs", F64_DTYPE),
+        ):
+            value = getattr(item, field, None)
+            if isinstance(value, list):
+                setattr(item, field, encode_token_list(value, dtype))
+
+
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
-    pass
+    # Select the token-metadata representation on served responses.
+    # JSON preserves numeric lists.
+    # Base64 encodes token IDs as i32 and log probabilities as f64.
+    # Enable base64 only when the downstream harness accepts envelope strings.
+    # Harnesses that parse raw Chat Completions token lists require JSON.
+    token_metadata_encoding: Literal["json", "base64"] = "json"
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -318,6 +365,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             completion,
             request_messages=request_messages,
         )
+        # Encode only after capture: capture must see the raw token lists.
+        _encode_token_metadata_in_place(completion, self.config.token_metadata_encoding)
         return completion
 
     async def messages(self, request: Request, body: dict = Body()):
@@ -365,6 +414,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             response,
             request_messages=request_messages,
         )
+        # Encode only after capture: capture must see the raw token lists.
+        _encode_token_metadata_in_place(response, self.config.token_metadata_encoding)
         return response
 
 
