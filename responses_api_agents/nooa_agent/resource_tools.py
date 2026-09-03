@@ -18,28 +18,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-from dataclasses import dataclass
-from time import perf_counter, time
 from typing import Any
-from uuid import uuid4
 
 from jsonschema import Draft202012Validator, ValidationError
 from pydantic import BaseModel
 
 from nemo_gym.server_utils import ServerClient
-
-
-@dataclass(slots=True)
-class ResourceToolExecution:
-    tool_call_id: str
-    name: str
-    arguments: dict[str, Any]
-    output: Any
-    status: str
-    started_at: float
-    completed_at: float
-    duration_ms: float
-    error_type: str | None = None
 
 
 def _as_tool_dict(tool: Any) -> dict[str, Any]:
@@ -72,12 +56,10 @@ class ResourceToolDispatcher:
         server_client: ServerClient,
         resources_server_name: str,
         cookies: dict[str, str],
-        executions: list[ResourceToolExecution],
     ) -> None:
         self._server_client = server_client
         self._resources_server_name = resources_server_name
         self._cookies = cookies
-        self._executions = executions
         self._lock = asyncio.Lock()
 
     async def call(
@@ -97,17 +79,10 @@ class ResourceToolDispatcher:
         arguments: dict[str, Any],
         validator: Draft202012Validator,
     ) -> Any:
-        started_at = time()
-        started_monotonic = perf_counter()
-        call_id = f"resource_tool_{uuid4().hex}"
-        status = "completed"
-        error_type = None
         try:
             validator.validate(arguments)
         except ValidationError as error:
             output: Any = {"error": f"Invalid arguments for {name}: {error.message}"}
-            status = "failed"
-            error_type = "invalid_arguments"
         else:
             response = await self._server_client.post(
                 server_name=self._resources_server_name,
@@ -121,24 +96,6 @@ class ResourceToolDispatcher:
                 output = json.loads(body)
             except json.JSONDecodeError:
                 output = body
-            if not 200 <= response.status < 400:
-                status = "failed"
-                error_type = f"http_{response.status}"
-
-        completed_at = max(started_at, time())
-        self._executions.append(
-            ResourceToolExecution(
-                tool_call_id=call_id,
-                name=name,
-                arguments=arguments,
-                output=output,
-                status=status,
-                started_at=started_at,
-                completed_at=completed_at,
-                duration_ms=(perf_counter() - started_monotonic) * 1000,
-                error_type=error_type,
-            )
-        )
         return output
 
 

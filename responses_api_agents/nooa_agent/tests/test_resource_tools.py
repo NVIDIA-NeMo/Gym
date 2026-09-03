@@ -26,7 +26,6 @@ from nooa import Agent
 
 from responses_api_agents.nooa_agent.resource_tools import (
     ResourceToolDispatcher,
-    ResourceToolExecution,
     create_agent_class_with_resource_methods,
     validate_agent_resource_method_bindings,
 )
@@ -82,16 +81,14 @@ def weather_tool() -> dict[str, Any]:
 
 def make_agent(
     response: FakeResponse,
-) -> tuple[FakeAgent, MagicMock, dict[str, str], list[ResourceToolExecution]]:
+) -> tuple[FakeAgent, MagicMock, dict[str, str]]:
     client = MagicMock()
     client.post = AsyncMock(return_value=response)
     cookies = {"session": "old"}
-    executions: list[ResourceToolExecution] = []
     dispatcher = ResourceToolDispatcher(
         server_client=client,
         resources_server_name="weather_resources",
         cookies=cookies,
-        executions=executions,
     )
     agent_class = create_agent_class_with_resource_methods(
         FakeAgent,
@@ -99,14 +96,12 @@ def make_agent(
         tools=[weather_tool()],
     )
     agent = agent_class()
-    return agent, client, cookies, executions
+    return agent, client, cookies
 
 
 @pytest.mark.asyncio
 async def test_method_is_attached_directly_with_typed_signature_defaults_and_cookies() -> None:
-    agent, client, cookies, executions = make_agent(
-        FakeResponse({"city": "Paris", "weather": "cold"}, cookie=("session", "new"))
-    )
+    agent, client, cookies = make_agent(FakeResponse({"city": "Paris", "weather": "cold"}, cookie=("session", "new")))
 
     output = await agent.get_weather("Paris")  # type: ignore[attr-defined]
 
@@ -125,65 +120,58 @@ async def test_method_is_attached_directly_with_typed_signature_defaults_and_coo
         "cookies": {"session": "new"},
     }
     assert cookies == {"session": "new"}
-    assert executions[0].status == "completed"
-    assert executions[0].arguments == {"city": "Paris", "units": "celsius"}
 
 
 @pytest.mark.asyncio
 async def test_invalid_arguments_are_model_visible_without_http_call() -> None:
-    agent, client, _, executions = make_agent(FakeResponse({}))
+    agent, client, _ = make_agent(FakeResponse({}))
 
     output = await agent.get_weather(city=7)  # type: ignore[attr-defined]
 
     assert "Invalid arguments" in output["error"]
     client.post.assert_not_awaited()
-    assert executions[0].status == "failed"
-    assert executions[0].error_type == "invalid_arguments"
 
 
 @pytest.mark.asyncio
 async def test_invalid_python_call_raises_type_error_without_http_call() -> None:
-    agent, client, _, executions = make_agent(FakeResponse({}))
+    agent, client, _ = make_agent(FakeResponse({}))
 
     with pytest.raises(TypeError, match="Invalid arguments for get_weather"):
         await agent.get_weather()  # type: ignore[attr-defined]
 
     client.post.assert_not_awaited()
-    assert executions == []
 
 
 @pytest.mark.asyncio
-async def test_resource_http_error_is_returned_and_observed() -> None:
-    agent, _, _, executions = make_agent(FakeResponse({"detail": "unavailable"}, status=503))
+async def test_resource_http_error_is_returned() -> None:
+    agent, _, _ = make_agent(FakeResponse({"detail": "unavailable"}, status=503))
 
     output = await agent.get_weather(city="Paris")  # type: ignore[attr-defined]
 
     assert output == {"detail": "unavailable"}
-    assert executions[0].status == "failed"
-    assert executions[0].error_type == "http_503"
 
 
 @pytest.mark.asyncio
 async def test_resource_calls_are_serialized_per_rollout() -> None:
     active_calls = 0
     max_active_calls = 0
+    call_order: list[str] = []
 
-    async def post(**_: Any) -> FakeResponse:
+    async def post(*, url_path: str, **_: Any) -> FakeResponse:
         nonlocal active_calls, max_active_calls
         active_calls += 1
         max_active_calls = max(max_active_calls, active_calls)
+        call_order.append(url_path)
         await asyncio.sleep(0.01)
         active_calls -= 1
         return FakeResponse({"ok": True})
 
     client = MagicMock()
     client.post = AsyncMock(side_effect=post)
-    executions: list[ResourceToolExecution] = []
     dispatcher = ResourceToolDispatcher(
         server_client=client,
         resources_server_name="resources",
         cookies={},
-        executions=executions,
     )
     validator = Draft202012Validator({"type": "object"})
 
@@ -193,7 +181,7 @@ async def test_resource_calls_are_serialized_per_rollout() -> None:
     )
 
     assert max_active_calls == 1
-    assert [execution.name for execution in executions] == ["first", "second"]
+    assert call_order == ["/first", "/second"]
 
 
 def test_rejects_method_name_that_collides_with_agent() -> None:
@@ -201,7 +189,6 @@ def test_rejects_method_name_that_collides_with_agent() -> None:
         server_client=MagicMock(),
         resources_server_name="resources",
         cookies={},
-        executions=[],
     )
 
     with pytest.raises(ValueError, match="conflicting agent method"):
@@ -217,7 +204,6 @@ def test_rejects_instance_field_that_hides_resource_method() -> None:
         server_client=MagicMock(),
         resources_server_name="resources",
         cookies={},
-        executions=[],
     )
     agent_class = create_agent_class_with_resource_methods(
         AgentWithInstanceCollision,
@@ -235,7 +221,6 @@ def test_method_can_be_attached_to_real_nooa_agent_instance() -> None:
         server_client=MagicMock(),
         resources_server_name="resources",
         cookies={},
-        executions=[],
     )
     agent_class = create_agent_class_with_resource_methods(
         Agent,
@@ -263,7 +248,6 @@ def test_rejects_unsupported_or_colliding_tool_definitions(tools: list[dict], me
         server_client=MagicMock(),
         resources_server_name="resources",
         cookies={},
-        executions=[],
     )
 
     with pytest.raises(ValueError, match=message):

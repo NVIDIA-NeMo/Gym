@@ -137,7 +137,6 @@ async def test_embedded_runner_maps_full_row_and_attaches_resource_methods() -> 
     assert result.agent.llm.model == "gym-policy"
     assert "get_weather" in vars(type(result.agent))
     assert "gym_tools" not in vars(result.agent)
-    assert result.tool_executions[0].name == "get_weather"
     assert client.post.await_args.kwargs["json"] == {"city": "Paris"}
 
 
