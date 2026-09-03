@@ -432,6 +432,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         was_interrupted = bool(result.get("interrupted")) or interrupted_by_dispatch
 
         harness_error = result.get("error")
+        agent_failed = bool(harness_error) or bool(result.get("failed"))
         metadata: dict[str, str] = {
             "interrupted": "true" if was_interrupted else "false",
             # `failed` = the underlying run flagged an API/provider failure (bad response shape,
@@ -460,7 +461,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             model=model_name,
             object="response",
             output=output_items,
-            status="completed" if agent_completed else "incomplete",
+            status="failed" if agent_failed else ("completed" if agent_completed else "incomplete"),
             error=response_error,
             metadata=metadata,
             tool_choice=body.tool_choice,
