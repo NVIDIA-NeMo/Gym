@@ -914,6 +914,8 @@ def _classify_status(status_code: int) -> Optional[str]:
 
 def _classify_exception(exc: BaseException) -> str:
     """Normalized error_category for an exception raised while calling the model."""
+    if isinstance(exc, asyncio.CancelledError):
+        return "cancelled"
     if isinstance(exc, asyncio.TimeoutError):
         return "timeout"
     name = type(exc).__name__.lower()
@@ -1324,7 +1326,7 @@ class _CaptureMiddleware:
 
         try:
             await self._app(scope, _receive, _send)
-        except Exception as exc:
+        except (Exception, asyncio.CancelledError) as exc:
             completed_at = time.time()
             exception_status, exception_body = _exception_http_details(exc)
             upstream_status = state["status"] or exception_status
