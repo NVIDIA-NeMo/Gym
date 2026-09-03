@@ -16,16 +16,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Protocol
 
-from nooa import Agent
+from nooa.atif import atif_scope
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import ModelCallRef
+from nemo_gym.rollout_observability import AgentEpisode, ModelCallRef
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
 from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM
-from responses_api_agents.nooa_agent.observability import NOOAEventTracker, TraceEvent
+from responses_api_agents.nooa_agent.observability import project_nooa_episode
 from responses_api_agents.nooa_agent.resource_tools import (
     ResourceToolDispatcher,
     create_agent_class_with_resource_methods,
@@ -45,13 +47,9 @@ class NOOARunRequest:
 
 @dataclass(slots=True)
 class NOOARunResult:
-    return_value: Any
-    agent: Agent
-    model_calls: list[ModelCallRef]
+    episode: AgentEpisode
     model_cookies: dict[str, str]
     resource_cookies: dict[str, str]
-    timeline: list[TraceEvent]
-    nooa_events: list[Any]
 
 
 class NOOARunner(Protocol):
@@ -81,8 +79,6 @@ class EmbeddedNOOARunner:
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
         model_calls: list[ModelCallRef] = []
-        timeline: list[TraceEvent] = []
-        tracker = NOOAEventTracker()
         llm = GymResponsesLLM(
             server_client=self._server_client,
             model_server_name=self._model_server_name,
@@ -90,8 +86,6 @@ class EmbeddedNOOARunner:
             max_policy_calls=self._max_policy_calls,
             model_call_collector=model_calls,
             cookies=request.model_cookies,
-            timeline=timeline,
-            invocation_id=lambda: tracker.invocation_id,
         )
         dispatcher = ResourceToolDispatcher(
             server_client=self._server_client,
@@ -105,18 +99,21 @@ class EmbeddedNOOARunner:
         )
         agent = agent_class(llm=llm, **self._invocation.init_kwargs)
         validate_agent_resource_method_bindings(agent)
-        unsubscribe = agent.event_manager.on("*", tracker.handle)
 
-        try:
-            return_value = await self._invocation_adapter(agent, request.responses_create_params)
-        finally:
-            unsubscribe()
-        return NOOARunResult(
+        with TemporaryDirectory(prefix="nemo-gym-nooa-") as directory:
+            path = Path(directory) / "trajectory.json"
+            async with atif_scope(agent, path=path) as exporter:
+                return_value = await self._invocation_adapter(agent, request.responses_create_params)
+            trajectory = exporter.get_trajectory()
+
+        episode = project_nooa_episode(
+            create_params=request.responses_create_params,
             return_value=return_value,
-            agent=agent,
+            trajectory=trajectory,
             model_calls=model_calls,
+        )
+        return NOOARunResult(
+            episode=episode,
             model_cookies=request.model_cookies,
             resource_cookies=request.resource_cookies,
-            timeline=timeline,
-            nooa_events=tracker.events,
         )
