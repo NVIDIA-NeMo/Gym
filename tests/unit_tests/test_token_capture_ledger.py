@@ -310,7 +310,7 @@ async def test_lineage_only_rows_do_not_enter_the_manifest(tmp_path):
     """Local-capture rows (no custody columns) resolve but are not manifest rows."""
     import json
 
-    from nemo_gym.token_id_capture.lineage import assistant_fingerprint, conversation_digest
+    from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, conversation_digest
 
     store = FileLineageStore(tmp_path)
     lineage_only_row = {
@@ -335,7 +335,7 @@ async def test_legacy_token_carrying_row_resolves_but_cannot_anchor_a_chain(tmp_
     """Pre-chain external rows stay readable; extending them fails closed."""
     import json
 
-    from nemo_gym.token_id_capture.lineage import assistant_fingerprint, conversation_digest
+    from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, conversation_digest
 
     store = FileLineageStore(tmp_path)
     legacy_row = {
