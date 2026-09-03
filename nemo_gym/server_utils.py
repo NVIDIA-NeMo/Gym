@@ -15,6 +15,7 @@
 import asyncio
 import atexit
 import json
+import logging
 import resource
 import socket
 import sys
@@ -80,9 +81,58 @@ from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_a
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
+logger = logging.getLogger(__name__)
+
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 _UPSTREAM_ERROR_LOG_BODY_CHARS = 2000
+_VALIDATION_ERROR_LOG_BODY_CHARS = 4096
+_VALIDATION_ERROR_LOG_MAX_ERRORS = 20
+
+
+async def _log_validation_exception(request: Request, exc: RequestValidationError) -> None:
+    errors = exc.errors()
+    error_summaries = [
+        {
+            "type": error.get("type"),
+            "loc": error.get("loc"),
+            "msg": error.get("msg"),
+        }
+        for error in errors[:_VALIDATION_ERROR_LOG_MAX_ERRORS]
+    ]
+
+    try:
+        body = await request.body()
+    except Exception:
+        logger.warning(
+            "Request validation failed; request body unavailable",
+            extra={
+                "validation_error_count": len(errors),
+                "validation_errors": error_summaries,
+                "validation_errors_truncated": len(errors) > len(error_summaries),
+            },
+        )
+        return
+
+    raw_prefix = body[:_VALIDATION_ERROR_LOG_BODY_CHARS]
+    rendered_prefix = json.dumps(raw_prefix.decode("utf-8", errors="replace"), ensure_ascii=True)
+    escaped_prefix = rendered_prefix[:_VALIDATION_ERROR_LOG_BODY_CHARS]
+    logger.warning(
+        "Request validation failed",
+        extra={
+            "request_body_size_bytes": len(body),
+            "request_body_prefix": escaped_prefix,
+            "request_body_truncated": len(body) > len(raw_prefix) or len(rendered_prefix) > len(escaped_prefix),
+            "validation_error_count": len(errors),
+            "validation_errors": error_summaries,
+            "validation_errors_truncated": len(errors) > len(error_summaries),
+        },
+    )
+
+
+async def _validation_exception_handler(request: Request, exc: RequestValidationError) -> Response:
+    await _log_validation_exception(request, exc)
+    return await request_validation_exception_handler(request, exc)
 
 
 class _PickleSafeRequestInfo(NamedTuple):
@@ -950,14 +1000,7 @@ repr(e): {repr(e)}"""
         # caller's CLIENT span.
         server.instrument_app_for_telemetry(app)
 
-        @app.exception_handler(RequestValidationError)
-        async def validation_exception_handler(request: Request, exc):
-            print(
-                f"""Hit validation exception! Errors: {json.dumps(exc.errors(), indent=4)}
-Full body: {json.dumps(exc.body, indent=4)}
-"""
-            )
-            return await request_validation_exception_handler(request, exc)
+        app.exception_handler(RequestValidationError)(_validation_exception_handler)
 
         profiling_config = ProfilingMiddlewareConfig.model_validate(global_config_dict)
         if profiling_config.profiling_enabled:
