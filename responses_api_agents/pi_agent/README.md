@@ -13,16 +13,17 @@ Put `policy_base_url`, `policy_api_key`, and `policy_model_name` in `env.yaml`.
 
 ```bash
 gym env start \
-  --resources-server math_with_judge/math_with_judge_pi_agent \
+  --config environments/pi_math/config.yaml \
   --model-type openai_model
 
-gym eval run --no-serve --agent math_with_judge_pi_agent \
-  --input responses_api_agents/pi_agent/data/example.jsonl \
+gym eval run --no-serve --agent pi_math_agent \
+  --input environments/pi_math/data/example.jsonl \
   --output pi_rollout.jsonl --limit 5
 ```
 
 Per request the agent writes `models.json` into an isolated `HOME`, runs one `pi` invocation with
-stdin from `/dev/null`, then parses the jsonl `message_end` events. Example rollouts are in `data/`.
+stdin from `/dev/null`, then parses the jsonl `message_end` events. Example rollouts are in
+`environments/pi_math/data/example_rollouts.jsonl`.
 
 ## Model id
 

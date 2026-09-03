@@ -19,12 +19,13 @@ import json
 import logging
 import os
 from copy import deepcopy
-from time import time, time_ns
+from threading import Lock
+from time import monotonic, time, time_ns
 from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
-from pydantic import Field
+from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
@@ -32,10 +33,13 @@ from nemo_gym.base_responses_api_model import (
     SimpleResponsesAPIModel,
 )
 from nemo_gym.openai_utils import (
+    REQUIRED_TOKEN_METADATA_FIELDS,
+    TOKEN_METADATA_FIELDS,
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
+    NeMoGymChatCompletionMessageForTraining,
     NeMoGymChoice,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -46,6 +50,7 @@ from nemo_gym.responses_converter import (
     split_responses_input_output_items,  # noqa: F401
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.token_id_capture import current_capture_context
 
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
@@ -149,6 +154,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     api_key: str
     model: str
     return_token_id_information: bool
+    # Request inline prompt and generation token IDs from compatible vLLM endpoints.
+    request_prompt_and_generation_token_ids: bool = False
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
@@ -161,6 +168,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
     sequential_reasoning_allowed: bool = True
+
+    # Opt in to supplying a verified parent's exact tokens to the engine.
+    # Prefix supply requires generation-time prompt_token_ids as proof.
+    # Stock vLLM does not support the required_prefix_token_ids extension.
+    # Prefix supply is incompatible with use_completions_api=true.
+    supply_prefix_token_ids: bool = False
 
     # As of Feb 2026, we default this to False since majority of open source models aren't responses native with the exception of GPT-OSS
     is_responses_native: bool = False
@@ -188,12 +201,35 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     extra_body: Optional[Dict[str, Any]] = None
 
     default_headers: Dict[str, str] = Field(default_factory=dict)
+
+    # Optional path to a file that publishes the current backend base_url.
+    # Used for shared serving jobs that move hosts when they restart.
+    endpoint_file: Optional[str] = None
+
+    # How long a missing endpoint file allows for the use of the last-known-good clients.
+    endpoint_stale_grace_s: float = 300.0
+
+    # Connection-error retry bound applied to clients when endpoint_file is set.
+    endpoint_connection_retries: Optional[int] = 8
+
+    # How often endpoint_file may be stat'd; otherwise the `os.stat` results is cached and reused.
+    endpoint_check_interval_s: float = 10.0
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
     # entries in ``metadata.audio_paths``) against. Absolute paths are used
     # as-is. When unset, relative paths raise. Audio is always inlined as a
     # ``data:audio/<fmt>;base64,...`` URI at request time — keeps the JSONL
     # small without depending on vLLM's ``--allowed-local-media-path``.
     audio_root: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate_prefix_supply(self) -> "VLLMModelConfig":
+        if self.supply_prefix_token_ids and not self.return_token_id_information:
+            raise ValueError("supply_prefix_token_ids requires return_token_id_information=true")
+        if self.supply_prefix_token_ids and self.use_completions_api:
+            raise ValueError("supply_prefix_token_ids is not supported with use_completions_api=true")
+        if self.supply_prefix_token_ids and self.is_responses_native:
+            raise ValueError("supply_prefix_token_ids is not supported with is_responses_native=true")
+        return self
 
     # When True, outbound calls go to vLLM's /v1/completions endpoint instead
     # of /v1/chat/completions. The Gym /v1/responses and /v1/chat/completions
@@ -228,6 +264,15 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 class VLLMModel(SimpleResponsesAPIModel):
     config: VLLMModelConfig
 
+    _TOKENIZE_CHAT_FIELDS: ClassVar[tuple[str, ...]] = (
+        "model",
+        "messages",
+        "tools",
+        "chat_template_kwargs",
+        "mm_processor_kwargs",
+        "required_prefix_token_ids",
+    )
+
     def get_converter(self) -> "VLLMConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
 
@@ -255,11 +300,17 @@ class VLLMModel(SimpleResponsesAPIModel):
                 base_url=base_url,
                 api_key=self.config.api_key,
                 default_headers=self.config.default_headers,
+                max_connection_retries=(
+                    self.config.endpoint_connection_retries if self.config.endpoint_file else None
+                ),
             )
             for base_url in self.config.base_url
         ]
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
+        self._endpoint_file_mtime: Optional[float] = None
+        self._endpoint_missing_since: Optional[float] = None
+        self._endpoint_last_check_at: Optional[float] = None
 
         self._converter = self.get_converter()
         self._transport_call_index = 0
@@ -416,6 +467,21 @@ class VLLMModel(SimpleResponsesAPIModel):
             encoded = base64.b64encode(f.read()).decode("ascii")
         return f"data:audio/{mime};base64,{encoded}"
 
+    @staticmethod
+    def _strip_hosted_only_tool_fields(body_dict: Dict[str, Any]) -> None:
+        """Remove OpenAI-hosted-only fields from function tool definitions.
+
+        ``strict`` is an OpenAI-hosted schema-enforcement flag that vLLM does
+        not implement: its FunctionDefinition keeps the unknown key, and chat
+        templates that render unknown function-definition keys (e.g.
+        Nemotron's ``render_extra_keys``) inject it into the prompt,
+        perturbing every tool-bearing request. Strip it at the vLLM boundary
+        so hosted providers keep their ``strict`` semantics.
+        """
+        for tool_dict in body_dict.get("tools") or []:
+            if tool_dict.get("type") == "function":
+                (tool_dict.get("function") or {}).pop("strict", None)
+
     def _preprocess_chat_completion_create_params(self, request: Request, body_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Preprocess the body dict before issuing a chat completion request.
 
@@ -432,6 +498,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             The (possibly mutated) ``body_dict`` that will be forwarded to
             ``client.create_chat_completion``.
         """
+        self._strip_hosted_only_tool_fields(body_dict)
+
         if self.config.replace_developer_role_with_system:
             for message_dict in body_dict["messages"]:
                 if message_dict.get("role") == "developer":
@@ -470,12 +538,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 top_logprobs=0,
                 # Typically passed via OpenAI client extra_body.
                 return_tokens_as_token_ids=True,
-                # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-                # For prompt and generation token IDs
-                # return_token_ids=True,
-                # For prompt token IDs
-                # prompt_logprobs=0,
             )
+            if self.config.request_prompt_and_generation_token_ids:
+                body_dict["return_token_ids"] = True
 
         if self.config.uses_reasoning_parser and not self.config.preserve_reasoning_in_assistant_content:
             for message_dict in body_dict["messages"]:
@@ -590,7 +655,105 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # No user message found — create one with just the audio blocks.
                 body_dict.setdefault("messages", []).append({"role": "user", "content": list(audio_blocks)})
 
-        return self._apply_sampling_overrides(body_dict)
+        self._apply_sampling_overrides(body_dict)
+        self._validate_single_choice_token_request(body_dict)
+        body_dict = self._apply_prefix_supply(body_dict)
+
+        return body_dict
+
+    # Protect the ``[supplied, eligible, total]`` diagnostic counts.
+    # Eligible calls have a resolved parent.
+    _prefix_supply_counts: List[int] = PrivateAttr(default_factory=lambda: [0, 0, 0])
+    _prefix_supply_lock: Any = PrivateAttr(default_factory=Lock)
+
+    def _apply_prefix_supply(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Add a verified parent's exact tokens to a compatible engine request.
+
+        Prefix supply is opt-in.
+        A unique parent match provides the cumulative token prefix.
+        The backend must implement the ``required_prefix_token_ids`` extension.
+        Stock vLLM does not implement this extension.
+        ``prefix_requested`` records that the request included the prefix.
+        Only generation-time ``prompt_token_ids`` can prove that the backend applied it.
+        That proof sets ``prefix_supplied``.
+        A missing or ambiguous parent leaves the request unchanged.
+        """
+        if not self.config.supply_prefix_token_ids:
+            return body_dict
+        context = current_capture_context()
+        # The parent was resolved before dispatch from the request as received.
+        # Conversion and preprocessing may have reshaped this body.
+        # Re-resolving here could select against a representation never indexed.
+        parent_tokens = context.parent_tokens if context is not None else []
+        with self._prefix_supply_lock:
+            self._prefix_supply_counts[2] += 1
+            if parent_tokens:
+                self._prefix_supply_counts[1] += 1
+        if context is None:
+            # An uncorrelated rollout call has no verified parent.
+            return body_dict
+        if not parent_tokens:
+            return body_dict
+        body_dict["required_prefix_token_ids"] = parent_tokens
+        # This records intent only.
+        # ``prefix_supplied`` remains false until generation-time prompt_token_ids prove application.
+        context.prefix_requested = True
+        return body_dict
+
+    @staticmethod
+    def _generation_prompt_token_ids(response: dict) -> Any:
+        """Return the prompt token IDs reported by generation.
+
+        Prefer the message-level token bundle over top-level transport fields.
+        Token capture uses the same source order.
+        """
+        choices = response.get("choices")
+        choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+        message = choice.get("message")
+        if isinstance(message, dict) and message.get("prompt_token_ids") is not None:
+            return message["prompt_token_ids"]
+        return response.get("prompt_token_ids")
+
+    def _verify_generation_prefix(self, body_dict: dict, response: dict) -> None:
+        """Require generation-time proof that the engine applied the requested prefix."""
+        context = current_capture_context()
+        if context is None or not context.prefix_requested:
+            return
+        required = body_dict.get("required_prefix_token_ids")
+        if not required:
+            raise RuntimeError("A requested token prefix was removed before generation.")
+        tokens = self._generation_prompt_token_ids(response)
+        if not isinstance(tokens, list):
+            raise RuntimeError(
+                f"`{self.config.name}` (base_url={self.config.base_url}) requested "
+                "required_prefix_token_ids, but the generation response did not include prompt_token_ids "
+                "proving which prompt the engine used. The backend must implement the "
+                "required_prefix_token_ids extension and return generation-time prompt token ids. "
+                "Disabling supply_prefix_token_ids is the fallback."
+            )
+        tokens = [int(token) for token in tokens]
+        if tokens[: len(required)] != list(required):
+            raise RuntimeError(
+                f"`{self.config.name}` (base_url={self.config.base_url}) returned generation "
+                "prompt_token_ids that do not start with required_prefix_token_ids. The backend must "
+                "implement the required_prefix_token_ids extension and return generation-time prompt "
+                "token ids that extend the supplied prefix. Disabling supply_prefix_token_ids is the fallback."
+            )
+        # This proves that the served prompt extended the exact parent tokens.
+        # It does not prove how the backend produced that prompt.
+        # A prefix-stable re-render still satisfies the training invariant.
+        context.prefix_supplied = True
+        with self._prefix_supply_lock:
+            self._prefix_supply_counts[0] += 1
+            supplied, eligible, total = self._prefix_supply_counts
+        if supplied % 10 == 0:
+            LOG.info(
+                "prefix supply: %d/%d eligible calls supplied (%.0f%%; %d enabled calls total)",
+                supplied,
+                eligible,
+                100.0 * supplied / eligible,
+                total,
+            )
 
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
@@ -709,6 +872,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         choice_dict = chat_completion_dict["choices"][0]
+        self._verify_generation_prefix(body_dict, chat_completion_dict)
         if self.config.uses_reasoning_parser:
             # See the TODO wrt reasoning_content above
             reasoning_content = choice_dict["message"].get("reasoning_content") or choice_dict["message"].get(
@@ -729,65 +893,190 @@ class VLLMModel(SimpleResponsesAPIModel):
                 f"NeMo Gym server `{self.config.name}` config has explicitly been set to not use a reasoning parser i.e. `uses_reasoning_parser: false`. Please do not use a reasoning parser in your vLLM endpoint, or fix the `{self.config.name}` server config!"
             )
 
-        if self.config.return_token_id_information and "prompt_token_ids" not in choice_dict["message"]:
-            # Check vLLM honored the logprobs request.
-            # It returns choice.logprobs=None when it computed none.
-            # That happens when a null top_logprobs reached it, or the contract changed across versions.
-            # Without this check the code below raises a TypeError or emits empty token ids that zero the loss mask.
-            # An empty content list is a valid zero-token generation and passes through.
-            logprobs_block = choice_dict.get("logprobs")
-            if not logprobs_block or logprobs_block.get("content") is None:
-                raise RuntimeError(
-                    f"`{self.config.name}` requested per-token logprobs from vLLM "
-                    f"(return_token_id_information=True, logprobs=True, top_logprobs=0), but the response "
-                    f"had none (choice.logprobs={logprobs_block!r}). Cannot extract token ids or logprobs."
-                )
-            log_probs = logprobs_block["content"]
-            generation_log_probs = [log_prob["logprob"] for log_prob in log_probs]
-
-            """
-            START TODO remove this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-            """
-            # Looks like `"token_id:151667"`
-            generation_token_ids = [log_prob["token"].removeprefix("token_id:") for log_prob in log_probs]
-
-            # The tokenize endpoint doesn't accept any sampling parameters
-            # The only relevant params are model, messages, and tools.
-            #
-            # IMPORTANT: pass through chat-template knobs (e.g. enable_thinking)
-            # when tokenizing, otherwise `prompt_token_ids` (and therefore logged
-            # `prompt_str`) can be built with different chat template settings than
-            # the actual generation request.
-            tokenize_body_dict = dict()
-            for key in ("model", "messages", "tools", "chat_template_kwargs"):
-                if key in body_dict:
-                    tokenize_body_dict[key] = body_dict[key]
-
-            # The base url has /v1 at the end but vLLM's tokenize endpoint does not have v1, hence the ..
-            tokenize_response = await client.create_tokenize(**tokenize_body_dict)
-            """
-            END
-            """
-
+        if self.config.return_token_id_information:
             message_dict = choice_dict["message"]
-            message_dict.update(
-                dict(
-                    # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-                    # prompt_token_ids=chat_completion_dict["prompt_token_ids"],
-                    prompt_token_ids=tokenize_response["tokens"],
-                    # generation_token_ids=choice_dict["token_ids"],
-                    generation_token_ids=generation_token_ids,
-                    generation_log_probs=generation_log_probs,
-                )
-            )
 
-            # Clean the duplicated information
-            choice_dict.pop("logprobs")
-            # TODO add this when NeMo RL upgrades to vLLM 0.10.2 support for prompt token ids
-            # chat_completion_dict.pop("prompt_token_ids")
-            # choice_dict.pop("token_ids")
+            # Token metadata uses this source order:
+            # 1. A complete bundle on the assistant message.
+            # 2. Prompt IDs at the response top level and generation IDs on the choice.
+            # 3. Generation data from choice logprobs and prompt IDs from `/tokenize`.
+            #
+            # An earlier source supplies the normalized bundle.
+            # Later inline sources are still checked when present.
+            # A partially present source is invalid.
+            # Duplicate token IDs must agree.
+            message_bundle = self._extract_message_token_bundle(message_dict)
+            response_token_ids = self._extract_vllm_response_token_ids(chat_completion_dict, choice_dict)
+
+            if message_bundle is not None:
+                if response_token_ids is not None:
+                    response_prompt_token_ids, response_generation_token_ids = response_token_ids
+                    if (
+                        message_bundle["prompt_token_ids"] != response_prompt_token_ids
+                        or message_bundle["generation_token_ids"] != response_generation_token_ids
+                    ):
+                        raise RuntimeError("Message-level token metadata disagrees with vLLM response token IDs.")
+                message_dict.update(message_bundle)
+            else:
+                logprob_token_ids, generation_log_probs = self._extract_choice_logprobs(choice_dict)
+                if response_token_ids is not None:
+                    prompt_token_ids, generation_token_ids = response_token_ids
+                    if generation_token_ids != logprob_token_ids:
+                        raise RuntimeError(
+                            "vLLM response generation token IDs disagree with choice logprob token IDs."
+                        )
+                else:
+                    tokenize_response = await client.create_tokenize(**self._get_tokenize_chat_body(body_dict))
+                    prompt_token_ids = self._require_token_id_list(
+                        tokenize_response.get("tokens"),
+                        "tokenize.tokens",
+                    )
+                    generation_token_ids = logprob_token_ids
+
+                message_dict.update(
+                    self._validate_token_bundle(
+                        {
+                            "prompt_token_ids": prompt_token_ids,
+                            "generation_token_ids": generation_token_ids,
+                            "generation_log_probs": generation_log_probs,
+                            **(
+                                {"routed_experts": message_dict["routed_experts"]}
+                                if message_dict.get("routed_experts") is not None
+                                else {}
+                            ),
+                        },
+                        "vLLM token transport",
+                    )
+                )
+
+                # The adapter consumed this compatibility payload.
+                choice_dict.pop("logprobs", None)
+
+            # Top-level and choice-level token-ID fields are transport details.
+            chat_completion_dict.pop("prompt_token_ids", None)
+            choice_dict.pop("token_ids", None)
+            choice_dict["message"] = NeMoGymChatCompletionMessageForTraining.model_validate(message_dict)
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+
+    @staticmethod
+    def _require_token_id_list(value: Any, field_name: str) -> List[Any]:
+        """Check the container without scanning or copying token IDs."""
+        if not isinstance(value, list):
+            raise RuntimeError(f"`{field_name}` must be a list of integer token IDs.")
+        return value
+
+    @staticmethod
+    def _require_log_prob_list(value: Any, field_name: str) -> List[Any]:
+        """Check the container without scanning or copying log probabilities."""
+        if not isinstance(value, list):
+            raise RuntimeError(f"`{field_name}` must be a list of numeric log probabilities.")
+        return value
+
+    @classmethod
+    def _validate_token_bundle(cls, bundle: Dict[str, Any], source: str) -> Dict[str, Any]:
+        present_fields = TOKEN_METADATA_FIELDS.intersection(bundle)
+        missing_fields = REQUIRED_TOKEN_METADATA_FIELDS.difference(present_fields)
+        if missing_fields:
+            missing = ", ".join(sorted(missing_fields))
+            raise RuntimeError(f"{source} returned partial token metadata; missing: {missing}.")
+
+        normalized = {
+            "prompt_token_ids": cls._require_token_id_list(bundle["prompt_token_ids"], f"{source}.prompt_token_ids"),
+            "generation_token_ids": cls._require_token_id_list(
+                bundle["generation_token_ids"], f"{source}.generation_token_ids"
+            ),
+            "generation_log_probs": cls._require_log_prob_list(
+                bundle["generation_log_probs"], f"{source}.generation_log_probs"
+            ),
+        }
+        if "routed_experts" in bundle:
+            normalized["routed_experts"] = bundle["routed_experts"]
+
+        if len(normalized["generation_token_ids"]) != len(normalized["generation_log_probs"]):
+            raise RuntimeError(
+                f"{source} returned mismatched generation token IDs and log probabilities: "
+                f"{len(normalized['generation_token_ids'])} token IDs and "
+                f"{len(normalized['generation_log_probs'])} log probabilities."
+            )
+
+        return normalized
+
+    @classmethod
+    def _extract_message_token_bundle(cls, message_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        required_fields = REQUIRED_TOKEN_METADATA_FIELDS.intersection(message_dict)
+        if not required_fields:
+            return None
+        present_fields = TOKEN_METADATA_FIELDS.intersection(message_dict)
+        return cls._validate_token_bundle(
+            {field: message_dict[field] for field in present_fields},
+            "choice.message",
+        )
+
+    @classmethod
+    def _extract_vllm_response_token_ids(
+        cls,
+        chat_completion_dict: Dict[str, Any],
+        choice_dict: Dict[str, Any],
+    ) -> Optional[tuple[List[Any], List[Any]]]:
+        prompt_value = chat_completion_dict.get("prompt_token_ids")
+        generation_value = choice_dict.get("token_ids")
+        prompt_present = prompt_value is not None
+        generation_present = generation_value is not None
+
+        if prompt_present != generation_present:
+            missing = "choice.token_ids" if prompt_present else "prompt_token_ids"
+            raise RuntimeError(f"vLLM response returned partial token metadata; missing: {missing}.")
+        if not prompt_present:
+            return None
+
+        return (
+            cls._require_token_id_list(prompt_value, "prompt_token_ids"),
+            cls._require_token_id_list(generation_value, "choice.token_ids"),
+        )
+
+    def _extract_choice_logprobs(self, choice_dict: Dict[str, Any]) -> tuple[List[int], List[float]]:
+        logprobs_block = choice_dict.get("logprobs")
+        if not isinstance(logprobs_block, dict) or not isinstance(logprobs_block.get("content"), list):
+            raise RuntimeError(
+                f"`{self.config.name}` requested per-token logprobs from vLLM "
+                "(return_token_id_information=True, logprobs=True, top_logprobs=0), "
+                f"but the response had none (choice.logprobs={logprobs_block!r}). "
+                "Cannot extract token ids or logprobs."
+            )
+
+        generation_token_ids: List[int] = []
+        generation_log_probs: List[float] = []
+        for index, entry in enumerate(logprobs_block["content"]):
+            if not isinstance(entry, dict):
+                raise RuntimeError(f"choice.logprobs.content[{index}] must be an object.")
+            token = entry.get("token")
+            if not isinstance(token, str) or not token.startswith("token_id:"):
+                raise RuntimeError(f"choice.logprobs.content[{index}].token must use the `token_id:<int>` format.")
+            try:
+                token_id = int(token.removeprefix("token_id:"))
+            except ValueError as e:
+                raise RuntimeError(
+                    f"choice.logprobs.content[{index}].token must use the `token_id:<int>` format."
+                ) from e
+            log_prob = entry.get("logprob")
+            if not isinstance(log_prob, (int, float)) or isinstance(log_prob, bool):
+                raise RuntimeError(f"choice.logprobs.content[{index}].logprob must be numeric.")
+            generation_token_ids.append(token_id)
+            generation_log_probs.append(float(log_prob))
+
+        return generation_token_ids, generation_log_probs
+
+    @classmethod
+    def _get_tokenize_chat_body(cls, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Keep every known prompt-affecting field aligned with generation."""
+        return {field: body_dict[field] for field in cls._TOKENIZE_CHAT_FIELDS if field in body_dict}
+
+    def _validate_single_choice_token_request(self, body_dict: Dict[str, Any]) -> None:
+        if self.config.return_token_id_information and body_dict.get("n") not in (None, 1):
+            raise ValueError(
+                f"NeMo Gym server `{self.config.name}` requires n=1 when return_token_id_information=true."
+            )
 
     async def _chat_completions_via_completions_api(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming
@@ -815,6 +1104,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         modes — /v1/completions is text-only.
         """
         body_dict = body.model_dump(exclude_unset=True)
+        # This path never runs _preprocess_chat_completion_create_params, and
+        # _render_messages_via_chat_template hands tools to apply_chat_template,
+        # so hosted-only fields must be stripped here too.
+        self._strip_hosted_only_tool_fields(body_dict)
         messages = body_dict.get("messages", []) or []
         metadata = body_dict.get("metadata", {}) or {}
 
@@ -841,6 +1134,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             prompt = self._render_messages_to_prompt(messages)
 
         completion_body = self._build_completion_body_from_chat_body(body_dict, prompt)
+        self._validate_single_choice_token_request(completion_body)
 
         client = self._resolve_client(request)
 
@@ -1131,7 +1425,80 @@ class VLLMModel(SimpleResponsesAPIModel):
             ],
         )
 
+    def _maybe_rebind_endpoint(self) -> None:
+        """Rebind clients when a shared serving job publishes a new endpoint.
+
+        Raises when the endpoints have stayed unpublished for longer than `endpoint_stale_grace_s`.
+        """
+        if not self.config.endpoint_file:
+            return
+        now = monotonic()
+        if (
+            self._endpoint_last_check_at is not None
+            and now - self._endpoint_last_check_at < self.config.endpoint_check_interval_s
+        ):
+            if self._endpoint_missing_since is not None:
+                self._note_endpoint_unpublished()
+            return
+        self._endpoint_last_check_at = now
+        try:
+            mtime = os.stat(self.config.endpoint_file).st_mtime
+        except FileNotFoundError:
+            # Serving jobs remove the endpoint file while rotating;
+            # keep the current clients until the successor publishes.
+            self._note_endpoint_unpublished()
+            return
+        except OSError:
+            # Transient filesystem trouble is not a backend exit; retry the current clients.
+            return
+        if mtime == self._endpoint_file_mtime:
+            if self._endpoint_missing_since is not None:
+                self._note_endpoint_unpublished()
+            return
+        try:
+            with open(self.config.endpoint_file) as endpoint_stream:
+                url = endpoint_stream.read().strip()
+        except OSError:
+            return
+        self._endpoint_file_mtime = mtime
+        if not url:
+            # An empty file is as unpublished as a missing one.
+            self._note_endpoint_unpublished()
+            return
+        self._endpoint_missing_since = None
+        if [url] == self.config.base_url:
+            return
+        print(
+            f"vllm_model '{self.config.name}': backend endpoint changed "
+            f"{self.config.base_url} -> {[url]}; rebinding clients.",
+            flush=True,
+        )
+        self.config.base_url = [url]
+        self._clients = [
+            NeMoGymAsyncOpenAI(
+                base_url=url,
+                api_key=self.config.api_key,
+                default_headers=self.config.default_headers,
+                max_connection_retries=self.config.endpoint_connection_retries,
+            )
+        ]
+        # Every session re-resolves onto the new host.
+        self._session_id_to_client.clear()
+
+    def _note_endpoint_unpublished(self) -> None:
+        now = monotonic()
+        if self._endpoint_missing_since is None:
+            self._endpoint_missing_since = now
+        elif now - self._endpoint_missing_since > self.config.endpoint_stale_grace_s:
+            raise RuntimeError(
+                f"vllm_model endpoint file {self.config.endpoint_file} unpublished (absent "
+                f"or empty) for {now - self._endpoint_missing_since:.0f}s (grace "
+                f"{self.config.endpoint_stale_grace_s:.0f}s); refusing to keep serving "
+                "against a backend that is no longer published."
+            )
+
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
+        self._maybe_rebind_endpoint()
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
             # Uvicorn workers do not share this cache. A stable assignment keeps

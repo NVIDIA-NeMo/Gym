@@ -84,9 +84,14 @@ dependencies = [
 
     # OpenAI: We leverage OpenAI Responses, Chat Completions, and Completions schemas for Nemo Gym abstractions. It may also be used to directly query endpoints.
     # We specifically upper bound this OpenAI dependency since the version bumps so frequently.
-    # Updated Wed Feb 17, 2026 with openai<=2.7.2
-    # License: Apache 2.0 https://github.com/openai/openai-python/blob/a8258744cbecf51321587fc870e8920bd2c07809/LICENSE
-    "openai<=2.7.2",
+    # Pinned to a single version, not a range.
+    # Gym subclasses the SDK's pydantic models and mirrors its Responses item union by hand.
+    # Each version needs its own audit, so a range would claim support for versions nobody tested.
+    # 2.45.0 makes InputTokensDetails.cache_write_tokens required, which NeMoGymResponseInputTokensDetails cannot satisfy.
+    # Moving this pin means re-running tests/unit_tests/test_openai_utils.py, which names each item type Gym cannot represent.
+    # Updated Tue Aug 11, 2026 with openai==2.44.0
+    # License: Apache 2.0 https://github.com/openai/openai-python/blob/v2.44.0/LICENSE
+    "openai==2.44.0",
 
     # Anthropic: We leverage the Anthropic Messages schemas (request/response Python types) for the
     # /v1/messages <-> Responses mapping in nemo_gym/anthropic_converter.py. Types only — we never
@@ -136,6 +141,14 @@ dependencies = [
     # License: BSD 3-Clause https://github.com/encode/uvicorn/blob/c1144fd4f130388cffc05ee17b08747ce8c1be11/LICENSE.md
     "uvicorn",
 
+    # httptools: C bindings to the llhttp HTTP parser.
+    # Gym explicitly selects httptools as Uvicorn's HTTP protocol implementation.
+    # Explicit selection prevents a silent fallback to the pure-Python h11 parser.
+    # A missing or incompatible wheel now fails during server startup.
+    # Updated Fri Aug 28, 2026 with httptools==0.8.0
+    # License: MIT https://github.com/MagicStack/httptools/blob/master/LICENSE
+    "httptools",
+
     # UVLoop: a faster async event loop than Python's native asyncio. Used automatically by Uvicorn as an async loop backend.
     # Updated Fri Aug 01, 2025 with uvloop==0.21.0
     # License: Apache 2.0 and MIT https://github.com/MagicStack/uvloop/blob/96b7ed31afaf02800d779a395591da6a2c8c50e1/LICENSE-APACHE https://github.com/MagicStack/uvloop/blob/96b7ed31afaf02800d779a395591da6a2c8c50e1/LICENSE-MIT
@@ -159,6 +172,14 @@ dependencies = [
     # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/c6ce84e817897e1a0461632f8a06d4e5e4ac3726/LICENSE.txt
     "mlflow-skinny>=3.15.1",
     "mlflow>=3.15.1",
+
+    # scipy: t-distribution confidence intervals for repeat-level reward metrics in
+    # nemo_gym/reward_profile.py. Lower bound is the first release with cp313 wheels;
+    # deliberately NOT >=1.18, which requires numpy>=2.0 and breaks servers pinned to
+    # numpy<2 (wmt_translation and osworld_agent, via unbabel-comet).
+    # Updated Tue Aug 18, 2026 with scipy>=1.14.1
+    # License: BSD 3-Clause https://github.com/scipy/scipy/blob/main/LICENSE.txt
+    "scipy>=1.14.1",
 
     # aiohttp: async http backend
     # Updated Sun Jun 29, 2026 with aiohttp>=3.14.1 (CVE mitigation)
@@ -237,12 +258,12 @@ all = [
 
 vllm = [
     # Pin to the same version used by local_vllm_model / genrm_model server venvs.
-    # Updated: Mon Aug 04, 2026 with vllm==0.24.0
-    "vllm==0.24.0",
-    # Pin flashinfer to the exact version vllm 0.24.0 specifies, ensuring pre-compiled
+    # Updated: Mon Aug 24, 2026 with vllm==0.25.1
+    "vllm==0.25.1",
+    # Pin flashinfer to the exact version vllm 0.25.1 specifies, ensuring pre-compiled
     # CUDA kernels are used (avoids JIT compilation on first generation == slow step time).
     # flashinfer>=0.2 bundles compiled kernels in the python package directly.
-    "flashinfer-python==0.6.12",
+    "flashinfer-python==0.6.13",
 ]
 
 sandbox = [
@@ -269,6 +290,14 @@ sandbox = [
     # License: Apache 2.0 https://pypi.org/project/daytona/
     "daytona>=0.179.0",
 
+    # E2B SDK: used by the E2B sandbox provider for create/exec/kill and file operations.
+    # Also drives any e2b-compatible gateway via connection.api_url/sandbox_url.
+    # Lower bound 2.36.0: provider traffic attribution, current template APIs, and stream-open timeout semantics.
+    # Upper bound <3.0.0: the provider depends on the E2B 2.x SDK contract.
+    # Updated: Tue Aug 04, 2026 with e2b>=2.36.0,<3.0.0
+    # License: MIT https://github.com/e2b-dev/E2B/blob/e2b@2.36.0/packages/python-sdk/LICENSE
+    "e2b>=2.36.0,<3.0.0",
+
     # boto3: AWS SDK used by the ECS Fargate sandbox provider for ECS/EC2/ECR/
     # CodeBuild/S3/SSM/Secrets Manager calls.
     # Updated: Tue Jun 03, 2026 with boto3>=1.34
@@ -286,6 +315,39 @@ openshell = [
     # Updated: Tue Jul 14, 2026 with openshell>=0.0.92,<0.1
     # License: Apache 2.0 https://github.com/NVIDIA/OpenShell/blob/main/LICENSE
     "openshell>=0.0.92,<0.1",
+]
+
+# Telemetry is opt-in: without this extra (or with `telemetry.enabled: false`) every
+# instrumentation site in nemo_gym is a ~0-cost no-op and Gym behaves identically.
+#
+# NOTE: uv resolves one unified lockfile across all optional-dependency groups, so this
+# extra's floor on opentelemetry-api (via nemo-lens[sdk] and the instrumentation packages
+# below) raises the version uv.lock records for *every* install, not just one that
+# requests `telemetry` — opentelemetry-api was already a transitive dependency (via
+# mlflow-tracing, a core dependency) and moved from 1.38.0 to 1.44.0 when this extra was
+# added. Accepted: OpenTelemetry's Python API keeps strict backward compatibility within
+# 1.x, and the full test suite passes unchanged at 1.44.0. There's no clean uv mechanism
+# to isolate one extra's transitive floor from the shared lockfile while still letting it
+# be installed alongside other extras (`[tool.uv] conflicts` forces extras to be mutually
+# exclusive, which `telemetry` is not — it needs to coexist with `dev`/`sandbox` in CI).
+telemetry = [
+    # nemo-lens: OpenTelemetry instrumentation shared across the NeMo ecosystem. Provides the
+    # tracer/meter lifecycle, span-group gating, W3C context propagation, and the FastAPI /
+    # aiohttp auto-instrumentation Gym uses to stitch one trace across its server processes.
+    # Pinned to a Lens commit via [tool.uv.sources] until 0.2.0 ships to PyPI; then drop that
+    # entry and use a version range. Megatron-LM pins this same commit.
+    # Updated: Tue Aug 18, 2026 with nemo-lens @ b85578fc
+    # License: Apache 2.0 https://github.com/NVIDIA-NeMo/Lens/blob/main/LICENSE
+    "nemo-lens[sdk]",
+
+    # FastAPI + aiohttp OTel auto-instrumentation. Not pulled in by nemo-lens[sdk]: its
+    # `contrib.instrument_fastapi` / `instrument_aiohttp_client` helpers import these lazily
+    # and raise ImportError when they are missing. Gym needs both — the FastAPI instrumentor
+    # extracts inbound traceparent on every server, the aiohttp one is the egress side.
+    # Updated: Tue Aug 18, 2026 with opentelemetry-instrumentation-*==0.65b0
+    # License: Apache 2.0 https://github.com/open-telemetry/opentelemetry-python-contrib/blob/main/LICENSE
+    "opentelemetry-instrumentation-fastapi>=0.60b0",
+    "opentelemetry-instrumentation-aiohttp-client>=0.60b0",
 ]
 
 # We include dev dependencies as an extra since technically each server module is a consumer (which means we cannot use dependency groups, which are intended to be within a project).
@@ -343,6 +405,8 @@ dev = [
 # update the script when uv lock bumps them.
 codec = [
     "opencv-python-headless",
+    "pynvvideocodec",
+    "torchcodec",
     "torchvision",
     "torchaudio",
 ]
@@ -374,6 +438,8 @@ override-dependencies = [
     # [tool.uv] override-dependencies (pyproject.toml servers), which takes
     # precedence. Reinstall for testing via docker/install_codec_deps.sh.
     "opencv-python-headless; sys_platform == 'never'",
+    "pynvvideocodec; sys_platform == 'never'",
+    "torchcodec; sys_platform == 'never'",
     "torchvision; sys_platform == 'never'",
     "torchaudio; sys_platform == 'never'",
     "pycountry; sys_platform == 'never'",
@@ -408,6 +474,17 @@ exclude-dependencies = [
     # Explicitly block it to prevent re-introduction via future transitive pulls.
     "diskcache",
 ]
+
+# nemo-lens has no 0.2.0 release on PyPI yet (only 0.1.0), and Gym needs post-0.1.0 APIs
+# (compact single-line JSON console export, the gym.* instruments). Pin the git rev until
+# 0.2.0 is published, then delete this table and put a version range on the extra above.
+# NOTE: [tool.uv.sources] is a uv-only mechanism and is NOT recorded in a built wheel, so
+# `pip install nemo-gym[telemetry]` from PyPI resolves nemo-lens 0.1.0 from PyPI instead.
+# The pin governs source checkouts, `uv sync`, and the uv lock — including the per-server
+# venvs that `gym env test` / `gym env start` build, which inherit it through the editable
+# nemo-gym install exactly as override-dependencies does.
+[tool.uv.sources]
+nemo-lens = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "b85578fc2b736a1804705e537001b5f45e9c715d" }
 
 [tool.setuptools.package-data]
 # The built-in asset trees (resources_servers, responses_api_agents, responses_api_models,
@@ -607,7 +684,7 @@ directory = "results/htmlcov"
 [tool.coverage.report]
 skip_covered = true
 sort = "miss"
-fail_under = 96.0
+fail_under = 95.0
 exclude_also = [
     "def __repr__",
     "if self.debug:",

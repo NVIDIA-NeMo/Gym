@@ -324,16 +324,24 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 }
             )
 
-        verify_request = SimpleAgentVerifyRequest.model_validate(body.model_dump() | {"response": model_response_json})
-
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(verify_response)
-        result = await get_response_json(verify_response)
+        if self.config.skip_verification:
+            result = body.model_dump() | {
+                "response": model_response_json,
+                "reward": float(self.config.skip_verification_reward),
+                "verification_skipped": True,
+            }
+        else:
+            verify_request = SimpleAgentVerifyRequest.model_validate(
+                body.model_dump() | {"response": model_response_json}
+            )
+            verify_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/verify",
+                json=verify_request.model_dump(),
+                cookies=cookies,
+            )
+            await raise_for_status(verify_response)
+            result = await get_response_json(verify_response)
         if trajectory is not None:
             resolved = result.get("resolved")
             if isinstance(resolved, bool) and trajectory.turns:
@@ -346,6 +354,16 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server."""
         return await self.proxy_aggregate_metrics(self.config.resources_server.name, body)
+        if self.config.skip_verification:
+            return await super().aggregate_metrics(body)
+
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/aggregate_metrics",
+            json=body,
+        )
+        await raise_for_status(response)
+        return AggregateMetrics.model_validate(await get_response_json(response))
 
 
 if __name__ == "__main__":
