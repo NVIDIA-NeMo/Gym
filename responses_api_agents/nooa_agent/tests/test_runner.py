@@ -138,9 +138,10 @@ async def test_embedded_runner_maps_full_row_and_attaches_resource_methods() -> 
         )
     )
 
-    assert result.episode.response.output[0].content[0].text == "Check delivery: cold"
+    assert result.episode.response.output == []
+    assert result.return_value == "Check delivery: cold"
     assert result.episode.observations.source == "nooa"
-    assert [gap.code for gap in result.episode.observations.gaps] == ["non_trainable_fallback_output"]
+    assert result.episode.observations.gaps == []
     assert client.post.await_args.kwargs["json"] == {"city": "Paris"}
 
 

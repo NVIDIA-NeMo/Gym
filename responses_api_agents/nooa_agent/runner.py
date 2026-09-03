@@ -48,6 +48,7 @@ class NOOARunRequest:
 @dataclass(slots=True)
 class NOOARunResult:
     episode: AgentEpisode
+    return_value: Any
     model_cookies: dict[str, str]
     resource_cookies: dict[str, str]
 
@@ -108,12 +109,12 @@ class EmbeddedNOOARunner:
 
         episode = project_nooa_episode(
             create_params=request.row.responses_create_params,
-            return_value=return_value,
             trajectory=trajectory,
             model_calls=model_calls,
         )
         return NOOARunResult(
             episode=episode,
+            return_value=return_value,
             model_cookies=request.model_cookies,
             resource_cookies=request.resource_cookies,
         )
