@@ -391,6 +391,12 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_musl_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
+    # Cap for OpenCode's `limit.output` (its maxOutputTokens). When unset, falls back to
+    # `opencode_max_context_window`, which makes every request carry max_tokens == the full
+    # window; backends that enforce prompt_tokens + max_tokens <= served context then reject
+    # every request outright. Set this to a sane generation cap (e.g. 32-64k) so the context
+    # window can stay at the served maximum.
+    opencode_max_output_tokens: Optional[int] = None
 
     # Sandbox config
     sandbox_provider: str
@@ -557,8 +563,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                             "limit": {
                                 "context": self.config.opencode_max_context_window,
                                 "input": self.config.opencode_max_context_window,
-                                # See the OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX flag below for more information.
-                                "output": self.config.opencode_max_context_window,
+                                # OpenCode derives maxOutputTokens from `output` (already distinct
+                                # from `context` in the pinned binary). See also the
+                                # OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX flag below.
+                                "output": self.config.opencode_max_output_tokens
+                                or self.config.opencode_max_context_window,
                             },
                         },
                     },
