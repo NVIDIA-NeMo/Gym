@@ -201,7 +201,7 @@ class NeMoGymLLM(BaseLLM):
             # Compacted
             self.trajectory.extend([*input_items, *response.output])
         else:
-            self.trajectory.extend([*input_items[len(self._last_input_items) :], *response.output])
+            self.trajectory.extend([input_items[-1], *response.output])
         self._last_input_items = input_items.copy()
 
         usage = response.usage
