@@ -1,0 +1,139 @@
+---
+title: "Distributed Tracing"
+description: ""
+position: 3
+---
+A NeMo Gym rollout crosses several processes. This page explains how those hops become a
+single trace, and what to check when they do not.
+
+## The Problem
+
+NeMo Gym runs each server as an independent FastAPI process:
+
+```
+gym env start
+├── resources server   (verification, tools, per-task state)
+├── model server       (inference)
+└── agent server       (the harness that drives the rollout)
+```
+
+They communicate over HTTP. Nothing in a plain HTTP request tells the receiving server
+which rollout it belongs to, so without propagation each server produces its own
+disconnected spans and a rollout looks like three unrelated traces.
+
+## How Context Crosses a Process Boundary
+
+NeMo Gym uses W3C Trace Context, the standard OpenTelemetry mechanism. Two halves make it
+work.
+
+**Outbound.** Every cross-server call in NeMo Gym goes through one function,
+`nemo_gym.server_utils.request()`. NeMo Gym bans `httpx` for async HTTP precisely so that
+this stays true, which means there is exactly one place to inject trace context. The
+function starts a CLIENT span and writes a `traceparent` header identifying it:
+
+```
+traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+             ^  ^                                ^                ^
+             |  trace id                          parent span id   flags
+             version
+```
+
+**Inbound.** Every NeMo Gym server applies OpenTelemetry FastAPI auto-instrumentation,
+which reads `traceparent` off the incoming request and makes the caller's span the parent
+of its own SERVER span.
+
+The result is a continuous parent chain across processes:
+
+```
+gym.rollout                    agent server        (span A, root)
+└─ HTTP POST                   agent server        (span B, parent = A)
+   └─ POST /v1/responses       model server        (span C, parent = B)
+      └─ gym.model.responses   model server        (span D, parent = C)
+```
+
+Span C lives in a different operating system process from span B and knows nothing about
+it except what arrived in the header.
+
+## Rollout Correlation
+
+NeMo Gym already had a correlation scheme before it had traces. `current_rollout_id()`
+tracks the active rollout in a `ContextVar`, and rollout-scoped routes carry the ID in the
+URL path as `/ng-rollout/{rollout_id}/...`.
+
+Telemetry joins that scheme rather than replacing it. The rollout ID is attached to spans
+as `nemo.gym.rollout.id`, so you can move between a trace, NeMo Gym's own logs, and a
+captured trajectory for the same rollout:
+
+```bash
+# From a trace, find the rollout
+jq -r 'select(.attributes."nemo.gym.rollout.id") | .attributes."nemo.gym.rollout.id"' spans.jsonl
+
+# From a rollout ID, find its captured model calls
+ls <capture_dir>/<rollout_id>.capture.jsonl
+```
+
+## Span Kinds
+
+Span kind is what tells a backend that a call left one service and arrived at another.
+NeMo Gym emits:
+
+- **CLIENT** on the outbound request from `server_utils.request()`.
+- **SERVER** on the inbound request, from FastAPI auto-instrumentation.
+- **INTERNAL** for everything inside a process, such as `gym.verify`.
+
+Without the CLIENT and SERVER pairing, service maps in Jaeger, Tempo, and Honeycomb cannot
+draw the edge between the agent server and the model server.
+
+## Verify Propagation
+
+Run with the console exporter and drive one rollout, then confirm that spans from
+different servers share a trace ID:
+
+```bash
+NEMO_LENS_ENABLED=1 NEMO_GYM_OTEL_EXPORTER=console \
+gym env start --resources-server example_single_tool_call --model-type vllm_model
+```
+
+```bash
+cat *.log | grep '"trace_id"' \
+  | jq -r '[.trace_id, .resource.attributes."service.name", .kind, .name] | @tsv' \
+  | sort
+```
+
+A working trace shows one trace ID across several `service.name` values. A broken one
+shows a different trace ID per service.
+
+## Troubleshooting
+
+### Every Span Is Its Own Trace
+
+The `traceparent` header is not arriving. Check, in order:
+
+1. **Is the `http_client` span group enabled?** Injection happens inside the outbound
+   span, so disabling that group disables propagation. Every preset includes it. If you
+   set `span_groups` to a hand-picked list, include `http_client` and `server`.
+2. **Is the call going through `server_utils.request()`?** A server that uses `httpx` or
+   `aiohttp` directly bypasses the only injection point. NeMo Gym bans `httpx` for this
+   and other reasons. See the async patterns section of `AGENTS.md`.
+3. **Is telemetry enabled in the *receiving* process?** A server that never initialized
+   telemetry does not extract the header. Confirm that the environment reached it —
+   `NEMO_GYM_OTEL_ENABLED` must be set in the server process, not only in your shell.
+
+### Traces Are Missing Their Last Spans
+
+Spans export in batches. A process that exits before its batch flushes drops whatever was
+pending. NeMo Gym flushes on normal shutdown, but a `SIGKILL` cannot be caught. Prefer
+`Ctrl-C`, which sends `SIGINT` and lets each server shut down cleanly.
+
+### Traces Are Enormous
+
+The `default` preset includes `job`, which wraps a whole rollout-collection run, so every
+rollout in the run nests inside one trace. For long runs, use `per_rollout` instead. It
+omits `job`, so each rollout becomes its own bounded root trace. See
+[Span Groups](/observability/span-groups).
+
+### Only the Orchestrator Emits Spans
+
+The `telemetry:` block reaches servers through environment variables exported before the
+servers start. If you set them after `gym env start` is already running, the servers never
+see them. Set them in the shell before you start the run.

@@ -83,6 +83,7 @@ class TestOpenCodeSandboxedAgent:
     async def test_start_sandbox_derives_cpu_cap_env_from_cpu_limit(self, monkeypatch: MonkeyPatch) -> None:
         sandbox = MagicMock()
         sandbox.start = AsyncMock()
+        sandbox.pty = AsyncMock()
         monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
         monkeypatch.setattr(app_module, "create_provider", lambda *_: MagicMock())
         monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
@@ -188,9 +189,11 @@ class TestOpenCodeSandboxedAgent:
         sandbox_mock = MagicMock()
         sandbox_mock.exec = AsyncMock(
             side_effect=[
-                SimpleNamespace(stdout="OpenCode run finished", stderr="", return_code=0, error_type=None),
+                SimpleNamespace(
+                    stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
+                ),
+                SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
-                SimpleNamespace(stdout="my dir"),
             ]
         )
         sandbox_mock.download = AsyncMock()
@@ -300,8 +303,7 @@ class TestOpenCodeSandboxedAgent:
 
         assert expected_response == actual_response
         assert not any(key.startswith("_ng_") for key in server._sandbox_id_to_run_result[""])
-        assert "XDG_DATA_HOME" not in sandbox_mock.exec.await_args_list[0].kwargs["env"]
-        assert sandbox_mock.exec.await_args_list[1].kwargs["env"] is None
+        assert "XDG_DATA_HOME" not in sandbox_mock.exec.await_args_list[0].kwargs["command"]
 
     def test_agent_sandbox_observation_classifies_timeout_errors(self) -> None:
         server = OpenCodeSandboxedAgent(
@@ -457,9 +459,11 @@ class TestOpenCodeSandboxedAgent:
         sandbox._handle = SandboxHandle(sandbox_id="connected-sandbox", provider_name="opensandbox", raw=None)
         sandbox.exec = AsyncMock(
             side_effect=[
-                SimpleNamespace(stdout="OpenCode run finished", stderr="", return_code=0, error_type=None),
+                SimpleNamespace(
+                    stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
+                ),
+                SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
-                SimpleNamespace(stdout="/workspace\n"),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
             ]
         )
@@ -475,7 +479,7 @@ class TestOpenCodeSandboxedAgent:
         monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.quote", local_quote)
 
         async def download(remote_path: str, local_path: Path) -> None:
-            if remote_path == "/workspace/export.json":
+            if remote_path == "/tmp/opencode_export.json":
                 local_path.write_text(json.dumps(opencode_export_test_data))
             else:
                 assert remote_path.endswith("/opencode/nemo-gym-observations.db")
@@ -547,10 +551,16 @@ class TestOpenCodeSandboxedAgent:
         assert sandbox_records[0].wall_time_s is None
         assert "sandbox_lifecycle_timing_unavailable" in {gap.code for gap in result.ng_agent_observations.gaps}
         assert "sandbox_cleanup_failed" not in {gap.code for gap in result.ng_agent_observations.gaps}
-        run_env = sandbox.exec.await_args_list[0].kwargs["env"]
-        export_env = sandbox.exec.await_args_list[1].kwargs["env"]
-        assert run_env["XDG_DATA_HOME"].startswith("/tmp/nemo-gym-opencode-")
-        assert export_env["XDG_DATA_HOME"] == run_env["XDG_DATA_HOME"]
+        session_list_env = sandbox.exec.await_args_list[1].kwargs["env"]
+        export_env = sandbox.exec.await_args_list[2].kwargs["env"]
+        remote_data_home = session_list_env["XDG_DATA_HOME"]
+        assert remote_data_home.startswith("/tmp/nemo-gym-opencode-")
+        assert f"XDG_DATA_HOME={remote_data_home}" in sandbox.exec.await_args_list[0].kwargs["command"]
+        assert export_env["XDG_DATA_HOME"] == remote_data_home
+        assert (
+            "opencode export session-id > /tmp/opencode_export.json"
+            in sandbox.exec.await_args_list[2].kwargs["command"]
+        )
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert server._sandbox_id_to_run_result == {}
         assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()

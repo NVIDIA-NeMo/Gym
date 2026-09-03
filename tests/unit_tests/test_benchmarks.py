@@ -87,6 +87,21 @@ class TestListBenchmarks:
         config_path.write_text(text)
         assert _is_benchmark_config(config_path) is is_benchmark
 
+    def test_prefilter_rejects_a_multi_benchmark_suite(self, tmp_path) -> None:
+        # A config declaring several benchmark datasets is an eval suite: it has no single name, agent, or
+        # repeat count, so it is not a valid `--benchmark` argument and must not reach the catalog.
+        from nemo_gym.benchmarks import _benchmark_config_paths
+
+        (tmp_path / "single").mkdir()
+        (tmp_path / "single" / "config.yaml").write_text("x:\n  datasets:\n  - name: a\n    type: benchmark\n")
+        (tmp_path / "suite").mkdir()
+        (tmp_path / "suite" / "config.yaml").write_text(
+            "x:\n  datasets:\n  - name: a\n    type: benchmark\ny:\n  datasets:\n  - name: b\n    type: benchmark\n"
+        )
+
+        found = {str(p.relative_to(tmp_path)) for p in _benchmark_config_paths(tmp_path)}
+        assert found == {"single/config.yaml"}
+
     def test_prefilter_keeps_unparseable_yaml_as_candidate(self, tmp_path) -> None:
         # A file we can't parse can't be classified, so it is kept as a candidate for the resolve step to
         # diagnose rather than silently dropped.
@@ -209,6 +224,20 @@ class TestDiscoverBenchmarksInDir:
         assert set(result) == {"good"}
         err = capsys.readouterr().err
         assert "Warning" in err and "bad" in err
+
+    def test_suite_resolving_to_many_benchmarks_is_skipped_not_aliased(self, tmp_path: Path, capsys) -> None:
+        # Resolving `config_paths` can surface several benchmark datasets even when the file itself declares
+        # one. Reporting the first would publish the suite under another benchmark's name, agent, and repeat
+        # count, so `--benchmark <suite>` would silently run that other benchmark instead.
+        from nemo_gym.benchmarks import BenchmarkConfig
+
+        # Chains two real benchmarks the way `benchmarks/nemotron_3.5_super/` chains its eval suite.
+        suite = tmp_path / "suite.yaml"
+        suite.write_text("config_paths:\n- benchmarks/gpqa/config.yaml\n- benchmarks/aime24/config.yaml\n")
+
+        assert BenchmarkConfig.from_config_path(suite, strict=False) is None
+        err = capsys.readouterr().err
+        assert "2 benchmark datasets" in err and "eval suite" in err
 
     def test_every_repo_benchmark_appears_in_listing(self, capsys) -> None:
         # Every config that declares a `type: benchmark` dataset must surface as its own listing entry —
@@ -514,3 +543,266 @@ class TestPrepareBenchmark:
             prepare_benchmark()
 
         assert mock_module.prepare.call_count == 0
+
+    def test_two_declarations_resolving_to_one_agent_both_prepare(self, tmp_path: Path) -> None:
+        """Keying by resolved agent used to silently drop all but the last declaration."""
+        for suffix in ("a", "b"):
+            (tmp_path / f"prepare_{suffix}.py").write_text("")
+        config = {
+            "dummy_agent": {
+                "responses_api_agents": {
+                    "simple_agent": {
+                        "resources_server": {"type": "resources_servers", "name": "dummy_rs"},
+                        "datasets": [
+                            {
+                                "name": "bench_a",
+                                "type": "benchmark",
+                                "jsonl_fpath": str(tmp_path / "a.jsonl"),
+                                "prepare_script": str(tmp_path / "prepare_a.py"),
+                            }
+                        ],
+                    }
+                }
+            },
+            "dummy_rs": {
+                "resources_servers": {
+                    "impl": {
+                        "datasets": [
+                            {
+                                "name": "bench_b",
+                                "type": "benchmark",
+                                "jsonl_fpath": str(tmp_path / "b.jsonl"),
+                                "prepare_script": str(tmp_path / "prepare_b.py"),
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+
+        prepared: list[str] = []
+
+        def fake_import(module_path: str):
+            suffix = module_path[-1]
+            module = MagicMock()
+            module.prepare = lambda **kwargs: prepared.append(suffix) or tmp_path / f"{suffix}.jsonl"
+            return module
+
+        with (
+            patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)),
+            patch("nemo_gym.cli.eval.importlib.import_module", side_effect=fake_import),
+        ):
+            prepare_benchmark()
+
+        assert sorted(prepared) == ["a", "b"]
+
+
+class TestBenchmarkAgentResolution:
+    """Pins how a benchmark finds its agent (dataset-decoupling): explicit `agent:` pin >
+    declaring agent block > unique agent referencing the declaring resources server."""
+
+    def _benchmark_dataset(self, **extra):
+        return {
+            "name": "bench",
+            "type": "benchmark",
+            "jsonl_fpath": "data/bench.jsonl",
+            "prepare_script": "prepare.py",
+            **extra,
+        }
+
+    def _agent(self, rs_name):
+        return {
+            "responses_api_agents": {
+                "impl": {"entrypoint": "app.py", "resources_server": {"type": "resources_servers", "name": rs_name}}
+            }
+        }
+
+    def _config(self, **top_level):
+        from nemo_gym.benchmarks import BenchmarkConfig
+
+        return BenchmarkConfig.from_initial_config_dict(
+            path=Path("bench/config.yaml"), initial_config_dict=OmegaConf.create(top_level), strict=False
+        )
+
+    def test_declaring_agent_block_still_wins_without_pin(self) -> None:
+        cfg = self._config(
+            my_agent={
+                "responses_api_agents": {"impl": {"entrypoint": "app.py", "datasets": [self._benchmark_dataset()]}}
+            }
+        )
+        assert cfg.agent_name == "my_agent"
+
+    def test_agent_pin_on_agent_declared_dataset_must_name_the_declarer(self) -> None:
+        """Dispatch routes rows to the declaring agent, so a pin elsewhere would silently not apply."""
+        from nemo_gym.config_types import ConfigError
+
+        with pytest.raises(ConfigError, match="the pin would silently not apply"):
+            self._config(
+                my_agent={
+                    "responses_api_agents": {
+                        "impl": {"entrypoint": "app.py", "datasets": [self._benchmark_dataset(agent="other_agent")]}
+                    }
+                },
+                other_agent={"responses_api_agents": {"impl": {"entrypoint": "app.py"}}},
+            )
+
+    def test_redundant_agent_pin_naming_the_declarer_is_allowed(self) -> None:
+        cfg = self._config(
+            my_agent={
+                "responses_api_agents": {
+                    "impl": {"entrypoint": "app.py", "datasets": [self._benchmark_dataset(agent="my_agent")]}
+                }
+            }
+        )
+        assert cfg.agent_name == "my_agent"
+
+    def test_rs_declared_dataset_resolves_via_unique_referencing_agent(self) -> None:
+        cfg = self._config(
+            my_rs={
+                "resources_servers": {
+                    "impl": {"entrypoint": "app.py", "domain": "other", "datasets": [self._benchmark_dataset()]}
+                }
+            },
+            my_agent=self._agent("my_rs"),
+        )
+        assert cfg.agent_name == "my_agent"
+
+    def test_rs_declared_dataset_with_two_agents_requires_pin(self) -> None:
+        from nemo_gym.config_types import ConfigError
+
+        with pytest.raises(ConfigError, match="Pin the harness with an `agent:` key"):
+            self._config(
+                my_rs={
+                    "resources_servers": {
+                        "impl": {"entrypoint": "app.py", "domain": "other", "datasets": [self._benchmark_dataset()]}
+                    }
+                },
+                agent_a=self._agent("my_rs"),
+                agent_b=self._agent("my_rs"),
+            )
+
+    def test_rs_declared_dataset_with_pin_needs_no_inversion(self) -> None:
+        cfg = self._config(
+            my_rs={
+                "resources_servers": {
+                    "impl": {
+                        "entrypoint": "app.py",
+                        "domain": "other",
+                        "datasets": [self._benchmark_dataset(agent="agent_b")],
+                    }
+                }
+            },
+            agent_a=self._agent("my_rs"),
+            agent_b=self._agent("my_rs"),
+        )
+        assert cfg.agent_name == "agent_b"
+
+    def test_rs_declared_pin_must_reference_the_declaring_rs(self) -> None:
+        """A pin naming an agent wired to a different RS would list one agent and run another."""
+        from nemo_gym.config_types import ConfigError
+
+        with pytest.raises(ConfigError, match="no agent of that name references resources server 'my_rs'"):
+            self._config(
+                my_rs={
+                    "resources_servers": {
+                        "impl": {
+                            "entrypoint": "app.py",
+                            "domain": "other",
+                            "datasets": [self._benchmark_dataset(agent="agent_b")],
+                        }
+                    }
+                },
+                some_other_rs={"resources_servers": {"impl": {"entrypoint": "app.py", "domain": "other"}}},
+                agent_a=self._agent("my_rs"),
+                agent_b=self._agent("some_other_rs"),
+            )
+
+    def test_rs_declared_pin_naming_unknown_agent_errors(self) -> None:
+        from nemo_gym.config_types import ConfigError
+
+        with pytest.raises(ConfigError, match="pins agent 'ghost'"):
+            self._config(
+                my_rs={
+                    "resources_servers": {
+                        "impl": {
+                            "entrypoint": "app.py",
+                            "domain": "other",
+                            "datasets": [self._benchmark_dataset(agent="ghost")],
+                        }
+                    }
+                },
+                agent_a=self._agent("my_rs"),
+            )
+
+
+class TestAgentPinDiscoveryCollateRollout:
+    """The agent discovery resolves for a pinned benchmark is the agent rollout dispatch routes
+    its collated rows to (previously the pin was honored at discovery only)."""
+
+    def test_pin_survives_discovery_collate_and_rollout(self, tmp_path: Path, monkeypatch) -> None:
+        import json
+
+        from nemo_gym.benchmarks import BenchmarkConfig
+        from nemo_gym.config_types import maybe_get_server_instance_config
+        from nemo_gym.rollout_collection import RolloutCollectionHelper
+        from nemo_gym.train_data_utils import TrainDataProcessor
+
+        data_fpath = tmp_path / "bench.jsonl"
+        data_fpath.write_text(json.dumps({"responses_create_params": {"input": []}}) + "\n")
+        config = {
+            "shared_rs": {
+                "resources_servers": {
+                    "impl": {
+                        "entrypoint": "app.py",
+                        "domain": "other",
+                        "datasets": [
+                            {
+                                "name": "bench",
+                                "type": "benchmark",
+                                "jsonl_fpath": str(data_fpath),
+                                "prepare_script": "prepare.py",
+                                "agent": "agent_b",
+                            }
+                        ],
+                    }
+                }
+            },
+            "agent_a": {
+                "responses_api_agents": {
+                    "impl": {
+                        "entrypoint": "app.py",
+                        "resources_server": {"type": "resources_servers", "name": "shared_rs"},
+                    }
+                }
+            },
+            "agent_b": {
+                "responses_api_agents": {
+                    "impl": {
+                        "entrypoint": "app.py",
+                        "resources_server": {"type": "resources_servers", "name": "shared_rs"},
+                    }
+                }
+            },
+        }
+        config_dict = OmegaConf.create(config)
+
+        # 1. Discovery: two agents reference shared_rs; the pin picks agent_b.
+        bc = BenchmarkConfig.from_initial_config_dict(
+            path=Path("bench/config.yaml"), initial_config_dict=config_dict, strict=False
+        )
+        assert bc.agent_name == "agent_b"
+
+        # 2. Collate (real stamping): rows carry only task_source, never the pin or an agent_ref.
+        rs_instance, err = maybe_get_server_instance_config("shared_rs", config_dict["shared_rs"])
+        assert err is None, err
+        monkeypatch.chdir(tmp_path)
+        paths = TrainDataProcessor()._collate_samples_single_type(
+            type="benchmark", server_instance_configs=[rs_instance]
+        )
+        rows = [json.loads(line) for line in open(paths[0])]
+        assert rows[0]["task_source"] == "shared_rs"
+        assert "agent_ref" not in rows[0]
+
+        # 3. Rollout dispatch: resolution reads the pin back off the declaring instance.
+        RolloutCollectionHelper.resolve_task_sources(rows, config_dict)
+        assert rows[0]["agent_ref"] == {"name": bc.agent_name}

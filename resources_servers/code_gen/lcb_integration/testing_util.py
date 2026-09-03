@@ -27,7 +27,7 @@ import traceback
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from io import BytesIO, StringIO
+from io import BytesIO, StringIO, TextIOWrapper
 
 # from pyext import RuntimeModule
 from types import ModuleType
@@ -38,7 +38,7 @@ from unittest.mock import mock_open, patch
 import numpy as np
 
 
-import_string = "from string import *\nfrom re import *\nfrom datetime import *\nfrom collections import *\nfrom heapq import *\nfrom bisect import *\nfrom copy import *\nfrom math import *\nfrom random import *\nfrom statistics import *\nfrom itertools import *\nfrom functools import *\nfrom operator import *\nfrom io import *\nfrom sys import *\nfrom json import *\nfrom builtins import *\nfrom typing import *\nimport string\nimport re\nimport datetime\nimport collections\nimport heapq\nimport bisect\nimport copy\nimport math\nimport random\nimport statistics\nimport itertools\nimport functools\nimport operator\nimport io\nimport sys\nimport json\nsys.setrecursionlimit(50000)\n"
+import_string = "from string import *\nfrom re import *\nfrom datetime import *\nfrom collections import *\nfrom heapq import *\nfrom bisect import *\nfrom copy import *\nfrom math import *\nfrom random import *\nfrom statistics import *\nfrom itertools import *\nfrom functools import *\nfrom operator import *\nfrom io import *\nfrom sys import *\nfrom json import *\nfrom builtins import *\nfrom typing import *\nimport string\nimport re\nimport datetime\nimport collections\nimport heapq\nimport bisect\nimport copy\nimport math\nimport random\nimport statistics\nimport itertools\nimport functools\nimport operator\nimport io\nimport sys\nimport json\nsys.setrecursionlimit(50000)\nsys.set_int_max_str_digits(1 << 20)\n"
 
 
 def truncatefn(s, length=300):
@@ -77,15 +77,24 @@ def timeout_handler_factory(debug: bool):
 class Capturing(list):
     def __enter__(self):
         self._stdout = sys.stdout
-        sys.stdout = self._stringio = StringIO()
-        # Make closing the StringIO a no-op
-        self._stringio.close = lambda x: 1
+        self._bytes_buffer = BytesIO()
+        self._stringio = TextIOWrapper(
+            self._bytes_buffer,
+            encoding="utf-8",
+            newline="",
+            write_through=True,
+        )
+        # Make closing the stream a no-op
+        self._stringio.close = lambda *args, **kwargs: None
+        sys.stdout = self._stringio
         return self
 
     def __exit__(self, *args):
-        self.append(self._stringio.getvalue())
-        del self._stringio  # free up some memory
+        self._stringio.flush()
+        self.append(self._bytes_buffer.getvalue().decode("utf-8", errors="replace"))
         sys.stdout = self._stdout
+        del self._stringio  # free up some memory
+        del self._bytes_buffer
 
 
 # Custom mock for sys.stdin that supports buffer attribute
@@ -253,11 +262,61 @@ def convert_line_to_decimals(line: str) -> tuple[bool, list[Decimal]]:
     return True, decimal_line
 
 
+FLOAT_ERROR_TOLERANCE = Decimal("1e-6")
+
+
+def token_is_floating_point(token: str) -> bool:
+    return "." in token or "e" in token.lower()
+
+
+def decimal_tokens_match(expected_token: str, predicted_token: str, expected: Decimal, predicted: Decimal) -> bool:
+    if expected == predicted:
+        return True
+    if not (token_is_floating_point(expected_token) or token_is_floating_point(predicted_token)):
+        return False
+    if not (expected.is_finite() and predicted.is_finite()):
+        return False
+    absolute_error = abs(expected - predicted)
+    relative_scale = max(abs(expected), Decimal(1))
+    return absolute_error <= FLOAT_ERROR_TOLERANCE or absolute_error / relative_scale <= FLOAT_ERROR_TOLERANCE
+
+
+def decimal_lines_match(
+    expected_tokens: list[str],
+    predicted_tokens: list[str],
+    expected_line: list[Decimal],
+    predicted_line: list[Decimal],
+) -> bool:
+    if len(expected_line) != len(predicted_line):
+        return False
+    return all(
+        decimal_tokens_match(expected_token, predicted_token, expected, predicted)
+        for expected_token, predicted_token, expected, predicted in zip(
+            expected_tokens, predicted_tokens, expected_line, predicted_line
+        )
+    )
+
+
 def get_stripped_lines(val: str):
     ## you don't want empty lines to add empty list after splitlines!
     val = val.strip()
 
     return [val_line.strip() for val_line in val.split("\n")]
+
+
+def values_are_close(expected, predicted) -> bool:
+    if expected == predicted:
+        return True
+    if isinstance(expected, bool) or isinstance(predicted, bool):
+        return False
+    if not (isinstance(expected, float) or isinstance(predicted, float)):
+        return False
+    if not isinstance(expected, (int, float, str)) or not isinstance(predicted, (int, float, str)):
+        return False
+    try:
+        return bool(np.allclose(float(predicted), float(expected)))
+    except (TypeError, ValueError):
+        return False
 
 
 def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: str, timeout: int):
@@ -304,10 +363,14 @@ def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: st
             except Exception:
                 pass
 
-            try:
-                tmp_result = tmp_result or (np.allclose(float(prediction), float(gt_out)))
-            except Exception:
-                pass
+            if not tmp_result:
+                tmp_result = values_are_close(gt_out, prediction)
+
+            if not tmp_result and isinstance(prediction, list) and isinstance(gt_out, list):
+                tmp_result = len(prediction) == len(gt_out) and all(
+                    values_are_close(expected_item, predicted_item)
+                    for predicted_item, expected_item in zip(prediction, gt_out)
+                )
 
             all_results.append(tmp_result)
 
@@ -455,7 +518,12 @@ def grade_stdio(
                 all_results.append(-2)
                 return all_results, WA_send_args
 
-            if decimal_prediction_line == decimal_gtout_line:
+            if decimal_lines_match(
+                stripped_gt_out_line.split(),
+                stripped_prediction_line.split(),
+                decimal_gtout_line,
+                decimal_prediction_line,
+            ):
                 continue
 
             all_results.append(-2)
