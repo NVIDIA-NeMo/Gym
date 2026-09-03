@@ -18,7 +18,7 @@ from abc import abstractmethod
 from copy import deepcopy
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym._checkpoint import ResourceSnapshot
@@ -89,21 +89,29 @@ class GymnasiumServer(SimpleResourcesServer):
     async def _reset_endpoint(self, body: EnvResetRequest, request: Request) -> EnvResetResponse:
         session_id = request.session.get(SESSION_ID_KEY)
         identity = self._current_identity()
+        obs, info = await self.reset(body.model_extra or {}, session_id)
         if identity is not None and session_id is not None:
             self.execution_to_session[identity] = session_id
-        obs, info = await self.reset(body.model_extra or {}, session_id)
         return EnvResetResponse(observation=obs, info=info)
 
     async def _step_endpoint(self, body: EnvStepRequest, request: Request) -> EnvStepResponse:
         identity = self._current_identity()
-        session_id = self.execution_to_session.get(identity) if identity is not None else None
-        if session_id is None:
+        if identity is not None:
+            session_id = self.execution_to_session.get(identity)
+            if session_id is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="execution has no successful reset binding",
+                )
+        else:
             session_id = request.session.get(SESSION_ID_KEY)
         obs, reward, terminated, truncated, info = await self.step(body.response, body.model_extra or {}, session_id)
         if terminated or truncated:
             await self.close_session(session_id)
             if identity is not None:
                 self.execution_to_session.pop(identity, None)
+                if self._checkpoint_participant is not None:
+                    self.checkpoint_participant().mark_terminal_after_request(*identity)
         return EnvStepResponse(observation=obs, reward=reward, terminated=terminated, truncated=truncated, info=info)
 
     @staticmethod
@@ -115,7 +123,15 @@ class GymnasiumServer(SimpleResourcesServer):
         return rollout_id, attempt_index
 
     def checkpoint_state_enabled(self) -> bool:
-        return True
+        """Subclasses opt in only after implementing restart-portable state."""
+        return False
+
+    def checkpoint_route_kind(self, path: str, method: str):
+        if method == "POST" and path == "/reset":
+            return "start"
+        if method == "POST" and path == "/step":
+            return "mutation"
+        return super().checkpoint_route_kind(path, method)
 
     def serialize_session_state(self, state: Any) -> dict[str, Any]:
         if not isinstance(state, dict):
@@ -140,6 +156,11 @@ class GymnasiumServer(SimpleResourcesServer):
             replacement_index[(snapshot.rollout_id, snapshot.attempt_index)] = session_id
         self.session_state = replacement_state
         self.execution_to_session = replacement_index
+
+    async def retire_checkpoint_state(self, rollout_id: str, attempt_index: int) -> None:
+        session_id = self.execution_to_session.pop((rollout_id, attempt_index), None)
+        if session_id is not None:
+            await self.close_session(session_id)
 
     async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:
         return None, {}
