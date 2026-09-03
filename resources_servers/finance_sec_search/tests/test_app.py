@@ -15,6 +15,7 @@
 """Tests for Finance Agent Resource Server."""
 
 import json
+import logging
 import tempfile
 import urllib.error
 from pathlib import Path
@@ -30,6 +31,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import ServerClient
 from resources_servers.finance_sec_search.app import (
+    EdgarSearchRequest,
     FinanceAgentResourcesServer,
     FinanceAgentResourcesServerConfig,
     FinanceAgentSearchRequest,
@@ -37,6 +39,7 @@ from resources_servers.finance_sec_search.app import (
     RateLimiter,
     RetrieveInformationRequest,
 )
+from resources_servers.finance_sec_search.tests.test_local_edgar_search import _index
 
 
 _TEST_SESSION_ID = "test-session"
@@ -712,6 +715,240 @@ class TestDumpFallback:
         result = await server._lookup_dump(url)
         assert result is not None
         assert "Revenue was $100B" in result
+
+
+class TestDumpFromSearch:
+    """edgar_search records where its hits live, so filing reads can skip sec.gov."""
+
+    _PRIMARY_URL = "https://www.sec.gov/Archives/edgar/data/320193/000032019324000001/aapl.htm"
+    _EXHIBIT_URL = "https://www.sec.gov/Archives/edgar/data/789019/000078901925000001/msft-ex991.htm"
+
+    @pytest.fixture
+    def server(self, server_config, tmp_path):
+        server_config.local_edgar_index_path = str(_index(tmp_path / "index.sqlite"))
+        server_config.sec_dump_path = str(tmp_path / "dump")
+        # Past the fixture's newest filing, so the exhibit is not clamped away.
+        server_config.max_end_date = "2030-01-01"
+        return FinanceAgentResourcesServer(config=server_config, server_client=MagicMock(spec=ServerClient))
+
+    @staticmethod
+    def _write_dump(server, relative_path: str, html: str) -> None:
+        target = Path(server.config.sec_dump_path) / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(html)
+
+    async def _search(self, server) -> None:
+        await server.edgar_search(_mock_request(), EdgarSearchRequest(search_query="quantum pineapple"))
+
+    @pytest.mark.asyncio
+    async def test_search_records_paths_for_every_returned_document(self, server) -> None:
+        await self._search(server)
+
+        assert server._dump_paths == {
+            "320193:000032019324000001:aapl.htm": "AAPL/10-K/2024/0000320193-24-000001/primary-document.html",
+            "789019:000078901925000001:msft-ex991.htm": "MSFT/8-K/2025/0000789019-25-000001/exhibits/EX-99.1.html",
+        }
+
+    @pytest.mark.asyncio
+    async def test_exhibit_is_served_from_the_dump(self, server) -> None:
+        await self._search(server)
+        self._write_dump(
+            server,
+            "MSFT/8-K/2025/0000789019-25-000001/exhibits/EX-99.1.html",
+            "<html><body><p>Guidance raised to $5B</p></body></html>",
+        )
+
+        with patch.object(server, "_fetch_with_retry", new=AsyncMock()) as fetch:
+            text = await server._fetch_sec_filing_text(self._EXHIBIT_URL)
+
+        assert "Guidance raised to $5B" in text
+        fetch.assert_not_called()
+        assert server._filing_read_sources["sec-corpus"] == 1
+        assert server._filing_read_sources["live"] == 0
+
+    @pytest.mark.asyncio
+    async def test_recorded_path_wins_over_the_layout_convention(self, server) -> None:
+        """The cached filing metadata points elsewhere, so only precedence explains the result."""
+        await self._search(server)
+        server._filings_cache["0000320193"] = {
+            "000032019324000001": {
+                "ticker": "AAPL",
+                "form": "10-K",
+                "report_date": "2023-01-01",
+                "accession_number": "0000320193-24-000001",
+            },
+        }
+        self._write_dump(
+            server,
+            "AAPL/10-K/2024/0000320193-24-000001/primary-document.html",
+            "<html><body><p>Recorded copy</p></body></html>",
+        )
+        self._write_dump(
+            server,
+            "AAPL/10-K/2023/0000320193-24-000001/primary-document.html",
+            "<html><body><p>Convention copy</p></body></html>",
+        )
+
+        text_content = await server._lookup_dump(self._PRIMARY_URL)
+
+        assert text_content is not None
+        assert "Recorded copy" in text_content
+
+    @pytest.mark.asyncio
+    async def test_convention_still_serves_urls_that_were_never_searched(self, server) -> None:
+        """sec_filing_search's path stays live when edgar_search recorded nothing."""
+        url = "https://www.sec.gov/Archives/edgar/data/320193/000032019324000009/aapl-10q.htm"
+        server._filings_cache["0000320193"] = {
+            "000032019324000009": {
+                "ticker": "AAPL",
+                "form": "10-Q",
+                "report_date": "2024-06-30",
+                "accession_number": "0000320193-24-000009",
+            },
+        }
+        self._write_dump(
+            server,
+            "AAPL/10-Q/2024/0000320193-24-000009/primary-document.html",
+            "<html><body><p>Convention copy</p></body></html>",
+        )
+
+        text_content = await server._lookup_dump(url)
+
+        assert text_content is not None
+        assert "Convention copy" in text_content
+
+    @pytest.mark.asyncio
+    async def test_missing_dump_file_falls_through_to_live(self, server) -> None:
+        """A recorded path whose file is absent must not shadow the live fetch."""
+        await self._search(server)
+
+        with patch.object(server, "_fetch_with_retry", new=AsyncMock(return_value=MOCK_HTML)) as fetch:
+            await server._fetch_sec_filing_text(self._PRIMARY_URL)
+
+        fetch.assert_called_once()
+        assert server._filing_read_sources["live"] == 1
+        assert server._filing_read_sources["sec-corpus"] == 0
+
+    @pytest.mark.asyncio
+    async def test_missing_exhibit_is_not_answered_with_the_primary_document(self, server) -> None:
+        """A recorded path with no file must not reach the convention: it names another document."""
+        await self._search(server)
+        server._filings_cache["0000789019"] = {
+            "000078901925000001": {
+                "ticker": "MSFT",
+                "form": "8-K",
+                "report_date": "2025-01-01",
+                "accession_number": "0000789019-25-000001",
+                "primary_document": "msft-8k.htm",
+            },
+        }
+        # The exhibit is absent from the corpus; its filing's own document is not.
+        self._write_dump(
+            server,
+            "MSFT/8-K/2025/0000789019-25-000001/primary-document.html",
+            "<html><body><p>Convention copy</p></body></html>",
+        )
+
+        with patch.object(server, "_fetch_with_retry", new=AsyncMock(return_value=MOCK_HTML)) as fetch:
+            text_content = await server._fetch_sec_filing_text(self._EXHIBIT_URL)
+
+        assert "Convention copy" not in text_content
+        assert "Company Financial Report" in text_content
+        fetch.assert_called_once()
+        assert server._filing_read_sources["live"] == 1
+        assert server._filing_read_sources["sec-corpus"] == 0
+
+    @pytest.mark.asyncio
+    async def test_convention_declines_a_url_naming_another_document(self, server) -> None:
+        """Reached without any search, as sec_filing_search leaves it."""
+        server._filings_cache["0000320193"] = {
+            "000032019324000009": {
+                "ticker": "AAPL",
+                "form": "10-Q",
+                "report_date": "2024-06-30",
+                "accession_number": "0000320193-24-000009",
+                "primary_document": "aapl-10q.htm",
+            },
+        }
+        self._write_dump(
+            server,
+            "AAPL/10-Q/2024/0000320193-24-000009/primary-document.html",
+            "<html><body><p>Convention copy</p></body></html>",
+        )
+
+        exhibit_url = "https://www.sec.gov/Archives/edgar/data/320193/000032019324000009/aapl-ex101.htm"
+        assert await server._lookup_dump(exhibit_url) is None
+
+    @pytest.mark.asyncio
+    async def test_convention_still_serves_the_filings_own_document(self, server) -> None:
+        server._filings_cache["0000320193"] = {
+            "000032019324000009": {
+                "ticker": "AAPL",
+                "form": "10-Q",
+                "report_date": "2024-06-30",
+                "accession_number": "0000320193-24-000009",
+                "primary_document": "aapl-10q.htm",
+            },
+        }
+        self._write_dump(
+            server,
+            "AAPL/10-Q/2024/0000320193-24-000009/primary-document.html",
+            "<html><body><p>Convention copy</p></body></html>",
+        )
+
+        primary_url = "https://www.sec.gov/Archives/edgar/data/320193/000032019324000009/aapl-10q.htm"
+        text_content = await server._lookup_dump(primary_url)
+
+        assert text_content is not None
+        assert "Convention copy" in text_content
+
+    @pytest.mark.asyncio
+    async def test_url_that_was_never_searched_is_fetched_live(self, server) -> None:
+        url = "https://www.sec.gov/Archives/edgar/data/1234567/000123456725000001/other.htm"
+
+        with patch.object(server, "_fetch_with_retry", new=AsyncMock(return_value=MOCK_HTML)) as fetch:
+            await server._fetch_sec_filing_text(url)
+
+        fetch.assert_called_once()
+        assert server._dump_paths == {}
+        assert server._filing_read_sources["live"] == 1
+
+    @pytest.mark.asyncio
+    async def test_every_read_source_is_counted_and_summarized(self, server, caplog) -> None:
+        """The summary is the only read-source signal that reaches a default log level."""
+        await self._search(server)
+        self._write_dump(
+            server,
+            "MSFT/8-K/2025/0000789019-25-000001/exhibits/EX-99.1.html",
+            "<html><body><p>Guidance raised to $5B</p></body></html>",
+        )
+
+        with (
+            caplog.at_level(logging.WARNING),
+            patch.object(server, "_fetch_with_retry", new=AsyncMock(return_value=MOCK_HTML)),
+        ):
+            await server._fetch_sec_filing_text(self._EXHIBIT_URL)
+            await server._fetch_sec_filing_text(self._PRIMARY_URL)
+
+        assert dict(server._filing_read_sources) == {"sec-corpus": 1, "live": 1}
+        # The first read logs; the second falls inside the interval and is quiet.
+        assert caplog.text.count("SEC filing reads by source:") == 1
+        assert "SEC filing reads by source: cache=0 sec-corpus=1 live=0" in caplog.text
+
+        caplog.clear()
+        server._log_filing_read_sources()
+        assert "SEC filing reads by source: cache=0 sec-corpus=1 live=1" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_dump_paths_are_not_collected_without_a_dump(self, server_config, tmp_path) -> None:
+        server_config.local_edgar_index_path = str(_index(tmp_path / "index.sqlite"))
+        server_config.sec_dump_path = None
+        server_config.max_end_date = "2030-01-01"
+        server = FinanceAgentResourcesServer(config=server_config, server_client=MagicMock(spec=ServerClient))
+
+        await self._search(server)
+
+        assert server._dump_paths == {}
 
 
 # ============================================================================
