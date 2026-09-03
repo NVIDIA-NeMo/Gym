@@ -103,27 +103,31 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
                 output=f"Error executing tool '{path}': {str(e)}"
             )  # return error to model so that it can correct itself
 
-    async def verify(self, body: WorkbenchVerifyRequest) -> WorkbenchVerifyResponse:
-        ground_truth = body.ground_truth
-        response = body.response.output
+    async def verify(self, request: Request, body: WorkbenchVerifyRequest) -> WorkbenchVerifyResponse:
+        session_id = request.session[SESSION_ID_KEY]
+        try:
+            ground_truth = body.ground_truth
+            response = body.response.output
 
-        total_score = 0.0
+            total_score = 0.0
 
-        # Convert list of ResponseFunctionToolCall objects into list of dictionaries
-        predicted_function_calls = []
+            # Convert list of ResponseFunctionToolCall objects into list of dictionaries
+            predicted_function_calls = []
 
-        for message in response:
-            if message.type == "function_call":
-                predicted_function_calls.append(message.model_dump())
+            for message in response:
+                if message.type == "function_call":
+                    predicted_function_calls.append(message.model_dump())
 
-        predicted_chat_content = []
+            predicted_chat_content = []
 
-        for message in response:
-            if message.type == "output_text":
-                predicted_chat_content.append(message.model_dump())
+            for message in response:
+                if message.type == "output_text":
+                    predicted_chat_content.append(message.model_dump())
 
-        total_score += is_correct(predicted_function_calls, ground_truth, None) * 1.0
-        return WorkbenchVerifyResponse(**body.model_dump(), reward=total_score)
+            total_score += is_correct(predicted_function_calls, ground_truth, None) * 1.0
+            return WorkbenchVerifyResponse(**body.model_dump(), reward=total_score)
+        finally:
+            self.session_id_to_tool_env.pop(session_id, None)
 
 
 if __name__ == "__main__":

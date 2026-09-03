@@ -20,8 +20,10 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.server_utils import ServerClient
+from resources_servers.finance_sec_search import local_edgar_search
 from resources_servers.finance_sec_search.app import (
     EdgarSearchRequest,
     FinanceAgentResourcesServer,
@@ -362,8 +364,80 @@ def test_sidecar_built_from_another_index_is_rejected(tmp_path: Path) -> None:
     other = _varied_index(tmp_path / "other.sqlite", documents=200)
     build(other, default_sidecar_path(other))
 
-    with pytest.raises(ValueError, match="Rebuild it"):
+    with pytest.raises(ValueError, match="covers 200 documents"):
         LocalEdgarSearch(index, metadata_path=default_sidecar_path(other))
+
+
+def test_sidecar_is_rejected_when_the_index_changed_underneath_it(tmp_path: Path) -> None:
+    index = _varied_index(tmp_path / "index.sqlite")
+    build(index, default_sidecar_path(index))
+
+    # id 1 is always sampled by the fingerprint, so this edit is caught deterministically
+    # rather than with the sampling probability a random row would carry.
+    connection = sqlite3.connect(index)
+    connection.execute("UPDATE documents SET accession_number = '000-999999' WHERE id = 1")
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(ValueError, match="built from a different index"):
+        LocalEdgarSearch(index, max_end_date="2030-01-01")
+
+
+def test_large_index_without_a_sidecar_is_rejected(tmp_path: Path, monkeypatch) -> None:
+    index = _varied_index(tmp_path / "index.sqlite")
+    monkeypatch.setattr(local_edgar_search, "SLOW_METADATA_LIMIT_BYTES", 1)
+
+    with pytest.raises(ValueError, match="no\nmetadata sidecar|no metadata sidecar"):
+        LocalEdgarSearch(index, max_end_date="2030-01-01")
+
+    build(index, default_sidecar_path(index))
+    assert LocalEdgarSearch(index, max_end_date="2030-01-01").uses_metadata_sidecar
+
+
+def test_server_refuses_to_boot_when_the_sidecar_is_required(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(local_edgar_search, "SLOW_METADATA_LIMIT_BYTES", 1)
+    config = _server_config(
+        tmp_path,
+        local_edgar_index_path=str(_index(tmp_path / "index.sqlite")),
+    )
+
+    # Must fail the whole server, not degrade edgar_search to unavailable.
+    with pytest.raises(ValidationError, match="no metadata sidecar"):
+        FinanceAgentResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def test_index_missing_a_metadata_column_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "index.sqlite"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE documents (
+            id INTEGER PRIMARY KEY,
+            cik TEXT NOT NULL,
+            body TEXT NOT NULL
+        );
+        CREATE VIRTUAL TABLE documents_fts USING fts5(
+            body,
+            content='documents',
+            content_rowid='id'
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(ValueError, match="missing required columns"):
+        LocalEdgarSearch(path)
+
+
+def test_server_refuses_to_boot_on_a_malformed_index(tmp_path: Path) -> None:
+    path = tmp_path / "index.sqlite"
+    sqlite3.connect(path).close()
+    config = _server_config(tmp_path, local_edgar_index_path=str(path))
+
+    # Must fail the whole server, not degrade edgar_search to unavailable.
+    with pytest.raises(ValidationError, match="missing required tables"):
+        FinanceAgentResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
 @pytest.mark.asyncio

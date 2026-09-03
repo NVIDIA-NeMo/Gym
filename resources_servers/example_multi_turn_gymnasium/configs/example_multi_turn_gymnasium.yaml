@@ -1,6 +1,7 @@
 example_multi_turn_gymnasium:
   resources_servers:
     example_multi_turn_gymnasium:
+      allowed_agents: [gymnasium_agent]
       entrypoint: app.py
       domain: knowledge
       description: Example multi-turn environment using Gymnasium

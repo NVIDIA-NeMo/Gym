@@ -25,11 +25,12 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import yaml
 from fastapi.testclient import TestClient
+from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
 )
@@ -63,8 +64,21 @@ _POLICY_FIELDS = ("no_tool_call_nudge", "max_time_seconds", "abort_on_tool_error
 
 
 def _shipped_block(instance: str) -> dict:
-    config = yaml.safe_load(_SHIPPED_CONFIGS[instance].read_text())
-    return config[instance]["responses_api_agents"]["finance_agent"]
+    """The agent block as the server starts with it. Resolved rather than read straight from the
+    file, because a profile may pull shared fields in through `config_paths`."""
+    initial = OmegaConf.merge(
+        GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+        {"config_paths": [str(_SHIPPED_CONFIGS[instance])]},
+    )
+    resolved = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=initial,
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    return OmegaConf.to_container(resolved[instance]["responses_api_agents"]["finance_agent"], resolve=True)
 
 
 def _shipped_policy(instance: str) -> dict:

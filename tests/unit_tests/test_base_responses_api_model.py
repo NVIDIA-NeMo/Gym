@@ -18,9 +18,10 @@ from unittest.mock import MagicMock
 
 import orjson
 import pytest
-from fastapi import Body, FastAPI
+from fastapi import Body, FastAPI, Response
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
+from pydantic import BaseModel
 
 from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import (
@@ -29,6 +30,7 @@ from nemo_gym.base_responses_api_model import (
     CaptureStore,
     ModelCallCaptureConfig,
     SimpleResponsesAPIModel,
+    _orjson_dispatch_response,
     build_model_call_record,
     install_model_call_capture,
     make_capture_store,
@@ -66,6 +68,32 @@ class TestBaseResponsesAPIModel:
         server_client.global_config_dict = {}
         model = TestSimpleResponsesAPIModel(config=config, server_client=server_client)
         model.setup_webserver()
+
+
+class _DispatchPayload(BaseModel):
+    text: str
+    token_ids: list[int]
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ({"text": "café", "token_ids": [1, 2, 3]}, {"text": "café", "token_ids": [1, 2, 3]}),
+        (_DispatchPayload(text="café", token_ids=[1, 2, 3]), {"text": "café", "token_ids": [1, 2, 3]}),
+    ],
+)
+def test_orjson_dispatch_response_serializes_json(content, expected):
+    response = _orjson_dispatch_response(content)
+
+    assert type(response) is Response
+    assert response.body == orjson.dumps(expected)
+    assert response.headers["content-type"] == "application/json"
+
+
+def test_orjson_dispatch_response_preserves_existing_response():
+    existing_response = Response(content=b"already encoded", media_type="application/octet-stream", status_code=202)
+
+    assert _orjson_dispatch_response(existing_response) is existing_response
 
 
 def _capture_config(tmp_path, *, enabled: bool = True) -> ModelCallCaptureConfig:
@@ -408,6 +436,62 @@ def test_raised_call_is_captured_then_reraised(tmp_path):
     assert calls[0].latency_ttft_ms is None  # nothing streamed before the raise
 
 
+def test_cancelled_call_is_captured_then_reraised(tmp_path):
+    import asyncio
+
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+
+    store = CaptureStore(tmp_path)
+    seen_paths: list[str] = []
+
+    async def run_cancelled_request() -> None:
+        request_read = asyncio.Event()
+
+        async def app(scope, receive, send) -> None:
+            del send
+            seen_paths.append(scope["path"])
+            message = await receive()
+            assert message["body"] == b'{"input":"x"}'
+            request_read.set()
+            await asyncio.sleep(3600)
+
+        async def receive() -> dict:
+            return {"type": "http.request", "body": b'{"input":"x"}', "more_body": False}
+
+        async def send(_message: dict) -> None:
+            pass
+
+        task = asyncio.create_task(
+            _CaptureMiddleware(app, store=store, model_server_name="srv")(
+                {
+                    "type": "http",
+                    "path": "/ng-rollout/r-cancel/v1/responses",
+                    "raw_path": b"/ng-rollout/r-cancel/v1/responses",
+                    "headers": [],
+                },
+                receive,
+                send,
+            )
+        )
+        await request_read.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run_cancelled_request())
+
+    assert seen_paths == ["/v1/responses"]
+    [exchange] = store.read("r-cancel")
+    assert exchange["request"] == {"input": "x"}
+    assert exchange["response"] is None
+    assert exchange["status_code"] is None
+    assert exchange["error_category"] == "cancelled"
+
+    [call] = read_model_call_records(store, "r-cancel")
+    assert call.error_category == "cancelled"
+    assert call.response is None
+
+
 def test_raised_upstream_error_preserves_status_and_body(tmp_path):
     class UpstreamError(RuntimeError):
         response = SimpleNamespace(status_code=403, content=b'{"error":{"message":"denied"}}')
@@ -560,6 +644,7 @@ def test_classify_exception_branches():
     class _ReadTimeout(Exception):
         pass
 
+    assert _classify_exception(asyncio.CancelledError()) == "cancelled"
     assert _classify_exception(asyncio.TimeoutError()) == "timeout"
     assert _classify_exception(_ReadTimeout()) == "timeout"  # name contains "timeout"
     assert _classify_exception(ConnectionError()) == "connection"  # name contains "conn"
@@ -611,6 +696,18 @@ def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, 
     assert model_call_capture_dirs_from_config({}) == []
     nested_config = {"policy_model": {"responses_api_models": {"model": {"observability_enabled": True}}}}
     assert model_call_capture_dirs_from_config(nested_config) == []
+
+
+def test_observability_enabled_from_config(tmp_path):
+    from nemo_gym.base_responses_api_model import observability_enabled_from_config
+
+    assert observability_enabled_from_config({}) is False
+
+    global_config = OmegaConf.create({"observability_enabled": True, "model_call_capture_dir": str(tmp_path)})
+    assert observability_enabled_from_config(global_config) is True
+
+    with pytest.raises(ValueError, match="required"):
+        observability_enabled_from_config({"observability_enabled": True})
 
 
 def test_make_capture_store_init_failure_returns_none(monkeypatch):

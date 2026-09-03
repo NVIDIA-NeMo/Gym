@@ -1,0 +1,91 @@
+# LMArena proxy v3 configuration.
+lmarena_v3:
+  resources_servers:
+    arena:
+      entrypoint: app.py
+      num_workers: null
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 32768
+        temperature: 0.0
+      domain: rlhf
+      verified: false
+      description: "LMArena proxy v3 chat evaluation benchmark"
+      value: Measure general chat quality via win rate against baseline responses
+      max_rollout_failure_rate: 0.01
+      judge_concurrency: 16
+      generation_only: false
+      policy_model_aliases: []
+      # Weak and strong win labels, if emitted, receive the same weight in v3.
+      verdict_weight: 1
+      score_both_bad_as_tie: true
+      style_control_method: reference_length
+      style_length_ratio_range: [0.5, 1.75]
+      style_short_reference_max_tokens: 100
+      style_short_response_max_tokens: 175
+      judge_timeout_secs: 1800
+      tokenizer_model: gpt-4o
+      bootstrap_rounds: 100
+      bootstrap_seed: 42
+      judge_prompt_template: "<|Conversation History|>\n{question}\n\n<|The Start of Assistant A's Answer|>\n{answer_a}\n<|The End of Assistant A's Answer|>\n\n<|The Start of Assistant B's Answer|>\n{answer_b}\n<|The End of Assistant B's Answer|>"
+      judge_system_message: |-
+        Please act as an impartial judge and evaluate the quality of the responses provided by two AI assistants to the user conversation displayed below. You will be given assistant A's answer and assistant B's answer. Your job is to evaluate which assistant's answer is better.
+
+        Begin your evaluation by generating your own last answer to the conversation. You must provide your answers before judging any answers.
+
+        When evaluating the assistants' answers, compare both assistants' answers with your answer. You must identify and correct any mistakes or inaccurate information.
+
+        Then consider if the assistant's answers are helpful, relevant, and concise. Helpful means the answer correctly responds to the prompt or follows the instructions. Note when user prompt has any ambiguity or more than one interpretation, it is more helpful and appropriate to ask for clarifications or more information from the user than providing an answer based on assumptions. Relevant means all parts of the response closely connect or are appropriate to what is being asked. Concise means the response is clear and not verbose or excessive.
+
+        Then consider the creativity and novelty of the assistant's answers when needed. Finally, identify any missing important information in the assistants' answers that would be beneficial to include when responding to the user prompt.
+
+        If neither assistant's answer adequately addresses the user prompt, you should judge both as bad rather than selecting a winner.
+
+        After providing your explanation, you must output only one of the following choices as your final verdict with a label:
+
+        1. Assistant A is better: [[A>>B]]
+        2. Tie, relatively the same: [[A=B]]
+        3. Assistant B is better: [[B>>A]]
+        4. Both assistant answers are bad: [[BB]]
+
+        Example output: "My final verdict is tie: [[A=B]]".
+      judge_system_message_by_category: {}
+      style_norm_mean: null
+      style_norm_std: null
+      style_coefs: null
+
+lmarena_v3_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: lmarena_v3
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: validation
+        type: validation
+        jsonl_fpath: benchmarks/lmarena_v3/data/lmarena_v3_validation.jsonl
+        gitlab_identifier:
+          dataset_name: lmarena_v3
+          version: 0.0.1
+          artifact_fpath: lmarena_v3_validation.jsonl
+        license: TBD
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/arena/data/example.jsonl
+
+judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: https://inference-api.nvidia.com/v1
+      api_key: YOUR_JUDGE_API_KEY
+      model: gcp/google/gemini-3.1-pro-preview
+      return_token_id_information: false
+      uses_reasoning_parser: false

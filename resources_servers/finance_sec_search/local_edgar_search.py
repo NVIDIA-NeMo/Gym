@@ -45,6 +45,11 @@ SIDECAR_ALIAS = "meta"
 SIDECAR_TABLE = f"{SIDECAR_ALIAS}.documents_meta"
 FINGERPRINT_SAMPLES = 64
 
+# Above this size, serving result metadata out of a table that also stores filing
+# text is slow enough that a rollout reads it as a hang, so it is refused rather
+# than allowed to degrade quietly. Small indexes pay no meaningful penalty.
+SLOW_METADATA_LIMIT_BYTES = 1 << 30
+
 # Mirrored into the sidecar so that swapping the metadata source leaves every
 # column name the search query references unchanged.
 METADATA_COLUMNS = (
@@ -237,8 +242,9 @@ class LocalEdgarSearch:
         self.index_path = Path(index_path)
         if not self.index_path.is_file():
             raise FileNotFoundError(f"Local EDGAR index not found: {self.index_path}")
-        self._validate_index()
+        self._document_columns = self._validate_index()
         self.metadata_path = self._resolve_metadata_path(metadata_path)
+        self._require_usable_metadata_source()
         self.max_end_date = _date_value("max_end_date", max_end_date)
         self.metrics_path: Path | None = None
         self._metrics_lock = threading.Lock()
@@ -264,8 +270,7 @@ class LocalEdgarSearch:
             candidate = default_sidecar_path(self.index_path)
             if not candidate.is_file():
                 logger.info(
-                    "No metadata sidecar at %s — searches will read filing metadata from "
-                    "the full-text index, which is substantially slower",
+                    "No metadata sidecar at %s — searches will read filing metadata from the index's documents table",
                     candidate,
                 )
                 return None
@@ -343,19 +348,42 @@ class LocalEdgarSearch:
             connection.close()
             self._local.connection = None
 
-    def _validate_index(self) -> None:
+    def _validate_index(self) -> frozenset[str]:
         connection = self._connect()
         try:
             tables = {
                 str(row[0])
                 for row in connection.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')")
             }
+            required = {"documents", "documents_fts"}
+            missing = sorted(required - tables)
+            if missing:
+                raise ValueError("Local EDGAR index is missing required tables: " + ", ".join(missing))
+            columns = frozenset(str(row[1]) for row in connection.execute("PRAGMA table_info(documents)"))
         finally:
             connection.close()
-        required = {"documents", "documents_fts"}
-        missing = sorted(required - tables)
-        if missing:
-            raise ValueError("Local EDGAR index is missing required tables: " + ", ".join(missing))
+
+        # Checked here rather than left to the first search, which would surface
+        # a missing column as a failed rollout instead of a failed startup.
+        absent = sorted(column for column in METADATA_COLUMNS if column not in columns)
+        if absent:
+            raise ValueError(
+                f"Local EDGAR index {self.index_path} table documents is missing required columns: {', '.join(absent)}"
+            )
+        return columns
+
+    def _require_usable_metadata_source(self) -> None:
+        if self.metadata_path is not None or "body" not in self._document_columns:
+            return
+        if self.index_path.stat().st_size < SLOW_METADATA_LIMIT_BYTES:
+            return
+        raise ValueError(
+            f"Local EDGAR index {self.index_path} stores filing text in documents and has no "
+            f"metadata sidecar, so every search would read filing text to return metadata. "
+            f"Build one with 'python resources_servers/finance_sec_search/scripts/"
+            f"build_local_edgar_metadata.py --index {self.index_path}', or point "
+            f"local_edgar_metadata_path at it if it is stored elsewhere."
+        )
 
     def search(
         self,

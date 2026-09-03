@@ -106,8 +106,8 @@ gym env start \
 # First run is slow. Use skip_venv_if_present config or place a .venv to skip venv creation.
 gym env test --resources-server example_single_tool_call
 
-# Run all server tests
-gym env test
+# Run all server tests (slow: one venv per server, so it needs an explicit opt-in)
+gym env test --all
 
 # Run core library unit tests
 pytest tests/unit_tests/ -x

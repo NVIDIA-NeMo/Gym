@@ -16,10 +16,12 @@ reports itself unavailable and the rest of the server works normally.
 | File | Required | Purpose |
 |------|----------|---------|
 | `<index>.sqlite` | yes | Filing text and metadata |
-| `<index>.sqlite.metadata` | no | Metadata-only copy that makes searches fast |
+| `<index>.sqlite.metadata` | for any index over 1 GB | Metadata-only copy that makes searches fast |
 
 The sidecar is found automatically when it sits beside the index with a
-`.metadata` suffix. See [Metadata sidecar](#metadata-sidecar).
+`.metadata` suffix, so **copy the two together**. A large index without one is a
+startup error rather than a slow server. See
+[Metadata sidecar](#metadata-sidecar) and [Startup checks](#startup-checks).
 
 ## Index schema
 
@@ -113,13 +115,42 @@ metadata. To prevent that, the sidecar records the document count and a
 fingerprint sampled from the index it came from, and the server refuses to start
 against an index that does not match.
 
+### Why a separate file rather than a second table
+
+Holding the metadata in its own table inside the index, with `body` moved to a
+table of its own and `content=` pointed at that, looks like the same fix without
+a second file. It was measured on a 27.7 GB corpus and is slower wherever it
+matters: comparable below 8 concurrent readers, then falling behind to about
+1.4x the latency, with a search throughput ceiling roughly 16% lower.
+
+What the sidecar buys is a small file that many concurrent readers keep resident
+in the page cache, and a narrow table sharing an inode with tens of gigabytes of
+filing text does not reproduce that. If you are tempted to fold the sidecar into
+the index to simplify the artifact story, measure under your real rollout
+concurrency first — the single-process numbers point the other way.
+
 ## Startup checks
 
-When `local_edgar_index_path` is set, the server verifies the index has the
-required tables, and, if a sidecar is present, that its schema version,
-document count and fingerprint match the index. A configured-but-unusable
-sidecar is a startup error rather than a silent fallback, because searches
-would still be correct without it but orders of magnitude slower.
+When `local_edgar_index_path` is set, the server verifies that:
+
+- `documents` and `documents_fts` exist, and `documents` has every column a
+  result needs — so a near-miss schema fails at startup instead of on the first
+  search, mid-rollout
+- a sidecar, if present, matches the index on schema version, document count and
+  fingerprint
+- the index is not larger than 1 GB while storing filing text in `documents`
+  with no sidecar available
+
+That last check is the one to know about. Searches remain correct without a
+sidecar, but on a large corpus each one reads filing text to return metadata,
+which costs tens of seconds and a rollout experiences as a hang rather than an
+error. Refusing to start turns a silent slowdown into an obvious misconfiguration
+— the common cause being an index copied to a new machine without its sidecar.
+Small indexes are exempt because the penalty scales with the corpus, and an index
+whose `documents` table holds no `body` needs no sidecar at all.
+
+A configured-but-missing `local_edgar_metadata_path` is always an error,
+whatever the size.
 
 ## Obtaining an index
 

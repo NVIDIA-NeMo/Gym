@@ -30,7 +30,12 @@ from nemo_gym.environment.manifest import (
     dump_manifest,
     load_manifest,
 )
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.global_config import (
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+    dataset_agent_pins,
+    resolve_dataset_agent,
+)
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 
 
@@ -144,6 +149,20 @@ def _select_dataset_agent(agents: list[Any]) -> Any:
     )
 
 
+def _resolve_dataset_owner_agent(resolved: DictConfig, owner_instance_name: str) -> str:
+    """The agent rollout dispatch routes ``owner_instance_name``'s datasets to (validation-time check)."""
+    pins = dataset_agent_pins(resolved, owner_instance_name)
+    if len(pins) > 1:
+        raise EnvironmentValidationError(
+            f"Datasets on {owner_instance_name!r} pin conflicting agents ({sorted(pins)}); rows route by the "
+            "declaring instance alone, so all pins on one instance must agree."
+        )
+    try:
+        return resolve_dataset_agent(resolved, owner_instance_name, pin=pins[0] if pins else None)
+    except ConfigError as e:
+        raise EnvironmentValidationError(f"Datasets on {owner_instance_name!r}: {e}") from e
+
+
 def _resolve_manifest_composition(config_path: Path) -> ResolvedComposition:
     """Resolve manifest wiring without probing or materializing runtime services."""
     initial = OmegaConf.merge(
@@ -163,17 +182,46 @@ def _resolve_manifest_composition(config_path: Path) -> ResolvedComposition:
     servers = parser.filter_for_server_instance_configs(resolved)
     by_instance = {server.name: server for server in servers}
     agents = [server for server in servers if server.SERVER_TYPE == "responses_api_agents"]
-    selected_agent = _select_dataset_agent(agents)
+
+    # Datasets may live on a resources server (decoupled layout) or on an agent (legacy and
+    # self-contained layouts). The agent is resolved by `resolve_dataset_agent` — the same
+    # resolver rollout dispatch uses — so a config that validates is a config that routes.
+    rs_with_data = [s for s in servers if s.SERVER_TYPE == "resources_servers" and s.datasets]
+    dataset_rs = None
+    if len(rs_with_data) > 1:
+        names = ", ".join(s.name for s in rs_with_data)
+        raise EnvironmentValidationError(
+            f"Workload config must define exactly one dataset-bearing instance; found resources servers: {names}."
+        )
+    if rs_with_data:
+        dataset_rs = rs_with_data[0]
+        agent_name = _resolve_dataset_owner_agent(resolved, dataset_rs.name)
+        selected_agent = by_instance.get(agent_name)
+        if selected_agent is None:
+            raise EnvironmentValidationError(
+                f"Datasets on {dataset_rs.name!r} route to agent {agent_name!r}, which is not defined in the config."
+            )
+    else:
+        selected_agent = _select_dataset_agent(agents)
+        # Rejects an `agent:` pin naming anyone but the declaring agent (dispatch would ignore it).
+        _resolve_dataset_owner_agent(resolved, selected_agent.name)
 
     agent_server = _implementation_name(selected_agent)
     agent_config = selected_agent.get_inner_run_server_config_dict()
     resources_ref = agent_config.get("resources_server") or {}
     model_ref = agent_config.get("model_server") or {}
-    resources_instance = by_instance.get(resources_ref.get("name")) if isinstance(resources_ref, DictConfig) else None
+    resources_instance = (
+        dataset_rs
+        if dataset_rs is not None
+        else by_instance.get(resources_ref.get("name"))
+        if isinstance(resources_ref, DictConfig)
+        else None
+    )
 
     resources_server = _implementation_name(resources_instance) if resources_instance is not None else None
     model_server = model_ref.get("name") if isinstance(model_ref, DictConfig) else None
-    datasets = tuple(_manifest_dataset(dataset) for dataset in (selected_agent.datasets or []))
+    dataset_owner = dataset_rs if dataset_rs is not None else selected_agent
+    datasets = tuple(_manifest_dataset(dataset) for dataset in (dataset_owner.datasets or []))
     grading_mode = None
     if resources_instance is not None:
         grading_mode = resources_instance.get_inner_run_server_config_dict().get("grading_mode")

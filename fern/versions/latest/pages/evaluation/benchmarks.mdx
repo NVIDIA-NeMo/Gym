@@ -37,8 +37,11 @@ aime24_math_with_judge_simple_agent:
 Use the CLI to browse what's available before running:
 
 ```bash
-# List all benchmarks with domain and repeat count
+# List all benchmarks with domain and description
 gym list benchmarks
+
+# Inspect one benchmark, including its agent harness
+gym list benchmarks aime24
 
 # Filter to a capability area
 gym search benchmarks math
@@ -66,7 +69,7 @@ For external benchmarks, reproduce the original reported numbers outside Gym bef
 
 ## Benchmark Categories
 
-NeMo Gym includes 80+ benchmarks across six categories. Use `gym list benchmarks` to browse the full list with domains and repeat counts.
+NeMo Gym includes 80+ benchmarks across six categories. Use `gym list benchmarks` to browse the full list with domains and descriptions.
 
 **Math & Science**
 AIME, IMO, formal proofs (Lean4), physics (critpt, ugphysics), chemistry (ether0, BunsenBench), FrontierScience, and multilingual math. Verification ranges from exact match and math-verify to LLM judges for open-ended proofs.

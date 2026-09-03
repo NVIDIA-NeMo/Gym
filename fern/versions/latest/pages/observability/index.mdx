@@ -1,0 +1,104 @@
+---
+title: "Observability"
+description: ""
+position: 1
+---
+NeMo Gym can emit OpenTelemetry traces, metrics, and logs through
+[nemo-lens](https://github.com/NVIDIA-NeMo/Lens), the shared instrumentation library for
+the NVIDIA NeMo ecosystem. Telemetry is optional and off by default.
+
+## Why This Exists
+
+A single rollout crosses several NeMo Gym processes. The agent server calls the model
+server, and both call the resources server. Each is a separate FastAPI process with its
+own logs, so answering "where did this rollout spend its time?" has meant reading three
+log files side by side and matching timestamps.
+
+With telemetry enabled, one rollout produces **one distributed trace**. Every hop appears
+as a nested span with the correct parent, so the timeline reads top to bottom:
+
+```
+gym.rollout                         agent server     4.21s
+└─ HTTP POST                        agent server     3.86s
+   └─ POST /v1/responses            model server     3.84s
+      └─ gym.model.responses        model server     3.83s
+└─ HTTP POST                        agent server     0.31s
+   └─ POST /verify                  resources server 0.30s
+      └─ gym.verify                 resources server 0.29s
+```
+
+This is *application* telemetry: where time goes, what failed, and how a configuration
+behaves on hardware you do not control. It does not replace Weights & Biases or MLflow,
+which track *experiment* telemetry such as reward and accuracy. The two answer different
+questions, and NeMo Gym keeps them separate. See [Metrics](/observability/metrics).
+
+## Quick Start
+
+Install the extra and turn telemetry on:
+
+```bash
+uv sync --extra dev --extra telemetry
+```
+
+```bash
+NEMO_LENS_ENABLED=1 NEMO_GYM_OTEL_EXPORTER=console \
+gym env start --resources-server example_single_tool_call --model-type vllm_model
+```
+
+Every server process now writes one JSON object per line to its stdout. To read the trace,
+collect the output and group it by `trace_id`:
+
+```bash
+grep -h '"trace_id"' *.log | jq -r '"\(.trace_id) \(.name)"' | sort
+```
+
+To send telemetry to a collector instead, set an OTLP endpoint:
+
+```bash
+NEMO_LENS_ENABLED=1 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+gym env start --resources-server example_single_tool_call --model-type vllm_model
+```
+
+## What You Get
+
+| Signal | Contents |
+| --- | --- |
+| Traces | One trace per rollout, spanning the agent, model, and resources server processes |
+| Metrics | Rollout and verification durations, verification success rate, active server count, and the `http.server.*` metrics from FastAPI auto-instrumentation |
+| Logs | Optional. Python log records exported with trace correlation |
+
+## Cost When Disabled
+
+Telemetry is off unless you enable it, and a disabled instrumentation site costs a single
+frozenset membership test. NeMo Gym runs at 16k+ concurrency, so every instrumentation
+site checks whether its span group is enabled before it does anything else, including
+building attributes and importing modules.
+
+If `nemo-lens` is not installed at all, NeMo Gym imports and runs exactly as it does
+without this feature. There is no import error and no missing attribute.
+
+## Next Steps
+
+<Cards>
+
+<Card title="Configuration" href="/observability/configuration">
+The `telemetry:` config block, environment variables, and exporters.
+</Card>
+
+<Card title="Distributed Tracing" href="/observability/distributed-tracing">
+How one rollout becomes one trace across several server processes.
+</Card>
+
+<Card title="Span Groups" href="/observability/span-groups">
+Control which spans exist, and how much a trace costs.
+</Card>
+
+<Card title="Metrics" href="/observability/metrics">
+Which metrics NeMo Gym emits, and which it deliberately does not.
+</Card>
+
+<Card title="Extending" href="/observability/extending">
+Add spans to your own resources server, agent, or model server.
+</Card>
+
+</Cards>

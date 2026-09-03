@@ -1472,13 +1472,16 @@ async def test_pty_exec_on_existing_session() -> None:
     session = _LiveShellSession(stderr=[b"warn\r\n"], rc=7)
     result = await sandbox.pty.exec("make all", session=session)
     assert result.return_code == 7
-    assert "live-output" in result.stdout
+    # Echoed input, prompts, and the marker lines must all be stripped: the
+    # slice between the start and status markers is the command output alone.
+    assert result.stdout == "live-output\r\n"
     assert result.stderr == "warn\r\n"
-    # The marker must not be matchable from the shell's echo of the typed line.
+    # Neither marker may be matchable from the shell's echo of the typed lines.
     typed = session.written[0].decode()
-    quoted = typed.split("'")
-    token = quoted[3] + quoted[5]
-    assert f"{token}:" not in typed
+    lines = typed.splitlines()
+    start_quoted, end_quoted = lines[0].split("'"), lines[-2].split("'")
+    assert start_quoted[3] + start_quoted[5] not in typed
+    assert f"{end_quoted[3] + end_quoted[5]}:" not in typed
     # The session's stdin never reaches EOF, so the command group must run
     # with stdin redirected or a stdin-reading command blocks forever.
     assert "</dev/null" in typed
@@ -1509,9 +1512,16 @@ class _LiveShellSession:
         if self._die or self._hang:
             return
         typed = data.decode()
-        quoted = typed.splitlines()[-1].split("'")
+        quoted = typed.splitlines()[-2].split("'")
         token = quoted[3] + quoted[5]
-        self._pending = [typed.encode(), b"live-output\r\n", f"{token}:{self._rc}\r\n".encode()]
+        # Echo of all typed lines, then the start marker, output, end marker —
+        # the order a real shell produces for the brace-group discipline.
+        self._pending = [
+            typed.encode(),
+            f"{token}S\r\n".encode(),
+            b"live-output\r\n",
+            f"{token}:{self._rc}\r\n".encode(),
+        ]
 
     async def read(self, *, timeout_s: float | None = None) -> bytes:
         if self._hang:
@@ -1699,7 +1709,7 @@ async def test_pty_exec_marker_edges() -> None:
             self.closed = False
 
         async def write(self, data: bytes) -> None:
-            quoted = data.decode().split("'")
+            quoted = data.decode().splitlines()[-2].split("'")
             token = quoted[3] + quoted[5]
             line = f"{token}:{self._reply}\r\n".encode()
             self._chunks = [line[:8], line[8:]] if self._split else [line]
