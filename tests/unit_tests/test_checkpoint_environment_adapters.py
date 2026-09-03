@@ -23,6 +23,7 @@ from nemo_gym._checkpoint import ResourceSnapshot
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.server_utils import ServerClient
 from resources_servers.blackjack.app import BlackjackEnv
+from resources_servers.example_multi_turn_gymnasium.app import ExampleMultiTurnEnv
 from resources_servers.example_session_state_mgmt.app import (
     StatefulCounterResourcesServer,
     StatefulCounterResourcesServerConfig,
@@ -57,19 +58,39 @@ async def test_counter_restores_under_replacement_attempt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_counter_retire_removes_mapping_state_and_keeps_tombstone() -> None:
+    server = _server(StatefulCounterResourcesServer, StatefulCounterResourcesServerConfig)
+    server.execution_to_session[("rollout-a", 0)] = "session-a"
+    server.session_id_to_counter["session-a"] = 17
+    participant = server.checkpoint_participant()
+    participant.bind("rollout-a", 0)
+
+    await participant.retire_execution("rollout-a", 0)
+
+    assert ("rollout-a", 0) not in server.execution_to_session
+    assert "session-a" not in server.session_id_to_counter
+    assert participant.is_tombstoned("rollout-a", 0)
+    assert participant.status()["lock_entries"] == 0
+
+
+@pytest.mark.asyncio
 async def test_workplace_restores_every_dataframe_before_activation() -> None:
     server = _server(WorkbenchResourcesServer, WorkbenchResourcesServerConfig)
     server.execution_to_session[("rollout-a", 0)] = "session-a"
     server.session_id_to_tool_env["session-a"] = get_tools(_TOOLKITS)
     state = await server.export_checkpoint_state("rollout-a", 0)
+    snapshot = ResourceSnapshot(rollout_id="rollout-a", attempt_index=1, state_revision=2, state=state)
+    snapshot = ResourceSnapshot.model_validate_json(snapshot.model_dump_json())
 
-    await server.restore_checkpoint_states(
-        [ResourceSnapshot(rollout_id="rollout-a", attempt_index=1, state_revision=2, state=state)]
-    )
+    await server.restore_checkpoint_states([snapshot])
     restored = server.session_id_to_tool_env[server.execution_to_session[("rollout-a", 1)]]
     for name, frames in state["containers"].items():
         for attribute, payload in frames.items():
-            assert getattr(restored["containers"][name], attribute).to_json(orient="split") == payload
+            original = server.session_id_to_tool_env["session-a"]["containers"][name]
+            restored_frame = getattr(restored["containers"][name], attribute)
+            original_frame = getattr(original, attribute)
+            assert restored_frame.equals(original_frame)
+            assert type(restored_frame.index) is type(original_frame.index)
 
 
 @pytest.mark.asyncio
@@ -86,3 +107,17 @@ async def test_blackjack_restores_rng_position() -> None:
     )
     restored = server.session_state[server.execution_to_session[("rollout-a", 1)]]
     assert restored["rng"].choice(["2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A"]) == expected_next
+
+
+def test_gymnasium_checkpoint_continuation_is_per_subclass_opt_in() -> None:
+    assert _server(BlackjackEnv, BaseResourcesServerConfig).checkpoint_state_enabled()
+    assert not _server(ExampleMultiTurnEnv, BaseResourcesServerConfig).checkpoint_state_enabled()
+
+
+def test_checkpoint_route_classification_defaults_unknown_posts_to_mutation() -> None:
+    server = _server(StatefulCounterResourcesServer, StatefulCounterResourcesServerConfig)
+    assert server.checkpoint_route_kind("/get_counter_value", "POST") == "read"
+    assert server.checkpoint_route_kind("/new_stateful_tool", "POST") == "mutation"
+    assert server.checkpoint_route_kind("/aggregate_metrics", "POST") is None
+    assert server.checkpoint_route_kind("/ng-control/v1/custom", "POST") is None
+    assert server.checkpoint_route_kind("/mcp", "POST") is None
