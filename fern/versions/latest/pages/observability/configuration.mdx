@@ -42,6 +42,8 @@ telemetry:
 | `run_id` | generated | Correlates every process of one run. |
 | `cpu_sampling_enabled` | `false` | Sample process CPU at span boundaries; emits `gym.process.cpu.percent` and a `nemo.gym.cpu.percent` span attribute. See [Metrics](/observability/metrics). |
 | `cpu_min_resample_interval_s` | `1.0` | Minimum seconds between real CPU reads; a span closing sooner reuses the last cached reading. |
+| `gpu_sampling_enabled` | `false` | Sample process GPU utilization/memory on a background thread; emits `gym.process.gpu.*` gauges. See [Metrics](/observability/metrics). |
+| `gpu_sample_interval_s` | `10.0` | Seconds between `nvidia-smi` polls on the background GPU sampler. |
 
 ### Why `service_name_per_server` Defaults to True
 

@@ -78,6 +78,13 @@ _INIT_LOCK = threading.Lock()
 _CPU_SAMPLING_ENABLED = False
 _CPU_MIN_RESAMPLE_INTERVAL_S = 1.0
 
+#: Same caching rationale as the CPU pair above, though GPU sampling itself runs on a
+#: background thread rather than at a per-request hot-path call site — these are cached
+#: for symmetry and so tests can assert resolved config without reaching into
+#: `nemo_gym.telemetry.gpu` internals.
+_GPU_SAMPLING_ENABLED = False
+_GPU_SAMPLE_INTERVAL_S = 10.0
+
 #: ``NemoLensConfig.from_env`` reads ``NEMO_GYM_OTEL_<KEY>`` first, then ``NEMO_LENS_<KEY>``.
 #: The fallback is what makes the documented ``NEMO_LENS_ENABLED=1`` work unchanged.
 _OTEL_PREFIX = "NEMO_GYM_OTEL"
@@ -112,6 +119,8 @@ _ENV_FIELD_MAP = {
     "instrument_aiohttp": f"{_OTEL_PREFIX}_INSTRUMENT_AIOHTTP",
     "cpu_sampling_enabled": f"{_OTEL_PREFIX}_CPU_SAMPLING_ENABLED",
     "cpu_min_resample_interval_s": f"{_OTEL_PREFIX}_CPU_MIN_RESAMPLE_INTERVAL_S",
+    "gpu_sampling_enabled": f"{_OTEL_PREFIX}_GPU_SAMPLING_ENABLED",
+    "gpu_sample_interval_s": f"{_OTEL_PREFIX}_GPU_SAMPLE_INTERVAL_S",
 }
 
 #: OTLP destination fields -> the standard (unprefixed) OTel SDK env vars they configure.
@@ -237,6 +246,23 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
         run_id = os.environ.get("SLURM_JOB_ID", "").strip() or uuid4().hex[:12]
         os.environ[f"{_OTEL_PREFIX}_RUN_ID"] = run_id
     return run_id
+
+
+def telemetry_env_snapshot() -> dict:
+    """Currently-set telemetry env vars in this process, for propagation into a child
+    that does not inherit ``os.environ`` the way a ``Popen``-spawned sibling server
+    does.
+
+    A Gym server process gets its `NEMO_GYM_OTEL_*`/`OTEL_*` config for free: it is
+    spawned via ``Popen``, which copies the parent's environment automatically. A Ray
+    actor is not — Ray's ``runtime_env.env_vars`` is the mechanism this codebase already
+    uses to forward `PYTHONPATH`/`PATH` into an actor
+    (``responses_api_models/local_vllm_model/app.py``), and telemetry env vars need the
+    identical treatment: read them here in the launching process, merge the result into
+    that same ``runtime_env.env_vars`` dict.
+    """
+    prefixes = (f"{_OTEL_PREFIX}_", f"{_OTEL_FALLBACK_PREFIX}_", "OTEL_")
+    return {key: value for key, value in os.environ.items() if key.startswith(prefixes)}
 
 
 #: Packages a Gym server process needs in order to export telemetry. `nemo-lens[sdk]`
@@ -425,6 +451,10 @@ def init_telemetry(
             if physical_count is not None:
                 attrs["nemo.gym.host.cpu_count_physical"] = physical_count
 
+        global _GPU_SAMPLING_ENABLED, _GPU_SAMPLE_INTERVAL_S
+        _GPU_SAMPLING_ENABLED = _env_flag(_ENV_FIELD_MAP["gpu_sampling_enabled"], False)
+        _GPU_SAMPLE_INTERVAL_S = _env_float(_ENV_FIELD_MAP["gpu_sample_interval_s"], 10.0)
+
         try:
             handle = setup_telemetry(config, rank=rank, world_size=world_size, resource_attributes=attrs)
         except Exception:
@@ -432,6 +462,11 @@ def init_telemetry(
             return None
 
         _TELEMETRY_HANDLE = handle
+
+        if _GPU_SAMPLING_ENABLED:
+            from nemo_gym.telemetry.gpu import start_gpu_sampler
+
+            start_gpu_sampler(_GPU_SAMPLE_INTERVAL_S)
 
         if config.logs_enabled and handle.is_exporting:
             try:
@@ -474,6 +509,22 @@ def cpu_min_resample_interval_s() -> float:
     return _CPU_MIN_RESAMPLE_INTERVAL_S
 
 
+def is_gpu_sampling_enabled() -> bool:
+    """Whether the background GPU sampler is on in this process. Resolved once in
+    `init_telemetry` and cached, mirroring :func:`is_cpu_sampling_enabled` — though
+    unlike that one, nothing calls this from a per-request hot path (the GPU sampler is
+    fire-and-forget on its own thread), so this getter exists mainly for symmetry and so
+    tests can assert resolved config without reaching into
+    `nemo_gym.telemetry.gpu` internals."""
+    return _GPU_SAMPLING_ENABLED
+
+
+def gpu_sample_interval_s() -> float:
+    """The configured seconds between ``nvidia-smi`` polls. See
+    ``TelemetryConfig.gpu_sample_interval_s``."""
+    return _GPU_SAMPLE_INTERVAL_S
+
+
 def get_telemetry() -> Optional["TelemetryHandle"]:
     """Return this process's telemetry handle, or ``None`` if uninitialised/disabled."""
     return _TELEMETRY_HANDLE
@@ -485,6 +536,13 @@ def shutdown_telemetry(timeout_ms: int = 5000) -> None:
     Idempotent — ``TelemetryHandle.shutdown`` guards against a second call, and Gym
     reaches this from more than one terminal path. Never raises.
     """
+    try:
+        from nemo_gym.telemetry.gpu import stop_gpu_sampler
+
+        stop_gpu_sampler()
+    except Exception:
+        logger.warning("nemo-lens: error stopping the GPU sampler", exc_info=True)
+
     handle = _TELEMETRY_HANDLE
     if handle is None:
         return
@@ -501,7 +559,16 @@ def _reset_for_testing() -> None:
     ``_INITIALISED`` enforces.
     """
     global _TELEMETRY_HANDLE, _INITIALISED, _CPU_SAMPLING_ENABLED, _CPU_MIN_RESAMPLE_INTERVAL_S
+    global _GPU_SAMPLING_ENABLED, _GPU_SAMPLE_INTERVAL_S
     _TELEMETRY_HANDLE = None
     _INITIALISED = False
     _CPU_SAMPLING_ENABLED = False
     _CPU_MIN_RESAMPLE_INTERVAL_S = 1.0
+    _GPU_SAMPLING_ENABLED = False
+    _GPU_SAMPLE_INTERVAL_S = 10.0
+    try:
+        from nemo_gym.telemetry.gpu import _reset_for_testing as _reset_gpu_for_testing
+
+        _reset_gpu_for_testing()
+    except Exception:
+        logger.debug("failed to reset gpu sampler state for testing", exc_info=True)

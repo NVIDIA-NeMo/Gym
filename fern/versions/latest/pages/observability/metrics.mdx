@@ -52,6 +52,9 @@ answers a "what is limiting this run" question the metrics above cannot:
 | `gym.http.timeout_total` | Counter | count | `nemo.gym.http.internal` | `http_client` | Is an outbound HTTP call timing out? |
 | `gym.http.retry_total` | Counter | count | `nemo.gym.http.retry_reason` (`server_disconnected`\|`client_os_error`\|`timeout`\|`other`) | `http_client` | Is Gym's HTTP client retrying, and why? |
 | `gym.process.cpu.percent` | Gauge | % | none — see resource attributes | `telemetry.cpu_sampling_enabled` | Is this process CPU-bound, and which span was running when it spiked? |
+| `gym.process.gpu.utilization_percent` | Gauge | % | `nemo.gym.gpu.index`, `nemo.gym.gpu.uuid` | `telemetry.gpu_sampling_enabled` | Is this GPU busy? |
+| `gym.process.gpu.memory_used_mib` | Gauge | MiB | `nemo.gym.gpu.index`, `nemo.gym.gpu.uuid` | `telemetry.gpu_sampling_enabled` | How much of this GPU's memory is in use? |
+| `gym.process.gpu.memory_total_mib` | Gauge | MiB | `nemo.gym.gpu.index`, `nemo.gym.gpu.uuid` | `telemetry.gpu_sampling_enabled` | How much memory does this GPU have? |
 
 ### Why These Are Attributed and the First Five Are Not
 
@@ -108,24 +111,76 @@ telemetry:
 
 **Reading `gym.process.cpu.percent` on a multi-core node:** `psutil` normalizes to one
 logical core = 100%, so a busy multi-threaded process on a many-core node can legitimately
-read 800%+. Every process that has `cpu_sampling_enabled` on also reports a static
-`nemo.gym.host.cpu_count` resource attribute (read once, not sampled) — divide by
-`100 * nemo.gym.host.cpu_count` for percent-of-node-capacity.
+read 800%+. Every process that has `cpu_sampling_enabled` on also reports static
+`nemo.gym.host.cpu_count_logical` and `nemo.gym.host.cpu_count_physical` resource
+attributes (read once, not sampled — logical includes SMT/hyperthreads, physical does
+not) — divide by `100 * nemo.gym.host.cpu_count_logical` for percent-of-node-capacity,
+since that's the count `psutil`'s own percentage is normalized against.
 
 **Multi-node runs** need no special handling: every span/metric already carries
 `host.name`, `process.pid`, and `service.instance.id` as resource attributes (see
 [Configuration](/observability/configuration)), so each node's processes are
 distinguishable without anything new from this feature.
 
-### Not Yet Covered: Sandbox CPU, Ray Worker CPU, and All Memory
+### Process GPU: a Periodic Background Sample, Not an Exemplar
 
-Process-level CPU for Gym's own server processes (agent/model/resources servers, the
-rollout driver) is covered above. Still unmeasured: CPU *inside* a sandbox/container
-(would need new per-provider work — a `docker stats` read, a cgroup v2 accounting-file
-read — with no existing hook to build on), CPU of Ray worker processes spawned for sandbox
-execution (separate OS processes with their own PID), and memory pressure of any kind.
-`SandboxObservation` (the offline trajectory-capture schema, unrelated to OTel) has
-`cpu_time_s` / `peak_memory_mib` fields, but nothing populates them from a real
+`gym.process.gpu.*` takes the opposite design from CPU, for the opposite reason. CPU is
+sampled inline at span boundaries specifically so a reading can carry an exemplar linking
+it to the exact span that produced it. GPU readings carry **no exemplar** and are
+correlated to a process only through that process's resource attributes — deliberately,
+not as a limitation nobody noticed: for a `local_vllm_model` server, the actual
+GPU-using vLLM engine runs in a *separate Ray actor process* from the one holding Gym's
+spans, which has no span context to link to in the first place. Linking GPU readings to
+spans there would need OTel context propagated across the Ray actor boundary, which does
+not exist today — out of scope here.
+
+Because there is no span-context constraint, GPU sampling runs on an independent
+background thread (`nemo_gym.telemetry.gpu`) polling `nvidia-smi` on its own cadence
+(`gpu_sample_interval_s`, default 10 seconds — far coarser than CPU's 1-second default,
+since every GPU read forks and execs a subprocess rather than reusing a cached handle):
+
+```yaml
+telemetry:
+  gpu_sampling_enabled: true
+  gpu_sample_interval_s: 10.0
+```
+
+`gpu_sampling_enabled` defaults to **off**, same reasoning as `cpu_sampling_enabled`. On
+a process with no visible GPU (a CPU-only agent/resources server, or a node without
+`nvidia-smi` at all), the sampler detects this once, logs at debug, and every later tick
+short-circuits before spawning another subprocess — not a repeating failure.
+
+**GPU attribution filters by `CUDA_VISIBLE_DEVICES`**, mirroring how nemo-lens's own
+`host.gpu.count` resource-attribute detector already reads that variable before falling
+back to `nvidia-smi --query-gpu=count`: a process only reports the GPU indices/UUIDs
+listed in its own `CUDA_VISIBLE_DEVICES`, not every GPU `nvidia-smi` can see on the node.
+When that variable is unset, empty, or unparseable, the sampler falls back to reporting
+everything `nvidia-smi` sees.
+
+**Known caveat for `local_vllm_model` specifically**: its Ray actor
+(`local_vllm_model_actor.py`) deliberately clears `CUDA_VISIBLE_DEVICES` and launches
+with `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1`, so in that actor the filter almost
+always falls back to "report everything." Harmless on a node running exactly one actor;
+over-reports (attributes other actors'/tenants' GPUs to this one) on a node whose GPUs are
+shared across more than one actor or process. This is an inherited limitation of that
+actor's existing GPU-visibility design, not something fixed by this feature.
+
+Since the actor process has no telemetry wiring of its own otherwise, enabling
+`gpu_sampling_enabled` also gives it a distinct `service.name` —
+`nemo-gym/<model-server-name>-vllm-actor` — separate from the outer model-server process
+(which only proxies HTTP and never touches the GPU), joinable by the shared
+`nemo.run.id`.
+
+### Not Yet Covered: Sandbox CPU/GPU, Ray Worker CPU, and All Memory
+
+Process-level CPU and GPU for Gym's own server processes (agent/model/resources servers,
+the rollout driver, and — for GPU — the `local_vllm_model` Ray actor) is covered above.
+Still unmeasured: CPU/GPU usage *inside* a sandbox/container (would need new
+per-provider work — a `docker stats` read, a cgroup v2 accounting-file read — with no
+existing hook to build on), CPU of Ray worker processes spawned for sandbox execution
+(separate OS processes with their own PID), and memory pressure of any kind other than
+GPU memory. `SandboxObservation` (the offline trajectory-capture schema, unrelated to
+OTel) has `cpu_time_s` / `peak_memory_mib` fields, but nothing populates them from a real
 measurement today. All of this is tracked as follow-up work.
 
 ### What `gym.verify.success_rate` Measures

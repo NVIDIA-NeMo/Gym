@@ -225,6 +225,50 @@ def record_process_cpu_percent(value: float) -> None:
     )
 
 
+def record_process_gpu_utilization(value: float, *, index: int, uuid: str) -> None:
+    """One GPU's SM utilization (0-100), sampled periodically via ``nvidia-smi`` on a
+    background thread (see :mod:`nemo_gym.telemetry.gpu`) -- unlike the CPU gauge, this
+    carries no exemplar, since GPU compute often happens in a different process from the
+    one holding the active span. Attributed by ``nemo.gym.gpu.index`` (human-readable,
+    can shift across driver re-enumeration) and ``nemo.gym.gpu.uuid`` (stable), since one
+    process can see more than one GPU and they must stay distinguishable from each
+    other, not just from other processes."""
+    _record_gauge(
+        "gym.process.gpu.utilization_percent",
+        "%",
+        "GPU compute (SM) utilization, sampled periodically via nvidia-smi.",
+        value,
+        {"nemo.gym.gpu.index": index, "nemo.gym.gpu.uuid": uuid},
+    )
+
+
+def record_process_gpu_memory_used_mib(value: float, *, index: int, uuid: str) -> None:
+    """One GPU's used memory in MiB, as reported by ``nvidia-smi``. See
+    :func:`record_process_gpu_utilization` for the attribute/exemplar reasoning."""
+    _record_gauge(
+        "gym.process.gpu.memory_used_mib",
+        "MiB",
+        "GPU memory in use, sampled periodically via nvidia-smi.",
+        value,
+        {"nemo.gym.gpu.index": index, "nemo.gym.gpu.uuid": uuid},
+    )
+
+
+def record_process_gpu_memory_total_mib(value: float, *, index: int, uuid: str) -> None:
+    """One GPU's total memory in MiB, as reported by ``nvidia-smi``. Reported as its own
+    gauge rather than folded into a used/total ratio: ``nvidia-smi`` already gives both
+    numbers natively, and a dashboard can derive a ratio from the pair, but not recover
+    the pair from a ratio alone -- keep the more expressive representation. See
+    :func:`record_process_gpu_utilization` for the attribute/exemplar reasoning."""
+    _record_gauge(
+        "gym.process.gpu.memory_total_mib",
+        "MiB",
+        "GPU total memory, sampled periodically via nvidia-smi.",
+        value,
+        {"nemo.gym.gpu.index": index, "nemo.gym.gpu.uuid": uuid},
+    )
+
+
 def _reset_for_testing() -> None:
     """Drop cached instruments. Test-only, mirrors ``telemetry.setup._reset_for_testing``."""
     with _INSTRUMENT_LOCK:

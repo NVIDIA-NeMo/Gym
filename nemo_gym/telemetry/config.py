@@ -133,3 +133,21 @@ class TelemetryConfig(BaseModel, extra="allow"):
     window since the last read reuses the cached value instead of issuing a fresh one,
     keeping this cheap when many spans close in quick succession. Also caps how stale a
     span's ``nemo.gym.cpu.percent`` attribute can be."""
+
+    gpu_sampling_enabled: bool = False
+    """Periodically sample this process's visible GPU utilization/memory on a background
+    thread and emit ``gym.process.gpu.*`` gauges. Off by default, for the same reason as
+    ``cpu_sampling_enabled``: not implied by ``metrics_enabled``, opt in explicitly.
+    Unlike CPU sampling, this runs on a genuine background thread rather than inline at
+    span boundaries, because GPU readings carry no exemplar and therefore have no
+    span-context constraint to honor — GPU compute for a ``local_vllm_model`` server, in
+    particular, happens in a separate Ray actor process that has no span context at all.
+    Safe to enable on a process with no visible GPU: the sampler degrades to a clean
+    no-op logged at debug, not a warning. See :mod:`nemo_gym.telemetry.gpu`."""
+
+    gpu_sample_interval_s: float = 10.0
+    """Seconds between ``nvidia-smi`` polls on the background GPU sampler. Much coarser
+    than ``cpu_min_resample_interval_s``'s 1.0s default deliberately: CPU sampling reuses
+    a cached ``psutil.Process()`` handle (near-zero marginal cost per read), while every
+    GPU sample forks and execs ``nvidia-smi`` — meaningfully more expensive, and
+    unnecessary at sub-second resolution for a metric nobody needs that precise."""

@@ -72,6 +72,9 @@ def test_recording_without_telemetry_is_a_no_op():
     gym_metrics.record_http_timeout(internal=False)
     gym_metrics.record_retry(reason="timeout")
     gym_metrics.record_process_cpu_percent(1.0)
+    gym_metrics.record_process_gpu_utilization(1.0, index=0, uuid="GPU-aaaa")
+    gym_metrics.record_process_gpu_memory_used_mib(1.0, index=0, uuid="GPU-aaaa")
+    gym_metrics.record_process_gpu_memory_total_mib(1.0, index=0, uuid="GPU-aaaa")
 
 
 def test_recording_errors_never_reach_the_caller(monkeypatch):
@@ -218,6 +221,33 @@ def test_process_cpu_percent_carries_an_exemplar_for_the_active_span(monkeypatch
     assert exemplar.trace_id == span_context.trace_id
     assert exemplar.span_id == span_context.span_id
     assert exemplar.value == 55.0
+
+
+def test_gpu_utilization_is_attributed_by_index_and_uuid(collected_metrics):
+    gym_metrics.record_process_gpu_utilization(42.0, index=0, uuid="GPU-aaaa")
+    point = collected_metrics()["gym.process.gpu.utilization_percent"][0]
+    assert point.value == 42.0
+    attrs = dict(point.attributes)
+    assert attrs["nemo.gym.gpu.index"] == 0
+    assert attrs["nemo.gym.gpu.uuid"] == "GPU-aaaa"
+
+
+def test_gpu_memory_used_and_total_are_distinct_instruments(collected_metrics):
+    gym_metrics.record_process_gpu_memory_used_mib(1024.0, index=0, uuid="GPU-aaaa")
+    gym_metrics.record_process_gpu_memory_total_mib(8192.0, index=0, uuid="GPU-aaaa")
+    metrics = collected_metrics()
+    assert metrics["gym.process.gpu.memory_used_mib"][0].value == 1024.0
+    assert metrics["gym.process.gpu.memory_total_mib"][0].value == 8192.0
+
+
+def test_gpu_metrics_distinguish_multiple_gpus_on_the_same_process(collected_metrics):
+    gym_metrics.record_process_gpu_utilization(10.0, index=0, uuid="GPU-aaaa")
+    gym_metrics.record_process_gpu_utilization(90.0, index=1, uuid="GPU-bbbb")
+
+    points = collected_metrics()["gym.process.gpu.utilization_percent"]
+    by_index = {dict(p.attributes)["nemo.gym.gpu.index"]: p.value for p in points}
+    assert by_index[0] == 10.0
+    assert by_index[1] == 90.0
 
 
 def test_instrument_cache_is_scoped_per_meter(collected_metrics, monkeypatch):

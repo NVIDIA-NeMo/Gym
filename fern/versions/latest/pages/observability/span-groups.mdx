@@ -95,13 +95,17 @@ without a second layer.
 There is no `dataset` group. NeMo Gym's dataset code is command-line upload and download
 tooling rather than a runtime path, so there is nothing worth tracing.
 
-There is no `cpu` or `resource` group. Process-CPU sampling (`gym.process.cpu.percent`
-and the `nemo.gym.cpu.percent` span attribute) piggybacks on whichever span group already
-decided a span exists — it never runs where `rollout`/`verify`/`model_call`/`sandbox`/
-`job` wouldn't already have produced a span — so there is no separate request-volume cost
-for a group to gate. It has its own dedicated opt-in instead:
-`telemetry.cpu_sampling_enabled`, off by default. See
-[Metrics](/observability/metrics#process-cpu-a-gauge-linked-to-the-exact-span-that-was-running).
+There is no `cpu`, `gpu`, or `resource` group. Process-CPU sampling
+(`gym.process.cpu.percent` and the `nemo.gym.cpu.percent` span attribute) piggybacks on
+whichever span group already decided a span exists — it never runs where
+`rollout`/`verify`/`model_call`/`sandbox`/`job` wouldn't already have produced a span —
+so there is no separate request-volume cost for a group to gate. Process-GPU sampling
+(`gym.process.gpu.*`) runs on its own background thread with no span involvement at all.
+Both have their own dedicated opt-in instead: `telemetry.cpu_sampling_enabled` and
+`telemetry.gpu_sampling_enabled`, both off by default. See
+[Metrics](/observability/metrics#process-cpu-a-gauge-linked-to-the-exact-span-that-was-running)
+and
+[Metrics](/observability/metrics#process-gpu-a-periodic-background-sample-not-an-exemplar).
 
 Span groups inherited from `nemo-lens` that relate to training, such as `checkpoint`,
 `step`, and `optimizer`, remain resolvable and are reachable through `all`, but no NeMo
