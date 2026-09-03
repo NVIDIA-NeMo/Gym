@@ -315,6 +315,7 @@ _ALL_SUCCESS_RESULTS = {
         ("schedule", {"CONTAINER_BUILD_RESULT": "failure"}, False),
         ("schedule", {"GPU_E2E_TEST_RESULT": "failure"}, False),
         ("schedule", {"PROVIDER_E2E_TEST_RESULT": "failure"}, False),
+        ("schedule", {"PROVIDER_E2E_TEST_RESULT": "skipped"}, True),
         (
             "schedule",
             {"DOCS_ONLY": "true", "UNIT_TEST_RESULT": "skipped", "CONTAINER_BUILD_RESULT": "failure"},
@@ -344,14 +345,11 @@ def test_nemo_cicd_test_gate_matches_event_and_job_results(
 def test_cicd_nightly_jobs_require_upstream_success() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
 
-    # A job's own `if:` replaces (not ANDs with) the implicit success()-of-
-    # needs check, so container_build/gpu_e2e_tests/provider_e2e_tests must
-    # explicitly check needs.*.result themselves. `is_nightly` is a single
-    # source of truth on classify_changes, referenced by three downstream
-    # jobs (container_build, gpu_e2e_tests, provider_e2e_tests) instead of
-    # each re-deriving github.event_name == 'schedule' || ... . notify-failure
-    # deliberately does NOT use it (see test_notify_failure_fires_even_if_
-    # classify_changes_is_skipped for why).
+    # `is_nightly` is a single source of truth on classify_changes, referenced
+    # by three downstream jobs (container_build, gpu_e2e_tests, and
+    # provider_e2e_tests) instead of each re-deriving github.event_name.
+    # notify-failure deliberately does NOT use it (see
+    # test_notify_failure_fires_even_if_classify_changes_is_skipped for why).
     assert workflow.count("needs.classify_changes.outputs.is_nightly == 'true'") == 3
     non_definition = workflow.replace(
         "is_nightly: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}", ""
@@ -361,6 +359,18 @@ def test_cicd_nightly_jobs_require_upstream_success() -> None:
     assert workflow.count("needs.classify_changes.result == 'success' &&") == 3
     assert "(needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')" in workflow
     assert "needs.container_build.result == 'success'" in workflow
+
+
+def test_cicd_docs_only_nightly_jobs_override_skipped_unit_status() -> None:
+    jobs = _cicd_main_jobs()
+
+    # Scheduled docs-only runs skip unit_tests. The explicit status function
+    # makes GitHub evaluate each downstream condition instead of applying its
+    # implicit success() check to the skipped dependency first.
+    for job_name in ("container_build", "gpu_e2e_tests", "provider_e2e_tests"):
+        condition = jobs[job_name]["if"]
+        assert "always() && !cancelled() &&" in condition
+        assert ("(needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')") in condition
 
 
 @pytest.mark.parametrize(
@@ -401,6 +411,18 @@ def test_notify_failure_uses_shared_ref_check_action() -> None:
 
         assert ref_check_step["uses"] == "./.github/actions/is-main-or-release-ref", workflow_file
         assert any(step.get("name") == "Checkout repository" for step in steps), workflow_file
+
+
+def test_notification_workflows_pin_slack_rejection_handling() -> None:
+    expected_action = (
+        "NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@f07495d7a01aad5578a407db8e0c4f4e395375f6"
+    )
+    for workflow_file in (CICD_MAIN_WORKFLOW, FULL_TEST_WORKFLOW):
+        jobs = yaml.safe_load(workflow_file.read_text())["jobs"]
+        steps = jobs["notify-failure"]["steps"]
+        (notify_step,) = (step for step in steps if step.get("name") == "Notify Gym alerts channel")
+
+        assert notify_step["uses"] == expected_action, workflow_file
 
 
 def test_full_test_suite_runs_on_schedule_and_dispatch_not_push() -> None:
@@ -572,6 +594,8 @@ def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
 
     assert "provider_e2e_tests:" in workflow
+    assert "TEMPORARILY DISABLED: this live Fireworks smoke test is currently failing." in workflow
+    assert "false &&" in workflow
     assert "name: ${{ matrix.provider }}-e2e" in workflow
     assert "timeout-minutes: 20" in workflow
     assert "provider: fireworks" in workflow

@@ -57,7 +57,7 @@ weak_target = "weak"
 base_threshold = 0.5
 ```
 
-Each route is a routing condition an eval can run under, and `--model` selects one — so running the same benchmark twice, once with `--model strong-only` and once with `--model policy-model`, compares the fixed baseline against the router on identical tasks.
+Each route is a routing condition an eval can run under, and `--model` selects one by its `id` — so running the same benchmark twice, once with `--model strong-only` and once with `--model policy-model`, compares the fixed baseline against the router on identical tasks.
 
 Point `deployment` at your TOML file and run an eval:
 
@@ -93,7 +93,7 @@ The deployment file plus the selected route is the routing condition the eval ru
 
 ## `--model` names a route, not a model
 
-For other model servers, `--model` is the model to serve. Here it is the **route name** Switchyard resolves — it must match a route in your deployment. Which concrete model actually served a call is Switchyard's decision, made per request, and comes back on the response.
+For other model servers, `--model` is the model to serve. Here it is the **route id** Switchyard resolves — it must match a route's `id` field in your deployment, which is not necessarily the route's TOML table name (the example above keeps the two identical). Which concrete model actually served a call is Switchyard's decision, made per request, and comes back on the response.
 
 <Note>
 A caller-supplied `model` in the request body is always overridden with the configured route name. Otherwise an agent that sets its own model would bypass the router, and the eval would silently measure something other than routing.
@@ -101,7 +101,7 @@ A caller-supplied `model` in the request body is always overridden with the conf
 
 ## Manage the proxy yourself
 
-Start Switchyard however you normally would — the standalone `switchyard-server` binary (built from the [Switchyard repo](https://github.com/NVIDIA-NeMo/Switchyard) with `cargo build --release`; it is not part of the `nemo-switchyard` wheel), a container, a shared service on another host — then set `switchyard_base_url` instead of `deployment`. Gym will use that proxy and never start one of its own.
+Start Switchyard however you normally would — the standalone `switchyard-server` binary (built from the [Switchyard repo](https://github.com/NVIDIA-NeMo/Switchyard) with `cargo build --locked --release -p switchyard-server`; it is not part of the `nemo-switchyard` wheel), a container, a shared service on another host — then set `switchyard_base_url` instead of `deployment`. Gym will use that proxy and never start one of its own.
 
 ```bash
 switchyard-server --config routes.toml --port 4000
@@ -128,7 +128,7 @@ Gym sends its rollout-attempt id to Switchyard as an opaque session id, using th
 The rollout id reaches this server on the `/ng-rollout/<id>/` URL prefix, which agents add only when [model-call capture](/model-server/model-call-capture) (`++observability_enabled=true` with a capture directory) or training-token capture is enabled. Without one of those, there is nothing to forward and Switchyard sees no session. The server checks this at startup: it warns when `forward_session_id` is on by default, and refuses to start when you set it explicitly.
 </Warning>
 
-On the Switchyard side, aggregate routing statistics are on `/v1/stats`. Per-session decision snapshots on `/v1/routing/session-stats` require a durable routing log, which at Switchyard 0.2.0 only the standalone binary can enable — run `switchyard-server --routing-log-file <path>`, attach with `switchyard_base_url`, and add `proxy_x_session_id` to `session_id_headers`, the name that log keys sessions on. Add header names knowingly: Switchyard forwards headers it does not recognize (and, at 0.2.0, the session header itself) through to the upstream provider.
+On the Switchyard side, aggregate routing statistics are on `/v1/stats`. Per-session decision snapshots on `/v1/routing/session-stats` require a durable routing log, which the proxy Gym hosts cannot enable at Switchyard 0.2.0 — run the standalone binary with `switchyard-server --routing-log-file <path>`, attach with `switchyard_base_url`, and add `proxy_x_session_id` to `session_id_headers`, the name that log keys sessions on. Add header names knowingly: Switchyard forwards headers it does not recognize (and, at 0.2.0, the session header itself) through to the upstream provider.
 
 To see which model served each call from Gym's side, enable [model-call capture](/model-server/model-call-capture). Each captured exchange records the response, so the routed model is visible per call.
 
@@ -156,7 +156,7 @@ gym eval run --benchmark <name> --model-type switchyard_model \
     ++policy_model.responses_api_models.switchyard_model.condition_dir=results/policy-model
 ```
 
-Each results directory now identifies its condition. `switchyard-condition.json` is the provenance manifest — the route, the deployment's SHA-256 and archived contents (inline `api_key` and all `extra_headers` values redacted), and the `nemo-switchyard` version — written when the proxy starts. `switchyard-stats.json` wraps the proxy's `/v1/stats` at shutdown: per-target requests, errors, tokens, and latency, plus the classifier-side usage of LLM-classifier routes, which for a hosted proxy would otherwise die with the process. Two runs are fairly comparable when their manifests differ only in `route`; a hosted run is reproducible from the archived deployment alone.
+Each results directory now identifies its condition. `switchyard-condition.json` is the provenance manifest — the route, the deployment's SHA-256 and archived contents (inline `api_key` and all `extra_headers` values redacted), and the `nemo-switchyard` version — written when the proxy starts. `switchyard-stats.json` wraps the proxy's `/v1/stats` at shutdown: per-target calls, errors, tokens, and latency, plus the classifier-side usage of LLM-classifier routes, which for a hosted proxy would otherwise die with the process. Two runs are fairly comparable when their manifests differ only in `route`; a hosted run is reproducible from the archived deployment alone.
 
 Comparing scores and cost means aligning the two runs' rollout rows first — a rollout that failed in one condition must not be counted in the other — and remembering that a routed call can cost more than its selected model: an `llm_classifier` route also spends classifier tokens, which appear in the stats snapshot rather than the rollout's own usage. Rollout rows carry `_ng_task_index` and `_ng_rollout_index` for exactly this kind of join:
 
@@ -201,7 +201,7 @@ Routing strategies with session affinity are stateful — compare them through o
 |---|---|---|
 | `deployment` | `null` | Native Switchyard TOML deployment. Gym hosts a proxy when this is set. |
 | `switchyard_base_url` | `null` | Attach to an existing proxy instead of hosting one. |
-| `switchyard_model` | `${policy_model_name}` | Route name to request. |
+| `switchyard_model` | `${policy_model_name}` | Route id to request. |
 | `switchyard_api_key` | `dummy` | Sent as the bearer token to the proxy. |
 | `proxy_port` | `null` | Fixed loopback port for the hosted proxy. `null` picks a free one. |
 | `session_id_headers` | `[x-switchyard-session-id]` | Header names carrying the rollout id. |
