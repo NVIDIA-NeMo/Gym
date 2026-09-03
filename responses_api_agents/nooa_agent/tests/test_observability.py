@@ -62,7 +62,6 @@ def test_projects_atif_semantics_and_model_references() -> None:
 
     episode = project_nooa_episode(
         create_params=NeMoGymResponseCreateParamsNonStreaming(input="Weather in Paris?"),
-        return_value="It is cold.",
         trajectory=trajectory,
         model_calls=model_calls,
     )
@@ -92,24 +91,38 @@ def test_projects_atif_semantics_and_model_references() -> None:
     assert episode.observations.gaps == []
 
 
-def test_uses_non_trainable_fallback_when_atif_has_no_model_message() -> None:
+def test_preserves_model_authored_return_result_without_synthetic_message() -> None:
     trajectory = Trajectory(
         trajectory_id="root",
         agent=AgentSchema(name="TestAgent", version="1"),
-        steps=[],
+        steps=[
+            StepObject(
+                step_id=1,
+                source="agent",
+                message="",
+                tool_calls=[
+                    ToolCallSchema(
+                        tool_call_id="return-1",
+                        function_name="return_result",
+                        arguments={"result": "fallback"},
+                    )
+                ],
+                llm_call_count=1,
+            )
+        ],
     )
 
     episode = project_nooa_episode(
         create_params=NeMoGymResponseCreateParamsNonStreaming(input="Hello"),
-        return_value={"answer": "fallback"},
         trajectory=trajectory,
         model_calls=[],
     )
 
-    assert episode.response.output[0].content[0].text == '{"answer": "fallback"}'
-    assert [gap.code for gap in episode.observations.gaps] == ["non_trainable_fallback_output"]
+    assert [item.type for item in episode.response.output] == ["function_call"]
+    assert episode.response.output[0].name == "return_result"
+    assert episode.observations.gaps == []
     invocation = next(record for record in episode.observations.records if isinstance(record, AgentInvocation))
-    assert [item.type for item in invocation.conversation] == ["message", "message"]
+    assert [item.type for item in invocation.conversation] == ["function_call"]
 
 
 def test_reports_ambiguous_model_ownership_for_nested_trajectories() -> None:
@@ -131,7 +144,6 @@ def test_reports_ambiguous_model_ownership_for_nested_trajectories() -> None:
 
     episode = project_nooa_episode(
         create_params=NeMoGymResponseCreateParamsNonStreaming(input="Delegate"),
-        return_value="root answer",
         trajectory=root,
         model_calls=[model_call],
     )

@@ -176,7 +176,6 @@ def _trajectory_records(
 def project_nooa_episode(
     *,
     create_params: NeMoGymResponseCreateParamsNonStreaming,
-    return_value: Any,
     trajectory: Trajectory,
     model_calls: list[ModelCallRef],
 ) -> AgentEpisode:
@@ -184,19 +183,6 @@ def project_nooa_episode(
 
     output = _response_items(trajectory)
     gaps: list[ObservationGap] = []
-    if not any(isinstance(item, NeMoGymResponseOutputMessage) for item in output):
-        output.append(
-            NeMoGymResponseOutputMessage(
-                id="nooa-fallback",
-                content=[NeMoGymResponseOutputText(annotations=[], text=_json_output(return_value))],
-            )
-        )
-        gaps.append(
-            ObservationGap(
-                code="non_trainable_fallback_output",
-                detail="NOOA returned without a model-authored assistant message.",
-            )
-        )
 
     invocations, tools = _trajectory_records(trajectory)
     if len(invocations) == 1:
