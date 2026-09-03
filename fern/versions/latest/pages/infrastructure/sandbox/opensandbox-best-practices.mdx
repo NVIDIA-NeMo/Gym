@@ -9,6 +9,20 @@ cluster you occupy, your **limits** decide what your commands may use, and both 
 everyone else's runs. Most "OpenSandbox is flaky" reports trace back to one of the traps below.
 See the [OpenSandbox Provider](/infrastructure/sandbox/opensandbox) page for the config schema.
 
+## Connection fields that must be right
+
+The shipped `nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml` has these set
+correctly; if you copy or override it, keep them.
+
+| Field | Set it to | Why |
+| --- | --- | --- |
+| `connection.domain` | the server's external address, via `OPENSANDBOX_DOMAIN` | The default is the in-cluster service DNS name, which resolves only from pods inside the cluster. From Slurm or a laptop every call fails to connect. |
+| `connection.use_server_proxy` | `true` | With `false`, exec, file and PTY calls dial the sandbox **pod's IP directly**. That only works from inside the cluster; from anywhere else the sandbox is created but every command hangs. Proxy mode routes everything through the server. |
+| `connection.transport_backend` | `aiohttp` | httpx's connection pool degrades badly at high concurrency; the aiohttp bridge (`httpx-aiohttp`, in the `sandbox` extra) does not. If the bridge is missing the provider falls back to httpx with a warning — treat that warning as a setup error. |
+| `connection.max_connections` | `null` | The pool is shared, so this also caps in-flight sandbox operations per process. The httpx default of 100 silently serializes a 1,000-sandbox run. |
+| `connection.keepalive_expiry_s` | below the server's idle timeout (shipped: `3.0`) | A pooled socket reused after the server closed it hangs the SDK. If a load balancer reaps idle connections anyway, set `disable_connection_pooling: true` and pay a handshake per request. |
+| `connection.protocol` | `http` unless you need TLS | TLS load-balancer listeners often have a fixed, short idle timeout that resets multi-minute streams. If you must use `https`, `background_exec: true` (below) is what keeps long commands alive. |
+
 ## Requests are not limits
 
 `resources` becomes the pod's **limits**. Scheduling **requests** are a separate map under
