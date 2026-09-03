@@ -198,8 +198,6 @@ def test_model_response_id_is_joined_to_the_owning_invocation():
 
 
 def test_concurrent_tool_intervals_end_at_each_worker_not_completion_callback():
-    from run_agent import AIAgent
-
     agent = _FakeAgent()
     release = {"fast": threading.Event(), "slow": threading.Event()}
     entered = {"fast": threading.Event(), "slow": threading.Event()}
@@ -210,28 +208,25 @@ def test_concurrent_tool_intervals_end_at_each_worker_not_completion_callback():
         return function_name
 
     agent._invoke_tool = invoke
-    agent._interrupt_requested = False
-    agent.quiet_mode = False
-    agent.verbose_logging = False
-    agent.log_prefix_chars = 100
-    agent.tool_progress_callback = None
-    agent._checkpoint_mgr = SimpleNamespace(enabled=False)
-    agent._get_budget_warning = lambda _count: None
     observer = HermesAgentObserver().instrument(agent)
-    calls = [
-        SimpleNamespace(id=f"{name}-call", function=SimpleNamespace(name=name, arguments="{}"))
-        for name in ("fast", "slow")
+    args = {name: {} for name in ("fast", "slow")}
+    for name in ("fast", "slow"):
+        agent.tool_start_callback(f"{name}-call", name, args[name])
+    workers = [
+        threading.Thread(target=agent._invoke_tool, args=(name, args[name], "task")) for name in ("fast", "slow")
     ]
-    execute = AIAgent._execute_tool_calls_concurrent.__get__(agent, _FakeAgent)
-    execution = threading.Thread(target=execute, args=(SimpleNamespace(tool_calls=calls), [], "task"))
-    execution.start()
+    for worker in workers:
+        worker.start()
     assert entered["fast"].wait(timeout=2)
     assert entered["slow"].wait(timeout=2)
     release["fast"].set()
     assert not threading.Event().wait(timeout=0.02)
     release["slow"].set()
-    execution.join(timeout=2)
-    assert not execution.is_alive()
+    for worker in workers:
+        worker.join(timeout=2)
+        assert not worker.is_alive()
+    for name in ("fast", "slow"):
+        agent.tool_complete_callback(f"{name}-call", name, args[name], name)
     bundle = observer.finish({"completed": True, "messages": []})
 
     fast = _tool(bundle, "fast-call")
@@ -284,6 +279,43 @@ def test_delegate_child_retains_parent_and_conversation():
     assert all(not invocation.model_calls for invocation in bundle.records if isinstance(invocation, AgentInvocation))
     ownership_gaps = [gap for gap in bundle.gaps if gap.code == "model_call_ownership_unavailable"]
     assert {gap.invocation_id for gap in ownership_gaps} == {"root", "root.child-1"}
+
+
+def test_unattributed_child_spawn_is_reported_as_gap():
+    root = _FakeAgent()
+    observer = HermesAgentObserver(root_invocation_id="root").instrument(root)
+    child = _FakeAgent({"completed": True, "messages": [{"role": "assistant", "content": "child"}]})
+
+    root._active_children.append(child)
+    child.run_conversation(user_message="task")
+    bundle = observer.finish({"completed": True, "messages": []})
+
+    child_invocation = _invocation(bundle, "root.child-1")
+    assert child_invocation.spawned_by_tool_call_id is None
+    assert any(
+        gap.code == "subagent_spawn_unattributed" and gap.invocation_id == child_invocation.invocation_id
+        for gap in bundle.gaps
+    )
+
+
+def test_opaque_reasoning_details_are_reported_but_not_normalized():
+    observer = HermesAgentObserver().instrument(_FakeAgent())
+    bundle = observer.finish(
+        {
+            "completed": True,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "answer",
+                    "reasoning_details": [{"type": "opaque", "data": "provider-specific"}],
+                }
+            ],
+        }
+    )
+
+    root = _invocation(bundle, "root")
+    assert [item.type for item in root.conversation] == ["message"]
+    assert any(gap.code == "reasoning_details_unavailable" and gap.invocation_id == "root" for gap in bundle.gaps)
 
 
 def test_compaction_is_explicit_and_hook_failures_do_not_break_execution():

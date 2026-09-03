@@ -13,97 +13,47 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
-import atexit
+import json
 import logging
 import os
-import shutil
+import signal
 import sys
 import tempfile
 from asyncio import Semaphore
 from collections.abc import Mapping
+from pathlib import Path
 from time import time
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
-import model_tools  # noqa: F401  # fail-fast if hermes-agent isn't installed  # pyright: ignore[reportMissingImports]
 from fastapi import Request
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
-    NeMoGymResponseOutputMessageForTraining,
-    NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.rollout_observability import (
     AgentEpisode,
     AgentObservationBundle,
     ObservationGap,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from responses_api_agents.hermes_agent.observability import HermesAgentObserver
-
-
-def _trajectory_to_output_items(messages, n_input):
-    output_items = []
-    for item in messages[n_input:]:
-        if not isinstance(item, dict):
-            continue
-        role = item.get("role")
-        content = item.get("content", "") or ""
-        if isinstance(content, list):
-            content = "".join(c.get("text", "") if isinstance(c, dict) else getattr(c, "text", "") for c in content)
-        if role == "assistant":
-            output_items.append(
-                NeMoGymResponseOutputMessageForTraining(
-                    id=f"msg-{len(output_items)}",
-                    content=[NeMoGymResponseOutputText(type="output_text", text=content, annotations=[])],
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                    prompt_token_ids=item.get("prompt_token_ids") or [],
-                    generation_token_ids=item.get("generation_token_ids") or [],
-                    generation_log_probs=item.get("generation_log_probs") or [],
-                    routed_experts=item.get("routed_experts"),
-                )
-            )
-            for tc in item.get("tool_calls") or []:
-                fn = tc.get("function") if isinstance(tc, dict) else None
-                if not fn:
-                    continue
-                output_items.append(
-                    NeMoGymResponseFunctionToolCall(
-                        arguments=fn.get("arguments", ""),
-                        call_id=tc.get("id", ""),
-                        name=fn.get("name", ""),
-                        type="function_call",
-                        id=tc.get("id"),
-                        status="completed",
-                    )
-                )
-        elif role == "tool":
-            output_items.append(
-                NeMoGymFunctionCallOutput(
-                    type="function_call_output",
-                    call_id=item.get("tool_call_id", ""),
-                    output=content,
-                    status="completed",
-                )
-            )
-    return output_items
+from responses_api_agents.hermes_agent.observability import build_hermes_observations
+from responses_api_agents.hermes_agent.setup_hermes import ensure_hermes
+from responses_api_agents.hermes_agent.trajectory import project_hermes_response_messages
 
 
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
+_RESPONSES_CONVERTER = ResponsesConverter(return_token_id_information=False)
 
 
 # if ray close sys.stderr mid-request, write to the original fd
@@ -124,39 +74,65 @@ if not LOG.handlers:
     LOG.addHandler(_SafeStderrHandler(level=logging.WARNING))
 
 
-def _split_input_to_user_and_history(input_items) -> tuple[str, list[dict], Optional[str]]:
-    items = list(input_items)
-    system_message: Optional[str] = None
-    if items:
-        first = items[0]
-        first_role = getattr(first, "role", None) or (first.get("role") if isinstance(first, dict) else None)
-        first_content = getattr(first, "content", None) or (first.get("content") if isinstance(first, dict) else None)
-        if first_role == "system":
-            if isinstance(first_content, list):
-                first_content = "".join(
-                    (p.get("text", "") if isinstance(p, dict) else getattr(p, "text", "")) for p in first_content
-                )
-            system_message = first_content or ""
-            items = items[1:]
+def _content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    return "".join(
+        part.get("text", "") if isinstance(part, dict) else getattr(part, "text", "") for part in content or []
+    )
 
-    user_message = ""
-    history: list[dict] = []
-    for idx, item in enumerate(items):
-        role = getattr(item, "role", None) or (item.get("role") if isinstance(item, dict) else None)
-        content = getattr(item, "content", None) or (item.get("content") if isinstance(item, dict) else None)
-        if isinstance(content, list):
-            content = "".join((p.get("text", "") if isinstance(p, dict) else getattr(p, "text", "")) for p in content)
-        content = content or ""
-        if idx == len(items) - 1 and role == "user":
-            user_message = content
-        else:
-            history.append({"role": role, "content": content})
+
+def _split_chat_messages(messages) -> tuple[str, list[dict], Optional[str]]:
+    """Adapt converted Chat Completions messages to Hermes's run_conversation arguments."""
+    items = [dict(item) for item in messages]
+    system_message: Optional[str] = None
+    if items and items[0].get("role") == "system":
+        system_message = _content_to_text(items.pop(0).get("content"))
+
+    if items and items[-1].get("role") == "user":
+        user_message = _content_to_text(items.pop().get("content"))
+    else:
+        user_message = ""
+
+    history = items
     return user_message, history, system_message
+
+
+def _result_to_response(
+    body: NeMoGymResponseCreateParamsNonStreaming,
+    result: dict[str, Any],
+    *,
+    model_name: str,
+    n_input: int,
+) -> NeMoGymResponse:
+    output_messages = (result.get("messages") or [])[n_input:]
+    messages = project_hermes_response_messages(output_messages)
+    output_items = _RESPONSES_CONVERTER.chat_completions_messages_to_responses_items(messages)
+
+    return NeMoGymResponse(
+        id=f"resp_{uuid4().hex}",
+        created_at=int(time()),
+        model=model_name,
+        object="response",
+        output=output_items,
+        tool_choice=body.tool_choice,
+        tools=body.tools,
+        parallel_tool_calls=body.parallel_tool_calls,
+        usage=NeMoGymResponseUsage(
+            input_tokens=0,
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+            output_tokens=0,
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+            total_tokens=0,
+        ),
+    )
 
 
 class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
+    # Explicit opt-in: upstream Hermes does not return Gym token fields inline.
+    token_id_capture: bool = False
     model: Optional[str] = None
     concurrency: int = 32
     max_turns: int = 90
@@ -192,26 +168,22 @@ class HermesAgentVerifyResponse(BaseVerifyResponse):
 class HermesAgent(SimpleResponsesAPIAgent):
     config: HermesAgentConfig
     sem: Semaphore = None
-    # Set of agents currently running run_conversation, plus a flag tracking whether the single
-    # shared SIGTERM dispatcher has been installed on the event loop. See _ensure_sigterm_handler.
-    active_agents: set = None
+    # Set of managed Hermes child processes, plus a flag tracking whether the single
+    # shared SIGTERM dispatcher has been installed on the event loop.
+    active_processes: set = None
     sigterm_installed: bool = False
     model_config = ConfigDict(arbitrary_types_allowed=True)
+    _hermes_python: Path = PrivateAttr()
 
     def _ensure_sigterm_handler(self) -> None:
-        """Install exactly one SIGTERM handler on the event loop that interrupts *every* in-flight
-        agent. Registering a fresh per-call handler is unsafe under concurrency: add_signal_handler
-        replaces the previous handler, so concurrent responses() calls clobber each other and the
-        first to finish removes the only remaining handler — leaving later SIGTERMs unhandled and
-        their trajectories lost. A single dispatcher over `active_agents` avoids that race."""
+        """Install one SIGTERM handler that asks every Hermes child to finish its partial trajectory."""
         if self.sigterm_installed:
             return
-        import signal
 
         def _dispatch():
-            for ag in list(self.active_agents):
-                if hasattr(ag, "interrupt"):
-                    ag.interrupt("timeout")
+            for process in list(self.active_processes):
+                if process.returncode is None:
+                    process.send_signal(signal.SIGTERM)
 
         try:
             asyncio.get_event_loop().add_signal_handler(signal.SIGTERM, _dispatch)
@@ -250,21 +222,105 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
-        self.active_agents = set()
-        # hermes-agent reads these from env (cli.py / batch_runner.py); env vars are
-        # process-global, so multiple HermesAgent instances in one process share them
-        os.environ["TERMINAL_ENV"] = self.config.terminal_backend
-        os.environ["TERMINAL_TIMEOUT"] = str(self.config.terminal_timeout)
-
-        # Build config.yaml with config parameters
-        hermes_home = tempfile.mkdtemp(prefix="hermes_agent_")
-        atexit.register(shutil.rmtree, hermes_home, True)
-        with open(os.path.join(hermes_home, "config.yaml"), "w") as _f:
-            _f.write(self._build_config())
-        os.environ["HERMES_HOME"] = hermes_home
+        self.active_processes = set()
+        self._hermes_python = ensure_hermes()
 
     def _model_name(self) -> str:
         return self.config.model or str(self.config.model_server.name)
+
+    def _request_overrides(self) -> dict[str, Any]:
+        """Build request fields that Hermes no longer exposes as constructor arguments."""
+        overrides: dict[str, Any] = {}
+        if self.config.temperature is not None:
+            overrides["temperature"] = self.config.temperature
+        if self.config.chat_template_kwargs_enabled:
+            overrides["extra_body"] = {
+                "chat_template_kwargs": {
+                    "enable_thinking": True,
+                    "truncate_history_thinking": False,
+                }
+            }
+        return overrides
+
+    async def _run_hermes_subprocess(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], AgentObservationBundle | None]:
+        with tempfile.TemporaryDirectory(prefix="nemo_gym_hermes_") as temp_dir_str:
+            temp_dir = Path(temp_dir_str)
+            hermes_home = temp_dir / "home"
+            hermes_home.mkdir()
+            (hermes_home / "config.yaml").write_text(self._build_config(), encoding="utf-8")
+            request_path = temp_dir / "request.json"
+            response_path = temp_dir / "response.json"
+            request_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            env = os.environ.copy()
+            env.pop("PYTHONPATH", None)
+            env.update(
+                {
+                    "HERMES_HOME": str(hermes_home),
+                    "HERMES_YOLO_MODE": "1",
+                    "HERMES_ACCEPT_HOOKS": "1",
+                    "TERMINAL_ENV": self.config.terminal_backend,
+                    "TERMINAL_TIMEOUT": str(self.config.terminal_timeout),
+                }
+            )
+
+            process = await asyncio.create_subprocess_exec(
+                str(self._hermes_python),
+                str(Path(__file__).with_name("runner.py")),
+                str(request_path),
+                str(response_path),
+                cwd=temp_dir,
+                env=env,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            self._ensure_sigterm_handler()
+            self.active_processes.add(process)
+            try:
+                _, stderr = await process.communicate()
+            except asyncio.CancelledError:
+                if process.returncode is None:
+                    process.send_signal(signal.SIGTERM)
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=10)
+                    except asyncio.TimeoutError:
+                        process.kill()
+                        await process.wait()
+                raise
+            finally:
+                self.active_processes.discard(process)
+
+            stderr_text = stderr.decode(errors="replace") if stderr else ""
+            if process.returncode != 0:
+                raise RuntimeError(
+                    f"Hermes runtime exited with status {process.returncode}"
+                    + (f": {stderr_text.strip()}" if stderr_text.strip() else "")
+                )
+            if not response_path.is_file():
+                raise RuntimeError("Hermes runtime exited without writing a response")
+
+            raw = json.loads(response_path.read_text(encoding="utf-8"))
+            result = raw.get("result")
+            if not isinstance(result, dict):
+                raise RuntimeError("Hermes runtime returned an invalid result")
+            raw_observations = raw.get("observations")
+            observations = None
+            if isinstance(raw_observations, dict):
+                try:
+                    observations = build_hermes_observations(
+                        raw_observations,
+                        model_ref=self.config.model_server,
+                    )
+                except Exception:
+                    LOG.exception("failed to project Hermes observations")
+                    observations = AgentObservationBundle(
+                        source="hermes",
+                        gaps=[ObservationGap(code="observation_capture_failed")],
+                    )
+            return result, observations
 
     async def _create_response(
         self,
@@ -273,153 +329,42 @@ class HermesAgent(SimpleResponsesAPIAgent):
         rollout_id: Optional[str] = None,
         observation_collector: Optional[Callable[[AgentObservationBundle], None]] = None,
     ) -> NeMoGymResponse:
-        from run_agent import AIAgent  # from hermes-agent on path  # pyright: ignore[reportMissingImports]
-
-        body = body.model_copy(deep=True)
-        if isinstance(body.input, str):
-            body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
-
-        user_message, history, input_system = _split_input_to_user_and_history(body.input)
+        chat_params = _RESPONSES_CONVERTER.responses_to_chat_completion_create_params(body)
+        user_message, history, input_system = _split_chat_messages(chat_params.messages)
         system_message = self.config.system_prompt or input_system
 
         base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
         model_name = self._model_name()
-
-        agent = AIAgent(
-            base_url=base_url,
-            api_key=self.config.api_key or os.environ.get("OPENAI_API_KEY", "gym"),  # pragma: allowlist secret
-            model=model_name,
-            use_streaming=False,
-            temperature=self.config.temperature,
-            insert_reasoning=True,
-            max_iterations=self.config.max_turns,
-            max_tokens=self.config.max_tokens,
-            enabled_toolsets=self.config.enabled_toolsets,
-            disabled_toolsets=self.config.disabled_toolsets,
-            quiet_mode=True,
-            skip_context_files=True,
-            skip_memory=True,
-            persist_session=False,
-            save_trajectories=False,
+        result, observations = await self._run_hermes_subprocess(
+            {
+                "user_message": user_message,
+                "system_message": system_message,
+                "history": history,
+                "base_url": base_url,
+                "api_key": self.config.api_key or os.environ.get("OPENAI_API_KEY", "gym"),  # pragma: allowlist secret
+                "model": model_name,
+                "max_iterations": self.config.max_turns,
+                "max_tokens": self.config.max_tokens,
+                "enabled_toolsets": self.config.enabled_toolsets,
+                "disabled_toolsets": self.config.disabled_toolsets,
+                "request_overrides": self._request_overrides(),
+                "capture_observations": observation_collector is not None,
+            }
         )
-        _original_build_api_kwargs = agent._build_api_kwargs
-
-        def _patched_build_api_kwargs(api_messages):
-            kw = _original_build_api_kwargs(api_messages)
-            if not self.config.chat_template_kwargs_enabled:
-                return kw
-            ctk = kw.setdefault("extra_body", {}).setdefault("chat_template_kwargs", {})
-            ctk.setdefault("enable_thinking", True)
-            ctk["truncate_history_thinking"] = False
-            return kw
-
-        agent._build_api_kwargs = _patched_build_api_kwargs
-        observer = None
         if observation_collector is not None:
             try:
-                observer = HermesAgentObserver(model_ref=self.config.model_server).instrument(agent)
-            except Exception:
-                LOG.exception("failed to initialize Hermes observability")
-
-        # Interrupt the agent cleanly on SIGTERM so run_conversation returns with partial messages
-        # instead of being killed mid-turn (which would leave response.json unwritten). A single
-        # shared dispatcher interrupts every in-flight agent; we just register this one in the set.
-        self._ensure_sigterm_handler()
-        self.active_agents.add(agent)
-
-        result = None
-        agent_error: Optional[BaseException] = None
-        try:
-            result = await asyncio.to_thread(
-                agent.run_conversation,
-                user_message,
-                system_message,
-                history,
-            )
-        except BaseException as exc:
-            agent_error = exc
-            raise
-        finally:
-            self.active_agents.discard(agent)
-            if observation_collector is not None:
-                try:
-                    observations = (
-                        observer.finish(result, error=agent_error)
-                        if observer is not None
-                        else AgentObservationBundle(
-                            source="hermes",
-                            gaps=[ObservationGap(code="observation_capture_failed")],
-                        )
-                    )
-                except Exception:
-                    LOG.exception("failed to finish Hermes observability")
-                    observations = AgentObservationBundle(
+                observation_collector(
+                    observations
+                    or AgentObservationBundle(
                         source="hermes",
                         gaps=[ObservationGap(code="observation_capture_failed")],
                     )
-                try:
-                    observation_collector(observations)
-                except Exception:
-                    LOG.exception("failed to return Hermes observations")
-
-        messages = result.get("messages") or []
-        # aiagent omits system from returned messages
-        n_input = len(history) + 1
-
-        output_items = _trajectory_to_output_items(messages, n_input)
-
-        has_assistant_message = any(
-            getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
-            for item in output_items
-        )
-        if not has_assistant_message:
-            LOG.warning(
-                "Hermes agent ended without an assistant message. Padding empty assistant message. This should not happen often, investigate: error=%r",
-                result.get("error"),
-            )
-            last_valid = next(
-                (
-                    m
-                    for m in reversed(messages)
-                    if isinstance(m, dict) and m.get("role") == "assistant" and m.get("generation_token_ids")
-                ),
-                None,
-            )
-            pti = last_valid["prompt_token_ids"] if last_valid else [0]
-            gti = last_valid["generation_token_ids"] if last_valid else [0]
-            glp = (last_valid.get("generation_log_probs") if last_valid else None) or [0.0]
-            routed_experts = last_valid.get("routed_experts") if last_valid else None
-            output_items.append(
-                NeMoGymResponseOutputMessageForTraining(
-                    id=f"msg_{uuid4().hex}",
-                    content=[NeMoGymResponseOutputText(text=result.get("error") or "", annotations=[])],
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                    prompt_token_ids=pti,
-                    generation_token_ids=gti,
-                    generation_log_probs=glp,
-                    routed_experts=routed_experts,
                 )
-            )
+            except Exception:
+                LOG.exception("failed to return Hermes observations")
 
-        return NeMoGymResponse(
-            id=f"resp_{uuid4().hex}",
-            created_at=int(time()),
-            model=model_name,
-            object="response",
-            output=output_items,
-            tool_choice=body.tool_choice,
-            tools=body.tools,
-            parallel_tool_calls=body.parallel_tool_calls,
-            usage=NeMoGymResponseUsage(
-                input_tokens=0,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
-                output_tokens=0,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
-                total_tokens=0,
-            ),
-        )
+        # AIAgent omits the system message from returned messages.
+        return _result_to_response(body, result, model_name=model_name, n_input=len(history) + 1)
 
     async def responses(
         self,

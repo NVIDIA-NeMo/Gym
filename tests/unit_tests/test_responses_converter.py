@@ -37,6 +37,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputMessageForTraining,
+    NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
@@ -1131,6 +1132,55 @@ def test_postprocess_empty_output_emits_empty_message(converter: ResponsesConver
     assert len(output) == 1
     assert isinstance(output[0], NeMoGymResponseOutputMessage)
     assert output[0].content[0].text == ""
+
+
+def test_postprocess_flattens_assistant_text_parts(converter: ResponsesConverter):
+    output = converter.postprocess_assistant_message_dict(
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "first"},
+                {"type": "text", "text": " second"},
+            ],
+        }
+    )
+    assert len(output) == 1
+    assert isinstance(output[0], NeMoGymResponseOutputMessage)
+    assert output[0].content[0].text == "first second"
+
+
+def test_postprocess_preserves_assistant_refusal_parts(converter: ResponsesConverter):
+    output = converter.postprocess_assistant_message_dict(
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "before"},
+                {"type": "refusal", "refusal": "cannot comply"},
+                {"type": "text", "text": "after"},
+            ],
+        }
+    )
+    assert len(output) == 1
+    assert isinstance(output[0], NeMoGymResponseOutputMessage)
+    assert [type(part) for part in output[0].content] == [
+        NeMoGymResponseOutputText,
+        NeMoGymResponseOutputRefusal,
+        NeMoGymResponseOutputText,
+    ]
+    assert [getattr(part, "text", getattr(part, "refusal", None)) for part in output[0].content] == [
+        "before",
+        "cannot comply",
+        "after",
+    ]
+
+
+def test_postprocess_preserves_top_level_assistant_refusal(converter: ResponsesConverter):
+    output = converter.postprocess_assistant_message_dict(
+        {"role": "assistant", "content": None, "refusal": "cannot comply"}
+    )
+    assert len(output) == 1
+    assert isinstance(output[0], NeMoGymResponseOutputMessage)
+    assert output[0].content == [NeMoGymResponseOutputRefusal(refusal="cannot comply")]
 
 
 def test_postprocess_tool_calls(converter: ResponsesConverter):
