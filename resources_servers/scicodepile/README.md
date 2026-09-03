@@ -46,10 +46,16 @@ Unlike BigCodeBench, there is **no calibration prefix**. BigCodeBench can prepen
 body; that is impossible here because SciCodePile's `prompt` field is display text
 whose docstring is not indented under the `def` line, so it is not valid Python.
 
-The prompt built in `benchmarks/scicodepile/prepare.py` therefore demands a complete
-definition under the exact `entry_point` name, and a bare function body scores
-`entry_point_missing`. All 200 upstream `canonical_solution` values are likewise
-complete definitions, so this matches the benchmark's own expectation.
+The server therefore looks `entry_point` up in the namespace produced by executing
+the model's code, and a bare function body scores `entry_point_missing`. All 200
+upstream `canonical_solution` values are complete definitions, so this matches the
+benchmark's own expectation.
+
+The benchmark deliberately does **not** instruct the model to do this — it passes
+the upstream prompt through unmodified, because upstream publishes no prompt to
+match and a wrapper measurably changes the result. See
+[`benchmarks/scicodepile/README.md`](../../benchmarks/scicodepile/README.md#prompting)
+for the A/B evidence and the non-attempt rate that choice costs.
 
 ### Code extraction
 

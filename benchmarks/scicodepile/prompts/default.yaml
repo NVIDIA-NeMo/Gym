@@ -1,10 +1,10 @@
 # Default prompt for the SciCodePile runnable benchmark.
 #
-# The instruction and fenced code block are built in prepare.py rather than here,
-# because the demand for a complete definition under the exact `entry_point` name
-# is a correctness requirement of the verifier, not a stylistic choice: the server
-# looks the function up by name after executing the model's code and has no
-# calibration prefix to fall back on.
+# Deliberately empty scaffolding: `question` is the upstream `prompt` field passed
+# through unmodified (a function signature plus docstring), HumanEval-style.
+# Upstream publishes no prompt of its own, so any instruction wrapper here would be
+# invention that changes what is measured. See the benchmark README for the A/B
+# measurement behind this choice, including the cost it carries.
 
 system: ""
 

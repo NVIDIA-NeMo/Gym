@@ -10,11 +10,15 @@ Notes on the upstream data, verified against all 200 released rows:
     function named by ``entry_point``.
   * The ``prompt`` field is **display text, not valid Python** — its docstring is
     not indented under the ``def`` line. It therefore cannot be prepended to the
-    model's output the way BigCodeBench calibrates with ``code_prompt``, and the
-    model is instead asked for a complete function definition. Every one of the
-    200 ``canonical_solution`` values is likewise a complete definition.
+    model's output the way BigCodeBench calibrates with ``code_prompt``. Every one
+    of the 200 ``canonical_solution`` values is a complete function definition, and
+    the verifier looks the function up by name, so the model has to produce one too.
   * ``setup_code`` is non-empty on 105 of 200 rows and must run before the
     model's code.
+
+The upstream ``prompt`` is passed through untouched, HumanEval-style. Upstream does
+not publish its own prompt, so any wrapper would be invention; measurements behind
+that choice are in this benchmark's README.
 """
 
 import argparse
@@ -34,20 +38,14 @@ HF_SPLIT = "train"
 EXPECTED_ROWS = 200
 
 
-def _build_question(prompt: str, entry_point: str) -> str:
-    """Wrap the task's display prompt with the instruction the verifier assumes.
+def _build_question(prompt: str) -> str:
+    """Return the user-visible question for one task.
 
-    The verifier looks up ``entry_point`` in the namespace produced by executing the
-    model's code, so the instruction has to demand a complete definition under that
-    exact name. Nothing is prepended at verify time to rescue a bare function body.
+    The upstream ``prompt`` — a function signature plus docstring — is passed
+    through unmodified. Adding instructions changes what is being measured, and
+    upstream publishes no prompt to match, so nothing is added here.
     """
-    return (
-        "Write a complete Python implementation of the following function.\n\n"
-        "Return the entire function definition, including the `def` line, in a single "
-        "```python code block. Do not return only the body, and do not rename the function: "
-        f"it must be named `{entry_point}`.\n\n"
-        f"```python\n{prompt}\n```\n"
-    )
+    return prompt
 
 
 def prepare(output_path: Path = OUTPUT_FPATH) -> Path:
@@ -85,7 +83,7 @@ def prepare(output_path: Path = OUTPUT_FPATH) -> Path:
                     meta = {}
 
             out = {
-                "question": _build_question(row["prompt"], row["entry_point"]),
+                "question": _build_question(row["prompt"]),
                 "verifier_metadata": {
                     "task_id": row["task_id"],
                     "test": row["test"],

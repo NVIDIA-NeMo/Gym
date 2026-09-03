@@ -50,6 +50,34 @@ gym eval run \
 Note `--split benchmark`: in NeMo Gym `--split` selects the dataset `type` declared
 in the config, not a train/test split.
 
+## Prompting
+
+The upstream `prompt` field — a function signature plus docstring — is passed to the
+model unmodified, HumanEval-style. Upstream publishes no prompt of its own, so any
+wrapper would be invention that changes what is measured.
+
+This choice was made from measurement, not taste. Both forms were run over all 200
+tasks against `gpt-5.4-mini`:
+
+| Prompt | Score | Non-attempts | Score given usable code |
+| --- | --- | --- | --- |
+| Raw upstream prompt (shipped) | **9.50%** | 34 | **11.45%** |
+| Instruction-wrapped | 8.50% | 0 | 8.50% |
+
+The raw prompt scores higher overall *and* substantially higher on the tasks where
+the model produced usable code, which is closer to the 12.30% upstream reports for
+this model.
+
+**It carries a real cost.** With no instruction, a chat model sometimes answers
+conversationally instead of writing code — *"It looks like you've pasted a docstring
+but not the implementation. If you want, I can…"* — which the extractor cannot parse.
+That accounted for 34 of 200 tasks (31 unparseable, 3 with no matching function).
+Instruction-wrapping eliminates those but depresses the quality of the code that is
+produced, apparently by encouraging literal transcription of the docstring.
+
+If a future run needs the non-attempt rate reported separately, the statuses
+`no_code_block`, `entry_point_missing`, and `error`/`syntax_error` isolate them.
+
 ## Data notes
 
 Verified against all 200 released rows:
