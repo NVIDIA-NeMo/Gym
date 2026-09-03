@@ -46,7 +46,7 @@ terminus_2_sandboxed_agent_terminal_bench_2_1:
 terminus_2_sandboxed_terminal_bench_2_1_resources_server:
   resources_servers:
     terminal_bench_2_1:
-      max_concurrency: 256
+      max_concurrency: 1024
       sandbox_config:
         metadata:
           nemo.nvidia.com/resources: custom
