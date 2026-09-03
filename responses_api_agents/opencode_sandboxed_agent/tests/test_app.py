@@ -184,6 +184,7 @@ class TestOpenCodeSandboxedAgent:
 
     async def test_responses_sanity(self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch) -> None:
         config = self._create_config()
+        config.opencode_max_output_tokens = 131072
         server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
         sandbox_mock = MagicMock()
@@ -223,6 +224,9 @@ class TestOpenCodeSandboxedAgent:
             body=NeMoGymResponseCreateParamsNonStreaming(
                 input=[{"role": "user", "content": "hello"}],
             ),
+        )
+        assert (
+            "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=131072" in sandbox_mock.exec.await_args_list[0].kwargs["command"]
         )
         expected_response = NeMoGymResponse(
             id="resp_",

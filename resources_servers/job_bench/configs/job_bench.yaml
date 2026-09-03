@@ -5,9 +5,9 @@ job_bench_resources_server:
       domain: other
       verified: false
       allowed_agents: [opencode_sandboxed_agent]
-      judge_base_url: ${oc.env:JOB_BENCH_JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
-      judge_api_key: ${oc.env:JOB_BENCH_JUDGE_API_KEY,${oc.env:NVIDIA_API_KEY,''}}
-      judge_model: ${oc.env:JOB_BENCH_JUDGE_MODEL,nvidia/openai/gpt-oss-20b}
+      judge_base_url: ${oc.env:JOB_BENCH_JUDGE_BASE_URL,https://api.x.ai/v1}
+      judge_api_key: ${oc.env:JOB_BENCH_JUDGE_API_KEY,${oc.env:XAI_API_KEY,''}}
+      judge_model: ${oc.env:JOB_BENCH_JUDGE_MODEL,grok-4.3}
       max_judge_workers: 10
       sandbox_provider: sandbox
       sandbox_config:

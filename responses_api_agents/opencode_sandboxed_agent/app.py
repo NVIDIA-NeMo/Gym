@@ -391,6 +391,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_musl_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
+    opencode_max_output_tokens: int = 1_000_000_000
 
     # Sandbox config
     sandbox_provider: str
@@ -557,7 +558,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                             "limit": {
                                 "context": self.config.opencode_max_context_window,
                                 "input": self.config.opencode_max_context_window,
-                                # See the OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX flag below for more information.
                                 "output": self.config.opencode_max_context_window,
                             },
                         },
@@ -707,17 +707,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             remote_data_home = f"/tmp/nemo-gym-opencode-{uuid4().hex}"
             xdg_home_str = f"XDG_DATA_HOME={remote_data_home}"
 
-        # @bxyu-nvidia: Regarding `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000` below:
-        # OpenCode defaults to 32k here https://github.com/anomalyco/opencode/blob/58a99916bb96edf5cf605dc03e1be1e4bacf9ff7/packages/opencode/src/provider/transform.ts#L21
-        # and there is no way to set it to null.
-        # Here, we set an exorbitantly high number that cannot ever be reached.
-        # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
         command = f"""
         echo "Shell: $SHELL" \
         && {install_str} \
         && export PATH=$HOME/.opencode/bin:$PATH \
         && echo "Installed OpenCode" \
-        && OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
+        && OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX={self.config.opencode_max_output_tokens} {xdg_home_str} \
             opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
         && echo "OpenCode run finished"
         """

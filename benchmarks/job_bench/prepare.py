@@ -30,11 +30,20 @@ def prepare() -> Path:
     with OUTPUT_FPATH.open("w", encoding="utf-8") as output:
         for task in tasks:
             task_id = f"{task.parent.name}/{task.name}"
-            prompt = (
-                "Read /workspace/task/TASK_INSTRUCTIONS.txt and the referenced files in /workspace/task. "
-                "Complete the task and save only final deliverables in /workspace/output. "
-                "Do not access paths outside /workspace. If required information is absent, search the web."
-            )
+            prompt = """=== TASK FOLDER ===
+/workspace/task
+
+=== INSTRUCTIONS ===
+1. Read TASK_INSTRUCTIONS.txt in the task folder
+2. Read the files named in its Reference Files section
+3. Complete the task as specified
+4. Save only final deliverables in the output directory
+
+=== OUTPUT DIRECTORY ===
+/workspace/output
+
+All reference files are in /workspace/task. Only access /workspace or search online for needed references.
+If information conflicts, explain and justify the chosen approach. Use appropriate tools to read office files."""
             output.write(
                 json.dumps(
                     {

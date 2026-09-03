@@ -1,13 +1,14 @@
 # Job-Bench
 
 This integration runs the official Job-Bench `main` split in an isolated sandbox with OpenCode 1.14.18,
-then applies the upstream weighted-rubric evaluator using NVIDIA GPT-OSS as the default judge. The upstream
+then applies the upstream weighted-rubric evaluator using the official Grok 4.3 judge default. The upstream
 evaluator is vendored in `resources_servers/job_bench/vendor/judge.py` to preserve its scoring behavior.
 
 ```bash
 uv run gym eval prepare --benchmark job_bench
 
 export NVIDIA_API_KEY=...
+export XAI_API_KEY=...
 export RAY_ENABLE_UV_RUN_RUNTIME_ENV=0
 uv run gym eval run \
   --benchmark job_bench \
@@ -20,9 +21,8 @@ uv run gym eval run \
   +default_host="$ROUTABLE_HOST_IP"
 ```
 
-The published Kimi K3 target is 54.3% weighted score. Run all 65 `main` tasks for a comparable score. Because
-the published score uses Grok 4.3 as judge, the default NVIDIA GPT-OSS result is a reproducible NVIDIA-only
-variant rather than an exact judge-matched reproduction. Set `JOB_BENCH_JUDGE_*` to override the judge.
+The published Kimi K3 target is 54.3% weighted score. Run all 65 `main` tasks for a comparable score. The default
+judge matches the official harness. Set `JOB_BENCH_JUDGE_*` to override it.
 `JOB_BENCH_SPLIT=easy` runs the smaller easy split. Easy-split scores are not leaderboard results.
 
 The benchmark selects Gym's OpenSandbox provider. Export `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` before

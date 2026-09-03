@@ -13,14 +13,18 @@ job_bench_opencode_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
       opencode_version: 1.14.18
+      opencode_max_output_tokens: 131072
       resources_server:
         type: resources_servers
         name: job_bench_resources_server
-      opencode_max_context_window: 131072
+      opencode_max_context_window: 1000000
       sandbox_timeout: 7200
       opencode_config:
         permission:
-          "*": allow
+          external_directory:
+            "*": deny
+            /workspace: allow
+            /workspace/**: allow
         tools:
           webfetch: true
           websearch: true
