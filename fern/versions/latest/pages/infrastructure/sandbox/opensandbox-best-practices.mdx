@@ -170,8 +170,6 @@ attach and mount namespaces fail for that reason, not because of your config.
 
 ## Be a good tenant
 
-- **Check load before a large launch**: `GET /v1/sandboxes?pageSize=1` and read `totalItems`.
-  Near the cluster's ceiling, every create becomes a 20-minute wait for everyone. Stagger runs.
 - **Keep attribution on.** Inside Kubernetes (no Slurm variables, OS user `root`) set
   `NEMO_GYM_TEAM` / `NEMO_GYM_USER` / `NEMO_GYM_WORKLOAD` on the pod, or nobody can tell whose run
   is filling the cluster.
