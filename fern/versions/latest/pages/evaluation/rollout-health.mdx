@@ -98,13 +98,13 @@ Check IDs identify both the evidence being evaluated and the condition detected.
 | `rollout_missing_agent_turns` | Rollout | Agent turns are observable, but no turn contains any of the following: (1) non-empty answer or reasoning content, (2) a tool call, or (3) a model-call reference. |
 | `rollout_token_count_mismatch` | Rollout | Both top-level rollout token totals and a complete set of bound policy-model-call token counts are available, but the prompt-token total or completion-token total differs from the corresponding call-level sum. |
 | `agent_turn_hollow` | Agent turn | An observable `TrajectoryTurn` does not contain any of the following: (1) non-empty answer content, (2) non-empty reasoning content, or (3) a tool call. |
-| `trajectory_capture_mismatch` | Trajectory and model calls | An explicit turn-to-model-call reference resolves to zero or multiple model calls, or `ng_trajectory.gaps` records an unmatched, ambiguous, or conflicting reference. |
+| `trajectory_capture_mismatch` | Trajectory and model calls | An explicit turn- or invocation-to-model-call reference resolves to zero or multiple model calls, or `ng_trajectory.gaps` records an unmatched, ambiguous, or conflicting reference. |
 | `model_call_failed` | Policy-model call | An exactly bound policy-model call has an HTTP error status, an error category, or response status `failed`, `error`, or `cancelled`. |
 | `model_call_missing_token_counts` | Policy-model call | On an exactly bound policy-model call, `token_stats.prompt_tokens` or `token_stats.completion_tokens` is omitted or set to `null`. A value of zero counts as present. |
 | `model_call_runaway_generation` | Policy-model call | An exactly bound policy-model call ended with `finish_reason: length` and its saved response contains no answer or reasoning content. |
 | `model_call_zero_completion_tokens` | Policy-model call | An exactly bound policy-model call reports zero completion tokens. |
 | `task_consistently_unhealthy` | Task | At least two repeats are computable and every computable repeat is unhealthy. Unobserved repeats do not prevent the flag. |
-| `task_no_successful_model_calls` | Task | Every repeat has at least one policy-model-call reference, every reference resolves to exactly one captured call, and none of the matched calls completed successfully. |
+| `task_no_successful_model_calls` | Task | Every repeat has at least one turn-to-model-call reference, every turn reference resolves to exactly one captured call, and none of those turn-bound calls completed successfully. |
 
 ### What Counts as Agent Activity
 
@@ -115,24 +115,32 @@ Reasoning-only turns are not hollow. A model-call reference also establishes act
 Agent logic that advances a rollout without calling the policy model has no bound model call and is outside model-call checks.
 The runner does not infer a special dispatch marker from sampling parameters or request metadata.
 
-### Binding Turns to Policy-Model Calls
+### Binding Policy-Model Calls
 
 An evaluation can contain calls to the policy model and to auxiliary models such as a judge or user simulator. Model-call checks
-must therefore establish which calls belong to policy-model turns before evaluating them.
+must therefore establish which calls belong to the policy model before evaluating them.
 
-The runner binds `TrajectoryTurn.model_calls` to `TrajectoryRecord.model_calls` using only one of these explicit identities:
+The per-call checks bind both `TrajectoryTurn.model_calls` and `AgentInvocation.model_calls` to
+`TrajectoryRecord.model_calls` using only one of these explicit identities:
 
 - `model_call_id`
 - the exact pair of `model_ref` and `response_id`
 
 It does not match calls by list position, timestamp, model name, or payload similarity. A reference that resolves exactly once
-becomes a bound policy-model call. Unreferenced model calls are not assigned to the policy model because they can belong to an
-auxiliary model.
+becomes a bound policy-model call. When the same call is referenced by both a turn and its containing invocation, the call is
+evaluated once. Unreferenced model calls are not assigned to the policy model because they can belong to an auxiliary model.
+
+The per-call checks are `model_call_failed`, `model_call_missing_token_counts`, `model_call_runaway_generation`,
+`model_call_zero_completion_tokens`, and `trajectory_capture_mismatch`. Invocation ownership is sufficient for these checks
+because each evaluates one call or one explicit reference independently. `rollout_token_count_mismatch` and
+`task_no_successful_model_calls` use only turn-owned calls. These aggregate checks require per-turn placement: an invocation can
+also own support calls that should be inspected individually but must not satisfy a trajectory-level token total or successful-call
+claim.
 
 <Note>
   The conservative binding rule avoids attributing a judge or user-simulator failure to the evaluated model. Its trade-off is
-  coverage: when a trajectory producer does not write explicit references, binding-dependent checks are unobserved even if the
-  trajectory contains an unowned list of model calls.
+  coverage: when a trajectory producer does not write explicit turn or invocation references, binding-dependent checks are
+  unobserved even if the trajectory contains an unowned list of model calls.
 </Note>
 
 ### Length-Limited Responses
@@ -168,9 +176,9 @@ conflict produces a finding.
 least two computable repeats and flags the task when all of them are unhealthy. An additional unobserved repeat does not erase
 the repeated observed failures.
 
-`task_no_successful_model_calls` requires complete policy-model-call bindings for every repeat. If any repeat lacks complete
-bindings, the task check is unobserved. This prevents the runner from claiming that a task had no successful policy-model call
-when an unobserved repeat might contain one.
+`task_no_successful_model_calls` requires complete turn-to-model-call bindings for every repeat. If any repeat lacks complete
+turn bindings, the task check is unobserved. Invocation-only support calls do not satisfy this task-level check. This prevents the
+runner from claiming that a task had no successful trajectory call when an unobserved repeat might contain one.
 
 Duplicate persisted records are kept in the per-rollout report and counted at run level, but records with the same task and
 rollout indices count as one repeat during task-level reduction. This prevents copied records from appearing to be independent
@@ -329,7 +337,7 @@ healthy.
 
 ## Implementation Reference
 
-- [`TrajectoryRecord`, `TrajectoryTurn`, `ObservationGap`, and `ModelCallRef`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/rollout_observability.py) define the standard evidence consumed by health checks.
+- [`TrajectoryRecord`, `TrajectoryTurn`, `AgentInvocation`, `ObservationGap`, and `ModelCallRef`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/rollout_observability.py) define the standard evidence consumed by health checks.
 - [`CheckSpec`, `Finding`, and `RolloutDigest`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/health/types.py) define the health data contracts.
 - [The check registry](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/health/checks.py) defines the stable check IDs and per-rollout rules.
 - [The rollout-health runner](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/rollout_health.py) derives verdicts and writes reports.
