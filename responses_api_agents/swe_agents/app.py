@@ -276,6 +276,11 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     resolved_agent_cls: str = "CodeActAgent"
     resolved_diversify_tool_names: Optional[bool] = False
     resolved_camel_case_tool_names: Optional[bool] = False
+    # Explicit per-instance tool names for the OpenHands agent: a JSON object mapping tool-name identifiers
+    # (e.g. BASH_TOOL_NAME) to the concrete names the episode must expose. Exported as TOOL_NAME_OVERRIDES to the agent
+    # process; takes precedence over DIVERSIFY_TOOL_NAMES / CAMEL_CASE_TOOL_NAMES in nv-OpenHands. Set per request by
+    # wrappers that need a fixed binding (see responses_api_agents/swe_if_agents); None = harness defaults.
+    resolved_tool_name_overrides: Optional[str] = None
 
     # Set later
     eval_command: Optional[ExecuteContainerCommandArgs] = None
@@ -1865,6 +1870,11 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
         else:
             camel_case_tool_names_cmd = ""
 
+        if self.config.resolved_tool_name_overrides:
+            tool_name_overrides_cmd = f"export TOOL_NAME_OVERRIDES={shlex.quote(self.config.resolved_tool_name_overrides)} && "
+        else:
+            tool_name_overrides_cmd = ""
+
         workspace_check_cmd = ""
 
         # Run the same baseline dependency/env repair the eval uses (if any), in a
@@ -1908,6 +1918,7 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
             f"{crypto_fix_cmd}"
             f"{diversify_tool_names_cmd}"
             f"{camel_case_tool_names_cmd}"
+            f"{tool_name_overrides_cmd}"
             f"echo {shlex.quote(config_str)} >{config_file_path} && "
             f"{baseline_fix_cmd}"
             # f" export EVAL_OUTPUT_DIR={eval_dir_in_openhands} && "
@@ -2983,6 +2994,19 @@ class RunOpenHandsAgent(BaseModel):
 ########################################
 
 
+
+def _dump_tool_for_replay(tool: BaseModel) -> dict:
+    """Dump a response tool so it re-validates as a request tool param.
+
+    Under the pinned openai schema, FunctionToolParam types ``defer_loading`` as a non-nullable bool while the
+    FunctionTool response model defaults it to None, so a plain dump fails validation; the other nullable fields
+    (``strict``, ``parameters``) are required keys and must stay even when None.
+    """
+    dumped = tool.model_dump()
+    if dumped.get("defer_loading") is None:
+        dumped.pop("defer_loading", None)
+    return dumped
+
 class SWEBenchWrapper(SimpleResponsesAPIAgent):
     config: SWEBenchWrapperConfig
 
@@ -3970,7 +3994,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             metadata, response.metadata = response.metadata, None
             responses_create_params = body.responses_create_params.model_dump() | {
                 "input": orjson.loads(metadata["input"]),
-                "tools": [t.model_dump() for t in response.tools] if response.tools else [],
+                "tools": [_dump_tool_for_replay(t) for t in response.tools] if response.tools else [],
             }
             metrics = SWEBenchMetrics.model_validate_json(metadata["metrics"])
             subagent_trajectories = None

@@ -1,0 +1,3 @@
+# Same dependencies as responses_api_agents/swe_agents (this agent subclasses it); ng_run builds a per-server venv from this file.
+-e nemo-gym[dev] @ ../../
+tomlkit

@@ -1,0 +1,72 @@
+# swe_if_agents — SWE-bench rollouts with injected instruction-following constraints, OpenCodeAgent persona (nv-OpenHands).
+#
+# Every dataset row carries its instruction surfaces in the request metadata (tool_name_overrides, system_prompt_template_text,
+# user_prompt_template_text, replay_observation_suffix) and its constraints (sdg_item); see responses_api_agents/swe_if_agents/README.md.
+# The agent framework must be an nv-OpenHands checkout that honours TOOL_NAME_OVERRIDES and `observation_suffix` on replayed tool
+# messages: the fork below (branch swe-if-agents = sdevare-nv/nv-OpenHands @ 7466868e2 + three commits). For cluster runs the repo
+# is a bare mirror on lustre; for the pull request point it at the GitHub fork.
+swe_agents:
+  responses_api_agents:
+    swe_if_agents: &swe_if_agents_config
+      entrypoint: app.py
+
+      # Agent framework configuration
+      agent_framework: openhands
+      agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
+      agent_max_turns: 100
+      agent_framework_repo: /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/gym_workdir/nv-OpenHands-fork.git
+      agent_framework_commit: fe33c54cf5f2018aa3eec15a1b62ff7c476e9d4f  # pragma: allowlist secret
+
+      # Container configuration
+      container_formatter: ???
+      container_folder_path: null
+      swebench_agent_timeout: 1800
+      swebench_tests_timeout: 900
+      apptainer_memory_limit_mb: 65536
+      command_exec_timeout: 300
+
+      dataset_path: ???
+
+      # PERSONA: the nv-OpenHands OpenCodeAgent only. No YAML-level system prompt: every IF row ships its own system prompt and
+      # user prompt template in metadata (the neutral base prompt with the injected instruction), which take precedence.
+      # diversify_tool_names stays false: a row that wants non-default names ships the full binding as tool_name_overrides.
+      agent_prompt_overrides:
+      - user_prompt_template: responses_api_agents/swe_agents/prompts/opencode/user_prompt.j2
+        agent_cls: OpenCodeAgent
+        diversify_tool_names: false
+
+      # Grade the row's constraints and attach if_constraints to the verify response (reward stays the SWE-bench outcome).
+      if_grading: true
+
+      # Optional model server reference
+      model_server:
+        name: policy_model # openai_model
+        type: responses_api_models
+
+      datasets:
+        # The rows come from the IF sampler (recipe if-constraint-design, sdg/build_gym_rows.py); these entries name the SWE
+        # task sets the sampler draws from.
+        - name: train
+          type: train
+          jsonl_fpath: responses_api_agents/swe_agents/data/swegym_for_sweagent_and_openhands.jsonl
+          gitlab_identifier:
+            dataset_name: swegym_for_sweagent_and_openhands
+            version: 0.0.2
+            artifact_fpath: swegym-converted.jsonl
+          license: Apache 2.0
+        - name: validation
+          type: validation
+          jsonl_fpath: responses_api_agents/swe_agents/data/swebench_verified_for_sweagent_and_openhands.jsonl
+          gitlab_identifier:
+            dataset_name: swebench_verified_for_sweagent_and_openhands
+            version: 0.0.1
+            artifact_fpath: swebench_verified_for_sweagent_and_openhands.jsonl
+          license: TBD
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/swe_agents/data/example.jsonl
+
+swe_agents_val:
+  responses_api_agents:
+    swe_if_agents:
+      <<: *swe_if_agents_config
