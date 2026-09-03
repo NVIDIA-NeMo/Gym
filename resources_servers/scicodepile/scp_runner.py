@@ -17,6 +17,15 @@ resources server, and so a hang is bounded by the parent's timeout. Every task i
 this benchmark carries the ``env_sensitive`` audit flag and 117 of 200 carry
 ``globals_patch``, so tests mutate global state freely — a fresh process per task
 is what keeps them independent.
+
+``code`` is unreviewed model output, and this runner is **not** a security
+sandbox: task code runs with the privileges and environment of the resources
+server, and can shell out, open sockets, or write outside its CWD. Containment is
+limited to process isolation, an address-space cap, a throwaway CWD, and the
+parent's timeout. Do not run untrusted rollouts on shared nodes without a real
+sandbox (see ``nemo_gym/sandbox/``). The result channel is kept off fd 1 so that
+stdout writes from task code can neither forge nor corrupt the verdict; see
+``main``.
 """
 
 import contextlib
@@ -93,6 +102,17 @@ def main() -> None:
     _apply_limits(int(req.get("max_as_limit", 0)))
     faulthandler.disable()
 
+    # Move the result channel off fd 1 before any task code runs, then point fd 1
+    # at /dev/null. Task code owns fd 1 too, and `redirect_stdout` below only
+    # rebinds `sys.stdout` — it does not protect the descriptor. Without this, a
+    # completion doing `os.write(1, b'{"status": "pass"}')` forges a reward-1.0
+    # verdict without `check()` ever running, and incidental C-level writes to
+    # fd 1 corrupt the JSON of an honest one.
+    result_fd = os.dup(1)
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull_fd, 1)
+    os.close(devnull_fd)
+
     # Run inside a throwaway working directory. Several tasks write files relative
     # to the CWD (observed: bioinformatics tasks emitting .fasta/.a3m/.pdb), which
     # would otherwise litter the repository, let concurrent tasks collide on
@@ -113,8 +133,11 @@ def main() -> None:
         except OSError:
             pass
 
-    sys.__stdout__.write(json.dumps(result))
-    sys.__stdout__.flush()
+    # Written to the private duplicate, not fd 1. A task that calls `os._exit`
+    # skips this entirely, leaving the parent an empty read that it reports as
+    # `unparseable_runner_output` — the runner fails closed, never to `pass`.
+    os.write(result_fd, json.dumps(result).encode())
+    os.close(result_fd)
 
 
 if __name__ == "__main__":
