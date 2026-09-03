@@ -13,11 +13,11 @@ NeMo Gym v0.6.0 lets you use external agent harnesses during RL training and add
 
 Highlights:
 
-- Use supported external agent harnesses during RL training; Gym preserves each model call's token IDs and reconstructs the multi-step run as one training response
+- Use supported external agent harnesses during RL training; NeMo Gym preserves each model call's token IDs and reconstructs the multi-step run as one training response
 - Run routing-aware evaluations with Switchyard by comparing fixed and routed conditions on the same benchmark
 - Trust and debug rollouts with automatic health checks, end-to-end traces, and per-agent token, turn, tool-call, and latency diagnostics
 - Evaluate and compare multiple agents and datasets in one run, with task-level routing to the appropriate harness
-- Submit eval jobs to a Slurm cluster with `gym eval submit`, scaling vLLM across GPUs or nodes for higher rollout concurrency
+- Submit eval jobs to a Slurm cluster directly from NeMo Gym, scaling vLLM across GPUs or nodes for higher rollout concurrency
 
 ### First-Time Contributors
 
@@ -39,20 +39,20 @@ Thank you to all **64 NeMo Gym contributors** this cycle, including 19 first-tim
 
 ### Configure Tasks and Data
 
-- Resources servers can declare their datasets, and `gym dataset collate` records each row's `task_source` so Gym can select the correct agent at run time
+- Resources servers can declare their datasets, and `gym dataset collate` records each row's `task_source` so NeMo Gym can select the correct agent at run time
 - Use `agent_map` to reroute selected tasks or fan-out to run the same tasks with multiple agents; invalid agent mappings fail before execution
 - Each resources server defines a typed `task_data` schema. Collation validates rows before a run, and `gym env schema --resources-server <name>` shows the expected data shape
 
 ### Configure Agent Harnesses
 
 - Use `--agent-type` to swap a benchmark or environment's configured harness, with compatibility checks for unsupported pairings
-- **OpenCode Sandboxed Agent** runs OpenCode inside task-specific Gym sandboxes, with configurations for SWE-Bench Verified and Multilingual, DeepSWE, and Terminal-Bench 2.1
-- **Cline Agent** runs the Cline CLI headlessly and converts its tool-use trace into a Gym trajectory; this initial integration is evaluation-only
+- **OpenCode Sandboxed Agent** runs OpenCode inside task-specific NeMo Gym sandboxes, with configurations for SWE-Bench Verified and Multilingual, DeepSWE, and Terminal-Bench 2.1
+- **Cline Agent** runs the Cline CLI headlessly and converts its tool-use trace into a NeMo Gym trajectory; this initial integration is evaluation-only
 - **Conversational Tool Use workflow** adds three agents that generate customer-service domains, policies, tools, and scenarios, plus a policy-loop agent and resources server that simulate and score multi-turn customer and tool interactions
-- **OSWorld Agent** runs OSWorld desktop tasks end to end, executes model-generated GUI actions, and returns Gym trajectories with OSWorld rewards
-- **Prime Agent** runs Prime Intellect's agent headlessly through Gym, with included math and Reasoning Gym environments
+- **OSWorld Agent** runs OSWorld desktop tasks end to end, executes model-generated GUI actions, and returns NeMo Gym trajectories with OSWorld rewards
+- **Prime Agent** runs Prime Intellect's agent headlessly through NeMo Gym, with included math and Reasoning Gym environments
 - **Simple Strands Agent** wraps the Simple Strands Resolver agent with configurable local tools; included environments cover math and Reasoning Gym
-- **Terminus-2 Agent** runs Harbor's terminal-command agent through Gym, with AnyTerminal integration and support for other terminal-compatible resources servers
+- **Terminus-2 Agent** runs Harbor's terminal-command agent through NeMo Gym, with AnyTerminal integration and support for other terminal-compatible resources servers
 - **Simple Agent with Compaction** applies configurable history policies before each model call, including policies that omit older image observations or reasoning blocks
 - **Image Tools Agent** lets models iteratively transform and inspect images, scores their image-tool calls, and delegates final-answer verification to the mapped environment
 - **Verified Code QA (VCQA) Agent** gives models read-only repository snapshots or Git histories to investigate with file, search, and shell tools, then scores answers against a rubric with an LLM judge
@@ -60,23 +60,23 @@ Thank you to all **64 NeMo Gym contributors** this cycle, including 19 first-tim
 
 ### Configure Models
 
-- **LiteLLM Model** connects Gym to providers supported by LiteLLM
+- **LiteLLM Model** connects NeMo Gym to providers supported by LiteLLM
 - **Switchyard Model** compares model-routing strategies on the same benchmark and records the route and configuration used for reproducible results
 - The vLLM model server now supports video inputs
 - Use `sampling_overrides` to enforce generation settings when external agent harnesses omit them, preserving on-policy training behavior
-- Use `endpoint_file` to update a vLLM backend address without restarting Gym, with bounded connection retries during endpoint rotation
+- Use `endpoint_file` to update a vLLM backend address without restarting NeMo Gym, with bounded connection retries during endpoint rotation
 
 ### Rollout Observability and Export
 
 - Export configs, metrics, and rollouts through a shared exporter framework. MLflow is new; W&B uses the same path
 - Automatic rollout health checks flag missing turns, inconsistent model calls, token-count mismatches, and runaway generation, with structured reports from evaluation and aggregation
-- NeMo Lens telemetry traces each rollout across Gym's agent, model, and resources servers, making latency and failures easier to diagnose
+- NeMo Lens telemetry traces each rollout across NeMo Gym's agent, model, and resources servers, making latency and failures easier to diagnose
 - Rollout diagnostics report token usage, turns, tool calls, and latency, with agent-level traces for OpenClaw, Hermes, Pi, OpenCode, and SWE agents
 - Repeated-rollout metrics now include variability and 95% confidence intervals
 
 ### Evaluation and Training
 
-- Compatible external agent harnesses can produce on-policy training data: Gym preserves exact token IDs across model calls and rebuilds each multi-step episode as one training response
+- Compatible external agent harnesses can produce on-policy training data: NeMo Gym preserves exact token IDs across model calls and rebuilds each multi-step episode as one training response
 - Opt in to `route_failures_to_sidecar` to keep an evaluation running when agent calls fail; coverage reporting identifies excluded rollouts, and selected failure classes can instead count as zero
 - Trust eval artifacts: automatic health checks catch missing turns, broken model calls, and runaway generation; rollouts record tokens, turns, tool calls, and latency
 - Verifiers can return a human-readable `failure_reason` to explain unsuccessful rollouts
