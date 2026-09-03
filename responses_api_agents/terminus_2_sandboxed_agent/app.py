@@ -92,6 +92,7 @@ class Terminus2AgentVerifyResponse(BaseVerifyResponse):
     terminus2_time_taken: float
     model_calls_gt_10min: int
     num_compactions: int
+    error: Optional[str]
 
 
 class NeMoGymSandboxEnvironment:
@@ -354,10 +355,13 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 async with asyncio.timeout(self.config.sandbox_timeout):
                     await agent.run(instruction, environment, context)
                 terminus2_completed = True
+                error = None
             except TimeoutError:
                 terminus2_completed = False
+                error = format_exc()
             except:
                 terminus2_completed = False
+                error = format_exc()
                 print(f"Hit exception while running Terminus2: {format_exc()}", file=sys.stderr)
             finally:
                 pass
@@ -397,6 +401,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             "terminus2_time_taken": total_time,
             "model_calls_gt_10min": llm._model_calls_gt_10min,
             "num_compactions": agent._num_compactions,
+            "error": error,
         }
         return response, metrics
 
