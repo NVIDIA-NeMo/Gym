@@ -15,8 +15,9 @@ See the [OpenSandbox Provider](/infrastructure/sandbox/opensandbox) page for the
    `--config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml` and override only
    the keys you need. Its connection settings are the ones that are hard to get right
    ([connection fields](#connection-fields-that-must-be-right)).
-2. **Set requests separately from limits** — small `resource_requests`, generous `resources`
-   ([requests are not limits](#requests-are-not-limits)).
+2. **Start with low requests and set limits to the max CPU/memory you need** — small
+   `resource_requests` so you pack densely, `resources` sized to your real peaks; never the same
+   map for both ([requests are not limits](#requests-are-not-limits)).
 3. **Leave `derive_cpu_env` on and give agents a bash timeout** — the sandbox sees the host's core
    count, not your limit ([host-core fan-out](#the-host-core-fan-out-trap)).
 4. **Use background execution** — the shipped default; keep the poll interval in the tens of
