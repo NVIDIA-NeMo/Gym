@@ -21,7 +21,7 @@ See the [OpenSandbox Provider](/infrastructure/sandbox/opensandbox) page for the
 3. **Leave `derive_cpu_env` on and give agents a bash timeout** — the sandbox sees the host's core
    count, not your limit ([host-core fan-out](#the-host-core-fan-out-trap)).
 4. **Use background execution** — the shipped default; keep the poll interval in the tens of
-   seconds ([background execution](#how-background-execution-works)).
+   seconds ([background execution and timeouts](#background-execution-and-timeouts)).
 5. **Retry creates, never commands** — a retried command can run twice
    ([retries](#retries-creates-yes-commands-no)).
 6. **Turn on egress controls** for any benchmark where the agent must not reach the internet —
@@ -104,17 +104,7 @@ Two things it cannot fix:
   is the validated default; 8 minutes measured quality-negative) so runaway commands fail fast and
   the agent recovers.
 
-## Know which timeout you are waiting on
-
-Create is synchronous on the server: schedule the pod, lazy-load the image, start the exec daemon.
-On a healthy cluster that is p50 ≈ 7 s, p90 ≈ 20 s, p99 ≈ 2 min. On a full cluster, pods sit
-`Pending` for as long as your timeout allows.
-
-- `create.timeout_s` must exceed `ready_timeout_s`; it bounds the whole create including the
-  readiness wait (the shipped config: 1500 s over 1200 s).
-- `ttl_s` is the server-side backstop if your client dies. Set it above your longest rollout.
-
-### How background execution works
+## Background execution and timeouts
 
 With `operations.background_exec: false`, `exec()` holds one streaming response open for the
 whole command; any load balancer with a fixed idle timeout drops that stream mid-command and the
@@ -138,6 +128,16 @@ Creates failing every ~20 minutes with `Timeout on reading data from socket` is
 for the full budget, and each retry adds another. Check cluster load; more retries or longer
 timeouts do not help a full cluster.
 </Warning>
+
+### Which timeout you are waiting on
+
+Create is synchronous on the server: schedule the pod, lazy-load the image, start the exec daemon.
+On a healthy cluster that is p50 ≈ 7 s, p90 ≈ 20 s, p99 ≈ 2 min. On a full cluster, pods sit
+`Pending` for as long as your timeout allows.
+
+- `create.timeout_s` must exceed `ready_timeout_s`; it bounds the whole create including the
+  readiness wait (the shipped config: 1500 s over 1200 s).
+- `ttl_s` is the server-side backstop if your client dies. Set it above your longest rollout.
 
 ## Retries: creates yes, commands no
 
@@ -198,21 +198,6 @@ Things to know:
   nameserver exemptions). Without a `network_policy` they are silently dropped, because there is
   no sidecar to read them.
 
-## Failure signatures that are not what they look like
-
-| What you see | What it is | What to do |
-| --- | --- | --- |
-| `No such file or directory` for a file that is in the image (`/testbed`, `/tests/test.sh`, exit 127 on a present binary) during a large create burst | Lazy-loading image flake; the negative lookup got cached. The image is fine. | Retry after ≥60 s; if it fails twice, recreate the sandbox. |
-| Bursts of `502` on `/proxy/.../ping` right after create | Exec daemon not listening yet in a new pod. Self-healing. | Nothing. If it persists for minutes, the cluster is overloaded. |
-| `DELETE` → `404` / "Failed to terminate sandbox" | Already gone (TTL or earlier stop). | Nothing; the provider treats it as success. |
-| Status poll → `404 unknown execution` on a live sandbox | Stale sandbox→IP routing during create/delete storms. | Treat as a lost execution and recreate; do not tear down other sandboxes. |
-| `Server disconnected` / `Connection reset by peer` on a long stream | Load-balancer idle timeout or a server worker restart. | `background_exec: true`; keep `keepalive_expiry_s` below the server's idle timeout. |
-| `SandboxPtyError: PTY session already has an attached client` on every retry | The sandbox's backend died while the proxy still records the old attachment. | Report the death. Environments must catch `SandboxPtyError` in `verify()`; one unhandled 500 on `/run` can abort the whole eval. |
-| Whole sandbox dies with `137` after one heavy command | Group OOM kill (fan-out above). | Cap parallelism, bash timeout; more memory alone rarely fixes it. |
-
-Sandboxes run with the default capability set — no `SYS_PTRACE`, no `SYS_ADMIN`. `strace`/`gdb`
-attach and mount namespaces fail for that reason, not because of your config.
-
 ## Be a good tenant
 
 - **Keep attribution on.** Inside Kubernetes (no Slurm variables, OS user `root`) set
@@ -232,3 +217,18 @@ attach and mount namespaces fail for that reason, not because of your config.
   instead of downloading it.
 - **Stop sandboxes in the background.** Teardown is a provider round-trip you never need to wait
   for; `ttl_s` reaps anything a background stop misses.
+
+## Failure signatures that are not what they look like
+
+| What you see | What it is | What to do |
+| --- | --- | --- |
+| `No such file or directory` for a file that is in the image (`/testbed`, `/tests/test.sh`, exit 127 on a present binary) during a large create burst | Lazy-loading image flake; the negative lookup got cached. The image is fine. | Retry after ≥60 s; if it fails twice, recreate the sandbox. |
+| Bursts of `502` on `/proxy/.../ping` right after create | Exec daemon not listening yet in a new pod. Self-healing. | Nothing. If it persists for minutes, the cluster is overloaded. |
+| `DELETE` → `404` / "Failed to terminate sandbox" | Already gone (TTL or earlier stop). | Nothing; the provider treats it as success. |
+| Status poll → `404 unknown execution` on a live sandbox | Stale sandbox→IP routing during create/delete storms. | Treat as a lost execution and recreate; do not tear down other sandboxes. |
+| `Server disconnected` / `Connection reset by peer` on a long stream | Load-balancer idle timeout or a server worker restart. | `background_exec: true`; keep `keepalive_expiry_s` below the server's idle timeout. |
+| `SandboxPtyError: PTY session already has an attached client` on every retry | The sandbox's backend died while the proxy still records the old attachment. | Report the death. Environments must catch `SandboxPtyError` in `verify()`; one unhandled 500 on `/run` can abort the whole eval. |
+| Whole sandbox dies with `137` after one heavy command | Group OOM kill (fan-out above). | Cap parallelism, bash timeout; more memory alone rarely fixes it. |
+
+Sandboxes run with the default capability set — no `SYS_PTRACE`, no `SYS_ADMIN`. `strace`/`gdb`
+attach and mount namespaces fail for that reason, not because of your config.
