@@ -1,7 +1,4 @@
 -e nemo-gym[dev,sandbox] @ ../..
 huggingface-hub
-openai
-python-docx
-python-pptx
-openpyxl
-pypdf
+pyyaml
+tqdm

@@ -2,15 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import csv
 import json
+import shutil
+import subprocess
+import sys
 import tarfile
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from fastapi import Request
-from openai import OpenAI
 from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import (
@@ -25,6 +26,7 @@ from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from resources_servers.workspace_bench.setup_upstream import ensure_upstream
 
 
 class WorkspaceBenchConfig(BaseResourcesServerConfig):
@@ -58,50 +60,7 @@ class WorkspaceBenchVerifyResponse(BaseVerifyResponse):
     total_count: int
     judge_model: str
     rubrics: list[dict[str, Any]]
-
-
-def _extract_text(path: Path) -> str:
-    suffix = path.suffix.lower()
-    try:
-        if suffix == ".pdf":
-            from pypdf import PdfReader
-
-            return "\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
-        if suffix == ".docx":
-            from docx import Document
-
-            return "\n".join(paragraph.text for paragraph in Document(path).paragraphs)
-        if suffix == ".pptx":
-            from pptx import Presentation
-
-            return "\n".join(
-                shape.text for slide in Presentation(path).slides for shape in slide.shapes if hasattr(shape, "text")
-            )
-        if suffix == ".xlsx":
-            from openpyxl import load_workbook
-
-            workbook = load_workbook(path, read_only=True, data_only=True)
-            return "\n".join(
-                "\t".join(str(value or "") for value in row) for sheet in workbook for row in sheet.values
-            )
-        if suffix == ".csv":
-            return "\n".join("\t".join(row) for row in csv.reader(path.open(encoding="utf-8", errors="replace")))
-        return path.read_text(encoding="utf-8", errors="replace")
-    except Exception as error:
-        return f"[content unavailable: {type(error).__name__}]"
-
-
-def _directory_snapshot(directory: Path, max_bytes: int = 25_000) -> str:
-    files = [path for path in sorted(directory.rglob("*")) if path.is_file()]
-    if not files:
-        return ""
-    section_bytes = max_bytes // len(files)
-    sections = []
-    for path in files:
-        header = f"## {path.relative_to(directory)}\n".encode()
-        content = _extract_text(path).encode("utf-8")[: max(0, section_bytes - len(header))]
-        sections.append(header + content)
-    return b"\n\n".join(sections)[:max_bytes].decode("utf-8", errors="ignore")
+    dependency_graph: dict[str, Any]
 
 
 class WorkspaceBenchResourcesServer(SimpleResourcesServer):
@@ -109,6 +68,7 @@ class WorkspaceBenchResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any, /) -> None:
         self._sandboxes: dict[str, AsyncSandbox] = {}
+        self._upstream_dir = ensure_upstream()
 
     async def seed_session(self, request: Request, body: WorkspaceBenchRequest) -> WorkspaceBenchSeedResponse:
         task_dir = Path(body.task_dir)
@@ -155,55 +115,36 @@ class WorkspaceBenchResourcesServer(SimpleResourcesServer):
         descriptor = await sandbox.serialize()
         return WorkspaceBenchSeedResponse(sandbox_handle=descriptor["sandbox_id"])
 
-    def _judge(self, metadata: dict[str, Any], input_dir: Path, output_dir: Path) -> list[dict[str, Any]]:
-        rubrics = metadata["rubrics"]
-        if not any(path.is_file() for path in output_dir.rglob("*")):
-            return [
+    def _judge(self, case_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        evaluation_dir = self._upstream_dir / "evaluation"
+        config_path = case_dir / "judge.yaml"
+        config_path.write_text(
+            json.dumps(
                 {
-                    "index": index,
-                    "rubric": rubric,
-                    "passed": False,
-                    "confidence": 1.0,
-                    "evidence": "No output files found.",
+                    "model_name": "gym-judge",
+                    "baseUrl": self.config.judge_base_url,
+                    "model": self.config.judge_model,
+                    "apiKey": self.config.judge_api_key,
                 }
-                for index, rubric in enumerate(rubrics)
-            ]
-        payload = {
-            "task": metadata["task"],
-            "rubrics": [{"index": index, "rubric": rubric} for index, rubric in enumerate(rubrics)],
-            "input_files": _directory_snapshot(input_dir, max_bytes=5_000),
-            "output_files": _directory_snapshot(output_dir),
-        }
-        response = OpenAI(
-            base_url=self.config.judge_base_url, api_key=self.config.judge_api_key
-        ).chat.completions.create(
-            model=self.config.judge_model,
-            temperature=0,
-            response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a strict Workspace-Bench evaluator. For every rubric, return a JSON object with a "
-                        "rubrics array. Each item must contain index, passed (boolean), confidence (0 to 1), and concise "
-                        "file-grounded evidence. Do not award credit without evidence."
-                    ),
-                },
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
+            ),
+            encoding="utf-8",
         )
-        judged = json.loads(response.choices[0].message.content or "{}").get("rubrics", [])
-        by_index = {item.get("index"): item for item in judged if isinstance(item, dict)}
-        return [
-            {
-                "index": index,
-                "rubric": rubric,
-                "passed": bool(by_index.get(index, {}).get("passed", False)),
-                "confidence": float(by_index.get(index, {}).get("confidence", 0.0)),
-                "evidence": str(by_index.get(index, {}).get("evidence", "Judge returned no result.")),
-            }
-            for index, rubric in enumerate(rubrics)
-        ]
+        subprocess.run(
+            [
+                sys.executable,
+                str(evaluation_dir / "src" / "agent_as_a_judge.py"),
+                "--task-dir",
+                str(case_dir),
+                "--eval-yaml",
+                str(config_path),
+                "--overwrite",
+            ],
+            cwd=evaluation_dir,
+            check=True,
+        )
+        judged = json.loads((case_dir / "rubrics_judge--gym-judge.json").read_text(encoding="utf-8"))
+        graph = json.loads((case_dir / "dependency_graph--gym-judge.json").read_text(encoding="utf-8"))
+        return judged["rubrics"], graph
 
     async def verify(self, request: Request, body: WorkspaceBenchVerifyRequest) -> WorkspaceBenchVerifyResponse:
         sandbox = self._sandboxes.pop(str(request.session[SESSION_ID_KEY]))
@@ -218,7 +159,9 @@ class WorkspaceBenchResourcesServer(SimpleResourcesServer):
                 with tarfile.open(archive, "r:gz") as tar:
                     tar.extractall(local_dir, filter="data")
                 metadata = json.loads((Path(body.task_dir) / "metadata.json").read_text(encoding="utf-8"))
-                rubrics = await asyncio.to_thread(self._judge, metadata, local_dir / "input", local_dir / "output")
+                (local_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+                shutil.copytree(local_dir / "input", local_dir / "data")
+                rubrics, dependency_graph = await asyncio.to_thread(self._judge, local_dir)
         finally:
             await sandbox.stop()
         passed = sum(item["passed"] for item in rubrics)
@@ -230,6 +173,7 @@ class WorkspaceBenchResourcesServer(SimpleResourcesServer):
             total_count=total,
             judge_model=self.config.judge_model,
             rubrics=rubrics,
+            dependency_graph=dependency_graph,
         )
 
 
