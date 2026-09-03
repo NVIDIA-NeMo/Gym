@@ -12,16 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
+from http.cookies import SimpleCookie
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from nemo_gym._checkpoint import AgentBoundaryRecord
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.gymnasium_agent.app import GymnasiumAgent, GymnasiumAgentConfig, GymnasiumAgentRunRequest
+from responses_api_agents.gymnasium_agent.app import (
+    GymnasiumAgent,
+    GymnasiumAgentConfig,
+    GymnasiumAgentRunRequest,
+    _cookie_values,
+)
 
 
 def _make_agent(max_steps=10, observability=True):
@@ -37,6 +45,13 @@ def _make_agent(max_steps=10, observability=True):
     server_client = MagicMock(spec=ServerClient)
     server_client.global_config_dict = {"observability_enabled": observability}
     return GymnasiumAgent(config=config, server_client=server_client)
+
+
+def test_checkpoint_cookie_values_do_not_serialize_morsel_attributes():
+    cookies = SimpleCookie()
+    cookies["sid"] = "abc"
+    cookies["sid"]["path"] = "/"
+    assert _cookie_values(cookies) == {"sid": "abc"}
 
 
 def _model_response(text: str, input_toks=1, output_toks=1, cached_toks=0, reasoning_toks=0) -> dict:
@@ -68,11 +83,11 @@ def _model_response(text: str, input_toks=1, output_toks=1, cached_toks=0, reaso
 
 
 class _FakeHttpResp:
-    def __init__(self, payload: dict):
+    def __init__(self, payload: dict, *, status: int = 200):
         self._payload = payload
         self.cookies = {}
-        self.status = 200
-        self.ok = True
+        self.status = status
+        self.ok = status < 400
 
     async def json(self):
         return self._payload
@@ -197,7 +212,15 @@ class TestRun:
             },
         )
 
-        result = await agent.run(request, body)
+        participant = agent.checkpoint_participant()
+        await participant.resume()
+        execution = await participant.begin("2-0", 1, task=None)
+        token = participant.bind(execution)
+        try:
+            result = await agent.run(request, body)
+        finally:
+            participant.unbind(token)
+        await participant.finish(execution, outcome="completed", result=result)
 
         assert result.reward == 1.0
         assert result.response.usage.total_tokens == 18
@@ -206,8 +229,111 @@ class TestRun:
         assert any(getattr(item, "content", None) == "observation-1" for item in model_body.input)
 
     @pytest.mark.asyncio
+    async def test_legacy_boundary_at_step_budget_returns_truncated_result(self):
+        agent = _make_agent(max_steps=2)
+        continuation = AgentBoundaryRecord(
+            rollout_id="2-0",
+            attempt_index=0,
+            boundary_index=2,
+            output_items=_model_response("turn-2")["output"],
+            usage=_model_response("turn-2")["usage"],
+            last_committed_model_call_id="call-2",
+            agent_state={
+                "reset_data": {"observation": "start", "info": {}},
+                "step_data": {
+                    "observation": "still-running",
+                    "reward": 0.5,
+                    "terminated": False,
+                    "truncated": False,
+                    "info": {},
+                },
+                "total_reward": 1.25,
+            },
+        )
+        participant = agent.checkpoint_participant()
+        participant.install_restored([continuation])
+        await participant.resume()
+        execution = await participant.begin("2-0", 1, task=None)
+        token = participant.bind(execution)
+        request = MagicMock(cookies={})
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "play"}]},
+            **{
+                TASK_INDEX_KEY_NAME: 2,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                ATTEMPT_INDEX_KEY_NAME: 1,
+            },
+        )
+        try:
+            result = await agent.run(request, body)
+        finally:
+            participant.unbind(token)
+
+        assert result.truncated is True
+        assert result.reward == 1.25
+        assert result.response.id == "call-2"
+        agent.server_client.post.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_run_parks_and_retries_refused_step_without_recording_error(self):
+        agent = _make_agent(max_steps=2)
+        participant = agent.checkpoint_participant()
+        refused = asyncio.Event()
+        calls: list[tuple[str, object]] = []
+        responses = {
+            "/reset": [_FakeHttpResp({"observation": "start", "info": {}})],
+            "/ng-rollout/2-0/v1/responses": [_FakeHttpResp(_model_response("act"))],
+            "/step": [
+                _FakeHttpResp(
+                    {"error": {"code": "checkpoint_parked", "detail": "paused"}},
+                    status=409,
+                ),
+                _FakeHttpResp(
+                    {
+                        "observation": None,
+                        "reward": 1.0,
+                        "terminated": True,
+                        "truncated": False,
+                        "info": {},
+                    }
+                ),
+            ],
+        }
+
+        async def post(server_name, url_path, json=None, **kwargs):
+            calls.append((url_path, json))
+            response = responses[url_path].pop(0)
+            if url_path == "/step" and response.status == 409:
+                refused.set()
+            return response
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        app = agent.setup_webserver()
+        body = {
+            "responses_create_params": {"input": [{"role": "user", "content": "play"}]},
+            TASK_INDEX_KEY_NAME: 2,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            ATTEMPT_INDEX_KEY_NAME: 0,
+        }
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://agent") as client:
+            run = asyncio.create_task(client.post("/run", json=body))
+            await refused.wait()
+            while participant.status()["parked"] != 1:
+                await asyncio.sleep(0)
+            await participant.resume()
+            response = await run
+
+        assert response.status_code == 200
+        assert [url for url, _body in calls].count("/step") == 2
+        assert "checkpoint_parked" not in str(calls)
+
+    @pytest.mark.asyncio
     async def test_terminates_on_first_step(self):
         agent = _make_agent()
+        checkpoint_participant = MagicMock()
+        checkpoint_participant.commit_boundary = AsyncMock()
+        checkpoint_participant.continuation.return_value = None
+        agent._checkpoint_participant = checkpoint_participant
         model_path = "/ng-rollout/2-0/v1/responses"
         payloads = {
             "/reset": [{"observation": "go", "info": {}}],
@@ -237,6 +363,7 @@ class TestRun:
         assert urls.count("/close") == 0
         model_calls = [(u, h) for (u, h) in seen if u == model_path]
         assert model_calls == [(model_path, None)]
+        checkpoint_participant.commit_boundary.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_successful_rollout_survives_close_http_failure(self):
