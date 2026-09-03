@@ -32,10 +32,22 @@ from uuid import uuid4
 from fastapi import Request
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
+from nemo_gym.base_resources_server import (
+    NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY,
+    BaseRunRequest,
+    BaseVerifyResponse,
+    MCPToolCallProvenance,
+)
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
+from nemo_gym.global_config import SKILLS_REF_KEY_NAME
+from nemo_gym.mcp import (
+    AgentExecutionResult,
+    RolloutMCPServer,
+    build_mcp_verify_payload,
+    parse_rollout_mcp_server,
+    resources_server_base_url,
+)
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -128,12 +140,31 @@ def parse_exec_jsonl(stdout: str) -> tuple[list[Any], dict]:
     """
     output_items: list[Any] = []
     buffered_think: Optional[str] = None
-    metadata: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "reasoning_tokens": 0}
+    metadata: dict[str, Any] = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_input_tokens": 0,
+        "reasoning_tokens": 0,
+        NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY: {},
+    }
     errors: list[str] = []
 
-    def _add_tool_pair(item: dict[str, Any], name: str, arguments: dict[str, Any], output: str) -> None:
+    def _add_tool_pair(
+        item: dict[str, Any],
+        name: str,
+        arguments: dict[str, Any],
+        output: str,
+        *,
+        mcp_identity: Optional[tuple[str, str]] = None,
+    ) -> None:
         call_id = str(item.get("id") or f"call-{uuid4().hex[:8]}")
         status = "completed" if item.get("status") != "failed" else "incomplete"
+        if mcp_identity is not None:
+            server_name, tool_name = mcp_identity
+            metadata[NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY][call_id] = {
+                "server_name": server_name,
+                "tool_name": tool_name,
+            }
         output_items.append(
             NeMoGymResponseFunctionToolCall(
                 arguments=json.dumps(arguments),
@@ -207,7 +238,20 @@ def parse_exec_jsonl(stdout: str) -> tuple[list[Any], dict]:
                 output = f"{output}\n[exit code: {exit_code}]"
             _add_tool_pair(item, "exec_command", {"cmd": item.get("command") or ""}, output)
         elif itype == "mcp_tool_call":
-            _add_tool_pair(item, str(item.get("tool") or ""), item.get("arguments") or {}, _mcp_result_text(item))
+            server_name = item.get("server")
+            tool_name = item.get("tool")
+            identity = (
+                (server_name, tool_name)
+                if isinstance(server_name, str) and server_name and isinstance(tool_name, str) and tool_name
+                else None
+            )
+            _add_tool_pair(
+                item,
+                str(tool_name or ""),
+                item.get("arguments") or {},
+                _mcp_result_text(item),
+                mcp_identity=identity,
+            )
         elif itype == "file_change":
             _add_tool_pair(item, "apply_patch", {"changes": item.get("changes")}, item.get("status") or "completed")
         elif itype == "web_search":
@@ -524,38 +568,16 @@ class CodexAgent(SimpleResponsesAPIAgent):
             if scratch_cwd is not None:
                 shutil.rmtree(scratch_cwd, ignore_errors=True)
 
-    def _resources_server_base_url(self) -> str:
-        cfg = get_first_server_config_dict(
-            self.server_client.global_config_dict,
-            self.config.resources_server.name,
-        )
-        return self.server_client._build_server_base_url(cfg)
-
-    def _rollout_mcp_servers(self, seed_response_json: dict[str, Any]) -> Optional[dict[str, Any]]:
-        """Per-rollout ``mcp_servers`` config.toml entries from /seed_session MCP metadata.
-
-        Codex reaches Gym MCP tools over streamable HTTP; the per-rollout session token rides on a
-        custom header via ``http_headers``.
-        """
-        metadata = seed_response_json.get(NEMO_GYM_MCP_METADATA_KEY)
-        if not isinstance(metadata, dict):
+    @staticmethod
+    def _codex_mcp_servers(server: RolloutMCPServer | None) -> Optional[dict[str, Any]]:
+        """Translate canonical Gym MCP metadata into Codex config.toml entries."""
+        if server is None:
             return None
 
-        server_name = str(metadata.get("server_name") or self.config.resources_server.name)
-        url_path = str(metadata.get("url_path") or "/mcp")
-        entry: dict[str, Any] = {
-            "url": f"{self._resources_server_base_url().rstrip('/')}/{url_path.lstrip('/')}",
-        }
-        headers = metadata.get("headers")
-        if isinstance(headers, dict) and headers:
-            entry["http_headers"] = {str(key): str(value) for key, value in headers.items()}
-        else:
-            LOG.warning(
-                "MCP seed metadata for %r has no headers; the tool endpoint will be called without a "
-                "session token and will reject the calls.",
-                server_name,
-            )
-        return {server_name: entry}
+        server_config: dict[str, Any] = {"url": server.url}
+        if server.headers:
+            server_config["http_headers"] = server.headers
+        return {server.server_name: server_config}
 
     async def _create_response(
         self,
@@ -563,7 +585,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         mcp_servers: Optional[dict[str, Any]] = None,
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
-    ) -> NeMoGymResponse:
+    ) -> AgentExecutionResult:
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -602,7 +624,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         input_tokens = usage.get("input_tokens", 0)
         output_tokens = usage.get("output_tokens", 0)
 
-        return NeMoGymResponse(
+        response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=model_name,
@@ -623,13 +645,21 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 total_tokens=input_tokens + output_tokens,
             ),
         )
+        raw_provenance = usage.get(NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY)
+        provenance = (
+            {call_id: MCPToolCallProvenance.model_validate(identity) for call_id, identity in raw_provenance.items()}
+            if raw_provenance is not None
+            else None
+        )
+        return AgentExecutionResult(response=response, mcp_tool_call_provenance=provenance)
 
     async def responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        return await self._create_response(body)
+        result = await self._create_response(body)
+        return result.response
 
     async def run(self, request: Request, body: CodexAgentRunRequest) -> CodexAgentVerifyResponse:
         async with self.sem:
@@ -650,19 +680,27 @@ class CodexAgent(SimpleResponsesAPIAgent):
             # can stage the skills into its per-request CODEX_HOME.
             skills_path = ((body.model_extra or {}).get(SKILLS_REF_KEY_NAME) or {}).get("path")
             rollout_id = self.rollout_id_from_run(body)
-
-            agent_resp = await self._create_response(
+            mcp_server = parse_rollout_mcp_server(
+                seed_resp_json,
+                resources_server_name=self.config.resources_server.name,
+                resources_server_base_url=lambda: resources_server_base_url(
+                    self.server_client, self.config.resources_server.name
+                ),
+                logger=LOG,
+            )
+            execution = await self._create_response(
                 body.responses_create_params,
-                mcp_servers=self._rollout_mcp_servers(seed_resp_json),
+                mcp_servers=self._codex_mcp_servers(mcp_server),
                 skills_path=skills_path,
                 rollout_id=rollout_id,
             )
+            agent_resp = execution.response
             agent_resp_json = agent_resp.model_dump(mode="json")
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=body.model_dump() | {"response": agent_resp_json},
+                json=build_mcp_verify_payload(body, agent_resp, execution.mcp_tool_call_provenance),
                 cookies=cookies,
             )
             await raise_for_status(verify_resp)

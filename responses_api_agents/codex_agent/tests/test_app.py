@@ -26,6 +26,7 @@ from fastapi import Request
 from pydantic import ValidationError
 
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME
+from nemo_gym.mcp import parse_rollout_mcp_server
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -473,19 +474,22 @@ class TestRolloutMCPServers:
 
     def test_no_metadata_returns_none(self) -> None:
         agent = self._agent_with_resources_server()
-        assert agent._rollout_mcp_servers({}) is None
+        assert agent._codex_mcp_servers(None) is None
 
     def test_builds_streamable_http_entry_with_session_header(self) -> None:
         agent = self._agent_with_resources_server()
-        servers = agent._rollout_mcp_servers(
+        server = parse_rollout_mcp_server(
             {
                 "mcp": {
                     "server_name": "example_mcp_weather",
                     "url_path": "/mcp",
                     "headers": {"X-NeMo-Gym-Session-Token": "secret-token"},
                 }
-            }
+            },
+            resources_server_name="example_mcp_weather",
+            resources_server_base_url="http://127.0.0.1:8123",
         )
+        servers = agent._codex_mcp_servers(server)
         assert servers == {
             "example_mcp_weather": {
                 "url": "http://127.0.0.1:8123/mcp",
@@ -509,6 +513,7 @@ class TestRolloutMCPServers:
                     cookies={"session": "abc"},
                 )
             if url_path == "/verify":
+                captured["verify_json"] = json
                 return FakeAioHTTPResponse(json | {"reward": 1.0})
             raise AssertionError(f"unexpected post: {server_name} {url_path}")
 
@@ -518,9 +523,31 @@ class TestRolloutMCPServers:
             captured["instruction"] = instruction
             captured["mcp_servers"] = mcp_servers
             captured["config"] = agent._build_config("http://x/v1", mcp_servers=mcp_servers)
-            return _item_completed(
-                {"id": "item_1", "type": "agent_message", "text": "The weather in Paris is sunny and 72 F."}
-            ), "codex-default"
+            return (
+                "\n".join(
+                    [
+                        _item_completed(
+                            {
+                                "id": "call_weather",
+                                "type": "mcp_tool_call",
+                                "server": "example_mcp_weather",
+                                "tool": "get_weather",
+                                "arguments": {"city": "Paris"},
+                                "result": {"content": [{"type": "text", "text": "sunny, 72F"}]},
+                                "status": "completed",
+                            }
+                        ),
+                        _item_completed(
+                            {
+                                "id": "item_1",
+                                "type": "agent_message",
+                                "text": "The weather in Paris is sunny and 72 F.",
+                            }
+                        ),
+                    ]
+                ),
+                "codex-default",
+            )
 
         agent.server_client.post.side_effect = fake_post
         object.__setattr__(agent, "_run_codex", fake_run_codex)
@@ -538,6 +565,12 @@ class TestRolloutMCPServers:
         server = captured["config"]["mcp_servers"]["example_mcp_weather"]
         assert server["url"] == "http://127.0.0.1:8123/mcp"
         assert server["http_headers"]["X-NeMo-Gym-Session-Token"] == "tok"
+        assert captured["verify_json"]["mcp_tool_call_provenance"] == {
+            "call_weather": {
+                "server_name": "example_mcp_weather",
+                "tool_name": "get_weather",
+            }
+        }
 
     def test_run_threads_session_cookie_seed_to_verify(self) -> None:
         agent = self._agent_with_resources_server()
@@ -748,10 +781,13 @@ class TestParseExecJsonl:
                 "status": "completed",
             }
         )
-        items, _ = parse_exec_jsonl(line)
+        items, metadata = parse_exec_jsonl(line)
         assert items[0].name == "get_weather"
         assert json.loads(items[0].arguments) == {"city": "Paris"}
         assert items[1].output == "sunny, 72F"
+        assert metadata["mcp_tool_call_provenance"] == {
+            "item_1": {"server_name": "gymweather", "tool_name": "get_weather"}
+        }
 
     def test_mcp_tool_call_error_surfaced(self) -> None:
         line = _item_completed(

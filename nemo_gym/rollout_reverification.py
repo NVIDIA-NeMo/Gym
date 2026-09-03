@@ -28,7 +28,12 @@ from pydantic import BaseModel, Field, model_validator
 from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
+from nemo_gym.base_resources_server import (
+    NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ReverifyMode,
+)
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError, UploadRolloutsConfigMixin
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.global_config import (
@@ -447,7 +452,10 @@ def _yield_inputs_and_rollouts_paired(
 
 
 def _build_verify_payload(pair: InputRolloutPair) -> Dict:
-    return pair.input | {"response": pair.rollout["response"]}
+    payload = pair.input | {"response": pair.rollout["response"]}
+    if NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY in pair.rollout:
+        payload[NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY] = pair.rollout[NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY]
+    return payload
 
 
 def _prepare_payloads(

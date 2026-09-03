@@ -93,8 +93,10 @@ from nemo_gym.base_resources_server import (
     _MCP_TOKEN_SALT,
     NEMO_GYM_MCP_METADATA_KEY,
     NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
+    NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY,
     RESERVED_MCP_TOOL_NAMES,
     MCPServerMetadata,
+    MCPToolCallProvenance,
 )
 from nemo_gym.server_utils import SESSION_ID_KEY
 
@@ -112,6 +114,7 @@ PERMISSIVE_SCHEMA: dict = {"type": "object", "additionalProperties": True}
 # MCP clients reject tool names outside this alphabet, and verify-time name normalization
 # (mcp__<server>__<tool>) cannot round-trip them.
 _MCP_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
+_MCP_PROVENANCE_TOKEN_SALT = "nemo-gym-mcp-tool-call-provenance"
 
 # Path-template params from the public route.path string ("/{tool_name}", "/items/{id:int}").
 _PATH_PARAM_RE = re.compile(r"{([^}:]+)(?::[^}]*)?}")
@@ -139,6 +142,14 @@ class DirectBinding:
     return_model: Optional[type[BaseModel]] = None
     body_is_dict: bool = False  # handler declares ``body: dict`` — FastAPI passes the parsed JSON through
     is_coroutine: bool = False  # sync (def) handlers go to a threadpool, as FastAPI would send them
+
+
+@dataclass(frozen=True)
+class MCPExecutedCall:
+    """Canonical identity and arguments observed by the resources server during MCP dispatch."""
+
+    tool_name: str
+    arguments: str
 
 
 @dataclass(frozen=True)
@@ -617,15 +628,133 @@ def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], di
     _swap_route(app, idx, "/seed_session", seed_session_endpoint)
 
 
-def _wrap_verify(app: FastAPI, server: Any) -> None:
-    """Wrap the app's current /verify endpoint so MCP-namespaced tool-call names are normalized for
-    scoring only. Verification runs against a deep copy with bare names; the reward response's
-    echoed names are restored to what the model emitted (matched by call_id), so persisted rollout
-    artifacts keep transport provenance. Wrapping whatever handler the route holds at install time
-    covers servers that strip and re-register /verify with their own handler.
+def _canonical_arguments(arguments: Any) -> Optional[str]:
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(arguments, dict):
+        return None
+    return json.dumps(arguments, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _provenance_token_payload(item: Any, identity: MCPToolCallProvenance, arguments: str) -> dict[str, str]:
+    return {
+        "call_id": item.call_id,
+        "emitted_name": item.name,
+        "arguments": arguments,
+        "server_name": identity.server_name,
+        "tool_name": identity.tool_name,
+    }
+
+
+def _validate_and_stamp_provenance(
+    calls: list,
+    provenance: Optional[dict[str, MCPToolCallProvenance]],
+    *,
+    resources_server_name: str,
+    session_id: Optional[str],
+    execution_ledger: dict[str, list[MCPExecutedCall]],
+    serializer: URLSafeSerializer,
+) -> tuple[Optional[dict[str, MCPToolCallProvenance]], set[str]]:
+    """Validate this server's unsigned claims against dispatches and sign accepted identities."""
+    if provenance is None:
+        if session_id is not None:
+            execution_ledger.pop(session_id, None)
+        return None, set()
+
+    calls_by_id: dict[str, list[Any]] = {}
+    for item in calls:
+        calls_by_id.setdefault(item.call_id, []).append(item)
+
+    invalid_call_ids = {
+        call_id
+        for call_id, identity in provenance.items()
+        if identity.server_name == resources_server_name and len(calls_by_id.get(call_id, [])) != 1
+    }
+    unsigned_claims: list[tuple[str, MCPToolCallProvenance, Any, str]] = []
+    validated = dict(provenance)
+    for call_id, identity in provenance.items():
+        if identity.server_name != resources_server_name or call_id in invalid_call_ids:
+            continue
+        item = calls_by_id[call_id][0]
+        arguments = _canonical_arguments(item.arguments)
+        if arguments is None:
+            invalid_call_ids.add(call_id)
+            continue
+        token_payload = _provenance_token_payload(item, identity, arguments)
+        if identity.execution_token is not None:
+            try:
+                signed_payload = serializer.loads(identity.execution_token)
+            except BadSignature:
+                invalid_call_ids.add(call_id)
+                continue
+            if signed_payload != token_payload:
+                invalid_call_ids.add(call_id)
+            continue
+        unsigned_claims.append((call_id, identity, item, arguments))
+
+    executed = execution_ledger.pop(session_id, []) if session_id is not None else []
+    claimed_executions = [
+        MCPExecutedCall(tool_name=identity.tool_name, arguments=arguments)
+        for _, identity, _, arguments in unsigned_claims
+    ]
+    if claimed_executions != executed:
+        invalid_call_ids.update(call_id for call_id, _, _, _ in unsigned_claims)
+        if unsigned_claims or executed:
+            LOG.warning(
+                "Ignoring unverified MCP provenance for %r: claimed_calls=%d, executed_calls=%d",
+                resources_server_name,
+                len(unsigned_claims),
+                len(executed),
+            )
+    else:
+        for call_id, identity, item, arguments in unsigned_claims:
+            validated[call_id] = identity.model_copy(
+                update={"execution_token": serializer.dumps(_provenance_token_payload(item, identity, arguments))}
+            )
+
+    for call_id in invalid_call_ids:
+        validated.pop(call_id, None)
+    return validated, invalid_call_ids
+
+
+def _wrap_verify(
+    app: FastAPI,
+    server: Any,
+    execution_ledger: dict[str, list[MCPExecutedCall]],
+    provenance_serializer: URLSafeSerializer,
+) -> None:
+    """Give verification a canonical MCP tool name without rewriting the stored trajectory.
+
+    New agent adapters provide authoritative ``(server_name, tool_name)`` provenance keyed by
+    ``call_id``. A present mapping is complete, so calls absent from it are built-in/non-MCP calls
+    and remain unchanged. ``None`` denotes an older trajectory and enables the narrow Claude Code
+    string fallback. Verification runs against a deep copy; the response restores emitted names so
+    replay and training retain the harness-facing representation.
+
+    Wrapping whatever handler the route holds at install time covers servers that strip and
+    re-register /verify with their own handler.
     """
     idx, route = _take_route(app, "/verify", "its tool-call names are normalized for scoring")
     endpoint = route.endpoint
+    signature = inspect.signature(endpoint)
+    hints = get_type_hints(endpoint)
+    request_param_name = next(
+        (name for name, param in signature.parameters.items() if hints.get(name, param.annotation) is Request),
+        None,
+    )
+    params = [
+        param.replace(annotation=hints.get(name, param.annotation)) for name, param in signature.parameters.items()
+    ]
+    passthrough = tuple(signature.parameters)
+    if request_param_name is None:
+        request_param_name = "__nemo_gym_request"
+        params = [
+            inspect.Parameter(request_param_name, kind=inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=Request),
+            *params,
+        ]
 
     def _function_calls(container: Any) -> list:
         return [
@@ -648,27 +777,64 @@ def _wrap_verify(app: FastAPI, server: Any) -> None:
 
     @functools.wraps(endpoint)
     async def verify_normalized(**kwargs: Any) -> Any:
-        located = _locate_trajectory_arg(kwargs)
+        request: Request = kwargs[request_param_name]
+        endpoint_kwargs = {key: kwargs[key] for key in passthrough}
+        located = _locate_trajectory_arg(endpoint_kwargs)
         if located is None:
-            result = endpoint(**kwargs)
+            result = endpoint(**endpoint_kwargs)
             return await result if inspect.isawaitable(result) else result
         key, container = located
 
-        emitted = {item.call_id: item.name for item in _function_calls(container)}
-        normalized = container.model_copy(deep=True)
-        for item in _function_calls(normalized):
-            item.name = server.normalize_tool_name(item.name)
-        kwargs[key] = normalized
+        calls = _function_calls(container)
+        emitted_response = container.response.model_copy(deep=True)
+        call_id_counts: dict[str, int] = {}
+        for item in calls:
+            call_id_counts[item.call_id] = call_id_counts.get(item.call_id, 0) + 1
 
-        result = endpoint(**kwargs)
+        normalized = container.model_copy(deep=True)
+        provenance = getattr(normalized, NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY, None)
+        resources_server_name = server.config.name or type(server).__name__
+        provenance, invalid_call_ids = _validate_and_stamp_provenance(
+            calls,
+            provenance,
+            resources_server_name=resources_server_name,
+            session_id=request.session.get(SESSION_ID_KEY),
+            execution_ledger=execution_ledger,
+            serializer=provenance_serializer,
+        )
+        normalized.mcp_tool_call_provenance = provenance
+        for item in _function_calls(normalized):
+            if provenance is None or call_id_counts.get(item.call_id, 0) != 1 or item.call_id in invalid_call_ids:
+                item.name = server.normalize_tool_name(item.name)
+                continue
+            identity = provenance.get(item.call_id)
+            if identity is not None and identity.server_name == resources_server_name:
+                item.name = identity.tool_name
+        endpoint_kwargs[key] = normalized
+
+        result = endpoint(**endpoint_kwargs)
         if inspect.isawaitable(result):
             result = await result
 
-        for item in _function_calls(result):
-            if item.call_id in emitted:
-                item.name = emitted[item.call_id]
+        if isinstance(result, BaseModel):
+            result = result.model_copy(
+                update={
+                    "response": emitted_response,
+                    NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY: provenance,
+                }
+            )
+        elif isinstance(result, dict):
+            result["response"] = emitted_response.model_dump(mode="json")
+            if provenance is None:
+                result.pop(NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY, None)
+            else:
+                result[NEMO_GYM_MCP_TOOL_CALL_PROVENANCE_KEY] = {
+                    call_id: identity.model_dump(mode="json") for call_id, identity in provenance.items()
+                }
         return result
 
+    verify_normalized.__signature__ = inspect.Signature(parameters=params)
+    verify_normalized.__annotations__ = {param.name: param.annotation for param in params}
     _swap_route(app, idx, "/verify", verify_normalized)
 
 
@@ -678,7 +844,13 @@ def _wrap_verify(app: FastAPI, server: Any) -> None:
 # ==================================================================================================
 
 
-def _mint_session_metadata(server: Any, serializer: URLSafeSerializer, request: Request, seed_body: dict) -> dict:
+def _mint_session_metadata(
+    server: Any,
+    serializer: URLSafeSerializer,
+    exposed_tool_names: tuple[str, ...],
+    request: Request,
+    seed_body: dict,
+) -> dict:
     """Mint the session token embedded in a /seed_session response (see ``_wrap_seed_session``).
 
     Assigns the rollout its session id, asks the server for any per-session tool narrowing, and
@@ -691,11 +863,13 @@ def _mint_session_metadata(server: Any, serializer: URLSafeSerializer, request: 
     # A raising hook propagates and fails the seed request — no token is minted past a broken hook.
     session_allowed = server.mcp_allowed_tools_for_session(seed_body)
     payload = {"sid": session_id, "tools": session_allowed}
+    allowed = None if session_allowed is None else frozenset(session_allowed)
     return MCPServerMetadata(
         server_name=server.config.name or type(server).__name__,
         url_path=MCP_URL_PATH,
         transport="http",
         headers={NEMO_GYM_MCP_SESSION_TOKEN_HEADER: serializer.dumps(payload)},
+        tool_names=[name for name in exposed_tool_names if allowed is None or name in allowed],
     ).model_dump()
 
 
@@ -761,11 +935,13 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
 
     secret = server.get_session_middleware_key()
     serializer = URLSafeSerializer(secret, salt=_MCP_TOKEN_SALT)
+    provenance_serializer = URLSafeSerializer(secret, salt=_MCP_PROVENANCE_TOKEN_SALT)
+    execution_ledger: dict[str, list[MCPExecutedCall]] = {}
     tools = harvest_tools(app, server)
 
-    mint_metadata = functools.partial(_mint_session_metadata, server, serializer)
+    mint_metadata = functools.partial(_mint_session_metadata, server, serializer, tuple(tools))
     _wrap_seed_session(app, mint_metadata)
-    _wrap_verify(app, server)
+    _wrap_verify(app, server, execution_ledger, provenance_serializer)
 
     mcp_server = _LowLevelMCPServer(server.config.name or type(server).__name__)
 
@@ -797,6 +973,12 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
         session_id, allowed = session_claims(required=True)
         if allowed is not None and name not in allowed:
             raise ValueError(f"Tool {name!r} is not allowed for this session.")
+        canonical_arguments = _canonical_arguments(arguments)
+        if canonical_arguments is None:
+            raise ValueError(f"Tool {name!r} arguments must be an object.")
+        execution_ledger.setdefault(session_id, []).append(
+            MCPExecutedCall(tool_name=name, arguments=canonical_arguments)
+        )
         try:
             payload = await call_direct(app, tool.binding, session_id, arguments, path_value=tool.path_value)
         except DirectDispatchError as exc:
