@@ -51,6 +51,7 @@ from nemo_gym.config_types import (
     ServerRefNotFoundError,
     UnsupportedAgentOverrideError,
     UnsupportedAgentPairingError,
+    UnsupportedModelPairingError,
     is_almost_server,
     is_server_ref,
     maybe_get_server_instance_config,
@@ -157,6 +158,9 @@ AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
 # Declared on a resources server: the agent types it is known to score correctly. Absent means any harness.
 ALLOWED_AGENTS_KEY_NAME = "allowed_agents"
+# Declared on a resources server: the model adapter types that can carry its workload. Absent means any adapter.
+ALLOWED_MODEL_TYPES_KEY_NAME = "allowed_model_types"
+MODEL_SERVER_TYPE_KEY_NAME = "responses_api_models"
 RESOURCES_SERVER_TYPE_KEY_NAME = "resources_servers"
 
 
@@ -632,6 +636,73 @@ Duplicate config paths:
         """
         reference = OmegaConf.select(server_config, "resources_server")
         return reference if isinstance(reference, DictConfig) else None
+
+    @staticmethod
+    def _model_server_reference(server_config: DictConfig) -> Optional[DictConfig]:
+        """The agent's `model_server` block, or None when it declares none."""
+        reference = OmegaConf.select(server_config, "model_server")
+        return reference if isinstance(reference, DictConfig) else None
+
+    def raise_on_unsupported_model_pairings(self, global_config_dict: DictConfig) -> None:
+        """Reject resource/model bindings that explicitly disallow the selected model adapter.
+
+        This runs while parsing the merged config, before Ray or any server subprocess starts. A resources
+        server opts in with ``allowed_model_types``; existing configs that do not declare it stay unrestricted.
+        """
+        if pairing_override_enabled(global_config_dict):
+            return
+
+        restrictions: List[List[str]] = []
+        rejected: List[Tuple[_AgentInstance, str, str, str, List[str]]] = []
+        for agent in self._agent_instances(global_config_dict):
+            resources_reference = self._resources_server_reference(agent.server_config)
+            if not resources_reference or resources_reference.get("type") != RESOURCES_SERVER_TYPE_KEY_NAME:
+                continue
+            resources_server_name = resources_reference.get("name")
+            allowed = allowed_model_types_for(global_config_dict, resources_server_name)
+            if allowed is None:
+                continue
+
+            model_reference = self._model_server_reference(agent.server_config)
+            if not model_reference or model_reference.get("type") != MODEL_SERVER_TYPE_KEY_NAME:
+                continue
+            model_server_name = model_reference.get("name")
+            model_type = model_type_for(global_config_dict, model_server_name)
+            # ``dummy_model`` is injected for parser clients that only need benchmark data or static config
+            # inspection (for example, ``gym eval prepare``). It is not a runtime model selection.
+            if model_type is None or model_type == "dummy_model":
+                continue
+
+            restrictions.append(allowed)
+            if model_type not in allowed:
+                rejected.append((agent, str(resources_server_name), str(model_server_name), model_type, allowed))
+
+        if not rejected:
+            return
+
+        rejected_list = "\n".join(
+            f"  - agent '{agent.name}' uses model server '{model_server_name}' (type '{model_type}'), "
+            f"but resources server '{resources_server_name}' accepts only: {', '.join(allowed)}"
+            for agent, resources_server_name, model_server_name, model_type, allowed in rejected
+        )
+        supported = [
+            model_type
+            for model_type in restrictions[0]
+            if all(model_type in restriction for restriction in restrictions[1:])
+        ]
+        if supported:
+            remedy = (
+                f"Select a compatible model adapter (for example, --model-type {supported[0]}). "
+                f"Supported model types: {', '.join(supported)}."
+            )
+        else:
+            remedy = "No single model type satisfies all of these resources servers."
+        raise UnsupportedModelPairingError(
+            "The selected Gym model-server adapter is not compatible with this workload:\n"
+            f"{rejected_list}\n\n"
+            f"{remedy} Or pass --allow-unsupported-pairing (or set "
+            f"{ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME}=1) to bypass the check."
+        )
 
     def _runs_against_a_resources_server(self, server_config: DictConfig) -> bool:
         """True when the agent has a task to hand over, so another agent can take its place.
@@ -1142,6 +1213,7 @@ Found global config dict yaml:
                 raise AlmostServerError(error_msg)
 
         server_instance_configs = self.filter_for_server_instance_configs(global_config_dict)
+        self.raise_on_unsupported_model_pairings(global_config_dict)
 
         with open_dict(global_config_dict):
             use_absolute_ip = global_config_dict.setdefault(USE_ABSOLUTE_IP, False)
@@ -1444,8 +1516,43 @@ def allowed_agents_for(global_config_dict: DictConfig, resources_server_name: Op
     return [str(name) for name in declared]
 
 
+def allowed_model_types_for(
+    global_config_dict: DictConfig, resources_server_name: Optional[str]
+) -> Optional[List[str]]:
+    """The model adapter types `resources_server_name` declares support for, or None when unrestricted."""
+    instance = global_config_dict.get(resources_server_name) if resources_server_name else None
+    if not isinstance(instance, DictConfig) or RESOURCES_SERVER_TYPE_KEY_NAME not in instance:
+        return None
+    servers = instance[RESOURCES_SERVER_TYPE_KEY_NAME]
+    if not isinstance(servers, DictConfig) or len(servers) != 1:
+        return None
+    implementation = next(iter(servers))
+    declared = servers[implementation].get(ALLOWED_MODEL_TYPES_KEY_NAME)
+    if not declared:
+        return None
+    if isinstance(declared, str):
+        return [declared]
+    if not isinstance(declared, ListConfig):
+        raise ConfigError(
+            f"'{resources_server_name}.{RESOURCES_SERVER_TYPE_KEY_NAME}.{implementation}."
+            f"{ALLOWED_MODEL_TYPES_KEY_NAME}' must be a list of model types, got {type(declared).__name__}."
+        )
+    return [str(name) for name in declared]
+
+
+def model_type_for(global_config_dict: DictConfig, model_server_name: Optional[str]) -> Optional[str]:
+    """The single model adapter type hosted by `model_server_name`, or None when it cannot be determined."""
+    instance = global_config_dict.get(model_server_name) if model_server_name else None
+    if not isinstance(instance, DictConfig) or MODEL_SERVER_TYPE_KEY_NAME not in instance:
+        return None
+    models = instance[MODEL_SERVER_TYPE_KEY_NAME]
+    if not isinstance(models, DictConfig) or len(models) != 1:
+        return None
+    return str(next(iter(models)))
+
+
 def pairing_override_enabled(global_config_dict: DictConfig) -> bool:
-    """True when the `allowed_agents` guard has been waived by config key or environment variable."""
+    """True when a declared agent/model compatibility guard has been explicitly waived."""
     return bool(global_config_dict.get(ALLOW_UNSUPPORTED_PAIRING_KEY_NAME)) or getenv(
         ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME, ""
     ).lower() not in ("", "0", "false")

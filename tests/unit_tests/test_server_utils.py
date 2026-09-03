@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 from aiohttp import ClientOSError, ClientResponseError, RequestInfo
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
-from pytest import MonkeyPatch, raises
+from pytest import CaptureFixture, MonkeyPatch, raises
 from yarl import URL
 
 import nemo_gym.global_config
@@ -38,6 +38,7 @@ from nemo_gym.server_utils import (
     HeadServer,
     ServerClient,
     SimpleServer,
+    _format_upstream_error_log,
     _make_keepalive_socket_factory,
     initialize_ray,
     raise_for_status,
@@ -541,6 +542,73 @@ class TestServerUtils:
             response = client.get("/session")
             assert response.json()["session_id"]
             assert 1 == len(response.headers.get_list("set-cookie"))
+
+    def test_upstream_error_log_has_bounded_body_and_redacted_url(self) -> None:
+        request_info = RequestInfo(
+            url=URL("http://policy.test/v1/responses?api_key=secret"),
+            method="POST",
+            headers=CIMultiDictProxy(CIMultiDict()),
+            real_url=URL("http://policy.test/v1/responses?api_key=secret"),
+        )
+        error = ClientResponseError(
+            request_info=request_info,
+            history=(),
+            status=500,
+            message="policy failed",
+        )
+        error.response_content = (
+            b"Traceback (most recent call last):\nValueError: actionable inner failure\n" + b"x" * 3000
+        )
+
+        message = _format_upstream_error_log("TestSimpleServer___my_server", error)
+
+        assert "[upstream_request_failed]" in message
+        assert "server=TestSimpleServer___my_server" in message
+        assert "method=POST url=http://policy.test/v1/responses status=500" in message
+        assert "ValueError: actionable inner failure" in message
+        assert "api_key=secret" not in message
+        assert message.endswith("…")
+        assert len(message) < 2200
+
+    async def test_exception_middleware_logs_upstream_error_without_debug(
+        self, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
+    ) -> None:
+        callbacks = []
+        app = MagicMock()
+
+        def register_middleware(middleware_type):
+            assert middleware_type == "http"
+
+            def register(callback):
+                callbacks.append(callback)
+                return callback
+
+            return register
+
+        app.middleware.side_effect = register_middleware
+        server = MagicMock()
+        server.get_session_middleware_key.return_value = "TestSimpleServer___my_server"
+        SimpleServer.setup_exception_middleware(server, app)
+
+        request_info = RequestInfo(
+            url=URL("http://policy.test/v1/responses"),
+            method="POST",
+            headers=CIMultiDictProxy(CIMultiDict()),
+            real_url=URL("http://policy.test/v1/responses"),
+        )
+        error = ClientResponseError(request_info=request_info, history=(), status=500, message="policy failed")
+        error.response_content = b"ValueError: actionable inner failure"
+
+        async def fail(_request):
+            raise error
+
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
+        response = await callbacks[0](MagicMock(), fail)
+
+        assert response.status_code == 500
+        captured = capsys.readouterr().out
+        assert "[upstream_request_failed]" in captured
+        assert "ValueError: actionable inner failure" in captured
 
     def _mock_global_client(self, monkeypatch: MonkeyPatch, connection_errors: int) -> MagicMock:
         """Global-client stand-in whose request() raises ClientOSError `connection_errors` times, then succeeds."""

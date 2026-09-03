@@ -47,6 +47,21 @@ logging.getLogger("opensandbox").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
+class _MissingSandboxTerminateFilter(logging.Filter):
+    """Hide the SDK warning emitted when terminate reaches its desired state."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not (
+            record.levelno == logging.WARNING
+            and message.startswith("Failed to terminate sandbox ")
+            and "[KUBERNETES::SANDBOX_NOT_FOUND]" in message
+        )
+
+
+logging.getLogger("opensandbox.adapters.sandboxes_adapter").addFilter(_MissingSandboxTerminateFilter())
+
+
 class OpenSandboxCreateError(SandboxCreateError):
     """Raised when OpenSandbox cannot create a sandbox."""
 
@@ -1283,36 +1298,47 @@ class OpenSandboxProvider:
         except Exception as error:
             if not isinstance(error, SandboxBackendUnreachableError) and _exception_status_code(error) != 502:
                 raise
-
-            get_info = getattr(handle.raw, "get_info", None)
-            if get_info is not None:
-                deadline = asyncio.get_running_loop().time() + 5.0
-                while (remaining_s := deadline - asyncio.get_running_loop().time()) > 0:
-                    try:
-                        info = await self._await_sdk_call(
-                            get_info(),
-                            operation="get_info after exec 502",
-                            sandbox_id=handle.sandbox_id,
-                            timeout_s=min(2.0, remaining_s),
-                        )
-                    except Exception:
-                        break
-                    raw_status = getattr(info, "status", None)
-                    state = getattr(raw_status, "state", None)
-                    reason = getattr(raw_status, "reason", None)
-                    message = getattr(raw_status, "message", None)
-                    status_text = f"{reason} {message}"
-                    if re.search(r"\boom[\s_-]*killed\b|\bout of memory\b", status_text, re.IGNORECASE):
-                        message = str(message or "")[:500]
-                        raise SandboxBackendUnreachableError(
-                            "Sandbox was OOM-killed. "
-                            f"OpenSandbox status: state={state!r}, reason={reason!r}, message={message!r}; "
-                            f"sandbox_id={handle.sandbox_id!r}"
-                        ) from error
-                    if message and _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
-                        break
-                    await asyncio.sleep(min(0.5, max(0.0, deadline - asyncio.get_running_loop().time())))
+            notice = await self._oom_death_notice(handle)
+            if notice is not None:
+                raise SandboxBackendUnreachableError(notice) from error
             raise
+
+    async def _oom_death_notice(self, handle: SandboxHandle, *, any_death: bool = False) -> str | None:
+        """Briefly poll the sandbox status; describe an OOM kill, else None.
+
+        With ``any_death`` every terminal state is reported, not just an OOM
+        kill — for callers that need to know whether the sandbox is gone at
+        all, not specifically why. When the backend stops answering it usually
+        takes the control plane a moment to record why, so poll for up to 5s
+        before giving up."""
+        get_info = getattr(handle.raw, "get_info", None)
+        if get_info is None:
+            return None
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while (remaining_s := deadline - asyncio.get_running_loop().time()) > 0:
+            try:
+                info = await self._await_sdk_call(
+                    get_info(),
+                    operation="get_info after backend loss",
+                    sandbox_id=handle.sandbox_id,
+                    timeout_s=min(2.0, remaining_s),
+                )
+            except Exception:
+                return None
+            raw_status = getattr(info, "status", None)
+            state = getattr(raw_status, "state", None)
+            reason = getattr(raw_status, "reason", None)
+            message = getattr(raw_status, "message", None)
+            status_text = (
+                f"OpenSandbox status: state={state!r}, reason={reason!r}, message={str(message or '')[:500]!r}; "
+                f"sandbox_id={handle.sandbox_id!r}"
+            )
+            if re.search(r"\boom[\s_-]*killed\b|\bout of memory\b", f"{reason} {message}", re.IGNORECASE):
+                return f"Sandbox was OOM-killed. {status_text}"
+            if message and _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
+                return f"Sandbox is dead. {status_text}" if any_death else None
+            await asyncio.sleep(min(0.5, max(0.0, deadline - asyncio.get_running_loop().time())))
+        return None
 
     async def _exec_background(
         self,
@@ -1476,6 +1502,7 @@ class OpenSandboxProvider:
             headers=headers,
             spec=spec,
             request_timeout_s=request_timeout_s,
+            diagnose=lambda: self._oom_death_notice(handle, any_death=True),
         )
         await self._retire_closed_pty_sessions()
         self._pty_sessions.add(session)
@@ -1493,6 +1520,14 @@ class OpenSandboxProvider:
         from nemo_gym.sandbox.providers.opensandbox.pty import _PTY_TAKEOVER_RETRY_DELAYS, attach_pty_session
 
         base_url, headers, request_timeout_s = await self._pty_target(handle)
+        if takeover:
+            # Release our own live attachment first, so the takeover below has
+            # nothing to evict and cannot be refused as "already attached".
+            for stale in [s for s in self._pty_sessions if s.session_id == session_id and not s.closed]:
+                try:
+                    await stale.detach()
+                except SandboxPtyError:
+                    pass  # already dead; the retry loop below rides out eviction
         # A takeover evicts the attached client, and execd waits for that
         # client to acknowledge. A half-open peer (silently dropped along the
         # proxy path) cannot answer, so execd's eviction times out and the
@@ -1509,10 +1544,21 @@ class OpenSandboxProvider:
                     takeover=takeover,
                     since=since,
                     request_timeout_s=request_timeout_s,
+                    diagnose=lambda: self._oom_death_notice(handle, any_death=True),
                 )
                 break
             except SandboxPtyError as e:
-                if not takeover or delay is None or "already has an attached client" not in str(e):
+                if not takeover or "already has an attached client" not in str(e):
+                    raise
+                if delay is None:
+                    # The eviction never completed across every retry. When the
+                    # sandbox itself is gone (node loss, OOM kill) the stale
+                    # attachment can never acknowledge its eviction, so the
+                    # takeover is refused forever — report the sandbox's death
+                    # instead of the refusal.
+                    notice = await self._oom_death_notice(handle, any_death=True)
+                    if notice is not None:
+                        raise SandboxPtyError(f"PTY attach takeover kept being refused: {notice}") from e
                     raise
             await asyncio.sleep(delay)
         await self._retire_closed_pty_sessions()

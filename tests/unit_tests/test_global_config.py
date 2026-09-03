@@ -36,6 +36,7 @@ from nemo_gym.config_types import (
     ServerRefNotFoundError,
     UnsupportedAgentOverrideError,
     UnsupportedAgentPairingError,
+    UnsupportedModelPairingError,
     WANDBConfig,
 )
 from nemo_gym.global_config import (
@@ -1974,6 +1975,123 @@ class TestOpenAIVersionMatchesNemoGymConstraint:
 
         monkeypatch.setattr(importlib.metadata, "requires", raise_not_found)
         assert _openai_version_matches_nemo_gym_constraint("2.52.0") is True
+
+
+class TestModelServerPairing:
+    _ABSENT = object()
+
+    def _config(self, model_type: str = "openai_model", declared=_ABSENT) -> DictConfig:
+        resources_config = {"entrypoint": "app.py", "domain": "other"}
+        if declared is not self._ABSENT:
+            resources_config["allowed_model_types"] = declared
+        return DictConfig(
+            {
+                "audio_resources_server": {"resources_servers": {"audio": resources_config}},
+                "audio_simple_agent": {
+                    "responses_api_agents": {
+                        "simple_agent": {
+                            "entrypoint": "app.py",
+                            "resources_server": {"type": "resources_servers", "name": "audio_resources_server"},
+                            "model_server": {"type": "responses_api_models", "name": "policy_model"},
+                        }
+                    }
+                },
+                "policy_model": {"responses_api_models": {model_type: {"entrypoint": "app.py"}}},
+            }
+        )
+
+    def test_rejects_an_unsupported_model_adapter_with_an_actionable_error(self) -> None:
+        config = self._config(declared=["vllm_model", "local_vllm_model"])
+
+        with raises(UnsupportedModelPairingError) as error:
+            GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+        message = str(error.value)
+        assert "audio_simple_agent" in message
+        assert "policy_model" in message
+        assert "openai_model" in message
+        assert "audio_resources_server" in message
+        assert "--model-type vllm_model" in message
+        assert "Supported model types: vllm_model, local_vllm_model" in message
+        assert "--allow-unsupported-pairing" in message
+
+    def test_allows_a_declared_model_adapter(self) -> None:
+        config = self._config(model_type="vllm_model", declared=["vllm_model"])
+
+        GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+    @mark.parametrize("declared", [_ABSENT, None, []], ids=["key absent", "null", "empty list"])
+    def test_resources_server_without_a_restriction_remains_compatible(self, declared) -> None:
+        config = self._config(declared=declared)
+
+        GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+    def test_accepts_a_bare_model_type_string(self) -> None:
+        config = self._config(model_type="vllm_model", declared="vllm_model")
+
+        GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+    @mark.parametrize("declared", [5, {"vllm_model": True}], ids=["scalar", "mapping"])
+    def test_rejects_a_malformed_model_type_declaration(self, declared) -> None:
+        config = self._config(declared=declared)
+
+        with raises(ConfigError) as error:
+            GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+        message = str(error.value)
+        assert "audio_resources_server.resources_servers.audio.allowed_model_types" in message
+        assert "must be a list of model types" in message
+
+    def test_pairing_override_also_waives_model_compatibility(self) -> None:
+        config = self._config(declared=["vllm_model"])
+        config[ALLOW_UNSUPPORTED_PAIRING_KEY_NAME] = True
+
+        GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+    def test_dummy_model_does_not_break_model_free_parser_clients(self) -> None:
+        config = self._config(model_type="dummy_model", declared=["vllm_model"])
+
+        GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+    @staticmethod
+    def _parse_librispeech(model_config_path: str) -> DictConfig:
+        initial = DictConfig(
+            {
+                "config_paths": [
+                    "benchmarks/librispeech_pc/config.yaml",
+                    model_config_path,
+                ],
+                "policy_base_url": "https://example.test/v1",
+                "policy_api_key": "test-key",
+                "policy_model_name": "test-model",
+            }
+        )
+        return GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=initial,
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+    def test_librispeech_config_fails_during_parse_with_openai_model(self) -> None:
+        model_config_path = "responses_api_models/openai_model/configs/openai_model.yaml"
+
+        with raises(UnsupportedModelPairingError) as error:
+            self._parse_librispeech(model_config_path)
+
+        message = str(error.value)
+        assert "librispeech_pc_asr_with_pc_simple_agent" in message
+        assert "type 'openai_model'" in message
+        assert "--model-type vllm_model" in message
+
+    def test_librispeech_config_resolves_with_vllm_model(self) -> None:
+        model_config_path = "responses_api_models/vllm_model/configs/vllm_model.yaml"
+
+        resolved = self._parse_librispeech(model_config_path)
+
+        assert "vllm_model" in resolved["policy_model"]["responses_api_models"]
 
 
 class TestComposeUnboundAgent:
