@@ -683,6 +683,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     f"bash {quote(self.config.remote_opencode_install_script_path)} "
                     f"--binary {quote(self.config.remote_opencode_binary_path)}"
                 )
+        elif self.config.remote_opencode_binary_path:
+            install_str = (
+                "mkdir -p $HOME/.opencode/bin && "
+                f"cp {quote(self.config.remote_opencode_binary_path)} $HOME/.opencode/bin/opencode"
+            )
         else:
             print(
                 "Downloading and installing OpenCode in the sandbox. Please consider mounting or uploading the appropriate OpenCode binary instead!",

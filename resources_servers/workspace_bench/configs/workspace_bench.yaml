@@ -1,0 +1,23 @@
+workspace_bench_resources_server:
+  resources_servers:
+    workspace_bench:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      allowed_agents: [opencode_sandboxed_agent]
+      judge_base_url: ${oc.env:WORKSPACE_BENCH_JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      judge_api_key: ${oc.env:NVIDIA_API_KEY,''}
+      judge_model: ${oc.env:WORKSPACE_BENCH_JUDGE_MODEL,nvidia/openai/gpt-oss-20b}
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: ${oc.env:WORKSPACE_BENCH_IMAGE,node:24-bookworm-slim}
+        ttl_s: 10800
+        ready_timeout_s: 1200
+        resources:
+          cpu: 2
+          memory_mib: 8192
+          disk_gib: 20
+        provider_options: {}
+        metadata:
+          benchmark: workspace-bench
+          harness: opencode

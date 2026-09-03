@@ -1,0 +1,34 @@
+config_paths:
+  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+  - responses_api_models/inference_provider/configs/inference_provider.yaml
+  - resources_servers/workspace_bench/configs/workspace_bench.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+policy_base_url: ${oc.env:WORKSPACE_BENCH_POLICY_BASE_URL,https://inference-api.nvidia.com/v1}
+policy_api_key: ${oc.env:NVIDIA_API_KEY,''}
+policy_model_name: ${oc.env:WORKSPACE_BENCH_POLICY_MODEL,nvidia/moonshotai/kimi-k3}
+
+policy_model:
+  responses_api_models:
+    inference_provider:
+      uses_reasoning_parser: true
+
+workspace_bench_opencode_agent:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      opencode_version: 1.14.18
+      opencode_max_context_window: 131072
+      opencode_config:
+        tools:
+          skill: true
+      resources_server:
+        type: resources_servers
+        name: workspace_bench_resources_server
+      sandbox_timeout: 7200
+      datasets:
+        - name: workspace_bench_lite
+          type: benchmark
+          jsonl_fpath: benchmarks/workspace_bench/data/workspace_bench_lite.jsonl
+          prepare_script: benchmarks/workspace_bench/prepare.py
+          num_repeats: 1
