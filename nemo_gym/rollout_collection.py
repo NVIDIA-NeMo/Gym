@@ -20,6 +20,7 @@ import os
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from contextlib import nullcontext
 from datetime import timedelta
 from difflib import get_close_matches
@@ -645,13 +646,33 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
     def _reject_input_jsonl_fpath(cls, data):
         # This config has no input_jsonl_fpath field, so pydantic would silently drop it and
         # e2e collection would overwrite it with the prepared split path — the user's file
-        # would be ignored without any indication.
-        if isinstance(data, dict) and "input_jsonl_fpath" in data:
+        # would be ignored without any indication. Match on Mapping, not dict: the CLI passes
+        # an OmegaConf DictConfig, which is a Mapping but not a dict.
+        if isinstance(data, Mapping) and "input_jsonl_fpath" in data:
             raise ConfigError(
                 "`input_jsonl_fpath` (-i/--input) is not supported when serving end-to-end: the input is "
                 "always the prepared dataset for the requested split. Either add --no-serve to collect "
                 "rollouts from your own input file against already-running servers, or drop -i/--input "
                 "to use the prepared data."
+            )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_example_split(cls, data):
+        # `example` is a real dataset type but deliberately not a runnable split: example
+        # datasets are the committed smoke-test samples the PR data gate validates, and they
+        # are excluded from prepared splits so they never leak into training or eval data.
+        # Catch it before the Literal check so the user gets the documented recipe instead of
+        # a bare "Input should be 'train'".
+        if isinstance(data, Mapping) and data.get("split") == "example":
+            raise ConfigError(
+                "`--split example` is not runnable end-to-end: example datasets are committed "
+                "smoke-test samples, not prepared train/validation/benchmark splits. To run one, "
+                "start the servers and point at the example file directly:\n"
+                "  gym env start --resources-server <server> ...\n"
+                "  gym eval run --no-serve --agent <agent> --input <server_dir>/data/example.jsonl --output <out>.jsonl\n"
+                "See the Quickstart: https://docs.nvidia.com/nemo/gym/latest/get-started/quickstart"
             )
         return data
 
