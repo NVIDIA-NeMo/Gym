@@ -830,6 +830,79 @@ class TestDumpFromSearch:
         assert server._filing_read_sources["sec-corpus"] == 0
 
     @pytest.mark.asyncio
+    async def test_missing_exhibit_is_not_answered_with_the_primary_document(self, server) -> None:
+        """A recorded path with no file must not reach the convention: it names another document."""
+        await self._search(server)
+        server._filings_cache["0000789019"] = {
+            "000078901925000001": {
+                "ticker": "MSFT",
+                "form": "8-K",
+                "report_date": "2025-01-01",
+                "accession_number": "0000789019-25-000001",
+                "primary_document": "msft-8k.htm",
+            },
+        }
+        # The exhibit is absent from the corpus; its filing's own document is not.
+        self._write_dump(
+            server,
+            "MSFT/8-K/2025/0000789019-25-000001/primary-document.html",
+            "<html><body><p>Convention copy</p></body></html>",
+        )
+
+        with patch.object(server, "_fetch_with_retry", new=AsyncMock(return_value=MOCK_HTML)) as fetch:
+            text_content = await server._fetch_sec_filing_text(self._EXHIBIT_URL)
+
+        assert "Convention copy" not in text_content
+        assert "Company Financial Report" in text_content
+        fetch.assert_called_once()
+        assert server._filing_read_sources["live"] == 1
+        assert server._filing_read_sources["sec-corpus"] == 0
+
+    @pytest.mark.asyncio
+    async def test_convention_declines_a_url_naming_another_document(self, server) -> None:
+        """Reached without any search, as sec_filing_search leaves it."""
+        server._filings_cache["0000320193"] = {
+            "000032019324000009": {
+                "ticker": "AAPL",
+                "form": "10-Q",
+                "report_date": "2024-06-30",
+                "accession_number": "0000320193-24-000009",
+                "primary_document": "aapl-10q.htm",
+            },
+        }
+        self._write_dump(
+            server,
+            "AAPL/10-Q/2024/0000320193-24-000009/primary-document.html",
+            "<html><body><p>Convention copy</p></body></html>",
+        )
+
+        exhibit_url = "https://www.sec.gov/Archives/edgar/data/320193/000032019324000009/aapl-ex101.htm"
+        assert await server._lookup_dump(exhibit_url) is None
+
+    @pytest.mark.asyncio
+    async def test_convention_still_serves_the_filings_own_document(self, server) -> None:
+        server._filings_cache["0000320193"] = {
+            "000032019324000009": {
+                "ticker": "AAPL",
+                "form": "10-Q",
+                "report_date": "2024-06-30",
+                "accession_number": "0000320193-24-000009",
+                "primary_document": "aapl-10q.htm",
+            },
+        }
+        self._write_dump(
+            server,
+            "AAPL/10-Q/2024/0000320193-24-000009/primary-document.html",
+            "<html><body><p>Convention copy</p></body></html>",
+        )
+
+        primary_url = "https://www.sec.gov/Archives/edgar/data/320193/000032019324000009/aapl-10q.htm"
+        text_content = await server._lookup_dump(primary_url)
+
+        assert text_content is not None
+        assert "Convention copy" in text_content
+
+    @pytest.mark.asyncio
     async def test_url_that_was_never_searched_is_fetched_live(self, server) -> None:
         url = "https://www.sec.gov/Archives/edgar/data/1234567/000123456725000001/other.htm"
 

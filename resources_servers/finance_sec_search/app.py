@@ -839,6 +839,10 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 text_content = await self._read_dump_file(root / candidate)
                 if text_content is not None:
                     return text_content
+                logger.warning("Index recorded %s but the corpus has no readable file there", relative_path)
+            # The index named this URL's own document, so the rebuild below could
+            # only answer with a different one.
+            return None
 
         # Otherwise rebuild the path from filing metadata that sec_filing_search
         # left in memory. Uses report_date for the year and form.replace("/", "_")
@@ -854,6 +858,13 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
 
         filing_meta = metadata.get(parts["accession_number"].replace("-", ""))
         if not filing_meta:
+            return None
+
+        # Reading primary-document.html for an exhibit URL returns the wrong text
+        # and reports success, so decline whenever the URL names another document.
+        document = parts.get("document", "").strip()
+        primary_document = str(filing_meta.get("primary_document", "")).strip()
+        if document and primary_document and document.lower() != primary_document.lower():
             return None
 
         ticker = filing_meta.get("ticker", "")
