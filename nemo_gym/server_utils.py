@@ -746,7 +746,7 @@ class ClientDisconnectCancellationMiddleware:
 
                     client_disconnected.set()
                     self.num_cancelled += 1
-                    if is_global_aiohttp_client_request_debug_enabled():
+                    if is_global_aiohttp_client_request_debug_enabled() or self.num_cancelled % 100 == 0:
                         client = scope.get("client")
                         client_address = f"{client[0]}:{client[1]}" if client else "-:-"
                         print(
