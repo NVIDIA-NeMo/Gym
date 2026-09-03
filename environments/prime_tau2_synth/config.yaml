@@ -1,0 +1,27 @@
+prime_tau2_synth_agent:
+  responses_api_agents:
+    prime_tau2_synth_agent:
+      entrypoint: app.py
+      domain: agent
+      description: tau2-bench style training with custom synthetic domains via Prime Intellect verifiers.
+      value: Improve multi-domain agentic customer service and tool use capabilities.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ""
+      vf_env_id: tau2-synth
+      vf_env_args:
+        domain: library
+        user_model: gpt-4.1
+        max_steps: 200
+        max_errors: 10
+      group_size: 1
+      max_concurrent_generation: -1
+      max_concurrent_scoring: -1
+      max_tokens: 16000
+      temperature: 1.0
+      top_p: 1.0
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: environments/prime_tau2_synth/data/example.jsonl
