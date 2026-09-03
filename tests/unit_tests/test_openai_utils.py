@@ -1264,9 +1264,10 @@ def test_request_model_carries_every_sdk_request_field() -> None:
 
 
 def test_chat_request_field_set_matches_sdk_without_deprecated_fields() -> None:
-    """Keep the strict Chat request model aligned with the supported SDK fields.
+    """Keep the modelled Chat request fields aligned with the supported SDK fields.
 
-    Deprecated fields remain disabled.
+    Deprecated fields remain disabled. Fields outside this set are carried rather than
+    modelled, so they land in the extras instead of becoming attributes.
     """
     sdk_fields = set(get_type_hints(CompletionCreateParamsNonStreaming, include_extras=True))
     expected = sdk_fields - {"function_call", "functions"}
@@ -1276,8 +1277,9 @@ def test_chat_request_field_set_matches_sdk_without_deprecated_fields() -> None:
         f"missing={sorted(expected - actual)} extra={sorted(actual - expected)}"
     )
 
-    with pytest.raises(ValidationError):
-        NeMoGymChatCompletionCreateParamsNonStreaming(messages=[], not_a_real_field=True)
+    carried = NeMoGymChatCompletionCreateParamsNonStreaming(messages=[], not_a_real_field=True)
+    assert "not_a_real_field" not in carried.model_fields
+    assert carried.model_extra["not_a_real_field"] is True
 
 
 def test_response_field_set_is_pinned() -> None:
@@ -1364,18 +1366,33 @@ def test_tool_message_accepts_the_name_field() -> None:
     assert parsed.messages[-1]["name"] == "terminal"
 
 
-def test_tool_message_still_rejects_unknown_fields() -> None:
+def test_tool_message_keeps_its_declared_shape() -> None:
+    """The name is modelled, so it survives as a field rather than as an untyped extra."""
     body = {
         "model": "policy_model",
-        "messages": [
-            {
-                "role": "tool",
-                "name": "terminal",
-                "tool_call_id": "call_abc",
-                "content": "ok",
-                "not_a_real_field": 1,
-            }
-        ],
+        "messages": [{"role": "tool", "name": "terminal", "tool_call_id": "call_abc", "content": "ok"}],
     }
+    message = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(body).messages[0]
+    assert message["name"] == "terminal"
+    assert message["tool_call_id"] == "call_abc"
+
+
+def test_request_carries_vendor_extensions() -> None:
+    """Engines behind Gym accept fields OpenAI does not define, and callers send them.
+
+    vLLM's chat_template_kwargs is how a caller drives a model's thinking mode. Rejecting the
+    request drops that caller's whole conversation for a field the engine understands.
+    """
+    body = {
+        "model": "policy_model",
+        "messages": [{"role": "user", "content": "hi"}],
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+    parsed = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(body)
+    assert parsed.model_extra["chat_template_kwargs"] == {"enable_thinking": True}
+
+
+def test_messages_are_still_validated() -> None:
+    body = {"model": "policy_model", "messages": [{"role": "not_a_role", "content": "hi"}]}
     with pytest.raises(ValidationError):
         NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(body)
