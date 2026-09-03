@@ -22,6 +22,7 @@ from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
 from collections.abc import Mapping
 from contextlib import nullcontext
+from dataclasses import dataclass
 from datetime import timedelta
 from difflib import get_close_matches
 from itertools import repeat
@@ -151,10 +152,18 @@ AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
 _NO_RESULT_FAILURE_CLASSES = frozenset({AGENT_REQUEST_FAILED_FAILURE_CLASS, AGENT_RUN_ERROR_FAILURE_CLASS})
 NG_TRAJECTORY_KEY = "ng_trajectory"
 NG_PERF_KEY = "ng_perf"
-_NG_ROLLOUT_LATENCY_MS_KEY = "_ng_rollout_latency_ms"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+
+
+@dataclass(frozen=True)
+class _CompletedRollout:
+    """A finished ``/run`` dispatch, with timing carried alongside (not inside) the raw result."""
+
+    row: Dict[str, Any]
+    result: Dict[str, Any]
+    rollout_latency_ms: Optional[float]
 
 
 def _nonnegative_int(value: Any) -> Optional[int]:
@@ -520,8 +529,9 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
     return ng_perf
 
 
-def _attach_ng_perf(result: dict[str, Any], *, observability_enabled: bool) -> None:
-    rollout_latency_ms = result.pop(_NG_ROLLOUT_LATENCY_MS_KEY, None)
+def _attach_ng_perf(
+    result: dict[str, Any], *, observability_enabled: bool, rollout_latency_ms: Optional[float] = None
+) -> None:
     if not observability_enabled:
         # ng_perf stays absent entirely when observability is off (OQ4): a caller who
         # disabled it only wants the final score, not partial/best-effort perf evidence.
@@ -1371,13 +1381,13 @@ class RolloutCollectionHelper(BaseModel):
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
         failure_counts: Counter = Counter()
-        for future in self.run_examples(
+        for future in self._run_examples_with_metadata(
             input_rows,
             semaphore=semaphore,
             route_failures_to_sidecar=config.route_failures_to_sidecar,
-            include_rollout_latency=True,
         ):
-            row, result = await future
+            completed = await future
+            row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -1410,10 +1420,8 @@ class RolloutCollectionHelper(BaseModel):
             if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
                 _attach_trajectory_record(row, result)
 
-            # Assembles ng_perf from ng_trajectory when observability is enabled;
-            # additionally drops the internal wall-clock timer key so it never
-            # leaks into a persisted rollout.
-            _attach_ng_perf(result, observability_enabled=observability_enabled)
+            # Assembles ng_perf from ng_trajectory when observability is enabled.
+            _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
 
             # Freeze and rebuild tokens only for participating agents.
             # This step does not retire the frozen snapshot.
@@ -1876,29 +1884,20 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             f"--allow-unsupported-pairing (or set {ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME}=1) to bypass the check."
         )
 
-    def run_examples(
+    def _run_examples_with_metadata(
         self,
         examples: List[Dict],
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
         route_failures_to_sidecar: bool = False,
-        include_rollout_latency: bool = False,
     ) -> Iterator[Future]:  # pragma: no cover
         """
-        We provide this function as a lower level interface for running rollout collection.
+        Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
 
-        Rows are dispatched as given: task_sources are resolved and agent names validated here,
-        but run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are NOT applied — call
-        ``preprocess_examples`` first if you need them.
-
-        ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
-        that ends every rollout still in flight. It defaults off because those rollouts then leave
-        the score.
-
-        ``include_rollout_latency`` stamps the private ``_ng_rollout_latency_ms`` timing key onto
-        successful results, for callers that will feed the result through ``_attach_ng_perf`` (which
-        consumes and removes it). It defaults off so direct callers get exactly the `/run` result,
-        with no Gym-private fields.
+        Identical contract to ``run_examples``, but each future resolves to a ``_CompletedRollout``
+        that carries ``rollout_latency_ms`` alongside the raw ``/run`` result instead of inside it,
+        so internal-only timing never has to be smuggled through (and stripped back out of) a dict
+        that a direct caller of ``run_examples`` could also observe.
         """
         server_client = self.setup_server_client(head_server_config)
         self.resolve_task_sources(examples, server_client.global_config_dict)
@@ -1906,7 +1905,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         self._validate_agent_pairings(examples, server_client.global_config_dict)
         semaphore = semaphore or nullcontext()
 
-        async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
+        async def _post_subroutine(row: Dict) -> _CompletedRollout:
             async with semaphore:
                 started_at = time()
                 res = None
@@ -1914,11 +1913,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                     await raise_for_status(res)
                     result = await get_response_json(res)
-                    if include_rollout_latency:
-                        # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
-                        # from summed model-call/tool latencies to account for additional overhead.
-                        result[_NG_ROLLOUT_LATENCY_MS_KEY] = (time() - started_at) * 1000
-                    return row, result
+                    # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
+                    # from summed model-call/tool latencies to account for additional overhead.
+                    rollout_latency_ms = (time() - started_at) * 1000
+                    return _CompletedRollout(row=row, result=result, rollout_latency_ms=rollout_latency_ms)
                 except Exception as e:
                     print(
                         "[rollout_collection] /run failed "
@@ -1933,7 +1931,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # The status comes from the error when it carries one, and from the response
                     # when the body was the part that failed.
                     status = getattr(e, "status", None) or getattr(res, "status", None)
-                    return row, _agent_request_failure_row(e, status)
+                    return _CompletedRollout(
+                        row=row, result=_agent_request_failure_row(e, status), rollout_latency_ms=None
+                    )
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),
@@ -1941,6 +1941,42 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             miniters=10,
             total=len(examples),
             maxinterval=60,
+        )
+
+    def run_examples(
+        self,
+        examples: List[Dict],
+        head_server_config: Optional[BaseServerConfig] = None,
+        semaphore: Optional[Semaphore] = None,
+        route_failures_to_sidecar: bool = False,
+    ) -> Iterator[Future]:  # pragma: no cover
+        """
+        We provide this function as a lower level interface for running rollout collection.
+
+        Rows are dispatched as given: task_sources are resolved and agent names validated here,
+        but run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are NOT applied — call
+        ``preprocess_examples`` first if you need them.
+
+        ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
+        that ends every rollout still in flight. It defaults off because those rollouts then leave
+        the score.
+
+        Every future resolves to exactly the ``(row, result)`` pair Gym's own `/run` endpoint
+        returned — no Gym-private fields are ever added to ``result``.
+        """
+
+        async def _without_metadata(future: Future) -> Tuple[Dict, Dict]:
+            completed = await future
+            return completed.row, completed.result
+
+        return map(
+            _without_metadata,
+            self._run_examples_with_metadata(
+                examples,
+                head_server_config=head_server_config,
+                semaphore=semaphore,
+                route_failures_to_sidecar=route_failures_to_sidecar,
+            ),
         )
 
     def setup_server_client(
