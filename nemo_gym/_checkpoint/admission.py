@@ -105,7 +105,9 @@ class AdmissionLimiter:
     def __init__(self) -> None:
         self.state = AdmissionState.ACCEPTING
         self._inflight: dict[str, AdmissionTicket] = {}
-        self._tombstones: set[tuple[str, int]] = set()
+        self._admission_tombstones: set[tuple[str, int]] = set()
+        self._checkpoint_exclusions: set[tuple[str, int]] = set()
+        self._seen_attempts: set[tuple[str, int]] = set()
         self._drained = asyncio.Event()
         self._drained.set()
         self._listeners: list[Callable[[], None]] = []
@@ -140,17 +142,18 @@ class AdmissionLimiter:
         if (rollout_id is None) != (attempt_index is None):
             raise ValueError("rollout_id and attempt_index must be provided together")
         if rollout_id is not None and attempt_index is not None:
-            if (rollout_id, attempt_index) in self._tombstones:
+            if (rollout_id, attempt_index) in self._admission_tombstones:
                 raise StaleAttemptError(
                     f"rollout {rollout_id!r} attempt {attempt_index} was closed at a checkpoint "
                     f"deadline; the restored run dispatched a replacement attempt"
                 )
-
         if self.state != AdmissionState.ACCEPTING:
             raise AdmissionParkedError(
                 f"admission is {self.state.value} for a checkpoint; park and re-issue this "
                 f"operation after the checkpoint completes"
             )
+        if rollout_id is not None and attempt_index is not None:
+            self._seen_attempts.add((rollout_id, attempt_index))
 
         ticket = AdmissionTicket(
             rollout_id=rollout_id,
@@ -185,6 +188,7 @@ class AdmissionLimiter:
 
     def resume(self) -> None:
         self.state = AdmissionState.ACCEPTING
+        self._checkpoint_exclusions.clear()
 
     def abort_inflight(self, rollout_id: str, attempt_index: int) -> list[str]:
         """Cancel and fence a rollout attempt that missed the prepare deadline.
@@ -192,7 +196,9 @@ class AdmissionLimiter:
         The request remains in flight until its ASGI task exits.
         A checkpoint cannot commit while cancelled code may still write.
         """
-        self._tombstones.add((rollout_id, attempt_index))
+        identity = (rollout_id, attempt_index)
+        self._admission_tombstones.add(identity)
+        self._checkpoint_exclusions.add(identity)
         aborted = [
             ticket.ticket_id
             for ticket in self._inflight.values()
@@ -210,10 +216,24 @@ class AdmissionLimiter:
         The checkpoint records logical IDs and explicit attempt indices.
         This method preserves those values without parsing capture-key suffixes.
         """
-        self._tombstones.add((logical_rollout_id, attempt_index))
+        self._admission_tombstones.add((logical_rollout_id, attempt_index))
 
     def tombstones(self) -> list[tuple[str, int]]:
-        return sorted(self._tombstones)
+        return sorted(self._admission_tombstones)
+
+    def checkpoint_exclusions(self) -> list[tuple[str, int]]:
+        """Return attempts aborted during this process's active checkpoint."""
+        return sorted(self._checkpoint_exclusions)
+
+    def is_tombstoned(self, rollout_id: Optional[str], attempt_index: Optional[int]) -> bool:
+        return (
+            rollout_id is not None
+            and attempt_index is not None
+            and (rollout_id, attempt_index) in self._admission_tombstones
+        )
+
+    def seen_attempts(self) -> list[tuple[str, int]]:
+        return sorted(self._seen_attempts)
 
     # -- observation ---------------------------------------------------------
 
@@ -338,8 +358,34 @@ class AdmissionMiddleware:
             await response(scope, receive, send)
             return
 
+        response_started = False
+
+        async def tracked_send(message: dict[str, Any]) -> None:
+            nonlocal response_started
+            if message.get("type") == "http.response.start":
+                response_started = True
+            await send(message)
+
         try:
-            await self._app(scope, receive, send)
+            await self._app(scope, receive, tracked_send)
+        except asyncio.CancelledError:
+            if not self._limiter.is_tombstoned(ticket.rollout_id, ticket.attempt_index):
+                raise
+            if response_started:
+                # HTTP status is immutable after response start. Propagating
+                # cancellation closes the transport instead of completing a
+                # misleading successful response.
+                raise
+            response = JSONResponse(
+                status_code=409,
+                content={
+                    "error": {
+                        "code": "stale_attempt",
+                        "detail": "the rollout attempt was aborted at a checkpoint deadline",
+                    }
+                },
+            )
+            await response(scope, receive, send)
         finally:
             # The ASGI call returns only after the response (including a
             # streamed one) has finished sending, so releasing here keeps the

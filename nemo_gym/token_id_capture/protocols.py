@@ -127,6 +127,23 @@ class LineageResolver(Protocol):
 
 
 @runtime_checkable
+class ExplicitParentLineageStore(Protocol):
+    """Optional exact-parent lookup for restored cross-attempt continuations.
+
+    Implementations must verify that ``request_items`` continue the named
+    parent. A resolved match must preserve staged-prefix coordinates:
+    ``staging_chain``, ``prev_len``, and ``chain_hash``.
+    """
+
+    async def resolve_explicit(
+        self,
+        source_capture_key: str,
+        parent_call_id: str,
+        request_items: list[dict],
+    ) -> LineageResolution: ...
+
+
+@runtime_checkable
 class CaptureLedger(LineageResolver, Protocol):
     """Store metadata for calls whose token data is staged externally.
 
