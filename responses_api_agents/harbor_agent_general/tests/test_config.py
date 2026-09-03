@@ -18,17 +18,19 @@ from pathlib import Path
 from responses_api_agents.harbor_agent_general.app import HarborAgentConfig
 
 
-def _make_config(tmp_path: Path, harbor_jobs_dir: Path) -> HarborAgentConfig:
-    return HarborAgentConfig(
-        name="harbor_agent_general",
-        host="0.0.0.0",
-        port=8080,
-        entrypoint="app.py",
-        harbor_jobs_dir=harbor_jobs_dir,
-        harbor_dataset={"path": str(tmp_path / "dataset")},
-        harbor_environment={"type": "docker"},
-        harbor_agent={"name": "opencode", "model_name": "test-model"},
-    )
+def _make_config(tmp_path: Path, harbor_jobs_dir: Path, **config_overrides: object) -> HarborAgentConfig:
+    config = {
+        "name": "harbor_agent_general",
+        "host": "0.0.0.0",
+        "port": 8080,
+        "entrypoint": "app.py",
+        "harbor_jobs_dir": harbor_jobs_dir,
+        "harbor_dataset": {"path": str(tmp_path / "dataset")},
+        "harbor_environment": {"type": "docker"},
+        "harbor_agent": {"name": "opencode", "model_name": "test-model"},
+    }
+    config.update(config_overrides)
+    return HarborAgentConfig.model_validate(config)
 
 
 def test_normalize_jobs_dir_keeps_directory_path(tmp_path: Path) -> None:
@@ -45,6 +47,11 @@ def test_normalize_jobs_dir_maps_jsonl_path_to_harbor_directory(tmp_path: Path) 
     config = _make_config(tmp_path, input_path)
 
     assert config.harbor_jobs_dir == (tmp_path / "logs" / "harbor").resolve()
+
+
+def test_reward_key_defaults_to_reward_and_accepts_override(tmp_path: Path) -> None:
+    assert _make_config(tmp_path, tmp_path / "default").harbor_reward_key == "reward"
+    assert _make_config(tmp_path, tmp_path / "custom", harbor_reward_key="score").harbor_reward_key == "score"
 
 
 def test_build_job_config_applies_single_trial_defaults(tmp_path: Path) -> None:

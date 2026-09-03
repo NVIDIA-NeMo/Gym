@@ -74,6 +74,7 @@ class HarborAgentConfig(BaseResponsesAPIAgentConfig):
     harbor_jobs_dir: Path
     harbor_debug: bool = Field(default=False)
     harbor_max_retries: int = Field(default=0)
+    harbor_reward_key: str = Field(default="reward", min_length=1)
     harbor_dataset: DatasetConfig = Field(default_factory=DatasetConfig)
     harbor_environment: EnvironmentConfig = Field(default_factory=EnvironmentConfig)
     harbor_agent: AgentConfig = Field(default_factory=AgentConfig)
@@ -415,11 +416,14 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
         n_input_tokens, n_cache_tokens, n_output_tokens, _ = trial.compute_token_cost_totals()
 
-        if step_rewards is not None and "reward" not in step_rewards:
+        reward_key = self.config.harbor_reward_key
+        if step_rewards is not None and reward_key not in step_rewards:
             logger.warning(
-                "Harbor verifier result for trial %s has no 'reward' key; using the first available reward or 0.0",
+                "Harbor verifier result for trial %s has no %r key; using the first available reward or 0.0",
                 trial.id,
+                reward_key,
             )
+        reward = float(step_rewards.get(reward_key, next(iter(step_rewards.values()), 0.0)) if step_rewards else 0.0)
 
         return HarborVerifyResponse.model_validate(
             body.model_dump(by_alias=True)
@@ -458,9 +462,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                         "total_tokens": (n_input_tokens or 0) + (n_output_tokens or 0),
                     },
                 ),
-                "reward": float(
-                    step_rewards.get("reward", next(iter(step_rewards.values()), 0.0)) if step_rewards else 0.0
-                ),
+                "reward": reward,
                 "atif_conversion": {
                     "lossless": not conversion_warnings,
                     "warnings": conversion_warnings,
