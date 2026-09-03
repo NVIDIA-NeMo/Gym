@@ -188,14 +188,24 @@ class NeMoGymLLM(BaseLLM):
             raise NotImplementedError(f"NeMoGymLLM does not support call options: {sorted(kwargs)}")
 
         input_items = self._input_items(message_history, prompt)
+        response = None
         start_time = perf_counter()
-        response = NeMoGymResponse.model_validate(
-            await self._client.create_response(
-                model=self._model_name,
-                input=[item.model_dump(mode="json", exclude_none=True) for item in input_items],
-            )
-        )
+        max_attempts = 3  # Hardcode 3 attempts for now
+        for attempt in range(max_attempts):
+            try:
+                async with asyncio.timeout(delay=60 * 10):  # Hardcoded to match litellm default timeout
+                    response = NeMoGymResponse.model_validate(
+                        await self._client.create_response(
+                            model=self._model_name,
+                            input=[item.model_dump(mode="json", exclude_none=True) for item in input_items],
+                        )
+                    )
+                    break
+            except TimeoutError:
+                print(f"Hit 10min timeout on model call, attempt {attempt + 1} / {max_attempts}", file=sys.stderr)
         self._times_spent.append(perf_counter() - start_time)
+        if not response:
+            raise TimeoutError(f"Failed to query model endpoint due to timeouts after {max_attempts} attempts!")
 
         if len(self._last_input_items) >= len(input_items):
             # Compacted
