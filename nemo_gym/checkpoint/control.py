@@ -36,7 +36,9 @@ commit/restore) share one fencing discipline, implemented here by
 """
 
 import asyncio
+import os
 import time
+from collections.abc import Mapping
 from enum import Enum
 from typing import Any, Awaitable, Callable, Literal, Optional
 
@@ -44,9 +46,12 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat
 
+from nemo_gym.token_id_capture.config import token_id_capture_config
+
 
 CONTROL_URL_PREFIX = "/ng-control/v1"
 CONTROL_SCHEMA_VERSION = 1
+CHECKPOINT_CONTROL_TOKEN_ENV = "NEMO_GYM_CHECKPOINT_CONTROL_TOKEN"
 
 
 class AdmissionState(str, Enum):
@@ -79,6 +84,7 @@ class CheckpointPhase(str, Enum):
     COMMITTING = "committing"
     COMMITTED_PAUSED = "committed_paused"
     RESTORING = "restoring"
+    RESTORE_FAILED_PAUSED = "restore_failed_paused"
     RESTORED_PAUSED = "restored_paused"
 
 
@@ -95,6 +101,19 @@ class ControlError(Exception):
 
 class StaleCheckpointError(ControlError):
     code = "stale_checkpoint"
+
+
+def checkpoint_control_auth_token(global_config: Any) -> Optional[str]:
+    """Resolve a checkpoint bearer independently of capture enablement."""
+    configured = os.environ.get(CHECKPOINT_CONTROL_TOKEN_ENV)
+    if configured:
+        return configured
+    if not isinstance(global_config, Mapping):
+        return None
+    settings = token_id_capture_config(global_config)
+    if settings is None or not settings.token_id_capture.external_staging:
+        return None
+    return settings.token_id_capture.resolve_control_auth_token()
 
 
 class CheckpointConflictError(ControlError):
@@ -255,6 +274,7 @@ class ControlFence:
         run: Callable[[], Awaitable[dict[str, Any]]],
         deadline: Optional[Deadline] = None,
         retire_outcome: Optional[str] = None,
+        phase_on_failure: Optional[CheckpointPhase] = None,
     ) -> dict[str, Any]:
         """Run one fenced control operation and record its result.
 
@@ -290,9 +310,9 @@ class ControlFence:
         try:
             result = await run()
         except BaseException as e:
-            self.phase = entry_phase
+            self.phase = phase_on_failure or entry_phase
             self.deadline = entry_deadline
-            if entry_phase == CheckpointPhase.IDLE:
+            if entry_phase == CheckpointPhase.IDLE and phase_on_failure is None:
                 self.active_checkpoint_id = None
             future.set_exception(e)
             # A coalesced duplicate re-raises through the shielded await;
