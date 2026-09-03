@@ -20,7 +20,7 @@ from typing import Any, List, Optional
 from fastapi import Request, Response
 from pydantic import ConfigDict, TypeAdapter, ValidationError
 
-from nemo_gym._checkpoint import AgentBoundaryRecord
+from nemo_gym._checkpoint import RESOURCE_STATE_REVISION_HEADER, AgentBoundaryRecord
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -66,6 +66,13 @@ _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 _INPUT_ITEMS_ADAPTER = TypeAdapter(List[NeMoGymResponseInputItem])
 
 
+def _cookie_values(cookies: Any) -> dict[str, str]:
+    return {
+        name: str(getattr(cookie, "value", cookie))
+        for name, cookie in (cookies.items() if cookies is not None else ())
+    }
+
+
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
@@ -86,6 +93,7 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 
 class SimpleAgent(SimpleResponsesAPIAgent):
     config: SimpleAgentConfig
+    checkpoint_continuation_supported = True
 
     async def _create_episode(
         self,
@@ -97,6 +105,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         rollout_id: str = "unscoped",
         collect_trajectory: bool = False,
         continuation: Optional[AgentBoundaryRecord] = None,
+        request: Optional[Request] = None,
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
         invocation_id = "root"
         tool_records: list[TrajectoryToolCall] = []
@@ -113,24 +122,47 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         step = 0
         invocation_status = "completed"
         model_server_cookies = None
+        resource_revision = 0
+        model_response = None
         if continuation is not None:
             new_outputs.extend(_INPUT_ITEMS_ADAPTER.validate_python(continuation.output_items))
             usage = NeMoGymResponseUsage.model_validate(continuation.usage) if continuation.usage is not None else None
             step = continuation.boundary_index
             model_server_cookies = continuation.agent_state.get("model_server_cookies") or None
             resources_server_cookies = continuation.agent_state.get("resources_server_cookies") or None
+            resource_revision = continuation.resource_state_revisions.get(self.config.resources_server.name, 0)
+            restored_response = continuation.agent_state.get("last_model_response")
+            if restored_response is not None:
+                model_response = NeMoGymResponse.model_validate(restored_response)
+            else:
+                model_response = NeMoGymResponse(
+                    id=continuation.last_committed_model_call_id or "restored-checkpoint-boundary",
+                    created_at=continuation.created_at,
+                    model=body.model or self.config.model_server.name,
+                    object="response",
+                    output=[],
+                    parallel_tool_calls=True,
+                    tool_choice="auto",
+                    tools=[],
+                )
 
         while True:
+            if self.config.max_steps and step >= self.config.max_steps:
+                invocation_status = "incomplete"
+                break
             step += 1
             new_body = body.model_copy(update={"input": body.input + new_outputs})
             if collect_trajectory:
                 turn_timestamp = time()
 
-            model_response = await self.server_client.post(
-                server_name=self.config.model_server.name,
-                url_path=model_url_path,
-                json=new_body,
-                cookies=model_server_cookies,
+            model_response = await self.retry_checkpoint_refusal(
+                lambda: self.server_client.post(
+                    server_name=self.config.model_server.name,
+                    url_path=model_url_path,
+                    json=new_body,
+                    cookies=model_server_cookies,
+                ),
+                request=request,
             )
             model_call_id = None
             if self._checkpoint_participant is not None:
@@ -206,14 +238,20 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         tool_status = "failed"
                 else:
                     # Resource-server errors are valid model-visible tool outputs.
-                    api_response = await self.server_client.post(
-                        server_name=self.config.resources_server.name,
-                        url_path=f"/{output_function_call.name}",
-                        json=parsed_arguments,
-                        cookies=resources_server_cookies,
+                    api_response = await self.retry_checkpoint_refusal(
+                        lambda: self.server_client.post(
+                            server_name=self.config.resources_server.name,
+                            url_path=f"/{output_function_call.name}",
+                            json=parsed_arguments,
+                            cookies=resources_server_cookies,
+                        ),
+                        request=request,
                     )
                     tool_output = (await api_response.content.read()).decode()
                     resources_server_cookies = api_response.cookies
+                    headers = getattr(api_response, "headers", None)
+                    if isinstance(headers, Mapping) and headers.get(RESOURCE_STATE_REVISION_HEADER) is not None:
+                        resource_revision = int(headers[RESOURCE_STATE_REVISION_HEADER])
                     if collect_trajectory:
                         completed = 200 <= api_response.status < 400
                         tool_status = "completed" if completed else "failed"
@@ -245,11 +283,17 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             if collect_trajectory and all_fn_calls:
                 turns[-1].step_count = len(tool_records)
 
-            if all_fn_calls and self._checkpoint_participant is not None:
+            if (
+                all_fn_calls
+                and self._checkpoint_participant is not None
+                and (not self.config.max_steps or step < self.config.max_steps)
+            ):
                 logical_rollout_id = current_logical_rollout_id()
                 attempt_index = current_attempt_index()
-                if logical_rollout_id is not None and attempt_index is not None:
+                execution = self.checkpoint_execution(request)
+                if logical_rollout_id is not None and attempt_index is not None and execution is not None:
                     await self.checkpoint_participant().commit_boundary(
+                        execution,
                         AgentBoundaryRecord(
                             rollout_id=logical_rollout_id,
                             attempt_index=attempt_index,
@@ -257,18 +301,19 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             output_items=[item.model_dump(mode="json") for item in new_outputs],
                             usage=usage.model_dump(mode="json") if usage is not None else None,
                             last_committed_model_call_id=model_call_id,
+                            resource_state_revisions={self.config.resources_server.name: resource_revision},
                             agent_state={
-                                "model_server_cookies": dict(model_server_cookies or {}),
-                                "resources_server_cookies": dict(resources_server_cookies or {}),
+                                "model_server_cookies": _cookie_values(model_server_cookies),
+                                "resources_server_cookies": _cookie_values(resources_server_cookies),
+                                "last_model_response": model_response.model_copy(
+                                    update={"output": new_outputs, "usage": usage}
+                                ).model_dump(mode="json"),
                             },
-                        )
+                        ),
                     )
 
-            # Check if max steps is not None and if we have exhausted it.
-            if self.config.max_steps and step >= self.config.max_steps:
-                invocation_status = "incomplete"
-                break
-
+        if model_response is None:
+            raise RuntimeError("agent episode ended before producing or restoring a model response")
         model_response.output = new_outputs
         model_response.usage = usage
         trajectory = None
@@ -300,15 +345,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         if rollout_id is None and isinstance(path_params, Mapping):
             rollout_id = path_params.get("rollout_id")
         collect_trajectory = self._model_call_capture_enabled() and isinstance(rollout_id, str)
-        logical_rollout_id = current_logical_rollout_id()
-        attempt_index = current_attempt_index()
-        continuation = (
-            self.checkpoint_participant().continuation(logical_rollout_id, attempt_index)
-            if self._checkpoint_participant is not None
-            and logical_rollout_id is not None
-            and attempt_index is not None
-            else None
-        )
+        continuation = self.checkpoint_continuation(body, request)
         model_response, trajectory, model_server_cookies, resources_server_cookies = await self._create_episode(
             body,
             model_url_path=self.url_path_for_request("/v1/responses", request),
@@ -316,6 +353,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             rollout_id=rollout_id or "unscoped",
             collect_trajectory=collect_trajectory,
             continuation=continuation,
+            request=request,
         )
         # Propogate any extra cookies necessary for downstream verification
         for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
@@ -330,22 +368,28 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         cookies = request.cookies
         continuation = self.checkpoint_continuation(body)
         if continuation is None:
-            seed_session_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/seed_session",
-                json=body.model_dump(),
-                cookies=cookies,
+            seed_session_response = await self.retry_checkpoint_refusal(
+                lambda: self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/seed_session",
+                    json=body.model_dump(),
+                    cookies=cookies,
+                )
             )
             await raise_for_status(seed_session_response)
             cookies = seed_session_response.cookies
         else:
             cookies = continuation.agent_state.get("resources_server_cookies") or cookies
 
-        response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path=self.url_path_for_run("/v1/responses", body),
-            json=body.responses_create_params,
-            cookies=cookies,
+        execution_headers = self.checkpoint_execution_headers()
+        response = await self.retry_checkpoint_refusal(
+            lambda: self.server_client.post(
+                server_name=self.config.name,
+                url_path=self.url_path_for_run("/v1/responses", body),
+                json=body.responses_create_params,
+                cookies=cookies,
+                **({"headers": execution_headers} if execution_headers is not None else {}),
+            )
         )
         await raise_for_status(response)
         model_response_json = await get_response_json(response)
@@ -389,11 +433,13 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             verify_request = SimpleAgentVerifyRequest.model_validate(
                 body.model_dump() | {"response": model_response_json}
             )
-            verify_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=verify_request.model_dump(),
-                cookies=cookies,
+            verify_response = await self.retry_checkpoint_refusal(
+                lambda: self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/verify",
+                    json=verify_request.model_dump(),
+                    cookies=cookies,
+                )
             )
             await raise_for_status(verify_response)
             result = await get_response_json(verify_response)
