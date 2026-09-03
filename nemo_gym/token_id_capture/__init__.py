@@ -50,14 +50,13 @@ from nemo_gym.token_id_capture.consumer import (
     trajectories_for_rollout,
     trajectories_from_source,
 )
+from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, canonicalize_tool_arguments
 from nemo_gym.token_id_capture.lineage import (
     FileLineageStore,
     IncrementalLineageStore,
     InMemoryLineageStore,
     LineageIndex,
     RolloutLineage,
-    assistant_fingerprint,
-    canonicalize_tool_arguments,
     stamp_continuation,
 )
 from nemo_gym.token_id_capture.protocols import (
