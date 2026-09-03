@@ -110,6 +110,15 @@ def store(request, tmp_path):
     return InMemoryLineageStore()
 
 
+def test_capture_ledger_type_hints_resolve_at_runtime():
+    """``CaptureLedgerCommit`` must not hide behind TYPE_CHECKING (get_type_hints resolves it)."""
+    import typing
+
+    from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
+
+    assert typing.get_type_hints(CaptureLedger.record)["commit"] is CaptureLedgerCommit
+
+
 def test_stores_implement_capture_ledger(store):
     assert isinstance(store, CaptureLedger)
 
@@ -154,6 +163,31 @@ async def test_same_call_commit_is_idempotent_and_conflicts_raise(store):
                 [ASSISTANT_1],
             )
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"weight_version": 18},
+        {"response_id": "chatcmpl-other"},
+        {"admitted_at": 1.0},
+    ],
+)
+async def test_recommit_with_changed_metadata_conflicts_even_when_index_agrees(store, changed):
+    """Fields the lineage index does not keep still make a re-commit a conflict."""
+    await _record_call_1(store)
+    with pytest.raises(ValueError, match="conflicting"):
+        await store.record(
+            _commit(
+                _call_record("c1").model_copy(update=changed),
+                [USER_1],
+                [ASSISTANT_1],
+                staging_chain=("r1/c1",),
+            )
+        )
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert [record.model_call_id for record in manifest.records] == ["c1"]
 
 
 @pytest.mark.asyncio

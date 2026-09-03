@@ -100,7 +100,7 @@ class CaptureAdmission(_WireModel):
     ``required_prefix_token_ids`` holds the ids inline.
     ``staging_chain`` names the staged records whose token deltas form the prefix.
     The worker resolves either encoding to a flat id list.
-    It then passes that list to ``CaptureAdapter.enter_prefix``.
+    It passes that list to ``CaptureAdapter.enter_prefix`` and to ``RolloutTokenCapture.begin_call``.
     """
 
     rollout_id: Identifier

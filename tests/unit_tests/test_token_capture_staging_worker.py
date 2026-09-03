@@ -95,6 +95,19 @@ def _child() -> CaptureAdmission:
     )
 
 
+def _chained_child() -> CaptureAdmission:
+    """The externally staged encoding of ``_child``: prefix lives behind a staging chain."""
+    return CaptureAdmission(
+        rollout_id="rollout-1",
+        model_call_id="c2",
+        parent_call_id="c1",
+        prev_len=3,
+        mode="token_in",
+        staging_chain=["rollout-1/c1"],
+        parent_chain_hash=_PARENT_CHAIN_HASH,
+    )
+
+
 def _capture(
     sink: _MemorySink | None = None,
     *,
@@ -209,6 +222,71 @@ def test_bad_delta_poisons_capture_without_staging() -> None:
         prompt_token_ids=[1, 2],
         generated_token_ids=[3],
         generated_logprobs=[-0.1],
+    )
+    assert coords.disposition == "capture_failed"
+    assert sink.events == []
+
+
+def test_staging_chain_admission_requires_the_resolved_prefix() -> None:
+    capture, sink = _capture()
+    with pytest.raises(CaptureError, match="resolved prefix_token_ids"):
+        capture.begin_call(_chained_child())
+    assert sink.events == []
+
+
+def test_staging_chain_admission_with_resolved_prefix_matches_inline_coordinates() -> None:
+    inline_capture, inline_sink = _capture()
+    chained_capture, chained_sink = _capture()
+    kwargs = dict(prompt_token_ids=[10, 11, 12, 20, 21], generated_token_ids=[22, 23], generated_logprobs=[-0.3, -0.4])
+
+    inline = inline_capture.complete_call(inline_capture.begin_call(_child()), **kwargs)
+    chained_call = chained_capture.begin_call(_chained_child(), prefix_token_ids=[10, 11, 12])
+    assert chained_call.prefix_token_ids == [10, 11, 12]
+    chained = chained_capture.complete_call(chained_call, **kwargs)
+
+    assert chained.disposition == inline.disposition == "staged"
+    assert (chained.digest, chained.chain_hash, chained.cumulative_hash) == (
+        inline.digest,
+        inline.chain_hash,
+        inline.cumulative_hash,
+    )
+    assert chained_sink.records[0].token_ids_delta == inline_sink.records[0].token_ids_delta == [20, 21, 22, 23]
+
+
+@pytest.mark.parametrize(
+    ("admission", "prefix", "match"),
+    [
+        (_chained_child(), [10, 11], "does not equal prev_len"),
+        (_chained_child(), [10, 11, 12, 13], "does not equal prev_len"),
+        (_child(), [10, 11, 99], "conflict with the admission's inline prefix"),
+        (_root(), [10], "accepts no prefix_token_ids"),
+        (_chained_child(), [10, -1, 12], "non-negative ints"),
+    ],
+)
+def test_begin_call_rejects_prefixes_that_violate_the_admission(
+    admission: CaptureAdmission, prefix: list[int], match: str
+) -> None:
+    capture, sink = _capture()
+    with pytest.raises(CaptureError, match=match):
+        capture.begin_call(admission, prefix_token_ids=prefix)
+    assert sink.events == []
+
+
+def test_inline_admission_accepts_a_matching_explicit_prefix() -> None:
+    capture, _ = _capture()
+    call = capture.begin_call(_child(), prefix_token_ids=[10, 11, 12])
+    assert call.prefix_token_ids == [10, 11, 12]
+    root = capture.begin_call(_root(), prefix_token_ids=[])
+    assert root.prefix_token_ids == []
+
+
+def test_resolved_prefix_still_rejects_a_generation_prompt_that_differs() -> None:
+    capture, sink = _capture()
+    coords = capture.complete_call(
+        capture.begin_call(_chained_child(), prefix_token_ids=[10, 11, 12]),
+        prompt_token_ids=[10, 99, 12, 20],
+        generated_token_ids=[21],
+        generated_logprobs=[-0.2],
     )
     assert coords.disposition == "capture_failed"
     assert sink.events == []

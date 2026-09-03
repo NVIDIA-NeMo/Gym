@@ -45,10 +45,16 @@ class StreamingUnsupportedError(CaptureError):
 
 @dataclass
 class ActiveCall:
-    """One admitted call and the policy version present at admission."""
+    """One admitted call, the policy version present at admission, and its resolved prefix.
+
+    ``prefix_token_ids`` is the exact token prefix the engine prompt must begin
+    with. ``begin_call`` resolves it from the admission's inline prefix or from
+    the caller-supplied ids fetched for a ``staging_chain``. Empty for a text root.
+    """
 
     admission: CaptureAdmission
     weight_version: int
+    prefix_token_ids: list[int] = field(default_factory=list)
     completed: bool = field(default=False, init=False)
 
     @property
@@ -81,8 +87,23 @@ class RolloutTokenCapture:
     def adapter(self) -> CaptureAdapter | None:
         return self._adapter
 
-    def begin_call(self, admission: CaptureAdmission, *, stream: bool = False) -> ActiveCall:
-        """Admit a typed gate contract and stamp its generation weight version."""
+    def begin_call(
+        self,
+        admission: CaptureAdmission,
+        *,
+        prefix_token_ids: list[int] | None = None,
+        stream: bool = False,
+    ) -> ActiveCall:
+        """Admit a typed gate contract and stamp its generation weight version.
+
+        ``prefix_token_ids`` is the resolved parent prefix for a ``token_in`` call.
+        It is required when the admission stores its prefix as a ``staging_chain``:
+        the caller fetches and concatenates those staged deltas and passes the ids here,
+        the same list it hands to ``CaptureAdapter.enter_prefix``.
+        When the admission carries the prefix inline the argument may be omitted;
+        if given it must match. A text root accepts no prefix.
+        Violations are caller bugs and raise ``CaptureError``; they never poison the call.
+        """
         if not isinstance(admission, CaptureAdmission):
             raise TypeError("admission must be a CaptureAdmission")
         if stream:
@@ -90,10 +111,38 @@ class RolloutTokenCapture:
                 f"rollout {admission.rollout_id} call {admission.model_call_id}: "
                 "token capture does not support streaming responses"
             )
+        resolved_prefix = self._resolve_prefix(admission, prefix_token_ids)
         weight_version = self._weight_version_fn()
         if type(weight_version) is not int or weight_version < 0:
             raise CaptureError(f"weight_version_fn must return a non-negative int, got {weight_version!r}")
-        return ActiveCall(admission=admission, weight_version=weight_version)
+        return ActiveCall(admission=admission, weight_version=weight_version, prefix_token_ids=resolved_prefix)
+
+    @staticmethod
+    def _resolve_prefix(admission: CaptureAdmission, prefix_token_ids: list[int] | None) -> list[int]:
+        where = f"rollout {admission.rollout_id} call {admission.model_call_id}"
+        if prefix_token_ids is not None:
+            if not isinstance(prefix_token_ids, list) or any(
+                type(token_id) is not int or token_id < 0 for token_id in prefix_token_ids
+            ):
+                raise CaptureError(f"{where}: prefix_token_ids must be a list of non-negative ints")
+        if admission.mode == "text":
+            if prefix_token_ids:
+                raise CaptureError(f"{where}: a text root admission accepts no prefix_token_ids")
+            return []
+        inline = list(admission.required_prefix_token_ids)
+        if prefix_token_ids is None:
+            if not inline:
+                raise CaptureError(
+                    f"{where}: staging_chain admission requires the caller to pass the resolved prefix_token_ids"
+                )
+            return inline
+        if len(prefix_token_ids) != admission.prev_len:
+            raise CaptureError(
+                f"{where}: prefix_token_ids length {len(prefix_token_ids)} does not equal prev_len {admission.prev_len}"
+            )
+        if inline and inline != list(prefix_token_ids):
+            raise CaptureError(f"{where}: prefix_token_ids conflict with the admission's inline prefix")
+        return list(prefix_token_ids)
 
     def complete_call(
         self,
@@ -108,10 +157,7 @@ class RolloutTokenCapture:
         self._claim_completion(call)
         admission = call.admission
         try:
-            if (
-                admission.mode == "token_in"
-                and prompt_token_ids[: admission.prev_len] != admission.required_prefix_token_ids
-            ):
+            if admission.mode == "token_in" and prompt_token_ids[: admission.prev_len] != call.prefix_token_ids:
                 raise ValueError("generation prompt does not begin with the gate-authorized token prefix")
             token_ids_delta, token_mask_delta, logprobs_delta = build_staging_delta(
                 prompt_token_ids=prompt_token_ids,

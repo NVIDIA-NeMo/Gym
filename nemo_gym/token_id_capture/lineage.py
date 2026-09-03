@@ -460,6 +460,16 @@ class InMemoryLineageStore:
         # hash covers continuity, so the index keeps tokens only for
         # lineage-only local-capture rows that inject prompt prefixes.
         record = commit.record
+        rows = self._ledgers.setdefault(commit.rollout_id, [])
+        row = {"model_call_id": record.model_call_id, **_custody_columns(record, commit.staging_chain)}
+        # Write-once per model call (CaptureLedger contract): an identical
+        # replay is a no-op, any differing field is a conflict. Checked on the
+        # full custody row, not just the columns the lineage index keeps.
+        existing = next((r for r in rows if r.get("model_call_id") == record.model_call_id), None)
+        if existing is not None:
+            if existing != row:
+                raise ValueError(f"conflicting lineage record for model call {record.model_call_id}")
+            return
         self.index.for_rollout(commit.rollout_id).record(
             record.model_call_id,
             list(commit.request_items) + list(commit.response_items),
@@ -471,10 +481,7 @@ class InMemoryLineageStore:
             cum_len=record.cum_len,
             chain_hash=record.chain_hash,
         )
-        rows = self._ledgers.setdefault(commit.rollout_id, [])
-        row = {"model_call_id": record.model_call_id, **_custody_columns(record, commit.staging_chain)}
-        if not any(existing == row for existing in rows):
-            rows.append(row)
+        rows.append(row)
 
     async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
         rows = self._ledgers.setdefault(rollout_id, [])

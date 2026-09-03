@@ -42,14 +42,10 @@ That closes the window where the final call's entry is lost without a trace.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
-
-
-if TYPE_CHECKING:
-    # ``staging.records`` pulls in the digest module; keep this module light.
-    from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
+from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
 
 
 @dataclass(frozen=True)
