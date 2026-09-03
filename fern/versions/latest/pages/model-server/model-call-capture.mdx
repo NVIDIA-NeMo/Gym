@@ -10,7 +10,7 @@ or rollout rewards.
 
 ## Run an evaluation with capture
 
-This example extends the [quickstart](/get-started/quickstart) MCQA evaluation. It assumes that your
+This example extends the [quickstart](/main/get-started/quickstart) MCQA evaluation. It assumes that your
 model credentials are already configured in `env.yaml`.
 
 In the first terminal, choose an absolute capture directory and start the servers with capture
@@ -108,7 +108,7 @@ includes a gap to show the complete shape. The `gaps` field is omitted when ther
 reported by the provider; a `null` value means unknown, not zero. For example, Anthropic does not
 report reasoning-token usage, so `tokens_reasoning` is `null` for that dialect.
 
-After successful [`ng_trajectory`](/reference/trajectory-capabilities) projection, attached calls
+After successful [`ng_trajectory`](/main/reference/trajectory-capabilities) projection, attached calls
 omit request and response payloads; those remain in `CaptureStore`. If projection fails, payloads
 remain attached and `gaps` includes `trajectory_projection_failed`. LabBench rows with the
 `multimodal_history_redacted` gap omit payload copies from `ng_trajectory`.
@@ -231,60 +231,17 @@ SDK harnesses that configure a client once can use `base_url_for_run(base_url, b
 must thread the id through multiple layers can use `rollout_id_from_run(body)` with
 `resolve_model_base_url(name, rollout_id)`.
 
-## Agent observations
+## Add agent-side evidence
 
-Currently, only `claude_code_agent` emits `ng_agent_observations`. This attachment is available when
-observability is enabled and is collected independently from model-call capture. It contains typed
-agent invocations, model-visible conversation items, tool-call intervals, context-compaction events,
-sandbox observations, and `gaps` for unavailable evidence.
+Model-call capture is one input to Gym's broader rollout-evidence pipeline. Supported harnesses can
+also emit `ng_agent_observations`; `rollout_collection` exact-joins the available sources into
+`ng_trajectory` and derives `ng_perf` when sufficient evidence exists.
 
-### Advanced: correlation, compaction, and sandbox evidence
-
-Join an agent invocation to captured model calls by `model_call_id`, or by the exact
-`(model_ref, response_id)` pair when the harness observes the protocol response ID. A producer may
-resolve a hidden call only through a unique exact match in its retained artifact and raw capture.
-Ambiguous matches remain unowned; timestamps and list position are not sufficient.
-
-Compaction records distinguish calls immediately before and after a context change from model calls
-used to perform the compaction. Integrations without an explicit identifier or unique match leave
-those references empty and report a gap.
-
-Model-visible tool calls and results remain in `AgentInvocation.conversation`. Execution timing and
-outcome, when observable, live in `ToolCallObservation` and join through
-`(invocation_id, tool_call_id)`. Tool timestamps are UTC Unix seconds when available; `duration_ms`
-is the measured interval and `timing_source` identifies its source.
-
-Each `SandboxObservation` covers one sandbox execution. Usage fields contain measured values, not
-configured limits. A tool observation can reference its enclosing `sandbox_id`, but overlapping tool
-calls cannot share sandbox-level CPU or memory usage as if it were per-call usage.
-
-## Performance summary: `ng_perf` and `perf_summary`
-
-When observability is enabled and at least one agent invocation was observed, `rollout_collection`
-assembles a per-rollout `ng_perf` field from `ng_trajectory`: reasoning-turn count, tool-call count,
-prompt/completion/reasoning/cached-prompt token totals (summed only over calls owned by a reasoning
-turn, excluding compaction), and an independently measured wall-clock `total_latency_ms`. Like
-`ng_model_call_capture`, each field is present only when the underlying data was collected; `ng_perf`
-itself is entirely absent, not null, when observability is disabled.
-
-```json
-{
-  "ng_perf": {
-    "num_turns": 7,
-    "num_tool_calls": 15,
-    "prompt_tokens": 4210,
-    "cached_prompt_tokens": 2100,
-    "completion_tokens": 1820,
-    "reasoning_tokens": 0,
-    "total_latency_ms": 22100
-  }
-}
-```
-
-`_aggregate_metrics.json` includes a matching `perf_summary` block per agent, aggregated across every
-rollout's `ng_perf`: mean/median/total token stats, mean/median tokens-per-turn, a
-mean/median/std/min/p90/max distribution for `num_turns`, and p50/p90/p99/mean `total_latency_ms`.
-`perf_summary` is absent when no rollout in the run carried `ng_perf`.
+See [Rollout evidence](/main/observability/rollout-evidence) for the full pipeline, exact correlation
+rules, payload retention, agent observations, gaps, and performance summaries. Agent-side coverage
+varies by producer and execution path; the
+[trajectory capability matrix](/main/reference/trajectory-capabilities) records the evaluated
+coverage.
 
 ## Limitations
 

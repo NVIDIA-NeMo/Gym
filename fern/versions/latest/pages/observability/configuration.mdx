@@ -1,7 +1,7 @@
 ---
 title: "Configuration"
 description: ""
-position: 2
+position: 4
 ---
 Telemetry is configured through a top-level `telemetry:` block in your NeMo Gym config, or
 through environment variables. Environment variables always win.
@@ -32,7 +32,7 @@ telemetry:
 | `enabled` | `false` | Master switch. When false, every site is a no-op. |
 | `service_name` | `nemo-gym` | The `service.name` reported to your backend. |
 | `service_name_per_server` | `true` | Append each server's config name, producing `nemo-gym/policy_model` and so on. |
-| `span_groups` | `default` | Which spans exist. See [Span Groups](/observability/span-groups). |
+| `span_groups` | `default` | Which spans exist. See [Span Groups](/main/observability/span-groups). |
 | `exporter` | `otlp` | `otlp` or `console`. |
 | `traces_enabled` | `true` | Emit spans. |
 | `metrics_enabled` | `true` | Emit metrics. |
@@ -145,4 +145,4 @@ grep -h '"trace_id"' *.log | jq -r .trace_id | sort | uniq -c
 
 One trace ID with several spans means propagation is working. Several trace IDs with one
 span each means it is not — see
-[Distributed Tracing](/observability/distributed-tracing) for what to check.
+[Distributed Tracing](/main/observability/distributed-tracing) for what to check.
