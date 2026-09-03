@@ -20,8 +20,10 @@ import pytest
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint, render_gym_cmd
 from nemo_gym.orchestration.executors.slurm_script import (
+    _build_service_command,
     _build_vllm_command,
     _build_vllm_ray_command,
+    _build_vllm_ray_serve_command,
     _node_totals,
     _render_directives,
     _render_pool_directives,
@@ -263,6 +265,88 @@ def test_build_vllm_ray_command_dp_head_and_worker_branches():
     assert '--data-parallel-address "$HEAD_NODE_IP"' in cmd
     assert "--data-parallel-rpc-port 13345" in cmd
     assert "--data-parallel-start-rank $(( SLURM_NODEID * 2 ))" in cmd
+
+
+# ---------------------------------------------------------------------------
+# _build_vllm_ray_serve_command / Ray Serve gateway selection
+# ---------------------------------------------------------------------------
+
+
+def test_build_vllm_ray_serve_command_single_node_no_ray_bootstrap(vllm_service):
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1)
+    assert "python -m nemo_gym.orchestration.ray_serve_gateway" in cmd
+    assert "ray symmetric-run" not in cmd
+    assert "vllm serve" not in cmd  # the gateway itself launches vllm serve, not this bash command
+
+
+def test_build_vllm_ray_serve_command_multi_node_wraps_in_symmetric_run(vllm_service):
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=2)
+    assert "ray symmetric-run" in cmd
+    assert "--min-nodes 2" in cmd
+    assert "python -m nemo_gym.orchestration.ray_serve_gateway" in cmd
+
+
+def test_build_vllm_ray_serve_command_passes_flags():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        port=9000,
+        tensor_parallel_size=8,
+        pipeline_parallel_size=2,
+        number_of_instances=2,
+        trust_remote_code=True,
+    )
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=4)
+    assert "--model org/model" in cmd
+    assert "--port 9000" in cmd
+    assert "--tensor-parallel-size 8" in cmd
+    assert "--pipeline-parallel-size 2" in cmd
+    assert "--number-of-instances 2" in cmd
+    assert "--trust-remote-code" in cmd
+
+
+def test_build_service_command_uses_ray_serve_when_opted_in(vllm_service):
+    vllm_service.use_ray_serve = True
+    cmd = _build_service_command(vllm_service, total_nodes=1, gpus_per_node_values=[8])
+    assert "python -m nemo_gym.orchestration.ray_serve_gateway" in cmd
+
+
+def test_build_service_command_default_ignores_ray_serve_single_node(vllm_service):
+    cmd = _build_service_command(vllm_service, total_nodes=1, gpus_per_node_values=[8])
+    assert "ray_serve_gateway" not in cmd
+    assert "vllm serve" in cmd
+
+
+def test_build_service_command_mandatory_ray_serve_when_instance_spans_nodes():
+    # TP*PP=16 > 8 GPUs/node with 2 instances on a 4-node/8-gpu allocation: an instance's own
+    # footprint must span nodes, which vLLM's own multi-node DP can't express - Ray Serve is
+    # forced on automatically, with no use_ray_serve set.
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        tensor_parallel_size=8,
+        pipeline_parallel_size=2,
+        number_of_instances=2,
+    )
+    cmd = _build_service_command(service, total_nodes=4, gpus_per_node_values=[8])
+    assert "python -m nemo_gym.orchestration.ray_serve_gateway" in cmd
+
+
+def test_build_service_command_default_multi_instance_multi_node_unchanged():
+    # tp_pp=8 fits within 8 gpus/node - stays on the existing (non-Ray) multi-node DP path even
+    # though it's multi-node and multi-instance.
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        tensor_parallel_size=8,
+        number_of_instances=4,
+    )
+    cmd = _build_service_command(service, total_nodes=2, gpus_per_node_values=[8])
+    assert "ray_serve_gateway" not in cmd
+    assert "--headless" in cmd
 
 
 # ---------------------------------------------------------------------------

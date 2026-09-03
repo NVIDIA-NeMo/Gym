@@ -24,6 +24,7 @@ from nemo_gym.orchestration.api import (
     SlurmComputeConfig,
     SubmitConfig,
     VllmServiceConfig,  # used in _BUILDERS dispatch table
+    effective_ray_serve,
 )
 from nemo_gym.orchestration.executors.script_templates import (
     bash_var,
@@ -201,6 +202,33 @@ def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int) -> str
     return _build_vllm_single_instance_multi_node_command(service, total_nodes)
 
 
+def _build_vllm_ray_serve_command(service: VllmServiceConfig, total_nodes: int) -> str:
+    # Ray Serve (nemo_gym/orchestration/ray_serve_gateway.py) launches all number_of_instances
+    # `vllm serve` processes itself and routes requests across them - Ray's own placement-group
+    # scheduler packs each instance's tensor/pipeline-parallel GPU footprint anywhere across the
+    # cluster, spanning nodes automatically when an instance's own footprint requires it. This is
+    # the only place NeMo Gym uses the `ray.serve` library, as opposed to vLLM's own Ray core
+    # executor (see _build_vllm_single_instance_multi_node_command).
+    gateway_cmd = (
+        f"python -m nemo_gym.orchestration.ray_serve_gateway"
+        f" --model {shlex.quote(service.model)}"
+        f" --port {service.port}"
+        f" --tensor-parallel-size {service.tensor_parallel_size}"
+        f" --pipeline-parallel-size {service.pipeline_parallel_size}"
+        f" --number-of-instances {service.number_of_instances}"
+    )
+    if service.trust_remote_code:
+        gateway_cmd += " --trust-remote-code"
+    if total_nodes <= 1:
+        # No multi-node Ray cluster to join - the gateway starts its own local Ray instance and
+        # launches all instances on this one node.
+        return gateway_cmd
+    resource_flags = (
+        "--num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE}"
+    )
+    return render_vllm_ray_symmetric_run(gateway_cmd, total_nodes, resource_flags)
+
+
 def _build_ray_command(_service: RayServiceConfig) -> str:
     return "ray start --head"
 
@@ -218,7 +246,11 @@ def _vllm_spans_multiple_nodes(service: VllmServiceConfig | RayServiceConfig, to
     return isinstance(service, VllmServiceConfig) and total_nodes > 1
 
 
-def _build_service_command(service: VllmServiceConfig | RayServiceConfig, total_nodes: int) -> str:
+def _build_service_command(
+    service: VllmServiceConfig | RayServiceConfig, total_nodes: int, gpus_per_node_values: list[int]
+) -> str:
+    if isinstance(service, VllmServiceConfig) and effective_ray_serve(service, total_nodes, gpus_per_node_values):
+        return _build_vllm_ray_serve_command(service, total_nodes)
     if _vllm_spans_multiple_nodes(service, total_nodes):
         return _build_vllm_ray_command(service, total_nodes)
     return _BUILDERS[type(service)](service)
@@ -241,6 +273,9 @@ def build_sbatch_script(
 
     total_nodes, total_ntasks = _node_totals(compute)
     is_multi_node = total_nodes > 1
+    gpus_per_node_values = [
+        pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node is not None
+    ]
 
     ray_prelude = (
         render_ray_prelude()
@@ -252,7 +287,7 @@ def build_sbatch_script(
         _render_service_command(
             name,
             service.container,
-            _build_service_command(service, total_nodes),
+            _build_service_command(service, total_nodes, gpus_per_node_values),
             service.env or None,
             service.mounts or None,
             # Only services that actually span multiple nodes need the whole allocation's --nodes/

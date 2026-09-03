@@ -55,6 +55,11 @@ class VllmServiceConfig(BaseModelServiceConfig):
     pipeline_parallel_size: int = 1
     trust_remote_code: bool = False
     number_of_instances: int = 1
+    # Opt-in escape hatch: run multiple instances behind a Ray Serve gateway (which handles both
+    # instance creation and request routing) instead of vLLM's own --data-parallel-size/multi-node
+    # DP mechanism. Most users never need to set this - it's forced on regardless of this value
+    # when the topology requires it (see SubmitConfig._effective_ray_serve).
+    use_ray_serve: bool = False
 
     @field_validator("number_of_instances")
     @classmethod
@@ -72,6 +77,24 @@ class VllmServiceConfig(BaseModelServiceConfig):
         elif self.health_check.port is None:
             self.health_check.port = self.port
         return self
+
+
+def effective_ray_serve(service: "VllmServiceConfig", total_nodes: int, gpus_per_node_values: list[int]) -> bool:
+    """Whether the Ray Serve gateway (ray_serve_gateway.py) manages instance creation and request
+    routing for this service, instead of vLLM's own --data-parallel-size/multi-node DP mechanism.
+
+    True either because the user opted in via `use_ray_serve`, or because the topology requires
+    it: an instance's own tensor/pipeline-parallel footprint would have to span multiple nodes,
+    which vLLM's own multi-node data-parallel mechanism cannot express. Shared between api.py's
+    validation and slurm_script.py's command building so both agree on the same decision.
+    """
+    if service.use_ray_serve:
+        return True
+    if not gpus_per_node_values:
+        return False
+    max_gpus_per_node = max(gpus_per_node_values)
+    tp_pp = service.tensor_parallel_size * service.pipeline_parallel_size
+    return total_nodes > 1 and service.number_of_instances > 1 and tp_pp > max_gpus_per_node
 
 
 class RayServiceConfig(BaseServiceConfig):
@@ -179,6 +202,7 @@ class SubmitConfig(_StrictModel):
                 and isinstance(service, VllmServiceConfig)
                 and service.number_of_instances > 1
                 and service.number_of_instances % total_nodes != 0
+                and not self._effective_ray_serve(service, total_nodes)
             ):
                 raise ValueError(
                     f"Service '{service_name}' has number_of_instances={service.number_of_instances}, which must "
@@ -213,6 +237,16 @@ class SubmitConfig(_StrictModel):
 
         return self
 
+    def _effective_ray_serve(self, service: "VllmServiceConfig", total_nodes: int) -> bool:
+        """Whether the Ray Serve gateway path (see ray_serve_gateway.py) is used for this service."""
+        compute = self.compute[service.placement]
+        if not isinstance(compute, SlurmComputeConfig):
+            return service.use_ray_serve
+        gpus_per_node_values = [
+            pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node is not None
+        ]
+        return effective_ray_serve(service, total_nodes, gpus_per_node_values)
+
     def _validate_vllm_gpu_footprint(self, service_name: str, service: "VllmServiceConfig", total_nodes: int) -> None:
         compute = self.compute[service.placement]
         if not isinstance(compute, SlurmComputeConfig):
@@ -226,26 +260,29 @@ class SubmitConfig(_StrictModel):
 
         max_gpus_per_node = max(gpus_per_node_values)
         tp_pp = service.tensor_parallel_size * service.pipeline_parallel_size
+        effective_ray_serve = self._effective_ray_serve(service, total_nodes)
 
-        if total_nodes > 1 and service.number_of_instances > 1:
-            if tp_pp > max_gpus_per_node:
-                # Each instance's own TP/PP footprint already exceeds a single node's GPU count, so
-                # spreading multiple such instances across nodes would require every instance to
-                # itself span multiple nodes. That's not supported: multi-node data-parallel only
-                # distributes whole instances across nodes with tensor/pipeline parallelism kept
-                # local to each node (see _build_vllm_multi_instance_multi_node_command).
-                raise ValueError(
-                    f"Service '{service_name}' sets number_of_instances={service.number_of_instances} with "
-                    f"tensor_parallel_size={service.tensor_parallel_size} x "
-                    f"pipeline_parallel_size={service.pipeline_parallel_size}={tp_pp}, which exceeds a single "
-                    f"node's gpus_per_node ({max_gpus_per_node}). Multiple instances where each instance's own "
-                    "tensor/pipeline-parallel footprint spans multiple nodes is not supported - reduce "
-                    "tensor_parallel_size/pipeline_parallel_size to fit within one node, or set "
-                    "number_of_instances=1 to let a single instance span nodes."
-                )
+        if total_nodes > 1 and effective_ray_serve:
+            # Ray Serve gateway path: Ray's own placement-group scheduler packs each instance's
+            # TP*PP GPUs anywhere across the shared cluster, so an instance may itself span nodes
+            # and multiple instances may share a node. Only the aggregate footprint has to fit -
+            # see ray_serve_gateway.py and _build_vllm_ray_serve_command.
+            gpus_needed = tp_pp * service.number_of_instances
+            gpus_available = sum(
+                pool.nodes * pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node
+            )
+            footprint = (
+                f"tensor_parallel_size={service.tensor_parallel_size} x "
+                f"pipeline_parallel_size={service.pipeline_parallel_size} x "
+                f"number_of_instances={service.number_of_instances} (ray_serve gateway)"
+            )
+            scope = f"the total GPUs across all nodes ({gpus_available})"
+        elif total_nodes > 1 and service.number_of_instances > 1:
             # Multi-node data-parallel: each node runs its own equal share of the replicas with
             # local tensor/pipeline parallelism (see _build_vllm_multi_instance_multi_node_command);
             # the per-node share, not the total footprint, has to fit in that node's GPU count.
+            # tp_pp > max_gpus_per_node can't reach here - that shape always sets
+            # effective_ray_serve above.
             instances_per_node = service.number_of_instances // total_nodes
             gpus_needed = tp_pp * instances_per_node
             gpus_available = max_gpus_per_node
