@@ -494,12 +494,13 @@ class TestRepoDir:
         process.communicate = AsyncMock(return_value=(b"", b""))
         agent = _make_agent(repo_dir=str(repo_dir))
         scored = [NeMoGymResponseOutputMessage(id="scored", content=[])]
+        create_process = AsyncMock(return_value=process)
 
         with (
             patch.object(agent, "_workspace_root", return_value=workspace),
             patch(
                 "responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec",
-                AsyncMock(return_value=process),
+                create_process,
             ),
             patch(
                 "responses_api_agents.opencode_agent.app.parse_opencode_session",
@@ -516,6 +517,8 @@ class TestRepoDir:
 
         assert output == scored
         assert usage == {"input_tokens": 1, "output_tokens": 2}
+        command = create_process.await_args.args
+        assert command[command.index("--title") + 1] == "NG dummy title"
         assert "agent_artifact_unavailable" in {gap.code for gap in observations.gaps}
         assert repo_dir.is_dir()
         assert not workspace.exists()

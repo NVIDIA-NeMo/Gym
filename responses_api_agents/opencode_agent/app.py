@@ -618,7 +618,18 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         self._write_opencode_config(project_dir, rollout_id)
         env = self._env(str(data_home), rollout_id)
 
-        cmd = [*self.config.command_parts, "run", "-m", self._effective_model(), "--dir", str(project_dir)]
+        # Supplying a title prevents OpenCode from making an auxiliary title-model
+        # request with the same session identifier as the policy conversation.
+        cmd = [
+            *self.config.command_parts,
+            "run",
+            "--title",
+            "NG dummy title",
+            "-m",
+            self._effective_model(),
+            "--dir",
+            str(project_dir),
+        ]
         if self.config.thinking:
             cmd.append("--thinking")
         cmd.extend(self.config.extra_args)
