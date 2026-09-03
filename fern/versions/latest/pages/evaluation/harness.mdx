@@ -5,7 +5,7 @@ position: 3
 ---
 
 An agent harness turns a model into an agent: it manages conversation state, routes tool calls, and
-decides when a task is complete. Two harnesses running the same model on the same tasks can score vary differently, and a harness that performs well on one model can perform poorly on another. Treat the harness as a variable worth isolating, not a fixed part of the environment.
+decides when a task is complete. Two harnesses can produce materially different scores on the same model and tasks, and a harness that performs well with one model may underperform with another. Treat the harness as an experimental variable to isolate and evaluate, not a fixed part of the environment
 
 `--agent-type` runs an environment or benchmark with a harness other than the one its config names,
 without editing any config. To ablate the harness, hold everything else fixed — model, dataset, and repeat count — and vary only `--agent-type`, writing each run to its own output:
@@ -63,7 +63,6 @@ NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING=1) to bypass the check.
 
 <Warning>
 `--allow-unsupported-pairing` bypasses this check at your own risk: an unsupported harness can score incorrectly without erroring.
-what they appear to mean — the harness might not be compatible with the resources server.
 </Warning>
 
 A server that declares nothing accepts any harness — such environments are swappable without further
