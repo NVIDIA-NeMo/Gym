@@ -35,8 +35,18 @@ from typing import Any, Callable, Optional
 from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
 from nemo_gym.telemetry.cpu import sample_cpu_percent
-from nemo_gym.telemetry.gym_metrics import record_process_cpu_percent
-from nemo_gym.telemetry.setup import cpu_min_resample_interval_s, is_cpu_sampling_enabled
+from nemo_gym.telemetry.gym_metrics import (
+    record_host_memory_total_mib,
+    record_host_memory_used_mib,
+    record_process_cpu_percent,
+)
+from nemo_gym.telemetry.memory import sample_host_memory_mib
+from nemo_gym.telemetry.setup import (
+    cpu_min_resample_interval_s,
+    is_cpu_sampling_enabled,
+    is_memory_sampling_enabled,
+    memory_min_resample_interval_s,
+)
 
 
 #: Span attribute carrying Gym's existing rollout correlation id.
@@ -46,6 +56,11 @@ ROLLOUT_ID_ATTRIBUTE = "nemo.gym.rollout.id"
 #: `nemo_gym.telemetry.cpu` for why this is sampled inline here rather than by a
 #: decoupled background sampler (exemplar linkage needs the active span context).
 CPU_PERCENT_ATTRIBUTE = "nemo.gym.cpu.percent"
+
+#: Span attributes carrying a host-memory-at-span-end reading. Same inline-sampling
+#: reasoning as CPU (see `nemo_gym.telemetry.memory`) -- host-wide, not process-scoped.
+MEMORY_USED_MIB_ATTRIBUTE = "nemo.gym.host.memory_used_mib"
+MEMORY_TOTAL_MIB_ATTRIBUTE = "nemo.gym.host.memory_total_mib"
 
 
 def traced_endpoint(
@@ -100,6 +115,14 @@ def traced_endpoint(
                         if cpu_percent is not None:
                             attributes[CPU_PERCENT_ATTRIBUTE] = cpu_percent
                             record_process_cpu_percent(cpu_percent)  # still inside `with managed_span`
+                    if is_memory_sampling_enabled():
+                        memory_reading = sample_host_memory_mib(memory_min_resample_interval_s())
+                        if memory_reading is not None:
+                            used_mib, total_mib = memory_reading
+                            attributes[MEMORY_USED_MIB_ATTRIBUTE] = used_mib
+                            attributes[MEMORY_TOTAL_MIB_ATTRIBUTE] = total_mib
+                            record_host_memory_used_mib(used_mib)  # still inside `with managed_span`
+                            record_host_memory_total_mib(total_mib)
                     safe_set_span_attributes(span, attributes)
 
     return wrapper

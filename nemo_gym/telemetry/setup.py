@@ -85,6 +85,10 @@ _CPU_MIN_RESAMPLE_INTERVAL_S = 1.0
 _GPU_SAMPLING_ENABLED = False
 _GPU_SAMPLE_INTERVAL_S = 10.0
 
+#: Cached the same way as the CPU/GPU pairs above.
+_MEMORY_SAMPLING_ENABLED = False
+_MEMORY_MIN_RESAMPLE_INTERVAL_S = 1.0
+
 #: ``NemoLensConfig.from_env`` reads ``NEMO_GYM_OTEL_<KEY>`` first, then ``NEMO_LENS_<KEY>``.
 #: The fallback is what makes the documented ``NEMO_LENS_ENABLED=1`` work unchanged.
 _OTEL_PREFIX = "NEMO_GYM_OTEL"
@@ -121,6 +125,8 @@ _ENV_FIELD_MAP = {
     "cpu_min_resample_interval_s": f"{_OTEL_PREFIX}_CPU_MIN_RESAMPLE_INTERVAL_S",
     "gpu_sampling_enabled": f"{_OTEL_PREFIX}_GPU_SAMPLING_ENABLED",
     "gpu_sample_interval_s": f"{_OTEL_PREFIX}_GPU_SAMPLE_INTERVAL_S",
+    "memory_sampling_enabled": f"{_OTEL_PREFIX}_MEMORY_SAMPLING_ENABLED",
+    "memory_min_resample_interval_s": f"{_OTEL_PREFIX}_MEMORY_MIN_RESAMPLE_INTERVAL_S",
 }
 
 #: OTLP destination fields -> the standard (unprefixed) OTel SDK env vars they configure.
@@ -451,6 +457,10 @@ def init_telemetry(
             if physical_count is not None:
                 attrs["nemo.gym.host.cpu_count_physical"] = physical_count
 
+        global _MEMORY_SAMPLING_ENABLED, _MEMORY_MIN_RESAMPLE_INTERVAL_S
+        _MEMORY_SAMPLING_ENABLED = _env_flag(_ENV_FIELD_MAP["memory_sampling_enabled"], False)
+        _MEMORY_MIN_RESAMPLE_INTERVAL_S = _env_float(_ENV_FIELD_MAP["memory_min_resample_interval_s"], 1.0)
+
         global _GPU_SAMPLING_ENABLED, _GPU_SAMPLE_INTERVAL_S
         _GPU_SAMPLING_ENABLED = _env_flag(_ENV_FIELD_MAP["gpu_sampling_enabled"], False)
         _GPU_SAMPLE_INTERVAL_S = _env_float(_ENV_FIELD_MAP["gpu_sample_interval_s"], 10.0)
@@ -509,6 +519,19 @@ def cpu_min_resample_interval_s() -> float:
     return _CPU_MIN_RESAMPLE_INTERVAL_S
 
 
+def is_memory_sampling_enabled() -> bool:
+    """Whether span-boundary host-memory sampling is on in this process. Same caching
+    reasoning as :func:`is_cpu_sampling_enabled` — called from `traced_endpoint`, a
+    per-request hot path."""
+    return _MEMORY_SAMPLING_ENABLED
+
+
+def memory_min_resample_interval_s() -> float:
+    """The configured minimum seconds between real host-memory reads. See
+    ``TelemetryConfig.memory_min_resample_interval_s``."""
+    return _MEMORY_MIN_RESAMPLE_INTERVAL_S
+
+
 def is_gpu_sampling_enabled() -> bool:
     """Whether the background GPU sampler is on in this process. Resolved once in
     `init_telemetry` and cached, mirroring :func:`is_cpu_sampling_enabled` — though
@@ -560,15 +583,24 @@ def _reset_for_testing() -> None:
     """
     global _TELEMETRY_HANDLE, _INITIALISED, _CPU_SAMPLING_ENABLED, _CPU_MIN_RESAMPLE_INTERVAL_S
     global _GPU_SAMPLING_ENABLED, _GPU_SAMPLE_INTERVAL_S
+    global _MEMORY_SAMPLING_ENABLED, _MEMORY_MIN_RESAMPLE_INTERVAL_S
     _TELEMETRY_HANDLE = None
     _INITIALISED = False
     _CPU_SAMPLING_ENABLED = False
     _CPU_MIN_RESAMPLE_INTERVAL_S = 1.0
     _GPU_SAMPLING_ENABLED = False
     _GPU_SAMPLE_INTERVAL_S = 10.0
+    _MEMORY_SAMPLING_ENABLED = False
+    _MEMORY_MIN_RESAMPLE_INTERVAL_S = 1.0
     try:
         from nemo_gym.telemetry.gpu import _reset_for_testing as _reset_gpu_for_testing
 
         _reset_gpu_for_testing()
     except Exception:
         logger.debug("failed to reset gpu sampler state for testing", exc_info=True)
+    try:
+        from nemo_gym.telemetry.memory import _reset_for_testing as _reset_memory_for_testing
+
+        _reset_memory_for_testing()
+    except Exception:
+        logger.debug("failed to reset memory sampler state for testing", exc_info=True)

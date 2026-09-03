@@ -55,6 +55,8 @@ answers a "what is limiting this run" question the metrics above cannot:
 | `gym.process.gpu.utilization_percent` | Gauge | % | `nemo.gym.gpu.index`, `nemo.gym.gpu.uuid` | `telemetry.gpu_sampling_enabled` | Is this GPU busy? |
 | `gym.process.gpu.memory_used_mib` | Gauge | MiB | `nemo.gym.gpu.index`, `nemo.gym.gpu.uuid` | `telemetry.gpu_sampling_enabled` | How much of this GPU's memory is in use? |
 | `gym.process.gpu.memory_total_mib` | Gauge | MiB | `nemo.gym.gpu.index`, `nemo.gym.gpu.uuid` | `telemetry.gpu_sampling_enabled` | How much memory does this GPU have? |
+| `gym.host.memory_used_mib` | Gauge | MiB | none — see resource attributes | `telemetry.memory_sampling_enabled` | How much of this node's memory is in use? |
+| `gym.host.memory_total_mib` | Gauge | MiB | none — see resource attributes | `telemetry.memory_sampling_enabled` | How much memory does this node have? |
 
 ### Why These Are Attributed and the First Five Are Not
 
@@ -171,16 +173,39 @@ Since the actor process has no telemetry wiring of its own otherwise, enabling
 (which only proxies HTTP and never touches the GPU), joinable by the shared
 `nemo.run.id`.
 
-### Not Yet Covered: Sandbox CPU/GPU, Ray Worker CPU, and All Memory
+### Host Memory: Same Design as CPU, for the Same Reason
+
+`gym.host.memory_used_mib`/`gym.host.memory_total_mib` follow CPU's design, not GPU's:
+sampled **inline at span boundaries**, exemplar-linked, gated by
+`telemetry.memory_sampling_enabled` (off by default) and rate-limited by
+`memory_min_resample_interval_s` (default 1 second, tracked independently of
+`cpu_min_resample_interval_s`). `psutil.virtual_memory()` is a single cheap read with no
+delta/priming semantics — even less reason than CPU to avoid sampling it on the request
+path.
+
+The one real difference from CPU: this is **host-wide, not process-scoped**.
+`virtual_memory()` reports the whole node's memory, not this process's share of it —
+appropriate, since memory pressure is a node-level condition every process on that node
+shares, unlike "how busy is this specific process" for CPU. That's also why there are no
+call-site attributes, same as the CPU gauge: distinguish nodes by the existing
+`host.name` resource attribute, not a metric attribute.
+
+```yaml
+telemetry:
+  memory_sampling_enabled: true
+  memory_min_resample_interval_s: 1.0
+```
+
+### Not Yet Covered: Sandbox CPU/GPU/Memory and Ray Worker CPU
 
 Process-level CPU and GPU for Gym's own server processes (agent/model/resources servers,
-the rollout driver, and — for GPU — the `local_vllm_model` Ray actor) is covered above.
-Still unmeasured: CPU/GPU usage *inside* a sandbox/container (would need new
-per-provider work — a `docker stats` read, a cgroup v2 accounting-file read — with no
-existing hook to build on), CPU of Ray worker processes spawned for sandbox execution
-(separate OS processes with their own PID), and memory pressure of any kind other than
-GPU memory. `SandboxObservation` (the offline trajectory-capture schema, unrelated to
-OTel) has `cpu_time_s` / `peak_memory_mib` fields, but nothing populates them from a real
+the rollout driver, and — for GPU — the `local_vllm_model` Ray actor), plus host memory
+for any process that opts in, are covered above. Still unmeasured: CPU/GPU/memory usage
+*inside* a sandbox/container (would need new per-provider work — a `docker stats` read, a
+cgroup v2 accounting-file read — with no existing hook to build on), and CPU of Ray
+worker processes spawned for sandbox execution (separate OS processes with their own
+PID). `SandboxObservation` (the offline trajectory-capture schema, unrelated to OTel) has
+`cpu_time_s` / `peak_memory_mib` fields, but nothing populates them from a real
 measurement today. All of this is tracked as follow-up work.
 
 ### What `gym.verify.success_rate` Measures

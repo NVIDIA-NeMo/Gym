@@ -269,6 +269,36 @@ def record_process_gpu_memory_total_mib(value: float, *, index: int, uuid: str) 
     )
 
 
+def record_host_memory_used_mib(value: float) -> None:
+    """This node's used memory, in MiB, sampled inline at span boundaries alongside CPU
+    (see :mod:`nemo_gym.telemetry.memory`) -- host-wide, not process-scoped, so no
+    call-site attributes are needed (every process on the same node reports the same
+    figure, distinguished only by which node it ran on via ``host.name``). Recorded
+    inside the active span's context like the CPU gauge, so it can carry the same
+    exemplar linkage."""
+    _record_gauge(
+        "gym.host.memory_used_mib",
+        "MiB",
+        "This node's used memory, sampled inline at span boundaries.",
+        value,
+        {},
+    )
+
+
+def record_host_memory_total_mib(value: float) -> None:
+    """This node's total memory, in MiB. Reported as its own gauge alongside
+    :func:`record_host_memory_used_mib` rather than folded into a ratio, same reasoning
+    as the GPU memory pair: the source already gives both numbers, a dashboard can derive
+    a ratio, the reverse is not true."""
+    _record_gauge(
+        "gym.host.memory_total_mib",
+        "MiB",
+        "This node's total memory, sampled inline at span boundaries.",
+        value,
+        {},
+    )
+
+
 def _reset_for_testing() -> None:
     """Drop cached instruments. Test-only, mirrors ``telemetry.setup._reset_for_testing``."""
     with _INSTRUMENT_LOCK:

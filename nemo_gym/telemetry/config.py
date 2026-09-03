@@ -151,3 +151,17 @@ class TelemetryConfig(BaseModel, extra="allow"):
     a cached ``psutil.Process()`` handle (near-zero marginal cost per read), while every
     GPU sample forks and execs ``nvidia-smi`` — meaningfully more expensive, and
     unnecessary at sub-second resolution for a metric nobody needs that precise."""
+
+    memory_sampling_enabled: bool = False
+    """Sample this node's host memory at span boundaries and emit
+    ``gym.host.memory_used_mib``/``gym.host.memory_total_mib``. Off by default, same
+    reasoning as ``cpu_sampling_enabled``. Sampled inline (like CPU, not GPU): a single
+    cheap ``psutil.virtual_memory()`` read with no delta/priming semantics, so a reading
+    taken inside a span's context can carry the same exemplar linkage CPU readings do.
+    Host-wide, not process-scoped — every process on a node reports the same figure,
+    distinguished only by ``host.name``. See :mod:`nemo_gym.telemetry.memory`."""
+
+    memory_min_resample_interval_s: float = 1.0
+    """Minimum seconds between real host-memory reads. Same rate-limiting shape as
+    ``cpu_min_resample_interval_s``, kept as an independent cache/interval so CPU and
+    memory sampling cadences can be tuned separately."""

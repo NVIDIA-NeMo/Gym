@@ -44,6 +44,8 @@ telemetry:
 | `cpu_min_resample_interval_s` | `1.0` | Minimum seconds between real CPU reads; a span closing sooner reuses the last cached reading. |
 | `gpu_sampling_enabled` | `false` | Sample process GPU utilization/memory on a background thread; emits `gym.process.gpu.*` gauges. See [Metrics](/observability/metrics). |
 | `gpu_sample_interval_s` | `10.0` | Seconds between `nvidia-smi` polls on the background GPU sampler. |
+| `memory_sampling_enabled` | `false` | Sample host memory at span boundaries; emits `gym.host.memory_used_mib`/`gym.host.memory_total_mib`. See [Metrics](/observability/metrics). |
+| `memory_min_resample_interval_s` | `1.0` | Minimum seconds between real host-memory reads; tracked independently of `cpu_min_resample_interval_s`. |
 
 ### Why `service_name_per_server` Defaults to True
 

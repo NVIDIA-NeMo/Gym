@@ -143,6 +143,24 @@ def test_cpu_sampling_disabled_gate_is_not_measurably_worse_than_a_bare_call():
     )
 
 
+def test_memory_sampling_disabled_gate_is_not_measurably_worse_than_a_bare_call():
+    """Same regression-guard shape as the CPU-sampling gate above, for
+    `is_memory_sampling_enabled` -- also called from `traced_endpoint` on every request.
+    """
+    from nemo_gym.telemetry.setup import is_memory_sampling_enabled
+
+    assert is_memory_sampling_enabled() is False
+
+    ns_gate = _min_ns("is_memory_sampling_enabled()", {"is_memory_sampling_enabled": is_memory_sampling_enabled})
+    ns_baseline = _min_ns("noop()", {"noop": lambda: None})
+
+    print(f"\ndisabled memory-sampling gate: {ns_gate:.1f} ns   bare call: {ns_baseline:.1f} ns")
+    assert ns_gate < ns_baseline * MAX_RATIO_VS_NULLCONTEXT, (
+        f"is_memory_sampling_enabled costs {ns_gate / ns_baseline:.1f}x a bare call "
+        f"({ns_gate:.1f} ns vs {ns_baseline:.1f} ns) — something expensive is running above the gate"
+    )
+
+
 def test_attribute_building_stays_below_the_gate():
     """The pattern Gym's call sites use must not build attributes when disabled.
 

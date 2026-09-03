@@ -30,6 +30,8 @@ from nemo_gym.telemetry import metrics as telemetry_metrics
 from nemo_gym.telemetry import setup as telemetry_setup
 from nemo_gym.telemetry.endpoints import (
     CPU_PERCENT_ATTRIBUTE,
+    MEMORY_TOTAL_MIB_ATTRIBUTE,
+    MEMORY_USED_MIB_ATTRIBUTE,
     ROLLOUT_ID_ATTRIBUTE,
     traced_endpoint,
     traced_rollout_endpoint,
@@ -193,6 +195,49 @@ async def test_cpu_percent_is_omitted_when_sampling_is_disabled(recorded_spans, 
 
     for span in recorded_spans():
         assert CPU_PERCENT_ATTRIBUTE not in span.attributes
+
+
+# --------------------------------------------------------------------------- #
+# Host memory sampling
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(autouse=True)
+def _reset_memory_sampler():
+    from nemo_gym.telemetry import memory as telemetry_memory
+
+    telemetry_memory._reset_for_testing()
+    yield
+    telemetry_memory._reset_for_testing()
+
+
+async def test_memory_is_attached_when_sampling_is_enabled(recorded_spans, monkeypatch):
+    monkeypatch.setattr(telemetry_setup, "_MEMORY_SAMPLING_ENABLED", True)
+    monkeypatch.setattr(telemetry_setup, "_MEMORY_MIN_RESAMPLE_INTERVAL_S", 0.0)
+
+    async def handler():
+        return "ok"
+
+    wrapped = traced_endpoint(GymSpanGroup.VERIFY, "gym.verify", handler)
+    await wrapped()
+
+    span = recorded_spans()[0]
+    assert isinstance(span.attributes[MEMORY_USED_MIB_ATTRIBUTE], float)
+    assert isinstance(span.attributes[MEMORY_TOTAL_MIB_ATTRIBUTE], float)
+
+
+async def test_memory_is_omitted_when_sampling_is_disabled(recorded_spans, monkeypatch):
+    monkeypatch.setattr(telemetry_setup, "_MEMORY_SAMPLING_ENABLED", False)
+
+    async def handler():
+        return "ok"
+
+    wrapped = traced_endpoint(GymSpanGroup.VERIFY, "gym.verify", handler)
+    await wrapped()
+
+    span = recorded_spans()[0]
+    assert MEMORY_USED_MIB_ATTRIBUTE not in span.attributes
+    assert MEMORY_TOTAL_MIB_ATTRIBUTE not in span.attributes
 
 
 async def test_attributes_are_still_set_when_the_handler_raises(recorded_spans, monkeypatch):

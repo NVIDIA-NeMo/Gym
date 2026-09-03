@@ -75,6 +75,8 @@ def test_recording_without_telemetry_is_a_no_op():
     gym_metrics.record_process_gpu_utilization(1.0, index=0, uuid="GPU-aaaa")
     gym_metrics.record_process_gpu_memory_used_mib(1.0, index=0, uuid="GPU-aaaa")
     gym_metrics.record_process_gpu_memory_total_mib(1.0, index=0, uuid="GPU-aaaa")
+    gym_metrics.record_host_memory_used_mib(1.0)
+    gym_metrics.record_host_memory_total_mib(1.0)
 
 
 def test_recording_errors_never_reach_the_caller(monkeypatch):
@@ -248,6 +250,28 @@ def test_gpu_metrics_distinguish_multiple_gpus_on_the_same_process(collected_met
     by_index = {dict(p.attributes)["nemo.gym.gpu.index"]: p.value for p in points}
     assert by_index[0] == 10.0
     assert by_index[1] == 90.0
+
+
+def test_host_memory_used_and_total_are_distinct_instruments_with_no_attributes(collected_metrics):
+    gym_metrics.record_host_memory_used_mib(1024.0)
+    gym_metrics.record_host_memory_total_mib(8192.0)
+    metrics = collected_metrics()
+
+    used_point = metrics["gym.host.memory_used_mib"][0]
+    total_point = metrics["gym.host.memory_total_mib"][0]
+    assert used_point.value == 1024.0
+    assert total_point.value == 8192.0
+    # Host-wide, not process-scoped -- no call-site attributes, same reasoning as the CPU
+    # gauge (distinguished only by resource attributes like host.name).
+    assert dict(used_point.attributes) == {}
+    assert dict(total_point.attributes) == {}
+
+
+def test_host_memory_used_last_value_wins(collected_metrics):
+    gym_metrics.record_host_memory_used_mib(1024.0)
+    gym_metrics.record_host_memory_used_mib(2048.0)
+    point = collected_metrics()["gym.host.memory_used_mib"][0]
+    assert point.value == 2048.0
 
 
 def test_instrument_cache_is_scoped_per_meter(collected_metrics, monkeypatch):
