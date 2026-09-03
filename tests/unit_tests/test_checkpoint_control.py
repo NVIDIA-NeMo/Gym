@@ -29,14 +29,7 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 from starlette.testclient import TestClient
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.checkpoint import (
+from nemo_gym._checkpoint import (
     CONTROL_SCHEMA_VERSION,
     CONTROL_URL_PREFIX,
     CheckpointConflictError,
@@ -48,6 +41,13 @@ from nemo_gym.checkpoint import (
     StaleCheckpointError,
     multi_process_capability_from_num_workers,
 )
+from nemo_gym.base_resources_server import (
+    BaseResourcesServerConfig,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
+from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import BaseServerConfig
 from nemo_gym.server_utils import ServerClient
 

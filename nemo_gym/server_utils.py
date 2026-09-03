@@ -55,7 +55,7 @@ from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym import WORKING_DIR
-from nemo_gym.checkpoint.control import (
+from nemo_gym._checkpoint.control import (
     ControlCapabilities,
     ControlFence,
     install_control_plane,

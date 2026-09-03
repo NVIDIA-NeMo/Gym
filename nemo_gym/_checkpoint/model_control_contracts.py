@@ -16,7 +16,7 @@
 
 from pydantic import Field
 
-from nemo_gym.checkpoint.control import CONTROL_URL_PREFIX, CheckpointControlRequest
+from nemo_gym._checkpoint.control import CONTROL_URL_PREFIX, CheckpointControlRequest
 from nemo_gym.rollout_correlation import ROLLOUT_ID_PATTERN
 
 

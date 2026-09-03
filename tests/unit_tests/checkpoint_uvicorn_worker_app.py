@@ -21,7 +21,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from nemo_gym.checkpoint import AdmissionLimiter, AdmissionMiddleware, WorkerAdmissionAgent
+from nemo_gym._checkpoint import AdmissionLimiter, AdmissionMiddleware, WorkerAdmissionAgent
 
 
 limiter = AdmissionLimiter()
