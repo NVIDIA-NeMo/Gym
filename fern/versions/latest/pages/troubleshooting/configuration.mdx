@@ -1,6 +1,6 @@
 ---
 title: "Configuration Errors"
-description: ""
+description: "Diagnose configuration and model-endpoint errors from gym env start and gym eval run."
 position: 1
 ---
 These errors appear when running `gym env start` or `gym eval run --no-serve`. NeMo Gym validates configuration at startup before launching servers, and checks the model endpoints the config names once its own servers are up.
@@ -198,7 +198,7 @@ curl -i https://example.com/v1/models
 curl -i https://example.com
 ```
 
-Any response, including `401` or `404`, means something is listening. Then correct that config key, or start the server it names. The [Quickstart](/get-started/quickstart) uses a hosted endpoint (`https://api.openai.com/v1`); a `localhost` URL means you serve the model yourself (see [Configure Model](/model-server)).
+Any response, including `401` or `404`, means something is listening. Then correct that config key, or start the server it names. The [Quickstart](/get-started/quickstart) uses a hosted endpoint (`https://api.openai.com/v1`); a `localhost` URL means you serve the model yourself (see [Configure Models](/model-server)).
 
 <Note>
 The check waits up to `model_endpoint_readiness_timeout_seconds` (default 600) so an inference server still loading weights is not treated as a failure. Raise it to wait longer, or set it to `0` to skip the check entirely.

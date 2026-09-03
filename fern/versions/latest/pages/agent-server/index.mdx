@@ -1,9 +1,9 @@
 ---
 title: "Configure Agents"
-description: ""
+description: "Configure the Agent server that orchestrates rollouts, tool calls, and reward collection."
 position: 1
 ---
-The Agent server is the central component of environment design. It defines whether a rollout is single-step or multi-step, single-turn or multi-turn, and orchestrates all interaction logic — calling the model, executing tool calls through resources, and collecting the final reward. The Agent server does not run an LLM itself, it is orchestration code that delegates all text generation to the Model server.
+The Agent server is the central component of environment design. It defines whether a rollout is single-step or multi-step, single-turn or multi-turn, and orchestrates all interaction logic — calling the model, executing tool calls through resources, and collecting the final reward. The Agent server does not run an LLM itself. It is orchestration code that delegates all text generation to the Model server.
 
 ## Rollout Lifecycle
 
