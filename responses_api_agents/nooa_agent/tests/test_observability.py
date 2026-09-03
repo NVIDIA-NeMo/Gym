@@ -13,135 +13,130 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
+from nooa.atif import AgentSchema, ObservationResultSchema, ObservationSchema, StepObject, ToolCallSchema, Trajectory
 
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseOutputMessageForTraining,
-    NeMoGymResponseOutputText,
-)
-from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
-from responses_api_agents.nooa_agent.observability import TraceEvent, project_nooa_result
-from responses_api_agents.nooa_agent.resource_tools import ResourceToolExecution
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollout_observability import AgentInvocation, ModelCallRef, ToolCallObservation
+from responses_api_agents.nooa_agent.observability import project_nooa_episode
 
 
-def response(response_id: str, text: str) -> NeMoGymResponse:
-    return NeMoGymResponse(
-        id=response_id,
-        created_at=0,
-        model="policy",
-        object="response",
-        output=[
-            NeMoGymResponseOutputMessageForTraining(
-                id=f"message-{response_id}",
-                content=[NeMoGymResponseOutputText(annotations=[], text=text)],
-                prompt_token_ids=[1, 2],
-                generation_token_ids=[3],
-                generation_log_probs=[-0.1],
-            )
+def test_projects_atif_semantics_and_model_references() -> None:
+    trajectory = Trajectory(
+        trajectory_id="root",
+        agent=AgentSchema(name="TestAgent", version="1"),
+        steps=[
+            StepObject(step_id=1, source="system", message="Use tools."),
+            StepObject(step_id=2, source="user", message="Weather in Paris?"),
+            StepObject(
+                step_id=3,
+                timestamp="2026-09-02T12:00:00.000Z",
+                source="agent",
+                message="I will check.",
+                reasoning_content="Need current weather.",
+                tool_calls=[
+                    ToolCallSchema(
+                        tool_call_id="call-1",
+                        function_name="execute_python",
+                        arguments={"code": "self.get_weather(city='Paris')"},
+                    )
+                ],
+                observation=ObservationSchema(
+                    results=[ObservationResultSchema(source_call_id="call-1", content="returned_value:\ncold")]
+                ),
+                llm_call_count=1,
+            ),
+            StepObject(step_id=4, source="agent", message="It is cold.", llm_call_count=1),
         ],
-        parallel_tool_calls=False,
-        tool_choice="none",
-        tools=[],
     )
-
-
-def events() -> list[SimpleNamespace]:
-    started = datetime.now(UTC)
-    return [
-        SimpleNamespace(
-            event_type="BeforeAgentCall",
-            call_id="root-call",
-            parent_call_id=None,
-            is_top_level=True,
-            timestamp=started,
+    model_calls = [
+        ModelCallRef(
+            model_ref=ModelServerRef(type="responses_api_models", name="policy"),
+            response_id="response-1",
         ),
-        SimpleNamespace(
-            event_type="BeforeAgentCall",
-            call_id="child-call",
-            parent_call_id="root-call",
-            is_top_level=False,
-            timestamp=started + timedelta(milliseconds=1),
-        ),
-        SimpleNamespace(
-            event_type="AfterAgentCall",
-            call_id="child-call",
-            success=True,
-            exception_type=None,
-            timestamp=started + timedelta(milliseconds=3),
-        ),
-        SimpleNamespace(
-            event_type="AfterAgentCall",
-            call_id="root-call",
-            success=True,
-            exception_type=None,
-            timestamp=started + timedelta(milliseconds=5),
+        ModelCallRef(
+            model_ref=ModelServerRef(type="responses_api_models", name="policy"),
+            response_id="response-2",
         ),
     ]
 
-
-def test_projects_model_and_semantic_resource_evidence_in_execution_order() -> None:
-    first = response("resp-1", "I will check.")
-    final = response("resp-2", "It is cold.")
-    execution = ResourceToolExecution(
-        tool_call_id="tool-1",
-        name="get_weather",
-        arguments={"city": "Paris"},
-        output={"weather": "cold"},
-        status="completed",
-        started_at=1.0,
-        completed_at=1.1,
-        duration_ms=100,
-        invocation_id="child-call",
-    )
-    params = NeMoGymResponseCreateParamsNonStreaming(input="Weather in Paris?")
-
-    projected, bundle = project_nooa_result(
-        responses_create_params=params,
-        return_value="ignored fallback",
-        model_calls=[],
-        tool_executions=[execution],
-        timeline=[
-            TraceEvent(kind="model", value=first, invocation_id="root-call"),
-            TraceEvent(kind="tool", value=execution, invocation_id="child-call"),
-            TraceEvent(kind="model", value=final, invocation_id="root-call"),
-        ],
-        nooa_events=events(),
-        model_ref=ModelServerRef(type="responses_api_models", name="policy_model"),
+    episode = project_nooa_episode(
+        create_params=NeMoGymResponseCreateParamsNonStreaming(input="Weather in Paris?"),
+        return_value="It is cold.",
+        trajectory=trajectory,
+        model_calls=model_calls,
     )
 
-    assert [item.type for item in projected.output] == [
+    assert [item.type for item in episode.response.output] == [
+        "reasoning",
         "message",
         "function_call",
         "function_call_output",
         "message",
     ]
-    assert projected.output[0].generation_token_ids == [3]
-    assert projected.output[-1].generation_log_probs == [-0.1]
-    invocations = [record for record in bundle.records if isinstance(record, AgentInvocation)]
-    assert invocations[1].parent_invocation_id == "root-call"
-    assert [ref.response_id for ref in invocations[0].model_calls] == ["resp-1", "resp-2"]
-    tool = next(record for record in bundle.records if isinstance(record, ToolCallObservation))
-    assert tool.invocation_id == "child-call"
-    assert tool.duration_ms == 100
-    assert bundle.gaps == []
+    invocation = next(record for record in episode.observations.records if isinstance(record, AgentInvocation))
+    assert [reference.response_id for reference in invocation.model_calls] == ["response-1", "response-2"]
+    assert [item.type for item in invocation.conversation] == [
+        "message",
+        "message",
+        "reasoning",
+        "message",
+        "function_call",
+        "function_call_output",
+        "message",
+    ]
+    tool = next(record for record in episode.observations.records if isinstance(record, ToolCallObservation))
+    assert tool.tool_name == "execute_python"
+    assert tool.status == "completed"
+    assert tool.timing_source == "artifact"
+    assert episode.observations.gaps == []
 
 
-def test_marks_return_value_fallback_as_non_trainable() -> None:
-    params = NeMoGymResponseCreateParamsNonStreaming(input="Hello")
-
-    projected, bundle = project_nooa_result(
-        responses_create_params=params,
-        return_value={"answer": "fallback"},
-        model_calls=[],
-        tool_executions=[],
-        timeline=[],
-        nooa_events=[],
-        model_ref=ModelServerRef(type="responses_api_models", name="policy_model"),
+def test_uses_non_trainable_fallback_when_atif_has_no_model_message() -> None:
+    trajectory = Trajectory(
+        trajectory_id="root",
+        agent=AgentSchema(name="TestAgent", version="1"),
+        steps=[],
     )
 
-    assert projected.output[0].content[0].text == '{"answer": "fallback"}'
-    assert [gap.code for gap in bundle.gaps] == ["non_trainable_fallback_output"]
+    episode = project_nooa_episode(
+        create_params=NeMoGymResponseCreateParamsNonStreaming(input="Hello"),
+        return_value={"answer": "fallback"},
+        trajectory=trajectory,
+        model_calls=[],
+    )
+
+    assert episode.response.output[0].content[0].text == '{"answer": "fallback"}'
+    assert [gap.code for gap in episode.observations.gaps] == ["non_trainable_fallback_output"]
+    invocation = next(record for record in episode.observations.records if isinstance(record, AgentInvocation))
+    assert [item.type for item in invocation.conversation] == ["message", "message"]
+
+
+def test_reports_ambiguous_model_ownership_for_nested_trajectories() -> None:
+    child = Trajectory(
+        trajectory_id="child",
+        agent=AgentSchema(name="ChildAgent", version="1"),
+        steps=[StepObject(step_id=1, source="agent", message="child answer", llm_call_count=1)],
+    )
+    root = Trajectory(
+        trajectory_id="root",
+        agent=AgentSchema(name="RootAgent", version="1"),
+        steps=[StepObject(step_id=1, source="agent", message="root answer", llm_call_count=1)],
+        subagent_trajectories=[child],
+    )
+    model_call = ModelCallRef(
+        model_ref=ModelServerRef(type="responses_api_models", name="policy"),
+        response_id="response-1",
+    )
+
+    episode = project_nooa_episode(
+        create_params=NeMoGymResponseCreateParamsNonStreaming(input="Delegate"),
+        return_value="root answer",
+        trajectory=root,
+        model_calls=[model_call],
+    )
+
+    invocations = [record for record in episode.observations.records if isinstance(record, AgentInvocation)]
+    assert invocations[1].parent_invocation_id == "root"
+    assert all(not invocation.model_calls for invocation in invocations)
+    assert [gap.code for gap in episode.observations.gaps] == ["model_call_ownership_unavailable"]
