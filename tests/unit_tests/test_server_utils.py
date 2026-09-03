@@ -580,6 +580,7 @@ class TestServerUtils:
             server_client=MagicMock(spec=ServerClient),
         )
         app = FastAPI()
+        server.setup_exception_middleware(app)
         server.setup_cancellation_middleware(app)
         handler_started = asyncio.Event()
         handler_cancelled = asyncio.Event()
@@ -621,8 +622,7 @@ class TestServerUtils:
         app_task = asyncio.create_task(app(scope, receive, send))
         await asyncio.wait_for(handler_started.wait(), timeout=1)
         await incoming_messages.put({"type": "http.disconnect"})
-        with raises(asyncio.CancelledError):
-            await asyncio.wait_for(app_task, timeout=1)
+        await asyncio.wait_for(app_task, timeout=1)
 
         assert handler_cancelled.is_set()
         assert sent_messages == []
