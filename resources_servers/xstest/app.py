@@ -14,13 +14,14 @@
 # limitations under the License.
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from time import sleep
 from typing import Any, Literal, Optional
 
 import requests
+
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 logger = logging.getLogger(__name__)
@@ -160,7 +161,9 @@ class XSTestResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
 
-        self._judge_semaphore = asyncio.Semaphore(value=self.config.judge_endpoint_max_concurrency)
+        self._judge_semaphore = TimedSemaphore(
+            value=self.config.judge_endpoint_max_concurrency, site="resources.xstest"
+        )
         with open(self.config.judge_prompt_template_fpath, "r") as f:
             self._judge_prompt_template = f.read().strip()
 

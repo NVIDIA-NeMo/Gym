@@ -32,6 +32,182 @@ would disagree the first time one dropped a sample.
 Rollout duration is recorded even when a rollout fails. A crashed rollout still consumed
 wall-clock time, and dropping those samples would bias the histogram toward the fast path.
 
+## Attributed Metrics (Bottleneck Diagnosis)
+
+The five metrics above all forward through `nemo-lens`'s `record_gym_metrics`, which is
+undimensioned at the pinned commit — see "A Note on `gym.server.request_duration_ms`"
+below for why that rules out using it for anything that needs to be broken down further.
+The metrics in this section are created directly against the OTel Metrics API instead
+(`nemo_gym.telemetry.gym_metrics`), specifically so they **can** carry attributes. Each
+answers a "what is limiting this run" question the metrics above cannot:
+
+| Metric | Type | Unit | Attributes | Gated By | Answers |
+| --- | --- | --- | --- | --- | --- |
+| `gym.concurrency.queue_wait_duration_ms` | Histogram | ms | `nemo.gym.concurrency.site` | `concurrency` | Is a task waiting for a concurrency-limiting semaphore slot instead of doing work? |
+| `gym.rollout.completed_total` | Counter | count | `nemo.gym.rollout.outcome` (`success`\|`failure`) | `rollout` | What is this run's rollout throughput and failure rate? |
+| `gym.sandbox.startup_duration_ms` | Histogram | ms | `nemo.gym.sandbox.provider` | `sandbox` | How long does provisioning one sandbox take, per provider? |
+| `gym.sandbox.create_retry_total` | Counter | count | `nemo.gym.sandbox.provider` | `sandbox` | Is sandbox creation retrying, and how often? |
+| `gym.model.call_duration_ms` | Histogram | ms | `nemo.gym.model.dialect`, `nemo.gym.server.name` | `model_call` | How long does one model-server call take, per dialect and server? |
+| `gym.model.time_to_first_byte_ms` | Histogram | ms | `nemo.gym.model.dialect`, `nemo.gym.server.name` | `model_call` | How long until the first response byte — is inference queued behind other work? |
+| `gym.http.timeout_total` | Counter | count | `nemo.gym.http.internal` | `http_client` | Is an outbound HTTP call timing out? |
+| `gym.http.retry_total` | Counter | count | `nemo.gym.http.retry_reason` (`server_disconnected`\|`client_os_error`\|`timeout`\|`other`) | `http_client` | Is Gym's HTTP client retrying, and why? |
+| `gym.process.cpu.percent` | Gauge | % | none — see resource attributes | `telemetry.cpu_sampling_enabled` | Is this process CPU-bound, and which span was running when it spiked? |
+| `gym.process.gpu.utilization_percent` | Gauge | % | `nemo.gym.gpu.index`, `nemo.gym.gpu.uuid` | `telemetry.gpu_sampling_enabled` | Is this GPU busy? |
+| `gym.process.gpu.memory_used_mib` | Gauge | MiB | `nemo.gym.gpu.index`, `nemo.gym.gpu.uuid` | `telemetry.gpu_sampling_enabled` | How much of this GPU's memory is in use? |
+| `gym.process.gpu.memory_total_mib` | Gauge | MiB | `nemo.gym.gpu.index`, `nemo.gym.gpu.uuid` | `telemetry.gpu_sampling_enabled` | How much memory does this GPU have? |
+| `gym.host.memory_used_mib` | Gauge | MiB | none — see resource attributes | `telemetry.memory_sampling_enabled` | How much of this node's memory is in use? |
+| `gym.host.memory_total_mib` | Gauge | MiB | none — see resource attributes | `telemetry.memory_sampling_enabled` | How much memory does this node have? |
+
+### Why These Are Attributed and the First Five Are Not
+
+An undimensioned `gym.concurrency.queue_wait_duration_ms` would mix the rollout driver's
+semaphore (typically hundreds of parallel tasks) with a judge's (typically single-digit
+concurrency) into one histogram — exactly the "answers no question anyone has" failure
+`gym.server.request_duration_ms` hits below, for the same reason: a number that averages
+unrelated things together. The difference is that `record_gym_metrics` cannot be given
+attributes at the pinned `nemo-lens` commit, so the metrics above route around it and talk
+to the OTel SDK directly. Filter by `nemo.gym.concurrency.site` (or the equivalent
+attribute on the other rows) to compare like with like — e.g. is the *rollout driver*
+queueing, or is a *specific judge*, or a *specific sandbox provider*.
+
+### Trajectory Throughput Is a Counter, Not a Rate
+
+`gym.rollout.completed_total` counts completed rollouts by outcome; throughput and
+failure rate are both derived downstream (`rate(...)` in your metrics backend) rather
+than computed and flattened in NeMo Gym. This is the same tradeoff `gym.verify.success_rate`
+hit — a gauge cannot express a rate on its own — resolved the other way: that one is
+stuck with a lens-provided gauge and has to keep a cumulative running fraction instead;
+this one is a local instrument, so it can just be a counter.
+
+### Process CPU: a Gauge Linked to the Exact Span That Was Running
+
+`gym.process.cpu.percent` is sampled **inline at span boundaries** — inside
+`traced_endpoint`'s `finally`, `AsyncSandbox.start`/`exec`, and the `gym.job` span —
+rather than on a background timer. That is a deliberate design constraint, not an
+implementation shortcut: an OTel exemplar (a data point that carries a trace/span id) can
+only be attached while the originating span is the *active* context, and OTel context does
+not cross OS threads without explicit propagation. A decoupled background-thread sampler
+would have no span to link to. So every `gym.process.cpu.percent` reading is taken by the
+same code path that also stamps the reading onto that span's `nemo.gym.cpu.percent`
+attribute — click through from a metric data point's exemplar to the exact span active
+when it was recorded (Honeycomb supports this natively; confirmed against the pinned
+`opentelemetry-sdk` 1.44.0, which attaches exemplars to a synchronous Gauge with no extra
+filter configuration).
+
+Both surfaces share one process-local sampler (`nemo_gym.telemetry.cpu`), rate-limited to
+one real `psutil` read per `telemetry.cpu_sampling_enabled`'s
+`cpu_min_resample_interval_s` (default 1 second) — a span closing inside that window
+reuses the last cached reading rather than triggering a fresh syscall, which is also why
+`nemo.gym.cpu.percent` can be up to that many seconds stale, the same "cumulative window"
+caveat `gym.verify.success_rate` carries below.
+
+`cpu_sampling_enabled` defaults to **off** — it is not implied by `metrics_enabled` or any
+span group, since even inline sampling is an extra syscall on every (rate-limited) span
+close plus an extra resource attribute per process:
+
+```yaml
+telemetry:
+  cpu_sampling_enabled: true
+  cpu_min_resample_interval_s: 1.0
+```
+
+**Reading `gym.process.cpu.percent` on a multi-core node:** `psutil` normalizes to one
+logical core = 100%, so a busy multi-threaded process on a many-core node can legitimately
+read 800%+. Every process that has `cpu_sampling_enabled` on also reports static
+`nemo.gym.host.cpu_count_logical` and `nemo.gym.host.cpu_count_physical` resource
+attributes (read once, not sampled — logical includes SMT/hyperthreads, physical does
+not) — divide by `100 * nemo.gym.host.cpu_count_logical` for percent-of-node-capacity,
+since that's the count `psutil`'s own percentage is normalized against.
+
+**Multi-node runs** need no special handling: every span/metric already carries
+`host.name`, `process.pid`, and `service.instance.id` as resource attributes (see
+[Configuration](/observability/configuration)), so each node's processes are
+distinguishable without anything new from this feature.
+
+### Process GPU: a Periodic Background Sample, Not an Exemplar
+
+`gym.process.gpu.*` takes the opposite design from CPU, for the opposite reason. CPU is
+sampled inline at span boundaries specifically so a reading can carry an exemplar linking
+it to the exact span that produced it. GPU readings carry **no exemplar** and are
+correlated to a process only through that process's resource attributes — deliberately,
+not as a limitation nobody noticed: for a `local_vllm_model` server, the actual
+GPU-using vLLM engine runs in a *separate Ray actor process* from the one holding Gym's
+spans, which has no span context to link to in the first place. Linking GPU readings to
+spans there would need OTel context propagated across the Ray actor boundary, which does
+not exist today — out of scope here.
+
+Because there is no span-context constraint, GPU sampling runs on an independent
+background thread (`nemo_gym.telemetry.gpu`) polling `nvidia-smi` on its own cadence
+(`gpu_sample_interval_s`, default 10 seconds — far coarser than CPU's 1-second default,
+since every GPU read forks and execs a subprocess rather than reusing a cached handle):
+
+```yaml
+telemetry:
+  gpu_sampling_enabled: true
+  gpu_sample_interval_s: 10.0
+```
+
+`gpu_sampling_enabled` defaults to **off**, same reasoning as `cpu_sampling_enabled`. On
+a process with no visible GPU (a CPU-only agent/resources server, or a node without
+`nvidia-smi` at all), the sampler detects this once, logs at debug, and every later tick
+short-circuits before spawning another subprocess — not a repeating failure.
+
+**GPU attribution filters by `CUDA_VISIBLE_DEVICES`**, mirroring how nemo-lens's own
+`host.gpu.count` resource-attribute detector already reads that variable before falling
+back to `nvidia-smi --query-gpu=count`: a process only reports the GPU indices/UUIDs
+listed in its own `CUDA_VISIBLE_DEVICES`, not every GPU `nvidia-smi` can see on the node.
+When that variable is unset, empty, or unparseable, the sampler falls back to reporting
+everything `nvidia-smi` sees.
+
+**Known caveat for `local_vllm_model` specifically**: its Ray actor
+(`local_vllm_model_actor.py`) deliberately clears `CUDA_VISIBLE_DEVICES` and launches
+with `RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1`, so in that actor the filter almost
+always falls back to "report everything." Harmless on a node running exactly one actor;
+over-reports (attributes other actors'/tenants' GPUs to this one) on a node whose GPUs are
+shared across more than one actor or process. This is an inherited limitation of that
+actor's existing GPU-visibility design, not something fixed by this feature.
+
+Since the actor process has no telemetry wiring of its own otherwise, enabling
+`gpu_sampling_enabled` also gives it a distinct `service.name` —
+`nemo-gym/<model-server-name>-vllm-actor` — separate from the outer model-server process
+(which only proxies HTTP and never touches the GPU), joinable by the shared
+`nemo.run.id`.
+
+### Host Memory: Same Design as CPU, for the Same Reason
+
+`gym.host.memory_used_mib`/`gym.host.memory_total_mib` follow CPU's design, not GPU's:
+sampled **inline at span boundaries**, exemplar-linked, gated by
+`telemetry.memory_sampling_enabled` (off by default) and rate-limited by
+`memory_min_resample_interval_s` (default 1 second, tracked independently of
+`cpu_min_resample_interval_s`). `psutil.virtual_memory()` is a single cheap read with no
+delta/priming semantics — even less reason than CPU to avoid sampling it on the request
+path.
+
+The one real difference from CPU: this is **host-wide, not process-scoped**.
+`virtual_memory()` reports the whole node's memory, not this process's share of it —
+appropriate, since memory pressure is a node-level condition every process on that node
+shares, unlike "how busy is this specific process" for CPU. That's also why there are no
+call-site attributes, same as the CPU gauge: distinguish nodes by the existing
+`host.name` resource attribute, not a metric attribute.
+
+```yaml
+telemetry:
+  memory_sampling_enabled: true
+  memory_min_resample_interval_s: 1.0
+```
+
+### Not Yet Covered: Sandbox CPU/GPU/Memory and Ray Worker CPU
+
+Process-level CPU and GPU for Gym's own server processes (agent/model/resources servers,
+the rollout driver, and — for GPU — the `local_vllm_model` Ray actor), plus host memory
+for any process that opts in, are covered above. Still unmeasured: CPU/GPU/memory usage
+*inside* a sandbox/container (would need new per-provider work — a `docker stats` read, a
+cgroup v2 accounting-file read — with no existing hook to build on), and CPU of Ray
+worker processes spawned for sandbox execution (separate OS processes with their own
+PID). `SandboxObservation` (the offline trajectory-capture schema, unrelated to OTel) has
+`cpu_time_s` / `peak_memory_mib` fields, but nothing populates them from a real
+measurement today. All of this is tracked as follow-up work.
+
 ### What `gym.verify.success_rate` Measures
 
 It measures whether the **verification call completed**, not whether the task passed.

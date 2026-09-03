@@ -61,6 +61,7 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 _DEFAULT_HARVEST_GLOBS = ["rtl/**/*.sv", "rtl/**/*.v", "rtl/**/*.vhd", "verif/**/*.sv", "verif/**/*.v"]
@@ -246,7 +247,7 @@ class CVDPAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
-        self.sem = asyncio.Semaphore(self.config.concurrency)
+        self.sem = TimedSemaphore(self.config.concurrency, site="agent.cvdp_agent")
         self._deps_dir = None
         self._deps_archive = None
         self._image = None

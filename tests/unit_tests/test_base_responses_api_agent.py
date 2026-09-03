@@ -102,3 +102,22 @@ class TestBaseResponsesAPIAgent:
         assert self._agent(gc, token_id_capture=True).rollout_id_from_run(body) == "0-0"
         # Agent opt-in alone does not enable capture.
         assert self._agent({}, token_id_capture=True).rollout_id_from_run(body) is None
+
+    def test_model_call_telemetry_alone_also_correlates_the_rollout(self, monkeypatch) -> None:
+        """Regression: `rollout_id_from_run` used to return `None` whenever
+        `observability_enabled` was off, regardless of OTel telemetry. That sets
+        `rollout_context(None)` for the whole `/run` handler, so every downstream model
+        call's `current_rollout_id()` is `None` too -- which is what silently kept
+        `gym.model.time_to_first_byte_ms` unreachable even after fixing the URL-prefixing
+        decision in `ServerClient.request` alone (that fix needs a non-None rollout id to
+        act on in the first place)."""
+        import nemo_gym.base_responses_api_agent as bra
+        from nemo_gym.telemetry.span_groups import GymSpanGroup
+
+        body = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+
+        monkeypatch.setattr(bra, "is_span_group_enabled", lambda group: False)
+        assert self._agent({}).rollout_id_from_run(body) is None
+
+        monkeypatch.setattr(bra, "is_span_group_enabled", lambda group: group == GymSpanGroup.MODEL_CALL)
+        assert self._agent({}).rollout_id_from_run(body) == "0-0"

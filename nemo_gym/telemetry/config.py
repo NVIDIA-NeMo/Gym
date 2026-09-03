@@ -119,3 +119,49 @@ class TelemetryConfig(BaseModel, extra="allow"):
     run_id: Optional[str] = None
     """Correlates every process of one ``gym env start`` / ``gym env test`` invocation.
     Generated in the orchestrator and inherited by the servers when unset."""
+
+    cpu_sampling_enabled: bool = False
+    """Sample this process's CPU utilization at span boundaries and emit
+    ``gym.process.cpu.percent`` plus a ``nemo.gym.cpu.percent`` span attribute. Off by
+    default: even though sampling is inline rather than a background thread, it is still
+    an extra syscall on every (rate-limited) span close plus an extra resource
+    attribute — not implied by ``metrics_enabled`` or any span group, opt in explicitly.
+    See :mod:`nemo_gym.telemetry.cpu`."""
+
+    cpu_min_resample_interval_s: float = 1.0
+    """Minimum seconds between real ``psutil`` CPU reads. A span closing inside this
+    window since the last read reuses the cached value instead of issuing a fresh one,
+    keeping this cheap when many spans close in quick succession. Also caps how stale a
+    span's ``nemo.gym.cpu.percent`` attribute can be."""
+
+    gpu_sampling_enabled: bool = False
+    """Periodically sample this process's visible GPU utilization/memory on a background
+    thread and emit ``gym.process.gpu.*`` gauges. Off by default, for the same reason as
+    ``cpu_sampling_enabled``: not implied by ``metrics_enabled``, opt in explicitly.
+    Unlike CPU sampling, this runs on a genuine background thread rather than inline at
+    span boundaries, because GPU readings carry no exemplar and therefore have no
+    span-context constraint to honor — GPU compute for a ``local_vllm_model`` server, in
+    particular, happens in a separate Ray actor process that has no span context at all.
+    Safe to enable on a process with no visible GPU: the sampler degrades to a clean
+    no-op logged at debug, not a warning. See :mod:`nemo_gym.telemetry.gpu`."""
+
+    gpu_sample_interval_s: float = 10.0
+    """Seconds between ``nvidia-smi`` polls on the background GPU sampler. Much coarser
+    than ``cpu_min_resample_interval_s``'s 1.0s default deliberately: CPU sampling reuses
+    a cached ``psutil.Process()`` handle (near-zero marginal cost per read), while every
+    GPU sample forks and execs ``nvidia-smi`` — meaningfully more expensive, and
+    unnecessary at sub-second resolution for a metric nobody needs that precise."""
+
+    memory_sampling_enabled: bool = False
+    """Sample this node's host memory at span boundaries and emit
+    ``gym.host.memory_used_mib``/``gym.host.memory_total_mib``. Off by default, same
+    reasoning as ``cpu_sampling_enabled``. Sampled inline (like CPU, not GPU): a single
+    cheap ``psutil.virtual_memory()`` read with no delta/priming semantics, so a reading
+    taken inside a span's context can carry the same exemplar linkage CPU readings do.
+    Host-wide, not process-scoped — every process on a node reports the same figure,
+    distinguished only by ``host.name``. See :mod:`nemo_gym.telemetry.memory`."""
+
+    memory_min_resample_interval_s: float = 1.0
+    """Minimum seconds between real host-memory reads. Same rate-limiting shape as
+    ``cpu_min_resample_interval_s``, kept as an independent cache/interval so CPU and
+    memory sampling cadences can be tuned separately."""

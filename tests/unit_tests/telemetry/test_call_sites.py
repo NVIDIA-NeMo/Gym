@@ -14,8 +14,11 @@
 # limitations under the License.
 """Instrumentation attached to Gym's own code: sandbox, servers, CLI orchestrator."""
 
+from unittest.mock import AsyncMock
+
 import pytest
 
+from nemo_gym.telemetry import setup as telemetry_setup
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from tests.unit_tests.telemetry.conftest import requires_lens
 
@@ -129,6 +132,136 @@ async def test_sandbox_is_uninstrumented_when_the_group_is_disabled(recorded_spa
 
     assert result.return_code == 0, "the sandbox must still work with telemetry off"
     assert recorded_spans() == ()
+
+
+@pytest.fixture(autouse=True)
+def _reset_cpu_sampler():
+    from nemo_gym.telemetry import cpu as telemetry_cpu
+    from nemo_gym.telemetry import memory as telemetry_memory
+
+    telemetry_cpu._reset_for_testing()
+    telemetry_memory._reset_for_testing()
+    yield
+    telemetry_cpu._reset_for_testing()
+    telemetry_memory._reset_for_testing()
+
+
+async def test_sandbox_start_and_exec_attach_cpu_percent_when_sampling_is_enabled(
+    recorded_spans, started_sandbox, monkeypatch
+):
+    from nemo_gym.telemetry.cpu import sample_cpu_percent
+
+    monkeypatch.setattr(telemetry_setup, "_CPU_SAMPLING_ENABLED", True)
+    monkeypatch.setattr(telemetry_setup, "_CPU_MIN_RESAMPLE_INTERVAL_S", 0.0)
+    sample_cpu_percent(0.0)  # prime directly so `start`'s own read is a real one
+
+    sandbox = await started_sandbox().start()
+    await sandbox.exec("echo hi")
+
+    spans = {span.name: span for span in recorded_spans()}
+    assert isinstance(spans["gym.sandbox.start"].attributes.get("nemo.gym.cpu.percent"), float)
+    assert isinstance(spans["gym.sandbox.exec"].attributes.get("nemo.gym.cpu.percent"), float)
+
+
+async def test_sandbox_omits_cpu_percent_when_sampling_is_disabled(recorded_spans, started_sandbox, monkeypatch):
+    monkeypatch.setattr(telemetry_setup, "_CPU_SAMPLING_ENABLED", False)
+
+    sandbox = await started_sandbox().start()
+    await sandbox.exec("echo hi")
+
+    for span in recorded_spans():
+        assert "nemo.gym.cpu.percent" not in span.attributes
+
+
+async def test_sandbox_start_and_exec_attach_memory_when_sampling_is_enabled(
+    recorded_spans, started_sandbox, monkeypatch
+):
+    monkeypatch.setattr(telemetry_setup, "_MEMORY_SAMPLING_ENABLED", True)
+    monkeypatch.setattr(telemetry_setup, "_MEMORY_MIN_RESAMPLE_INTERVAL_S", 0.0)
+
+    sandbox = await started_sandbox().start()
+    await sandbox.exec("echo hi")
+
+    spans = {span.name: span for span in recorded_spans()}
+    assert isinstance(spans["gym.sandbox.start"].attributes.get("nemo.gym.host.memory_used_mib"), float)
+    assert isinstance(spans["gym.sandbox.exec"].attributes.get("nemo.gym.host.memory_used_mib"), float)
+
+
+async def test_sandbox_omits_memory_when_sampling_is_disabled(recorded_spans, started_sandbox, monkeypatch):
+    monkeypatch.setattr(telemetry_setup, "_MEMORY_SAMPLING_ENABLED", False)
+
+    sandbox = await started_sandbox().start()
+    await sandbox.exec("echo hi")
+
+    for span in recorded_spans():
+        assert "nemo.gym.host.memory_used_mib" not in span.attributes
+
+
+# --------------------------------------------------------------------------- #
+# Rollout driver: gym.job
+# --------------------------------------------------------------------------- #
+
+
+async def test_job_span_attaches_cpu_percent_when_sampling_is_enabled(recorded_spans, monkeypatch):
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.telemetry.cpu import sample_cpu_percent
+
+    monkeypatch.setattr(telemetry_setup, "_CPU_SAMPLING_ENABLED", True)
+    monkeypatch.setattr(telemetry_setup, "_CPU_MIN_RESAMPLE_INTERVAL_S", 0.0)
+    sample_cpu_percent(0.0)  # prime directly
+
+    helper = RolloutCollectionHelper()
+    monkeypatch.setattr(helper, "_run_from_config", AsyncMock(return_value="done"))
+
+    result = await helper.run_from_config(config=object())
+
+    assert result == "done"
+    job_span = next(span for span in recorded_spans() if span.name == "gym.job")
+    assert isinstance(job_span.attributes.get("nemo.gym.cpu.percent"), float)
+
+
+async def test_job_span_omits_cpu_percent_when_sampling_is_disabled(recorded_spans, monkeypatch):
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+    monkeypatch.setattr(telemetry_setup, "_CPU_SAMPLING_ENABLED", False)
+
+    helper = RolloutCollectionHelper()
+    monkeypatch.setattr(helper, "_run_from_config", AsyncMock(return_value="done"))
+
+    await helper.run_from_config(config=object())
+
+    job_span = next(span for span in recorded_spans() if span.name == "gym.job")
+    assert "nemo.gym.cpu.percent" not in job_span.attributes
+
+
+async def test_job_span_attaches_memory_when_sampling_is_enabled(recorded_spans, monkeypatch):
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+    monkeypatch.setattr(telemetry_setup, "_MEMORY_SAMPLING_ENABLED", True)
+    monkeypatch.setattr(telemetry_setup, "_MEMORY_MIN_RESAMPLE_INTERVAL_S", 0.0)
+
+    helper = RolloutCollectionHelper()
+    monkeypatch.setattr(helper, "_run_from_config", AsyncMock(return_value="done"))
+
+    await helper.run_from_config(config=object())
+
+    job_span = next(span for span in recorded_spans() if span.name == "gym.job")
+    assert isinstance(job_span.attributes.get("nemo.gym.host.memory_used_mib"), float)
+    assert isinstance(job_span.attributes.get("nemo.gym.host.memory_total_mib"), float)
+
+
+async def test_job_span_omits_memory_when_sampling_is_disabled(recorded_spans, monkeypatch):
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+    monkeypatch.setattr(telemetry_setup, "_MEMORY_SAMPLING_ENABLED", False)
+
+    helper = RolloutCollectionHelper()
+    monkeypatch.setattr(helper, "_run_from_config", AsyncMock(return_value="done"))
+
+    await helper.run_from_config(config=object())
+
+    job_span = next(span for span in recorded_spans() if span.name == "gym.job")
+    assert "nemo.gym.host.memory_used_mib" not in job_span.attributes
 
 
 # --------------------------------------------------------------------------- #

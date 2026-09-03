@@ -21,7 +21,6 @@ The judge prompt is fully configurable via server config.
 # limitations under the License.
 from __future__ import annotations
 
-import asyncio
 import re
 from contextlib import nullcontext
 from typing import Any, Optional
@@ -43,6 +42,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
@@ -274,7 +274,9 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         super().__init__(*args, **kwargs)
 
         if self.config.judge_endpoint_max_concurrency is not None:
-            self._judge_endpoint_max_concurrency = asyncio.Semaphore(value=self.config.judge_endpoint_max_concurrency)
+            self._judge_endpoint_max_concurrency = TimedSemaphore(
+                value=self.config.judge_endpoint_max_concurrency, site="resources.equivalence_llm_judge"
+            )
         else:
             self._judge_endpoint_max_concurrency = nullcontext()
 

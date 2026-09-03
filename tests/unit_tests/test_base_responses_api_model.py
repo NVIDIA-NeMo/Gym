@@ -1496,6 +1496,59 @@ def test_rollout_prefix_stripped_when_capture_disabled():
     assert client.post("/ng-rollout/3-0/v1/chat/completions", json={}).status_code == 200
 
 
+def test_time_to_first_byte_is_recorded_when_capture_is_off_but_model_call_telemetry_is_on(monkeypatch):
+    """Regression: the middleware's early-return guard (`store is None and not
+    capture_wanted`) used to bail out before the TTFT-tracking block ever ran, making it
+    dead code whenever JSONL capture was disabled -- the common case. `gym.model.time_to_first_byte_ms`
+    must fire under `GymSpanGroup.MODEL_CALL` regardless of capture config."""
+    import nemo_gym.base_responses_api_model as bram
+
+    recorded = []
+    monkeypatch.setattr(bram, "is_span_group_enabled", lambda group: group == bram.GymSpanGroup.MODEL_CALL)
+    monkeypatch.setattr(
+        bram,
+        "record_model_time_to_first_byte",
+        lambda duration_ms, *, dialect, server_name: recorded.append((dialect, server_name)),
+    )
+
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def _cc() -> dict:
+        return {"ok": True}
+
+    install_model_call_capture(app, ModelCallCaptureConfig(), model_server_name="policy_model")
+    client = TestClient(app)
+    assert client.post("/ng-rollout/3-0/v1/chat/completions", json={}).status_code == 200
+
+    assert recorded == [("chat", "policy_model")]
+
+
+def test_time_to_first_byte_is_not_recorded_when_telemetry_and_capture_are_both_off(monkeypatch):
+    """The plain-forward path (no capture, no telemetry) must not pay for or emit TTFT."""
+    import nemo_gym.base_responses_api_model as bram
+
+    recorded = []
+    monkeypatch.setattr(bram, "is_span_group_enabled", lambda group: False)
+    monkeypatch.setattr(
+        bram,
+        "record_model_time_to_first_byte",
+        lambda duration_ms, *, dialect, server_name: recorded.append((dialect, server_name)),
+    )
+
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def _cc() -> dict:
+        return {"ok": True}
+
+    install_model_call_capture(app, ModelCallCaptureConfig(), model_server_name="policy_model")
+    client = TestClient(app)
+    assert client.post("/ng-rollout/3-0/v1/chat/completions", json={}).status_code == 200
+
+    assert recorded == []
+
+
 def test_extract_token_stats_anthropic_cache_fold():
     from nemo_gym.base_responses_api_model import extract_token_stats
 

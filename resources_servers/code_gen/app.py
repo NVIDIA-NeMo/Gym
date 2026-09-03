@@ -34,6 +34,7 @@ from nemo_gym.reward_profile import (
     compute_subset_metrics,
     highest_k_metrics,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 # ----------------------------
@@ -83,7 +84,7 @@ class CompCodingResourcesServer(SimpleResourcesServer):
     config: CompCodingResourcesServerConfig
 
     def model_post_init(self, context):
-        self._semaphore: Semaphore = Semaphore(value=self.config.num_processes)
+        self._semaphore: Semaphore = TimedSemaphore(value=self.config.num_processes, site="resources.code_gen")
 
     @staticmethod
     def _has_reasoning_format_violation(response) -> bool:

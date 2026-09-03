@@ -27,7 +27,6 @@ LLM judge. protocolqa2 rows may include ``reference_passage`` for the judge prom
 
 from __future__ import annotations
 
-import asyncio
 from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 
@@ -47,6 +46,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +147,9 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, __context: Any) -> None:
         if self.config.judge_endpoint_max_concurrency is not None:
-            self._judge_sem = asyncio.Semaphore(self.config.judge_endpoint_max_concurrency)
+            self._judge_sem = TimedSemaphore(
+                self.config.judge_endpoint_max_concurrency, site="resources.labbench2_vlm"
+            )
         else:
             self._judge_sem = nullcontext()
 

@@ -8,7 +8,6 @@ the ground-truth query's result set via unordered set equality (the official
 BIRD evaluator's rule).
 """
 
-import asyncio
 import logging
 import re
 from enum import Enum
@@ -29,6 +28,7 @@ from nemo_gym.reward_profile import (
     compute_subset_metrics,
     highest_k_metrics,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from resources_servers.bird_sql.eval_utils import execute_and_compare
 from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql
 
@@ -123,7 +123,7 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         self._dev_databases_dir: Path = ensure_bird_sql(self._resolve_bird_sql_dir())
-        self._semaphore = asyncio.Semaphore(self.config.max_concurrency)
+        self._semaphore = TimedSemaphore(self.config.max_concurrency, site="resources.bird_sql")
 
     def _resolve_bird_sql_dir(self) -> Path:
         p = Path(self.config.bird_sql_dir)

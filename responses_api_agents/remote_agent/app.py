@@ -71,6 +71,7 @@ from nemo_gym.server_utils import (
     is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 REMOTE_AGENT_FAILURE_CLASS = "remote_agent_error"
@@ -157,7 +158,7 @@ class RemoteAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
-        self.sem = asyncio.Semaphore(self.config.concurrency)
+        self.sem = TimedSemaphore(self.config.concurrency, site="agent.remote_agent")
 
     async def responses(
         self,

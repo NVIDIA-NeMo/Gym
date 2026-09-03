@@ -31,6 +31,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 try:
@@ -101,7 +102,7 @@ class IFBenchResourcesServer(SimpleResourcesServer):
         import instructions_registry
 
         self._instructions_registry = instructions_registry
-        self._semaphore = asyncio.Semaphore(value=self.config.num_processes)
+        self._semaphore = TimedSemaphore(value=self.config.num_processes, site="resources.ifbench")
 
     def setup_webserver(self) -> FastAPI:
         return super().setup_webserver()

@@ -42,6 +42,7 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_me
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.docker import DockerCreateConfig, DockerProvider
 from nemo_gym.server_utils import apply_rollout_prefix
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 def _format_container(container_formatter: str | list[str], task_name: str, docker_image: str) -> str:
@@ -707,7 +708,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
     _server: Optional[AnyTerminalServerConfig] = None
 
     def model_post_init(self, context: Any) -> None:
-        self._sem = Semaphore(self.config.concurrency)
+        self._sem = TimedSemaphore(self.config.concurrency, site="agent.anyterminal_agent")
         self.config.sandbox_default_metadata = resolve_provider_metadata(
             self.config.sandbox_provider, self.server_client.global_config_dict
         )

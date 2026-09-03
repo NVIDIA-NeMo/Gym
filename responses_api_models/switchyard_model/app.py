@@ -64,6 +64,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint, request
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 logger = logging.getLogger(__name__)
@@ -204,7 +205,7 @@ class SwitchyardModel(SimpleResponsesAPIModel):
 
     def model_post_init(self, context: Any) -> None:
         self._semaphore = (
-            asyncio.Semaphore(self.config.max_concurrent_requests)
+            TimedSemaphore(self.config.max_concurrent_requests, site="model.switchyard_model")
             if self.config.max_concurrent_requests is not None
             else nullcontext()
         )

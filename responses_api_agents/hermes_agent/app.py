@@ -50,6 +50,7 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver
 
 
@@ -249,7 +250,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         return yaml.dump(config, default_flow_style=False)
 
     def model_post_init(self, __context: Any) -> None:
-        self.sem = Semaphore(self.config.concurrency)
+        self.sem = TimedSemaphore(self.config.concurrency, site="agent.hermes_agent")
         self.active_agents = set()
         # hermes-agent reads these from env (cli.py / batch_runner.py); env vars are
         # process-global, so multiple HermesAgent instances in one process share them

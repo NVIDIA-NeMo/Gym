@@ -33,6 +33,7 @@ GYM_SPECIFIC = {
     "agent",
     "model_call",
     "sandbox",
+    "concurrency",
 }
 
 
@@ -64,14 +65,14 @@ def test_default_preset_is_coarse():
     """`default` is the run-level view: the spine plus job/evaluate, and nothing per-request."""
     resolved = GymSpanGroup.resolve("default")
     assert resolved == {"job", "server", "http_client", "rollout"}
-    for fine_grained in ("verify", "agent", "model_call", "sandbox"):
+    for fine_grained in ("verify", "agent", "model_call", "sandbox", "concurrency"):
         assert fine_grained not in resolved
 
 
 def test_per_rollout_adds_request_detail_and_drops_job():
     """`per_rollout` bounds each trace at one rollout instead of one run."""
     resolved = GymSpanGroup.resolve("per_rollout")
-    assert {"verify", "agent", "model_call"} <= resolved
+    assert {"verify", "agent", "model_call", "concurrency"} <= resolved
     assert "job" not in resolved, "per_rollout must not nest every rollout under one run-long span"
 
 
@@ -92,7 +93,17 @@ def test_every_preset_group_has_a_call_site():
     training-oriented groups stay resolvable through `all` but are kept out of the
     curated presets.
     """
-    emitting_groups = {"job", "server", "http_client", "rollout", "verify", "agent", "model_call", "sandbox"}
+    emitting_groups = {
+        "job",
+        "server",
+        "http_client",
+        "rollout",
+        "verify",
+        "agent",
+        "model_call",
+        "sandbox",
+        "concurrency",
+    }
     for preset in ("default", "per_rollout"):
         assert GymSpanGroup.resolve(preset) <= emitting_groups, (
             f"preset {preset!r} advertises groups with no call site: "

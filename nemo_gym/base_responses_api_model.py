@@ -68,7 +68,9 @@ from nemo_gym.server_utils import (
     BaseServer,
     SimpleServer,
 )
-from nemo_gym.telemetry.endpoints import traced_endpoint
+from nemo_gym.telemetry._fallbacks import is_span_group_enabled
+from nemo_gym.telemetry.endpoints import traced_model_call_endpoint
+from nemo_gym.telemetry.gym_metrics import record_model_time_to_first_byte
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
     CaptureContext,
@@ -196,13 +198,16 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         model_attributes = {"nemo.gym.server.name": self.config.name}
         app.post("/v1/chat/completions")(
-            traced_endpoint(
-                GymSpanGroup.MODEL_CALL, "gym.model.chat_completions", self.chat_completions_dispatch, model_attributes
+            # "chat", not "chat_completions": matches `_OBSERVED_PATHS`'s dialect vocabulary
+            # (the capture middleware below), so `gym.model.call_duration_ms` and
+            # `gym.model.time_to_first_byte_ms` are attributed with the same dialect string.
+            traced_model_call_endpoint(
+                self.chat_completions_dispatch, "gym.model.chat_completions", "chat", model_attributes
             )
         )
 
         app.post("/v1/responses")(
-            traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.responses", self.responses_dispatch, model_attributes)
+            traced_model_call_endpoint(self.responses_dispatch, "gym.model.responses", "responses", model_attributes)
         )
 
         # Every Gym model server speaks the Anthropic Messages API by default, mapping
@@ -210,7 +215,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # harnesses that require an Anthropic endpoint (e.g. the Claude Code CLI) target any
         # model server directly.
         app.post("/v1/messages")(
-            traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.messages", self.messages, model_attributes)
+            traced_model_call_endpoint(self.messages, "gym.model.messages", "messages", model_attributes)
         )
 
         return app
@@ -1242,7 +1247,16 @@ class _CaptureMiddleware:
                         path,
                         exc_info=True,
                     )
-        if (self._store is None and not capture_wanted) or rollout_from_path is None or dialect is None:
+        # `telemetry_wants_time_to_first_byte` widens the original `store is None and not capture_wanted`
+        # bail-out: without it, a run with JSONL capture off (the common case) would never
+        # reach the TTFT-tracking block below even with `GymSpanGroup.MODEL_CALL` enabled,
+        # since this guard would already have forwarded and returned.
+        telemetry_wants_time_to_first_byte = is_span_group_enabled(GymSpanGroup.MODEL_CALL)
+        if (
+            (self._store is None and not capture_wanted and not telemetry_wants_time_to_first_byte)
+            or rollout_from_path is None
+            or dialect is None
+        ):
             await self._app(scope, receive, send)
             return
 
@@ -1269,6 +1283,35 @@ class _CaptureMiddleware:
         # Training-only capture has no evaluation record.
         # Forward without buffering while the sink is active.
         if self._store is None:
+            # Pure telemetry, no capture at all (`capture_wanted` is False -- otherwise
+            # this is the training-only-capture case below, which must keep forwarding
+            # plain, unchanged). This is the common case: JSONL capture off, telemetry on.
+            if not capture_wanted and telemetry_wants_time_to_first_byte:
+                start = time.perf_counter()
+                time_to_first_byte_recorded = False
+
+                async def _send_time_to_first_byte_only(message: dict[str, Any]) -> None:
+                    nonlocal time_to_first_byte_recorded
+                    if (
+                        not time_to_first_byte_recorded
+                        and message.get("type") == "http.response.body"
+                        and message.get("body")
+                    ):
+                        record_model_time_to_first_byte(
+                            (time.perf_counter() - start) * 1000.0,
+                            dialect=dialect,
+                            server_name=self._model_server_name,
+                        )
+                        time_to_first_byte_recorded = True
+                    await send(message)
+
+                try:
+                    await self._app(scope, receive, _send_time_to_first_byte_only)
+                finally:
+                    if sink_token is not None:
+                        reset_token_sink(sink_token)
+                return
+
             try:
                 await self._app(scope, receive, send)
             finally:
@@ -1333,6 +1376,8 @@ class _CaptureMiddleware:
             upstream_body = bytes(state["body"]) or exception_body
             error_category = _classify_status(upstream_status) if isinstance(upstream_status, int) else None
             error_category = error_category or _classify_exception(exc)
+            if is_span_group_enabled(GymSpanGroup.MODEL_CALL) and state["ttft_ms"] is not None:
+                record_model_time_to_first_byte(state["ttft_ms"], dialect=dialect, server_name=self._model_server_name)
             # Offload the blocking write+fsync so it never stalls the event loop.
             try:
                 await asyncio.to_thread(
@@ -1371,6 +1416,8 @@ class _CaptureMiddleware:
         ttft_ms = state["ttft_ms"]
         request_bytes = bytes(request_body)
         store, model_server_name = self._store, self._model_server_name
+        if is_span_group_enabled(GymSpanGroup.MODEL_CALL) and ttft_ms is not None:
+            record_model_time_to_first_byte(ttft_ms, dialect=dialect, server_name=model_server_name)
 
         def _parse_and_record() -> None:
             # Off the event loop: body parse + SSE reassembly is best-effort and fully guarded, so a

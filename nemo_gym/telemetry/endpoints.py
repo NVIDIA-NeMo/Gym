@@ -34,10 +34,33 @@ from typing import Any, Callable, Optional
 
 from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
+from nemo_gym.telemetry.cpu import sample_cpu_percent
+from nemo_gym.telemetry.gym_metrics import (
+    record_host_memory_total_mib,
+    record_host_memory_used_mib,
+    record_process_cpu_percent,
+)
+from nemo_gym.telemetry.memory import sample_host_memory_mib
+from nemo_gym.telemetry.setup import (
+    cpu_min_resample_interval_s,
+    is_cpu_sampling_enabled,
+    is_memory_sampling_enabled,
+    memory_min_resample_interval_s,
+)
 
 
 #: Span attribute carrying Gym's existing rollout correlation id.
 ROLLOUT_ID_ATTRIBUTE = "nemo.gym.rollout.id"
+
+#: Span attribute carrying a CPU-utilization-at-span-end reading. See
+#: `nemo_gym.telemetry.cpu` for why this is sampled inline here rather than by a
+#: decoupled background sampler (exemplar linkage needs the active span context).
+CPU_PERCENT_ATTRIBUTE = "nemo.gym.cpu.percent"
+
+#: Span attributes carrying a host-memory-at-span-end reading. Same inline-sampling
+#: reasoning as CPU (see `nemo_gym.telemetry.memory`) -- host-wide, not process-scoped.
+MEMORY_USED_MIB_ATTRIBUTE = "nemo.gym.host.memory_used_mib"
+MEMORY_TOTAL_MIB_ATTRIBUTE = "nemo.gym.host.memory_total_mib"
 
 
 def traced_endpoint(
@@ -74,13 +97,33 @@ def traced_endpoint(
             return await handler(*args, **kwargs)
 
         with managed_span(group, span_name) as span:
-            if span is not None:
-                attributes = dict(base_attributes)
-                rollout_id = current_rollout_id()
-                if rollout_id:
-                    attributes[ROLLOUT_ID_ATTRIBUTE] = rollout_id
-                safe_set_span_attributes(span, attributes)
-            return await handler(*args, **kwargs)
+            try:
+                return await handler(*args, **kwargs)
+            finally:
+                # Attributes are set here, after the handler returns, rather than
+                # before — so a CPU reading (added below) reflects span-end, not
+                # span-start. Moved intentionally; this used to run before the handler
+                # call, which is why `attributes` construction lives in a `finally`
+                # around it now instead of ahead of it.
+                if span is not None:
+                    attributes = dict(base_attributes)
+                    rollout_id = current_rollout_id()
+                    if rollout_id:
+                        attributes[ROLLOUT_ID_ATTRIBUTE] = rollout_id
+                    if is_cpu_sampling_enabled():
+                        cpu_percent = sample_cpu_percent(cpu_min_resample_interval_s())
+                        if cpu_percent is not None:
+                            attributes[CPU_PERCENT_ATTRIBUTE] = cpu_percent
+                            record_process_cpu_percent(cpu_percent)  # still inside `with managed_span`
+                    if is_memory_sampling_enabled():
+                        memory_reading = sample_host_memory_mib(memory_min_resample_interval_s())
+                        if memory_reading is not None:
+                            used_mib, total_mib = memory_reading
+                            attributes[MEMORY_USED_MIB_ATTRIBUTE] = used_mib
+                            attributes[MEMORY_TOTAL_MIB_ATTRIBUTE] = total_mib
+                            record_host_memory_used_mib(used_mib)  # still inside `with managed_span`
+                            record_host_memory_total_mib(total_mib)
+                    safe_set_span_attributes(span, attributes)
 
     return wrapper
 
@@ -114,6 +157,46 @@ def traced_verify_endpoint(handler: Callable, static_attributes: Optional[dict] 
             return result
         finally:
             record_verify((time.perf_counter() - started) * 1000.0, succeeded=succeeded)
+
+    return wrapper
+
+
+def traced_model_call_endpoint(
+    handler: Callable, span_name: str, dialect: str, static_attributes: Optional[dict] = None
+) -> Callable:
+    """`traced_endpoint` for one model-server dialect route, plus `gym.model.call_duration_ms`.
+
+    One model server registers three of these (`chat_completions`/`responses`/`messages`).
+    `dialect` becomes an attribute on the duration histogram so the three are comparable
+    against each other in a dashboard rather than collapsed into one undimensioned number
+    — the same reasoning `gym.rollout.duration_ms` gets away with skipping, because a
+    rollout is one comparable unit of work and a `/v1/messages` call is not a
+    `/v1/responses` call.
+
+    For a streaming response this measures "handler returned", not "stream fully
+    drained" — a pre-existing limit of the underlying `gym.model.*` spans, not introduced
+    here.
+    """
+    import time
+
+    from nemo_gym.telemetry.gym_metrics import record_model_call_duration
+    from nemo_gym.telemetry.span_groups import GymSpanGroup
+
+    traced = traced_endpoint(GymSpanGroup.MODEL_CALL, span_name, handler, static_attributes)
+    server_name = (static_attributes or {}).get("nemo.gym.server.name")
+
+    @wraps(handler)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if not is_span_group_enabled(GymSpanGroup.MODEL_CALL):
+            return await handler(*args, **kwargs)
+
+        started = time.perf_counter()
+        try:
+            return await traced(*args, **kwargs)
+        finally:
+            record_model_call_duration(
+                (time.perf_counter() - started) * 1000.0, dialect=dialect, server_name=server_name
+            )
 
     return wrapper
 

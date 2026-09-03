@@ -50,6 +50,7 @@ from nemo_gym.sandbox.providers.base import (
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
 from nemo_gym.sandbox.providers.utils import path_under_mount as _path_under_mount
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 
 
 LOGGER = logging.getLogger(__name__)
@@ -305,7 +306,7 @@ class EnrootProvider:
         self._create_config = _coerce_config(create, EnrootCreateConfig)
         self._probe = _coerce_config(probe, EnrootProbeConfig)
         self._binary = _require_enroot()
-        self._semaphore = asyncio.Semaphore(self._exec_config.concurrency)
+        self._semaphore = TimedSemaphore(self._exec_config.concurrency, site="sandbox.enroot")
 
         # Resolve and pin provider-scoped enroot paths. Falling back to a
         # provider-managed base dir keeps the provider working when XDG_* /

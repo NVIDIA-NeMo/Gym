@@ -111,6 +111,23 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
         description=("TCP_KEEPCNT: number of unanswered probes before the kernel drops the connection."),
     )
 
+    global_aiohttp_total_timeout_seconds: Optional[float] = Field(
+        default=300.0,
+        description=(
+            "Total timeout for one aiohttp request, seconds. 300.0 matches aiohttp's own "
+            "implicit default, so this only surfaces the knob -- it does not change behavior "
+            "until a caller opts into a different value."
+        ),
+    )
+    global_aiohttp_connect_timeout_seconds: Optional[float] = Field(
+        default=30.0,
+        description="Timeout for establishing the connection, seconds.",
+    )
+    global_aiohttp_sock_read_timeout_seconds: Optional[float] = Field(
+        default=None,
+        description="Timeout for reading a chunk of the response, seconds. Unset by default.",
+    )
+
 
 def get_global_aiohttp_client(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
@@ -169,7 +186,11 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
                 probes=cfg.global_aiohttp_tcp_keepalive_probes,
             ),
         ),
-        timeout=ClientTimeout(),
+        timeout=ClientTimeout(
+            total=cfg.global_aiohttp_total_timeout_seconds,
+            connect=cfg.global_aiohttp_connect_timeout_seconds,
+            sock_read=cfg.global_aiohttp_sock_read_timeout_seconds,
+        ),
         cookie_jar=DummyCookieJar(),
     )
 
@@ -287,9 +308,21 @@ async def _traced_request(
             }
             safe_set_span_attributes(span, attributes)
 
-        response = await _request_with_retries(
-            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
-        )
+        # Mutated in place by `_request_with_retries` on every retry attempt, so the count
+        # is visible here even when the call ultimately raises.
+        retry_count = [0]
+        try:
+            response = await _request_with_retries(
+                method,
+                url,
+                _internal=_internal,
+                _max_connection_retries=_max_connection_retries,
+                _retry_count_out=retry_count,
+                **kwargs,
+            )
+        finally:
+            if span is not None and retry_count[0]:
+                safe_set_span_attributes(span, {"nemo.gym.http.retry_count": retry_count[0]})
 
         if span is not None:
             safe_set_span_attributes(span, {"http.response.status_code": response.status})
@@ -337,12 +370,31 @@ async def _request_with_retries(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _retry_count_out: Optional[list] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
+    """Retry loop behind :func:`request`.
+
+    ``_retry_count_out``, when given a one-element list, is mutated in place on every
+    retry attempt (regardless of reason) -- since this loop can raise or return from many
+    branches, an out-parameter the caller already holds a reference to is simpler than
+    threading a return value through every exit point. Metric recording is gated by
+    ``GymSpanGroup.HTTP_CLIENT`` directly here (not just at the ``request()`` dispatch
+    point) since this function is reached from both the traced and untraced paths.
+    """
+    from nemo_gym.telemetry._fallbacks import is_span_group_enabled
+    from nemo_gym.telemetry.gym_metrics import record_http_timeout, record_retry
+    from nemo_gym.telemetry.span_groups import GymSpanGroup
+
     client = get_global_aiohttp_client()
     num_tries = 1
     retries = 0
     retry_start = time.monotonic()
+
+    def _bump_retry_count() -> None:
+        if _retry_count_out is not None:
+            _retry_count_out[0] = retries
+
     while True:
         try:
             return await client.request(method=method, url=url, **kwargs)
@@ -350,6 +402,9 @@ async def _request_with_retries(
             global _NUM_SERVER_DISCONNECTED_ERROR
             _NUM_SERVER_DISCONNECTED_ERROR += 1
             retries += 1
+            _bump_retry_count()
+            if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT):
+                record_retry(reason="server_disconnected")
             if _NUM_SERVER_DISCONNECTED_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                 print(
                     f"[request_retry url={url} error=ServerDisconnectedError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
@@ -366,6 +421,9 @@ async def _request_with_retries(
             global _NUM_CLIENT_OS_ERROR
             _NUM_CLIENT_OS_ERROR += 1
             retries += 1
+            _bump_retry_count()
+            if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT):
+                record_retry(reason="client_os_error")
             if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                 print(
                     f"[request_retry url={url} error=ClientOSError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
@@ -377,9 +435,35 @@ async def _request_with_retries(
                 raise
 
             await asyncio.sleep(0.5)
+        except asyncio.TimeoutError as e:
+            retries += 1
+            _bump_retry_count()
+            if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT):
+                record_http_timeout(internal=_internal)
+                record_retry(reason="timeout")
+
+            # Same retry policy as the generic-exception branch below (this used to land
+            # there, unclassified): internal callers retry indefinitely, external ones
+            # stop after MAX_NUM_TRIES.
+            if not _internal:
+                print(
+                    f"""Hit a timeout while making a request (try {num_tries}): {type(e)}: {e}
+Sleeping 0.5s and retrying...
+"""
+                )
+                if num_tries >= MAX_NUM_TRIES:
+                    raise e
+                num_tries += 1
+
+            await asyncio.sleep(0.5)
         except Exception as e:
             if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                 print_exc()
+
+            retries += 1
+            _bump_retry_count()
+            if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT):
+                record_retry(reason="other")
 
             # Don't increment internal since we know we are ok. If we are not, the head server will shut everything down anyways.
             if not _internal:
@@ -501,9 +585,16 @@ class ServerClient(BaseModel):
             if rollout_id is not None and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/"):
                 url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
 
+        # The rollout-id prefix is also what makes a model call resolvable in
+        # `_ModelCallCaptureMiddleware` (the ASGI middleware in base_responses_api_model.py) --
+        # including its `GymSpanGroup.MODEL_CALL`-gated `gym.model.time_to_first_byte_ms`
+        # tracking, not just the JSONL capture pipeline `observability_enabled` was written for.
+        # Without this, `time_to_first_byte_ms` silently never fires when telemetry is on but
+        # `observability_enabled` (a separate, older flag) is not, since the middleware never
+        # sees a rollout id to key off of.
         if (
             rollout_id is not None
-            and observability_enabled
+            and (observability_enabled or is_span_group_enabled(GymSpanGroup.MODEL_CALL))
             and server_entry is not None
             and "responses_api_models" in server_entry
             and url_path.partition("?")[0] in {"/v1/responses", "/v1/chat/completions", "/v1/messages"}

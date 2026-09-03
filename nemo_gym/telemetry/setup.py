@@ -69,6 +69,26 @@ _TELEMETRY_HANDLE: Optional["TelemetryHandle"] = None
 _INITIALISED = False
 _INIT_LOCK = threading.Lock()
 
+#: Resolved once in `init_telemetry` and cached here, mirroring how span groups are
+#: resolved once into a frozenset rather than re-parsed from the environment on every
+#: call. `is_cpu_sampling_enabled`/`cpu_min_resample_interval_s` are called from
+#: `traced_endpoint`, Gym's highest-volume per-request site -- re-reading and
+#: re-parsing an env var there each time measured 27x a bare call in
+#: `test_overhead.py`, well above what a disabled hot-path gate should cost.
+_CPU_SAMPLING_ENABLED = False
+_CPU_MIN_RESAMPLE_INTERVAL_S = 1.0
+
+#: Same caching rationale as the CPU pair above, though GPU sampling itself runs on a
+#: background thread rather than at a per-request hot-path call site — these are cached
+#: for symmetry and so tests can assert resolved config without reaching into
+#: `nemo_gym.telemetry.gpu` internals.
+_GPU_SAMPLING_ENABLED = False
+_GPU_SAMPLE_INTERVAL_S = 10.0
+
+#: Cached the same way as the CPU/GPU pairs above.
+_MEMORY_SAMPLING_ENABLED = False
+_MEMORY_MIN_RESAMPLE_INTERVAL_S = 1.0
+
 #: ``NemoLensConfig.from_env`` reads ``NEMO_GYM_OTEL_<KEY>`` first, then ``NEMO_LENS_<KEY>``.
 #: The fallback is what makes the documented ``NEMO_LENS_ENABLED=1`` work unchanged.
 _OTEL_PREFIX = "NEMO_GYM_OTEL"
@@ -101,6 +121,12 @@ _ENV_FIELD_MAP = {
     # Gym-owned flags, read back by init_telemetry / server_utils rather than by lens.
     "service_name_per_server": f"{_OTEL_PREFIX}_SERVICE_NAME_PER_SERVER",
     "instrument_aiohttp": f"{_OTEL_PREFIX}_INSTRUMENT_AIOHTTP",
+    "cpu_sampling_enabled": f"{_OTEL_PREFIX}_CPU_SAMPLING_ENABLED",
+    "cpu_min_resample_interval_s": f"{_OTEL_PREFIX}_CPU_MIN_RESAMPLE_INTERVAL_S",
+    "gpu_sampling_enabled": f"{_OTEL_PREFIX}_GPU_SAMPLING_ENABLED",
+    "gpu_sample_interval_s": f"{_OTEL_PREFIX}_GPU_SAMPLE_INTERVAL_S",
+    "memory_sampling_enabled": f"{_OTEL_PREFIX}_MEMORY_SAMPLING_ENABLED",
+    "memory_min_resample_interval_s": f"{_OTEL_PREFIX}_MEMORY_MIN_RESAMPLE_INTERVAL_S",
 }
 
 #: OTLP destination fields -> the standard (unprefixed) OTel SDK env vars they configure.
@@ -121,6 +147,17 @@ def _env_flag(name: str, default: bool) -> bool:
     if not raw:
         return default
     return raw in _TRUTHY
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a Gym-owned float env var, tolerating an unset, blank, or malformed value."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 def is_telemetry_env_enabled() -> bool:
@@ -215,6 +252,23 @@ def configure_telemetry_env(telemetry_config: Union[TelemetryConfig, None]) -> O
         run_id = os.environ.get("SLURM_JOB_ID", "").strip() or uuid4().hex[:12]
         os.environ[f"{_OTEL_PREFIX}_RUN_ID"] = run_id
     return run_id
+
+
+def telemetry_env_snapshot() -> dict:
+    """Currently-set telemetry env vars in this process, for propagation into a child
+    that does not inherit ``os.environ`` the way a ``Popen``-spawned sibling server
+    does.
+
+    A Gym server process gets its `NEMO_GYM_OTEL_*`/`OTEL_*` config for free: it is
+    spawned via ``Popen``, which copies the parent's environment automatically. A Ray
+    actor is not — Ray's ``runtime_env.env_vars`` is the mechanism this codebase already
+    uses to forward `PYTHONPATH`/`PATH` into an actor
+    (``responses_api_models/local_vllm_model/app.py``), and telemetry env vars need the
+    identical treatment: read them here in the launching process, merge the result into
+    that same ``runtime_env.env_vars`` dict.
+    """
+    prefixes = (f"{_OTEL_PREFIX}_", f"{_OTEL_FALLBACK_PREFIX}_", "OTEL_")
+    return {key: value for key, value in os.environ.items() if key.startswith(prefixes)}
 
 
 #: Packages a Gym server process needs in order to export telemetry. `nemo-lens[sdk]`
@@ -390,6 +444,27 @@ def init_telemetry(
         if resource_attributes:
             attrs.update(resource_attributes)
 
+        global _CPU_SAMPLING_ENABLED, _CPU_MIN_RESAMPLE_INTERVAL_S
+        _CPU_SAMPLING_ENABLED = _env_flag(_ENV_FIELD_MAP["cpu_sampling_enabled"], False)
+        _CPU_MIN_RESAMPLE_INTERVAL_S = _env_float(_ENV_FIELD_MAP["cpu_min_resample_interval_s"], 1.0)
+        if _CPU_SAMPLING_ENABLED:
+            from nemo_gym.telemetry.cpu import host_cpu_count_logical, host_cpu_count_physical
+
+            logical_count = host_cpu_count_logical()
+            if logical_count is not None:
+                attrs["nemo.gym.host.cpu_count_logical"] = logical_count
+            physical_count = host_cpu_count_physical()
+            if physical_count is not None:
+                attrs["nemo.gym.host.cpu_count_physical"] = physical_count
+
+        global _MEMORY_SAMPLING_ENABLED, _MEMORY_MIN_RESAMPLE_INTERVAL_S
+        _MEMORY_SAMPLING_ENABLED = _env_flag(_ENV_FIELD_MAP["memory_sampling_enabled"], False)
+        _MEMORY_MIN_RESAMPLE_INTERVAL_S = _env_float(_ENV_FIELD_MAP["memory_min_resample_interval_s"], 1.0)
+
+        global _GPU_SAMPLING_ENABLED, _GPU_SAMPLE_INTERVAL_S
+        _GPU_SAMPLING_ENABLED = _env_flag(_ENV_FIELD_MAP["gpu_sampling_enabled"], False)
+        _GPU_SAMPLE_INTERVAL_S = _env_float(_ENV_FIELD_MAP["gpu_sample_interval_s"], 10.0)
+
         try:
             handle = setup_telemetry(config, rank=rank, world_size=world_size, resource_attributes=attrs)
         except Exception:
@@ -397,6 +472,11 @@ def init_telemetry(
             return None
 
         _TELEMETRY_HANDLE = handle
+
+        if _GPU_SAMPLING_ENABLED:
+            from nemo_gym.telemetry.gpu import start_gpu_sampler
+
+            start_gpu_sampler(_GPU_SAMPLE_INTERVAL_S)
 
         if config.logs_enabled and handle.is_exporting:
             try:
@@ -416,6 +496,58 @@ def init_telemetry(
         return handle
 
 
+def is_cpu_sampling_enabled() -> bool:
+    """Whether span-boundary CPU sampling is on in this process.
+
+    Returns a value resolved once in `init_telemetry` and cached in a module global,
+    like span groups are resolved once into a frozenset — not re-read from the
+    environment on every call. Call sites (`traced_endpoint`, `AsyncSandbox.start`/
+    `exec`, the `gym.job` span) check this before calling
+    `nemo_gym.telemetry.cpu.sample_cpu_percent`, and this is Gym's highest-volume
+    per-request site, so a disabled run must cost one attribute read and nothing else
+    — re-parsing an env var here on every call measured 27x a bare call in
+    `test_overhead.py` (`os.environ.get` plus `str.strip`/`str.lower`), which is why this
+    is cached rather than computed live like `_env_flag` normally would.
+    """
+    return _CPU_SAMPLING_ENABLED
+
+
+def cpu_min_resample_interval_s() -> float:
+    """The configured minimum seconds between real CPU reads. See
+    ``TelemetryConfig.cpu_min_resample_interval_s``. Cached at `init_telemetry` time,
+    same reasoning as :func:`is_cpu_sampling_enabled`."""
+    return _CPU_MIN_RESAMPLE_INTERVAL_S
+
+
+def is_memory_sampling_enabled() -> bool:
+    """Whether span-boundary host-memory sampling is on in this process. Same caching
+    reasoning as :func:`is_cpu_sampling_enabled` — called from `traced_endpoint`, a
+    per-request hot path."""
+    return _MEMORY_SAMPLING_ENABLED
+
+
+def memory_min_resample_interval_s() -> float:
+    """The configured minimum seconds between real host-memory reads. See
+    ``TelemetryConfig.memory_min_resample_interval_s``."""
+    return _MEMORY_MIN_RESAMPLE_INTERVAL_S
+
+
+def is_gpu_sampling_enabled() -> bool:
+    """Whether the background GPU sampler is on in this process. Resolved once in
+    `init_telemetry` and cached, mirroring :func:`is_cpu_sampling_enabled` — though
+    unlike that one, nothing calls this from a per-request hot path (the GPU sampler is
+    fire-and-forget on its own thread), so this getter exists mainly for symmetry and so
+    tests can assert resolved config without reaching into
+    `nemo_gym.telemetry.gpu` internals."""
+    return _GPU_SAMPLING_ENABLED
+
+
+def gpu_sample_interval_s() -> float:
+    """The configured seconds between ``nvidia-smi`` polls. See
+    ``TelemetryConfig.gpu_sample_interval_s``."""
+    return _GPU_SAMPLE_INTERVAL_S
+
+
 def get_telemetry() -> Optional["TelemetryHandle"]:
     """Return this process's telemetry handle, or ``None`` if uninitialised/disabled."""
     return _TELEMETRY_HANDLE
@@ -427,6 +559,13 @@ def shutdown_telemetry(timeout_ms: int = 5000) -> None:
     Idempotent — ``TelemetryHandle.shutdown`` guards against a second call, and Gym
     reaches this from more than one terminal path. Never raises.
     """
+    try:
+        from nemo_gym.telemetry.gpu import stop_gpu_sampler
+
+        stop_gpu_sampler()
+    except Exception:
+        logger.warning("nemo-lens: error stopping the GPU sampler", exc_info=True)
+
     handle = _TELEMETRY_HANDLE
     if handle is None:
         return
@@ -442,6 +581,26 @@ def _reset_for_testing() -> None:
     Test-only. Production code has exactly one init per process, which is what
     ``_INITIALISED`` enforces.
     """
-    global _TELEMETRY_HANDLE, _INITIALISED
+    global _TELEMETRY_HANDLE, _INITIALISED, _CPU_SAMPLING_ENABLED, _CPU_MIN_RESAMPLE_INTERVAL_S
+    global _GPU_SAMPLING_ENABLED, _GPU_SAMPLE_INTERVAL_S
+    global _MEMORY_SAMPLING_ENABLED, _MEMORY_MIN_RESAMPLE_INTERVAL_S
     _TELEMETRY_HANDLE = None
     _INITIALISED = False
+    _CPU_SAMPLING_ENABLED = False
+    _CPU_MIN_RESAMPLE_INTERVAL_S = 1.0
+    _GPU_SAMPLING_ENABLED = False
+    _GPU_SAMPLE_INTERVAL_S = 10.0
+    _MEMORY_SAMPLING_ENABLED = False
+    _MEMORY_MIN_RESAMPLE_INTERVAL_S = 1.0
+    try:
+        from nemo_gym.telemetry.gpu import _reset_for_testing as _reset_gpu_for_testing
+
+        _reset_gpu_for_testing()
+    except Exception:
+        logger.debug("failed to reset gpu sampler state for testing", exc_info=True)
+    try:
+        from nemo_gym.telemetry.memory import _reset_for_testing as _reset_memory_for_testing
+
+        _reset_memory_for_testing()
+    except Exception:
+        logger.debug("failed to reset memory sampler state for testing", exc_info=True)

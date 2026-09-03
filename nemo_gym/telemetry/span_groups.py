@@ -137,6 +137,13 @@ class GymSpanGroup(SpanGroup):
     SANDBOX = "sandbox"
     """Sandbox provider create/exec/delete spans."""
 
+    CONCURRENCY = "concurrency"
+    """Semaphore queue-wait timing across the rollout driver, agent/model servers,
+    resources-server judges, and sandbox providers. Not part of ``default`` — it fires at
+    every one of Gym's ~60 concurrency-limiting semaphores, which is too much volume for
+    the always-on baseline preset. Part of ``per_rollout``: "am I bottlenecked on a
+    concurrency limit" is exactly the debugging question that preset exists for."""
+
     # ------------------------------------------------------------------ #
     # All groups and presets
     # ------------------------------------------------------------------ #
@@ -150,6 +157,7 @@ class GymSpanGroup(SpanGroup):
             AGENT,
             MODEL_CALL,
             SANDBOX,
+            CONCURRENCY,
         ]
     )
 
@@ -162,6 +170,6 @@ class GymSpanGroup(SpanGroup):
         # NOTE: ``per_rollout`` deliberately omits ``job`` so each rollout is its own root
         # trace with a bounded span count. ``job`` wraps a whole eval run and lives in
         # ``default`` and ``all``.
-        "per_rollout": frozenset([VERIFY, AGENT, MODEL_CALL]) | CROSS_PROCESS_SPINE,
+        "per_rollout": frozenset([VERIFY, AGENT, MODEL_CALL, CONCURRENCY]) | CROSS_PROCESS_SPINE,
         "all": ALL_GROUPS,
     }

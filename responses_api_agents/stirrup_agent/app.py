@@ -50,6 +50,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.telemetry.concurrency import TimedSemaphore
 from responses_api_agents.stirrup_agent.task_strategy import TaskSampleSkipError, TaskStrategy
 
 
@@ -954,7 +955,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
-        self.sem = Semaphore(self.config.concurrency)
+        self.sem = TimedSemaphore(self.config.concurrency, site="agent.stirrup_agent")
         self.task_strategy = get_task_strategy(self.config.task)
         # persist_deliverables_dir must be absolute — the resources server
         # reads it from a different subprocess CWD, so a relative path
