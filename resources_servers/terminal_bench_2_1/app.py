@@ -40,8 +40,6 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
 
-    max_concurrency: Optional[int] = None
-
     debug: bool = False
 
 
