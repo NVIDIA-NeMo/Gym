@@ -72,12 +72,19 @@ class PartialStagePolicy:
     behaviour. Rows already resolved by the standard terminal/max-attempt rules
     remain eligible, but every omission still counts against the configured
     coverage floors. Drained/no-persist and missing rows keep the stage open.
+
+    ``tolerate_unresolved`` drops that last rule: the coverage floors alone
+    decide the stage, whatever the cause of an omission. Set it on a
+    calibration stage whose omissions are structural -- a missing reference
+    deliverable never becomes present on retry, so holding the stage open for
+    it only converts a data gap into a hang.
     """
 
     min_success_fraction: float = 1.0
     min_per_reference_success_fraction: float = 1.0
     min_successful_rows_per_reference: int = 1
     waivable_failure_classes: Tuple[str, ...] = ("timeout_exceeded",)
+    tolerate_unresolved: bool = False
 
 
 @dataclass

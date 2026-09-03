@@ -211,6 +211,7 @@ def _partial_policy_record(policy: PartialStagePolicy) -> Dict[str, Any]:
         "min_per_reference_success_fraction": policy.min_per_reference_success_fraction,
         "min_successful_rows_per_reference": policy.min_successful_rows_per_reference,
         "newly_waivable_failure_classes": sorted(policy.waivable_failure_classes),
+        "tolerate_unresolved": policy.tolerate_unresolved,
     }
 
 
@@ -304,14 +305,15 @@ def _partial_stage_outcome(
     included_rows = [successful_by_key[key] for key in included_keys]
     already_resolved_omitted_keys = set(omitted_keys) - set(unresolved_keys)
     result_by_key = {_stage_key(result): result for result in new_results}
-    for key in unresolved_keys:
-        result = result_by_key.get(key)
-        if (
-            result is None
-            or result.get(NG_NO_PERSIST_KEY)
-            or result.get(NG_FAILURE_CLASS_KEY) not in policy.waivable_failure_classes
-        ):
-            return None
+    if not policy.tolerate_unresolved:
+        for key in unresolved_keys:
+            result = result_by_key.get(key)
+            if (
+                result is None
+                or result.get(NG_NO_PERSIST_KEY)
+                or result.get(NG_FAILURE_CLASS_KEY) not in policy.waivable_failure_classes
+            ):
+                return None
 
     per_reference = {
         reference_id: {
@@ -360,6 +362,7 @@ def _cached_partial_snapshot_is_valid(
         "min_per_reference_success_fraction",
         "min_successful_rows_per_reference",
         "newly_waivable_failure_classes",
+        "tolerate_unresolved",
     }
     if (
         expected_policy is None
@@ -608,12 +611,13 @@ def _parse_partial_stage_policy(raw: Any) -> Optional[PartialStagePolicy]:
         "min_per_reference_success_fraction",
         "min_successful_rows_per_reference",
         "waivable_failure_classes",
+        "tolerate_unresolved",
     }
     unknown_fields = sorted(set(raw) - allowed_fields)
     if unknown_fields:
         raise ValueError(f"unknown partial_completion field(s): {', '.join(map(str, unknown_fields))}")
 
-    numeric_fields = allowed_fields - {"waivable_failure_classes"}
+    numeric_fields = allowed_fields - {"waivable_failure_classes", "tolerate_unresolved"}
     if any(isinstance(raw.get(field), bool) for field in numeric_fields if field in raw):
         raise ValueError("partial_completion thresholds must be numeric, not boolean")
 
@@ -621,6 +625,10 @@ def _parse_partial_stage_policy(raw: Any) -> Optional[PartialStagePolicy]:
     if isinstance(raw_waivable, (str, bytes)) or not isinstance(raw_waivable, Sequence):
         raise ValueError("partial_completion.waivable_failure_classes must be a sequence of strings")
     waivable = tuple(str(value) for value in raw_waivable)
+
+    raw_tolerate = raw.get("tolerate_unresolved", False)
+    if not isinstance(raw_tolerate, bool):
+        raise ValueError("partial_completion.tolerate_unresolved must be a boolean")
 
     try:
         raw_minimum_rows = raw.get("min_successful_rows_per_reference", 1)
@@ -630,6 +638,7 @@ def _parse_partial_stage_policy(raw: Any) -> Optional[PartialStagePolicy]:
             min_per_reference_success_fraction=float(raw.get("min_per_reference_success_fraction", 1.0)),
             min_successful_rows_per_reference=minimum_rows,
             waivable_failure_classes=waivable,
+            tolerate_unresolved=raw_tolerate,
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("partial_completion thresholds must be numeric") from exc
