@@ -51,6 +51,7 @@ answers a "what is limiting this run" question the metrics above cannot:
 | `gym.model.time_to_first_byte_ms` | Histogram | ms | `nemo.gym.model.dialect`, `nemo.gym.server.name` | `model_call` | How long until the first response byte — is inference queued behind other work? |
 | `gym.http.timeout_total` | Counter | count | `nemo.gym.http.internal` | `http_client` | Is an outbound HTTP call timing out? |
 | `gym.http.retry_total` | Counter | count | `nemo.gym.http.retry_reason` (`server_disconnected`\|`client_os_error`\|`timeout`\|`other`) | `http_client` | Is Gym's HTTP client retrying, and why? |
+| `gym.process.cpu.percent` | Gauge | % | none — see resource attributes | `telemetry.cpu_sampling_enabled` | Is this process CPU-bound, and which span was running when it spiked? |
 
 ### Why These Are Attributed and the First Five Are Not
 
@@ -73,14 +74,59 @@ hit — a gauge cannot express a rate on its own — resolved the other way: tha
 stuck with a lens-provided gauge and has to keep a cumulative running fraction instead;
 this one is a local instrument, so it can just be a counter.
 
-### Not Yet Covered: CPU / Memory Pressure
+### Process CPU: a Gauge Linked to the Exact Span That Was Running
 
-NeMo Gym does not currently emit host or process CPU/memory metrics for sandboxes or
-servers. `SandboxObservation` (the offline trajectory-capture schema, unrelated to OTel)
-has `cpu_time_s` / `peak_memory_mib` fields, but nothing populates them from a real
-measurement today. Filling this in needs a resource-sampling mechanism (per-sandbox-
-provider process stats, or cgroup reads) that does not exist yet — tracked as follow-up
-work, not covered by the metrics on this page.
+`gym.process.cpu.percent` is sampled **inline at span boundaries** — inside
+`traced_endpoint`'s `finally`, `AsyncSandbox.start`/`exec`, and the `gym.job` span —
+rather than on a background timer. That is a deliberate design constraint, not an
+implementation shortcut: an OTel exemplar (a data point that carries a trace/span id) can
+only be attached while the originating span is the *active* context, and OTel context does
+not cross OS threads without explicit propagation. A decoupled background-thread sampler
+would have no span to link to. So every `gym.process.cpu.percent` reading is taken by the
+same code path that also stamps the reading onto that span's `nemo.gym.cpu.percent`
+attribute — click through from a metric data point's exemplar to the exact span active
+when it was recorded (Honeycomb supports this natively; confirmed against the pinned
+`opentelemetry-sdk` 1.44.0, which attaches exemplars to a synchronous Gauge with no extra
+filter configuration).
+
+Both surfaces share one process-local sampler (`nemo_gym.telemetry.cpu`), rate-limited to
+one real `psutil` read per `telemetry.cpu_sampling_enabled`'s
+`cpu_min_resample_interval_s` (default 1 second) — a span closing inside that window
+reuses the last cached reading rather than triggering a fresh syscall, which is also why
+`nemo.gym.cpu.percent` can be up to that many seconds stale, the same "cumulative window"
+caveat `gym.verify.success_rate` carries below.
+
+`cpu_sampling_enabled` defaults to **off** — it is not implied by `metrics_enabled` or any
+span group, since even inline sampling is an extra syscall on every (rate-limited) span
+close plus an extra resource attribute per process:
+
+```yaml
+telemetry:
+  cpu_sampling_enabled: true
+  cpu_min_resample_interval_s: 1.0
+```
+
+**Reading `gym.process.cpu.percent` on a multi-core node:** `psutil` normalizes to one
+logical core = 100%, so a busy multi-threaded process on a many-core node can legitimately
+read 800%+. Every process that has `cpu_sampling_enabled` on also reports a static
+`nemo.gym.host.cpu_count` resource attribute (read once, not sampled) — divide by
+`100 * nemo.gym.host.cpu_count` for percent-of-node-capacity.
+
+**Multi-node runs** need no special handling: every span/metric already carries
+`host.name`, `process.pid`, and `service.instance.id` as resource attributes (see
+[Configuration](/observability/configuration)), so each node's processes are
+distinguishable without anything new from this feature.
+
+### Not Yet Covered: Sandbox CPU, Ray Worker CPU, and All Memory
+
+Process-level CPU for Gym's own server processes (agent/model/resources servers, the
+rollout driver) is covered above. Still unmeasured: CPU *inside* a sandbox/container
+(would need new per-provider work — a `docker stats` read, a cgroup v2 accounting-file
+read — with no existing hook to build on), CPU of Ray worker processes spawned for sandbox
+execution (separate OS processes with their own PID), and memory pressure of any kind.
+`SandboxObservation` (the offline trajectory-capture schema, unrelated to OTel) has
+`cpu_time_s` / `peak_memory_mib` fields, but nothing populates them from a real
+measurement today. All of this is tracked as follow-up work.
 
 ### What `gym.verify.success_rate` Measures
 

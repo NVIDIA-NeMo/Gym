@@ -40,6 +40,8 @@ telemetry:
 | `export_strategy` | `all_ranks` | Which processes export. See below. |
 | `export_rank` | `-1` | For `single_rank`: which rank exports. `-1` means the last rank. |
 | `run_id` | generated | Correlates every process of one run. |
+| `cpu_sampling_enabled` | `false` | Sample process CPU at span boundaries; emits `gym.process.cpu.percent` and a `nemo.gym.cpu.percent` span attribute. See [Metrics](/observability/metrics). |
+| `cpu_min_resample_interval_s` | `1.0` | Minimum seconds between real CPU reads; a span closing sooner reuses the last cached reading. |
 
 ### Why `service_name_per_server` Defaults to True
 

@@ -97,6 +97,17 @@ def _record_counter(name: str, description: str, attributes: dict, amount: int =
         logger.debug("nemo-lens: failed to record %s", name, exc_info=True)
 
 
+def _record_gauge(name: str, unit: str, description: str, value: float, attributes: dict) -> None:
+    meter = _meter()
+    if meter is None:
+        return
+    try:
+        instrument = _get_or_create(meter, name, lambda: meter.create_gauge(name, unit=unit, description=description))
+        instrument.set(value, attributes=attributes)
+    except Exception:
+        logger.debug("nemo-lens: failed to record %s", name, exc_info=True)
+
+
 def record_queue_wait(duration_ms: float, *, site: str) -> None:
     """Record time spent waiting to acquire a concurrency-limiting semaphore.
 
@@ -188,6 +199,29 @@ def record_retry(*, reason: str) -> None:
         "gym.http.retry_total",
         "Count of outbound HTTP request retries by reason.",
         {"nemo.gym.http.retry_reason": reason},
+    )
+
+
+def record_process_cpu_percent(value: float) -> None:
+    """This process's CPU utilization (0-100 per logical core; can exceed 100 on a
+    multi-threaded workload -- normalize against the ``nemo.gym.host.cpu_count``
+    resource attribute for percent-of-node-capacity).
+
+    Call this from *inside* the active span's context (i.e. within the
+    ``with managed_span(...) as span:`` block that produced the reading) so the OTel
+    SDK's exemplar mechanism can attach that span's trace/span id to this data point.
+    Calling it outside a span context still records the gauge, just without a linked
+    exemplar. No call-site attributes: process identity is already carried by every
+    instrument this process emits via resource attributes
+    (``nemo.gym.server.name``/``nemo.gym.server.type``, see
+    ``telemetry.setup._build_resource_attributes``).
+    """
+    _record_gauge(
+        "gym.process.cpu.percent",
+        "%",
+        "This process's CPU utilization, sampled inline at span boundaries.",
+        value,
+        {},
     )
 
 

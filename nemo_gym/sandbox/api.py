@@ -400,7 +400,9 @@ class AsyncSandbox:
         if is_span_group_enabled(GymSpanGroup.SANDBOX):
             import time
 
-            from nemo_gym.telemetry.gym_metrics import record_sandbox_startup
+            from nemo_gym.telemetry.cpu import sample_cpu_percent
+            from nemo_gym.telemetry.gym_metrics import record_process_cpu_percent, record_sandbox_startup
+            from nemo_gym.telemetry.setup import cpu_min_resample_interval_s, is_cpu_sampling_enabled
 
             provider_name = self._telemetry_provider_name()
             started = time.perf_counter()
@@ -408,8 +410,13 @@ class AsyncSandbox:
                 GymSpanGroup.SANDBOX,
                 "gym.sandbox.start",
                 **{"nemo.gym.sandbox.provider": provider_name},
-            ):
+            ) as span:
                 handle = await self._provider.create(requested_spec)
+                if span is not None and is_cpu_sampling_enabled():
+                    cpu_percent = sample_cpu_percent(cpu_min_resample_interval_s())
+                    if cpu_percent is not None:
+                        safe_set_span_attributes(span, {"nemo.gym.cpu.percent": cpu_percent})
+                        record_process_cpu_percent(cpu_percent)
             record_sandbox_startup((time.perf_counter() - started) * 1000.0, provider=provider_name)
         else:
             handle = await self._provider.create(requested_spec)
@@ -456,13 +463,22 @@ class AsyncSandbox:
         ) as span:
             result = await self._exec_uninstrumented(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
             if span is not None:
-                safe_set_span_attributes(
-                    span,
-                    {
-                        "nemo.gym.sandbox.return_code": result.return_code,
-                        "nemo.gym.sandbox.error_type": result.error_type,
-                    },
-                )
+                attributes = {
+                    "nemo.gym.sandbox.return_code": result.return_code,
+                    "nemo.gym.sandbox.error_type": result.error_type,
+                }
+                from nemo_gym.telemetry.setup import is_cpu_sampling_enabled
+
+                if is_cpu_sampling_enabled():
+                    from nemo_gym.telemetry.cpu import sample_cpu_percent
+                    from nemo_gym.telemetry.gym_metrics import record_process_cpu_percent
+                    from nemo_gym.telemetry.setup import cpu_min_resample_interval_s
+
+                    cpu_percent = sample_cpu_percent(cpu_min_resample_interval_s())
+                    if cpu_percent is not None:
+                        attributes["nemo.gym.cpu.percent"] = cpu_percent
+                        record_process_cpu_percent(cpu_percent)
+                safe_set_span_attributes(span, attributes)
             return result
 
     async def _exec_uninstrumented(

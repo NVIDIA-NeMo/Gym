@@ -29,6 +29,7 @@ from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.telemetry import metrics as telemetry_metrics
 from nemo_gym.telemetry import setup as telemetry_setup
 from nemo_gym.telemetry.endpoints import (
+    CPU_PERCENT_ATTRIBUTE,
     ROLLOUT_ID_ATTRIBUTE,
     traced_endpoint,
     traced_rollout_endpoint,
@@ -144,6 +145,76 @@ async def test_gyms_existing_rollout_id_is_bridged_onto_the_span(recorded_spans)
         await wrapped()
 
     assert recorded_spans()[0].attributes[ROLLOUT_ID_ATTRIBUTE] == "7-2-a1"
+
+
+# --------------------------------------------------------------------------- #
+# CPU sampling
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(autouse=True)
+def _reset_cpu_sampler():
+    from nemo_gym.telemetry import cpu as telemetry_cpu
+
+    telemetry_cpu._reset_for_testing()
+    yield
+    telemetry_cpu._reset_for_testing()
+
+
+async def test_cpu_percent_is_attached_when_sampling_is_enabled(recorded_spans, monkeypatch):
+    monkeypatch.setattr(telemetry_setup, "_CPU_SAMPLING_ENABLED", True)
+    monkeypatch.setattr(telemetry_setup, "_CPU_MIN_RESAMPLE_INTERVAL_S", 0.0)
+
+    async def handler():
+        return "ok"
+
+    wrapped = traced_endpoint(GymSpanGroup.VERIFY, "gym.verify", handler)
+    await wrapped()  # priming call -- the sampler has no reading yet
+    await wrapped()  # second call gets a real reading
+
+    spans = recorded_spans()
+    assert CPU_PERCENT_ATTRIBUTE not in spans[0].attributes
+    assert CPU_PERCENT_ATTRIBUTE in spans[1].attributes
+    assert isinstance(spans[1].attributes[CPU_PERCENT_ATTRIBUTE], float)
+
+
+async def test_cpu_percent_is_omitted_when_sampling_is_disabled(recorded_spans, monkeypatch):
+    """OTel attributes can't be `None`, so an unprimed/disabled reading must skip the
+    key entirely rather than set it to something falsy -- same pattern already used for
+    a missing rollout id."""
+    monkeypatch.setattr(telemetry_setup, "_CPU_SAMPLING_ENABLED", False)
+
+    async def handler():
+        return "ok"
+
+    wrapped = traced_endpoint(GymSpanGroup.VERIFY, "gym.verify", handler)
+    await wrapped()
+    await wrapped()
+
+    for span in recorded_spans():
+        assert CPU_PERCENT_ATTRIBUTE not in span.attributes
+
+
+async def test_attributes_are_still_set_when_the_handler_raises(recorded_spans, monkeypatch):
+    """Attribute-setting moved into a `finally` around the handler call (so a CPU
+    reading reflects span-end); this must not silently stop firing on an exception."""
+    from nemo_gym.telemetry.cpu import sample_cpu_percent
+
+    monkeypatch.setattr(telemetry_setup, "_CPU_SAMPLING_ENABLED", True)
+    monkeypatch.setattr(telemetry_setup, "_CPU_MIN_RESAMPLE_INTERVAL_S", 0.0)
+    sample_cpu_percent(0.0)  # prime directly -- the handler below always raises
+
+    async def handler():
+        raise ValueError("boom")
+
+    wrapped = traced_endpoint(GymSpanGroup.VERIFY, "gym.verify", handler)
+    with rollout_context("7-2-a1"):
+        with pytest.raises(ValueError, match="boom"):
+            await wrapped()
+
+    span = recorded_spans()[0]
+    assert span.attributes[ROLLOUT_ID_ATTRIBUTE] == "7-2-a1"
+    assert CPU_PERCENT_ATTRIBUTE in span.attributes
 
 
 async def test_no_rollout_id_attribute_when_there_is_no_rollout(recorded_spans):

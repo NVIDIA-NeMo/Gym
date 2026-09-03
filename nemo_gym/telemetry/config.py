@@ -119,3 +119,17 @@ class TelemetryConfig(BaseModel, extra="allow"):
     run_id: Optional[str] = None
     """Correlates every process of one ``gym env start`` / ``gym env test`` invocation.
     Generated in the orchestrator and inherited by the servers when unset."""
+
+    cpu_sampling_enabled: bool = False
+    """Sample this process's CPU utilization at span boundaries and emit
+    ``gym.process.cpu.percent`` plus a ``nemo.gym.cpu.percent`` span attribute. Off by
+    default: even though sampling is inline rather than a background thread, it is still
+    an extra syscall on every (rate-limited) span close plus an extra resource
+    attribute — not implied by ``metrics_enabled`` or any span group, opt in explicitly.
+    See :mod:`nemo_gym.telemetry.cpu`."""
+
+    cpu_min_resample_interval_s: float = 1.0
+    """Minimum seconds between real ``psutil`` CPU reads. A span closing inside this
+    window since the last read reuses the cached value instead of issuing a fresh one,
+    keeping this cheap when many spans close in quick succession. Also caps how stale a
+    span's ``nemo.gym.cpu.percent`` attribute can be."""

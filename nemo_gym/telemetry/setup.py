@@ -69,6 +69,15 @@ _TELEMETRY_HANDLE: Optional["TelemetryHandle"] = None
 _INITIALISED = False
 _INIT_LOCK = threading.Lock()
 
+#: Resolved once in `init_telemetry` and cached here, mirroring how span groups are
+#: resolved once into a frozenset rather than re-parsed from the environment on every
+#: call. `is_cpu_sampling_enabled`/`cpu_min_resample_interval_s` are called from
+#: `traced_endpoint`, Gym's highest-volume per-request site -- re-reading and
+#: re-parsing an env var there each time measured 27x a bare call in
+#: `test_overhead.py`, well above what a disabled hot-path gate should cost.
+_CPU_SAMPLING_ENABLED = False
+_CPU_MIN_RESAMPLE_INTERVAL_S = 1.0
+
 #: ``NemoLensConfig.from_env`` reads ``NEMO_GYM_OTEL_<KEY>`` first, then ``NEMO_LENS_<KEY>``.
 #: The fallback is what makes the documented ``NEMO_LENS_ENABLED=1`` work unchanged.
 _OTEL_PREFIX = "NEMO_GYM_OTEL"
@@ -101,6 +110,8 @@ _ENV_FIELD_MAP = {
     # Gym-owned flags, read back by init_telemetry / server_utils rather than by lens.
     "service_name_per_server": f"{_OTEL_PREFIX}_SERVICE_NAME_PER_SERVER",
     "instrument_aiohttp": f"{_OTEL_PREFIX}_INSTRUMENT_AIOHTTP",
+    "cpu_sampling_enabled": f"{_OTEL_PREFIX}_CPU_SAMPLING_ENABLED",
+    "cpu_min_resample_interval_s": f"{_OTEL_PREFIX}_CPU_MIN_RESAMPLE_INTERVAL_S",
 }
 
 #: OTLP destination fields -> the standard (unprefixed) OTel SDK env vars they configure.
@@ -121,6 +132,17 @@ def _env_flag(name: str, default: bool) -> bool:
     if not raw:
         return default
     return raw in _TRUTHY
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a Gym-owned float env var, tolerating an unset, blank, or malformed value."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 def is_telemetry_env_enabled() -> bool:
@@ -390,6 +412,19 @@ def init_telemetry(
         if resource_attributes:
             attrs.update(resource_attributes)
 
+        global _CPU_SAMPLING_ENABLED, _CPU_MIN_RESAMPLE_INTERVAL_S
+        _CPU_SAMPLING_ENABLED = _env_flag(_ENV_FIELD_MAP["cpu_sampling_enabled"], False)
+        _CPU_MIN_RESAMPLE_INTERVAL_S = _env_float(_ENV_FIELD_MAP["cpu_min_resample_interval_s"], 1.0)
+        if _CPU_SAMPLING_ENABLED:
+            from nemo_gym.telemetry.cpu import host_cpu_count_logical, host_cpu_count_physical
+
+            logical_count = host_cpu_count_logical()
+            if logical_count is not None:
+                attrs["nemo.gym.host.cpu_count_logical"] = logical_count
+            physical_count = host_cpu_count_physical()
+            if physical_count is not None:
+                attrs["nemo.gym.host.cpu_count_physical"] = physical_count
+
         try:
             handle = setup_telemetry(config, rank=rank, world_size=world_size, resource_attributes=attrs)
         except Exception:
@@ -414,6 +449,29 @@ def init_telemetry(
             config.span_groups,
         )
         return handle
+
+
+def is_cpu_sampling_enabled() -> bool:
+    """Whether span-boundary CPU sampling is on in this process.
+
+    Returns a value resolved once in `init_telemetry` and cached in a module global,
+    like span groups are resolved once into a frozenset — not re-read from the
+    environment on every call. Call sites (`traced_endpoint`, `AsyncSandbox.start`/
+    `exec`, the `gym.job` span) check this before calling
+    `nemo_gym.telemetry.cpu.sample_cpu_percent`, and this is Gym's highest-volume
+    per-request site, so a disabled run must cost one attribute read and nothing else
+    — re-parsing an env var here on every call measured 27x a bare call in
+    `test_overhead.py` (`os.environ.get` plus `str.strip`/`str.lower`), which is why this
+    is cached rather than computed live like `_env_flag` normally would.
+    """
+    return _CPU_SAMPLING_ENABLED
+
+
+def cpu_min_resample_interval_s() -> float:
+    """The configured minimum seconds between real CPU reads. See
+    ``TelemetryConfig.cpu_min_resample_interval_s``. Cached at `init_telemetry` time,
+    same reasoning as :func:`is_cpu_sampling_enabled`."""
+    return _CPU_MIN_RESAMPLE_INTERVAL_S
 
 
 def get_telemetry() -> Optional["TelemetryHandle"]:
@@ -442,6 +500,8 @@ def _reset_for_testing() -> None:
     Test-only. Production code has exactly one init per process, which is what
     ``_INITIALISED`` enforces.
     """
-    global _TELEMETRY_HANDLE, _INITIALISED
+    global _TELEMETRY_HANDLE, _INITIALISED, _CPU_SAMPLING_ENABLED, _CPU_MIN_RESAMPLE_INTERVAL_S
     _TELEMETRY_HANDLE = None
     _INITIALISED = False
+    _CPU_SAMPLING_ENABLED = False
+    _CPU_MIN_RESAMPLE_INTERVAL_S = 1.0

@@ -71,6 +71,7 @@ def test_recording_without_telemetry_is_a_no_op():
     gym_metrics.record_model_time_to_first_byte(1.0, dialect="responses", server_name="m")
     gym_metrics.record_http_timeout(internal=False)
     gym_metrics.record_retry(reason="timeout")
+    gym_metrics.record_process_cpu_percent(1.0)
 
 
 def test_recording_errors_never_reach_the_caller(monkeypatch):
@@ -161,6 +162,62 @@ def test_retry_counts_by_reason(collected_metrics):
     by_reason = {dict(p.attributes)["nemo.gym.http.retry_reason"]: p.value for p in points}
     assert by_reason["timeout"] == 2
     assert by_reason["server_disconnected"] == 1
+
+
+def test_process_cpu_percent_is_a_gauge_with_no_call_attributes(collected_metrics):
+    gym_metrics.record_process_cpu_percent(42.5)
+    point = collected_metrics()["gym.process.cpu.percent"][0]
+    assert point.value == 42.5
+    # Process identity is carried by resource attributes (nemo.gym.server.name/type),
+    # not a call-site attribute -- locks in the decision so a future change doesn't add
+    # one by accident, mirroring the undimensioned five lens instruments.
+    assert dict(point.attributes) == {}
+
+
+def test_process_cpu_percent_last_value_wins(collected_metrics):
+    gym_metrics.record_process_cpu_percent(10.0)
+    gym_metrics.record_process_cpu_percent(90.0)
+    point = collected_metrics()["gym.process.cpu.percent"][0]
+    assert point.value == 90.0
+
+
+def test_process_cpu_percent_carries_an_exemplar_for_the_active_span(monkeypatch):
+    """The whole point of sampling inline at span boundaries rather than on a background
+    timer: a gauge point recorded while a span is active picks up that span's
+    trace_id/span_id as an OTel exemplar, confirmed against the pinned opentelemetry-sdk
+    (1.44.0) -- no extra exemplar-filter configuration needed, the SDK default already
+    does this for a synchronous Gauge."""
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+    from opentelemetry.sdk.trace import TracerProvider
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader])
+
+    class _Handle:
+        is_exporting = True
+        meter = provider.get_meter("test")
+
+    monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _Handle())
+    gym_metrics._reset_for_testing()
+
+    tracer = TracerProvider().get_tracer("test")
+    with tracer.start_as_current_span("gym.model.responses") as span:
+        span_context = span.get_span_context()
+        gym_metrics.record_process_cpu_percent(55.0)
+
+    point = None
+    for rm in reader.get_metrics_data().resource_metrics:
+        for sm in rm.scope_metrics:
+            for m in sm.metrics:
+                if m.name == "gym.process.cpu.percent":
+                    point = m.data.data_points[0]
+    assert point is not None
+    assert point.exemplars, "expected an exemplar linking this reading to the active span"
+    exemplar = point.exemplars[0]
+    assert exemplar.trace_id == span_context.trace_id
+    assert exemplar.span_id == span_context.span_id
+    assert exemplar.value == 55.0
 
 
 def test_instrument_cache_is_scoped_per_meter(collected_metrics, monkeypatch):

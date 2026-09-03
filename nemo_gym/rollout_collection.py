@@ -82,7 +82,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
-from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
+from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
 from nemo_gym.telemetry.concurrency import TimedSemaphore
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
@@ -1218,8 +1218,22 @@ class RolloutCollectionHelper(BaseModel):
         """
         if not is_span_group_enabled(GymSpanGroup.JOB):
             return await self._run_from_config(config)
-        with managed_span(GymSpanGroup.JOB, "gym.job"):
-            return await self._run_from_config(config)
+        with managed_span(GymSpanGroup.JOB, "gym.job") as span:
+            try:
+                return await self._run_from_config(config)
+            finally:
+                if span is not None:
+                    from nemo_gym.telemetry.setup import is_cpu_sampling_enabled
+
+                    if is_cpu_sampling_enabled():
+                        from nemo_gym.telemetry.cpu import sample_cpu_percent
+                        from nemo_gym.telemetry.gym_metrics import record_process_cpu_percent
+                        from nemo_gym.telemetry.setup import cpu_min_resample_interval_s
+
+                        cpu_percent = sample_cpu_percent(cpu_min_resample_interval_s())
+                        if cpu_percent is not None:
+                            safe_set_span_attributes(span, {"nemo.gym.cpu.percent": cpu_percent})
+                            record_process_cpu_percent(cpu_percent)
 
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)

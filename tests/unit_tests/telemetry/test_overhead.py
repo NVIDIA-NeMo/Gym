@@ -120,6 +120,29 @@ def test_managed_span_alone_is_not_free_which_is_why_sites_gate_first():
     )
 
 
+def test_cpu_sampling_disabled_gate_is_not_measurably_worse_than_a_bare_call():
+    """`traced_endpoint`'s CPU-sampling addition reintroduced a span-close hot-path
+    concern (queue-wait/sandbox sites are per-request too, but CPU sampling runs inside
+    every `traced_endpoint` call, the highest-volume site of all). `is_cpu_sampling_enabled`
+    must cost about what `is_span_group_enabled` costs -- a single cached-attribute read,
+    not a `sample_cpu_percent` call (which must never run on the disabled path) and not a
+    live env-var re-parse (an earlier version of this function did that and measured 27x
+    a bare call here -- see `nemo_gym.telemetry.setup`'s `_CPU_SAMPLING_ENABLED` caching).
+    """
+    from nemo_gym.telemetry.setup import is_cpu_sampling_enabled
+
+    assert is_cpu_sampling_enabled() is False
+
+    ns_gate = _min_ns("is_cpu_sampling_enabled()", {"is_cpu_sampling_enabled": is_cpu_sampling_enabled})
+    ns_baseline = _min_ns("noop()", {"noop": lambda: None})
+
+    print(f"\ndisabled cpu-sampling gate: {ns_gate:.1f} ns   bare call: {ns_baseline:.1f} ns")
+    assert ns_gate < ns_baseline * MAX_RATIO_VS_NULLCONTEXT, (
+        f"is_cpu_sampling_enabled costs {ns_gate / ns_baseline:.1f}x a bare call "
+        f"({ns_gate:.1f} ns vs {ns_baseline:.1f} ns) — something expensive is running above the gate"
+    )
+
+
 def test_attribute_building_stays_below_the_gate():
     """The pattern Gym's call sites use must not build attributes when disabled.
 

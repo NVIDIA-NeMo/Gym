@@ -34,10 +34,18 @@ from typing import Any, Callable, Optional
 
 from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
+from nemo_gym.telemetry.cpu import sample_cpu_percent
+from nemo_gym.telemetry.gym_metrics import record_process_cpu_percent
+from nemo_gym.telemetry.setup import cpu_min_resample_interval_s, is_cpu_sampling_enabled
 
 
 #: Span attribute carrying Gym's existing rollout correlation id.
 ROLLOUT_ID_ATTRIBUTE = "nemo.gym.rollout.id"
+
+#: Span attribute carrying a CPU-utilization-at-span-end reading. See
+#: `nemo_gym.telemetry.cpu` for why this is sampled inline here rather than by a
+#: decoupled background sampler (exemplar linkage needs the active span context).
+CPU_PERCENT_ATTRIBUTE = "nemo.gym.cpu.percent"
 
 
 def traced_endpoint(
@@ -74,13 +82,25 @@ def traced_endpoint(
             return await handler(*args, **kwargs)
 
         with managed_span(group, span_name) as span:
-            if span is not None:
-                attributes = dict(base_attributes)
-                rollout_id = current_rollout_id()
-                if rollout_id:
-                    attributes[ROLLOUT_ID_ATTRIBUTE] = rollout_id
-                safe_set_span_attributes(span, attributes)
-            return await handler(*args, **kwargs)
+            try:
+                return await handler(*args, **kwargs)
+            finally:
+                # Attributes are set here, after the handler returns, rather than
+                # before — so a CPU reading (added below) reflects span-end, not
+                # span-start. Moved intentionally; this used to run before the handler
+                # call, which is why `attributes` construction lives in a `finally`
+                # around it now instead of ahead of it.
+                if span is not None:
+                    attributes = dict(base_attributes)
+                    rollout_id = current_rollout_id()
+                    if rollout_id:
+                        attributes[ROLLOUT_ID_ATTRIBUTE] = rollout_id
+                    if is_cpu_sampling_enabled():
+                        cpu_percent = sample_cpu_percent(cpu_min_resample_interval_s())
+                        if cpu_percent is not None:
+                            attributes[CPU_PERCENT_ATTRIBUTE] = cpu_percent
+                            record_process_cpu_percent(cpu_percent)  # still inside `with managed_span`
+                    safe_set_span_attributes(span, attributes)
 
     return wrapper
 
