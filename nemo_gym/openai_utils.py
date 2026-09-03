@@ -931,22 +931,20 @@ class NeMoGymChatCompletionMessageToolCallFunctionParam(TypedDict, total=False):
     name: Required[str]
 
 
-# `NeMoGymChatCompletionCreateParamsNonStreaming` sets `extra="forbid"`, and
-# pydantic propagates that config into every nested `TypedDict`. Tool calls are
-# echoed back by agents from whatever the provider returned, so they routinely
-# carry provider-specific keys that are not in the OpenAI schema. Opt the tool
-# call shapes out so those keys are dropped rather than rejected; the request
-# model itself stays strict.
-_TOOL_CALL_CONFIG = ConfigDict(extra="ignore")
-
-
+# Clients label a tool call with the tool's name alongside the nested
+# `function.name`, and servers accept it, but the field is absent from OpenAI's
+# own type. Since the request schema forbids extras, and pydantic propagates
+# that into nested `TypedDict`s, its presence rejects the whole conversation.
+# Declared rather than ignored so it round-trips: an unknown field here is
+# still an error, because tool calls carry provider state that a client must
+# echo back verbatim and silently dropping it would corrupt the trajectory.
 class NeMoGymChatCompletionMessageToolCallParam(ChatCompletionMessageToolCallParam):
-    __pydantic_config__ = _TOOL_CALL_CONFIG
     function: NeMoGymChatCompletionMessageToolCallFunctionParam
+    name: NotRequired[str]
 
 
 class NeMoGymChatCompletionMessageCustomToolCallParam(ChatCompletionMessageCustomToolCallParam):
-    __pydantic_config__ = _TOOL_CALL_CONFIG
+    name: NotRequired[str]
 
 
 NeMoGymChatCompletionMessageToolCallUnionParam = Annotated[
