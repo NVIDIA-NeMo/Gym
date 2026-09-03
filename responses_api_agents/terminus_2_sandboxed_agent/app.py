@@ -206,7 +206,10 @@ class NeMoGymLLM(BaseLLM):
                     break
             except TimeoutError:
                 self._model_calls_gt_10min += 1
-                print(f"Hit 10min timeout on model call, attempt {attempt + 1} / {max_attempts}", file=sys.stderr)
+                print(
+                    f"Hit LiteLLM default 10min timeout on model call, attempt {attempt + 1} / {max_attempts}",
+                    file=sys.stderr,
+                )
         self._times_spent.append(perf_counter() - start_time)
         if not response:
             raise TimeoutError(f"Failed to query model endpoint due to timeouts after {max_attempts} attempts!")
