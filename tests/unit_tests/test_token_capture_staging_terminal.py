@@ -31,6 +31,8 @@ def _row(
         extras_digest=EMPTY_EXTRAS_DIGEST,
         staging_key=f"r1/{model_call_id}",
         mode="text" if parent_call_id is None else "token_in",
+        chain_hash=DIGEST,
+        cumulative_hash=DIGEST,
         response_id=f"chatcmpl-{model_call_id}",
         admitted_at=admitted_at,
     )

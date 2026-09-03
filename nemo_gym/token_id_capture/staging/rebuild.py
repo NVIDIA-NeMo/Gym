@@ -303,10 +303,9 @@ def verify_and_linearize(
     for index, record in enumerate(chain):
         snapshot = snapshots_by_id[record.model_call_id]
         # Chained-digest verification: each staged delta must extend its
-        # parent's chain hash. Rows staged before the chain columns existed
-        # carry ``None`` and skip this check.
+        # parent's chain hash.
         running_chain_hash = compute_chain_hash(running_chain_hash, snapshot.token_ids_delta)
-        if record.chain_hash is not None and record.chain_hash != running_chain_hash:
+        if record.chain_hash != running_chain_hash:
             raise RebuildError(
                 "chain_hash_mismatch",
                 f"call {record.model_call_id} does not extend its parent's staged chain",
@@ -334,8 +333,7 @@ def verify_and_linearize(
         raise RebuildError("empty_training_row", "terminal chain has no generated tokens")
     # Terminal-only whole-sequence anchor; per-record cumulative checks would
     # rehash O(n^2) tokens for no additional coverage over the chain hashes.
-    terminal_cumulative_hash = chain[-1].cumulative_hash
-    if terminal_cumulative_hash is not None and terminal_cumulative_hash != hash_token_ids(token_ids):
+    if chain[-1].cumulative_hash != hash_token_ids(token_ids):
         raise RebuildError(
             "cumulative_hash_mismatch",
             f"terminal call {chain[-1].model_call_id} cumulative hash does not cover the linearized tokens",

@@ -315,6 +315,8 @@ def test_stage_result_and_receipt_validate_identity() -> None:
         extras_digest=payload["extras_digest"],
         staging_key="backend/key",
         mode=payload["mode"],
+        chain_hash=payload["chain_hash"],
+        cumulative_hash=payload["cumulative_hash"],
         response_id="chatcmpl-call-1",
     )
     receipt = RolloutReceipt(

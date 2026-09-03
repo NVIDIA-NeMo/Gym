@@ -22,6 +22,7 @@ from typing import Annotated, Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, model_validator
 
 from nemo_gym.token_id_capture.records import (  # noqa: F401  (re-exported for staging consumers)
+    LEDGER_ROW_MISSING_CHAIN_HASH_REASON,
     LEDGER_ROW_MISSING_RESPONSE_ID_REASON,
     UNCOMMITTED_CALL_REASON,
     UNRESOLVED_PARENT_REASON,
@@ -59,7 +60,8 @@ def staging_key(rollout_id: str, model_call_id: str) -> str:
 
 # Reasons specific to worker commit coordinates. The shared reasons
 # (``UNRESOLVED_PARENT_REASON``, ``UNCOMMITTED_CALL_REASON``,
-# ``LEDGER_ROW_MISSING_RESPONSE_ID_REASON``) live in the core records module
+# ``LEDGER_ROW_MISSING_RESPONSE_ID_REASON``, ``LEDGER_ROW_MISSING_CHAIN_HASH_REASON``)
+# live in the core records module
 # and are re-exported here.
 
 # The worker's response carried no ``ng_commit_coords`` acknowledgement.
@@ -156,8 +158,8 @@ class StagedCallBaseSnapshot(_DigestWireModel):
     token_mask_delta: list[StrictFloat]
     generation_log_probs_delta: list[StrictFloat]
     extras_digest: DigestHex = EMPTY_EXTRAS_DIGEST
-    chain_hash: DigestHex | None = None
-    cumulative_hash: DigestHex | None = None
+    chain_hash: DigestHex
+    cumulative_hash: DigestHex
 
     @property
     def staging_key(self) -> str:
@@ -294,8 +296,8 @@ class CallRecord(_DigestWireModel):
     extras_digest: DigestHex
     staging_key: Identifier
     mode: CaptureMode = "token_in"
-    chain_hash: DigestHex | None = None
-    cumulative_hash: DigestHex | None = None
+    chain_hash: DigestHex
+    cumulative_hash: DigestHex
     # The response envelope ID observed before the model server returns the response.
     # Terminal attribution matches the scored ``response.id`` to this field.
     response_id: Identifier

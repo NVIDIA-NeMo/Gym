@@ -37,10 +37,23 @@ def _snapshot(
     logprobs: list[float],
     weight_version: int = 7,
     extras: dict[str, Any] | None = None,
+    parent: StagedCallBaseSnapshot | None = None,
+    prefix_token_ids: list[int] | None = None,
     chain_hash: str | None = None,
     cumulative_hash: str | None = None,
 ) -> StagedCallBaseSnapshot:
+    """Build a snapshot whose chain digests extend ``parent`` unless overridden.
+
+    ``prefix_token_ids`` are the linearized tokens preceding this delta; they
+    default to the parent's own delta (a two-level chain).
+    """
     mode = "text" if parent_call_id is None else "token_in"
+    if prefix_token_ids is None:
+        prefix_token_ids = list(parent.token_ids_delta) if parent is not None else []
+    if chain_hash is None:
+        chain_hash = compute_chain_hash(parent.chain_hash if parent is not None else None, token_ids)
+    if cumulative_hash is None:
+        cumulative_hash = hash_token_ids(prefix_token_ids + token_ids)
     extras_digest = compute_extras_digest(extras)
     delta_len = len(token_ids)
     cum_len = prev_len + delta_len
@@ -131,6 +144,7 @@ def _branched() -> tuple[RolloutReceipt, list[StagedCallBaseSnapshot]]:
         masks=[0.0, 1.0],
         logprobs=[0.0, -0.2],
         weight_version=4,
+        parent=root,
     )
     sibling = _snapshot(
         "sibling",
@@ -140,6 +154,7 @@ def _branched() -> tuple[RolloutReceipt, list[StagedCallBaseSnapshot]]:
         masks=[0.0, 1.0, 1.0],
         logprobs=[0.0, -0.3, -0.4],
         weight_version=99,
+        parent=root,
     )
     snapshots = [root, sibling, main]
     return _receipt(snapshots, terminal="main"), snapshots
@@ -283,6 +298,7 @@ def test_missing_terminal_and_wrong_parent_length_are_rejected() -> None:
         masks=[0.0, 1.0],
         logprobs=[0.0, -0.2],
         weight_version=4,
+        parent=snapshots[0],
     )
     bad_main = _manifest_row(
         bad_snapshot,
@@ -314,14 +330,11 @@ def test_out_of_order_mask_is_rejected() -> None:
 
 
 def _chained_pair() -> tuple[StagedCallBaseSnapshot, StagedCallBaseSnapshot]:
-    root_chain = compute_chain_hash(None, [10, 11, 12])
     root = _snapshot(
         "root",
         token_ids=[10, 11, 12],
         masks=[0.0, 0.0, 1.0],
         logprobs=[0.0, 0.0, -0.1],
-        chain_hash=root_chain,
-        cumulative_hash=hash_token_ids([10, 11, 12]),
     )
     child = _snapshot(
         "child",
@@ -330,9 +343,11 @@ def _chained_pair() -> tuple[StagedCallBaseSnapshot, StagedCallBaseSnapshot]:
         token_ids=[20, 21],
         masks=[0.0, 1.0],
         logprobs=[0.0, -0.2],
-        chain_hash=compute_chain_hash(root_chain, [20, 21]),
-        cumulative_hash=hash_token_ids([10, 11, 12, 20, 21]),
+        parent=root,
     )
+    assert root.chain_hash == compute_chain_hash(None, [10, 11, 12])
+    assert child.chain_hash == compute_chain_hash(root.chain_hash, [20, 21])
+    assert child.cumulative_hash == hash_token_ids([10, 11, 12, 20, 21])
     return root, child
 
 
@@ -378,15 +393,13 @@ def test_terminal_cumulative_hash_mismatch_is_rejected() -> None:
     assert error.value.code == "cumulative_hash_mismatch"
 
 
-def test_hash_free_legacy_receipt_still_verifies() -> None:
-    root = _snapshot(
-        "root",
-        token_ids=[10, 11],
-        masks=[0.0, 1.0],
-        logprobs=[0.0, -0.1],
-    )
-    row = verify_and_linearize(_receipt([root], terminal="root"), [root])
-    assert row.token_ids == [10, 11]
+def test_chain_digests_are_required_on_staged_rows() -> None:
+    root = _snapshot("root", token_ids=[10, 11], masks=[0.0, 1.0], logprobs=[0.0, -0.1])
+    for field in ("chain_hash", "cumulative_hash"):
+        with pytest.raises(ValueError):
+            StagedCallBaseSnapshot(**{**root.model_dump(), field: None})
+        with pytest.raises(ValueError):
+            CallRecord(**{**_manifest_row(root).model_dump(), field: None})
 
 
 def test_base_snapshot_validates_strictly_without_extras_bytes() -> None:

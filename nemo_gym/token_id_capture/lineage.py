@@ -125,7 +125,10 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
     columns and are not part of a capture manifest.
     """
     # Deferred: staging.records pulls in the digest module; lineage stays light.
-    from nemo_gym.token_id_capture.records import LEDGER_ROW_MISSING_RESPONSE_ID_REASON
+    from nemo_gym.token_id_capture.records import (
+        LEDGER_ROW_MISSING_CHAIN_HASH_REASON,
+        LEDGER_ROW_MISSING_RESPONSE_ID_REASON,
+    )
     from nemo_gym.token_id_capture.staging.records import (
         CallRecord,
         ManifestFailure,
@@ -154,6 +157,16 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     )
                 )
                 continue
+            if not row.get("chain_hash") or not row.get("cumulative_hash"):
+                # Same treatment for a custody row missing either chain digest:
+                # without them the row cannot anchor verification.
+                failures.append(
+                    ManifestFailure(
+                        model_call_id=str(row["model_call_id"]),
+                        reason=LEDGER_ROW_MISSING_CHAIN_HASH_REASON,
+                    )
+                )
+                continue
             records.append(
                 CallRecord(
                     model_call_id=str(row["model_call_id"]),
@@ -166,8 +179,8 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     extras_digest=str(row["extras_digest"]),
                     staging_key=str(row["staging_key"]),
                     mode=str(row["mode"]),
-                    chain_hash=row.get("chain_hash"),
-                    cumulative_hash=row.get("cumulative_hash"),
+                    chain_hash=str(row["chain_hash"]),
+                    cumulative_hash=str(row["cumulative_hash"]),
                     response_id=str(row["response_id"]),
                     admitted_at=row.get("admitted_at"),
                     output_fingerprint=row.get("output_fingerprint") or None,
@@ -451,12 +464,12 @@ class InMemoryLineageStore:
             record.model_call_id,
             list(commit.request_items) + list(commit.response_items),
             [],
-            record.cumulative_hash or "",
+            record.cumulative_hash,
             context_len=len(commit.request_items),
             staging_key=record.staging_key,
             parent_staging_chain=list(commit.staging_chain),
             cum_len=record.cum_len,
-            chain_hash=record.chain_hash or "",
+            chain_hash=record.chain_hash,
         )
         rows = self._ledgers.setdefault(commit.rollout_id, [])
         row = {"model_call_id": record.model_call_id, **_custody_columns(record, commit.staging_chain)}
@@ -873,7 +886,7 @@ class FileLineageStore(IncrementalLineageStore):
             "fingerprint": assistant_fingerprint(request_items + list(commit.response_items)),
             "context_len": len(request_items),
             "context_digest": conversation_digest(request_items),
-            "digest": commit.record.cumulative_hash or "",
+            "digest": commit.record.cumulative_hash,
             **_custody_columns(commit.record, commit.staging_chain),
         }
         with self._locked(commit.rollout_id):

@@ -64,6 +64,8 @@ UNRESOLVED_PARENT_REASON = "unresolved_parent"
 UNCOMMITTED_CALL_REASON = "request_finished_without_staged_coordinates"
 # A committed ledger row lacks the served response id that terminal attribution joins on.
 LEDGER_ROW_MISSING_RESPONSE_ID_REASON = "ledger_row_missing_response_id"
+# A committed ledger row lacks the chain or cumulative digest that verification anchors on.
+LEDGER_ROW_MISSING_CHAIN_HASH_REASON = "ledger_row_missing_chain_hash"
 
 
 class ParentResolutionStatus(StrEnum):

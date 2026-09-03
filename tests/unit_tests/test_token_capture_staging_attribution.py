@@ -21,6 +21,8 @@ Every abstention and disagreement fails closed; the caller's parent-link
 policy (``select_terminal_call``) remains the no-witness fallback.
 """
 
+import hashlib
+
 import pydantic
 import pytest
 
@@ -68,8 +70,9 @@ def _row(
         extras_digest="b" * 64,
         staging_key=f"r0/{call_id}",
         mode="text" if parent is None else "token_in",
-        chain_hash=chain_hash,
-        cumulative_hash=cumulative_hash,
+        # Distinct per call unless a test deliberately makes rows collide.
+        chain_hash=chain_hash or hashlib.sha256(f"chain:{call_id}".encode()).hexdigest(),
+        cumulative_hash=cumulative_hash or hashlib.sha256(f"cum:{call_id}".encode()).hexdigest(),
         response_id=response_id,
         output_fingerprint=output_fingerprint or None,
         continuation_fingerprint=continuation_fingerprint or None,

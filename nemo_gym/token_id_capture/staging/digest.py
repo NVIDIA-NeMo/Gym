@@ -75,9 +75,11 @@ def _validate_digest(value: str, *, field: str) -> None:
         raise ValueError(f"{field} must be a lowercase SHA-256 hex digest")
 
 
-def _encode_optional_digest(value: str | None, *, field: str) -> bytes:
-    if value is None:
-        return b"\x00"
+def _encode_present_digest(value: str, *, field: str) -> bytes:
+    # The leading presence byte is part of the frozen v2 layout; every staged
+    # record carries both chain digests, so it is always ``0x01``.
+    if not isinstance(value, str):
+        raise TypeError(f"{field} must be a digest string")
     _validate_digest(value, field=field)
     return b"\x01" + bytes.fromhex(value)
 
@@ -207,8 +209,8 @@ def compute_staging_digest(
     token_mask_delta: Sequence[float],
     generation_log_probs_delta: Sequence[float],
     extras_digest: str,
-    chain_hash: str | None = None,
-    cumulative_hash: str | None = None,
+    chain_hash: str,
+    cumulative_hash: str,
 ) -> str:
     """Compute the v2 digest for one staged call delta."""
     if type(schema_version) is not int or schema_version != STAGING_SCHEMA_VERSION:
@@ -256,8 +258,8 @@ def compute_staging_digest(
         _encode_bytes(_encode_float32_values(generation_log_probs_delta, field="generation_log_probs_delta"))
     )
     payload.extend(bytes.fromhex(extras_digest))
-    payload.extend(_encode_optional_digest(chain_hash, field="chain_hash"))
-    payload.extend(_encode_optional_digest(cumulative_hash, field="cumulative_hash"))
+    payload.extend(_encode_present_digest(chain_hash, field="chain_hash"))
+    payload.extend(_encode_present_digest(cumulative_hash, field="cumulative_hash"))
     return hashlib.sha256(_CALL_DIGEST_DOMAIN + bytes(payload)).hexdigest()
 
 

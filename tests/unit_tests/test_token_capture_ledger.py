@@ -331,6 +331,30 @@ async def test_lineage_only_rows_do_not_enter_the_manifest(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["chain_hash", "cumulative_hash"])
+async def test_custody_row_missing_a_chain_digest_poisons_the_manifest(tmp_path, missing):
+    """A committed row without either chain digest cannot anchor verification."""
+    import json
+
+    from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, conversation_digest
+    from nemo_gym.token_id_capture.records import LEDGER_ROW_MISSING_CHAIN_HASH_REASON
+
+    store = FileLineageStore(tmp_path)
+    row = {
+        "model_call_id": "c1",
+        "fingerprint": assistant_fingerprint([USER_1, ASSISTANT_1]),
+        "context_len": 1,
+        "context_digest": conversation_digest([USER_1]),
+        "digest": CUMULATIVE_HASH_1,
+        **{k: v for k, v in _custody_columns(_call_record("c1"), ("r1/c1",)).items() if k != missing},
+    }
+    (tmp_path / "r1.lineage.jsonl").write_text(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+    manifest = RolloutManifest.model_validate(await store.manifest("r1"))
+    assert manifest.records == []
+    assert [failure.reason for failure in manifest.failures] == [LEDGER_ROW_MISSING_CHAIN_HASH_REASON]
+
+
+@pytest.mark.asyncio
 async def test_legacy_token_carrying_row_resolves_but_cannot_anchor_a_chain(tmp_path):
     """Pre-chain external rows stay readable; extending them fails closed."""
     import json
