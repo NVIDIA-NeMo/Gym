@@ -40,6 +40,8 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxPtyAttach,
     create_provider,
 )
+from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
+from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
 T = TypeVar("T")
@@ -60,14 +62,20 @@ def _pty_timeout_result(command: str, timeout_s: float | int | None, *, reusable
 
 
 async def _run_in_pty_session(session: SandboxPtySession, command: str) -> SandboxExecResult:
-    """Run ``command`` in a live session, delimited by a unique marker."""
+    """Run ``command`` in a live session, delimited by unique markers."""
     token = f"NGPTY{uuid.uuid4().hex[:12]}"
-    # The marker is assembled from two literals so the shell's echo of this
-    # line cannot itself match the marker we scan for. The brace group keeps
-    # shell state while putting stdin at EOF: the session's stdin never ends,
-    # so a stdin-reading command would block forever and eat the marker line.
+    # The markers are split across two printf arguments so the shell's echo of
+    # these lines can never match them. Both printfs run inside the brace
+    # group: all echoed input and prompts appear before the start marker, and
+    # the exit-status marker directly follows the output, so the slice between
+    # the markers is the command's output alone. The group also puts stdin at
+    # EOF — the session's stdin never ends, so a stdin-reading command would
+    # otherwise block forever.
     await session.write(
-        f"{{ {command}\n}} </dev/null\nprintf '%s%s:%s\\n' '{token[:5]}' '{token[5:]}' \"$?\"\n".encode()
+        f"{{ printf '%s%s\\n' '{token[:5]}' '{token[5:]}S'\n"
+        f"{command}\n"
+        f"printf '%s%s:%s\\n' '{token[:5]}' '{token[5:]}' \"$?\"\n"
+        f"}} </dev/null\n".encode()
     )
 
     needle = f"{token}:".encode()
@@ -79,6 +87,11 @@ async def _run_in_pty_session(session: SandboxPtySession, command: str) -> Sandb
         buffer.extend(chunk)
 
     stdout, _, trailing = bytes(buffer).partition(needle)
+    # Drop the echoed input and prompts: real output starts on the line after
+    # the start marker.
+    _, seen_start, after_start = stdout.partition(f"{token}S".encode())
+    if seen_start:
+        stdout = after_start.partition(b"\n")[2]
     while b"\n" not in trailing:
         # The status digits can straddle the chunk that carried the marker.
         chunk = await session.read()
@@ -374,6 +387,10 @@ class AsyncSandbox:
         self._closed = False
         self.pty = SandboxPty(self)
 
+    def _telemetry_provider_name(self) -> str:
+        """Provider name for span attributes (`docker`, `daytona`, `opensandbox`, ...)."""
+        return getattr(self._provider, "name", type(self._provider).__name__)
+
     def _require_handle(self) -> SandboxHandle:
         if self._handle is None or self._stopped:
             raise RuntimeError("Sandbox has not been started")
@@ -391,7 +408,15 @@ class AsyncSandbox:
         if requested_spec is None:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
 
-        handle = await self._provider.create(requested_spec)
+        if is_span_group_enabled(GymSpanGroup.SANDBOX):
+            with managed_span(
+                GymSpanGroup.SANDBOX,
+                "gym.sandbox.start",
+                **{"nemo.gym.sandbox.provider": self._telemetry_provider_name()},
+            ):
+                handle = await self._provider.create(requested_spec)
+        else:
+            handle = await self._provider.create(requested_spec)
         try:
             if requested_spec.files:
                 with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
@@ -412,6 +437,39 @@ class AsyncSandbox:
         return self
 
     async def exec(
+        self,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | float | None = 180,
+        user: str | int | None = None,
+    ) -> SandboxExecResult:
+        if not is_span_group_enabled(GymSpanGroup.SANDBOX):
+            return await self._exec_uninstrumented(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        # The command itself is deliberately not recorded. In a code-execution environment
+        # it is model output or task content, which must not land in a trace backend
+        # (`safe_set_span_attributes` would redact a key named `command`, not a value that
+        # happens to be one). Provider, exit code and duration are the useful,
+        # content-free parts.
+        with managed_span(
+            GymSpanGroup.SANDBOX,
+            "gym.sandbox.exec",
+            **{"nemo.gym.sandbox.provider": self._telemetry_provider_name()},
+        ) as span:
+            result = await self._exec_uninstrumented(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+            if span is not None:
+                safe_set_span_attributes(
+                    span,
+                    {
+                        "nemo.gym.sandbox.return_code": result.return_code,
+                        "nemo.gym.sandbox.error_type": result.error_type,
+                    },
+                )
+            return result
+
+    async def _exec_uninstrumented(
         self,
         command: str,
         *,
