@@ -1,0 +1,19 @@
+# Chain to the BenchFlow agent base config.
+config_paths:
+  - responses_api_agents/benchflow_agent/configs/benchflow_agent.yaml
+
+# Inherit the base benchflow_agent server and specialize it for SkillsBench.
+skillsbench_benchflow_agent:
+  _inherit_from: benchflow_agent
+  responses_api_agents:
+    benchflow_agent:
+      # SkillsBench task definitions, cloned by prepare.py (ng_prepare_benchmark).
+      tasks_dir: ../../benchmarks/skillsbench/data/skillsbench_repo/tasks
+
+      datasets:
+      - name: skillsbench
+        type: benchmark
+        jsonl_fpath: benchmarks/skillsbench/data/skillsbench_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/skillsbench/prepare.py
+        num_repeats: 1
