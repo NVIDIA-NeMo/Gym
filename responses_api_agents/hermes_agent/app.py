@@ -307,8 +307,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
         agent._disable_streaming = True
         _original_build_api_kwargs = agent._build_api_kwargs
 
-        def _patched_build_api_kwargs(api_messages):
-            kw = _original_build_api_kwargs(api_messages)
+        def _patched_build_api_kwargs(api_messages, tools_for_api=None):
+            kw = _original_build_api_kwargs(api_messages, tools_for_api=tools_for_api)
             # hermes-agent 569b912 dropped the use_streaming constructor flag; without it the agent
             # emits stream=true, but gym's model server only accepts non-streaming requests
             # (NonStreaming schema -> HTTP 422 "stream: Input should be False"). Force it off here,
