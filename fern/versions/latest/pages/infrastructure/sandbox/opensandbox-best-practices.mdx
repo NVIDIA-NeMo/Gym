@@ -18,8 +18,9 @@ See the [OpenSandbox Provider](/infrastructure/sandbox/opensandbox) page for the
 2. **Start with low requests and set limits to the max CPU/memory you need** — small
    `resource_requests` so you pack densely, `resources` sized to your real peaks; never the same
    map for both ([requests are not limits](#requests-are-not-limits)).
-3. **Leave `derive_cpu_env` on and give agents a bash timeout** — the sandbox sees the host's core
-   count, not your limit ([host-core fan-out](#the-host-core-fan-out-trap)).
+3. **Check what CPU count your sandbox actually sees** — on many clusters it is the host's cores,
+   not your limit, and that varies cluster to cluster. Be mindful of it: leave `derive_cpu_env`
+   on and give agents a bash timeout ([host-core fan-out](#the-host-core-fan-out-trap)).
 4. **Use background execution** — the shipped default; keep the poll interval in the tens of
    seconds ([background execution and timeouts](#background-execution-and-timeouts)).
 5. **Retry creates, never commands** — a retried command can run twice
@@ -80,25 +81,30 @@ inside the sandbox — not from a failure message.
 
 ## The host-core fan-out trap
 
-Inside a sandbox, `nproc`, `os.cpu_count()` and `os.cpus()` report the **host's** cores (often
-128–192), not your limit. Tools that size worker pools from that number — old `jest`, Python
+What a sandbox reports as its CPU count **varies cluster to cluster**. On a plain Kubernetes node,
+`nproc`, `os.cpu_count()` and `os.cpus()` report the **host's** cores (often 128–192), not your
+limit. Clusters that run [LXCFS](https://linuxcontainers.org/lxcfs/introduction/) overlay
+`/proc/cpuinfo`, `/proc/meminfo` and `/sys/devices/system/cpu/online` with cgroup-aware values, so
+the same tools report your limit instead. Check before assuming either — run `nproc` and
+`python -c 'import os; print(os.cpu_count())'` in one sandbox on the cluster you are about to use.
+
+Where the host count leaks through, tools that size worker pools from it — old `jest`, Python
 `multiprocessing`, `pytest -n auto`, `make -j$(nproc)`, OpenBLAS — fan out to 100+ processes in a
 4-CPU, 16 GiB box. The result is an OOM kill, or a near-miss that thrashes at the memory ceiling
 and runs 10× slower. It depends on each repo's tooling, so it looks random.
 
-`derive_cpu_env` (default `true` in the SWE-bench configs) injects cap variables derived from
-`resources.cpu` — `OMP_NUM_THREADS`, `PYTHON_CPU_COUNT`, `PYTEST_XDIST_AUTO_NUM_WORKERS`,
-`GOMAXPROCS`, `CARGO_BUILD_JOBS`, `UV_THREADPOOL_SIZE`, and others; see `CPU_CAP_ENV_VARS` in
-`nemo_gym/sandbox/utils.py`. Explicit `sandbox_config.env` keys win.
+`derive_cpu_env` (default `true` in the SWE-bench configs) is the portable mitigation: it injects
+cap variables derived from `resources.cpu` — `OMP_NUM_THREADS`, `PYTHON_CPU_COUNT`,
+`PYTEST_XDIST_AUTO_NUM_WORKERS`, `GOMAXPROCS`, `CARGO_BUILD_JOBS`, `UV_THREADPOOL_SIZE`, and
+others; see `CPU_CAP_ENV_VARS` in `nemo_gym/sandbox/utils.py`. Explicit `sandbox_config.env` keys
+win. Leave it on even where LXCFS is present; it is harmless there and protects you when the same
+config moves to a cluster without it.
 
 Two things it cannot fix:
 
 - Runners that ignore the environment: old `jest`, plain `make`, `ninja`, and Python
-  `multiprocessing` before 3.13. Cap these in the task's setup command or the image. Some
-  clusters run [LXCFS](https://linuxcontainers.org/lxcfs/introduction/), which overlays
-  `/proc/cpuinfo`, `/proc/meminfo`, and `/sys/devices/system/cpu/online` with cgroup-aware
-  values so these tools see the limit instead of the host — check `nproc` inside a sandbox to
-  find out; where it is present, this class of fan-out disappears.
+  `multiprocessing` before 3.13. On clusters without LXCFS, cap these in the task's setup command
+  or the image.
 - Agent-written runaway code. This is the majority of OOMs on coding benchmarks, and Kubernetes
   group-OOM kills the **whole sandbox**, ending the rollout. Give agents a bash timeout (2 minutes
   is the validated default; 8 minutes measured quality-negative) so runaway commands fail fast and
