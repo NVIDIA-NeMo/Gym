@@ -17,7 +17,7 @@ Highlights:
 - Run routing-aware evaluations with Switchyard by comparing fixed and routed conditions on the same benchmark
 - Trust and debug rollouts with automatic health checks, end-to-end traces, and per-agent token, turn, tool-call, and latency diagnostics
 - Evaluate and compare multiple agents and datasets in one run, with task-level routing to the appropriate harness
-- Submit distributed vLLM evaluations to Slurm directly from Gym, using multiple model replicas across nodes to run more rollouts concurrently
+- Submit eval jobs to a Slurm cluster with `gym eval submit`, scaling vLLM across GPUs or nodes for higher rollout concurrency
 
 ### First-Time Contributors
 
@@ -68,7 +68,7 @@ Thank you to all **64 NeMo Gym contributors** this cycle, including 19 first-tim
 
 ### Rollout Observability and Export
 
-- Export configs, metrics, and rollouts to W&B and MLflow through a shared exporter framework
+- Export configs, metrics, and rollouts through a shared exporter framework. MLflow is new; W&B uses the same path
 - Automatic rollout health checks flag missing turns, inconsistent model calls, token-count mismatches, and runaway generation, with structured reports from evaluation and aggregation
 - NeMo Lens telemetry traces each rollout across Gym's agent, model, and resources servers, making latency and failures easier to diagnose
 - Rollout diagnostics report token usage, turns, tool calls, and latency, with agent-level traces for OpenClaw, Hermes, Pi, OpenCode, and SWE agents
@@ -78,7 +78,7 @@ Thank you to all **64 NeMo Gym contributors** this cycle, including 19 first-tim
 
 - Compatible external agent harnesses can produce on-policy training data: Gym preserves exact token IDs across model calls and rebuilds each multi-step episode as one training response
 - Opt in to `route_failures_to_sidecar` to keep an evaluation running when agent calls fail; coverage reporting identifies excluded rollouts, and selected failure classes can instead count as zero
-- Verification can be skipped when collecting rollouts for workflows that score results separately
+- Trust eval artifacts: automatic health checks catch missing turns, broken model calls, and runaway generation; rollouts record tokens, turns, tool calls, and latency
 - Verifiers can return a human-readable `failure_reason` to explain unsuccessful rollouts
 
 ### Sandboxing and Orchestration
