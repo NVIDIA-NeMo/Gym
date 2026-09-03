@@ -664,6 +664,25 @@ class TestProcessSingleDatapoint:
         assert metrics["agent_timed_out"] is True
         assert metrics["mask_sample"] is True
 
+    async def test_container_killed_mid_run_sets_flag_and_masks(self, tmp_path: Path) -> None:
+        # exec() on a container the TTL already removed returns error_type="sandbox" without
+        # raising, so this must be caught the same way a "timeout" is, not just via the
+        # except-block sandbox_failed path (which never fires here).
+        cfg = _make_instance_config(tmp_path)
+        sandbox = SimpleNamespace(
+            start=AsyncMock(),
+            exec=AsyncMock(return_value=_sandbox_result(return_code=125, error_type="sandbox")),
+            stop=AsyncMock(),
+        )
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
+            with patch.object(RunTerminalAgent, "_stage_tests", new=AsyncMock(return_value=None)):
+                await RunTerminalAgent(config=cfg).process_single_datapoint()
+
+        metrics = json.loads(cfg.metrics_fpath.read_text())
+        assert metrics["agent_timed_out"] is True
+        assert metrics["sandbox_failed"] is False
+        assert metrics["mask_sample"] is True
+
     async def test_sandbox_start_failure_is_isolated(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
         sandbox = SimpleNamespace(

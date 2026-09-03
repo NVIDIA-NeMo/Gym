@@ -545,7 +545,7 @@ class RunTerminalAgent(BaseModel):
         if result.return_code != 0:
             detail = result.stderr or result.stdout or ""
             print(f"[{cfg.task_name}] agent exit {result.return_code}: {detail[-2000:]}", flush=True)
-        return time.time() - t0, result.error_type == "timeout"
+        return time.time() - t0, result.error_type in ("timeout", "sandbox")
 
     async def _stage_tests(self, cfg: AnyTerminalInstanceConfig) -> None:
         """Copy the task's test files into the staging dir, visible to the sandbox at /tests."""
@@ -567,7 +567,7 @@ class RunTerminalAgent(BaseModel):
         result = await sandbox.exec(_apt_root_sandbox(cfg) + test_cmd, timeout_s=cfg.tb_eval_timeout, user="root")
         if result.return_code != 0:
             print(f"[{cfg.task_name}] eval exit {result.return_code}: {(result.stderr or '')[-2000:]}", flush=True)
-        return time.time() - t0, result.error_type == "timeout"
+        return time.time() - t0, result.error_type in ("timeout", "sandbox")
 
     async def process_single_datapoint(self) -> bool:
         cfg = self.config
