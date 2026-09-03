@@ -22,6 +22,7 @@ import tempfile
 import time
 import uuid
 from asyncio import Semaphore
+from contextlib import contextmanager
 from pathlib import Path
 from subprocess import Popen
 from traceback import format_exc
@@ -117,6 +118,52 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
     existing = {k: v for k, v in json.loads(metrics_fpath.read_text()).items() if v is not None}
     update = {k: v for k, v in update_dict.items() if v is not None}
     metrics_fpath.write_text(json.dumps(existing | update))
+
+
+# A dead process (killed -9, OOM, node loss) can leave a .lockdir behind forever, wedging every
+# future waiter. 2h comfortably exceeds any real deps-setup run, so a lock that old is presumed dead.
+_AGENT_DEPS_LOCK_STALE_AFTER_SECONDS = 7200  # 2 hours
+
+
+@contextmanager
+def _file_lock(file_path: Path, label: str, max_wait: float = 7200.0, poll_interval: float = 5.0):
+    """Cross-node lock using mkdir, which is atomic on Lustre/NFS."""
+    lock_dir = file_path.parent
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f".{file_path.name}.lockdir"
+
+    print(f"Acquiring {label} lock at {lock_path}", flush=True)
+    waited = 0.0
+    while True:
+        try:
+            lock_path.mkdir(exist_ok=False)
+            break
+        except FileExistsError:
+            try:
+                lock_age = time.time() - lock_path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            if lock_age >= _AGENT_DEPS_LOCK_STALE_AFTER_SECONDS:
+                try:
+                    if time.time() - lock_path.stat().st_mtime >= _AGENT_DEPS_LOCK_STALE_AFTER_SECONDS:
+                        print(f"  Reclaiming stale {label} lock at {lock_path} (age {lock_age:.0f}s)", flush=True)
+                        shutil.rmtree(lock_path, ignore_errors=True)
+                except FileNotFoundError:
+                    pass
+                continue
+            if waited >= max_wait:
+                raise TimeoutError(
+                    f"Timed out waiting for {label} lock at {lock_path} after {max_wait}s; lock age is {lock_age:.0f}s"
+                )
+            if waited % 30 == 0:
+                print(f"  Waiting for {label} lock (held by another process, {waited:.0f}s elapsed)...", flush=True)
+            time.sleep(poll_interval)
+            waited += poll_interval
+
+    try:
+        yield
+    finally:
+        shutil.rmtree(lock_path, ignore_errors=True)
 
 
 def _safe_config_json(params: "AnyTerminalInstanceConfig", indent: Optional[int] = None) -> str:
@@ -246,19 +293,26 @@ class GymAgentHarnessProcessor(BaseModel):
         if sentinel.exists() and sentinel.read_text().strip() == recipe:
             print(f"Agent deps already at {deps_dir}", flush=True)
             return deps_dir
-        if not script.exists():
-            print(f"No setup script for {self._agent_key}, skipping deps install", flush=True)
+
+        with _file_lock(deps_dir, f"{self._agent_key} deps setup"):
+            if sentinel.exists() and sentinel.read_text().strip() == recipe:
+                print(f"Agent deps already at {deps_dir}", flush=True)
+                return deps_dir
+
+            if not script.exists():
+                print(f"No setup script for {self._agent_key}, skipping deps install", flush=True)
+                deps_dir.mkdir(parents=True, exist_ok=True)
+                sentinel.write_text(recipe)
+                return deps_dir
+
             deps_dir.mkdir(parents=True, exist_ok=True)
+            proc = Popen(
+                f"PORTABLE_PYTHON_SH={shared} DEPS_DIR={deps_dir} NEMO_GYM_ROOT={PARENT_DIR} bash {script}",
+                shell=True,
+            )
+            assert proc.wait() == 0, f"Agent deps setup failed ({script})"
             sentinel.write_text(recipe)
             return deps_dir
-
-        deps_dir.mkdir(parents=True, exist_ok=True)
-        proc = Popen(
-            f"PORTABLE_PYTHON_SH={shared} DEPS_DIR={deps_dir} NEMO_GYM_ROOT={PARENT_DIR} bash {script}", shell=True
-        )
-        assert proc.wait() == 0, f"Agent deps setup failed ({script})"
-        sentinel.write_text(recipe)
-        return deps_dir
 
     def get_run_command(self) -> str:
         """Write instruction.txt and agent_runner.py; return the shell command to run the agent."""
