@@ -9,6 +9,27 @@ cluster you occupy, your **limits** decide what your commands may use, and both 
 everyone else's runs. Most "OpenSandbox is flaky" reports trace back to one of the traps below.
 See the [OpenSandbox Provider](/infrastructure/sandbox/opensandbox) page for the config schema.
 
+## The short list
+
+1. **Start from the shipped config** — pass
+   `--config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml` and override only
+   the keys you need. Its connection settings are the ones that are hard to get right
+   ([connection fields](#connection-fields-that-must-be-right)).
+2. **Set requests separately from limits** — small `resource_requests`, generous `resources`
+   ([requests are not limits](#requests-are-not-limits)).
+3. **Leave `derive_cpu_env` on and give agents a bash timeout** — the sandbox sees the host's core
+   count, not your limit ([host-core fan-out](#the-host-core-fan-out-trap)).
+4. **Use background execution** — the shipped default; keep the poll interval in the tens of
+   seconds ([background execution](#how-background-execution-works)).
+5. **Retry creates, never commands** — a retried command can run twice
+   ([retries](#retries-creates-yes-commands-no)).
+6. **Turn on egress controls** for any benchmark where the agent must not reach the internet —
+   they are off by default ([egress controls](#egress-controls-are-off-by-default)).
+7. **Clean up zombie sandboxes** — reap an interrupted run by its `run` id, set `ttl_s` as the
+   backstop, and keep attribution on so the run is findable ([be a good tenant](#be-a-good-tenant)).
+8. **Check the failure table before filing a bug** — most alarming errors at scale are known and
+   benign ([failure signatures](#failure-signatures-that-are-not-what-they-look-like)).
+
 ## Connection fields that must be right
 
 The shipped `nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml` has these set
