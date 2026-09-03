@@ -288,6 +288,78 @@ class TestNeMoGymChatCompletionSchemas:
         assert params.messages[0]["tool_calls"][0]["type"] == "custom"
         assert params.messages[0]["generation_token_ids"] == [2]
 
+    def test_tool_call_keeps_unknown_keys_out_of_the_way(self) -> None:
+        """Agents echo tool calls back verbatim, so they carry provider-specific keys.
+
+        The request model is `extra="forbid"` and pydantic propagates that into
+        nested TypedDicts, which would otherwise turn a harmless extra key into a
+        hard validation error for every tool-calling agent.
+        """
+        payload = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "name": "KB_search",
+                            "function": {
+                                "name": "KB_search",
+                                "arguments": '{"query": "hello"}',
+                            },
+                            "type": "function",
+                        }
+                    ],
+                }
+            ],
+            "model": "gpt-test",
+        }
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+
+        tool_call = params.messages[0]["tool_calls"][0]
+        assert tool_call["type"] == "function"
+        assert tool_call["function"] == {"name": "KB_search", "arguments": '{"query": "hello"}'}
+        assert "name" not in tool_call
+
+    def test_custom_tool_call_keeps_unknown_keys_out_of_the_way(self) -> None:
+        payload = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "custom",
+                            "custom": {"name": "shell", "input": "echo hello"},
+                            "name": "shell",
+                        }
+                    ],
+                }
+            ],
+            "model": "gpt-test",
+        }
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+
+        tool_call = params.messages[0]["tool_calls"][0]
+        assert tool_call["type"] == "custom"
+        assert tool_call["custom"] == {"name": "shell", "input": "echo hello"}
+        assert "name" not in tool_call
+
+    def test_unknown_top_level_request_key_is_still_rejected(self) -> None:
+        """Tolerating extras on tool calls must not loosen the request model."""
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+                {
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "model": "gpt-test",
+                    "not_a_real_request_field": True,
+                }
+            )
+
     def test_custom_response_tool_call_round_trip(self) -> None:
         payload = {
             "id": "chatcmpl-1",

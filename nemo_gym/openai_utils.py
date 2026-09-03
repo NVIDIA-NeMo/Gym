@@ -931,12 +931,22 @@ class NeMoGymChatCompletionMessageToolCallFunctionParam(TypedDict, total=False):
     name: Required[str]
 
 
+# `NeMoGymChatCompletionCreateParamsNonStreaming` sets `extra="forbid"`, and
+# pydantic propagates that config into every nested `TypedDict`. Tool calls are
+# echoed back by agents from whatever the provider returned, so they routinely
+# carry provider-specific keys that are not in the OpenAI schema. Opt the tool
+# call shapes out so those keys are dropped rather than rejected; the request
+# model itself stays strict.
+_TOOL_CALL_CONFIG = ConfigDict(extra="ignore")
+
+
 class NeMoGymChatCompletionMessageToolCallParam(ChatCompletionMessageToolCallParam):
+    __pydantic_config__ = _TOOL_CALL_CONFIG
     function: NeMoGymChatCompletionMessageToolCallFunctionParam
 
 
 class NeMoGymChatCompletionMessageCustomToolCallParam(ChatCompletionMessageCustomToolCallParam):
-    pass
+    __pydantic_config__ = _TOOL_CALL_CONFIG
 
 
 NeMoGymChatCompletionMessageToolCallUnionParam = Annotated[
