@@ -107,7 +107,11 @@ timeouts do not help a full cluster.
 
 ## Retries: creates yes, commands no
 
-`create.retries` is safe: a failed create leaves nothing behind. `operations.command_retries`
+`create.retries` is safe: a failed create leaves nothing behind. `operations.retries` (shipped:
+`5`, exponential backoff from `retry_delay_s` to `retry_max_delay_s`) covers the SDK calls after
+create — status and endpoint lookups, file transfer, close — plus a command submit that failed at
+TCP connect before the body reached the exec daemon. All of those are idempotent or provably never
+started, so retrying them is safe. `operations.command_retries`
 defaults to `0` and should stay there for agent commands, because a proxy `502` on
 `POST /command` does not mean the command never started — the server maps every transport error
 to 502, including a dropped read *after* the body reached the exec daemon, which runs commands on
