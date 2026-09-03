@@ -104,6 +104,67 @@ class BaseNeMoGymCLIConfig(BaseModel):
         exit()
 
 
+class RunSelectionConfig(BaseNeMoGymCLIConfig):
+    """Which run pair to read and which agent to compare -- shared by `gym eval compare` and
+    `gym eval stat-test`, which both read a baseline/candidate run's `<stem>_aggregate_metrics.json`
+    and pick an agent the same way.
+    """
+
+    # Subclasses may raise this once >1 candidate is supported.
+    MAX_CANDIDATES: ClassVar[int] = 1
+
+    baseline_rollouts_jsonl_fpath: str = Field(
+        description="Baseline run's rollouts JSONL, as passed to `gym eval run --output`. Used to derive "
+        "`<stem>_aggregate_metrics.json`; the JSONL itself is not read."
+    )
+    candidate_rollouts_jsonl_fpaths: List[str] = Field(
+        min_length=1,
+        description="Candidate run's rollouts JSONL paths (comma-separated); one candidate is supported today.",
+    )
+    baseline_aggregate_metrics_fpath: Optional[str] = Field(
+        default=None,
+        description="Override for the baseline's aggregate-metrics JSON. Defaults to the "
+        "`<stem>_aggregate_metrics.json` sibling of baseline_rollouts_jsonl_fpath.",
+    )
+    candidate_aggregate_metrics_fpaths: Optional[List[str]] = Field(
+        default=None,
+        description="Override for the candidate's aggregate-metrics JSON. When set, must have the same "
+        "length as candidate_rollouts_jsonl_fpaths.",
+    )
+
+    agent_name: Optional[str] = Field(
+        default=None,
+        description="Agent to compare on both sides. When unset, compares the agent present in both runs.",
+    )
+    baseline_agent_name: Optional[str] = Field(
+        default=None,
+        description="Agent to read from the baseline's metrics. Takes precedence over agent_name.",
+    )
+    candidate_agent_names: Optional[List[str]] = Field(
+        default=None,
+        description="Agent to read from the candidate's metrics. Takes precedence over agent_name.",
+    )
+
+    @model_validator(mode="after")
+    def _check_candidate_parallel_lists(self) -> "RunSelectionConfig":
+        num_candidates = len(self.candidate_rollouts_jsonl_fpaths)
+        if num_candidates > self.MAX_CANDIDATES:
+            raise ValueError(
+                f"{num_candidates} candidates were given, but more than {self.MAX_CANDIDATES} candidate "
+                "is not supported yet. Give a single candidate run."
+            )
+        for field_name, value in (
+            ("candidate_agent_names", self.candidate_agent_names),
+            ("candidate_aggregate_metrics_fpaths", self.candidate_aggregate_metrics_fpaths),
+        ):
+            if value is not None and len(value) != num_candidates:
+                raise ValueError(
+                    f"{field_name} has {len(value)} entries but {num_candidates} candidate run(s) were given. "
+                    "Give one entry per candidate, in the same order."
+                )
+        return self
+
+
 ########################################
 # Server references
 #

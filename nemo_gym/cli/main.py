@@ -631,7 +631,7 @@ def _dataset_download(args: argparse.Namespace, overrides: list[str]) -> None:
     dispatch(targets[args.storage], overrides)
 
 
-# Run-selection flags shared by `eval compare` and `eval test` -- both read the same
+# Run-selection flags shared by `eval compare` and `eval stat-test` -- both read the same
 # `<stem>_aggregate_metrics.json` pair and pick an agent the same way.
 _EVAL_RUN_SELECTION_FLAGS = (
     _value_flag(
@@ -668,7 +668,7 @@ _EVAL_RUN_SELECTION_FLAGS = (
     ),
 )
 
-# Statistical-test flags shared by `eval compare` (its default stats step) and `eval test`.
+# Statistical-test flags shared by `eval compare` (its default stats step) and `eval stat-test`.
 _STATISTICAL_TEST_FLAGS = (
     _comma_list_flag(
         "metric",
@@ -1147,27 +1147,23 @@ COMMANDS = {
             _value_flag(
                 "stats-output-dir",
                 "stats_output_dirpath",
-                "Where to write the statistics report (default: statistical_tests/ inside the candidate "
-                "run's own directory). Independent of --output-dir, which only controls compare_report.*.",
+                "Where to write the statistical-test step's own report (default: "
+                "`<candidate run's directory>/statistical_tests/`). Independent of --output-dir, which "
+                "controls only compare_report.*.",
                 quote=True,
             ),
-            _bool_flag(
-                "no-stats",
-                "no_stats",
-                "Skip the default statistics step entirely (no statistical_tests/ directory is written).",
-            ),
+            _bool_flag("no-stats", "no_stats", "Skip the default statistical-test step."),
         ),
     ),
-    "eval test": Command(
-        target="nemo_gym.cli.eval:test",
-        summary="Paired statistical significance test of a baseline eval run against a candidate run.",
+    "eval stat-test": Command(
+        target="nemo_gym.cli.eval:stat_test",
+        summary="Statistical significance test between a baseline and a candidate run (default: paired).",
         flags=(
             *_EVAL_RUN_SELECTION_FLAGS,
             _value_flag(
                 "output-dir",
                 "output_dirpath",
-                "Where to write the report. Given explicitly, used literally; left unset, defaults to "
-                "statistical_tests/ inside the candidate run's own directory (auto-created).",
+                "Where to write the report (default: `<candidate run's directory>/statistical_tests/`).",
                 aliases=("-o",),
                 quote=True,
             ),
@@ -1177,6 +1173,10 @@ COMMANDS = {
                 "Report artifacts to write (default: both).",
                 choices=("md", "json", "both"),
             ),
+            # Choices are spelled out rather than derived from `statistical_tests.registry`:
+            # importing it here would put pydantic + the whole stats package on the path of every
+            # `gym` invocation. `test_cli_test_flag_choices_match_the_registry` pins them together.
+            _value_flag("test", "test", "Statistical test to run (default: paired).", choices=("paired",)),
             *_STATISTICAL_TEST_FLAGS,
         ),
     ),
