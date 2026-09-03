@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Read-only HTTP control plane for the rollout capture ledger.
+"""Expose rollout capture manifests over HTTP.
 
-The single route exposes the token-free per-rollout manifest so the framework
-never reads ledger files directly — ``LineageStore`` implementations remain
-swappable. Rollout lifecycle (receipt assembly, staging cleanup) is
-framework-owned; there are no register/seal/fail transitions.
+The training framework reads one manifest for each rollout.
+The endpoint returns call metadata and does not read staged token data.
+The framework builds receipts and removes staged data after use.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException
 
-from nemo_gym.token_id_capture.protocols import LineageStore
+from nemo_gym.token_id_capture.protocols import CaptureLedger
 from nemo_gym.token_id_capture.staging.records import RolloutManifest
 
 
@@ -26,7 +25,7 @@ CONTROL_ROUTE_PREFIX = "/training-token-capture/control"
 
 def install_rollout_control_routes(
     app: Any,
-    lineage_store: LineageStore,
+    lineage_store: CaptureLedger,
     *,
     auth_token: str,
 ) -> None:

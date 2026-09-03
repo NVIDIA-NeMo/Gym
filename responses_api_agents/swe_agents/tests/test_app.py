@@ -1077,8 +1077,8 @@ class TestOpenHandsHarnessProcessor:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _make_instance_config(
                 tmpdir,
-                ng_rollout_id="rollout-1",
-                token_capture_enabled=True,
+                model_server_base_url="http://test-host:12345/ng-rollout/rollout-1/training-token-capture",
+                install_openhands_capture_overlay=True,
             )
             processor = OpenHandsHarnessProcessor(config=config)
             processor.get_run_command()
@@ -1361,8 +1361,7 @@ class TestOpenCodeHarnessProcessor:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = self._opencode_config(
                 tmpdir,
-                ng_rollout_id="rollout-1",
-                token_capture_enabled=True,
+                model_server_base_url="http://test-host:12345/ng-rollout/rollout-1/training-token-capture",
             )
             OpenCodeHarnessProcessor(config=config).get_run_command()
             script = self._read_agent_script(config)
@@ -2360,7 +2359,7 @@ class TestSWEBenchWrapperBuildApptainerCommand:
     def test_basic_command(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)
         with tempfile.TemporaryDirectory() as tmpdir:
-            params = _make_instance_config(tmpdir, token_capture_enabled=True)
+            params = _make_instance_config(tmpdir, install_openhands_capture_overlay=True)
             params.persistent_dir.mkdir(parents=True, exist_ok=True)
             (params.persistent_dir / "container_scripts").mkdir(parents=True, exist_ok=True)
 
@@ -2714,9 +2713,37 @@ class TestSWEBenchWrapperSetupParams:
             with rollout_context("rollout-1"):
                 params, _ = wrapper._setup_params(body)
 
-            assert params.token_capture_enabled is True
+            assert params.install_openhands_capture_overlay is True
+            assert params.model_server_base_url.endswith("/ng-rollout/rollout-1/training-token-capture")
             # The sandboxed agent reaches the model through the capture-prefixed URL.
             assert "/training-token-capture/" in params.agent_script
+
+    def test_setup_params_raises_when_capture_enabled_without_rollout_id(self, monkeypatch) -> None:
+        wrapper = _create_wrapper(monkeypatch)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            container_file = Path(tmpdir) / "django__django-12345.sif"
+            container_file.touch()
+            wrapper.config.container_formatter = [str(Path(tmpdir) / "{instance_id}.sif")]
+            self._setup_oh_dirs(wrapper)
+            body = NeMoGymResponseCreateParamsNonStreaming(
+                model="test-model",
+                input=[],
+                temperature=1.0,
+                top_p=1.0,
+                metadata={
+                    "problem_statement": "Fix bug",
+                    "instance_id": "django__django-12345",
+                    "base_commit": "abc123",
+                    "dataset_name": "SWE-bench",
+                    "split": "test",
+                    "instance_dict": json.dumps({"repo": "django/django"}),
+                },
+            )
+
+            monkeypatch.setattr(type(wrapper), "_token_id_capture_enabled", lambda self: True)
+            # No rollout_context: the request carries no rollout id.
+            with pytest.raises(RuntimeError, match="no rollout id"):
+                wrapper._setup_params(body)
 
     def test_setup_params_nv_internal(self, monkeypatch) -> None:
         wrapper = _create_wrapper(monkeypatch)

@@ -57,11 +57,10 @@ from nemo_gym.token_id_capture.staging.rebuild import (
     verify_and_linearize,
 )
 from nemo_gym.token_id_capture.staging.records import (
-    DIGEST_VERSION,
-    SCHEMA_VERSION,
     CallRecord,
     CaptureAdmission,
     CaptureDisposition,
+    CaptureLedgerCommit,
     CaptureMode,
     CommitCoords,
     RolloutReceipt,
@@ -82,13 +81,11 @@ from nemo_gym.token_id_capture.staging.routes import (
 )
 from nemo_gym.token_id_capture.staging.terminal import TerminalSelection, select_terminal_call
 
-# The witness-corroboration engine is shared with the legacy capture path;
-# custody rows are recognized there by their ``staging_key`` and matched
-# through recorded ``output_fingerprint``/``cumulative_hash`` columns. The
-# harness's ``declared_response_id`` is authoritative: a declared id the
-# ledger cannot confirm attributes nothing and never falls back. Attribution
-# never reads tokens — a wrong attribution can only name a chain whose every
-# digest ``verify_and_linearize`` still checks downstream.
+# Terminal selection is shared with the existing capture path.
+# Rows with a ``staging_key`` use their recorded response and content fingerprints.
+# A supplied ``declared_response_id`` must match exactly one row.
+# Terminal selection does not read staged tokens.
+# ``verify_and_linearize`` validates the selected token chain afterward.
 from nemo_gym.token_id_capture.terminal import (
     TerminalAttribution,
     resolve_terminal,
@@ -96,14 +93,13 @@ from nemo_gym.token_id_capture.terminal import (
 
 
 __all__ = [
-    "DIGEST_VERSION",
     "EMPTY_EXTRAS_DIGEST",
     "EXTRAS_DIGEST_VERSION",
     "MISSING_ROUTE_SENTINEL",
-    "SCHEMA_VERSION",
     "STAGING_DIGEST_VERSION",
     "STAGING_SCHEMA_VERSION",
     "CallRecord",
+    "CaptureLedgerCommit",
     "ActiveCall",
     "CaptureAdapter",
     "CaptureError",

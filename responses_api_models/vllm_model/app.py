@@ -58,6 +58,7 @@ from nemo_gym.token_id_capture import (
 )
 from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
+from nemo_gym.token_id_capture.protocols import CaptureLedger
 from nemo_gym.token_id_capture.records import (
     TOKEN_FIELDS,
     response_to_output_items,
@@ -67,6 +68,8 @@ from nemo_gym.token_id_capture.staging.records import (
     INVALID_COMMIT_COORDS_REASON,
     WORKER_CAPTURE_FAILED_REASON,
     WORKER_MISSING_COMMIT_COORDS_REASON,
+    CallRecord,
+    CaptureLedgerCommit,
     CommitCoords,
 )
 
@@ -410,9 +413,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         return self._converter.chat_completion_to_response(
             responses_create_params=body,
             chat_completion=chat_completion_response,
-            # The served envelope id is the terminal-attribution join key; only
-            # capture-enabled servers trade the minted resp_* id for it.
-            preserve_envelope_id=self._external_capture_enabled,
+            # Keep the backend envelope id only for captured requests. Terminal
+            # attribution matches it to the ledger row.
+            preserve_envelope_id=self._preserve_envelope_id(),
         )
 
     def _apply_sampling_overrides(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -703,12 +706,17 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         return body_dict
 
-    def _apply_external_capture(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Attach the typed admission to this worker-bound chat request.
+    def _preserve_envelope_id(self) -> bool:
+        """Keep the backend envelope id only for requests with an active external-capture context."""
+        context = current_capture_context()
+        return context is not None and context.external_staging
 
-        An unadmitted call (``UNRESOLVED`` — already poisoned in the ledger)
-        is forwarded as plain traffic: the worker stages nothing and the
-        completion still serves the agent.
+    def _apply_external_capture(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Add worker capture metadata to an admitted chat request.
+
+        If parent resolution did not admit the call, forward the request without capture metadata.
+        The lineage store has already recorded that capture failure.
+        The worker returns the completion without staging token data.
         """
         context = current_capture_context()
         if context is None or not context.external_staging:
@@ -1032,17 +1040,19 @@ class VLLMModel(SimpleResponsesAPIModel):
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
     async def _finalize_external_capture(self, payload: Dict[str, Any]) -> None:
-        """Publish the worker's coordinates as a ledger row, then strip custody fields.
+        """Validate and record a response staged by the inference worker.
 
-        The ordering invariant the external sink requires — a call must not
-        become a lineage parent until its staged record is durable — holds
-        structurally: the worker stages before acknowledging, so the ledger
-        row (which is what makes the call resolvable) is written only after
-        the coordinates arrive.
+        The worker returns commit coordinates only after ``StagingSink.stage`` succeeds.
+        This method validates those coordinates against the active call.
+        It then records the call in the lineage store.
+        Finally, it removes token data and commit coordinates from the served response.
         """
         context = current_capture_context()
         if context is None or not context.external_staging or context.lineage_store is None:
             return
+        ledger = context.lineage_store
+        if not isinstance(ledger, CaptureLedger):
+            raise ValueError("external staging requires a CaptureLedger on the capture context")
         coords_payload = payload.pop(NG_COMMIT_COORDS_FIELD, None)
         admission = context.capture_admission
         if admission is None:
@@ -1051,7 +1061,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             return
         try:
             if coords_payload is None:
-                await context.lineage_store.record_failure(
+                await ledger.record_failure(
                     context.rollout_id,
                     context.model_call_id,
                     WORKER_MISSING_COMMIT_COORDS_REASON,
@@ -1064,7 +1074,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                     f"active capture context {context.rollout_id}/{context.model_call_id}"
                 )
             if coords.disposition == "capture_failed":
-                await context.lineage_store.record_failure(
+                await ledger.record_failure(
                     context.rollout_id,
                     context.model_call_id,
                     WORKER_CAPTURE_FAILED_REASON,
@@ -1072,19 +1082,17 @@ class VLLMModel(SimpleResponsesAPIModel):
                 return
             if coords.parent_call_id != admission.parent_call_id or coords.prev_len != admission.prev_len:
                 raise ValueError(f"coordinates for {coords.model_call_id} diverge from admission")
-            # The served envelope id is the terminal-attribution join key: the
-            # agent proves which response it kept by possessing it. Observe the
-            # payload's own id; never mint one. A served completion without an
-            # id is a stamping bug and fails closed (poisons the call below).
+            # Store the response ID returned to the agent with the corresponding lineage row.
+            # A missing ID makes that association impossible.
+            # Treat a missing ID as a capture failure.
             response_id = str(payload.get("id") or "")
             if not response_id:
                 raise ValueError(f"served response for {coords.model_call_id} carries no envelope id")
             child_staging_chain = list(context.parent_staging_chain) + [str(coords.staging_key)]
             response_items, _ = strip_token_fields(response_to_output_items(payload))
-            # Content-witness keys, hashed while the response is still
-            # server-side: this call's own output, and request + output (the
-            # cumulative reading). Unfingerprintable content abstains (None)
-            # rather than poisoning a valid completion.
+            # Compute one fingerprint for the response items.
+            # Compute another for the request and response items together.
+            # If either input cannot be fingerprinted, store no fingerprints and continue recording the call.
             try:
                 output_fingerprint = assistant_fingerprint(list(response_items)) or None
                 continuation_fingerprint = (
@@ -1093,36 +1101,37 @@ class VLLMModel(SimpleResponsesAPIModel):
             except (TypeError, ValueError):
                 output_fingerprint = None
                 continuation_fingerprint = None
-            # Custody rows are token-free: the worker's chained ``chain_hash``
-            # replaces the cumulative token array, and its whole-sequence
-            # ``cumulative_hash`` becomes the row digest. Finalization
-            # re-verifies both against the staged deltas in TQ.
-            await context.lineage_store.record(
-                context.rollout_id,
-                context.model_call_id,
-                list(context.request_items or []),
-                response_items,
-                [],
-                coords.cumulative_hash or "",
+            # The lineage row omits token arrays because the worker stores token deltas separately.
+            # Finalization verifies both hashes against those staged token deltas.
+            # ``CallRecord`` re-validates the manifest-row invariants (contiguous
+            # lengths, root/child mode); a ValidationError poisons the call below.
+            record = CallRecord(
+                model_call_id=coords.model_call_id,
                 parent_call_id=coords.parent_call_id,
-                staging_key=coords.staging_key,
-                weight_version=coords.weight_version,
                 prev_len=coords.prev_len,
                 delta_len=coords.delta_len,
                 cum_len=coords.cum_len,
-                staging_digest=coords.digest,
+                weight_version=coords.weight_version,
+                digest=coords.digest,
                 extras_digest=coords.extras_digest,
+                staging_key=coords.staging_key,
                 mode=admission.mode,
-                logical_request_id=context.logical_request_id,
-                admitted_at=context.admitted_at,
-                staging_chain=child_staging_chain,
                 chain_hash=coords.chain_hash,
                 cumulative_hash=coords.cumulative_hash,
                 response_id=response_id,
+                admitted_at=context.admitted_at,
                 output_fingerprint=output_fingerprint,
                 continuation_fingerprint=continuation_fingerprint,
                 fingerprint_version=FINGERPRINT_VERSION,
             )
+            commit = CaptureLedgerCommit(
+                rollout_id=context.rollout_id,
+                record=record,
+                staging_chain=tuple(child_staging_chain),
+                request_items=list(context.request_items or []),
+                response_items=response_items,
+            )
+            await ledger.record(commit)
             mark_external_staging_committed(
                 rollout_id=coords.rollout_id,
                 model_call_id=coords.model_call_id,
@@ -1137,7 +1146,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 context.model_call_id,
             )
             try:
-                await context.lineage_store.record_failure(
+                await ledger.record_failure(
                     context.rollout_id,
                     context.model_call_id,
                     INVALID_COMMIT_COORDS_REASON,

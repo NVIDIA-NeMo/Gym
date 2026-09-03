@@ -24,7 +24,7 @@ It hashes model-authored turns and ignores user and tool content added between c
 ``conversation_digest`` verifies the unchanged request context.
 A digest mismatch rejects the claimed lineage before any parent tokens are reused.
 
-The shared ``LineageStore`` resolves entries already committed by ``TokenSink``.
+The shared ``LineageResolver`` resolves entries already committed by ``TokenSink``.
 ``FileLineageStore`` tails the token JSONL through the token store's lock.
 Each child receives its parent's cumulative tokens.
 Downstream inference consumes those tokens to supply the exact prompt prefix.
@@ -47,12 +47,16 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import orjson
 
 from nemo_gym.token_id_capture.protocols import LineageMatch, LineageResolution
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, cumulative_tokens
+
+
+if TYPE_CHECKING:
+    from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit
 
 
 # Increment when fingerprint canonicalization or hash layout changes.
@@ -75,7 +79,6 @@ _CUSTODY_FIELDS = (
     "staging_digest",
     "extras_digest",
     "mode",
-    "logical_request_id",
     "admitted_at",
     "staging_chain",
     "chain_hash",
@@ -87,48 +90,30 @@ _CUSTODY_FIELDS = (
 )
 
 
-def _custody_columns(
-    parent_call_id: str | None,
-    staging_key: str | None,
-    weight_version: int | None,
-    prev_len: int | None,
-    delta_len: int | None,
-    cum_len: int | None,
-    staging_digest: str | None,
-    extras_digest: str | None,
-    mode: str | None,
-    logical_request_id: str | None,
-    admitted_at: float | None,
-    staging_chain: list[str] | None = None,
-    chain_hash: str | None = None,
-    cumulative_hash: str | None = None,
-    response_id: str | None = None,
-    output_fingerprint: str | None = None,
-    continuation_fingerprint: str | None = None,
-    fingerprint_version: int = 0,
-) -> dict:
-    """Return the ledger custody columns, or an empty dict for a lineage-only row."""
-    if staging_key is None:
-        return {}
+def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[str] = ()) -> dict:
+    """Return the ledger custody columns for one committed ``CallRecord``.
+
+    ``_manifest_from_rows`` rebuilds the ``CallRecord`` from these columns, so
+    the mapping must stay a lossless round trip.
+    """
     return {
-        "parent_call_id": parent_call_id,
-        "staging_key": staging_key,
-        "weight_version": weight_version,
-        "prev_len": prev_len,
-        "delta_len": delta_len,
-        "cum_len": cum_len,
-        "staging_digest": staging_digest,
-        "extras_digest": extras_digest,
-        "mode": mode,
-        "logical_request_id": logical_request_id,
-        "admitted_at": admitted_at,
+        "parent_call_id": record.parent_call_id,
+        "staging_key": record.staging_key,
+        "weight_version": record.weight_version,
+        "prev_len": record.prev_len,
+        "delta_len": record.delta_len,
+        "cum_len": record.cum_len,
+        "staging_digest": record.digest,
+        "extras_digest": record.extras_digest,
+        "mode": record.mode,
+        "admitted_at": record.admitted_at,
         "staging_chain": list(staging_chain) if staging_chain else [],
-        "chain_hash": chain_hash,
-        "cumulative_hash": cumulative_hash,
-        "response_id": response_id,
-        "output_fingerprint": output_fingerprint or None,
-        "continuation_fingerprint": continuation_fingerprint or None,
-        "fingerprint_version": fingerprint_version,
+        "chain_hash": record.chain_hash,
+        "cumulative_hash": record.cumulative_hash,
+        "response_id": record.response_id,
+        "output_fingerprint": record.output_fingerprint or None,
+        "continuation_fingerprint": record.continuation_fingerprint or None,
+        "fingerprint_version": record.fingerprint_version,
     }
 
 
@@ -140,8 +125,8 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
     columns and are not part of a capture manifest.
     """
     # Deferred: staging.records pulls in the digest module; lineage stays light.
+    from nemo_gym.token_id_capture.records import LEDGER_ROW_MISSING_RESPONSE_ID_REASON
     from nemo_gym.token_id_capture.staging.records import (
-        LEDGER_ROW_MISSING_RESPONSE_ID_REASON,
         CallRecord,
         ManifestFailure,
         RolloutManifest,
@@ -184,7 +169,6 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     chain_hash=row.get("chain_hash"),
                     cumulative_hash=row.get("cumulative_hash"),
                     response_id=str(row["response_id"]),
-                    logical_request_id=row.get("logical_request_id"),
                     admitted_at=row.get("admitted_at"),
                     output_fingerprint=row.get("output_fingerprint") or None,
                     continuation_fingerprint=row.get("continuation_fingerprint") or None,
@@ -652,7 +636,7 @@ class InMemoryLineageStore:
     Its index is memory-only.
     Eviction or restart leaves affected continuations unresolved.
     That failure mode is safe but can mask otherwise usable rollouts.
-    Multi-worker deployments require a shared ``LineageStore``.
+    Multi-worker deployments require a shared ``LineageResolver``.
     The resolution index evicts rollouts under memory bounds, so this store
     cannot serve as an external-staging capture ledger (completeness would
     break); it remains for unit tests and single-worker development. Its
@@ -674,73 +658,26 @@ class InMemoryLineageStore:
     def is_process_shared(self) -> bool:
         return False
 
-    async def record(
-        self,
-        rollout_id: str,
-        model_call_id: str,
-        request_items: list[dict],
-        response_items: list[dict],
-        cumulative_token_ids: list[int],
-        digest: str,
-        *,
-        parent_call_id: str | None = None,
-        staging_key: str | None = None,
-        weight_version: int | None = None,
-        prev_len: int | None = None,
-        delta_len: int | None = None,
-        cum_len: int | None = None,
-        staging_digest: str | None = None,
-        extras_digest: str | None = None,
-        mode: str | None = None,
-        logical_request_id: str | None = None,
-        admitted_at: float | None = None,
-        staging_chain: list[str] | None = None,
-        chain_hash: str | None = None,
-        cumulative_hash: str | None = None,
-        response_id: str | None = None,
-        output_fingerprint: str | None = None,
-        continuation_fingerprint: str | None = None,
-        fingerprint_version: int = 0,
-    ) -> None:
+    async def record(self, commit: CaptureLedgerCommit) -> None:
         # Custody rows are token-free (mirrors FileLineageStore): the chain
         # hash covers continuity, so the index keeps tokens only for
         # lineage-only local-capture rows that inject prompt prefixes.
-        self.index.for_rollout(rollout_id).record(
-            model_call_id,
-            list(request_items) + list(response_items),
-            [] if staging_key else cumulative_token_ids,
-            digest,
-            context_len=len(request_items),
-            staging_key=staging_key or "",
-            parent_staging_chain=staging_chain,
-            cum_len=cum_len,
-            chain_hash=chain_hash or "",
+        record = commit.record
+        self.index.for_rollout(commit.rollout_id).record(
+            record.model_call_id,
+            list(commit.request_items) + list(commit.response_items),
+            [],
+            record.cumulative_hash or "",
+            context_len=len(commit.request_items),
+            staging_key=record.staging_key,
+            parent_staging_chain=list(commit.staging_chain),
+            cum_len=record.cum_len,
+            chain_hash=record.chain_hash or "",
         )
-        custody = _custody_columns(
-            parent_call_id,
-            staging_key,
-            weight_version,
-            prev_len,
-            delta_len,
-            cum_len,
-            staging_digest,
-            extras_digest,
-            mode,
-            logical_request_id,
-            admitted_at,
-            staging_chain,
-            chain_hash,
-            cumulative_hash,
-            response_id,
-            output_fingerprint,
-            continuation_fingerprint,
-            fingerprint_version,
-        )
-        if custody:
-            rows = self._ledgers.setdefault(rollout_id, [])
-            row = {"model_call_id": model_call_id, **custody}
-            if not any(existing == row for existing in rows):
-                rows.append(row)
+        rows = self._ledgers.setdefault(commit.rollout_id, [])
+        row = {"model_call_id": record.model_call_id, **_custody_columns(record, commit.staging_chain)}
+        if not any(existing == row for existing in rows):
+            rows.append(row)
 
     async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
         rows = self._ledgers.setdefault(rollout_id, [])
@@ -1138,96 +1075,31 @@ class FileLineageStore(IncrementalLineageStore):
             chain_hash=str(record.get("chain_hash") or ""),
         )
 
-    async def record(
-        self,
-        rollout_id: str,
-        model_call_id: str,
-        request_items: list[dict],
-        response_items: list[dict],
-        cumulative_token_ids: list[int],
-        digest: str,
-        *,
-        parent_call_id: str | None = None,
-        staging_key: str | None = None,
-        weight_version: int | None = None,
-        prev_len: int | None = None,
-        delta_len: int | None = None,
-        cum_len: int | None = None,
-        staging_digest: str | None = None,
-        extras_digest: str | None = None,
-        mode: str | None = None,
-        logical_request_id: str | None = None,
-        admitted_at: float | None = None,
-        staging_chain: list[str] | None = None,
-        chain_hash: str | None = None,
-        cumulative_hash: str | None = None,
-        response_id: str | None = None,
-        output_fingerprint: str | None = None,
-        continuation_fingerprint: str | None = None,
-        fingerprint_version: int = 0,
-    ) -> None:
-        custody = _custody_columns(
-            parent_call_id,
-            staging_key,
-            weight_version,
-            prev_len,
-            delta_len,
-            cum_len,
-            staging_digest,
-            extras_digest,
-            mode,
-            logical_request_id,
-            admitted_at,
-            staging_chain,
-            chain_hash,
-            cumulative_hash,
-            response_id,
-            output_fingerprint,
-            continuation_fingerprint,
-            fingerprint_version,
-        )
-        await asyncio.to_thread(
-            self._record,
-            rollout_id,
-            model_call_id,
-            request_items,
-            response_items,
-            cumulative_token_ids,
-            digest,
-            custody,
-        )
+    async def record(self, commit: CaptureLedgerCommit) -> None:
+        await asyncio.to_thread(self._record, commit)
 
-    def _record(
-        self,
-        rollout_id: str,
-        model_call_id: str,
-        request_items: list[dict],
-        response_items: list[dict],
-        cumulative_token_ids: list[int],
-        digest: str,
-        custody: dict | None = None,
-    ) -> None:
+    def _record(self, commit: CaptureLedgerCommit) -> None:
+        request_items = list(commit.request_items)
+        model_call_id = commit.record.model_call_id
+        # Custody rows are token-free: the chained ``chain_hash`` covers
+        # continuity and the whole-sequence ``cumulative_hash`` is the row
+        # digest, so no cumulative token array is stored.
         record = {
             "model_call_id": model_call_id,
-            "fingerprint": assistant_fingerprint(list(request_items) + list(response_items)),
+            "fingerprint": assistant_fingerprint(request_items + list(commit.response_items)),
             "context_len": len(request_items),
             "context_digest": conversation_digest(request_items),
-            "digest": digest,
-            **(custody or {}),
+            "digest": commit.record.cumulative_hash or "",
+            **_custody_columns(commit.record, commit.staging_chain),
         }
-        if not custody:
-            # Custody rows are token-free: the chained ``chain_hash`` covers
-            # continuity, so only lineage-only (local capture) rows store the
-            # cumulative sequence for prompt-prefix injection.
-            record["cumulative_token_ids"] = list(cumulative_token_ids)
-        with self._locked(rollout_id):
-            records = self._read(rollout_id)
+        with self._locked(commit.rollout_id):
+            records = self._read(commit.rollout_id)
             matches = [existing for existing in records if existing["model_call_id"] == model_call_id]
             if matches:
                 if matches[0] != record:
                     raise ValueError(f"conflicting lineage record for model call {model_call_id}")
                 return
-            self._append(rollout_id, record, records)
+            self._append(commit.rollout_id, record, records)
 
     async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
         await asyncio.to_thread(self._record_failure, rollout_id, model_call_id, reason)

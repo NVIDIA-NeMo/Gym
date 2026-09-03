@@ -151,7 +151,9 @@ class VLLMModelWithCompaction(VLLMModel):
         return self._converter.chat_completion_to_response(
             responses_create_params=standard_body,
             chat_completion=chat_completion_response,
-            preserve_envelope_id=self._external_capture_enabled,
+            # Keep the backend envelope id only for captured requests. Terminal
+            # attribution matches it to the ledger row.
+            preserve_envelope_id=self._preserve_envelope_id(),
         )
 
 

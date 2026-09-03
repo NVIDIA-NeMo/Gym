@@ -29,11 +29,8 @@ different agent classes, so up to four witnesses testify:
   explicit     — the caller names the kept call directly (a gate seal or an
                  agent-declared terminal id). Soft: a miss is an abstention
                  and other witnesses may still attribute.
-  declared     — the harness names the response it kept by served response
-                 id. Authoritative: a declared id that matches no record (or
-                 an ambiguous match) attributes nothing and never falls back,
-                 because the harness claimed a specific response and the
-                 records cannot confirm it.
+  declared     — the harness reports the response id it retained. Selection
+                 stops if that id does not match exactly one captured row.
   response_id  — the ``/run`` response's ``id`` equals the served id recorded
                  on exactly one entry. Possession of the id proves which
                  response the client actually received.
@@ -45,11 +42,9 @@ different agent classes, so up to four witnesses testify:
                  response), and the transcript's trailing model-authored
                  block (a merged multi-turn transcript).
 
-This module serves both capture paths. Legacy ``TokenEntry`` records carry
-token arrays and ``output_items``; token-free custody rows (staging
-``CallRecord``) carry recorded ``output_fingerprint``/``cumulative_hash``
-columns instead. Records are duck-typed: a record with a ``staging_key`` is
-treated as a custody row.
+External staging rows omit token arrays because those tokens remain in framework storage.
+They carry a ``staging_key`` and precomputed content fingerprints instead.
+This module identifies external staging rows by the presence of ``staging_key``.
 
 Each witness abstains rather than guesses (ambiguity inside a witness is an
 abstention, not a vote). The verdict then follows the stack's rule that claims
@@ -128,9 +123,8 @@ def resolve_terminal(
         declared_matches = [entry for entry in entries if entry.response_id == declared_response_id]
         declared_winner = _collapse_identical(declared_matches)
         if declared_winner is None:
-            # A declaration is authoritative: a miss (or an ambiguous match)
-            # masks and never falls back to weaker evidence — the harness
-            # claimed a specific response and the records cannot confirm it.
+            # The harness reported a specific response ID.
+            # Do not select a different call when that ID has no unique match.
             reasons.append("declared_ambiguous" if declared_matches else "declared_terminal_not_captured")
             return TerminalAttribution(None, reason=",".join(reasons))
         witnesses.append(("declared", declared_winner))

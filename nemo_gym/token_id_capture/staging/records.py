@@ -21,6 +21,11 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, StrictStr, model_validator
 
+from nemo_gym.token_id_capture.records import (  # noqa: F401  (re-exported for staging consumers)
+    LEDGER_ROW_MISSING_RESPONSE_ID_REASON,
+    UNCOMMITTED_CALL_REASON,
+    UNRESOLVED_PARENT_REASON,
+)
 from nemo_gym.token_id_capture.staging.digest import (
     EMPTY_EXTRAS_DIGEST,
     EXTRAS_DIGEST_VERSION,
@@ -30,11 +35,6 @@ from nemo_gym.token_id_capture.staging.digest import (
     compute_staging_digest,
 )
 
-
-# Compatibility spelling for the original staging SDK. Version 2 is an
-# intentionally incompatible integrity contract; readers reject v1 records.
-SCHEMA_VERSION = STAGING_SCHEMA_VERSION
-DIGEST_VERSION = STAGING_DIGEST_VERSION
 
 CaptureDisposition = Literal["staged", "capture_failed"]
 CaptureMode = Literal["token_in", "text"]
@@ -57,12 +57,11 @@ def staging_key(rollout_id: str, model_call_id: str) -> str:
 # ``TerminalSelection.reason`` from the parent-link fallback walk. Values are
 # wire contract: the framework switches on them, so never repurpose one.
 
-# The gate could not admit the call: the request fingerprint matched no
-# committed ledger row (or matched ambiguously). Written by ``resolve_parent``.
-UNRESOLVED_PARENT_REASON = "unresolved_parent"
-# The request was admitted but returned without worker commit coordinates.
-# Written by the capture middleware's uncommitted-call handler.
-UNCOMMITTED_CALL_REASON = "request_finished_without_staged_coordinates"
+# Reasons specific to worker commit coordinates. The shared reasons
+# (``UNRESOLVED_PARENT_REASON``, ``UNCOMMITTED_CALL_REASON``,
+# ``LEDGER_ROW_MISSING_RESPONSE_ID_REASON``) live in the core records module
+# and are re-exported here.
+
 # The worker's response carried no ``ng_commit_coords`` acknowledgement.
 WORKER_MISSING_COMMIT_COORDS_REASON = "worker_response_missing_commit_coordinates"
 # The worker acknowledged the call with ``disposition="capture_failed"``.
@@ -70,8 +69,6 @@ WORKER_CAPTURE_FAILED_REASON = "worker_capture_failed"
 # The worker's commit coordinates failed identity validation against the
 # admitted capture context.
 INVALID_COMMIT_COORDS_REASON = "invalid_worker_commit_coordinates"
-# A committed ledger row lacks the served response id the witnesses join on.
-LEDGER_ROW_MISSING_RESPONSE_ID_REASON = "ledger_row_missing_response_id"
 
 # Terminal-selection outcomes from the no-witness parent-link walk
 # (``staging.terminal.select_terminal_call``).
@@ -95,7 +92,14 @@ class _DigestWireModel(_WireModel):
 
 
 class CaptureAdmission(_WireModel):
-    """Gate-to-worker identity and exact-prefix contract for one model call."""
+    """Gate-to-worker identity and exact-prefix contract for one model call.
+
+    A ``token_in`` admission carries its prefix in one of two encodings.
+    ``required_prefix_token_ids`` holds the ids inline.
+    ``staging_chain`` names the staged records whose token deltas form the prefix.
+    The worker resolves either encoding to a flat id list.
+    It then passes that list to ``CaptureAdapter.enter_prefix``.
+    """
 
     rollout_id: Identifier
     model_call_id: Identifier
@@ -131,14 +135,12 @@ class CaptureAdmission(_WireModel):
 
 
 class StagedCallBaseSnapshot(_DigestWireModel):
-    """The extras-free part of a staged call that verifies without extras bytes.
+    """Token columns and metadata for one staged call.
 
-    Carries every custody-critical scalar and token column plus the *committed*
-    ``extras_digest``. Validation recomputes the call digest from the committed
-    extras digest, so a valid instance proves the base row is authentic — it
-    deliberately does NOT claim the extras payload was fetched or verified.
-    Consumers verify deferred extras against ``extras_digest`` at their own
-    point of use.
+    This model excludes the optional ``extras`` payload.
+    Validation recomputes the call digest from these fields and the recorded ``extras_digest``.
+    It does not verify that the corresponding extras payload exists or matches that digest.
+    A consumer that loads extras must verify them separately with ``compute_extras_digest``.
     """
 
     rollout_id: Identifier
@@ -240,7 +242,7 @@ class StageResult(_WireModel):
 
 
 class CommitCoords(_DigestWireModel):
-    """Token-light worker acknowledgement committed by the Gym gate."""
+    """Metadata returned after an inference worker stages one call."""
 
     rollout_id: Identifier
     model_call_id: Identifier
@@ -294,22 +296,14 @@ class CallRecord(_DigestWireModel):
     mode: CaptureMode = "token_in"
     chain_hash: DigestHex | None = None
     cumulative_hash: DigestHex | None = None
-    # The served response envelope id, recorded by the model server before the
-    # response leaves the process. Possession of this id proves which served
-    # response the agent kept: terminal attribution joins the scored
-    # ``response.id`` to exactly one manifest row through it.
+    # The response envelope ID observed before the model server returns the response.
+    # Terminal attribution matches the scored ``response.id`` to this field.
     response_id: Identifier
-    # The client correlation header (``x-nemo-gym-logical-request-id``) when
-    # the harness sent one. Attribution never reads it; it remains for
-    # observability joins only.
-    logical_request_id: Identifier | None = None
     # Wall-clock admission time stamped by the model-server middleware.
     # Heuristic terminal selection orders candidate roots by this value.
     admitted_at: StrictFloat | None = None
-    # Content-witness keys: ``assistant_fingerprint`` over this call's own
-    # output items, and over request + output (the cumulative reading).
-    # ``None`` means the content was unfingerprintable — a legitimate
-    # abstention, not a schema gap.
+    # Fingerprints of this call output and of the request followed by that output.
+    # A value is ``None`` when the corresponding items cannot be fingerprinted.
     output_fingerprint: DigestHex | None = None
     continuation_fingerprint: DigestHex | None = None
     # Canonicalization version of the fingerprints above; 0 means none were
@@ -331,8 +325,22 @@ class CallRecord(_DigestWireModel):
         return self
 
 
+class CaptureLedgerCommit(_WireModel):
+    """One successfully staged call, as handed to ``CaptureLedger.record``.
+
+    ``record`` is the manifest row. The remaining fields feed parent resolution
+    and are not part of the manifest.
+    """
+
+    rollout_id: Identifier
+    record: CallRecord
+    staging_chain: tuple[Identifier, ...] = ()
+    request_items: list[dict]
+    response_items: list[dict]
+
+
 class ManifestFailure(_WireModel):
-    """One poison row in a rollout's capture ledger."""
+    """A call whose token capture did not complete."""
 
     model_call_id: Identifier
     reason: Identifier

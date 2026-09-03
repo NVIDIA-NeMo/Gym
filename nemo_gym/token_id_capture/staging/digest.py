@@ -13,17 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Canonical integrity encoding for framework-owned token staging.
+"""Encode staged records for integrity verification.
 
-The call digest binds every custody-critical scalar and token column. Optional
-per-token material is encoded separately and its digest is bound into the call
-digest. This permits a metadata-only finalizer to verify the base row while a
-later consumer verifies deferred extras against the same receipt.
+The staged-record digest covers the call metadata and token columns.
+Optional extras are encoded separately.
+Their digest is included in the staged-record digest.
+This lets one consumer verify token data without loading extras.
+A later consumer can verify extras against the same recorded digest.
 
-All encodings are length-delimited and versioned. Token masks and log
-probabilities are encoded as IEEE-754 float32 bit patterns because framework
-staging columns use float32. Extras use a small typed binary encoding rather
-than implementation-specific JSON serialization.
+All values use versioned, length-delimited encodings.
+Masks and log probabilities use IEEE-754 float32 bit patterns.
+Extras use a typed binary encoding instead of JSON serialization.
 """
 
 from __future__ import annotations

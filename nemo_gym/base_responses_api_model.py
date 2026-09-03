@@ -61,7 +61,7 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import LOGICAL_REQUEST_HEADER, maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -71,7 +71,6 @@ from nemo_gym.server_utils import (
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
-    UNCOMMITTED_CALL_REASON,
     CaptureContext,
     capture_tokens,
     current_capture_context,
@@ -88,7 +87,8 @@ from nemo_gym.token_id_capture import (
 from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
-from nemo_gym.token_id_capture.protocols import CaptureLedger
+from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolver
+from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
 from nemo_gym.token_id_capture.store import make_token_store
 
 
@@ -1175,21 +1175,8 @@ def _record(
             logger.warning("Could not mark rollout %s capture as incomplete.", rollout_id, exc_info=True)
 
 
-def _scope_header(scope: dict[str, Any], name: str) -> str | None:
-    """Read one unambiguous ASGI header value."""
-    encoded_name = name.lower().encode("ascii")
-    values = {value.decode("latin-1") for key, value in scope.get("headers", []) if key.lower() == encoded_name}
-    if not values:
-        return None
-    if len(values) == 1:
-        return values.pop()
-    # A joined value cannot authenticate and contains a character rejected by
-    # logical-id validation. Preserve fail-closed behavior without logging it.
-    return ",".join(sorted(values))
-
-
 async def _fail_uncommitted_external_call(context: CaptureContext | None) -> None:
-    """Poison an admitted call that returned without a durable worker ack."""
+    """Record a failure when an admitted worker call returns without commit coordinates."""
     if (
         context is None
         or not context.external_staging
@@ -1198,8 +1185,16 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         or context.lineage_store is None
     ):
         return
+    ledger = context.lineage_store
+    if not isinstance(ledger, CaptureLedger):
+        logger.error(
+            "Cannot poison uncommitted call %s for rollout %s: the lineage resolver is not a CaptureLedger.",
+            context.model_call_id,
+            context.rollout_id,
+        )
+        return
     try:
-        await context.lineage_store.record_failure(
+        await ledger.record_failure(
             context.rollout_id,
             context.model_call_id,
             UNCOMMITTED_CALL_REASON,
@@ -1233,7 +1228,7 @@ class _CaptureMiddleware:
         model_server_name: str | None,
         token_store: Any = None,
         configured_sink: Any = None,
-        lineage_store: Any = None,
+        lineage_store: LineageResolver | None = None,
         delta_records: bool = False,
         external_staging: bool = False,
         token_capture_enabled: bool = False,
@@ -1245,11 +1240,14 @@ class _CaptureMiddleware:
         self._token_store = token_store
         # Built from token_id_capture.sink, once, in this process.
         self._configured_sink = configured_sink
-        self._lineage_store = lineage_store
+        self._lineage_store: LineageResolver | None = lineage_store
         self._delta_records = delta_records
         # A framework inference worker owns record staging; the lineage store
         # doubles as the per-rollout capture ledger.
         self._external_staging = external_staging
+        self._capture_ledger: CaptureLedger | None = (
+            lineage_store if external_staging and isinstance(lineage_store, CaptureLedger) else None
+        )
         # Capture may have no destination in this process.
         # A framework may stage records from its inference worker.
         # This process still resolves the capture identity.
@@ -1316,10 +1314,9 @@ class _CaptureMiddleware:
                 rollout_id=rollout_id,
                 model_call_id=model_call_id,
                 token_sink=token_sink,
-                lineage_store=self._lineage_store,
+                lineage_store=self._capture_ledger if self._external_staging else self._lineage_store,
                 delta_records=self._delta_records,
                 external_staging=self._external_staging,
-                logical_request_id=_scope_header(scope, LOGICAL_REQUEST_HEADER),
                 admitted_at=time.time(),
             )
             sink_token = set_token_sink(capture_context)
@@ -1527,7 +1524,9 @@ def install_model_call_capture(
     external_staging = capture_settings is not None and capture_settings.token_id_capture.external_staging
     if external_staging:
         if lineage_store is None:
-            raise ValueError("token_id_capture.external_staging requires a LineageStore")
+            raise ValueError(
+                "token_id_capture.external_staging requires a lineage resolver that implements CaptureLedger"
+            )
         if isinstance(lineage_store, InMemoryLineageStore):
             # The in-memory index evicts rollouts under memory bounds, which is
             # acceptable for a resolution cache but not for a completeness
@@ -1539,11 +1538,12 @@ def install_model_call_capture(
         if not isinstance(lineage_store, CaptureLedger):
             raise ValueError(
                 "token_id_capture.external_staging requires the lineage store to implement "
-                "the CaptureLedger protocol (record_failure, manifest, has_rows)"
+                "the CaptureLedger protocol (record, record_failure, manifest, has_rows)"
             )
+        capture_ledger: CaptureLedger = lineage_store
         install_rollout_control_routes(
             app,
-            lineage_store,
+            capture_ledger,
             auth_token=capture_settings.token_id_capture.resolve_control_auth_token(),
         )
 

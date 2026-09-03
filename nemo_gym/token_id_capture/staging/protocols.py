@@ -13,17 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Framework interfaces for the dependency-free staging contract.
+"""Interfaces for storing token data outside Gym model servers.
 
-These synchronous interfaces are intentional: the first consumer is an
-inference worker whose capture hook is synchronous. Implementations must not
-hide an asynchronous network client behind these methods; a serving host must
-move a blocking implementation off its event loop explicitly.
+Inference workers call these interfaces from synchronous capture hooks.
+Implementations must therefore provide synchronous methods.
+A serving system with async storage must move the call off its event loop.
 
-The capture host does not serialize sink access: ``StagingSink.stage`` may be
-invoked concurrently from multiple threads (one per in-flight completion).
-Implementations must be safe under concurrent invocation; one that requires
-serialization must synchronize internally rather than rely on the host.
+The capture object may call ``StagingSink.stage`` concurrently.
+Implementations must synchronize their own shared state.
 """
 
 from __future__ import annotations
@@ -63,10 +60,23 @@ class WeightVersionProvider(Protocol):
 
 
 class CaptureAdapter(Protocol):
-    """Extract engine-native capture material without owning its lifecycle."""
+    """Translate between engine-native payloads and capture material.
+
+    The adapter knows the engine's request and response formats.
+    It does not resolve where prefix tokens are stored.
+    The framework worker owns that step.
+    """
 
     def enter_prefix(self, request_payload: dict[str, Any], prefix_ids: list[int]) -> dict[str, Any]:
-        """Attach an exact parent prefix to an engine request."""
+        """Attach an exact parent prefix to an engine request.
+
+        ``prefix_ids`` is the complete, already resolved prefix.
+        The caller resolves a ``CaptureAdmission`` to these ids before calling.
+        It uses ``required_prefix_token_ids`` when the admission carries the prefix inline.
+        It fetches and concatenates the ``staging_chain`` records when the prefix is stored externally.
+        The adapter writes the ids in the engine's native request shape and returns the payload.
+        The adapter must not fetch staged records or inspect ``staging_chain``.
+        """
         ...
 
     def extract_prompt_ids(self, response_payload: dict[str, Any]) -> list[int]:

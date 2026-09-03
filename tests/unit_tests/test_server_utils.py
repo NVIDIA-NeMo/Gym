@@ -268,7 +268,7 @@ class TestServerUtils:
         )
         assert "my mock response" == actual_response
 
-    async def test_ServerClient_preserves_external_capture_url_and_capability(self, monkeypatch: MonkeyPatch) -> None:
+    async def test_ServerClient_preserves_external_capture_url(self, monkeypatch: MonkeyPatch) -> None:
         server_client = ServerClient(
             head_server_config=BaseServerConfig(host="head", port=12345),
             global_config_dict=DictConfig(
@@ -280,7 +280,6 @@ class TestServerUtils:
             NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME,
             "http://model/ng-rollout/rollout-1/training-token-capture",
         )
-        monkeypatch.setenv("OPENAI_API_KEY", "rollout-capability")
 
         request_mock = AsyncMock(return_value="response")
         client_mock = MagicMock()
@@ -297,10 +296,7 @@ class TestServerUtils:
         request_mock.assert_awaited_once_with(
             method="POST",
             url="http://model/ng-rollout/rollout-1/training-token-capture/v1/chat/completions",
-            headers={
-                "x-existing": "value",
-                "x-nemo-gym-capture-capability": "rollout-capability",
-            },
+            headers={"x-existing": "value"},
         )
 
     def test_BaseServer_load_config_from_global_config(self, monkeypatch: MonkeyPatch) -> None:

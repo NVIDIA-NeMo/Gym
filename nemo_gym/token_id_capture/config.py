@@ -76,7 +76,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym.token_id_capture.protocols import (
-    LineageStore,
+    LineageResolver,
     TokenSink,
     installed_lineage_store,
     installed_token_sink,
@@ -127,14 +127,14 @@ class TokenIdCaptureSettings(BaseModel):
     # ``None`` disables the kill switch.
     max_mask_fraction: float | None = None
     mask_fraction_min_samples: int = 50
-    # Framework-worker staging custody: the inference worker stages each
-    # call's token delta durably and acknowledges with token-light commit
-    # coordinates; the process-shared lineage store doubles as the
-    # per-rollout capture ledger. Serving workers coordinate only through
-    # that store — there is no separate gate state.
+    # Store token deltas in framework-owned storage.
+    # The inference worker writes each delta before returning commit coordinates.
+    # The shared lineage store records call metadata.
+    # It also makes committed parents visible to every serving worker.
+    # No additional in-memory coordinator is used.
     external_staging: bool = False
-    # Store only the environment variable name in config/telemetry. The
-    # manifest-route bearer itself is resolved inside the serving process.
+    # Name of the environment variable containing the manifest-route bearer token.
+    # The serving process reads the token without adding it to serialized configuration.
     control_auth_token_env: str = Field(
         default="NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN",
         min_length=1,
@@ -240,7 +240,7 @@ class TokenIdCaptureConfig(BaseModel):
             return None
         return self._build_endpoint(target, self.token_id_capture.sink_kwargs, TokenSink, "sink")
 
-    def build_lineage_store(self) -> LineageStore | None:
+    def build_lineage_store(self) -> LineageResolver | None:
         """Construct the configured request-time lineage store."""
         target = self.token_id_capture.lineage_store
         if not self.token_id_capture.enabled or target is None:
@@ -248,7 +248,7 @@ class TokenIdCaptureConfig(BaseModel):
         return self._build_endpoint(
             target,
             self.token_id_capture.lineage_store_kwargs,
-            LineageStore,
+            LineageResolver,
             "lineage_store",
         )
 

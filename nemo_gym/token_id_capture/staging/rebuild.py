@@ -1,14 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Verify sealed receipts and rebuild only their declared terminal ancestry.
+"""Verify a rollout receipt and rebuild its selected token sequence.
 
-The verifier is metadata-only: it consumes :class:`StagedCallBaseSnapshot`
-rows and never fetches, digests, or decodes extras payloads. Extras stay a
-committed, externally deferred payload — the returned
-:class:`ExtrasCommitment` list tells consumers which digests to verify at
-their own point of use (see ``staging.routes`` for the route envelope codec
-and span decision table).
+The verifier reads token columns from :class:`StagedCallBaseSnapshot`.
+It does not fetch or decode optional extras.
+For each selected call, it returns an :class:`ExtrasCommitment`.
+Consumers fetch the extras and compare their digest before use.
 """
 
 from __future__ import annotations
@@ -257,40 +255,37 @@ def verify_and_linearize(
     if not receipt.manifest:
         raise _fail("empty_manifest", "successful receipt has no committed calls")
 
-    manifest_ids = [record.model_call_id for record in receipt.manifest]
-    staging_keys = [record.staging_key for record in receipt.manifest]
-    if len(manifest_ids) != len(set(manifest_ids)):
-        raise _fail("duplicate_manifest_row", "model_call_id values are not unique")
-    if len(staging_keys) != len(set(staging_keys)):
-        raise _fail("duplicate_staging_key", "staging keys are not unique")
+    records_by_id: dict[str, CallRecord] = {}
+    staging_keys: set[str] = set()
+    for record in receipt.manifest:
+        if record.model_call_id in records_by_id:
+            raise _fail("duplicate_manifest_row", "model_call_id values are not unique")
+        if record.staging_key in staging_keys:
+            raise _fail("duplicate_staging_key", "staging keys are not unique")
+        records_by_id[record.model_call_id] = record
+        staging_keys.add(record.staging_key)
+
     if len(snapshots) != len(receipt.manifest):
         raise _fail(
             "row_count_mismatch",
             f"{len(snapshots)} snapshots for {len(receipt.manifest)} manifest rows",
         )
 
-    for snapshot in snapshots:
+    # One indexed pass binds each manifest row to its snapshot and validates it.
+    snapshots_by_id: dict[str, StagedCallBaseSnapshot] = {}
+    for record, snapshot in zip(receipt.manifest, snapshots):
         if not isinstance(snapshot, StagedCallBaseSnapshot):
             raise TypeError("snapshots must contain StagedCallBaseSnapshot values")
-
-    snapshot_ids = [snapshot.model_call_id for snapshot in snapshots]
-    if len(snapshot_ids) != len(set(snapshot_ids)):
-        raise _fail("duplicate_snapshot", "model_call_id values are not unique")
-    if set(snapshot_ids) != set(manifest_ids):
-        missing = sorted(set(manifest_ids) - set(snapshot_ids))
-        extra = sorted(set(snapshot_ids) - set(manifest_ids))
-        raise _fail("snapshot_identity_mismatch", f"missing={missing}, extra={extra}")
-    for record, snapshot in zip(receipt.manifest, snapshots):
+        if snapshot.model_call_id in snapshots_by_id:
+            raise _fail("duplicate_snapshot", "model_call_id values are not unique")
+        if snapshot.model_call_id not in records_by_id:
+            raise _fail("snapshot_identity_mismatch", f"snapshot {snapshot.model_call_id} is not in the manifest")
         if snapshot.model_call_id != record.model_call_id:
             raise _fail(
                 "snapshot_order_mismatch",
                 f"key {record.staging_key} expected {record.model_call_id}, received {snapshot.model_call_id}",
             )
-
-    snapshots_by_id = {snapshot.model_call_id: snapshot for snapshot in snapshots}
-    records_by_id = {record.model_call_id: record for record in receipt.manifest}
-    for record in receipt.manifest:
-        snapshot = snapshots_by_id[record.model_call_id]
+        snapshots_by_id[snapshot.model_call_id] = snapshot
         _compare_manifest_fields(receipt, record, snapshot)
         _recompute_integrity(snapshot)
     _validate_manifest_graph(records_by_id)

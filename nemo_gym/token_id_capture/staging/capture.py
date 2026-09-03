@@ -121,9 +121,8 @@ class RolloutTokenCapture:
             )
             delta_len = len(token_ids_delta)
             cum_len = admission.prev_len + delta_len
-            # The prefix custody proof above makes prompt + generation the
-            # exact cumulative sequence, so both hashes are computable here
-            # without the gate ever materializing tokens.
+            # For a continuation, the comparison above verifies that the prompt starts with the required prefix.
+            # Appending the generated IDs therefore yields the complete sequence for both hashes.
             chain_hash = compute_chain_hash(admission.parent_chain_hash, token_ids_delta)
             cumulative_hash = hash_token_ids(list(prompt_token_ids) + list(generated_token_ids))
             extras_digest = compute_extras_digest(extras)

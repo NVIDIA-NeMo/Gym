@@ -31,8 +31,6 @@ from nemo_gym.global_config import (
 
 _ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_rollout_id", default=None)
 
-LOGICAL_REQUEST_HEADER = "x-nemo-gym-logical-request-id"
-
 # A capture id is a path segment in ``/ng-rollout/<id>/...``.
 # Restrict it to characters that survive a path round trip.
 # Exclude leading dots because stores also use the id as a filename component.

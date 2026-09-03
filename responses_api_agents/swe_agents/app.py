@@ -282,10 +282,11 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     resolved_agent_cls: str = "CodeActAgent"
     resolved_diversify_tool_names: Optional[bool] = False
     resolved_camel_case_tool_names: Optional[bool] = False
-    ng_rollout_id: Optional[str] = None
-    # Route the sandboxed agent's model traffic through the token-capture URL
-    # prefix so the capture middleware attributes every call to the rollout.
-    token_capture_enabled: bool = False
+    # Mount the OpenHands capture overlay into the agent container.
+    # The pinned OpenHands nemo-gym client resolves the model server from
+    # the global config and ignores ``llm.base_url``; the overlay redirects
+    # it to ``model_server_base_url``.
+    install_openhands_capture_overlay: bool = False
 
     # Set later
     eval_command: Optional[ExecuteContainerCommandArgs] = None
@@ -341,7 +342,7 @@ class SWEBenchMetrics(BaseModel):
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
     instance_config: SWEBenchWrapperInstanceConfig
     subagent_trajectories: Optional[List[Dict[str, Any]]] = None
-    terminal_logical_request_id: Optional[str] = None
+    terminal_response_id: Optional[str] = None
 
 
 ########################################
@@ -1785,13 +1786,9 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
         # openai_model proxy force-overrides). tomlkit refuses to serialize None,
         # so coerce to an empty string here; the value is unused once the proxy
         # substitutes its configured backend.
-        model_server_base_url = apply_rollout_prefix(
-            self.config.model_server_base_url,
-            self.config.ng_rollout_id,
-            token_capture=self.config.token_capture_enabled,
-        )
+        model_server_base_url = self.config.model_server_base_url
         capture_route_cmd = ""
-        if self.config.token_capture_enabled:
+        if self.config.install_openhands_capture_overlay:
             capture_route_cmd = (
                 f"export PYTHONPATH={OPENHANDS_CAPTURE_OVERLAY_MOUNT}:${{PYTHONPATH:-}} && "
                 f"export NEMO_GYM_MODEL_SERVER_BASE_URL={shlex.quote(model_server_base_url)} && "
@@ -2171,11 +2168,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             "OpenCodeHarnessProcessor.setup() ran in model_post_init."
         )
 
-        model_server_base_url = apply_rollout_prefix(
-            self.config.model_server_base_url,
-            self.config.ng_rollout_id,
-            token_capture=self.config.token_capture_enabled,
-        )
+        model_server_base_url = self.config.model_server_base_url
 
         # openai_model.yaml uses `openai_model`; vllm_model.yaml uses `model`.
         try:
@@ -3105,9 +3098,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         files; we return the main session (no parent_session_id). All other
         per-session files stay on disk for offline training pickup.
 
-        Returns (messages, tools, prefix_message_count, terminal_logical_request_id).
-        `prefix_message_count`
-        is the number of chat messages the live model saw on its first call
+        Returns ``(messages, tools, prefix_message_count, terminal_response_id)``.
+        ``terminal_response_id`` is the served ``response.id`` of the selected session's latest completion.
+        ``prefix_message_count`` is the number of chat messages the live model saw on its first call
         (= the replay prefix in chat-completion format, or just system+user for
         non-replay runs). Used by `_inner_responses` to split input/output at
         the live continuation boundary.
@@ -3152,8 +3145,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         messages, tools = self._materialize_trajectory(main_data)
         response_id = (main_data.get("response") or {}).get("id")
-        terminal_logical_request_id = str(response_id) if response_id else None
-        return messages, tools, first_prefix_count, terminal_logical_request_id
+        terminal_response_id = str(response_id) if response_id else None
+        return messages, tools, first_prefix_count, terminal_response_id
 
     def get_all_session_trajectories_from_completions(self, trajectories_dir: Path, instance_id: str) -> list[dict]:
         """All per-session trajectories on disk (opencode subagent capture).
@@ -3447,9 +3440,9 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     f"--mount type=bind,src={dataset_path_to_mount},dst=/root/dataset/data.jsonl",
                 ]
             )
-            if params.token_capture_enabled and command.mode == "agent":
-                # OpenHands pins its own nemo-gym dependency. Inject only the
-                # capture-route compatibility patch for capture-enabled agents.
+            if params.install_openhands_capture_overlay and command.mode == "agent":
+                # Mount ``sitecustomize.py`` into capture-enabled agent containers.
+                # The module patches the OpenHands ``nemo-gym`` client at startup.
                 mount_args.append(
                     f"--mount type=bind,src={OPENHANDS_CAPTURE_OVERLAY_DIR},dst={OPENHANDS_CAPTURE_OVERLAY_MOUNT},ro"
                 )
@@ -3764,18 +3757,31 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
 
         # persistent_dir is mounted here in each container
         base_mounted_dir = Path("/trajectories_mount")
-        ng_rollout_id = current_rollout_id()
+        rollout_id = current_rollout_id()
+        token_capture_enabled = self._token_id_capture_enabled()
+        if token_capture_enabled and not rollout_id:
+            raise RuntimeError(
+                "token capture is enabled but the /run request carries no rollout id; "
+                "the model URL cannot be prefixed and no tokens would be captured"
+            )
+        model_server_base_url = apply_rollout_prefix(
+            self._swe_bench_wrapper_server_config.model_server_base_url,
+            rollout_id,
+            token_capture=token_capture_enabled,
+        )
+        # ``model_server_base_url`` also appears in the server config dump; the
+        # resolved rollout-specific URL must win.
+        config_kwargs = {**self.config.model_dump(), **self._swe_bench_wrapper_server_config.model_dump()}
+        config_kwargs["model_server_base_url"] = model_server_base_url
 
         params: SWEBenchWrapperInstanceConfig = SWEBenchWrapperInstanceConfig(
-            **self.config.model_dump(),
-            **self._swe_bench_wrapper_server_config.model_dump(),
+            **config_kwargs,
             problem_info=problem_info,
             body=body,
             persistent_dir=persistent_dir,
             metrics_fpath=persistent_dir / "nemo_gym_metrics.json",
             base_mounted_dir=base_mounted_dir,
-            ng_rollout_id=ng_rollout_id,
-            token_capture_enabled=self._token_id_capture_enabled(),
+            install_openhands_capture_overlay=token_capture_enabled,
             profiling_dir=persistent_dir / "profiling",
             profiling_mounted_dir=base_mounted_dir / "profiling",
             ray_queue_timestamp=time.time(),
@@ -3909,7 +3915,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             chat_completions_trajectory,
             chat_completions_tools,
             prefix_msg_count,
-            terminal_logical_request_id,
+            terminal_response_id,
         ) = self.get_openhands_trajectory_from_completions(trajectories_dir, params.instance_id)
 
         tools = [
@@ -3996,8 +4002,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 captured_subagents,
             )
             metadata["subagent_trajectories"] = orjson.dumps(subagent_trajectories).decode()
-        if terminal_logical_request_id is not None:
-            metadata["terminal_logical_request_id"] = terminal_logical_request_id
+        if terminal_response_id is not None:
+            metadata["terminal_response_id"] = terminal_response_id
 
         return NeMoGymResponse(
             id=f"swebench-{params.instance_id}",
@@ -4035,7 +4041,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     **(responses_create_params.get("metadata") or {}),
                     "subagent_trajectories": metadata["subagent_trajectories"],
                 }
-            terminal_logical_request_id = metadata.get("terminal_logical_request_id")
+            terminal_response_id = metadata.get("terminal_response_id")
 
             return SWEBenchVerifyResponse(
                 responses_create_params=responses_create_params,
@@ -4046,7 +4052,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     metadata["instance_config"]
                 ).model_dump(),
                 subagent_trajectories=subagent_trajectories,
-                terminal_logical_request_id=terminal_logical_request_id,
+                terminal_response_id=terminal_response_id,
             )
 
 

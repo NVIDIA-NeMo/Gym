@@ -1,18 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Heuristic terminal-call selection for rollouts without a declared terminal.
+"""Select a terminal call when the harness did not identify one.
 
-A harness that reports the response id it kept gives receipt assembly an
-authoritative terminal row. A harness that reports nothing leaves the ledger
-manifest as the only evidence. This module infers the terminal call from the
-manifest's explicit parent links alone: it never reads tokens, so a wrong
-inference can only select a shorter verified chain, never corrupt one —
-``verify_and_linearize`` still checks every digest downstream.
+The selector follows ``parent_call_id`` links in the manifest.
+It ignores an abandoned leaf when a sibling has descendants.
+It returns no result when more than one terminal call remains possible.
 
-Selection is fail-closed. Any shape with two defensible answers (a retry of
-the final call, divergent extended branches) returns no terminal and a reason
-the caller records as the rollout's failure reason.
+This function does not inspect token data.
+``verify_and_linearize`` validates the selected chain before training.
 """
 
 from __future__ import annotations
@@ -69,15 +65,14 @@ def _root_order_key(records: Sequence[CallRecord]):
 
 
 def select_terminal_call(records: Sequence[CallRecord]) -> TerminalSelection:
-    """Infer the terminal call of an undeclared rollout from parent links.
+    """Select a terminal call from parent links when the harness did not provide one.
 
-    The manifest's committed rows form a forest. The main root is the
-    earliest-admitted root, except that a root extended by children beats an
-    abandoned (childless) sibling root. The walk descends the fork structure,
-    eliminating abandoned retries the same way: a childless child loses to an
-    extended sibling. One surviving child continues the chain; several
-    surviving candidates are ambiguous and mask the rollout — a retry of the
-    final call is indistinguishable from its survivor, so it always masks.
+    Records may contain multiple roots and branches.
+    A root with children is preferred over roots without children.
+    Remaining roots are ordered by admission time and then manifest position.
+    At each subsequent level, children with descendants are preferred over childless siblings.
+    Selection continues when exactly one preferred child remains.
+    If multiple preferred children remain, no terminal call is returned.
     """
     if not records:
         return TerminalSelection(None, NO_RECORDS)

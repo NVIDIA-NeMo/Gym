@@ -13,13 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Preserve correlated Gym routes in OpenHands' pinned Gym client.
+"""Route OpenHands model requests through the rollout-specific Gym URL.
 
-OpenHands runs in a separate Python environment and intentionally pins its own
-``nemo-gym`` version.  Importing the entire current Gym tree there can pull in
-dependencies that environment does not provide.  Python loads this module at
-startup from the launcher-provided ``PYTHONPATH``, allowing us to patch only
-the outbound request routing contract while leaving the pinned package intact.
+The pinned nv-OpenHands fork calls the model through ``nemo_gym.server_utils.ServerClient``
+(``openhands/agenthub/nemo_gym_client.py``), not through litellm and ``llm.base_url``.
+That client resolves a bare host and port from the global config and knows nothing about
+the ``/ng-rollout/<id>/training-token-capture`` prefix, so the prefixed ``llm.base_url``
+written into the OpenHands config has no effect on model routing.
+
+The fork pins ``nemo-gym`` from Gym ``main``, which predates the
+``NEMO_GYM_MODEL_SERVER_BASE_URL`` override in ``ServerClient.request``. Python loads this
+module at interpreter startup from the launcher-provided ``PYTHONPATH`` and patches only
+``ServerClient.request`` to honor that variable. The base Miniforge interpreter has no
+``nemo-gym`` installed and skips the patch.
+
+Remove this module once nv-OpenHands re-locks ``nemo-gym`` on a Gym commit that includes the
+env override natively.
 """
 
 import os
@@ -28,17 +37,15 @@ from typing import Any
 
 _MODEL_SERVER_NAME_ENV = "NEMO_GYM_MODEL_SERVER_NAME"
 _MODEL_SERVER_BASE_URL_ENV = "NEMO_GYM_MODEL_SERVER_BASE_URL"
-_CAPABILITY_HEADER = "x-nemo-gym-capture-capability"
-_CAPTURE_PATH_SEGMENT = "training-token-capture"
 
 
 def _install_capture_route_patch() -> None:
     try:
         from nemo_gym import server_utils
     except ModuleNotFoundError as error:
-        # The launcher also invokes tooling from its base Miniforge Python,
-        # where nemo-gym is intentionally absent.  The OpenHands venv that
-        # makes model calls does provide it and will install the patch.
+        # The base Miniforge interpreter also loads this module without ``nemo-gym`` installed.
+        # Model requests run in the OpenHands virtual environment.
+        # That environment has ``nemo-gym`` installed and applies the patch.
         if error.name == "nemo_gym":
             return
         raise
@@ -67,13 +74,6 @@ def _install_capture_route_patch() -> None:
 
         if "json" in kwargs and isinstance(kwargs["json"], BaseModel):
             kwargs["json"] = kwargs["json"].model_dump(exclude_unset=True)
-
-        if _CAPTURE_PATH_SEGMENT in model_server_base_url:
-            capability = os.getenv("OPENAI_API_KEY")
-            if capability:
-                headers = dict(kwargs.get("headers") or {})
-                headers.setdefault(_CAPABILITY_HEADER, capability)
-                kwargs["headers"] = headers
 
         return await server_utils.request(
             method=method,

@@ -34,17 +34,15 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from nemo_gym.token_id_capture.lineage import assistant_fingerprint, stamp_continuation
-from nemo_gym.token_id_capture.protocols import LineageResolution, LineageStore, TokenSink
+from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolution, LineageResolver, TokenSink
 from nemo_gym.token_id_capture.records import (
+    UNRESOLVED_PARENT_REASON,
     ParentResolutionStatus,
     TokenEntry,
     extract_token_fields,
     response_to_output_items,
     stamp_lineage,
     strip_token_fields,
-)
-from nemo_gym.token_id_capture.staging.records import (
-    UNRESOLVED_PARENT_REASON,
 )
 
 
@@ -77,7 +75,8 @@ class CaptureContext:
     # ``None`` means another process owns record staging.
     # The context still carries the capture identity.
     token_sink: TokenSink | None
-    lineage_store: LineageStore | None = None
+    # External staging binds a ``CaptureLedger``; the built-in path needs only a resolver.
+    lineage_store: LineageResolver | CaptureLedger | None = None
     model: str = ""
     # ``commit_entry`` sets this after another capture path records the call.
     committed: bool = False
@@ -94,7 +93,6 @@ class CaptureContext:
     # store doubles as the rollout's capture ledger and admission is the
     # strict tri-state of the lineage result.
     external_staging: bool = False
-    logical_request_id: str | None = None
     # Stamped once when the middleware admits the call. The ledger row reuses
     # this value on every commit retry so idempotent re-records stay
     # byte-identical.
@@ -187,13 +185,15 @@ async def resolve_parent(request_messages: list | None) -> None:
     Every attempted resolution records a root, resolved, or unresolved decision.
     An unresolved decision includes its reason.
 
-    With external staging the lineage result is a strict tri-state admission:
-    a unique verified match admits ``token_in``; a ROOT resolution (or an
-    unresolved one on a rollout with no ledger rows — seeded assistant history)
-    admits a ``text`` root; anything else writes a poison row and leaves the
-    call unadmitted. An unresolved request is never silently converted into a
-    new root: the earlier policy-generated tokens would train as mask-zero
-    prompt tokens.
+    For external staging, parent resolution determines whether the worker may capture the call:
+
+    * A unique parent creates a ``token_in`` admission.
+    * A request with no prior assistant output creates a ``text`` root.
+    * An unresolved request may create a ``text`` root only when the rollout has no ledger rows.
+    * Every other result records a failure and leaves the call unadmitted.
+
+    An unresolved continuation cannot become a new root.
+    Doing so would train the earlier generated tokens as prompt tokens.
     """
     context = _CAPTURE_CONTEXT.get()
     if context is None or request_messages is None:
@@ -236,6 +236,9 @@ async def resolve_parent(request_messages: list | None) -> None:
         context.parent_chain_hash = resolved_match.chain_hash
     if not context.external_staging or context.capture_admission is not None or context.lineage_store is None:
         return
+    ledger = context.lineage_store
+    if not isinstance(ledger, CaptureLedger):
+        raise RuntimeError("external staging requires a CaptureLedger on the capture context")
 
     # Deferred: staging.records pulls in the digest module.
     from nemo_gym.token_id_capture.staging.records import CaptureAdmission
@@ -264,14 +267,14 @@ async def resolve_parent(request_messages: list | None) -> None:
                 context.rollout_id,
                 exc_info=True,
             )
-            await context.lineage_store.record_failure(
+            await ledger.record_failure(
                 context.rollout_id,
                 context.model_call_id,
                 UNRESOLVED_PARENT_REASON,
             )
         return
     is_root = context.parent_resolution is not None and context.parent_resolution.status == ParentResolutionStatus.ROOT
-    if is_root or not await context.lineage_store.has_rows(context.rollout_id):
+    if is_root or not await ledger.has_rows(context.rollout_id):
         context.capture_admission = CaptureAdmission(
             rollout_id=context.rollout_id,
             model_call_id=context.model_call_id,
@@ -283,7 +286,7 @@ async def resolve_parent(request_messages: list | None) -> None:
         context.model_call_id,
         context.rollout_id,
     )
-    await context.lineage_store.record_failure(
+    await ledger.record_failure(
         context.rollout_id,
         context.model_call_id,
         UNRESOLVED_PARENT_REASON,

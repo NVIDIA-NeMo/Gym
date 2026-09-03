@@ -64,7 +64,7 @@ from nemo_gym.token_id_capture.protocols import (
     CaptureLedger,
     LineageMatch,
     LineageResolution,
-    LineageStore,
+    LineageResolver,
     TokenCaptureSnapshot,
     TokenSink,
     TokenSource,
@@ -79,6 +79,8 @@ from nemo_gym.token_id_capture.records import (
     TOKEN_ENTRY_MIN_SCHEMA_VERSION,
     TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
     TOKEN_FIELDS,
+    UNCOMMITTED_CALL_REASON,
+    UNRESOLVED_PARENT_REASON,
     ParentResolutionStatus,
     TokenEntry,
     compute_digest,
@@ -101,8 +103,8 @@ from nemo_gym.token_id_capture.sink import (
     set_token_sink,
 )
 from nemo_gym.token_id_capture.staging.records import (
-    UNCOMMITTED_CALL_REASON,
-    UNRESOLVED_PARENT_REASON,
+    CallRecord,
+    CaptureLedgerCommit,
 )
 from nemo_gym.token_id_capture.store import TokenCaptureStore, make_token_store, validate_rollout_id
 
@@ -125,9 +127,11 @@ __all__ = [
     "TokenSink",
     "TokenSource",
     "CaptureLedger",
+    "CaptureLedgerCommit",
+    "CallRecord",
     "LineageMatch",
     "LineageResolution",
-    "LineageStore",
+    "LineageResolver",
     "install_lineage_store",
     "installed_lineage_store",
     "TokenCaptureSnapshot",
