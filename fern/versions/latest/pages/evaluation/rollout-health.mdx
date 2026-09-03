@@ -82,6 +82,8 @@ whether the check passes or produces a finding.
 
 The capability basis identifies the observability contract that a check inspects. It does not imply that every rollout passes
 that contract: for example, `model_call_missing_token_counts` cites C2 because a missing C2 token count is the defect it reports.
+The rows mirror the evaluated agent paths in the capability matrix; they are not an inventory of every directory under
+`responses_api_agents`.
 
 | ID | Health check | Capability basis |
 | --- | --- | --- |
@@ -141,6 +143,8 @@ that contract: for example, `model_call_missing_token_counts` cites C2 because a
 H6 through H10 accept either ownership scope. Claude Code, Hermes, OpenClaw, and Pi provide invocation ownership through C10.
 OpenCode and sandboxed OpenCode provide C10 when their model calls carry the exact OpenCode session identity. These agents can
 therefore run the five per-call checks even though they do not provide C3 or C11.
+The OpenCode rows assume a supported version that sends `X-Session-Id` on model calls routed through the Gym Model Server.
+Without that identity, ownership remains unavailable and C10-dependent checks are unobserved.
 
 H4 and H5 require C3 because invocation histories do not define individual semantic turns. H11 and H13 require C11 because an
 invocation can own support calls that should be inspected individually but must not be counted as trajectory calls in an
@@ -229,7 +233,8 @@ claim.
 `model_call_runaway_generation` needs one provider-independent definition of an empty saved response. The check recognizes
 non-empty text, content, output text, answer, encrypted reasoning content, reasoning, or reasoning summaries in OpenAI Responses,
 Chat Completions, and Messages-style responses. If any supported content is present, a length-limited response is not classified
-as an empty runaway generation.
+as an empty runaway generation. If a length-limited bound call does not retain its response payload, the check is unobserved
+instead of treating the absent payload as an empty response.
 
 ## How Health Checks Interpret Existing Observation Gaps
 
@@ -366,6 +371,10 @@ Each finding contains a stable check ID, an optional locator for the affected tu
 file stores each displayed object on one JSONL line. `unobserved` lists enabled rollout-level checks that lacked required
 evidence. Ignored checks are recorded only in `quality_summary.json`, so consumers must read the summary before interpreting
 verdicts produced with a reduced check set.
+
+For `model_call_failed`, `detail.terminal` is `true` only when all explicit ownership references resolve and the failed call has
+the greatest captured `call_index` among the bound calls. It is `false` when a later bound call exists or terminal position
+cannot be established.
 
 If a rollout line is unreadable, its real identity is unavailable. The report assigns a synthetic `_ng_task_index` such as
 `__unreadable_record__:input-0:line-42`, uses `_ng_rollout_index: 0`, and records the source file and physical line in the finding
