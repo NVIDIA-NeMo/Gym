@@ -13,13 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from asyncio import Semaphore
+import asyncio
+import contextlib
 from time import time
 from typing import Any, Dict, List, Optional, Union
 
+import ray
 from lcb_integration.compute_code_generation_metrics import check_correctness_remote
 from lcb_integration.extraction_utils import LMStyle, extract_code
-from pydantic import BaseModel
+from pydantic import BaseModel, PositiveInt
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -40,8 +42,10 @@ from nemo_gym.reward_profile import (
 # Config
 # ----------------------------
 class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
-    num_processes: int
-    unit_test_timeout_secs: int
+    num_processes: PositiveInt
+    unit_test_timeout_secs: PositiveInt
+    unit_test_global_timeout_secs: PositiveInt = 600
+    unit_test_result_max_bytes: PositiveInt = 16 * 1024 * 1024
     debug: bool
     reasoning_format_penalty: float = 0.0
 
@@ -79,11 +83,21 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
 # ----------------------------
 # Server
 # ----------------------------
+async def _await_remote_result(future: Any) -> Any:
+    try:
+        return await future
+    except asyncio.CancelledError:
+        with contextlib.suppress(Exception):
+            ray.cancel(future, force=False)
+        raise
+
+
 class CompCodingResourcesServer(SimpleResourcesServer):
     config: CompCodingResourcesServerConfig
 
     def model_post_init(self, context):
-        self._semaphore: Semaphore = Semaphore(value=self.config.num_processes)
+        super().model_post_init(context)
+        self._semaphore = asyncio.Semaphore(value=self.config.num_processes)
 
     @staticmethod
     def _has_reasoning_format_violation(response) -> bool:
@@ -197,14 +211,16 @@ class CompCodingResourcesServer(SimpleResourcesServer):
             start_time = time()
 
             task_args = (
-                {"input_output": tests.model_dump_json()},  # sample
+                {"input_output": tests.model_dump(mode="json")},  # sample
                 code,  # generation
                 self.config.unit_test_timeout_secs,  # timeout
                 self.config.debug,  # debug
+                self.config.unit_test_global_timeout_secs,
+                self.config.unit_test_result_max_bytes,
             )
 
             future = check_correctness_remote.remote(*task_args)
-            result, metadata = await future
+            result, metadata = await _await_remote_result(future)
 
             unit_tests_time_taken = time() - start_time
 

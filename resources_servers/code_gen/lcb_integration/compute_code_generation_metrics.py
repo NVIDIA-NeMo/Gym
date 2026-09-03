@@ -19,6 +19,7 @@
 import json
 import multiprocessing
 import os
+import pickle
 import sys
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -36,10 +37,33 @@ sys.set_int_max_str_digits(50000)
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
-def _temp_run(in_outs, generation, debug, result, metadata_list, timeout):
-    res, metadata = run_test(in_outs, test=generation, debug=debug, timeout=timeout)
-    result.append(res)
-    metadata_list.append(metadata)
+_WORKER_RESULT_VERSION = 1
+_DEFAULT_GLOBAL_TIMEOUT_SECONDS = 600
+_DEFAULT_RESULT_MAX_BYTES = 16 * 1024 * 1024
+
+
+def _temp_run(in_outs, generation, debug, result_connection, timeout, result_max_bytes):
+    try:
+        result, metadata = run_test(in_outs, test=generation, debug=debug, timeout=timeout)
+        payload = pickle.dumps(
+            {
+                "version": _WORKER_RESULT_VERSION,
+                "result": result,
+                "metadata": metadata,
+            },
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
+        if len(payload) > result_max_bytes:
+            payload = pickle.dumps(
+                {
+                    "version": _WORKER_RESULT_VERSION,
+                    "error": "result_too_large",
+                },
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+        result_connection.send_bytes(payload)
+    finally:
+        result_connection.close()
 
 
 # Using SPREAD scheduling so that Ray assigns tasks to as many distinct nodes as possible.
@@ -58,56 +82,82 @@ _CODE_GEN_DIR = str(Path(__file__).parent.parent)
         "env_vars": {"PYTHONPATH": _CODE_GEN_DIR},
     },
 )
-def check_correctness_remote(sample, generation, timeout, debug=True):
+def check_correctness_remote(
+    sample,
+    generation,
+    timeout,
+    debug=True,
+    global_timeout_seconds=_DEFAULT_GLOBAL_TIMEOUT_SECONDS,
+    result_max_bytes=_DEFAULT_RESULT_MAX_BYTES,
+):
     """Ray wrapper of check_correctness for remote execution."""
-    return check_correctness(sample, generation, timeout, debug)
+    return check_correctness(
+        sample,
+        generation,
+        timeout,
+        debug,
+        global_timeout_seconds,
+        result_max_bytes,
+    )
 
 
-def check_correctness(sample, generation, timeout, debug=True):
+def check_correctness(
+    sample,
+    generation,
+    timeout,
+    debug=True,
+    global_timeout_seconds=_DEFAULT_GLOBAL_TIMEOUT_SECONDS,
+    result_max_bytes=_DEFAULT_RESULT_MAX_BYTES,
+):
     """Check correctness of code generation with a global timeout.
     The global timeout is to catch some extreme/rare cases not handled by the timeouts
     inside `run_test`"""
 
-    # Parse JSON once at the beginning to avoid multiple parsing
     try:
-        in_outs = json.loads(sample["input_output"])
-    except (ValueError, MemoryError):
+        input_output = sample["input_output"]
+        in_outs = json.loads(input_output) if isinstance(input_output, str) else input_output
+        num_inputs = len(in_outs["inputs"])
+    except (KeyError, TypeError, ValueError, MemoryError):
         return [-1], None
 
-    manager = multiprocessing.Manager()
+    result_connection, child_connection = multiprocessing.Pipe(duplex=False)
     p: multiprocessing.Process | None = None
     try:
-        result = manager.list()
-        metadata_list = manager.list()
         p = multiprocessing.Process(
             target=_temp_run,
-            args=(in_outs, generation, debug, result, metadata_list, timeout),
+            args=(in_outs, generation, debug, child_connection, timeout, result_max_bytes),
         )
         p.start()
-        p.join(timeout=(timeout + 1) * len(in_outs["inputs"]) + 5)
-        if p.is_alive():
-            p.kill()
-            # Reap the worker after SIGKILL to release joinable resources.
-            p.join(timeout=5)
-
-        # Drain ListProxy values into plain lists before Manager shutdown, since access
-        # raises once the Manager helper process exits.
-        if result:
-            result_local: list = list(result)
-            metadata_local: list = list(metadata_list)
-            return result_local[0], metadata_local[0]
+        child_connection.close()
+        join_backstop = min((timeout + 1) * num_inputs + 5, global_timeout_seconds)
+        if result_connection.poll(join_backstop):
+            try:
+                payload = result_connection.recv_bytes(maxlength=result_max_bytes)
+                message = pickle.loads(payload)
+                result = message.get("result") if isinstance(message, dict) else None
+                metadata = message.get("metadata") if isinstance(message, dict) else None
+                if (
+                    isinstance(message, dict)
+                    and message.get("version") == _WORKER_RESULT_VERSION
+                    and isinstance(result, list)
+                    and (metadata is None or isinstance(metadata, dict))
+                ):
+                    return result, metadata
+            except Exception:
+                pass
 
         if debug:
             print("global timeout")
         # consider that all tests failed
-        return [-1 for _ in range(len(in_outs["inputs"]))], None
+        return [-1 for _ in range(num_inputs)], None
     finally:
         if p is not None and p.is_alive():
-            # Defensive: reap the worker if an exception bypassed the join above.
             p.kill()
             p.join(timeout=5)
-        # Always shut down the Manager so its helper process doesn't leak under stress.
-        manager.shutdown()
+        elif p is not None:
+            p.join(timeout=5)
+        child_connection.close()
+        result_connection.close()
 
 
 def evaluate_generations_by_problem(args):
