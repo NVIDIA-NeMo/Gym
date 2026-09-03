@@ -931,20 +931,12 @@ class NeMoGymChatCompletionMessageToolCallFunctionParam(TypedDict, total=False):
     name: Required[str]
 
 
-# Clients label a tool call with the tool's name alongside the nested
-# `function.name`, and servers accept it, but the field is absent from OpenAI's
-# own type. Since the request schema forbids extras, and pydantic propagates
-# that into nested `TypedDict`s, its presence rejects the whole conversation.
-# Declared rather than ignored so it round-trips: an unknown field here is
-# still an error, because tool calls carry provider state that a client must
-# echo back verbatim and silently dropping it would corrupt the trajectory.
 class NeMoGymChatCompletionMessageToolCallParam(ChatCompletionMessageToolCallParam):
     function: NeMoGymChatCompletionMessageToolCallFunctionParam
-    name: NotRequired[str]
 
 
 class NeMoGymChatCompletionMessageCustomToolCallParam(ChatCompletionMessageCustomToolCallParam):
-    name: NotRequired[str]
+    pass
 
 
 NeMoGymChatCompletionMessageToolCallUnionParam = Annotated[
@@ -956,10 +948,34 @@ NeMoGymChatCompletionMessageToolCallUnionParam = Annotated[
 ]
 
 
+def _strip_outer_tool_call_names(value: Any) -> Any:
+    """Copy tool calls carrying a redundant outer name and remove only that field."""
+    if not isinstance(value, list):
+        return value
+
+    normalized = None
+    for index, tool_call in enumerate(value):
+        if not isinstance(tool_call, dict) or "name" not in tool_call:
+            continue
+        if normalized is None:
+            normalized = list(value)
+        normalized_tool_call = dict(tool_call)
+        del normalized_tool_call["name"]
+        normalized[index] = normalized_tool_call
+
+    return value if normalized is None else normalized
+
+
+NeMoGymChatCompletionMessageToolCallsParam: TypeAlias = Annotated[
+    List[NeMoGymChatCompletionMessageToolCallUnionParam],
+    BeforeValidator(_strip_outer_tool_call_names),
+]
+
+
 class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageParam, total=False):
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
-    tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCallUnionParam]] = None
+    tool_calls: Optional[NeMoGymChatCompletionMessageToolCallsParam] = None
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(
