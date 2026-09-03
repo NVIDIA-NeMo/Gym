@@ -473,11 +473,11 @@ ENVIRONMENT = _asset_selector("environment", repeatable=True)
 RESOURCES_SERVER_CONFIG = _asset_selector("resources-server", repeatable=True)
 MODEL_TYPE = _asset_selector("model-type")
 
-# Override for the verifier-side `allowed_agents` guard. Offered wherever --agent-type composes.
+# Override for verifier-side agent/model compatibility guards. Offered wherever runtime configs compose.
 ALLOW_UNSUPPORTED_PAIRING = _bool_flag(
     "allow-unsupported-pairing",
     "allow_unsupported_pairing",
-    "Run even if the environment's resources server does not declare support for the selected agent.",
+    "Run even if the environment's resources server does not declare support for the selected agent or model type.",
 )
 
 AGENT_TYPE = Flag(

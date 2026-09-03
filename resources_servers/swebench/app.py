@@ -39,13 +39,13 @@ from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.rollout_observability import SandboxObservation
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import SandboxPtySession
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swebench.swebench_patches import (
     patch_swebench_multilingual_golden_patch_pass,
     patch_swebench_multilingual_log_parsing,
     patch_swebench_multilingual_sandbox,
+    patch_swebench_verified_env_vars,
     run_instance,
 )
 
@@ -236,7 +236,6 @@ class SWEBenchSeedSessionRequest(SWEBenchInstanceRequest, BaseSeedSessionRequest
 
 class SWEBenchSeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
-    pty_session_id: str
 
 
 class SwebenchResourcesServer(SimpleResourcesServer):
@@ -245,7 +244,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
 
-        self._session_id_to_sandbox: Dict[str, Tuple[AsyncSandbox, SandboxPtySession]] = dict()
+        self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
 
     async def _create_sandbox(self, test_spec: TestSpec) -> AsyncSandbox:
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
@@ -260,6 +259,8 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         env = dict(self.config.sandbox_config.get("env", {}))
         if self.config.sandbox_config.get("derive_cpu_env", True):
             env = cpu_cap_env(sandbox_resources.cpu) | env
+
+        patch_swebench_verified_env_vars(test_spec.repo, env)
 
         eval_sandbox_spec = SandboxSpec(
             image=test_spec.instance_image_key,
@@ -297,11 +298,7 @@ class SwebenchResourcesServer(SimpleResourcesServer):
     async def seed_session(self, request: Request, body: SWEBenchSeedSessionRequest) -> SWEBenchSeedSessionResponse:
         test_spec = self._make_test_spec(body)
         eval_sandbox = await self._create_sandbox(test_spec)
-        pty_session = await eval_sandbox.pty.create()
-        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = (eval_sandbox, pty_session)
-
-        # @bxyu-nvidia: Activate the necessary conda environments for SWE Bench Verified Python instances
-        await eval_sandbox.pty.exec("source /opt/miniconda3/bin/activate && conda activate testbed")
+        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
 
         if self.config.apply_anti_cheating:
             # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
@@ -318,9 +315,7 @@ Stdout:
 Stderr:
 {result.stderr}""")
 
-        return SWEBenchSeedSessionResponse(
-            sandbox_handle=eval_sandbox._handle.sandbox_id, pty_session_id=pty_session.session_id
-        )
+        return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
         """
@@ -354,7 +349,7 @@ Stderr:
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
-            original_sandbox, original_pty_session = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
+            original_sandbox = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
             try:
                 original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
                 model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")
@@ -362,7 +357,6 @@ Stderr:
             except:
                 print("Failed to extract patch from container", format_exc(), file=sys.stderr)
             try:
-                await original_pty_session.close()
                 await original_sandbox.stop()
             except:
                 print("Failed to stop original sandbox", format_exc(), file=sys.stderr)
