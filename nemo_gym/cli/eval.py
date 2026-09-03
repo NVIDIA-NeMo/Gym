@@ -608,10 +608,80 @@ def compare() -> None:  # pragma: no cover
     from nemo_gym.comparison.runner import invoked_command, run_comparison
     from nemo_gym.comparison.schema import ComparisonConfig
 
-    config = ComparisonConfig.model_validate(get_global_config_dict())
+    global_config_dict = get_global_config_dict()
+    config = ComparisonConfig.model_validate(global_config_dict)
 
     result, written = run_comparison(config, invoked_command())
 
     for table in render_key_metrics_tables(result):
         print_rich_table(table)
     print("\n".join(summary_lines(result, written)))
+
+    if not global_config_dict.get("no_stats", False):
+        _run_stats_step_for_compare(config, global_config_dict)
+
+
+def _run_stats_step_for_compare(config, global_config_dict) -> None:  # pragma: no cover
+    """`gym eval compare`'s default statistics step: the same paired test `gym eval test` runs,
+    called in-process and written only to its own `statistical_tests/` artifacts -- this never
+    touches `compare_report.*`. See `nemo_gym.statistical_tests`.
+    """
+    from nemo_gym.statistical_tests.report import render_paired_test_table, write_paired_test_reports
+    from nemo_gym.statistical_tests.report import summary_lines as stats_summary_lines
+    from nemo_gym.statistical_tests.runner import build_paired_test_report, resolve_output_dir
+    from nemo_gym.statistical_tests.schema import PairedTestConfig
+
+    stats_kwargs: Dict[str, Any] = {
+        "baseline_rollouts_jsonl_fpath": config.baseline_rollouts_jsonl_fpath,
+        "candidate_rollouts_jsonl_fpaths": config.candidate_rollouts_jsonl_fpaths,
+        "baseline_aggregate_metrics_fpath": config.baseline_aggregate_metrics_fpath,
+        "candidate_aggregate_metrics_fpaths": config.candidate_aggregate_metrics_fpaths,
+        "agent_name": config.agent_name,
+        "baseline_agent_name": config.baseline_agent_name,
+        "candidate_agent_names": config.candidate_agent_names,
+        "report_format": config.report_format,
+    }
+    if global_config_dict.get("stats_output_dirpath"):
+        stats_kwargs["output_dirpath"] = global_config_dict["stats_output_dirpath"]
+    if global_config_dict.get("metric"):
+        stats_kwargs["metric"] = global_config_dict["metric"]
+    if global_config_dict.get("margin") is not None:
+        stats_kwargs["margin"] = global_config_dict["margin"]
+    if global_config_dict.get("alpha") is not None:
+        stats_kwargs["alpha"] = global_config_dict["alpha"]
+    stats_config = PairedTestConfig.model_validate(stats_kwargs)
+
+    stats_report = build_paired_test_report(stats_config, invoked_command_for_compare())
+    stats_output_dir = resolve_output_dir(stats_config)
+    stats_written = write_paired_test_reports(stats_report, stats_config, stats_output_dir)
+
+    for table in render_paired_test_table(stats_report):
+        print_rich_table(table)
+    print("\n".join(stats_summary_lines(stats_report, stats_written)))
+
+
+def invoked_command_for_compare() -> str:  # pragma: no cover
+    """Provenance string for the stats artifacts `gym eval compare` writes as a side effect."""
+    from nemo_gym.comparison.runner import invoked_command
+
+    return invoked_command()
+
+
+@exit_cleanly_on_config_error
+def test() -> None:  # pragma: no cover
+    """`gym eval test`: standalone paired significance test, own report identity.
+
+    Independent of `compare` -- runnable with no dependency on `gym eval compare` having been run
+    first, and never reads or writes `compare_report.*`.
+    """
+    from nemo_gym.statistical_tests.report import render_paired_test_table, summary_lines
+    from nemo_gym.statistical_tests.runner import invoked_command, run_and_write_paired_test
+    from nemo_gym.statistical_tests.schema import PairedTestConfig
+
+    config = PairedTestConfig.model_validate(get_global_config_dict())
+
+    report, written = run_and_write_paired_test(config, invoked_command())
+
+    for table in render_paired_test_table(report):
+        print_rich_table(table)
+    print("\n".join(summary_lines(report, written)))
