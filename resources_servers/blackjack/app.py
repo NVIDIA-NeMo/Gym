@@ -55,6 +55,9 @@ def _nested_tuple(value):
 
 
 class BlackjackEnv(GymnasiumServer):
+    def checkpoint_state_enabled(self) -> bool:
+        return True
+
     def serialize_session_state(self, state: dict) -> dict:
         return {
             "player": list(state["player"]),

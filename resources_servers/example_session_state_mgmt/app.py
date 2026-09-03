@@ -14,7 +14,7 @@
 # limitations under the License.
 from typing import Dict
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from nemo_gym._checkpoint import ResourceSnapshot
@@ -91,14 +91,20 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
         return GetCounterValueResponse(count=counter)
 
     async def verify(self, request: Request, body: StatefulCounterVerifyRequest) -> BaseVerifyResponse:
+        identity = self._current_identity()
         session_id = self._session_id(request)
-
-        reward = 0.0
-        if session_id in self.session_id_to_counter:
-            counter = self.session_id_to_counter[session_id]
-            reward = float(body.expected_count == counter)
-
-        return BaseVerifyResponse(**body.model_dump(), reward=reward)
+        try:
+            reward = 0.0
+            if session_id in self.session_id_to_counter:
+                counter = self.session_id_to_counter[session_id]
+                reward = float(body.expected_count == counter)
+            return BaseVerifyResponse(**body.model_dump(), reward=reward)
+        finally:
+            self.session_id_to_counter.pop(session_id, None)
+            if identity is not None:
+                self.execution_to_session.pop(identity, None)
+                if self._checkpoint_participant is not None:
+                    self.checkpoint_participant().mark_terminal_after_request(*identity)
 
     @staticmethod
     def _current_identity() -> tuple[str, int] | None:
@@ -110,12 +116,20 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
 
     def _session_id(self, request: Request) -> str:
         identity = self._current_identity()
-        if identity is not None and identity in self.execution_to_session:
-            return self.execution_to_session[identity]
+        if identity is not None:
+            session_id = self.execution_to_session.get(identity)
+            if session_id is None:
+                raise HTTPException(status_code=409, detail="execution has no successful seed binding")
+            return session_id
         return request.session[SESSION_ID_KEY]
 
     def checkpoint_state_enabled(self) -> bool:
         return True
+
+    def checkpoint_route_kind(self, path: str, method: str):
+        if method == "POST" and path == "/get_counter_value":
+            return "read"
+        return super().checkpoint_route_kind(path, method)
 
     async def export_checkpoint_state(self, rollout_id: str, attempt_index: int) -> dict:
         session_id = self.execution_to_session[(rollout_id, attempt_index)]
@@ -130,6 +144,11 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
             index[(snapshot.rollout_id, snapshot.attempt_index)] = session_id
         self.session_id_to_counter = counters
         self.execution_to_session = index
+
+    async def retire_checkpoint_state(self, rollout_id: str, attempt_index: int) -> None:
+        session_id = self.execution_to_session.pop((rollout_id, attempt_index), None)
+        if session_id is not None:
+            self.session_id_to_counter.pop(session_id, None)
 
 
 if __name__ == "__main__":
