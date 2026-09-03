@@ -12,16 +12,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
+import contextvars
 import json
+import time
+from http.cookies import SimpleCookie
 from unittest.mock import AsyncMock, MagicMock, call
 
+import httpx
 import orjson
 import pytest
 from fastapi import Response
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym._checkpoint import AgentBoundaryRecord
+from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -31,6 +37,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from nemo_gym.rollout_collection import _attach_trajectory_record
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.rollout_observability import TrajectoryRecord
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.simple_agent.app import (
@@ -39,6 +46,7 @@ from responses_api_agents.simple_agent.app import (
     SimpleAgent,
     SimpleAgentConfig,
     SimpleAgentRunRequest,
+    _cookie_values,
 )
 
 
@@ -54,6 +62,13 @@ def _drop_nulls(value):
     if isinstance(value, list):
         return [_drop_nulls(v) for v in value]
     return value
+
+
+def test_checkpoint_cookie_values_do_not_serialize_morsel_attributes() -> None:
+    cookies = SimpleCookie()
+    cookies["sid"] = "abc"
+    cookies["sid"]["path"] = "/"
+    assert _cookie_values(cookies) == {"sid": "abc"}
 
 
 def _make_agent(
@@ -931,6 +946,7 @@ class TestApp:
             skip_verification_reward=0.25,
         )
         server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server.checkpoint_participant()
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -955,12 +971,18 @@ class TestApp:
 
         server.server_client.post.side_effect = [seed_response, model_response]
 
-        response = client.post(
-            "/run",
-            json={"responses_create_params": {"input": [{"role": "user", "content": "hello"}]}},
-        )
+        request_body = {
+            "responses_create_params": {"input": [{"role": "user", "content": "hello"}]},
+            TASK_INDEX_KEY_NAME: 4,
+            ROLLOUT_INDEX_KEY_NAME: 1,
+            ATTEMPT_INDEX_KEY_NAME: 0,
+        }
+        response = client.post("/run", json=request_body)
+        replay = client.post("/run", json=request_body)
 
         assert response.status_code == 200
+        assert replay.status_code == 200
+        assert replay.json() == response.json()
         response_json = response.json()
         assert response_json["reward"] == 0.25
         assert response_json["verification_skipped"] is True
@@ -974,3 +996,197 @@ class TestApp:
         assert post_call_kwargs[0]["server_name"] == "my resources server"
         assert post_call_kwargs[1]["server_name"] == "simple_agent"
         assert post_call_kwargs[1]["cookies"] == {"session": "seeded"}
+
+    async def test_legacy_boundary_at_step_budget_does_not_generate_an_extra_turn(self) -> None:
+        server, client = _make_agent(observability_enabled=False)
+        server.config.max_steps = 2
+        continuation = AgentBoundaryRecord(
+            rollout_id="4-1",
+            attempt_index=0,
+            boundary_index=2,
+            output_items=[],
+            last_committed_model_call_id="call-2",
+        )
+
+        response, _trajectory, _model_cookies, _resource_cookies = await server._create_episode(
+            NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+            model_url_path="/v1/responses",
+            continuation=continuation,
+        )
+
+        assert response.id == "call-2"
+        client.post.assert_not_awaited()
+
+    async def test_refused_tool_call_parks_and_retries_without_entering_history(self) -> None:
+        server, client = _make_agent(observability_enabled=False)
+        participant = server.checkpoint_participant()
+        execution = await participant.begin("4-1", 0, task=asyncio.current_task())
+        refused = asyncio.Event()
+        calls = []
+        tool_call = {
+            "id": "fc_1",
+            "call_id": "call_1",
+            "name": "my_tool",
+            "arguments": "{}",
+            "type": "function_call",
+            "status": "completed",
+        }
+        final_message = {
+            "id": "msg_final",
+            "content": [{"annotations": [], "text": "done", "type": "output_text"}],
+            "role": "assistant",
+            "status": "completed",
+            "type": "message",
+        }
+        model_payloads = [
+            {
+                "id": "resp_tool",
+                "created_at": 1.0,
+                "model": "dummy_model",
+                "object": "response",
+                "output": [tool_call],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+            {
+                "id": "resp_final",
+                "created_at": 2.0,
+                "model": "dummy_model",
+                "object": "response",
+                "output": [final_message],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        ]
+        tool_payloads = [
+            _mock_response(
+                {"error": {"code": "checkpoint_parked", "detail": "paused"}},
+                status=409,
+            ),
+            _mock_response(content="tool-result"),
+        ]
+
+        async def post(server_name, url_path, **kwargs):
+            calls.append((server_name, url_path, kwargs))
+            if server_name == "model":
+                return _mock_response(model_payloads.pop(0))
+            response = tool_payloads.pop(0)
+            if response.status == 409:
+                refused.set()
+            return response
+
+        client.post = AsyncMock(side_effect=post)
+        token = participant.bind(execution)
+        with rollout_context("4-1", attempt_index=0, logical_rollout_id="4-1"):
+            episode = asyncio.create_task(
+                server._create_episode(
+                    NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+                    model_url_path="/v1/responses",
+                )
+            )
+        participant.unbind(token)
+        await refused.wait()
+        while participant.status()["parked"] != 1:
+            await asyncio.sleep(0)
+        await participant.resume()
+        response, _trajectory, _model_cookies, _resource_cookies = await episode
+
+        assert response.output[-1].type == "message"
+        assert [url for _server_name, url, _kwargs in calls].count("/my_tool") == 2
+        second_model_input = [kwargs["json"].input for name, _url, kwargs in calls if name == "model"][1]
+        assert "checkpoint_parked" not in str(second_model_input)
+        assert "tool-result" in str(second_model_input)
+
+    async def test_retire_cancels_outer_run_and_internal_responses_handler(self) -> None:
+        server, client = _make_agent(observability_enabled=True)
+        server.config.skip_verification = True
+        participant = server.checkpoint_participant()
+        app = server.setup_webserver()
+        model_started = asyncio.Event()
+        release_model = asyncio.Event()
+        calls: list[tuple[str, str]] = []
+        tool_call_payload = {
+            "id": "resp_tool",
+            "created_at": 1.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                {
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "my_tool",
+                    "arguments": "{}",
+                    "type": "function_call",
+                    "status": "completed",
+                }
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+
+        class SelfResponse:
+            def __init__(self, response: httpx.Response) -> None:
+                self.status = response.status_code
+                self.ok = response.is_success
+                self.cookies = response.cookies
+                self._content = response.content
+
+            async def read(self) -> bytes:
+                return self._content
+
+        async def post(server_name, url_path, json=None, cookies=None, headers=None, **kwargs):
+            calls.append((server_name, url_path))
+            if server_name == "resources" and url_path == "/seed_session":
+                return _mock_response()
+            if server_name == "simple":
+                payload = json.model_dump(exclude_unset=True) if hasattr(json, "model_dump") else json
+
+                async def call_internal_handler() -> SelfResponse:
+                    async with httpx.AsyncClient(
+                        transport=httpx.ASGITransport(app=app),
+                        base_url="http://agent",
+                    ) as internal_client:
+                        response = await internal_client.post(
+                            url_path,
+                            json=payload,
+                            cookies=cookies,
+                            headers=headers,
+                        )
+                    return SelfResponse(response)
+
+                return await asyncio.create_task(call_internal_handler(), context=contextvars.Context())
+            if server_name == "model":
+                model_started.set()
+                await release_model.wait()
+                return _mock_response(tool_call_payload)
+            if server_name == "resources" and url_path == "/my_tool":
+                return _mock_response(content="tool-result")
+            raise AssertionError(f"unexpected call: {server_name} {url_path}")
+
+        client.post = AsyncMock(side_effect=post)
+        body = {
+            "responses_create_params": {"input": [{"role": "user", "content": "hello"}]},
+            TASK_INDEX_KEY_NAME: 4,
+            ROLLOUT_INDEX_KEY_NAME: 1,
+            ATTEMPT_INDEX_KEY_NAME: 0,
+        }
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://actor") as actor:
+            run = asyncio.create_task(actor.post("/run", json=body))
+            await model_started.wait()
+            prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+            await asyncio.sleep(0)
+            release_model.set()
+            report = await prepare
+            assert report["parked_with_boundary"] == 1
+            await participant.retire("4-1", 0)
+            with pytest.raises((asyncio.CancelledError, RuntimeError)) as cancelled:
+                await run
+            if isinstance(cancelled.value, RuntimeError):
+                assert str(cancelled.value) == "No response returned."
+
+        await asyncio.sleep(0)
+        assert sum(server_name == "model" for server_name, _url_path in calls) == 1
+        assert calls.count(("resources", "/my_tool")) == 1
