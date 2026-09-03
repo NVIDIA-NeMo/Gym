@@ -91,6 +91,7 @@ class Terminus2AgentVerifyResponse(BaseVerifyResponse):
     model_call_time_pct: float
     terminus2_time_taken: float
     model_calls_gt_10min: int
+    num_compactions: int
 
 
 class NeMoGymSandboxEnvironment:
@@ -249,6 +250,7 @@ class NeMoGymTerminus2(Terminus2):
         self._nemo_gym_llm = llm
         self._dump_trajectory_enabled = dump_trajectory
         self._times_spent = []
+        self._num_compactions = 0
         super().__init__(*args, **kwargs)
 
     def _init_llm(self, *args: Any, **kwargs: Any) -> BaseLLM:
@@ -266,6 +268,12 @@ class NeMoGymTerminus2(Terminus2):
         res = await super()._execute_commands(*args, **kwargs)
         self._times_spent.append(perf_counter() - start_time)
 
+        return res
+
+    async def _check_proactive_summarization(self, *args, **kwargs):
+        res = await super()._check_proactive_summarization(*args, **kwargs)
+        if res:
+            self._num_compactions += 1
         return res
 
 
@@ -385,6 +393,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             "model_call_time_pct": 100 * total_model_call_time / total_time,
             "terminus2_time_taken": total_time,
             "model_calls_gt_10min": llm._model_calls_gt_10min,
+            "num_compactions": agent._num_compactions,
         }
         return response, metrics
 
