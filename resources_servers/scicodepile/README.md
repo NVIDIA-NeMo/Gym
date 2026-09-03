@@ -59,11 +59,13 @@ for the A/B evidence and the non-attempt rate that choice costs.
 
 ### Code extraction
 
-`code_extraction.py` is a byte-identical copy of the BigCodeBench server's module,
-kept in sync deliberately so a score difference between the two servers can never be
-an extractor artifact. One inherited quirk is worth knowing: with an **untagged**
-` ``` ` fence followed by trailing prose, extraction returns empty and the task
-scores `no_code_block`. The prompt asks for a ` ```python ` tag to avoid this.
+`code_extraction.py` carries the same extraction logic as the BigCodeBench server's
+module, kept in sync deliberately so a score difference between the two servers can
+never be an extractor artifact. One inherited quirk is worth knowing: with an
+**untagged** ` ``` ` fence followed by trailing prose, extraction returns empty and
+the task scores `no_code_block`. Nothing asks the model for a ` ```python ` tag —
+the upstream prompt is passed through unmodified (see above), so untagged fences are
+part of the non-attempt rate that choice costs.
 
 ### Validation
 

@@ -5,13 +5,18 @@
 def preprocess_code_completion(completion: str, language: str = "python", strip_whitespace: bool = True) -> str:
     r"""Port of NeMo-Skills' nemo_skills.evaluation.evaluator.code.preprocess_code.
 
-    Shared with ``resources_servers/bigcodebench/code_extraction.py``; kept as a
-    byte-identical copy so both servers extract code the same way and a score
-    difference between them can never be an extractor artifact.
+    Shared with ``resources_servers/bigcodebench/code_extraction.py``: the extraction
+    logic is kept identical so both servers extract code the same way and a score
+    difference between them can never be an extractor artifact. Only these module
+    docstrings differ.
 
     Behaviour:
       1. Drop everything up to and including the first ``</think>`` (model
-         reasoning trace). If a ``<think>`` opens but never closes, return ``""``.
+         reasoning trace). Matching is on that closing tag alone: no ``<think>``
+         opener is required, and because the tag is known to be present the
+         ``return ""`` branch below is unreachable. Both quirks are inherited
+         verbatim from NeMo-Skills and are left as-is to hold score parity with
+         BigCodeBench.
       2. Find the LAST fenced block (``\`\`\`python`` preferred, falls back to
          the generic ``\`\`\``). Strict mode: if the opener has no closer,
          return ``""``.
