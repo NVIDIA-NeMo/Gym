@@ -54,13 +54,18 @@ class TestFernDocsLinks(unittest.TestCase):
 
                 self.assertIn("The following synthetic record shows the exact persisted field shape.", guide)
 
-    def test_model_call_capture_scopes_agent_observations_to_claude_code(self):
-        for version in ("latest", "v0.5.0", "v0.5.1"):
-            with self.subTest(version=version):
-                guide = read(f"fern/versions/{version}/pages/model-server/model-call-capture.mdx")
+    def test_model_call_capture_describes_agent_observations(self):
+        latest = read("fern/versions/latest/pages/model-server/model-call-capture.mdx")
+        frozen = [
+            read(f"fern/versions/{version}/pages/model-server/model-call-capture.mdx")
+            for version in ("v0.5.0", "v0.5.1")
+        ]
 
-                self.assertIn("Currently, only `claude_code_agent`", guide)
-                self.assertIn("### Advanced: correlation, compaction, and sandbox evidence", guide)
+        self.assertIn("Several built-in harnesses emit `ng_agent_observations`", latest)
+        for guide in frozen:
+            self.assertIn("Currently, only `claude_code_agent`", guide)
+        for guide in (latest, *frozen):
+            self.assertIn("### Advanced: correlation, compaction, and sandbox evidence", guide)
 
     def test_model_server_index_links_model_call_capture(self):
         for version in ("latest", "v0.5.0", "v0.5.1"):
