@@ -159,6 +159,7 @@ class NeMoGymLLM(BaseLLM):
         self._model_output_limit = model_output_limit
         self.trajectory: list[NeMoGymResponseOutputItem] = []
         self._times_spent = []
+        self._last_input_items = []
 
     @staticmethod
     def _input_items(message_history: list[dict[str, Any]], prompt: str) -> list[NeMoGymEasyInputMessage]:
@@ -195,7 +196,14 @@ class NeMoGymLLM(BaseLLM):
             )
         )
         self._times_spent.append(perf_counter() - start_time)
-        self.trajectory.extend([*input_items, *response.output])
+
+        if len(self._last_input_items) >= len(input_items):
+            # Compacted
+            self.trajectory.extend([*input_items, *response.output])
+        else:
+            self.trajectory.extend([*input_items[len(self._last_input_items) :], *response.output])
+        self._last_input_items = input_items.copy()
+
         usage = response.usage
         usage_info = None
         if usage is not None:
