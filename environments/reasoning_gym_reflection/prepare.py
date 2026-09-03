@@ -7,8 +7,11 @@ import logging
 from environments.langgraph_reflection_reasoning_gym.prepare import main
 
 
+logger = logging.getLogger(__name__)
+
+
 if __name__ == "__main__":
-    logging.getLogger(__name__).warning(
+    logger.warning(
         "`environments/reasoning_gym_reflection/prepare.py` is deprecated; "
         "use `environments/langgraph_reflection_reasoning_gym/prepare.py`."
     )
