@@ -27,7 +27,6 @@ from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM
 from responses_api_agents.nooa_agent.mapping import materialize_arguments
 from responses_api_agents.nooa_agent.resource_tools import (
     ResourceToolDispatcher,
-    ResourceToolExecution,
     create_agent_class_with_resource_methods,
     validate_agent_resource_method_bindings,
 )
@@ -48,7 +47,6 @@ class NOOARunResult:
     return_value: Any
     agent: Agent
     model_calls: list[ModelCallRef]
-    tool_executions: list[ResourceToolExecution]
     model_cookies: dict[str, str]
     resource_cookies: dict[str, str]
 
@@ -78,7 +76,6 @@ class EmbeddedNOOARunner:
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
         model_calls: list[ModelCallRef] = []
-        executions: list[ResourceToolExecution] = []
         llm = GymResponsesLLM(
             server_client=self._server_client,
             model_server_name=self._model_server_name,
@@ -91,7 +88,6 @@ class EmbeddedNOOARunner:
             server_client=self._server_client,
             resources_server_name=self._resources_server_name,
             cookies=request.resource_cookies,
-            executions=executions,
         )
         agent_class = create_agent_class_with_resource_methods(
             self._agent_class,
@@ -108,7 +104,6 @@ class EmbeddedNOOARunner:
             return_value=return_value,
             agent=agent,
             model_calls=model_calls,
-            tool_executions=executions,
             model_cookies=request.model_cookies,
             resource_cookies=request.resource_cookies,
         )
