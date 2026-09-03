@@ -1,0 +1,194 @@
+---
+title: "OpenSandbox Best Practices"
+description: "Field-tested guidance for running Gym environments on OpenSandbox at scale: resource requests vs limits, timeouts, retries, and the failure signatures that look like bugs but are not."
+position: 2
+---
+
+This page collects what we learned running thousands of concurrent OpenSandbox sandboxes for
+agentic benchmarks (SWE-bench, Terminal-Bench, DeepSWE). Every recommendation here came from a
+real incident or a measured A/B, and each section starts with the trap it prevents. Read the
+[OpenSandbox Provider](/infrastructure/sandbox/opensandbox) page first for the config schema.
+
+<Note>
+The single most important idea: **one sandbox is one Kubernetes pod on a shared cluster.** Your
+resource requests decide how much of the cluster you occupy, your limits decide what your commands
+may use, and both are shared with everyone else's runs. Most "OpenSandbox is flaky" reports trace
+back to one of the misconfigurations below.
+</Note>
+
+## Resources: requests are not limits
+
+`SandboxSpec.resources` (the `resources:` block in an agent or resources-server `sandbox_config`)
+becomes the pod's **limits** — the ceiling a command may consume before it is throttled or
+OOM-killed. Scheduling **requests** — the capacity the cluster reserves for you — are a separate
+map under `provider_options.resource_requests`. If you set only `resources`, the server applies
+that single map as *both* requests and limits.
+
+```yaml
+sandbox_config:
+  resources:                # LIMITS: what a command may burst to
+    cpu: 4
+    memory_mib: 16384
+    disk_gib: 30
+  provider_options:
+    resource_requests:      # REQUESTS: what the scheduler reserves; keep these small
+      cpu: 0.5
+      memory_mib: 512
+      disk_gib: 30
+```
+
+<Warning>
+**Trap: requests == limits.** A sandbox requesting `4` CPU / `32Gi` occupies the same node
+capacity as roughly thirty sandboxes requesting `0.5` CPU / `512Mi`. On a shared cluster one such
+run can hold ~70% of all reserved memory with under 10% of the pods, pushing everyone else's
+creates into `Pending`. The symptom others see is "sandbox create timed out", not "someone
+over-requested".
+</Warning>
+
+Why low requests are safe: sandbox workloads are bursty (an agent thinks, runs a test, thinks
+again), so dense packing with generous limits was measured contention-free — median memory use
+~1.2–1.9 GB against a 16 GiB limit, with occasional 7–16 GB peaks during test/build phases. The
+limits protect you during the peaks; the small requests keep the cluster usable for everyone.
+
+Guidance:
+
+| Knob | Recommended | Why |
+| --- | --- | --- |
+| `resources.cpu` (limit) | `4` | Best reward/failure profile measured on SWE-bench Verified; `2` raised sandbox-fatal exec errors ~15×. |
+| `resources.memory_mib` (limit) | `16384` | Covers observed build/test peaks; raising it further mostly treats symptoms (see fan-out below). |
+| `resource_requests.cpu` | `0.5` | Dense packing measured contention-free for agentic workloads. |
+| `resource_requests.memory_mib` | `512` | Same. |
+| `disk_gib` | `30` | Works on every provider; keep requests and limits identical for disk. |
+
+## The host-core fan-out trap
+
+Inside a sandbox, `nproc`, `os.cpu_count()`, `os.cpus()` and friends report the **host's** core
+count (often 128–192), not your CPU limit. Any tool that sizes a worker pool from that number —
+old `jest` (`maxWorkers = cores-1`), Python `multiprocessing`/`ProcessPool`, `pytest-xdist -n auto`,
+`make -j$(nproc)`, Rust test threads, OpenBLAS — will fan out to 100+ processes inside a 4-CPU,
+16 GiB box. The result is either a container OOM kill or a near-miss that thrashes at the memory
+ceiling and runs 10× slower under CFS throttling. Because it depends on the repo's tooling, it
+looks random and task-specific.
+
+Gym mitigates this with `derive_cpu_env` (default `true` in the SWE-bench configs): the provider
+derives a set of cap variables from `resources.cpu` and injects them into the sandbox
+environment — `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`, `PYTHON_CPU_COUNT`,
+`PYTEST_XDIST_AUTO_NUM_WORKERS`, `DJANGO_TEST_PROCESSES`, `GOMAXPROCS`, `CARGO_BUILD_JOBS`,
+`RAYON_NUM_THREADS`, `UV_THREADPOOL_SIZE`, `CMAKE_BUILD_PARALLEL_LEVEL`, and others (see
+`CPU_CAP_ENV_VARS` in `nemo_gym/sandbox/utils.py`). Explicit `sandbox_config.env` keys always win.
+
+Two things the caps do **not** cover, so plan for them:
+
+- **Runners that ignore the environment**: old `jest`, plain `make`, `ninja`, and Python
+  `multiprocessing.cpu_count()` before 3.13 (`PYTHON_CPU_COUNT` only helps on 3.13+; `taskset`
+  does not help either — it counts configured CPUs, not affinity). If your tasks hit these, add a
+  repo-specific cap in the task's setup command or bake it into the image.
+- **Agent-written runaway code** (unbounded recursion, giant allocations in intermediate
+  attempts). These are the majority of OOMs on coding benchmarks and no limit fixes them; note
+  that Kubernetes group-OOM kills the *whole* sandbox, so one runaway command ends the rollout.
+  Give agents a bash timeout (the validated default is 2 minutes; 8 minutes measured
+  quality-negative) so runaway commands fail fast and the agent can recover.
+
+## Timeouts: know which one you are waiting on
+
+Sandbox create is synchronous on the server: it waits for the pod to be scheduled, the image to
+lazy-load, and the exec daemon to start. Server-side create latency on a healthy cluster is
+p50 ≈ 7 s, p90 ≈ 20 s, p99 ≈ 2 min — but when the cluster is at its capacity ceiling, pods sit
+`Pending` for as long as your timeout allows.
+
+- `create.timeout_s` must **exceed** `SandboxSpec.ready_timeout_s`; it bounds the whole create
+  call including the readiness wait (the shipped config uses 1500 s over a 1200 s readiness wait).
+- `connection.request_timeout_s` is the per-request budget for long submits. Status polls are
+  small idempotent GETs and get their own short budget via `operations.status_poll_timeout_s`
+  (default 10 s) — without it, every poll against an unreachable sandbox hangs for the full
+  request timeout per retry.
+- `ttl_s` is the server-side backstop that reaps a sandbox if your client dies. Set it above your
+  longest rollout, not to "infinite".
+
+<Warning>
+**Trap: failures on an exact N-minute cadence.** If creates fail every ~20 minutes with
+`Timeout on reading data from socket`, that is your `create.request_timeout_s` (1200 s) echoing
+back: creates are hanging for the full budget server-side because the cluster has no capacity, and
+each retry adds another full period. Check cluster load before adding retries or raising timeouts;
+neither helps a full cluster.
+</Warning>
+
+Also keep long-lived streams off load balancers with short idle timeouts. The default
+`operations.background_exec: true` polls status instead of holding one SSE stream open per
+command, precisely so multi-minute commands survive TLS listeners with fixed idle limits; keep it
+on, and keep `background_poll_interval_s` in the tens of seconds — at 1,500 concurrent sandboxes a
+1 s poll interval is 1,500 requests per second against the shared server.
+
+## Retries: creates yes, commands no
+
+`create.retries` (default 10) is safe: a failed create leaves nothing behind you care about.
+`operations.command_retries` defaults to `0` and should stay there for agent commands.
+
+A proxy `502` on `POST /command` does **not** mean the command never started. The server maps
+every transport error to 502, including a dropped read *after* the body reached the exec daemon,
+and the daemon runs commands on a detached context that a dropped connection never cancels. A
+retried `git apply` or `pip install` therefore runs twice. In production tracking of >100k
+requests this race never actually fired — but the cost of being wrong is a corrupted rollout, and
+the harness already surfaces the error for you to handle. Raise `command_retries` only for
+provably idempotent workloads.
+
+Keep `create.skip_health_check: false`. Skipping it lets your first command race a pod whose exec
+daemon is not listening yet; the resulting 502 kills the rollout.
+
+## Failure signatures that are not what they look like
+
+| What you see | What it usually is | What to do |
+| --- | --- | --- |
+| `No such file or directory` for a file that is definitely in the image (`/tests/test.sh`, `/testbed`, `command -v` failing on a present binary, exit 127) during a large create burst | Lazy-loading image flake: an in-flight read was aborted and the negative lookup got cached. The image is fine. | Retry after ≥60 s (an immediate retry often fails again); if it fails twice, recreate the sandbox. Reduce same-image create/delete churn where you can. |
+| Bursts of `502` on `/proxy/.../ping` right after create | The exec daemon is not listening yet in a just-started pod. Normal startup latency, self-healing. | Nothing; the provider's readiness probe absorbs it. If it persists for minutes, the cluster is overloaded. |
+| `DELETE` returns `404` / "Failed to terminate sandbox ... not found" | The sandbox already went away (TTL or a previous stop). | Nothing. The provider treats this as success. |
+| A command's status poll returns `404 unknown execution` on a sandbox that is alive | Stale sandbox→IP routing in the server under create/delete storms; the poll reached a reused pod IP. | Treat as a lost execution and recreate; do not tear down other healthy sandboxes over it. |
+| `Server disconnected` / `Connection reset by peer` on a long stream | Load-balancer idle timeout, or a server worker restart. | Use `background_exec: true` and short polls; keep `keepalive_expiry_s` below the server's idle timeout. |
+| `SandboxPtyError: PTY session already has an attached client` on every takeover retry | The sandbox's backend died while the proxy still records the old attachment. | Check sandbox status and report the death. Environments must catch `SandboxPtyError` in `verify()` — one unhandled 500 on `/run` can abort an entire eval. |
+| Sandbox-wide death with `137` after one heavy command | Group OOM kill (see fan-out above). | Cap parallelism, add a bash timeout; raising memory alone rarely fixes it. |
+
+Sandboxes also run with the default runtime capability set — no `SYS_PTRACE`, no `SYS_ADMIN`.
+Tasks that need `strace`/`gdb` attach or mount namespaces will fail for that reason, not because
+of your config.
+
+## Be a good tenant
+
+- **Check load before a large launch.** List the server's sandboxes (`GET /v1/sandboxes` with a
+  small page size and read `totalItems`) and look at how many of your own are still creating. A
+  cluster near its pod or request ceiling turns every create into a 20-minute wait for everyone.
+  Stagger large runs instead of starting several at once.
+- **Keep attribution on.** The provider's `attribution` block labels every sandbox with
+  `team`/`user`/`workload`/`run`. When Gym runs inside Kubernetes (no Slurm variables, OS user is
+  `root`), set `NEMO_GYM_TEAM`/`NEMO_GYM_USER`/`NEMO_GYM_WORKLOAD` on the pod, or your sandboxes
+  are invisible to per-team accounting and nobody can tell whose run is filling the cluster.
+- **Clean up interrupted runs.** Note the `run` id logged at the first create and reap exactly that
+  run's sandboxes:
+
+  ```bash
+  python -m nemo_gym.sandbox.providers.opensandbox.cleanup_sandboxes \
+    --domain "$OPENSANDBOX_DOMAIN" --api-key "$OPENSANDBOX_API_KEY" \
+    --run-id <run-id> --user <user>          # audit
+  python -m nemo_gym.sandbox.providers.opensandbox.cleanup_sandboxes ... --reap   # delete
+  ```
+
+  Rely on `ttl_s` only as the backstop.
+- **Do not `apt-get` inside every sandbox.** Installing a tool per rollout costs 10–40 s of network
+  time, multiplied by thousands of rollouts, and any registry hiccup fails the step. Bake tools into
+  the task image, or mount a prebuilt binary and run it from there. The same goes for downloading
+  the agent binary: mount it.
+- **Keep teardown off your critical path.** Stopping a sandbox is a provider round-trip you never
+  need to wait for; schedule it in the background (bounded by a timeout) so the rollout's
+  concurrency slot frees as soon as verification returns. The provider's TTL reaps anything a
+  background stop misses.
+
+## Sizing quick reference
+
+| Environment shape | cpu / memory limit | requests | bash timeout |
+| --- | --- | --- | --- |
+| Python-heavy repos (SWE-bench Verified) | `4` / `16 GiB` | `0.5` / `512 MiB` | 2 min |
+| Polyglot repos (SWE-bench Multilingual) | `4` / `16 GiB` | `0.5` / `512 MiB` | 2 min |
+| Terminal / build-heavy tasks | `4` / `16 GiB`, consider `8` only after measuring throttling | `0.5` / `512 MiB` | 2 min |
+
+If you believe a task class needs more, measure first: sandbox cgroup `memory.peak` and
+`cpu.stat` throttled time are readable inside the sandbox, and Gym's opencode agent can record
+them per rollout. Raise limits based on peaks you observed, not on the failure message.
