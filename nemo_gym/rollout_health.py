@@ -23,6 +23,7 @@ import orjson
 
 from nemo_gym.health.checks import (
     _INCOMPLETE_MODEL_CALL_GAPS,
+    _LENGTH_LIMIT_FINISH_REASONS,
     _ROLLOUT_CHECKS,
     _ROLLOUT_SPECS,
     _TASK_SPECS,
@@ -174,6 +175,12 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
             or not bindings.matched_calls
             or not _transcript_tokens(record)[2]
             or any(call.get("tokens_in") is None or call.get("tokens_out") is None for call in bindings.matched_calls)
+        ):
+            unobserved.append(spec.id)
+            continue
+        if spec.id == "model_call_runaway_generation" and any(
+            call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS and call.get("response") is None
+            for call in bindings.matched_calls
         ):
             unobserved.append(spec.id)
             continue

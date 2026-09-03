@@ -520,7 +520,10 @@ def _trajectory_capture_mismatch(
     seen: set[tuple[str, str]] = set()
     for reference in bindings.missing_references:
         locator = reference.split(":")[-1]
-        seen.add(("missing_captured_call", locator))
+        finding_key = ("missing_captured_call", locator)
+        if finding_key in seen:
+            continue
+        seen.add(finding_key)
         findings.append(
             Finding(
                 check="trajectory_capture_mismatch",
@@ -531,7 +534,10 @@ def _trajectory_capture_mismatch(
         )
     for reference, count in bindings.duplicated_references:
         locator = reference.split(":")[-1]
-        seen.add(("duplicated_captured_call", locator))
+        finding_key = ("duplicated_captured_call", locator)
+        if finding_key in seen:
+            continue
+        seen.add(finding_key)
         findings.append(
             Finding(
                 check="trajectory_capture_mismatch",
