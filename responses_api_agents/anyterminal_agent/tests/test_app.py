@@ -26,6 +26,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
@@ -276,6 +277,10 @@ class TestSetupParams:
         params = agent._setup_params(body)
 
         assert params.tb_agent_timeout == 7200
+
+    def test_global_agent_timeout_rejects_zero(self) -> None:
+        with pytest.raises(ValidationError, match="global_agent_timeout"):
+            _config(global_agent_timeout=0)
 
 
 # ── _instruction_from_input ───────────────────────────────────────────────────────

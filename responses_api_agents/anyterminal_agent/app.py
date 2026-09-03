@@ -299,7 +299,7 @@ class AnyTerminalAgentConfig(BaseResponsesAPIAgentConfig):
     agent_runtime_source: str = "auto"
     tb_agent_timeout: int = 1800
     # When set, overrides the per-task agent_timeout_sec from the dataset for every task.
-    global_agent_timeout: Optional[int] = None
+    global_agent_timeout: Optional[int] = Field(default=None, gt=0)
     tb_eval_timeout: int = 300
     tb_sandbox_ttl: int = 7200
     agent_overhead_mb: int = 2048  # extra container memory on top of the task's memory_mb for the
