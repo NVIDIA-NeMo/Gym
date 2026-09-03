@@ -17,12 +17,12 @@ Prepare the anyterminal_agent input dataset from Terminal Bench tasks.
     python prepare.py                                              # download tasks + build dataset
     python prepare.py --limit 5                                    # first 5 tasks (smoke test)
     python prepare.py --task-name gpt2-codegolf                    # single task
-    python prepare.py --build-image                                # build Apptainer SIFs
-    python prepare.py --build-image --image-dir PATH               # build images into a custom directory
+    python prepare.py --build-image --sandbox-provider PROVIDER  # run provider image preparation
+    python prepare.py --build-image --sandbox-provider PROVIDER --image-dir PATH
 
 Prerequisites:
   - Harbor CLI on PATH (for dataset download).
-  - `apptainer` on PATH for image builds (skip with --no-build-image).
+  - Provider-specific image build dependencies when using --build-image.
 
 Schema anyterminal_agent expects: each row has the task prompt in
 `responses_create_params.input` (as a user message) and `responses_create_params.metadata`
@@ -38,11 +38,27 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from nemo_gym.sandbox.providers import SandboxImagePrepareRequest, create_provider, prepare_provider_image
+
 
 _THIS_DIR = Path(__file__).parent
 
 DEFAULT_TASKS_CACHE = Path.home() / ".cache" / "harbor" / "tasks"
 DEFAULT_DATASET_NAME = "terminal-bench@2.0"
+IMAGE_BUILD_ATTEMPTS = 3
+IMAGE_BUILD_RETRY_DELAY_SECONDS = 2
+
+
+def _parse_provider_config(raw: str) -> dict:
+    value = raw.strip()
+    if not value:
+        raise ValueError("sandbox provider must be a provider name or JSON object")
+    if value.startswith("{"):
+        parsed = json.loads(value)
+        if not isinstance(parsed, dict):
+            raise ValueError("sandbox provider JSON must be an object")
+        return parsed
+    return {value: {}}
 
 
 def _load_task_config(task_dir: Path) -> dict:
@@ -231,33 +247,36 @@ def build_dataset(
     return ids
 
 
-def _build_one_image(task_name: str, docker_image: str, image_dir: Path, force: bool) -> tuple[str, bool, str]:
-    img_path = image_dir / f"{task_name}.sif"
-    if img_path.exists() and not force:
-        return task_name, True, "exists"
-    proc = subprocess.run(
-        ["apptainer", "build", "--force", str(img_path), f"docker://{docker_image}"],
-        capture_output=True,
-        text=True,
-        errors="replace",
+def _build_one_image(
+    provider: object,
+    task_name: str,
+    docker_image: str,
+    image_dir: Path,
+    force: bool,
+) -> tuple[str, bool, str]:
+    result = prepare_provider_image(
+        provider,
+        SandboxImagePrepareRequest(
+            image=docker_image,
+            target_dir=image_dir,
+            target_name=task_name,
+            force=force,
+            attempts=IMAGE_BUILD_ATTEMPTS,
+            retry_delay_s=IMAGE_BUILD_RETRY_DELAY_SECONDS,
+        ),
     )
-    if proc.returncode != 0:
-        return task_name, False, proc.stderr.strip()[-500:]
-    return task_name, True, "built"
+    return task_name, result.ok, result.detail
 
 
-def build_images(task_rows: list[dict], image_dir: Path, jobs: int, force: bool) -> None:
-    from shutil import which
-
-    if not which("apptainer"):
-        sys.exit("`apptainer` not found on PATH. Install it or omit --build-image to skip image builds.")
+def build_images(task_rows: list[dict], image_dir: Path, jobs: int, force: bool, provider: object) -> None:
     image_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Building {len(task_rows)} sif(s) into {image_dir} with {jobs} worker(s)...", flush=True)
+    print(f"Preparing {len(task_rows)} image(s) into {image_dir} with {jobs} worker(s)...", flush=True)
     failures: list[str] = []
     with ThreadPoolExecutor(max_workers=jobs) as pool:
         futures = {
             pool.submit(
                 _build_one_image,
+                provider,
                 r["responses_create_params"]["metadata"]["task_name"],
                 r["responses_create_params"]["metadata"]["docker_image"],
                 image_dir,
@@ -271,11 +290,11 @@ def build_images(task_rows: list[dict], image_dir: Path, jobs: int, force: bool)
             if not ok:
                 failures.append(name)
     if failures:
-        print(f"\n{len(failures)} image build(s) failed:", flush=True)
+        print(f"\n{len(failures)} image preparation(s) failed:", flush=True)
         for name in failures:
             print(f"  - {name}", flush=True)
         sys.exit(1)
-    print(f"All images ready. Use: container_formatter='{image_dir}/{{task_name}}.sif'", flush=True)
+    print("Image preparation complete.", flush=True)
 
 
 def main() -> None:
@@ -295,6 +314,11 @@ def main() -> None:
     p.add_argument("--task-name", nargs="+", default=None, metavar="TASK")
     p.add_argument("--image-dir", type=Path, default=_THIS_DIR / "data" / "images")
     p.add_argument("--build-image", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument(
+        "--sandbox-provider",
+        default=None,
+        help="Provider name or single-key provider config JSON used for image preparation.",
+    )
     p.add_argument("--jobs", type=int, default=4)
     p.add_argument("--force", action="store_true", help="Rebuild images that already exist")
     args = p.parse_args()
@@ -305,10 +329,17 @@ def main() -> None:
     # Build the dataset JSONL
     build_dataset(args.output, args.tasks_cache, args.dataset_name, args.limit, args.task_name)
 
-    # Build the container images
+    # Prepare provider images
     if args.build_image:
+        if args.sandbox_provider is None:
+            sys.exit("--sandbox-provider is required when --build-image is set")
+        try:
+            provider_config = _parse_provider_config(args.sandbox_provider)
+        except (ValueError, json.JSONDecodeError) as exc:
+            sys.exit(str(exc))
+        provider = create_provider(provider_config)
         task_rows = [json.loads(line) for line in args.output.read_text().splitlines() if line.strip()]
-        build_images(task_rows, args.image_dir, args.jobs, args.force)
+        build_images(task_rows, args.image_dir, args.jobs, args.force, provider)
 
 
 if __name__ == "__main__":

@@ -163,6 +163,69 @@ ExecResult = SandboxExecResult
 
 
 @dataclass(frozen=True)
+class SandboxImagePrepareRequest:
+    """Provider-neutral image preparation request.
+
+    ``image`` is the source image reference. ``target_path`` is an explicit
+    provider-specific output path. Generic callers should prefer ``target_dir``
+    plus ``target_name`` and let the provider choose any required file naming.
+    Providers may return a no-op result when no preparation is needed.
+    """
+
+    image: str
+    target_path: str | Path | None = None
+    target_dir: str | Path | None = None
+    target_name: str | None = None
+    force: bool = False
+    attempts: int = 1
+    retry_delay_s: int | float = 0
+    provider_options: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.image, str) or not self.image.strip():
+            raise ValueError("Sandbox image prepare request image must be a non-empty string")
+        object.__setattr__(self, "image", self.image.strip())
+
+        if self.target_path is not None:
+            object.__setattr__(self, "target_path", Path(self.target_path))
+        if self.target_dir is not None:
+            object.__setattr__(self, "target_dir", Path(self.target_dir))
+        if self.target_name is not None:
+            if not isinstance(self.target_name, str) or not self.target_name.strip():
+                raise ValueError("Sandbox image prepare target_name must be a non-empty string")
+            object.__setattr__(self, "target_name", self.target_name.strip())
+
+        if isinstance(self.attempts, bool):
+            raise ValueError("Sandbox image prepare attempts must be >= 1")
+        try:
+            attempts = int(self.attempts)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Sandbox image prepare attempts must be >= 1") from exc
+        if attempts < 1:
+            raise ValueError("Sandbox image prepare attempts must be >= 1")
+        object.__setattr__(self, "attempts", attempts)
+
+        if isinstance(self.retry_delay_s, bool) or not isinstance(self.retry_delay_s, (int, float)):
+            raise ValueError("Sandbox image prepare retry_delay_s must be >= 0")
+        if self.retry_delay_s < 0:
+            raise ValueError("Sandbox image prepare retry_delay_s must be >= 0")
+
+        if not isinstance(self.provider_options, Mapping):
+            raise TypeError("Sandbox image prepare provider_options must be a mapping")
+        object.__setattr__(self, "provider_options", dict(self.provider_options))
+
+
+@dataclass(frozen=True)
+class SandboxImagePrepareResult:
+    """Result from preparing an image for a sandbox provider."""
+
+    image: str
+    ok: bool = True
+    prepared: bool = False
+    detail: str = ""
+
+
+@dataclass(frozen=True)
 class SandboxPtySpec:
     """Interactive PTY session request.
 
@@ -253,6 +316,32 @@ class SupportsSandboxEndpoint(Protocol):
     async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
         """Resolve a declared service port to a caller-reachable endpoint."""
         ...
+
+
+@runtime_checkable
+class SupportsSandboxImagePrepare(Protocol):
+    """Optional provider capability for preparing images before sandbox create."""
+
+    def prepare_image(self, request: SandboxImagePrepareRequest) -> SandboxImagePrepareResult:
+        """Prepare an image and return the image reference callers should use."""
+        ...
+
+
+def prepare_provider_image(provider: object, request: SandboxImagePrepareRequest) -> SandboxImagePrepareResult:
+    """Prepare an image when the provider supports it; otherwise no-op."""
+    if isinstance(provider, SupportsSandboxImagePrepare):
+        result = provider.prepare_image(request)
+        if not isinstance(result, SandboxImagePrepareResult):
+            raise TypeError(
+                f"Sandbox provider prepare_image() must return SandboxImagePrepareResult, got {type(result).__name__}"
+            )
+        return result
+    return SandboxImagePrepareResult(
+        image=request.image,
+        ok=True,
+        prepared=False,
+        detail="provider does not prepare images",
+    )
 
 
 @runtime_checkable

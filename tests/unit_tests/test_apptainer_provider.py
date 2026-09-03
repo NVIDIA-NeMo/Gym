@@ -17,6 +17,7 @@ import json
 import shlex
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 import pytest
@@ -25,6 +26,7 @@ from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
 from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
+    SandboxImagePrepareRequest,
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
@@ -212,6 +214,126 @@ def test_private_env_file_is_mode_0600_and_always_removed(tmp_path: Path) -> Non
             assert failed_path is not None
             raise RuntimeError("failure")
     assert not failed_path.exists()
+
+
+def test_prepare_image_noops_without_target_path(fake_binary: str) -> None:
+    provider = apptainer_provider.ApptainerProvider()
+
+    result = provider.prepare_image(SandboxImagePrepareRequest(image="ubuntu:22.04"))
+
+    assert result.ok is True
+    assert result.prepared is False
+    assert result.image == "docker://ubuntu:22.04"
+    assert result.detail == "no target requested"
+
+
+def test_prepare_image_existing_target_without_force_skips_build(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    image = tmp_path / "task.sif"
+    image.write_text("known-good")
+
+    def run(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("prepare_image should not build an existing target without force")
+
+    monkeypatch.setattr(apptainer_provider.subprocess, "run", run)
+    provider = apptainer_provider.ApptainerProvider()
+
+    result = provider.prepare_image(
+        SandboxImagePrepareRequest(image="example/image:tag", target_path=image, force=False, attempts=3)
+    )
+
+    assert result.ok is True
+    assert result.prepared is False
+    assert result.image == str(image)
+    assert result.detail == "exists"
+    assert image.read_text() == "known-good"
+
+
+def test_prepare_image_retries_then_atomically_installs_image(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    attempts = 0
+
+    def run(command: list[str], **_kwargs: Any) -> SimpleNamespace:
+        nonlocal attempts
+        attempts += 1
+        assert command[:3] == [FAKE_BINARY, "build", "--force"]
+        assert command[-1] == "docker://example/image:tag"
+        output = Path(command[3])
+        output.write_text("partial" if attempts == 1 else "complete")
+        return SimpleNamespace(returncode=1 if attempts == 1 else 0, stderr="truncated manifest", stdout="")
+
+    sleeps: list[int | float] = []
+    monkeypatch.setattr(apptainer_provider.subprocess, "run", run)
+    monkeypatch.setattr(apptainer_provider.time, "sleep", sleeps.append)
+    provider = apptainer_provider.ApptainerProvider()
+
+    with caplog.at_level("WARNING", logger=apptainer_provider.LOGGER.name):
+        result = provider.prepare_image(
+            SandboxImagePrepareRequest(
+                image="example/image:tag",
+                target_dir=tmp_path,
+                target_name="task",
+                attempts=3,
+                retry_delay_s=2,
+            )
+        )
+
+    assert result.ok is True
+    assert result.prepared is True
+    assert result.detail == "built after 2 attempts"
+    assert result.image == str(tmp_path / "task.sif")
+    assert attempts == 2
+    assert (tmp_path / "task.sif").read_text() == "complete"
+    assert list(tmp_path.iterdir()) == [tmp_path / "task.sif"]
+    assert sleeps == [2]
+    assert "attempt 1/3" in caplog.text
+    assert "retrying in 2s" in caplog.text
+    assert "truncated manifest" in caplog.text
+
+
+def test_prepare_image_removes_intermediate_output_after_failures(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def run(command: list[str], **_kwargs: Any) -> SimpleNamespace:
+        Path(command[3]).write_text("partial")
+        return SimpleNamespace(returncode=1, stderr="unexpected end of JSON input", stdout="")
+
+    monkeypatch.setattr(apptainer_provider.subprocess, "run", run)
+    provider = apptainer_provider.ApptainerProvider()
+
+    result = provider.prepare_image(
+        SandboxImagePrepareRequest(image="example/image:tag", target_path=tmp_path / "task.sif", attempts=3)
+    )
+
+    assert result.ok is False
+    assert result.prepared is False
+    assert "attempt 3/3" in result.detail
+    assert "unexpected end of JSON input" in result.detail
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_prepare_image_failed_forced_rebuild_preserves_existing_image(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    image = tmp_path / "task.sif"
+    image.write_text("known-good")
+
+    def run(command: list[str], **_kwargs: Any) -> SimpleNamespace:
+        Path(command[3]).write_text("partial")
+        return SimpleNamespace(returncode=1, stderr="registry unavailable", stdout="")
+
+    monkeypatch.setattr(apptainer_provider.subprocess, "run", run)
+    provider = apptainer_provider.ApptainerProvider()
+
+    result = provider.prepare_image(
+        SandboxImagePrepareRequest(image="example/image:tag", target_path=image, force=True, attempts=3)
+    )
+
+    assert result.ok is False
+    assert image.read_text() == "known-good"
+    assert list(tmp_path.iterdir()) == [image]
 
 
 def test_to_sandbox_status() -> None:

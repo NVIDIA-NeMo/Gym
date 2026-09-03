@@ -24,7 +24,9 @@ import re
 import shlex
 import shutil
 import signal
+import subprocess
 import tempfile
+import time
 import uuid
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
@@ -36,6 +38,8 @@ from nemo_gym.sandbox.providers.base import (
     SandboxCreateVerificationError,
     SandboxExecResult,
     SandboxHandle,
+    SandboxImagePrepareRequest,
+    SandboxImagePrepareResult,
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
@@ -55,6 +59,7 @@ SANDBOX_RUNTIME_RETURN_CODE = 125
 # failed to run the command. Apptainer prefixes its own fatal errors with "FATAL:".
 APPTAINER_RUNTIME_ERROR_MARKERS = ("fatal:", "no instance found", "instance not found", "does not exist")
 APPTAINER_MISSING_INSTANCE_MARKERS = ("no instance found", "instance not found", "does not exist")
+APPTAINER_BUILD_ERROR_TAIL_CHARS = 500
 APPTAINER_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 APPTAINER_ENV_FILE_READONLY = frozenset({"EUID", "GID", "HOME", "IFS", "OPTIND", "PWD", "UID"})
 
@@ -293,6 +298,97 @@ class ApptainerProvider:
         self._binary = _require_apptainer(bin_path)
         self._subprocess_env = _apptainer_subprocess_env(bin_path)
         self._semaphore = asyncio.Semaphore(self._exec_config.concurrency)
+
+    def prepare_image(self, request: SandboxImagePrepareRequest) -> SandboxImagePrepareResult:
+        """Build a local SIF image for Apptainer with retry-safe installation."""
+        source_image = _resolve_image(request.image)
+        if request.target_path is not None:
+            target_path = Path(request.target_path)
+        elif request.target_dir is not None and request.target_name is not None:
+            target_path = Path(request.target_dir) / f"{request.target_name}.sif"
+        else:
+            return SandboxImagePrepareResult(
+                image=source_image,
+                ok=True,
+                prepared=False,
+                detail="no target requested",
+            )
+
+        if target_path.exists() and not request.force:
+            return SandboxImagePrepareResult(
+                image=str(target_path),
+                ok=True,
+                prepared=False,
+                detail="exists",
+            )
+
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        failures: list[str] = []
+        for attempt in range(1, request.attempts + 1):
+            build_dir = Path(tempfile.mkdtemp(prefix=f".{target_path.stem}-", dir=target_path.parent))
+            staged_path = build_dir / target_path.name
+            built = False
+            attempt_detail = ""
+            try:
+                proc = subprocess.run(
+                    [self._binary, "build", "--force", str(staged_path), source_image],
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    env=self._subprocess_env,
+                )
+                if proc.returncode != 0:
+                    error = proc.stderr.strip() or proc.stdout.strip() or f"exit code {proc.returncode}"
+                    attempt_detail = error[-APPTAINER_BUILD_ERROR_TAIL_CHARS:]
+                    failures.append(f"attempt {attempt}/{request.attempts}: {attempt_detail}")
+                elif not staged_path.is_file():
+                    attempt_detail = f"apptainer succeeded without producing {staged_path.name}"
+                    failures.append(f"attempt {attempt}/{request.attempts}: {attempt_detail}")
+                else:
+                    os.replace(staged_path, target_path)
+                    built = True
+            except OSError as exc:
+                attempt_detail = str(exc)
+                failures.append(f"attempt {attempt}/{request.attempts}: {attempt_detail}")
+
+            try:
+                shutil.rmtree(build_dir)
+            except OSError as exc:
+                message = f"attempt {attempt}/{request.attempts}: failed to clean {build_dir}: {exc}"
+                if built:
+                    LOGGER.warning(message)
+                else:
+                    attempt_detail = message
+                    failures.append(message)
+
+            if built:
+                detail = "built" if attempt == 1 else f"built after {attempt} attempts"
+                return SandboxImagePrepareResult(
+                    image=str(target_path),
+                    ok=True,
+                    prepared=True,
+                    detail=detail,
+                )
+            if attempt < request.attempts:
+                retry_delay_s = request.retry_delay_s * attempt
+                LOGGER.warning(
+                    "apptainer image build failed for %s -> %s on attempt %s/%s; retrying in %ss: %s",
+                    source_image,
+                    target_path,
+                    attempt,
+                    request.attempts,
+                    retry_delay_s,
+                    attempt_detail,
+                )
+                if retry_delay_s > 0:
+                    time.sleep(retry_delay_s)
+
+        return SandboxImagePrepareResult(
+            image=str(target_path),
+            ok=False,
+            prepared=False,
+            detail="\n".join(failures),
+        )
 
     async def _run(
         self,
