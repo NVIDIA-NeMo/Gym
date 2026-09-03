@@ -26,7 +26,7 @@ package are the server-side mechanisms that make those control calls safe:
   limiter and aggregates worker acknowledgements and in-flight counts.
 """
 
-from nemo_gym.checkpoint.admission import (
+from nemo_gym._checkpoint.admission import (
     GATED_MODEL_ROUTE_SUFFIXES,
     PLANE_HEADER,
     AdmissionLimiter,
@@ -35,7 +35,7 @@ from nemo_gym.checkpoint.admission import (
     AdmissionTicket,
     StaleAttemptError,
 )
-from nemo_gym.checkpoint.control import (
+from nemo_gym._checkpoint.control import (
     CONTROL_SCHEMA_VERSION,
     CONTROL_URL_PREFIX,
     AdmissionState,
@@ -52,13 +52,13 @@ from nemo_gym.checkpoint.control import (
     install_control_plane,
     multi_process_capability_from_num_workers,
 )
-from nemo_gym.checkpoint.coordinator import (
+from nemo_gym._checkpoint.coordinator import (
     AdmissionCoordinator,
     MissingWorkersError,
     WorkerAdmissionAgent,
     build_coordinator_control_app,
 )
-from nemo_gym.checkpoint.model_control_contracts import (
+from nemo_gym._checkpoint.model_control_contracts import (
     MODEL_ADMISSION_URL_PREFIX,
     ModelAbortInflightRequest,
     ModelAdmissionPauseRequest,

@@ -40,7 +40,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from nemo_gym.checkpoint import (
+from nemo_gym._checkpoint import (
     MODEL_ADMISSION_URL_PREFIX,
     AdmissionCoordinator,
     AdmissionLimiter,

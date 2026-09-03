@@ -35,7 +35,7 @@ from uuid import uuid4
 
 from starlette.responses import JSONResponse
 
-from nemo_gym.checkpoint.control import AdmissionState, ControlError
+from nemo_gym._checkpoint.control import AdmissionState, ControlError
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
 from nemo_gym.rollout_correlation import (
     ATTEMPT_INDEX_HEADER,

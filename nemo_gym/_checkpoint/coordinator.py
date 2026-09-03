@@ -46,8 +46,8 @@ from typing import Any, Callable, Optional
 
 from fastapi import FastAPI
 
-from nemo_gym.checkpoint.admission import AdmissionLimiter
-from nemo_gym.checkpoint.control import (
+from nemo_gym._checkpoint.admission import AdmissionLimiter
+from nemo_gym._checkpoint.control import (
     AdmissionState,
     CheckpointPhase,
     ControlCapabilities,
@@ -56,7 +56,7 @@ from nemo_gym.checkpoint.control import (
     Deadline,
     install_control_plane,
 )
-from nemo_gym.checkpoint.model_control_contracts import (
+from nemo_gym._checkpoint.model_control_contracts import (
     MODEL_ADMISSION_URL_PREFIX,
     ModelAbortInflightRequest,
     ModelAdmissionPauseRequest,
