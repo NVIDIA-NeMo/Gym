@@ -135,11 +135,9 @@ async def test_embedded_runner_invokes_adapter_and_attaches_resource_methods() -
         )
     )
 
-    assert result.return_value == "Check delivery: cold"
-    assert result.agent.label == "configured"
-    assert result.agent.llm.model == "gym-policy"
-    assert "get_weather" in vars(type(result.agent))
-    assert "gym_tools" not in vars(result.agent)
+    assert result.episode.response.output[0].content[0].text == "Check delivery: cold"
+    assert result.episode.observations.source == "nooa"
+    assert [gap.code for gap in result.episode.observations.gaps] == ["non_trainable_fallback_output"]
     assert adapter_requests == [request]
     assert client.post.await_args.kwargs["json"] == {"city": "Paris"}
 
@@ -167,7 +165,7 @@ async def test_constructs_a_fresh_agent_for_every_rollout() -> None:
     )
 
     assert FakeAgent.instances == 2
-    assert first.agent is not second.agent
+    assert first.episode is not second.episode
     assert first.resource_cookies is not second.resource_cookies
 
 
