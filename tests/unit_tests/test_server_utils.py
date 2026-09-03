@@ -29,6 +29,12 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
+from nemo_gym.rollout_correlation import (
+    PARENT_MODEL_CALL_ID_HEADER,
+    SOURCE_CAPTURE_KEY_HEADER,
+    RolloutContextMiddleware,
+    checkpoint_parent_context,
+)
 from nemo_gym.server_utils import (
     NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME,
     NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME,
@@ -261,12 +267,63 @@ class TestServerUtils:
             url_path="blah blah",
         )
         assert "my mock response" == actual_response
-
         actual_response = await server_client.post(
             server_name="my_server",
             url_path="blah blah",
         )
         assert "my mock response" == actual_response
+
+    async def test_ServerClient_propagates_restored_parent_headers(self, monkeypatch: MonkeyPatch) -> None:
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="head", port=80),
+            global_config_dict=DictConfig(
+                {
+                    "agent": {"responses_api_agents": {"agent": {"host": "agent", "port": 80}}},
+                    "judge": {
+                        "responses_api_models": {"model": {"host": "judge", "port": 80, "instance_role": "auxiliary"}}
+                    },
+                    "policy": {"responses_api_models": {"model": {"host": "policy", "port": 80}}},
+                }
+            ),
+        )
+        request_mock = AsyncMock(return_value="response")
+        monkeypatch.setattr(nemo_gym.server_utils, "request", request_mock)
+
+        with checkpoint_parent_context("rollout-a2", "call-1"):
+            await server_client.post(
+                server_name="agent",
+                url_path="/ng-rollout/rollout-a3/v1/responses",
+                json={},
+            )
+
+        relay_headers = request_mock.await_args.kwargs["headers"]
+
+        async def relayed_agent_request(scope, receive, send) -> None:
+            await server_client.post(server_name="judge", url_path="/v1/responses", json={})
+            await server_client.post(server_name="policy", url_path="/v1/responses", json={})
+            await server_client.post(server_name="policy", url_path="/v1/responses", json={})
+
+        await RolloutContextMiddleware(relayed_agent_request)(
+            {
+                "type": "http",
+                "path": "/ng-rollout/rollout-a3/v1/responses",
+                "headers": [(name.encode(), value.encode()) for name, value in relay_headers.items()],
+            },
+            None,
+            None,
+        )
+
+        calls = request_mock.await_args_list
+        relay_headers = calls[0].kwargs["headers"]
+        assert relay_headers[SOURCE_CAPTURE_KEY_HEADER] == "rollout-a2"
+        assert relay_headers[PARENT_MODEL_CALL_ID_HEADER] == "call-1"
+        assert SOURCE_CAPTURE_KEY_HEADER not in calls[1].kwargs["headers"]
+        assert PARENT_MODEL_CALL_ID_HEADER not in calls[1].kwargs["headers"]
+        first_policy_headers = calls[2].kwargs["headers"]
+        assert first_policy_headers[SOURCE_CAPTURE_KEY_HEADER] == "rollout-a2"
+        assert first_policy_headers[PARENT_MODEL_CALL_ID_HEADER] == "call-1"
+        assert SOURCE_CAPTURE_KEY_HEADER not in calls[3].kwargs["headers"]
+        assert PARENT_MODEL_CALL_ID_HEADER not in calls[3].kwargs["headers"]
 
     async def test_ServerClient_preserves_external_capture_url_and_capability(self, monkeypatch: MonkeyPatch) -> None:
         server_client = ServerClient(

@@ -147,13 +147,23 @@ async def test_has_rows_is_false_for_untouched_rollout(store):
     assert RolloutManifest.model_validate(await store.manifest("r-none")).records == []
 
 
-async def _admit(store, request_items, rollout_id="r1", model_call_id="c2"):
+async def _admit(
+    store,
+    request_items,
+    rollout_id="r1",
+    model_call_id="c2",
+    *,
+    source_capture_key=None,
+    explicit_parent_call_id=None,
+):
     context = CaptureContext(
         rollout_id=rollout_id,
         model_call_id=model_call_id,
         token_sink=None,
         lineage_store=store,
         external_staging=True,
+        source_capture_key=source_capture_key,
+        explicit_parent_call_id=explicit_parent_call_id,
     )
     token = set_token_sink(context)
     try:
@@ -177,6 +187,103 @@ async def test_admission_match_uses_staging_chain_without_wire_prefix(store):
     assert context.parent_staging_chain == ["r1/c1"]
     assert context.parent_chain_hash == CHAIN_HASH_1
     assert context.request_items == [USER_1, ASSISTANT_1, USER_2]
+
+
+@pytest.mark.asyncio
+async def test_cross_attempt_admission_uses_explicit_verified_parent(store):
+    await _record_call_1(store, rollout_id="r1")
+    context = await _admit(
+        store,
+        [USER_1, ASSISTANT_1, USER_2],
+        rollout_id="r1-a1",
+        source_capture_key="r1",
+        explicit_parent_call_id="c1",
+    )
+    admission = context.capture_admission
+    assert admission is not None
+    assert admission.rollout_id == "r1-a1"
+    assert admission.parent_call_id == "c1"
+    assert admission.staging_chain == ["r1/c1"]
+    assert admission.prev_len == len(TOKENS_1)
+    assert admission.parent_chain_hash == CHAIN_HASH_1
+
+    tokens_2 = TOKENS_1 + [901, 902]
+    chain_hash_2 = compute_chain_hash(CHAIN_HASH_1, [901, 902])
+    await store.record(
+        "r1-a1",
+        "c2",
+        [USER_1, ASSISTANT_1, USER_2],
+        [ASSISTANT_2],
+        [],
+        hash_token_ids(tokens_2),
+        parent_call_id="c1",
+        staging_key="r1-a1/c2",
+        weight_version=17,
+        prev_len=len(TOKENS_1),
+        delta_len=2,
+        cum_len=len(tokens_2),
+        staging_digest=STAGING_DIGEST,
+        extras_digest=EMPTY_EXTRAS_DIGEST,
+        mode="token_in",
+        staging_chain=["r1/c1", "r1-a1/c2"],
+        chain_hash=chain_hash_2,
+        cumulative_hash=hash_token_ids(tokens_2),
+    )
+    next_context = await _admit(
+        store,
+        [USER_1, ASSISTANT_1, USER_2, ASSISTANT_2, USER_3],
+        rollout_id="r1-a1",
+        model_call_id="c3",
+    )
+    next_admission = next_context.capture_admission
+    assert next_admission is not None
+    assert next_admission.parent_call_id == "c2"
+    assert next_admission.staging_chain == ["r1/c1", "r1-a1/c2"]
+    assert next_admission.prev_len == len(tokens_2)
+    assert next_admission.parent_chain_hash == chain_hash_2
+
+
+@pytest.mark.asyncio
+async def test_cross_attempt_parent_requires_matching_fingerprint(store):
+    await _record_call_1(store, rollout_id="r1")
+    context = await _admit(
+        store,
+        [USER_1, ASSISTANT_SEEDED, USER_2],
+        rollout_id="r1-a1",
+        source_capture_key="r1",
+        explicit_parent_call_id="c1",
+    )
+    assert context.capture_admission is None
+    manifest = RolloutManifest.model_validate(await store.manifest("r1-a1"))
+    assert [failure.reason for failure in manifest.failures] == [UNRESOLVED_PARENT_REASON]
+
+
+@pytest.mark.asyncio
+async def test_custom_store_without_explicit_lookup_fails_closed():
+    class LegacyCustomStore:
+        def __init__(self) -> None:
+            self.inner = InMemoryLineageStore()
+
+        async def resolve(self, rollout_id, request_items):
+            return await self.inner.resolve(rollout_id, request_items)
+
+        async def has_rows(self, rollout_id):
+            return await self.inner.has_rows(rollout_id)
+
+        async def record_failure(self, rollout_id, model_call_id, reason):
+            await self.inner.record_failure(rollout_id, model_call_id, reason)
+
+    store = LegacyCustomStore()
+    context = await _admit(
+        store,
+        [USER_1, ASSISTANT_1, USER_2],
+        rollout_id="r1-a1",
+        source_capture_key="r1",
+        explicit_parent_call_id="c1",
+    )
+    assert context.capture_admission is None
+    manifest = RolloutManifest.model_validate(await store.inner.manifest("r1-a1"))
+    assert [failure.reason for failure in manifest.failures] == [UNRESOLVED_PARENT_REASON]
 
 
 @pytest.mark.asyncio

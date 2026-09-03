@@ -34,7 +34,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from nemo_gym.token_id_capture.lineage import assistant_fingerprint, stamp_continuation
-from nemo_gym.token_id_capture.protocols import LineageResolution, LineageStore, TokenSink
+from nemo_gym.token_id_capture.protocols import (
+    ExplicitParentLineageStore,
+    LineageResolution,
+    LineageStore,
+    TokenSink,
+)
 from nemo_gym.token_id_capture.records import (
     ParentResolutionStatus,
     TokenEntry,
@@ -95,6 +100,8 @@ class CaptureContext:
     # strict tri-state of the lineage result.
     external_staging: bool = False
     logical_request_id: str | None = None
+    source_capture_key: str | None = None
+    explicit_parent_call_id: str | None = None
     # Stamped once when the middleware admits the call. The ledger row reuses
     # this value on every commit retry so idempotent re-records stay
     # byte-identical.
@@ -198,11 +205,11 @@ async def resolve_parent(request_messages: list | None) -> None:
     context = _CAPTURE_CONTEXT.get()
     if context is None or request_messages is None:
         return
+    if (context.source_capture_key is None) != (context.explicit_parent_call_id is None):
+        raise RuntimeError("source capture key and parent model-call ID must be provided together")
     context.request_items = list(request_messages)
     try:
-        if not assistant_fingerprint(request_messages):
-            context.parent_resolution = LineageResolution(ParentResolutionStatus.ROOT)
-        elif context.lineage_store is None:
+        if context.lineage_store is None:
             context.parent_resolution = LineageResolution(
                 ParentResolutionStatus.UNRESOLVED,
                 reason="resolver_unavailable",
@@ -217,6 +224,20 @@ async def resolve_parent(request_messages: list | None) -> None:
                     "No lineage resolver is available: every continuation resolves UNRESOLVED "
                     "and multi-call rollouts will be masked (allow_unresolved_continuations is set)."
                 )
+        elif context.source_capture_key is not None and context.explicit_parent_call_id is not None:
+            if not isinstance(context.lineage_store, ExplicitParentLineageStore):
+                context.parent_resolution = LineageResolution(
+                    ParentResolutionStatus.UNRESOLVED,
+                    reason="explicit_parent_unsupported",
+                )
+            else:
+                context.parent_resolution = await context.lineage_store.resolve_explicit(
+                    context.source_capture_key,
+                    context.explicit_parent_call_id,
+                    request_messages,
+                )
+        elif not assistant_fingerprint(request_messages):
+            context.parent_resolution = LineageResolution(ParentResolutionStatus.ROOT)
         else:
             context.parent_resolution = await context.lineage_store.resolve(context.rollout_id, request_messages)
         _count_resolution(context.parent_resolution.status.value)
@@ -271,7 +292,9 @@ async def resolve_parent(request_messages: list | None) -> None:
             )
         return
     is_root = context.parent_resolution is not None and context.parent_resolution.status == ParentResolutionStatus.ROOT
-    if is_root or not await context.lineage_store.has_rows(context.rollout_id):
+    if is_root or (
+        context.source_capture_key is None and not await context.lineage_store.has_rows(context.rollout_id)
+    ):
         context.capture_admission = CaptureAdmission(
             rollout_id=context.rollout_id,
             model_call_id=context.model_call_id,
