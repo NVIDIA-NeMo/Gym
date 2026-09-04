@@ -1320,10 +1320,7 @@ def _dataset(tmp_path: Path, name: str, rows: list) -> dict:
 
 
 class TestCollateTaskSourceStamping:
-    """Pins the collate stamping contract (dataset-decoupling RFC): rows are stamped with
-    task_source (the declaring instance) and carry NO agent_ref — the agent is a run-time
-    choice, never part of the data. This is also the processed-format contract external
-    training frameworks consume."""
+    """Pins dataset routing stamps for resources, agents, and rollout orchestrators."""
 
     ROWS = [{"responses_create_params": {"input": []}, "question": "q1"}]
 
@@ -1355,6 +1352,32 @@ class TestCollateTaskSourceStamping:
         rows = self._read(paths[0])
         assert rows[0]["task_source"] == "tau2_agent"
         assert "agent_ref" not in rows[0]
+
+    def test_orchestrator_declared_dataset_stamps_orchestrator_ref(self, tmp_path, monkeypatch) -> None:
+        orchestrator = _instance(
+            "turn_orchestrator",
+            "rollout_orchestrators",
+            {
+                "entrypoint": "app.py",
+                "resources_server": {"type": "resources_servers", "name": "game"},
+                "agents": {
+                    "player0": {"type": "responses_api_agents", "name": "player0"},
+                    "player1": {"type": "responses_api_agents", "name": "player1"},
+                },
+                "focal_agent": "player0",
+                "datasets": [_dataset(tmp_path, "orchestrated", self.ROWS)],
+            },
+        )
+
+        paths = self._collate(tmp_path, monkeypatch, [orchestrator])
+        rows = self._read(paths[0])
+
+        assert rows[0]["orchestrator_ref"] == {
+            "type": "rollout_orchestrators",
+            "name": "turn_orchestrator",
+        }
+        assert "agent_ref" not in rows[0]
+        assert "task_source" not in rows[0]
 
     def test_incoming_legacy_agent_ref_is_stripped_with_warning(self, tmp_path, monkeypatch) -> None:
         legacy_rows = [
