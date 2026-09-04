@@ -3,6 +3,7 @@
 from argparse import ArgumentParser
 from collections import Counter
 from contextlib import nullcontext
+from os import stat
 
 import orjson
 
@@ -13,8 +14,9 @@ parser.add_argument("--group-to-write-out", type=str, default=None)
 args = parser.parse_args()
 
 
+f_out_path = "temp.jsonl"
 counts = Counter()
-with open(args.fpath, "rb") as f, open("temp.jsonl", "wb") if args.group_to_write_out else nullcontext() as f_out:
+with open(args.fpath, "rb") as f, open(f_out_path, "wb") if args.group_to_write_out else nullcontext() as f_out:
     for i, line in enumerate(f):
         row = orjson.loads(line)
 
@@ -60,3 +62,6 @@ print_str = ""
 for k, v in counts.items():
     print_str += f"{k}: {v} ({int(100 * v / counts['Total samples with reward=0'])}%)\n"
 print(print_str)
+
+if args.group_to_write_out:
+    print(f"Wrote out {stat(f_out_path).st_size / 1024**2} MB to {f_out_path}")
