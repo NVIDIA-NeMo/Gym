@@ -14,6 +14,20 @@ Nano Omni and Qwen3.5 use different model-output adapters, but they consume the
 same 552 tasks and drive the same browser, proxy/CAPTCHA, action executor, and
 Gemini judge. The earlier BrowserGym-compatible path is not included.
 
+## Validation evidence
+
+The latest pre-merge full-population runs used the same hash-pinned tasks and
+`visual_browser` runtime:
+
+| Policy | Result | Completeness |
+| --- | ---: | --- |
+| Qwen3.5-122B-A10B-FP8 | 300/552, 54.35% | 552 valid unique; no missing, invalid, or duplicate-valid tasks |
+| Nano Omni tuned checkpoint `iter_0004622` | 398/552, 72.10% | 552 valid unique; no missing, invalid, or duplicate-valid tasks |
+
+The runs used a frozen execution snapshot matching this implementation line
+before its PR history was reorganized. Treat the scores as end-to-end
+integration evidence rather than stable live-site leaderboard claims.
+
 ## Install and prepare
 
 Run from a clean Gym checkout on Linux:
