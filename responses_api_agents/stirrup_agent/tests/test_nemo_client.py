@@ -368,3 +368,133 @@ async def test_recovery_nudge_never_enters_the_trajectory() -> None:
 
     assert len(history) == 1
     assert history[0].content == "hi"
+
+
+class TestProviderHistoryMatchesStrictIngress:
+    """Provider-bound history must pass Gym's strict proxy schema unchanged.
+
+    Stirrup's serializer leaks internal model fields; the proxy used to drop
+    them silently and now rejects them with 422 on the first turn that replays
+    a tool call. The producer emits exactly the canonical form the validated
+    campaigns' policies saw.
+    """
+
+    @staticmethod
+    def _history() -> list:
+        from stirrup.core.models import Reasoning
+
+        return [
+            SystemMessage(content="sys"),
+            UserMessage(content="do it"),
+            AssistantMessage(
+                content="",
+                reasoning=Reasoning(content="I think...", signature="sig-1"),
+                metadata={"k": "v"},
+                tool_calls=[
+                    ToolCall(tool_call_id="call_1", name="code_exec", arguments='{"cmd":"true"}', signature="tsig"),
+                ],
+                token_usage=TokenUsage(input=1, answer=1, reasoning=1),
+            ),
+            NeMoUserMessage(content="ok", name="code_exec", success=True, tool_call_id="call_1"),
+            AssistantMessage(content="done", token_usage=TokenUsage(input=1, answer=1, reasoning=0)),
+        ]
+
+    def test_exact_canonical_key_sets(self) -> None:
+        serialized = to_provider_openai_messages(self._history())
+
+        assistant, tool, final = serialized[2], serialized[3], serialized[4]
+        assert set(assistant) == {"role", "content", "tool_calls"}
+        assert set(assistant["tool_calls"][0]) == {"id", "type", "function"}
+        assert assistant["tool_calls"][0] == {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "code_exec", "arguments": '{"cmd":"true"}'},
+        }
+        assert set(tool) == {"role", "content", "tool_call_id"}
+        assert tool["tool_call_id"] == "call_1"
+        assert set(final) == {"role", "content"}
+
+    def test_validates_against_strict_chat_schema_and_round_trips(self) -> None:
+        from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+
+        serialized = to_provider_openai_messages(self._history())
+        validated = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": serialized})
+        # Nothing is added or removed by ingress: the producer already emits the
+        # exact form the schema accepts, so the policy sees the same bytes the
+        # validated campaigns' proxies forwarded.
+        assert validated.model_dump(exclude_unset=True)["messages"] == serialized
+
+    def test_disagreeing_alias_is_rejected_not_hidden(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import responses_api_agents.stirrup_agent.stirrup_utils as stirrup_utils
+
+        original_serializer = stirrup_utils.to_openai_messages
+
+        def drifted_serializer(msgs):
+            out = original_serializer(msgs)
+            out[0]["tool_calls"][0]["name"] = "different_tool"
+            return out
+
+        monkeypatch.setattr(stirrup_utils, "to_openai_messages", drifted_serializer)
+        message = AssistantMessage(
+            content="",
+            tool_calls=[ToolCall(tool_call_id="call_1", name="code_exec", arguments="{}")],
+            token_usage=TokenUsage(input=1, answer=1, reasoning=0),
+        )
+        with pytest.raises(ValueError, match="alias disagrees"):
+            to_provider_openai_messages([message])
+
+    def test_fixture_actually_leaks_the_fields_the_schema_rejects(self) -> None:
+        """Guard the fixture against going stale: the raw serializer must still
+        emit every field the canonicalization exists to remove."""
+        import responses_api_agents.stirrup_agent.stirrup_utils as stirrup_utils
+
+        raw = stirrup_utils.to_openai_messages(stirrup_utils.restore_tool_messages_for_model(self._history()))
+        assert {"reasoning_content", "thinking_blocks", "metadata"} <= set(raw[2])
+        assert {"tool_call_id", "name", "arguments", "signature", "provider_specific_fields"} <= set(
+            raw[2]["tool_calls"][0]
+        )
+        assert "name" in raw[3]
+
+    def test_allowlists_stay_within_the_strict_schema(self) -> None:
+        """Subset pin: if the ingress schema ever widens (e.g. to replay
+        reasoning_content), this still passes, but the allowlist must then be
+        revisited deliberately; if the schema narrows below the allowlist,
+        canonical output would 422 and this fails first."""
+        from typing import get_type_hints
+
+        from nemo_gym.openai_utils import (
+            NeMoGymChatCompletionAssistantMessageParam,
+            NeMoGymChatCompletionMessageToolCallParam,
+            NeMoGymChatCompletionToolMessageParam,
+        )
+        from responses_api_agents.stirrup_agent.stirrup_utils import (
+            _PROVIDER_ASSISTANT_KEYS,
+            _PROVIDER_TOOL_CALL_KEYS,
+            _PROVIDER_TOOL_MESSAGE_KEYS,
+        )
+
+        assert _PROVIDER_ASSISTANT_KEYS <= set(get_type_hints(NeMoGymChatCompletionAssistantMessageParam))
+        assert _PROVIDER_TOOL_MESSAGE_KEYS <= set(get_type_hints(NeMoGymChatCompletionToolMessageParam))
+        assert _PROVIDER_TOOL_CALL_KEYS <= set(get_type_hints(NeMoGymChatCompletionMessageToolCallParam))
+
+    def test_think_tagged_content_passes_through_verbatim(self) -> None:
+        """Prior-turn reasoning reaches the policy embedded in content (the vLLM
+        proxy wraps it in <think> tags); canonicalization must not touch it."""
+        content = "<think>plan the steps</think>Running the command."
+        message = AssistantMessage(
+            content=content,
+            tool_calls=[ToolCall(tool_call_id="call_1", name="code_exec", arguments="{}")],
+            token_usage=TokenUsage(input=1, answer=1, reasoning=1),
+        )
+        serialized = to_provider_openai_messages([message])
+        assert serialized[0]["content"] == [{"type": "text", "text": content}]
+
+    def test_history_objects_are_not_mutated(self) -> None:
+        history = self._history()
+        assistant = history[2]
+        to_provider_openai_messages(history)
+        # Canonicalization is wire-only; persisted/exported history keeps
+        # reasoning, metadata, and signatures for forensics and training.
+        assert assistant.reasoning is not None and assistant.reasoning.signature == "sig-1"
+        assert assistant.metadata == {"k": "v"}
+        assert assistant.tool_calls[0].signature == "tsig"

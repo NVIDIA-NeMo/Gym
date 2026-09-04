@@ -111,9 +111,50 @@ def restore_tool_messages_for_model(messages: list[ChatMessage]) -> list[ChatMes
     return restored
 
 
+# Stirrup's ``to_openai_messages`` leaks its internal models onto the wire:
+# ``ToolCall.model_dump()`` (``tool_call_id``/``name``/``arguments``/``signature``)
+# beside the canonical ``{id, type, function}`` envelope, ``name`` on tool-role
+# messages, and ``reasoning_content``/``thinking_blocks``/``metadata`` on the
+# assistant message. Gym's proxy ingress validated with ``extra="ignore"`` for
+# every campaign to date, so the policy only ever saw the canonical keys below.
+# The ingress schema is strict now; emit exactly what it accepted before rather
+# than widening the schema, so the provider-bound payload stays byte-identical.
+_PROVIDER_ASSISTANT_KEYS = frozenset({"role", "content", "tool_calls"})
+_PROVIDER_TOOL_CALL_KEYS = frozenset({"id", "type", "function"})
+_PROVIDER_TOOL_MESSAGE_KEYS = frozenset({"role", "content", "tool_call_id"})
+
+
+def _canonical_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
+    function = tool_call.get("function") or {}
+    # The flat duplicates come from the same ToolCall object as the canonical
+    # envelope, so a disagreement means the serializer changed underneath us;
+    # dropping the alias would then hide which value the model actually saw.
+    for alias, canonical in (
+        (tool_call.get("tool_call_id"), tool_call.get("id")),
+        (tool_call.get("name"), function.get("name")),
+        (tool_call.get("arguments"), function.get("arguments")),
+    ):
+        if alias is not None and canonical is not None and alias != canonical:
+            raise ValueError(f"tool call alias disagrees with its canonical field: {alias!r} != {canonical!r}")
+    return {key: value for key, value in tool_call.items() if key in _PROVIDER_TOOL_CALL_KEYS}
+
+
+def _canonical_provider_message(message: dict[str, Any]) -> dict[str, Any]:
+    role = message.get("role")
+    if role == "assistant":
+        canonical = {key: value for key, value in message.items() if key in _PROVIDER_ASSISTANT_KEYS}
+        if canonical.get("tool_calls"):
+            canonical["tool_calls"] = [_canonical_tool_call(tool_call) for tool_call in canonical["tool_calls"]]
+        return canonical
+    if role == "tool":
+        return {key: value for key, value in message.items() if key in _PROVIDER_TOOL_MESSAGE_KEYS}
+    return message
+
+
 def to_provider_openai_messages(messages: list[ChatMessage]) -> list[NeMoGymChatCompletionMessageParam]:
     """Serialize Stirrup history for an OpenAI-compatible provider."""
-    return cast(list[NeMoGymChatCompletionMessageParam], to_openai_messages(restore_tool_messages_for_model(messages)))
+    serialized = to_openai_messages(restore_tool_messages_for_model(messages))
+    return cast(list[NeMoGymChatCompletionMessageParam], [_canonical_provider_message(m) for m in serialized])
 
 
 def convert_stirrup_history_to_output_items(

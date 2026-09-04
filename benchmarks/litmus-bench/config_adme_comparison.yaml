@@ -1,0 +1,20 @@
+# ADME Tier-5 sub10, comparison subset.
+config_paths:
+  - benchmarks/litmus-bench/config_adme_base.yaml
+
+prepare_script_args:
+  subset: comparison
+
+adme_tier5_comparison_agent:
+  _inherit_from: litmus_agent_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: adme_tier5_resources_server
+      datasets:
+        - name: adme-tier5-comparison
+          type: benchmark
+          jsonl_fpath: benchmarks/litmus-bench/data/adme-tier5-comparison_benchmark.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/litmus-bench/prepare_adme_tier5.py
+          num_repeats: 5

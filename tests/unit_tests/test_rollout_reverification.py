@@ -24,7 +24,13 @@ from pydantic import ValidationError
 
 from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ConfigError
-from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, SKILLS_REF_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import (
+    AGENT_REF_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    SKILLS_REF_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+    TASK_SOURCE_KEY_NAME,
+)
 from nemo_gym.rollout_reverification import (
     _RECOVERY_TWO_SOURCES_WARNING,
     JUDGE_FAILED_FAILURE_CLASS,
@@ -1594,7 +1600,7 @@ class TestRolloutReverificationRunFromConfig:
         )
         monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None))
         monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
-        monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_exporters", list)
         # run_from_config resolves the input paths for real; the files don't exist in these tests, so stub it out.
         monkeypatch.setattr("nemo_gym.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
 
@@ -1808,7 +1814,7 @@ class TestRolloutReverificationRunFromConfig:
         agg_mock = AsyncMock(return_value=None)
         monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", agg_mock)
         monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
-        monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_exporters", list)
         monkeypatch.setattr("nemo_gym.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
         config = self._make_config(tmp_path)
 
@@ -1879,7 +1885,7 @@ class TestRunFromConfigForceFlag:
             lambda *_a, **_kw: [fake_future()],
         )
         monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None))
-        monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_exporters", list)
         monkeypatch.setattr("nemo_gym.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
 
     async def test_no_unsafe_prefix_when_all_rs_stateless(
@@ -1955,7 +1961,7 @@ class TestRunFromConfigResumeFromCache:
         monkeypatch.setattr("nemo_gym.rollout_reverification._run_verification_payloads", fake_run)
         monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
         monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None))
-        monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_exporters", list)
 
     def _read_jsonl(self, path: Path) -> list[dict]:
         return [orjson.loads(line) for line in path.read_bytes().splitlines() if line.strip()]
@@ -2198,7 +2204,7 @@ class TestRunFromConfigJudgeFailedOnly:
         monkeypatch.setattr("nemo_gym.rollout_reverification._guard_reverify_mode", guard_mock)
         agg_mock = AsyncMock(return_value=None)
         monkeypatch.setattr("nemo_gym.rollout_reverification._call_aggregate_metrics", agg_mock)
-        monkeypatch.setattr("nemo_gym.rollout_reverification.get_wandb_run", lambda: None)
+        monkeypatch.setattr("nemo_gym.rollout_reverification.get_exporters", list)
         return guard_mock, agg_mock
 
     def _patch(self, monkeypatch: pytest.MonkeyPatch, dispatched: list, recovered_reward: float = 0.9):
@@ -2541,3 +2547,65 @@ class TestRunFromConfigJudgeFailedOnly:
         assert sorted(r[TASK_INDEX_KEY_NAME] for r in returned) == [0, 1, 2, 3]
         # task 0 seeded exactly once across both invocations (idempotent seeding)
         assert [r[TASK_INDEX_KEY_NAME] for r in self._read_jsonl(tmp_path / "recovered.jsonl")].count(0) == 1
+
+
+class TestVerifyAggregationRoutingConsistency:
+    """Aggregation must route each result with the SAME resolver as /verify (_rs_for_row):
+    a remapped row must not be verified by one server and aggregated by another."""
+
+    def test_load_reverified_results_retains_task_source(self, tmp_path: Path) -> None:
+        out = tmp_path / "out.jsonl"
+        out.write_bytes(
+            orjson.dumps(
+                {
+                    AGENT_REF_KEY_NAME: {"name": "a"},
+                    TASK_SOURCE_KEY_NAME: "math_rs",
+                    TASK_INDEX_KEY_NAME: 0,
+                    ROLLOUT_INDEX_KEY_NAME: 0,
+                }
+            )
+            + b"\n"
+        )
+        _, rows = _load_reverified_results(out)
+        assert rows == [{AGENT_REF_KEY_NAME: {"name": "a"}, TASK_SOURCE_KEY_NAME: "math_rs"}]
+
+    async def test_aggregation_routes_by_task_source_like_verify(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A row whose task_source names an RS aggregates on THAT server, not on the one the
+        agent's config edge points at (which is where the old grouping sent it)."""
+        rows = [
+            {
+                AGENT_REF_KEY_NAME: {"name": "agent_a"},
+                TASK_SOURCE_KEY_NAME: "math_rs",
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+        ]
+        results = [{"reward": 1.0, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+
+        posted: list[str] = []
+
+        async def capture_post(server_name, url_path, json):  # noqa: ARG001
+            posted.append(server_name)
+            return MagicMock()
+
+        mock_client = MagicMock()
+        # task_source 'math_rs' resolves to an RS instance in the merged config...
+        mock_client.global_config_dict = {"math_rs": {"resources_servers": {"impl": {}}}}
+        monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: mock_client)
+        # ...while agent_a's config edge points somewhere else entirely.
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification._build_agent_to_resources_server_mapping",
+            lambda _: {"agent_a": "other_rs"},
+        )
+        monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            "nemo_gym.rollout_reverification.get_response_json",
+            AsyncMock(return_value={"agent_metrics": {}, "key_metrics": {}, "group_level_metrics": []}),
+        )
+        mock_client.post = capture_post
+
+        await _call_aggregate_metrics(results, rows, tmp_path / "out.jsonl")
+
+        assert posted == ["math_rs"]

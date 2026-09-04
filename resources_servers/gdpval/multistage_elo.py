@@ -72,12 +72,30 @@ class PartialStagePolicy:
     behaviour. Rows already resolved by the standard terminal/max-attempt rules
     remain eligible, but every omission still counts against the configured
     coverage floors. Drained/no-persist and missing rows keep the stage open.
+
+    ``tolerate_unresolved`` relaxes *only* the failure-class test: an unresolved
+    row that came back with any persisted failure class is accepted, subject to
+    the coverage floors. It never waives a row that never returned, that was
+    drained/no-persist, or that carries no failure class at all -- their absence
+    is the resume signal that lets the next allocation re-dispatch them intact,
+    so those keep the stage open exactly as before. Set it on a calibration stage
+    whose omissions are structural -- a missing reference deliverable never
+    becomes present on retry, so holding the stage open for it only converts a
+    data gap into a hang.
+
+    Enabling it accepts more than structural gaps: *every* persisted class
+    becomes waivable, including the infrastructure-wide ones
+    (``agent_request_failed``, ``agent_run_error``, ...). A whole agent-server
+    outage mid-stage is therefore indistinguishable from scattered structural
+    omissions, and the coverage floors above are the only remaining guard. Set
+    them deliberately tight before turning this on.
     """
 
     min_success_fraction: float = 1.0
     min_per_reference_success_fraction: float = 1.0
     min_successful_rows_per_reference: int = 1
     waivable_failure_classes: Tuple[str, ...] = ("timeout_exceeded",)
+    tolerate_unresolved: bool = False
 
 
 @dataclass

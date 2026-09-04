@@ -47,6 +47,7 @@ gdpval_judge_model:
 gdpval_resources_server:
   resources_servers:
     gdpval:
+      allowed_agents: [stirrup_agent]
       entrypoint: app.py
       domain: other
       verified: false

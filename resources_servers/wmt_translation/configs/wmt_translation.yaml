@@ -9,8 +9,9 @@ wmt_translation:
       compute_comet: true
       comet_model: Unbabel/XCOMET-XXL
       comet_batch_size: 16
-      # Listed explicitly so OmegaConf struct mode accepts `++…comet_num_shards=N` CLI overrides.
+      # Listed explicitly so OmegaConf struct mode accepts `++…` CLI overrides.
       comet_num_shards: 8
+      comet_use_worker_python: false
       # Optional per-rollout language-consistency backend.
       language_consistency_backend: null
       # Warn once per aggregation for source-target pairs below this 0-100 score.

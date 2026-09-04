@@ -167,6 +167,27 @@ class StageResume:
             setattr(self, name, {stage: value for stage, value in values.items() if stage <= index})
 
 
+# Classes worth re-dispatching inside the same process. Deliberately narrower
+# than "not terminal": _is_terminal_failure also spares reference_missing /
+# eval_missing / transport_ineligible on the grounds that the deliverable tree
+# may be repaired *between* runs. Nothing repairs it mid-process, so retrying
+# those here only burns dispatch budget.
+# `incomplete`, `judge_invalid` and `legitimate` are retried across resumes up to
+# NEMO_GYM_MAX_ROLLOUT_ATTEMPTS but are excluded here too: they are a recorded
+# decision, pending evidence that an *immediate* re-dispatch recovers them
+# rather than reproducing the same outcome at full rollout cost.
+_IN_PROCESS_RETRYABLE_CLASSES = frozenset({"timeout_exceeded", "transient"})
+
+
+def _is_in_process_retryable(row: Mapping[str, Any]) -> bool:
+    return (
+        not _is_success_row(row)
+        and not row.get(NG_NO_PERSIST_KEY)
+        and not _is_terminal_failure(row)
+        and row.get(NG_FAILURE_CLASS_KEY) in _IN_PROCESS_RETRYABLE_CLASSES
+    )
+
+
 def _is_success_row(row: Mapping[str, Any]) -> bool:
     """A row is a success iff it carries neither a failure class nor no-persist."""
     return (
@@ -211,6 +232,7 @@ def _partial_policy_record(policy: PartialStagePolicy) -> Dict[str, Any]:
         "min_per_reference_success_fraction": policy.min_per_reference_success_fraction,
         "min_successful_rows_per_reference": policy.min_successful_rows_per_reference,
         "newly_waivable_failure_classes": sorted(policy.waivable_failure_classes),
+        "tolerate_unresolved": policy.tolerate_unresolved,
     }
 
 
@@ -306,11 +328,18 @@ def _partial_stage_outcome(
     result_by_key = {_stage_key(result): result for result in new_results}
     for key in unresolved_keys:
         result = result_by_key.get(key)
-        if (
-            result is None
-            or result.get(NG_NO_PERSIST_KEY)
-            or result.get(NG_FAILURE_CLASS_KEY) not in policy.waivable_failure_classes
-        ):
+        # A row that never returned, or that was drained before its POST, is the
+        # resume signal for the next allocation: its absence is what makes the
+        # sample re-dispatchable intact. `tolerate_unresolved` never waives those.
+        if result is None or result.get(NG_NO_PERSIST_KEY):
+            return None
+        # A persisted failure class is required either way: `tolerate_unresolved`
+        # widens *which* classes are waivable, it never waives a row carrying no
+        # class at all.
+        failure_class = result.get(NG_FAILURE_CLASS_KEY)
+        if failure_class is None:
+            return None
+        if not policy.tolerate_unresolved and failure_class not in policy.waivable_failure_classes:
             return None
 
     per_reference = {
@@ -361,12 +390,22 @@ def _cached_partial_snapshot_is_valid(
         "min_successful_rows_per_reference",
         "newly_waivable_failure_classes",
     }
-    if (
-        expected_policy is None
-        or not isinstance(policy_record, Mapping)
-        or not required_policy_fields <= set(policy_record)
-        or {field: policy_record[field] for field in required_policy_fields} != _partial_policy_record(expected_policy)
-    ):
+    if expected_policy is None or not isinstance(policy_record, Mapping):
+        return False
+    if not required_policy_fields <= set(policy_record):
+        return False
+    # `tolerate_unresolved` post-dates the first durable records, so it is read
+    # with a default: a legacy record round-trips as the off value instead of
+    # invalidating every resume of a run that already froze a partial outcome.
+    recorded_tolerate_unresolved = policy_record.get("tolerate_unresolved", False)
+    # It is also non-material to validity and so excluded from the comparison:
+    # the snapshot is revalidated by re-deriving the outcome from its recorded
+    # evidence, and this flag does not change that evidence -- only whether a
+    # stage would be accepted. Flipping it mid-run (its intended use, to break a
+    # hang) must therefore not invalidate an already-frozen snapshot.
+    expected_policy_record = _partial_policy_record(expected_policy)
+    recorded_policy_fields = {field: policy_record[field] for field in required_policy_fields}
+    if recorded_policy_fields != {field: expected_policy_record[field] for field in required_policy_fields}:
         return False
     # The durable record spells the waiver set `newly_waivable_failure_classes`;
     # the config field is `waivable_failure_classes`. Map it back before parsing.
@@ -374,6 +413,7 @@ def _cached_partial_snapshot_is_valid(
         field: policy_record[field] for field in required_policy_fields if field != "newly_waivable_failure_classes"
     }
     replayed_policy_fields["waivable_failure_classes"] = policy_record["newly_waivable_failure_classes"]
+    replayed_policy_fields["tolerate_unresolved"] = recorded_tolerate_unresolved
     try:
         policy = _parse_partial_stage_policy(replayed_policy_fields)
     except (TypeError, ValueError):
@@ -440,7 +480,15 @@ def compute_fingerprint(
     connection_fields = {"host", "port"}
 
     def is_connection_field(name: str) -> bool:
-        return name in connection_fields or name.endswith("_api_key") or name.endswith("_base_url")
+        # ``endpoint_*`` covers the vLLM proxy's endpoint-file liveness knobs
+        # (stale grace, connection retries, poll interval): how a replica is
+        # reached, never what it generates.
+        return (
+            name in connection_fields
+            or name.endswith("_api_key")
+            or name.endswith("_base_url")
+            or name.startswith("endpoint_")
+        )
 
     def jsonable_runtime_block(block: Mapping[str, Any]) -> Dict[str, Any]:
         """Serialize a component block without endpoints or credentials."""
@@ -500,9 +548,11 @@ def compute_fingerprint(
             "sha256": materialized_hasher.hexdigest(),
         }
     if rollout_collection_config is not None:
+        # ``input_jsonl_fpath`` is deliberately absent: the materialized rows
+        # above hash the input by content, and the CLI's generated preprocessed
+        # path moves between releases without a byte of input changing.
         result_affecting_fields = (
             "agent_name",
-            "input_jsonl_fpath",
             "limit",
             "num_repeats",
             "num_repeats_add_seed",
@@ -557,6 +607,11 @@ class MultiStageRunConfig:
     # Judge a task's cached deliverable in later stages instead of re-running the
     # policy. Falls back to a fresh rollout when the deliverable is missing.
     reuse_cached_deliverables: bool = True
+    # Re-dispatch retryable rows inside the same process, up to
+    # NEMO_GYM_MAX_ROLLOUT_ATTEMPTS, applying the same gate a resume would.
+    # Off by default: without it the attempt cap only advances across resumes,
+    # so a timed-out row is lost whenever a run exits cleanly.
+    retry_inprocess: bool = False
 
 
 # Failure classes a partial-calibration policy may newly waive. A waived row is
@@ -575,6 +630,8 @@ def _validate_partial_stage_policy(policy: PartialStagePolicy) -> None:
     minimum_rows = policy.min_successful_rows_per_reference
     if isinstance(minimum_rows, bool) or not isinstance(minimum_rows, int) or minimum_rows <= 0:
         raise ValueError("partial_completion.min_successful_rows_per_reference must be a positive integer")
+    if not isinstance(policy.tolerate_unresolved, bool):
+        raise ValueError("partial_completion.tolerate_unresolved must be a boolean")
     waivable = policy.waivable_failure_classes
     if isinstance(waivable, (str, bytes)) or not isinstance(waivable, Sequence) or not waivable:
         raise ValueError("partial_completion.waivable_failure_classes must be a non-empty sequence of strings")
@@ -598,12 +655,13 @@ def _parse_partial_stage_policy(raw: Any) -> Optional[PartialStagePolicy]:
         "min_per_reference_success_fraction",
         "min_successful_rows_per_reference",
         "waivable_failure_classes",
+        "tolerate_unresolved",
     }
     unknown_fields = sorted(set(raw) - allowed_fields)
     if unknown_fields:
         raise ValueError(f"unknown partial_completion field(s): {', '.join(map(str, unknown_fields))}")
 
-    numeric_fields = allowed_fields - {"waivable_failure_classes"}
+    numeric_fields = allowed_fields - {"waivable_failure_classes", "tolerate_unresolved"}
     if any(isinstance(raw.get(field), bool) for field in numeric_fields if field in raw):
         raise ValueError("partial_completion thresholds must be numeric, not boolean")
 
@@ -611,6 +669,10 @@ def _parse_partial_stage_policy(raw: Any) -> Optional[PartialStagePolicy]:
     if isinstance(raw_waivable, (str, bytes)) or not isinstance(raw_waivable, Sequence):
         raise ValueError("partial_completion.waivable_failure_classes must be a sequence of strings")
     waivable = tuple(str(value) for value in raw_waivable)
+
+    raw_tolerate = raw.get("tolerate_unresolved", False)
+    if not isinstance(raw_tolerate, bool):
+        raise ValueError("partial_completion.tolerate_unresolved must be a boolean")
 
     try:
         raw_minimum_rows = raw.get("min_successful_rows_per_reference", 1)
@@ -620,6 +682,7 @@ def _parse_partial_stage_policy(raw: Any) -> Optional[PartialStagePolicy]:
             min_per_reference_success_fraction=float(raw.get("min_per_reference_success_fraction", 1.0)),
             min_successful_rows_per_reference=minimum_rows,
             waivable_failure_classes=waivable,
+            tolerate_unresolved=raw_tolerate,
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("partial_completion thresholds must be numeric") from exc
@@ -682,6 +745,7 @@ def parse_multistage_config(raw: Mapping[str, Any]) -> MultiStageRunConfig:
         nested_tasks=bool(raw.get("nested_tasks", False)),
         seed=raw.get("seed"),
         reuse_cached_deliverables=bool(raw.get("reuse_cached_deliverables", True)),
+        retry_inprocess=bool(raw.get("retry_inprocess", False)),
     )
 
 
@@ -899,6 +963,7 @@ async def run_multistage_stages(
                     sidecar_produced_by_stage.setdefault(stage_index, set()).add((task_id, int(key[1] or 0)))
 
     max_attempts = _get_max_rollout_attempts()
+    retry_inprocess = bool(getattr(multistage_config, "retry_inprocess", False))
     for index, stage in enumerate(multistage_config.stages):
         # A sidecar reuse flag is emitted only after the policy artifact exists.
         # Treat it as produced from this stage onward even when the judging row
@@ -1097,6 +1162,87 @@ async def run_multistage_stages(
         )
         if resume is not None:
             resume.on_rows(index, new_tagged)
+
+        # In-process retry: re-dispatch rows that came back retryable, applying the
+        # same gate a resume would (success / terminal / max-attempt), until the cap
+        # is reached or the dispatch budget runs out. Without this, max_attempts only
+        # ever advances across resumes, so a timed-out row is lost whenever a run
+        # exits cleanly -- the whole point of the cap never fires inside a leg.
+        # ``resume.attempts_by_stage`` is a startup snapshot that never mutates in
+        # process, so the cap has to be tracked locally. The total consumed for a
+        # key is: attempts recorded at startup + this leg's initial dispatch + the
+        # in-process retries made below.
+        inprocess_attempts: Dict[Tuple[Any, Any], int] = {}
+        if retry_inprocess and pairs and resume is not None:
+            startup_attempts = resume.attempts_by_stage.get(index, {})
+            # Sticky for the whole stage: once a key is known to have a reusable
+            # deliverable on disk it stays reusable, even if a later attempt comes
+            # back stamped on the rollout path without the flag.
+            reuse_cached_keys_for_stage = set(resume.reuse_cached_keys.get(index, frozenset()))
+            pending_by_key = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]): r for r in pending_rows}
+            while True:
+                retry_rows = []
+                for row in new_tagged:
+                    if not _is_in_process_retryable(row):
+                        continue
+                    key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+                    attempts_used = startup_attempts.get(key, 0) + 1 + inprocess_attempts.get(key, 0)
+                    if attempts_used >= max_attempts:
+                        continue
+                    source = pending_by_key.get(key)
+                    if source is None:
+                        continue
+                    retry_row = dict(source)
+                    # 0-based index of the attempt about to be made, so each retry
+                    # gets its own rollout capture key.
+                    retry_row[ATTEMPT_INDEX_KEY_NAME] = attempts_used
+                    # A failed judging attempt keeps its policy artifact: rejudge it
+                    # rather than rerunning the agent, exactly as resume does. The
+                    # flag may have been set on this very row moments ago, so honour
+                    # both it and the startup snapshot.
+                    if row.get("reuse_cached_deliverable"):
+                        reuse_cached_keys_for_stage.add(key)
+                    if key in reuse_cached_keys_for_stage:
+                        retry_row["reuse_cached_deliverable"] = True
+                    retry_rows.append(retry_row)
+                    inprocess_attempts[key] = inprocess_attempts.get(key, 0) + 1
+                if not retry_rows:
+                    break
+                retry_pairs = await run_rollouts(retry_rows)
+                retried = tag_results(
+                    retry_pairs,
+                    index,
+                    expected_final_stage_index=total_stages - 1,
+                    expected_stage_row_count=expected_stage_row_count,
+                )
+                # Once the dispatch budget is gone every row comes back drained
+                # without a POST. A drained row means "we never got to try", not
+                # "the earlier persisted attempt is void": it must neither become
+                # the row of record nor journal a no-persist disposition over a
+                # key whose sidecar already holds a real failure -- that tombstone
+                # is durable and would permanently disable the pre-dispatch
+                # partial-outcome shortcut for that key.
+                dispatched = [r for r in retried if not r.get(NG_NO_PERSIST_KEY)]
+                num_drained = len(retried) - len(dispatched)
+                if dispatched:
+                    resume.on_rows(index, dispatched)
+                _emit(
+                    "stage_retry",
+                    index=index,
+                    total_stages=total_stages,
+                    num_selected=len(retry_rows),
+                    num_dispatched=len(dispatched),
+                    num_drained=num_drained,
+                    num_recovered=sum(1 for r in dispatched if _is_success_row(r)),
+                )
+                # Later *dispatched* attempt wins for a key; earlier attempts stay
+                # in the sidecar. Drained rows are discarded, leaving the persisted
+                # attempt as the row of record; the attempt counter still advanced
+                # above, so the loop cannot spin on them.
+                superseded = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in dispatched}
+                new_tagged = [
+                    r for r in new_tagged if (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) not in superseded
+                ] + dispatched
         # A verify-side failure can still carry a complete, reusable policy
         # artifact. Make it available immediately to later stages in this same
         # process; startup-only sidecar loading covers only resumed runs.
@@ -1141,7 +1287,7 @@ async def run_multistage_stages(
                 not resolved
                 and result.get(NG_FAILURE_CLASS_KEY) is not None
                 and not result.get(NG_NO_PERSIST_KEY)
-                and prior_attempts.get(key, 0) + 1 >= max_attempts
+                and prior_attempts.get(key, 0) + 1 + inprocess_attempts.get(key, 0) >= max_attempts
             ):
                 resolved = True
             if resolved:
@@ -2013,9 +2159,11 @@ async def run_e2e_multistage(
     """
     from contextlib import nullcontext
 
-    from nemo_gym.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.base_responses_api_model import observability_enabled_from_config
+    from nemo_gym.rollout_collection import RolloutCollectionHelper, _attach_ng_perf
 
     multistage_config = parse_multistage_config(global_config_dict.get("multistage") or {})
+    observability_enabled = observability_enabled_from_config(global_config_dict)
 
     helper = RolloutCollectionHelper()
     materialized_rows = helper._preprocess_rows_from_config(rollout_collection_config)
@@ -2037,6 +2185,10 @@ async def run_e2e_multistage(
     semaphore_size = getattr(rollout_collection_config, "num_samples_in_parallel", None)
     dispatch_budget_s = getattr(rollout_collection_config, "dispatch_budget_s", None)
     drain_margin_s = getattr(rollout_collection_config, "drain_margin_s", None)
+    # The multistage driver bypasses run_from_config, so the failure-routing
+    # knob must be forwarded explicitly or a failed /run silently reverts to
+    # raising and killing every in-flight rollout of the stage.
+    route_failures_to_sidecar = bool(getattr(rollout_collection_config, "route_failures_to_sidecar", False))
     if dispatch_budget_s is not None and (semaphore_size is None or semaphore_size <= 0):
         raise ValueError(
             "dispatch_budget_s requires a finite positive num_samples_in_parallel; "
@@ -2062,8 +2214,10 @@ async def run_e2e_multistage(
             dispatch_budget_s=remaining_budget_s,
             drain_margin_s=drain_margin_s,
             latency_tracker=latency_tracker,
+            route_failures_to_sidecar=route_failures_to_sidecar,
         ):
             row, result = await future
+            _attach_ng_perf(result, observability_enabled=observability_enabled)
             results.append((row, result))
         return results
 
@@ -2205,6 +2359,15 @@ def _log_event(name: str, data: dict) -> None:  # pragma: no cover
             f"[multistage-elo] stage {data['index'] + 1}/{data['total_stages']} accepted partial calibration: "
             f"success coverage {data.get('success_fraction', 0):.1%}, omitted "
             f"{data.get('num_omitted')} rollout(s)",
+            file=sys.stderr,
+            flush=True,
+        )
+    elif name == "stage_retry":
+        print(
+            f"[multistage-elo] stage {data['index'] + 1}/{data['total_stages']} in-process retry: "
+            f"{data.get('num_selected')} rollout(s) selected, {data.get('num_dispatched')} re-dispatched, "
+            f"{data.get('num_drained')} drained without dispatch, "
+            f"{data.get('num_recovered')} recovered",
             file=sys.stderr,
             flush=True,
         )

@@ -131,6 +131,26 @@ class TestAudioVideoBlock:
         assert audio_format_token("wav") == "wav"
         assert audio_format_token(".UNKNOWN") == "unknown"
 
+    def test_every_supported_audio_extension_passes_proxy_ingress(self) -> None:
+        """The judge proxy validates content parts strictly; every audio format
+        Gym itself emits must survive ingress, not only the SDK's wav/mp3."""
+        from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+        from resources_servers.gdpval.judge_panel import AUDIO_EXTS
+        from resources_servers.gdpval.media_conversion import audio_video_block
+
+        blocks = [
+            audio_video_block(f"audio/{ext.lstrip('.')}", b"snd", ext=ext, file_type="AUDIO", openai_native=True)
+            for ext in sorted(AUDIO_EXTS)
+        ]
+        assert {block["type"] for block in blocks} == {"input_audio"}
+        request = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+            {"messages": [{"role": "user", "content": blocks}]}
+        )
+        forwarded = request.model_dump(exclude_unset=True)["messages"][0]["content"]
+        assert [part["input_audio"]["format"] for part in forwarded] == [
+            block["input_audio"]["format"] for block in blocks
+        ]
+
 
 class TestComparisonImagesAndText:
     def test_build_file_section_rasterizes_pdf(self, tmp_path) -> None:

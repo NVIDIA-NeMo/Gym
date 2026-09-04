@@ -118,6 +118,9 @@ def sanitize_streaming_responses_body(body: dict[str, Any]) -> tuple[dict[str, A
     # The params model only admits `stream: false` (Gym responses are non-streaming internally);
     # the streaming envelope is synthesized by the caller, so the flag is dropped here.
     body.pop("stream", None)
+    # `stream_options` applies only when `stream` is true.
+    # Remove it from the internal non-streaming request.
+    body.pop("stream_options", None)
 
     ns_map: NamespaceMap = {}
     if "tools" in body:
