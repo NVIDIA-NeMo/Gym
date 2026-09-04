@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import atexit
+import hashlib
 import json
 import resource
 import socket
@@ -62,7 +63,6 @@ from nemo_gym.global_config import (
     DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
-    OBSERVABILITY_ENABLED_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
     UVICORN_TIMEOUT_WORKER_HEALTHCHECK,
     GlobalConfigDictParser,
@@ -71,7 +71,11 @@ from nemo_gym.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import (
+    ROLLOUT_ID_HEADER,
+    current_rollout_id,
+    maybe_rollout_id_from_run_body,
+)
 
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
@@ -266,6 +270,34 @@ Sleeping 0.5s and retrying...
 async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cover
     if not response.ok:
         content = await response.content.read()
+        # This diagnostic is deliberately always-on.  Unlike full observability it retains no
+        # request/response payloads; it gives failures a stable rollout join key and enough endpoint
+        # information to distinguish policy, judge, and resource-server failures in one debug run.
+        try:
+            request_info = response.request_info
+            request_url = getattr(request_info, "real_url", None) or getattr(request_info, "url", None)
+            preview_limit = 4096
+            decoded_content = content.decode("utf-8", errors="replace")
+            if len(decoded_content) > preview_limit:
+                half = preview_limit // 2
+                decoded_content = f"{decoded_content[:half]}...<truncated>...{decoded_content[-half:]}"
+            print(
+                "[nemo_gym_http_error] "
+                + orjson.dumps(
+                    {
+                        "rollout_id": current_rollout_id(),
+                        "status": response.status,
+                        "method": getattr(request_info, "method", None),
+                        "url": str(request_url) if request_url is not None else None,
+                        "response_bytes": len(content),
+                        "response_sha256": hashlib.sha256(content).hexdigest(),
+                        "response_preview": decoded_content,
+                    }
+                ).decode(),
+                flush=True,
+            )
+        except Exception:  # noqa: BLE001 - diagnostics must never alter error handling.
+            print("[nemo_gym_http_error] diagnostic serialization failed", flush=True)
         if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
             print(f"""Request info: {response.request_info}
 Response content: {content}""")
@@ -337,10 +369,14 @@ class ServerClient(BaseModel):
                 json_obj = json_obj.model_dump(exclude_unset=True)
                 kwargs["json"] = json_obj
 
-        observability_enabled = self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False)
         server_entry = self.global_config_dict.get(server_name)
-        rollout_id = current_rollout_id()
-        if observability_enabled and server_entry is not None and "resources_servers" in server_entry:
+        rollout_id = current_rollout_id() or maybe_rollout_id_from_run_body(json_obj)
+        if rollout_id is not None:
+            headers = dict(kwargs.get("headers") or {})
+            headers.setdefault(ROLLOUT_ID_HEADER, rollout_id)
+            kwargs["headers"] = headers
+
+        if server_entry is not None and "resources_servers" in server_entry:
             if url_path == "/verify":
                 rollout_id = rollout_id or maybe_rollout_id_from_run_body(json_obj)
             if rollout_id is not None and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/"):
@@ -348,7 +384,6 @@ class ServerClient(BaseModel):
 
         if (
             rollout_id is not None
-            and observability_enabled
             and server_entry is not None
             and "responses_api_models" in server_entry
             and url_path.partition("?")[0] in {"/v1/responses", "/v1/chat/completions", "/v1/messages"}

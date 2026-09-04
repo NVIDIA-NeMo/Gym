@@ -72,7 +72,6 @@ _failures_path_for = failures_path_for  # Backwards-compatible alias
 from nemo_gym.server_utils import (
     ServerClient,
     get_response_json,
-    is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
 )
 from nemo_gym.server_utils import (
@@ -512,8 +511,10 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
     metadata = row.get("metadata") or {}
     summary = {
+        "rollout_id": maybe_rollout_id_from_run_body(row),
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
+        ATTEMPT_INDEX_KEY_NAME: row.get(ATTEMPT_INDEX_KEY_NAME),
         "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
         "dataset": row.get("dataset"),
         "dataset_uuid": metadata.get("uuid") if isinstance(metadata, dict) else None,
@@ -1042,13 +1043,12 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 try:
                     await raise_for_status(res)
                 except Exception:
-                    if is_global_aiohttp_client_request_debug_enabled():
-                        print(
-                            "[rollout_collection] /run failed "
-                            f"status={getattr(res, 'status', None)} "
-                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                            flush=True,
-                        )
+                    print(
+                        "[rollout_collection] /run failed "
+                        f"status={getattr(res, 'status', None)} "
+                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                        flush=True,
+                    )
                     raise
                 return row, await get_response_json(res)
 

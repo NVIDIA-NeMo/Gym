@@ -101,6 +101,7 @@ class TestRolloutCollection:
             "agent_name": "my_agent",
             "dataset": "example_dataset@v1",
             "dataset_uuid": "row-uuid",
+            "rollout_id": "12-3",
             TASK_INDEX_KEY_NAME: 12,
             ROLLOUT_INDEX_KEY_NAME: 3,
         }
@@ -297,12 +298,10 @@ class TestRolloutCollection:
             sanitized = _rollout_for_wandb(malformed_result)
             assert b"secret" not in orjson.dumps(sanitized)
 
-    @pytest.mark.parametrize("request_debug_enabled", [True, False])
-    async def test_run_examples_logs_failed_run_when_request_debug_enabled(
+    async def test_run_examples_always_logs_failed_run(
         self,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
-        request_debug_enabled: bool,
     ) -> None:
         row = {
             AGENT_REF_KEY_NAME: {"name": "my_agent"},
@@ -327,30 +326,22 @@ class TestRolloutCollection:
             raise RuntimeError("boom")
 
         monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", fail_raise_for_status)
-        monkeypatch.setattr(
-            nemo_gym.rollout_collection,
-            "is_global_aiohttp_client_request_debug_enabled",
-            lambda: request_debug_enabled,
-        )
-
         with pytest.raises(RuntimeError, match="boom"):
             await next(RolloutCollectionHelper().run_examples([row]))
 
         captured = capsys.readouterr()
-        if request_debug_enabled:
-            assert "[rollout_collection] /run failed status=500" in captured.out
-            assert '"_ng_task_index": 7' in captured.out
-            assert '"_ng_rollout_index": 0' in captured.out
-            assert '"agent_name": "my_agent"' in captured.out
-            assert '"dataset": "example_dataset@v1"' in captured.out
-            assert '"dataset_uuid": "row-uuid"' in captured.out
-            assert "private_detail" not in captured.out
-            assert "env_specific_metadata" not in captured.out
-            assert "do not log this either" not in captured.out
-            assert "responses_create_params" not in captured.out
-            assert "do not log this" not in captured.out
-        else:
-            assert "[rollout_collection] /run failed" not in captured.out
+        assert "[rollout_collection] /run failed status=500" in captured.out
+        assert '"rollout_id": "7-0"' in captured.out
+        assert '"_ng_task_index": 7' in captured.out
+        assert '"_ng_rollout_index": 0' in captured.out
+        assert '"agent_name": "my_agent"' in captured.out
+        assert '"dataset": "example_dataset@v1"' in captured.out
+        assert '"dataset_uuid": "row-uuid"' in captured.out
+        assert "private_detail" not in captured.out
+        assert "env_specific_metadata" not in captured.out
+        assert "do not log this either" not in captured.out
+        assert "responses_create_params" not in captured.out
+        assert "do not log this" not in captured.out
 
     def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
         """prompt_config builds responses_create_params.input from template."""

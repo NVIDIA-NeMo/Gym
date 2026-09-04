@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+import time
 from abc import abstractmethod
 from collections.abc import Mapping
 from functools import wraps
@@ -33,7 +35,13 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.rollout_correlation import (
+    RolloutContextMiddleware,
+    current_rollout_id,
+    maybe_rollout_id_from_headers,
+    maybe_rollout_id_from_run_body,
+    rollout_context,
+)
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
     BaseServer,
@@ -59,6 +67,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         app = FastAPI()
 
         self.setup_session_middleware(app)
+        app.add_middleware(RolloutContextMiddleware)
 
         app.post("/v1/responses")(self.responses)
         # Prefixed twin of /v1/responses: a self-call made with url_path_for_run() lands here, and
@@ -73,8 +82,71 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             body = kwargs.get("body")
             if body is None:
                 body = next((arg for arg in args if isinstance(arg, BaseRunRequest)), None)
-            with rollout_context(self.rollout_id_from_run(body)):
-                return await run(*args, **kwargs)
+            request = kwargs.get("request")
+            if not isinstance(request, Request):
+                request = next((arg for arg in args if isinstance(arg, Request)), None)
+
+            body_rollout_id = self.rollout_id_from_run(body)
+            header_rollout_id = maybe_rollout_id_from_headers(request.headers) if request is not None else None
+            rollout_id = body_rollout_id or header_rollout_id or current_rollout_id()
+            if body_rollout_id and header_rollout_id and body_rollout_id != header_rollout_id:
+                print(
+                    "[nemo_gym_rollout_correlation_mismatch] "
+                    + json.dumps(
+                        {
+                            "agent_name": self.config.name,
+                            "body_rollout_id": body_rollout_id,
+                            "header_rollout_id": header_rollout_id,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+
+            def body_field(key: str) -> Any:
+                if isinstance(body, Mapping):
+                    return body.get(key)
+                return getattr(body, key, None)
+
+            metadata = body_field("metadata") or {}
+            agent_ref = body_field("agent_ref") or {}
+            attribution = {
+                "rollout_id": rollout_id,
+                "agent_name": self.config.name,
+                "requested_agent_name": agent_ref.get("name") if isinstance(agent_ref, Mapping) else None,
+                "task_index": body_field("_ng_task_index"),
+                "rollout_index": body_field("_ng_rollout_index"),
+                "attempt_index": body_field("_ng_attempt_index"),
+                "dataset": body_field("dataset"),
+                "dataset_uuid": metadata.get("uuid") if isinstance(metadata, Mapping) else None,
+            }
+            attribution = {key: value for key, value in attribution.items() if value is not None}
+            if rollout_id is not None:
+                print(
+                    "[nemo_gym_rollout_start] " + json.dumps(attribution, default=repr, sort_keys=True),
+                    flush=True,
+                )
+
+            started = time.monotonic()
+            with rollout_context(rollout_id):
+                try:
+                    return await run(*args, **kwargs)
+                except BaseException as exc:
+                    print(
+                        "[nemo_gym_rollout_exception] "
+                        + json.dumps(
+                            {
+                                **attribution,
+                                "elapsed_s": round(time.monotonic() - started, 3),
+                                "error_type": type(exc).__name__,
+                                "error": repr(exc)[:4096],
+                            },
+                            default=repr,
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
+                    raise
 
         app.post("/run")(run_with_rollout_context)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
@@ -90,20 +162,19 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False))
 
     def rollout_id_from_run(self, body: Any) -> Optional[str]:
-        """Per-rollout capture id for a run-request (its task/rollout indices).
+        """Per-rollout correlation id for a run request (its task/rollout indices).
 
-        None when model-call capture (observability) is disabled or the body carries no indices,
-        so callers apply no correlation prefix in either case.
+        Correlation is intentionally independent of full model-call capture.  The lightweight
+        path prefix lets always-on failure diagnostics identify the originating rollout even when
+        observability (and its request/response payload capture) is disabled.
         """
-        if not self._model_call_capture_enabled():
-            return None
-        return maybe_rollout_id_from_run_body(body)
+        return maybe_rollout_id_from_run_body(body) or current_rollout_id()
 
     def url_path_for_run(self, url_path: str, body: Any) -> str:
         """A downstream url_path with the per-rollout capture-correlation prefix applied.
 
-        Returns ``/ng-rollout/<id><url_path>`` when observability is enabled and the run body
-        carries task/rollout indices; otherwise ``url_path`` unchanged. Use for calls made while
+        Returns ``/ng-rollout/<id><url_path>`` when the run body carries task/rollout indices;
+        otherwise ``url_path`` unchanged. Use for calls made while
         handling ``/run`` — both direct model-server calls and self-calls to ``/v1/responses``
         (the prefixed self-call route carries the id into ``responses()``).
         """
@@ -113,7 +184,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """A model-server base URL with the per-rollout capture-correlation prefix applied.
 
         ``base_url_for_run`` is the base-URL counterpart of ``url_path_for_run`` for SDK-style
-        harnesses that configure a client once instead of prefixing each call: same gating, applied
+        harnesses that configure a client once instead of prefixing each call: same correlation, applied
         to a server root URL (append the API-version suffix afterwards).
         """
         return apply_rollout_prefix(base_url, self.rollout_id_from_run(body))
@@ -127,6 +198,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
+        if rollout_id is None and request is not None:
+            rollout_id = maybe_rollout_id_from_headers(getattr(request, "headers", None))
+        rollout_id = rollout_id or current_rollout_id()
         return f"{rollout_path_prefix(rollout_id)}{url_path}"
 
     def resolve_model_base_url(self, model_server_name: str, rollout_id: Optional[str] = None) -> str:

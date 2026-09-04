@@ -29,6 +29,8 @@ from nemo_gym.global_config import (
 
 
 _ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_rollout_id", default=None)
+ROLLOUT_ID_HEADER = "x-nemo-gym-rollout-id"
+_ROLLOUT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -> Optional[str]:
@@ -55,6 +57,27 @@ def current_rollout_id() -> Optional[str]:
     return _ROLLOUT_ID.get()
 
 
+def maybe_rollout_id_from_headers(headers: Any) -> Optional[str]:
+    """Read a validated rollout id from HTTP-style headers, if present."""
+    try:
+        value = headers.get(ROLLOUT_ID_HEADER)
+    except (AttributeError, TypeError):
+        return None
+    if isinstance(value, bytes):
+        value = value.decode("ascii", errors="ignore")
+    if not isinstance(value, str) or _ROLLOUT_ID_RE.fullmatch(value) is None:
+        return None
+    return value
+
+
+def maybe_rollout_id_from_asgi_scope(scope: Mapping[str, Any]) -> Optional[str]:
+    """Read the rollout-id header directly from an ASGI scope."""
+    for key, value in scope.get("headers", ()):
+        if key.lower() == ROLLOUT_ID_HEADER.encode("ascii"):
+            return maybe_rollout_id_from_headers({ROLLOUT_ID_HEADER: value})
+    return None
+
+
 @contextmanager
 def rollout_context(rollout_id: Optional[str]) -> Iterator[None]:
     token = _ROLLOUT_ID.set(rollout_id)
@@ -76,11 +99,13 @@ class RolloutContextMiddleware:
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         match = self._PREFIX.match(scope.get("path", "")) if scope.get("type") == "http" else None
-        if match is None:
+        rollout_id = match.group("rollout_id") if match is not None else maybe_rollout_id_from_asgi_scope(scope)
+        if match is None and rollout_id is None:
             await self._app(scope, receive, send)
             return
 
-        path = match.group("rest")
-        scope = {**scope, "path": path, "raw_path": path.encode()}
-        with rollout_context(match.group("rollout_id")):
+        if match is not None:
+            path = match.group("rest")
+            scope = {**scope, "path": path, "raw_path": path.encode()}
+        with rollout_context(rollout_id):
             await self._app(scope, receive, send)

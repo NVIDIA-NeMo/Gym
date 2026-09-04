@@ -48,6 +48,7 @@ from nemo_gym.responses_converter import (
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     split_responses_input_output_items,  # noqa: F401
 )
+from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_from_headers
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 
 
@@ -94,6 +95,169 @@ def _jsonable(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     return repr(value)
+
+
+def _bounded_preview(text: str, limit: int = 1024) -> str:
+    if len(text) <= limit:
+        return text
+    half = limit // 2
+    return f"{text[:half]}...<truncated>...{text[-half:]}"
+
+
+def _serialized_debug_summary(value: Any, *, preview_limit: int = 1024) -> Dict[str, Any]:
+    serialized = json.dumps(_jsonable(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    encoded = serialized.encode("utf-8")
+    return {
+        "bytes": len(encoded),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "preview": _bounded_preview(serialized, preview_limit),
+    }
+
+
+def _content_text(value: Any) -> str:
+    """Best-effort text extraction for diagnostics; never emits unbounded content."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(filter(None, (_content_text(item) for item in value)))
+    if isinstance(value, dict):
+        for key in ("text", "content", "input_text", "output_text"):
+            if key in value:
+                return _content_text(value[key])
+    return ""
+
+
+def _message_debug_summaries(messages: Any) -> List[Dict[str, Any]]:
+    if not isinstance(messages, list):
+        return []
+    summaries: List[Dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        serialized = _serialized_debug_summary(message, preview_limit=256)
+        if not isinstance(message, dict):
+            summaries.append({"index": index, "value": serialized})
+            continue
+        content_text = _content_text(message.get("content"))
+        tool_calls = message.get("tool_calls") or []
+        tool_names = []
+        if isinstance(tool_calls, list):
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function") or {}
+                if isinstance(function, dict) and function.get("name") is not None:
+                    tool_names.append(str(function["name"]))
+        summaries.append(
+            {
+                "index": index,
+                "role": message.get("role"),
+                "name": message.get("name"),
+                "tool_call_id": message.get("tool_call_id"),
+                "content_chars": len(content_text),
+                "content_sha256": hashlib.sha256(content_text.encode("utf-8")).hexdigest(),
+                "content_preview": _bounded_preview(content_text, 512),
+                "tool_call_count": len(tool_calls) if isinstance(tool_calls, list) else None,
+                "tool_names": tool_names,
+                "serialized": serialized,
+            }
+        )
+    return summaries
+
+
+def _vllm_request_debug_summary(body_dict: Dict[str, Any]) -> Dict[str, Any]:
+    messages = body_dict.get("messages")
+    tools = body_dict.get("tools") or []
+    tool_names = []
+    if isinstance(tools, list):
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            function = tool.get("function") or {}
+            if isinstance(function, dict) and function.get("name") is not None:
+                tool_names.append(str(function["name"]))
+
+    parameter_keys = (
+        "model",
+        "max_tokens",
+        "max_completion_tokens",
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "n",
+        "seed",
+        "stream",
+    )
+    summary: Dict[str, Any] = {
+        "request": _serialized_debug_summary(body_dict),
+        "parameters": {key: _jsonable(body_dict[key]) for key in parameter_keys if key in body_dict},
+        "message_count": len(messages) if isinstance(messages, list) else None,
+        "messages": _message_debug_summaries(messages),
+        "tool_count": len(tools) if isinstance(tools, list) else None,
+        "tool_names": tool_names,
+    }
+    if "prompt" in body_dict:
+        prompt = body_dict["prompt"]
+        summary["prompt"] = {
+            **_serialized_debug_summary(prompt),
+            "text_chars": len(prompt) if isinstance(prompt, str) else None,
+            "text_preview": _bounded_preview(prompt, 1024) if isinstance(prompt, str) else None,
+        }
+    if "metadata" in body_dict:
+        summary["metadata"] = _serialized_debug_summary(body_dict["metadata"], preview_limit=2048)
+    return summary
+
+
+def _client_response_error_content(error: ClientResponseError) -> bytes:
+    content = getattr(error, "response_content", b"")
+    if isinstance(content, str):
+        return content.encode("utf-8", errors="replace")
+    return bytes(content) if isinstance(content, (bytes, bytearray)) else repr(content).encode()
+
+
+def _log_vllm_upstream_http_error(
+    model: "VLLMModel",
+    request: Request,
+    body_dict: Dict[str, Any],
+    error: ClientResponseError,
+    *,
+    api_kind: str,
+    handled_as_length: bool,
+) -> None:
+    """Always-on, bounded diagnostics for upstream HTTP failures."""
+    try:
+        content = _client_response_error_content(error)
+        request_info = getattr(error, "request_info", None)
+        upstream_url = getattr(request_info, "real_url", None) or getattr(request_info, "url", None)
+        rollout_id = current_rollout_id() or maybe_rollout_id_from_headers(request.headers)
+        client = request.client
+        event = {
+            "event": "vllm_upstream_http_error",
+            "rollout_id": rollout_id,
+            "model_server_name": model.config.name,
+            "model_adapter_class": type(model).__name__,
+            "configured_model": model.config.model,
+            "configured_base_urls": model.config.base_url,
+            "api_kind": api_kind,
+            "handled_as_length": handled_as_length,
+            "status": error.status,
+            "upstream_url": str(upstream_url) if upstream_url is not None else None,
+            "ingress_path": request.url.path,
+            "ingress_client": f"{client.host}:{client.port}" if client is not None else None,
+            "transport_context": _transport_log_context(request),
+            "error_type": type(error).__name__,
+            "error": repr(error),
+            "response_bytes": len(content),
+            "response_sha256": hashlib.sha256(content).hexdigest(),
+            "response_preview": _bounded_preview(content.decode("utf-8", errors="replace"), 4096),
+            **_vllm_request_debug_summary(body_dict),
+        }
+        print(
+            "[nemo_gym_vllm_http_error] "
+            + json.dumps(_jsonable(event), ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            flush=True,
+        )
+    except Exception:  # noqa: BLE001 - diagnostics must never alter request handling.
+        LOG.exception("Failed to emit vLLM upstream HTTP-error diagnostics")
 
 
 def _transport_images(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -650,6 +814,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         try:
             chat_completion_dict = await client.create_chat_completion(**body_dict)
         except ClientResponseError as e:
+            error_content = _client_response_error_content(e)
             if transport_io_enabled:
                 finished_ns = time_ns()
                 _append_transport_io(
@@ -662,7 +827,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                         "elapsed_ns": finished_ns - started_ns,
                         "pid": os.getpid(),
                         "http_status": e.status,
-                        "raw_response_body": e.response_content.decode(errors="replace"),
+                        "raw_response_body": error_content.decode(errors="replace"),
                         "error": repr(e),
                     }
                 )
@@ -677,10 +842,18 @@ class VLLMModel(SimpleResponsesAPIModel):
             3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
             4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
             """
-            result_content_str = e.response_content.decode()
+            result_content_str = error_content.decode(errors="replace")
 
             is_out_of_context_length = e.status == 400 and (
                 "context length" in result_content_str or "max_tokens" in result_content_str
+            )
+            _log_vllm_upstream_http_error(
+                self,
+                request,
+                body_dict,
+                e,
+                api_kind="chat_completions",
+                handled_as_length=is_out_of_context_length,
             )
             if is_out_of_context_length:
                 res = self._create_empty_chat_completion()
@@ -986,9 +1159,17 @@ class VLLMModel(SimpleResponsesAPIModel):
         try:
             completion_dict = await client.create_completion(**completion_body)
         except ClientResponseError as e:
-            result_content_str = e.response_content.decode()
+            result_content_str = _client_response_error_content(e).decode(errors="replace")
             is_out_of_context_length = e.status == 400 and (
                 "context length" in result_content_str or "max_tokens" in result_content_str
+            )
+            _log_vllm_upstream_http_error(
+                self,
+                request,
+                completion_body,
+                e,
+                api_kind="completions",
+                handled_as_length=is_out_of_context_length,
             )
             if is_out_of_context_length:
                 res = self._create_empty_chat_completion()

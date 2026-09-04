@@ -852,7 +852,7 @@ def _make_base_agent(global_config):
     return _Agent(config=config, server_client=server_client)
 
 
-def test_base_agent_url_path_for_run_gates_on_observability_and_indices():
+def test_base_agent_url_path_for_run_is_independent_of_observability():
     body = {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1}
 
     enabled = _make_base_agent({"observability_enabled": True})
@@ -863,11 +863,11 @@ def test_base_agent_url_path_for_run_gates_on_observability_and_indices():
     assert enabled.base_url_for_run("http://h:1", {}) == "http://h:1"
 
     disabled = _make_base_agent({"observability_enabled": False})
-    assert disabled.rollout_id_from_run(body) is None
-    assert disabled.url_path_for_run("/v1/responses", body) == "/v1/responses"
-    assert disabled.base_url_for_run("http://h:1", body) == "http://h:1"
+    assert disabled.rollout_id_from_run(body) == "3-1"
+    assert disabled.url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/v1/responses"
+    assert disabled.base_url_for_run("http://h:1", body) == "http://h:1/ng-rollout/3-1"
 
-    assert _make_base_agent(MagicMock()).url_path_for_run("/v1/responses", body) == "/v1/responses"
+    assert _make_base_agent(MagicMock()).url_path_for_run("/v1/responses", body) == "/ng-rollout/3-1/v1/responses"
 
 
 def test_base_agent_url_path_for_request_propagates_inbound_prefix():
@@ -875,6 +875,8 @@ def test_base_agent_url_path_for_request_propagates_inbound_prefix():
 
     prefixed = SimpleNamespace(path_params={"rollout_id": "7-0"})
     assert agent.url_path_for_request("/v1/responses", prefixed) == "/ng-rollout/7-0/v1/responses"
+    header_correlated = SimpleNamespace(path_params={}, headers={"x-nemo-gym-rollout-id": "8-1-a2"})
+    assert agent.url_path_for_request("/v1/responses", header_correlated) == "/ng-rollout/8-1-a2/v1/responses"
     assert agent.url_path_for_request("/v1/responses", SimpleNamespace(path_params={})) == "/v1/responses"
     assert agent.url_path_for_request("/v1/responses", SimpleNamespace()) == "/v1/responses"
     assert agent.url_path_for_request("/v1/responses", None) == "/v1/responses"
@@ -1326,12 +1328,20 @@ def test_rollout_prefix_stripped_when_capture_disabled():
 
     @app.post("/v1/chat/completions")
     async def _cc() -> dict:
-        return {"ok": True}
+        from nemo_gym.rollout_correlation import current_rollout_id
+
+        return {"ok": True, "rollout_id": current_rollout_id()}
 
     install_model_call_capture(app, ModelCallCaptureConfig())
     client = TestClient(app)
-    assert client.post("/v1/chat/completions", json={}).status_code == 200
-    assert client.post("/ng-rollout/3-0/v1/chat/completions", json={}).status_code == 200
+    assert client.post("/v1/chat/completions", json={}).json() == {"ok": True, "rollout_id": None}
+    assert client.post("/ng-rollout/3-0/v1/chat/completions", json={}).json() == {
+        "ok": True,
+        "rollout_id": "3-0",
+    }
+    assert client.post(
+        "/v1/chat/completions", json={}, headers={"x-nemo-gym-rollout-id": "4-2-a1"}
+    ).json() == {"ok": True, "rollout_id": "4-2-a1"}
 
 
 def test_extract_token_stats_anthropic_cache_fold():

@@ -60,7 +60,11 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import (
+    maybe_rollout_id_from_asgi_scope,
+    maybe_rollout_id_from_run_body,
+    rollout_context,
+)
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -1060,15 +1064,17 @@ class _CaptureMiddleware:
             rollout_from_path = prefix_match.group("rollout_id")
             path = prefix_match.group("rest")
             scope = {**scope, "path": path, "raw_path": path.encode("utf-8")}
+        rollout_id = rollout_from_path or maybe_rollout_id_from_asgi_scope(scope)
 
         # Capture disabled: the prefix is already stripped (routing preserved), so just forward.
         if self._store is None:
-            await self._app(scope, receive, send)
+            with rollout_context(rollout_id):
+                await self._app(scope, receive, send)
             return
 
         # Only explicitly correlated model calls are captured. An unprefixed call is forwarded
         # unchanged rather than being mixed with unrelated calls under a shared fallback key.
-        if rollout_from_path is None:
+        if rollout_id is None:
             await self._app(scope, receive, send)
             return
 
@@ -1077,7 +1083,6 @@ class _CaptureMiddleware:
             await self._app(scope, receive, send)  # not observed (or a stripped non-/v1 path)
             return
 
-        rollout_id = rollout_from_path
         model_call_id = uuid4().hex
         request_body = bytearray()
 
@@ -1128,7 +1133,8 @@ class _CaptureMiddleware:
                 await send(message)
 
         try:
-            await self._app(scope, _receive, _send)
+            with rollout_context(rollout_id):
+                await self._app(scope, _receive, _send)
         except Exception as exc:
             completed_at = time.time()
             exception_status, exception_body = _exception_http_details(exc)
