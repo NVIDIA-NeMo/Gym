@@ -48,8 +48,6 @@ with open(args.fpath, "rb") as f, open(f_out_path, "wb") if args.group_to_write_
         count_dict["Samples covered by the above errors"] = (
             count_dict["Long model calls"] or count_dict["Model claims to be stuck"] or count_dict["Long model calls"]
         )
-        if not count_dict["Samples covered by the above errors"]:
-            print(f"{i + 1}: {count_dict}")
 
         counts.update(count_dict)
         counts["Total samples with reward=0"] += 1
@@ -66,4 +64,6 @@ for k, v in counts.items():
 print(print_str)
 
 if args.group_to_write_out:
-    print(f"Wrote out {num_wrote_out} rows ({stat(f_out_path).st_size / 1024**2} MB) to {f_out_path}")
+    print(
+        f"Wrote out {num_wrote_out} rows ({stat(f_out_path).st_size / 1024**2} MB) for `{args.group_to_write_out}` to {f_out_path}"
+    )
