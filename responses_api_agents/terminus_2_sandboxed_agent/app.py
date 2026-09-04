@@ -93,6 +93,7 @@ class Terminus2AgentVerifyResponse(BaseVerifyResponse):
     model_call_time_pct: float
     terminus2_time_taken: float
     model_calls_gt_10min: int
+    usages: List[NeMoGymResponseUsage]
     num_proactive_compactions: int
     num_compactions: int
     error: Optional[str]
@@ -412,6 +413,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             "num_proactive_compactions": agent._num_proactive_compactions,
             "num_compactions": llm._num_compactions,
             "error": error,
+            "usages": llm.usages,
         }
         return response, metrics
 
