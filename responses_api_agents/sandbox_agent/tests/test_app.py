@@ -13,11 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.sandbox_agent.app import SandboxAgent, SandboxAgentConfig
 
@@ -149,6 +150,16 @@ def test_sandbox_model_url_keeps_loopback_on_dns_failure():
     ):
         url = agent._sandbox_model_url(MagicMock())
     assert url == "http://localhost:8000"
+
+
+async def test_grading_command_failure_is_not_reward_zero():
+    agent = _make_agent()
+    agent._provider.exec = AsyncMock(return_value=SandboxExecResult("", "grader crashed", 2))
+    agent._provider.download_file = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="eval command failed.*grader crashed"):
+        await agent._grade_in_box(MagicMock(), {"eval_command": "false"})
+    agent._provider.download_file.assert_not_awaited()
 
 
 def test_gym_tar_built_on_init():
