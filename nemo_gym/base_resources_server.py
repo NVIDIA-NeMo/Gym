@@ -17,7 +17,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 if TYPE_CHECKING:
@@ -96,6 +96,20 @@ class BaseVerifyRequest(BaseRunRequest):
 
 class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
+
+    mask_sample: bool = Field(
+        default=False,
+        description=(
+            "Whether this completed sample should be excluded from evaluation scores and "
+            "other downstream quality calculations because its reward is not a valid "
+            "measurement of the evaluated system. Set it when the environment or its "
+            "infrastructure failed rather than the evaluated system: a lost session, an "
+            "unavailable judge, an OOM-killed container, a reset that timed out. The "
+            "default means the reward is a valid measurement. It is independent of the "
+            "diagnostic fields: a sample that degraded but was still measured validly "
+            "keeps mask_sample=False while naming a failure_kind/failure_reason."
+        ),
+    )
 
     # Human-readable diagnosis of why `reward` may not reflect policy quality.
     # Machine-readable handling belongs to `mask_sample`/`failure_kind`.

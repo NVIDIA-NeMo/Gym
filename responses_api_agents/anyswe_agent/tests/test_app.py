@@ -16,17 +16,20 @@
 These exercise runner generation, image resolution, and configuration.
 """
 
+import asyncio
 import base64
 import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+from nemo_gym.openai_utils import NeMoGymResponse
 from responses_api_agents.anyswe_agent.agent_runner import _extract_patch, _snapshot_repo
 from responses_api_agents.anyswe_agent.app import (
     AnySweAgent,
     AnySweAgentConfig,
     AnySweRunRequest,
+    SWEBenchMetrics,
     _classify_agent_error,
     _dataset_family,
     _model_url_for_rollout,
@@ -262,3 +265,65 @@ class TestExampleData:
         for row in rows:
             assert "metadata" in row["responses_create_params"]
             assert "instance_id" in row["responses_create_params"]["metadata"]
+
+
+class TestRunReportsMaskSample:
+    """`/run` must build a serializable response and carry the masking decision."""
+
+    def _agent(self, *, mask_sample: bool) -> AnySweAgent:
+        metrics = SWEBenchMetrics(resolved=True, mask_sample=mask_sample)
+        instance_config = {
+            "problem_info": {"instance_id": "astropy__astropy-12907"},
+            "body": {"input": "fix it"},
+            "persistent_dir": "/tmp/anyswe",
+            "metrics_fpath": "/tmp/anyswe/metrics.json",
+            "container": "swebench/sweb.eval.x86_64.astropy__astropy-12907",
+            "run_session_id": "run-1",
+            "base_results_dir": "/tmp/anyswe/results",
+            "model_server_url": "http://localhost:9000",
+            "resolved_sandbox_provider": {"opensandbox": {}},
+            "sandbox_config": {},
+            "sandbox_default_metadata": {},
+            **_config().model_dump(mode="json"),
+        }
+        response = NeMoGymResponse.model_construct(
+            id="resp-1",
+            output=[],
+            tools=[],
+            metadata={
+                "metrics": metrics.model_dump_json(),
+                "instance_config": json.dumps(instance_config),
+                "input": json.dumps("fix it"),
+            },
+        )
+
+        class _StubbedAgent(AnySweAgent):
+            async def _responses(self, *args, **kwargs):
+                return response
+
+            def rollout_id_from_run(self, body):
+                return None
+
+        agent = _StubbedAgent.__new__(_StubbedAgent)
+        object.__setattr__(agent, "__dict__", {"_sem": asyncio.Semaphore(1)})
+        object.__setattr__(agent, "__pydantic_fields_set__", set())
+        object.__setattr__(agent, "__pydantic_extra__", None)
+        object.__setattr__(agent, "__pydantic_private__", {})
+        return agent
+
+    def _body(self) -> AnySweRunRequest:
+        return AnySweRunRequest(responses_create_params={"input": "fix it"})
+
+    def test_a_masked_run_serializes_and_reports_the_flag_once(self) -> None:
+        dumped = asyncio.run(self._agent(mask_sample=True).run(self._body())).model_dump()
+
+        assert dumped["mask_sample"] is True
+        assert dumped["reward"] == 1.0
+        # The compatibility location keeps reporting the same decision.
+        assert dumped["instance_config"]["mask_sample"] is True
+
+    def test_an_unmasked_run_is_not_implicitly_masked(self) -> None:
+        dumped = asyncio.run(self._agent(mask_sample=False).run(self._body())).model_dump()
+
+        assert dumped["mask_sample"] is False
+        assert dumped["instance_config"]["mask_sample"] is False

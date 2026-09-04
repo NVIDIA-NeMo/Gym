@@ -70,3 +70,46 @@ class TestBaseResourcesServer:
 
     def test_reverify_mode(self) -> None:
         assert asyncio.run(_resources_server().get_reverify_mode()) == ReverifyMode.UNKNOWN
+
+
+class TestVerifyResponseFailureReporting:
+    """`mask_sample` / `failure_reason` on the contract, so every environment can use them."""
+
+    def _params(self) -> NeMoGymResponseCreateParamsNonStreaming:
+        return NeMoGymResponseCreateParamsNonStreaming(input="hi")
+
+    def _response(self) -> NeMoGymResponse:
+        return NeMoGymResponse.model_construct(id="resp-1", output=[])
+
+    def test_defaults_keep_existing_environments_unchanged(self) -> None:
+        response = BaseVerifyResponse(responses_create_params=self._params(), response=self._response(), reward=0.0)
+        assert response.mask_sample is False
+        assert response.failure_reason is None
+
+    def test_round_trip_preserves_the_flag_and_reason(self) -> None:
+        response = BaseVerifyResponse(
+            responses_create_params=self._params(),
+            response=self._response(),
+            reward=0.0,
+            mask_sample=True,
+            failure_reason="judge_unavailable",
+        )
+        dumped = response.model_dump()
+        assert dumped["mask_sample"] is True
+        assert dumped["failure_reason"] == "judge_unavailable"
+
+    def test_zero_reward_is_not_implicitly_masked(self) -> None:
+        """A policy that scores zero must stay a valid sample."""
+        response = BaseVerifyResponse(responses_create_params=self._params(), response=self._response(), reward=0.0)
+        assert response.mask_sample is False
+
+    def test_a_degraded_but_legitimately_scored_rollout_is_not_masked(self) -> None:
+        """The diagnosis is independent of the decision to exclude the sample."""
+        response = BaseVerifyResponse(
+            responses_create_params=self._params(),
+            response=self._response(),
+            reward=0.4,
+            failure_reason="one retry was needed to reach the judge",
+        )
+        assert response.mask_sample is False
+        assert response.failure_reason is not None
