@@ -308,6 +308,114 @@ class TestApp:
         assert calls[4][1]["json"]["action"][0]["call_id"] == "call_2"
         assert calls[5] == call(server_name="my resources name", url_path="/close", json={"env_id": env_id})
 
+    async def test_responses_generates_final_response_after_environment_done(self) -> None:
+        config = AviaryAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(
+                type="responses_api_models",
+                name="my model name",
+            ),
+            resources_server=ResourcesServerRef(
+                type="resources_servers",
+                name="my resources name",
+            ),
+            max_steps=1,
+            return_transitions=False,
+            generate_final_response_after_done=True,
+        )
+        agent = AviaryAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        env_id = str(uuid.uuid4())
+        mock_seed_session_data = {
+            "env_id": env_id,
+            "obs": [{"role": "user", "content": "Initial observation"}],
+            "tools": [],
+        }
+        mock_terminal_response = {
+            "id": "resp_terminal",
+            "created_at": 1753983920.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                NeMoGymResponseFunctionToolCall(
+                    call_id="submit_call",
+                    name="submit_answer",
+                    arguments=json.dumps({"answer": "The answer is 42"}),
+                ).model_dump()
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+        mock_terminal_step = {
+            "obs": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "submit_call",
+                    "output": "Correct answer!",
+                }
+            ],
+            "reward": 1.0,
+            "done": True,
+        }
+        mock_final_response = {
+            "id": "resp_final",
+            "created_at": 1753983921.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                {
+                    "id": "msg_final",
+                    "content": [{"annotations": [], "text": "The answer is 42", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            "parallel_tool_calls": False,
+            "tool_choice": "none",
+            "tools": [],
+        }
+        mock_close_data = {"message": "Success", "success": True}
+
+        dotjson_mock = AsyncMock()
+        dotjson_mock.json.side_effect = [
+            mock_seed_session_data,
+            mock_terminal_response,
+            mock_terminal_step,
+            mock_final_response,
+            mock_close_data,
+        ]
+        dotjson_mock.raise_for_status = MagicMock()
+        dotjson_mock.cookies = MagicMock()
+        agent.server_client.post = AsyncMock(return_value=dotjson_mock)
+
+        request = AviaryAgentRunRequest(
+            task_idx=42, responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[])
+        )
+        response = await agent.responses(request)
+
+        assert [item.type for item in response.output] == ["function_call", "function_call_output", "message"]
+        assert response.output[-1].content[0].text == "The answer is 42"
+
+        calls = agent.server_client.post.await_args_list
+        assert [request_call.kwargs["url_path"] for request_call in calls] == [
+            "/seed_session",
+            "/v1/responses",
+            "/step",
+            "/v1/responses",
+            "/close",
+        ]
+
+        final_model_input = calls[3].kwargs["json"]
+        assert final_model_input.tools == []
+        assert final_model_input.tool_choice == "none"
+        assert final_model_input.input[-1].type == "function_call_output"
+        assert final_model_input.input[-1].output == "Correct answer!"
+
     async def test_responses_return_transitions_false(self) -> None:
         config = AviaryAgentConfig(
             host="0.0.0.0",
