@@ -204,13 +204,16 @@ def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int) -> str
     return _build_vllm_single_instance_multi_node_command(service, total_nodes)
 
 
-def _build_vllm_ray_serve_command(service: VllmServiceConfig, total_nodes: int, gym_install: GymInstallConfig) -> str:
+def _build_vllm_ray_serve_command(
+    service: VllmServiceConfig, total_nodes: int, gym_install: GymInstallConfig, gpus_per_node_values: list[int]
+) -> str:
     # Ray Serve (nemo_gym/orchestration/ray_serve_gateway.py) launches all number_of_instances
-    # `vllm serve` processes itself and routes requests across them - Ray's own placement-group
-    # scheduler packs each instance's tensor/pipeline-parallel GPU footprint anywhere across the
-    # cluster, spanning nodes automatically when an instance's own footprint requires it. This is
-    # the only place NeMo Gym uses the `ray.serve` library, as opposed to vLLM's own Ray core
-    # executor (see _build_vllm_single_instance_multi_node_command).
+    # `vllm serve` processes itself and routes requests across them. Ray's own placement-group
+    # scheduler only decides where each instance's *worker* ranks land - not where the `vllm serve`
+    # driver process itself runs - so the gateway needs gpus_per_node to compute how many nodes
+    # each instance's own footprint needs, to explicitly pin different instances' drivers to
+    # different nodes. This is the only place NeMo Gym uses the `ray.serve` library, as opposed to
+    # vLLM's own Ray core executor (see _build_vllm_single_instance_multi_node_command).
     gateway_args = (
         f"--model {shlex.quote(service.model)}"
         f" --port {service.port}"
@@ -218,6 +221,8 @@ def _build_vllm_ray_serve_command(service: VllmServiceConfig, total_nodes: int, 
         f" --pipeline-parallel-size {service.pipeline_parallel_size}"
         f" --number-of-instances {service.number_of_instances}"
     )
+    if gpus_per_node_values:
+        gateway_args += f" --gpus-per-node {max(gpus_per_node_values)}"
     if service.trust_remote_code:
         gateway_args += " --trust-remote-code"
 
@@ -274,7 +279,7 @@ def _build_service_command(
                 "(nemo_gym/orchestration/ray_serve_gateway.py) is fetched from that repo/ref into "
                 "the vLLM service's own container. Set driver.gym_install.{repo,ref}."
             )
-        return _build_vllm_ray_serve_command(service, total_nodes, gym_install)
+        return _build_vllm_ray_serve_command(service, total_nodes, gym_install, gpus_per_node_values)
     if _vllm_spans_multiple_nodes(service, total_nodes):
         return _build_vllm_ray_command(service, total_nodes)
     return _BUILDERS[type(service)](service)

@@ -19,6 +19,8 @@ from nemo_gym.orchestration.ray_serve_gateway import (
     RoundRobinRouter,
     build_instance_command,
     instance_port,
+    node_for_instance,
+    nodes_per_instance,
     parse_args,
 )
 
@@ -124,6 +126,54 @@ def test_build_instance_command_no_trust_remote_code_by_default():
     args = parse_args(["--model", "org/model", "--port", "8000"])
     cmd = build_instance_command(args, 0)
     assert "--trust-remote-code" not in cmd
+
+
+# ---------------------------------------------------------------------------
+# nodes_per_instance
+# ---------------------------------------------------------------------------
+
+
+def test_nodes_per_instance_no_gpus_per_node_defaults_to_one():
+    assert nodes_per_instance(tensor_parallel_size=8, pipeline_parallel_size=2, gpus_per_node=None) == 1
+
+
+def test_nodes_per_instance_fits_in_one_node():
+    assert nodes_per_instance(tensor_parallel_size=8, pipeline_parallel_size=1, gpus_per_node=8) == 1
+
+
+def test_nodes_per_instance_spans_two_nodes():
+    assert nodes_per_instance(tensor_parallel_size=8, pipeline_parallel_size=2, gpus_per_node=8) == 2
+
+
+def test_nodes_per_instance_rounds_up():
+    assert nodes_per_instance(tensor_parallel_size=5, pipeline_parallel_size=1, gpus_per_node=4) == 2
+
+
+# ---------------------------------------------------------------------------
+# node_for_instance
+# ---------------------------------------------------------------------------
+
+
+def test_node_for_instance_single_node_per_instance_round_robins():
+    nodes = ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"]
+    assert [node_for_instance(i, 1, nodes) for i in range(4)] == nodes
+
+
+def test_node_for_instance_wraps_around_when_more_instances_than_nodes():
+    nodes = ["10.0.0.1", "10.0.0.2"]
+    assert [node_for_instance(i, 1, nodes) for i in range(4)] == nodes + nodes
+
+
+def test_node_for_instance_multi_node_per_instance_uses_distinct_slices():
+    # 4 nodes, 2 nodes/instance -> instance 0 anchors to node 0, instance 1 to node 2.
+    nodes = ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"]
+    assert node_for_instance(0, 2, nodes) == "10.0.0.1"
+    assert node_for_instance(1, 2, nodes) == "10.0.0.3"
+
+
+def test_node_for_instance_empty_nodes_raises():
+    with pytest.raises(RuntimeError):
+        node_for_instance(0, 1, [])
 
 
 # ---------------------------------------------------------------------------

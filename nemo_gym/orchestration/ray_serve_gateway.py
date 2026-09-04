@@ -26,15 +26,22 @@ launches `number_of_instances` independent `vllm serve` subprocesses (each using
 core executor, `--distributed-executor-backend ray` - the same proven mechanism used for a single
 instance spanning nodes), waits for each to become healthy, and then runs a Ray Serve HTTP ingress
 that round-robins incoming requests across them. Ray's own placement-group scheduler decides where
-each instance's tensor/pipeline-parallel GPU footprint lands, spanning nodes automatically when an
-instance's own footprint requires it - this module never touches vLLM engine internals directly.
+each instance's *worker* ranks land, spanning nodes automatically when an instance's own footprint
+requires it - but it does NOT decide where the `vllm serve` driver process itself runs (that's
+just wherever the OS process that launched it happens to execute). So each instance's driver is
+explicitly pinned to a different node (round-robin, `nodes_per_instance` apart) via a small Ray
+actor with node-affinity scheduling - otherwise every instance's driver would land on this
+process's own node, and vLLM refuses to start once that node's local GPU share is exhausted by an
+earlier instance, even though other nodes in the cluster are completely free.
 """
 
 import argparse
 import asyncio
 import itertools
 import logging
+import math
 import os
+import subprocess
 import time
 
 import aiohttp
@@ -48,6 +55,7 @@ logger = logging.getLogger(__name__)
 HEALTH_PATH = "/health"
 HEALTH_POLL_INTERVAL_S = 5.0
 HEALTH_TIMEOUT_S = 900.0
+NODE_AFFINITY_RESOURCE_WEIGHT = 0.001
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -57,6 +65,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--pipeline-parallel-size", type=int, default=1)
     parser.add_argument("--number-of-instances", type=int, default=1)
+    parser.add_argument(
+        "--gpus-per-node",
+        type=int,
+        default=None,
+        help="Used only to compute how many nodes a single instance's own TP*PP footprint needs "
+        "(for node-affinity assignment). Omit if every instance fits on one node.",
+    )
     parser.add_argument("--trust-remote-code", action="store_true")
     return parser.parse_args(argv)
 
@@ -65,6 +80,30 @@ def instance_port(gateway_port: int, instance_index: int) -> int:
     """Each backing vLLM instance listens on its own port, offset above the gateway's own port so
     it never collides with the gateway's listening socket."""
     return gateway_port + 1 + instance_index
+
+
+def nodes_per_instance(tensor_parallel_size: int, pipeline_parallel_size: int, gpus_per_node: int | None) -> int:
+    """How many physical nodes a single instance's own TP*PP footprint needs."""
+    if not gpus_per_node:
+        return 1
+    return max(1, math.ceil((tensor_parallel_size * pipeline_parallel_size) / gpus_per_node))
+
+
+def alive_node_ips() -> list[str]:
+    """Sorted, deduplicated IPs of every alive Ray node - deterministic so node assignment is
+    stable across the gateway process and any code that needs to reason about it."""
+    ips = {n["NodeManagerAddress"] for n in ray.nodes() if n.get("Alive") and n.get("NodeManagerAddress")}
+    return sorted(ips)
+
+
+def node_for_instance(instance_index: int, instance_nodes: int, node_ips: list[str]) -> str:
+    """Round-robin node assignment, `instance_nodes` apart, so each instance's driver (and, via
+    vLLM's own placement group, its worker ranks) lands on a distinct slice of the cluster instead
+    of every instance's driver piling onto this process's own node."""
+    if not node_ips:
+        raise RuntimeError("No alive Ray nodes found - is the Ray cluster up?")
+    start = (instance_index * instance_nodes) % len(node_ips)
+    return node_ips[start]
 
 
 def build_instance_command(args: argparse.Namespace, instance_index: int) -> list[str]:
@@ -88,6 +127,23 @@ def build_instance_command(args: argparse.Namespace, instance_index: int) -> lis
     return cmd
 
 
+@ray.remote(num_cpus=0, num_gpus=0)
+class _InstanceProcess:
+    """Supervises one `vllm serve` OS subprocess. Scheduled with a node-affinity resource (see
+    node_for_instance) so its physical node is chosen explicitly rather than left to chance -
+    Ray's placement-group scheduler only decides where vLLM's *worker* ranks land, not where this
+    driver process itself runs. num_gpus=0 here is intentional: this actor doesn't claim any GPU
+    itself, so it doesn't compete with vLLM's own internal placement-group GPU request for the
+    node it's pinned to.
+    """
+
+    def __init__(self, cmd: list[str], env: dict[str, str]) -> None:
+        self._proc = subprocess.Popen(cmd, env=env)
+
+    def poll(self) -> int | None:
+        return self._proc.poll()
+
+
 class RoundRobinRouter:
     """Cycles through backend instance URLs in order. Not load-aware - just spreads requests
     evenly, mirroring what vLLM's own --data-parallel-size router would have done."""
@@ -103,11 +159,12 @@ class RoundRobinRouter:
 
 
 async def _wait_until_healthy(
-    session: aiohttp.ClientSession, url: str, proc: asyncio.subprocess.Process, instance_index: int, deadline: float
+    session: aiohttp.ClientSession, url: str, actor: "ray.actor.ActorHandle", instance_index: int, deadline: float
 ) -> None:
     while True:
-        if proc.returncode is not None:
-            raise RuntimeError(f"vLLM instance {instance_index} ({url}) exited early with code {proc.returncode}")
+        returncode = await actor.poll.remote()
+        if returncode is not None:
+            raise RuntimeError(f"vLLM instance {instance_index} ({url}) exited early with code {returncode}")
         try:
             async with session.get(f"{url}{HEALTH_PATH}", timeout=aiohttp.ClientTimeout(total=5)) as resp:
                 if resp.status == 200:
@@ -120,7 +177,9 @@ async def _wait_until_healthy(
         await asyncio.sleep(HEALTH_POLL_INTERVAL_S)
 
 
-async def launch_instances_and_wait(args: argparse.Namespace, gcs_address: str) -> list[str]:
+async def launch_instances_and_wait(
+    args: argparse.Namespace, gcs_address: str
+) -> tuple[list[str], list["ray.actor.ActorHandle"]]:
     """Launch every vLLM instance subprocess concurrently and block until all are healthy.
 
     Each `vllm serve` subprocess does its own internal `ray.init()` (inside its Ray distributed
@@ -130,19 +189,32 @@ async def launch_instances_and_wait(args: argparse.Namespace, gcs_address: str) 
     other instances, so multiple instances contend for the same GPUs). Passing RAY_ADDRESS
     explicitly is what makes every instance join the one shared cluster.
 
-    Returns the list of ready instance base URLs, in instance order.
+    Returns (instance base URLs, actor handles) in instance order - the caller must keep the actor
+    handles alive for as long as the instances should keep running (Ray kills an actor once its
+    last handle is garbage collected).
     """
+    instance_nodes = nodes_per_instance(args.tensor_parallel_size, args.pipeline_parallel_size, args.gpus_per_node)
+    node_ips = alive_node_ips()
     env = {**os.environ, "RAY_ADDRESS": gcs_address}
-    commands = [build_instance_command(args, i) for i in range(args.number_of_instances)]
-    procs = [await asyncio.create_subprocess_exec(*cmd, env=env) for cmd in commands]
-    urls = [f"http://localhost:{instance_port(args.port, i)}" for i in range(args.number_of_instances)]
+
+    actors = []
+    urls = []
+    for i in range(args.number_of_instances):
+        node_ip = node_for_instance(i, instance_nodes, node_ips)
+        cmd = build_instance_command(args, i)
+        actor = _InstanceProcess.options(resources={f"node:{node_ip}": NODE_AFFINITY_RESOURCE_WEIGHT}).remote(cmd, env)
+        actors.append(actor)
+        urls.append(f"http://{node_ip}:{instance_port(args.port, i)}")
 
     deadline = time.monotonic() + HEALTH_TIMEOUT_S
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(
-            *(_wait_until_healthy(session, url, proc, i, deadline) for i, (url, proc) in enumerate(zip(urls, procs)))
+            *(
+                _wait_until_healthy(session, url, actor, i, deadline)
+                for i, (url, actor) in enumerate(zip(urls, actors))
+            )
         )
-    return urls
+    return urls, actors
 
 
 app = FastAPI()
@@ -195,7 +267,10 @@ def main(argv: list[str] | None = None) -> None:
         ray.init()
     gcs_address = ray.get_runtime_context().gcs_address
 
-    instance_urls = asyncio.run(launch_instances_and_wait(args, gcs_address))
+    # instance_actors must stay referenced for the rest of this (never-returning) function - Ray
+    # kills an actor once its last handle is garbage collected, and these back the running vLLM
+    # instances. Since main() never returns (it blocks forever below), this frame's locals live on.
+    instance_urls, instance_actors = asyncio.run(launch_instances_and_wait(args, gcs_address))  # noqa: F841
 
     serve.start(http_options={"host": "0.0.0.0", "port": args.port})
     serve.run(VLLMGateway.bind(instance_urls))

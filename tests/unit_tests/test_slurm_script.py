@@ -276,7 +276,7 @@ _GYM_INSTALL = GymInstallConfig(repo="https://github.com/NVIDIA-NeMo/gym", ref="
 
 
 def test_build_vllm_ray_serve_command_single_node_no_ray_bootstrap(vllm_service):
-    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gym_install=_GYM_INSTALL)
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gym_install=_GYM_INSTALL, gpus_per_node_values=[])
     assert "nemo_gym/orchestration/ray_serve_gateway.py" in cmd
     assert "git clone" in cmd
     assert "git checkout main" in cmd
@@ -285,11 +285,28 @@ def test_build_vllm_ray_serve_command_single_node_no_ray_bootstrap(vllm_service)
 
 
 def test_build_vllm_ray_serve_command_multi_node_wraps_in_symmetric_run(vllm_service):
-    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=2, gym_install=_GYM_INSTALL)
+    cmd = _build_vllm_ray_serve_command(
+        vllm_service, total_nodes=2, gym_install=_GYM_INSTALL, gpus_per_node_values=[8]
+    )
     assert "ray symmetric-run" in cmd
     assert "--min-nodes 2" in cmd
     assert "nemo_gym/orchestration/ray_serve_gateway.py" in cmd
     assert "git clone" in cmd
+
+
+def test_build_vllm_ray_serve_command_passes_gpus_per_node():
+    cmd = _build_vllm_ray_serve_command(
+        VllmServiceConfig(type="vllm", container="vllm:latest", model="org/model"),
+        total_nodes=2,
+        gym_install=_GYM_INSTALL,
+        gpus_per_node_values=[8],
+    )
+    assert "--gpus-per-node 8" in cmd
+
+
+def test_build_vllm_ray_serve_command_omits_gpus_per_node_when_unknown(vllm_service):
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gym_install=_GYM_INSTALL, gpus_per_node_values=[])
+    assert "--gpus-per-node" not in cmd
 
 
 def test_build_vllm_ray_serve_command_passes_flags():
@@ -303,7 +320,7 @@ def test_build_vllm_ray_serve_command_passes_flags():
         number_of_instances=2,
         trust_remote_code=True,
     )
-    cmd = _build_vllm_ray_serve_command(service, total_nodes=4, gym_install=_GYM_INSTALL)
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=4, gym_install=_GYM_INSTALL, gpus_per_node_values=[8])
     assert "--model org/model" in cmd
     assert "--port 9000" in cmd
     assert "--tensor-parallel-size 8" in cmd
