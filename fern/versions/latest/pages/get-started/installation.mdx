@@ -54,7 +54,7 @@ docker run --gpus all -it --rm \
   -p 6006:6006 \
   --ulimit memlock=-1 \
   --ulimit stack=67108864 \
-  nvcr.io/nvidian/nemo-gym:v0.5.1
+  nvcr.io/nvidia/nemo-gym:v0.5.1
 ```
 
 The image's default entrypoint is `gym`, so it drops you straight into the CLI. To get a shell instead, override the entrypoint:
@@ -69,7 +69,7 @@ docker run --gpus all -it --rm \
   -p 6006:6006 \
   --ulimit memlock=-1 \
   --ulimit stack=67108864 \
-  nvcr.io/nvidian/nemo-gym:v0.5.1
+  nvcr.io/nvidia/nemo-gym:v0.5.1
 ```
 
 <Note>
