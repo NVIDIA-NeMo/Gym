@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.api import GymInstallConfig, SubmitConfig
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint, render_gym_cmd
 from nemo_gym.orchestration.executors.slurm_script import (
     _build_service_command,
@@ -272,18 +272,24 @@ def test_build_vllm_ray_command_dp_head_and_worker_branches():
 # ---------------------------------------------------------------------------
 
 
+_GYM_INSTALL = GymInstallConfig(repo="https://github.com/NVIDIA-NeMo/gym", ref="main")
+
+
 def test_build_vllm_ray_serve_command_single_node_no_ray_bootstrap(vllm_service):
-    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1)
-    assert "python -m nemo_gym.orchestration.ray_serve_gateway" in cmd
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gym_install=_GYM_INSTALL)
+    assert "nemo_gym/orchestration/ray_serve_gateway.py" in cmd
+    assert "git clone" in cmd
+    assert "git checkout main" in cmd
     assert "ray symmetric-run" not in cmd
     assert "vllm serve" not in cmd  # the gateway itself launches vllm serve, not this bash command
 
 
 def test_build_vllm_ray_serve_command_multi_node_wraps_in_symmetric_run(vllm_service):
-    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=2)
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=2, gym_install=_GYM_INSTALL)
     assert "ray symmetric-run" in cmd
     assert "--min-nodes 2" in cmd
-    assert "python -m nemo_gym.orchestration.ray_serve_gateway" in cmd
+    assert "nemo_gym/orchestration/ray_serve_gateway.py" in cmd
+    assert "git clone" in cmd
 
 
 def test_build_vllm_ray_serve_command_passes_flags():
@@ -297,7 +303,7 @@ def test_build_vllm_ray_serve_command_passes_flags():
         number_of_instances=2,
         trust_remote_code=True,
     )
-    cmd = _build_vllm_ray_serve_command(service, total_nodes=4)
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=4, gym_install=_GYM_INSTALL)
     assert "--model org/model" in cmd
     assert "--port 9000" in cmd
     assert "--tensor-parallel-size 8" in cmd
@@ -308,12 +314,18 @@ def test_build_vllm_ray_serve_command_passes_flags():
 
 def test_build_service_command_uses_ray_serve_when_opted_in(vllm_service):
     vllm_service.use_ray_serve = True
-    cmd = _build_service_command(vllm_service, total_nodes=1, gpus_per_node_values=[8])
-    assert "python -m nemo_gym.orchestration.ray_serve_gateway" in cmd
+    cmd = _build_service_command(vllm_service, total_nodes=1, gpus_per_node_values=[8], gym_install=_GYM_INSTALL)
+    assert "nemo_gym/orchestration/ray_serve_gateway.py" in cmd
+
+
+def test_build_service_command_missing_gym_install_raises(vllm_service):
+    vllm_service.use_ray_serve = True
+    with pytest.raises(ValueError, match="gym_install"):
+        _build_service_command(vllm_service, total_nodes=1, gpus_per_node_values=[8], gym_install=None)
 
 
 def test_build_service_command_default_ignores_ray_serve_single_node(vllm_service):
-    cmd = _build_service_command(vllm_service, total_nodes=1, gpus_per_node_values=[8])
+    cmd = _build_service_command(vllm_service, total_nodes=1, gpus_per_node_values=[8], gym_install=None)
     assert "ray_serve_gateway" not in cmd
     assert "vllm serve" in cmd
 
@@ -330,8 +342,8 @@ def test_build_service_command_mandatory_ray_serve_when_instance_spans_nodes():
         pipeline_parallel_size=2,
         number_of_instances=2,
     )
-    cmd = _build_service_command(service, total_nodes=4, gpus_per_node_values=[8])
-    assert "python -m nemo_gym.orchestration.ray_serve_gateway" in cmd
+    cmd = _build_service_command(service, total_nodes=4, gpus_per_node_values=[8], gym_install=_GYM_INSTALL)
+    assert "nemo_gym/orchestration/ray_serve_gateway.py" in cmd
 
 
 def test_build_service_command_default_multi_instance_multi_node_unchanged():
@@ -344,7 +356,7 @@ def test_build_service_command_default_multi_instance_multi_node_unchanged():
         tensor_parallel_size=8,
         number_of_instances=4,
     )
-    cmd = _build_service_command(service, total_nodes=2, gpus_per_node_values=[8])
+    cmd = _build_service_command(service, total_nodes=2, gpus_per_node_values=[8], gym_install=None)
     assert "ray_serve_gateway" not in cmd
     assert "--headless" in cmd
 

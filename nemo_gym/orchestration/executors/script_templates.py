@@ -105,6 +105,15 @@ def render_gym_cmd(subcommand: str, var_name: str, args: list[str]) -> str:
     return f"{var_name}=(\n    " + "\n    ".join(entries) + "\n)"
 
 
+def render_repo_checkout(repo: str, ref: str) -> str:
+    """Render `git clone {repo} && cd {name} && git checkout {ref}` as a single &&-chained
+    command, leaving the shell's cwd at the repo root. Shared by the driver entrypoint (which
+    additionally pip-installs the whole package) and the Ray Serve gateway command (which just
+    needs the raw ray_serve_gateway.py file - see _build_vllm_ray_serve_command)."""
+    repo_name = repo.rstrip("/").split("/")[-1].removesuffix(".git")
+    return f"git clone {shlex.quote(repo)} && cd {shlex.quote(repo_name)} && git checkout {shlex.quote(ref)}"
+
+
 def render_driver_entrypoint(
     repo: str | None,
     ref: str | None,

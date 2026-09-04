@@ -19,6 +19,7 @@ from pathlib import Path
 
 from nemo_gym.orchestration.api import (
     BenchmarkRunConfig,
+    GymInstallConfig,
     NodePool,
     RayServiceConfig,
     SlurmComputeConfig,
@@ -32,6 +33,7 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_gym_cmd,
     render_health_check,
     render_ray_prelude,
+    render_repo_checkout,
     render_vllm_ray_symmetric_run,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args
@@ -202,31 +204,43 @@ def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int) -> str
     return _build_vllm_single_instance_multi_node_command(service, total_nodes)
 
 
-def _build_vllm_ray_serve_command(service: VllmServiceConfig, total_nodes: int) -> str:
+def _build_vllm_ray_serve_command(service: VllmServiceConfig, total_nodes: int, gym_install: GymInstallConfig) -> str:
     # Ray Serve (nemo_gym/orchestration/ray_serve_gateway.py) launches all number_of_instances
     # `vllm serve` processes itself and routes requests across them - Ray's own placement-group
     # scheduler packs each instance's tensor/pipeline-parallel GPU footprint anywhere across the
     # cluster, spanning nodes automatically when an instance's own footprint requires it. This is
     # the only place NeMo Gym uses the `ray.serve` library, as opposed to vLLM's own Ray core
     # executor (see _build_vllm_single_instance_multi_node_command).
-    gateway_cmd = (
-        f"python -m nemo_gym.orchestration.ray_serve_gateway"
-        f" --model {shlex.quote(service.model)}"
+    gateway_args = (
+        f"--model {shlex.quote(service.model)}"
         f" --port {service.port}"
         f" --tensor-parallel-size {service.tensor_parallel_size}"
         f" --pipeline-parallel-size {service.pipeline_parallel_size}"
         f" --number-of-instances {service.number_of_instances}"
     )
     if service.trust_remote_code:
-        gateway_cmd += " --trust-remote-code"
+        gateway_args += " --trust-remote-code"
+
+    # ray_serve_gateway.py has no internal nemo_gym imports (stdlib + ray/fastapi/aiohttp only), so
+    # it's fetched and run as a standalone script rather than `pip install -e .`-ing the whole
+    # nemo_gym package - the vLLM service's own container (e.g. vllm/vllm-openai) never has
+    # nemo_gym installed, and a full package install there risks nemo_gym's own pinned deps (torch,
+    # ray, ...) clobbering vLLM's already-working install. Reuses driver.gym_install (the same
+    # repo/ref the driver itself checks out) instead of a separate per-service field, so the two
+    # can't drift out of sync.
+    fetch_and_run = (
+        f"{render_repo_checkout(gym_install.repo, gym_install.ref)}"
+        " && pip install --quiet aiohttp"
+        f" && python3 nemo_gym/orchestration/ray_serve_gateway.py {gateway_args}"
+    )
     if total_nodes <= 1:
         # No multi-node Ray cluster to join - the gateway starts its own local Ray instance and
         # launches all instances on this one node.
-        return gateway_cmd
+        return f"bash -lc '{fetch_and_run}'"
     resource_flags = (
         "--num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE}"
     )
-    return render_vllm_ray_symmetric_run(gateway_cmd, total_nodes, resource_flags)
+    return render_vllm_ray_symmetric_run(fetch_and_run, total_nodes, resource_flags)
 
 
 def _build_ray_command(_service: RayServiceConfig) -> str:
@@ -247,10 +261,20 @@ def _vllm_spans_multiple_nodes(service: VllmServiceConfig | RayServiceConfig, to
 
 
 def _build_service_command(
-    service: VllmServiceConfig | RayServiceConfig, total_nodes: int, gpus_per_node_values: list[int]
+    service: VllmServiceConfig | RayServiceConfig,
+    total_nodes: int,
+    gpus_per_node_values: list[int],
+    gym_install: GymInstallConfig | None,
 ) -> str:
     if isinstance(service, VllmServiceConfig) and effective_ray_serve(service, total_nodes, gpus_per_node_values):
-        return _build_vllm_ray_serve_command(service, total_nodes)
+        if gym_install is None:
+            raise ValueError(
+                "Service requires the Ray Serve gateway (use_ray_serve or an instance spanning "
+                "multiple nodes) but driver.gym_install is not set - the gateway script "
+                "(nemo_gym/orchestration/ray_serve_gateway.py) is fetched from that repo/ref into "
+                "the vLLM service's own container. Set driver.gym_install.{repo,ref}."
+            )
+        return _build_vllm_ray_serve_command(service, total_nodes, gym_install)
     if _vllm_spans_multiple_nodes(service, total_nodes):
         return _build_vllm_ray_command(service, total_nodes)
     return _BUILDERS[type(service)](service)
@@ -287,7 +311,7 @@ def build_sbatch_script(
         _render_service_command(
             name,
             service.container,
-            _build_service_command(service, total_nodes, gpus_per_node_values),
+            _build_service_command(service, total_nodes, gpus_per_node_values, config.driver.gym_install),
             service.env or None,
             service.mounts or None,
             # Only services that actually span multiple nodes need the whole allocation's --nodes/

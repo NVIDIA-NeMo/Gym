@@ -212,6 +212,13 @@ class SubmitConfig(_StrictModel):
 
             if isinstance(service, VllmServiceConfig):
                 self._validate_vllm_gpu_footprint(service_name, service, total_nodes)
+                if self._effective_ray_serve(service, total_nodes) and self.driver.gym_install is None:
+                    raise ValueError(
+                        f"Service '{service_name}' requires the Ray Serve gateway (use_ray_serve or an instance "
+                        "spanning multiple nodes), but driver.gym_install is not set. The gateway script "
+                        "(nemo_gym/orchestration/ray_serve_gateway.py) is fetched from that repo/ref into the "
+                        "vLLM service's own container - set driver.gym_install.{repo,ref}."
+                    )
 
         if self.driver.policy_model is not None:
             if self.driver.policy_model not in self.services:
