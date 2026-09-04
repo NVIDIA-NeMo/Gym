@@ -17,13 +17,11 @@ args = parser.parse_args()
 
 f_out_path = "temp.jsonl"
 num_wrote_out = 0
-counts = Counter()
+failed_counts = Counter()
+success_counts = Counter()
 with open(args.fpath, "rb") as f, open(f_out_path, "wb") if args.group_to_write_out else nullcontext() as f_out:
     for i, line in tqdm(enumerate(f)):
         row = orjson.loads(line)
-
-        if row["reward"] == 0:
-            continue
 
         count = 0
         stuck_count = 0
@@ -49,7 +47,14 @@ with open(args.fpath, "rb") as f, open(f_out_path, "wb") if args.group_to_write_
         count_dict["Samples covered by the above errors"] = (
             count_dict["Long model calls"] or count_dict["Model claims to be stuck"] or count_dict["Long model calls"]
         )
-        counts.update(count_dict)
+
+        if row["reward"]:
+            success_counts.update(count_dict)
+        else:
+            failed_counts.update(count_dict)
+
+        if row["reward"] != 0.0:
+            continue
 
         if args.group_to_write_out and count_dict[args.group_to_write_out]:
             num_wrote_out += 1
@@ -57,10 +62,17 @@ with open(args.fpath, "rb") as f, open(f_out_path, "wb") if args.group_to_write_
             f_out.write(orjson.dumps(row) + b"\n")
 
 
-print_str = ""
-for k, v in counts.items():
-    print_str += f"{k}: {v} ({int(100 * v / counts['Total samples with reward=0'])}%)\n"
-print(print_str)
+def print_counts(counts: Counter):
+    print_str = ""
+    for k, v in counts.items():
+        print_str += f"{k}: {v} ({int(100 * v / counts['Total samples with reward=0'])}%)\n"
+    print(print_str)
+
+
+print("Successful samples:")
+print_counts(success_counts)
+print("\nFailed samples:")
+print_counts(failed_counts)
 
 if args.group_to_write_out:
     print(
