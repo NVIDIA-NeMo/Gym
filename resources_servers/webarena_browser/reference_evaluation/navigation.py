@@ -11,7 +11,7 @@ async def goto(page: Any, url: str, **kwargs: Any) -> Any:
     """Navigate an async Playwright page.
 
     The internal source routes this call through its public-web Cloudflare
-    helper. WebArena uses self-hosted sites and does not need
+    helper. WebArena and VisualWebArena use self-hosted sites and do not need
     CAPTCHA/proxy intervention during evaluation, so their Gym evaluator keeps
     that concern out of the scoring package.
     """
