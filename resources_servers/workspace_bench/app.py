@@ -33,6 +33,8 @@ class WorkspaceBenchConfig(BaseResourcesServerConfig):
     judge_base_url: str
     judge_api_key: str
     judge_model: str
+    judge_timeout_s: float = 600
+    num_processes: int = 10
     sandbox_provider: str
     sandbox_config: dict[str, Any]
 
@@ -69,6 +71,7 @@ class WorkspaceBenchResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any, /) -> None:
         self._sandboxes: dict[str, AsyncSandbox] = {}
         self._upstream_dir = ensure_upstream()
+        self._semaphore = asyncio.Semaphore(self.config.num_processes)
 
     async def seed_session(self, request: Request, body: WorkspaceBenchRequest) -> WorkspaceBenchSeedResponse:
         task_dir = Path(body.task_dir)
@@ -143,6 +146,10 @@ class WorkspaceBenchResourcesServer(SimpleResourcesServer):
             ],
             cwd=evaluation_dir,
             check=True,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=self.config.judge_timeout_s,
         )
         judged = json.loads((case_dir / "rubrics_judge--gym-judge.json").read_text(encoding="utf-8"))
         graph = json.loads((case_dir / "dependency_graph--gym-judge.json").read_text(encoding="utf-8"))
@@ -163,14 +170,17 @@ class WorkspaceBenchResourcesServer(SimpleResourcesServer):
                 metadata = json.loads((Path(body.task_dir) / "metadata.json").read_text(encoding="utf-8"))
                 (local_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
                 shutil.copytree(local_dir / "input", local_dir / "data")
-                rubrics, dependency_graph = await asyncio.to_thread(self._judge, local_dir)
+                async with self._semaphore:
+                    rubrics, dependency_graph = await asyncio.to_thread(self._judge, local_dir)
         finally:
             await sandbox.stop()
         passed = sum(item["passed"] for item in rubrics)
         total = len(rubrics)
+        if not total:
+            raise ValueError("Workspace-Bench judge returned no rubrics")
         return WorkspaceBenchVerifyResponse(
             **body.model_dump(),
-            reward=passed / total if total else 0.0,
+            reward=passed / total,
             passed_count=passed,
             total_count=total,
             judge_model=self.config.judge_model,

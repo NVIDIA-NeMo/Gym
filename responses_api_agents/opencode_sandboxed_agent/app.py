@@ -686,7 +686,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         elif self.config.remote_opencode_binary_path:
             install_str = (
                 "mkdir -p $HOME/.opencode/bin && "
-                f"cp {quote(self.config.remote_opencode_binary_path)} $HOME/.opencode/bin/opencode"
+                f"cp {quote(self.config.remote_opencode_binary_path)} $HOME/.opencode/bin/opencode && "
+                "chmod +x $HOME/.opencode/bin/opencode"
             )
         else:
             print(

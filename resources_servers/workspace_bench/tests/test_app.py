@@ -24,6 +24,8 @@ def test_judge_uses_upstream_evaluator(monkeypatch, tmp_path: Path) -> None:
     def run(command, **kwargs):
         assert command[1] == str(evaluation_dir / "src" / "agent_as_a_judge.py")
         assert kwargs["cwd"] == evaluation_dir
+        assert kwargs["timeout"] == 600
+        assert kwargs["capture_output"] is True
         (tmp_path / "rubrics_judge--gym-judge.json").write_text(
             json.dumps({"rubrics": [{"index": 0, "passed": True}]}), encoding="utf-8"
         )
