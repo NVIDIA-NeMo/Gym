@@ -27,6 +27,7 @@ from typing import (
     get_origin,
     get_type_hints,
 )
+from unittest.mock import AsyncMock, MagicMock
 
 import openai
 import pytest
@@ -67,6 +68,7 @@ from openai.types.responses.response_output_item import (
 from pydantic import ValidationError
 
 from nemo_gym.openai_utils import (
+    MAX_NUM_TRIES,
     RESPONSES_TO_TRAIN,
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
@@ -124,6 +126,24 @@ def _response_with_output(output: list) -> dict:
 class TestOpenAIUtils:
     async def test_NeMoGymAsyncOpenAI(self) -> None:
         NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+
+    async def test_no_infinite_endpoint_retries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        response = MagicMock(status=504)
+        response.content.read = AsyncMock(return_value=b"gateway timeout")
+        request = AsyncMock(return_value=response)
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        monkeypatch.setattr(
+            "nemo_gym.openai_utils.raise_for_status", AsyncMock(side_effect=RuntimeError("gateway timeout"))
+        )
+
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="https://example.com/v1", no_infinite_endpoint_retries=True
+        )
+        with pytest.raises(RuntimeError, match="gateway timeout"):
+            await client._request_with_retry(method="POST", url="https://example.com/v1/chat/completions")
+
+        assert request.await_count == MAX_NUM_TRIES
 
 
 class TestNeMoGymResponseCreateParamsNonStreaming:

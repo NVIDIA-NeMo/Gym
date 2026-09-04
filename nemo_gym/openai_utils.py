@@ -1069,6 +1069,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
     base_url: str
     api_key: str
+    no_infinite_endpoint_retries: bool = False
 
     internal: bool = Field(
         default=False,
@@ -1108,7 +1109,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
             if response.status in RETRY_ERROR_CODES:
                 # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
-                if response.status in RATE_LIMIT_ERROR_CODES:
+                if response.status in RATE_LIMIT_ERROR_CODES and not self.no_infinite_endpoint_retries:
                     max_num_tries += 1
 
                 content = (await response.content.read()).decode()
