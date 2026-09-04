@@ -14,6 +14,7 @@ The wrapper supports two agent harnesses, selected by the `agent_framework` conf
 ## Table of Contents
 
 - [Architecture at a glance](#architecture-at-a-glance)
+- [Artifact locations and cleanup](#artifact-locations-and-cleanup)
 - [Agent flow per instance](#agent-flow-per-instance)
 - [Supported datasets and harnesses](#supported-datasets-and-harnesses)
 - [OpenHands integration](#openhands-integration)
@@ -72,6 +73,22 @@ Concurrency across instances is bounded by `concurrency` (default 256) via an as
 
 ---
 
+## Artifact locations and cleanup
+
+This server keeps three kinds of state, anchored differently (see the global `results_dir` / `cache_dir` keys in the [configuration reference](https://docs.nvidia.com/nemo/gym/latest/reference/configuration)):
+
+| State | Location | Lifecycle |
+|-------|----------|-----------|
+| Packaged read-only assets (setup scripts, prompts, configs) | next to the code (`responses_api_agents/swe_agents/`) | ships with the install |
+| Setup trees (harness clones, venvs, toolchains; multi-GB) | `<cache_dir>/swe_agents/swe_*_setup` | reused across runs; safe to delete when no run is active |
+| Per-run results | `<results_dir>/swebench_results_<run_session_id>` | one per server process per run; never deleted automatically |
+
+Per-instance work is scheduled across the cluster (Ray `SPREAD`), and the generated agent/eval commands embed the setup-tree and results paths as host paths executed from **other nodes**. Both roots must therefore resolve to the same content at the same path on every node that runs rollout workers: a shared filesystem, or trees pre-staged identically per node (e.g. baked into the container image). A `cache_dir` populated only on the head node breaks remote rollouts.
+
+Two compatibility notes: setup trees pre-staged next to the package (the layout before `cache_dir` existed, e.g. baked into container images at build time) are used only while `cache_dir` is left at its default — explicitly configuring `cache_dir` opts out, and removing the pre-staged trees migrates a default-config deployment. And OpenHands resolves `agent_framework_commit` to a full commit SHA against the configured repository at startup (`git ls-remote` for branches/`HEAD`; full 40-hex SHAs pass through), then keys its cache tree by repository identity plus that SHA (`swe_openhands_setup/<repo>-<hash>/<sha>`), so runs configured with different refs or forks never reset each other's checkout; old per-SHA trees are not garbage-collected — prune them when disk fills.
+
+---
+
 ## Agent flow per instance
 
 Implemented in `RunOpenHandsAgent.process_single_datapoint` (and `_run_golden_patch_verification` for the verify-only path):
@@ -120,7 +137,7 @@ Selection is driven by `problem_info["dataset_name"]` (set in the input JSONL). 
 >
 > Treat reward signals from `deepswe` / `denovoswe` as directional until a full agent-driven baseline is reproduced and matches published numbers.
 
-All harnesses are installed lazily on first use and locked across nodes with `mkdir`-based cross-node locks (`_setup_directory_lock`) — atomic on Lustre/NFS where `fcntl.flock` is not. Stale locks older than 1h are auto-broken.
+All harnesses are installed lazily on first use and locked across nodes with `mkdir`-based cross-node locks (`file_lock`) — atomic on Lustre/NFS where `fcntl.flock` is not. Stale locks older than 1h are auto-broken.
 
 The eval container is built from the same SIF as the agent for some datasets, but for SWE-bench / R2E-Gym / SWE-rebench / SWE-bench-Multilingual the harness venv is mounted at both `/{dataset}_setup` *and* its host absolute path (because `uv venv` bakes absolute paths into its wrappers).
 
@@ -500,7 +517,7 @@ gym eval run --no-serve \
 `gym eval run` defaults to a concurrency of 100; tune to your hardware. View the results with:
 
 ```bash
-ng_viewer +jsonl_fpath=swebench-verified.openhands.qwen3-30b-coder.jsonl
+jq -C . swebench-verified.openhands.qwen3-30b-coder.jsonl | less -R
 ```
 
 ---

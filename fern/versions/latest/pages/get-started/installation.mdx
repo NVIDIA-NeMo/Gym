@@ -5,7 +5,7 @@ position: 2
 ---
 
 <Info>
-Python 3.12 is required. Refer to [Prerequisites](/get-started/prerequisites) for full system requirements.
+Python 3.13.14 is required. Refer to [Prerequisites](/get-started/prerequisites) for full system requirements.
 </Info>
 
 Install from PyPI for the quickest setup. Clone from git if you need the latest features and environments, or use a NeMo RL container if you intend to train with NeMo Gym and NeMo RL.
@@ -14,17 +14,17 @@ Install from PyPI for the quickest setup. Clone from git if you need the latest 
 <Tab title="PyPI">
 
 ```bash
-python3.12 -m pip install nemo-gym
+python3.13 -m pip install nemo-gym
 ```
 
 Or with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv venv --python 3.12 && source .venv/bin/activate
+uv venv --python 3.13.14 && source .venv/bin/activate
 uv pip install nemo-gym
 ```
 
-The package includes built-in environments and CLI commands. Config and data paths resolve against the package install location automatically. To pin a release: `python3.12 -m pip install nemo-gym==0.4.0`.
+The package includes built-in environments and CLI commands. Config and data paths resolve against the package install location automatically. To pin a release: `python3.13 -m pip install nemo-gym==0.5.1`.
 
 </Tab>
 <Tab title="Git">
@@ -32,7 +32,7 @@ The package includes built-in environments and CLI commands. Config and data pat
 ```bash
 git clone git@github.com:NVIDIA-NeMo/Gym.git
 cd Gym
-uv venv --python 3.12 && source .venv/bin/activate
+uv venv --python 3.13.14 && source .venv/bin/activate
 uv sync
 ```
 
@@ -40,6 +40,48 @@ uv sync
 <Tab title="Container">
 
 Container choice depends on your NeMo Gym version and model recipe. See [RL Framework Compatibility](/reference/rl-framework-compatibility) for the full mapping.
+
+### Pre-built NeMo Gym image
+
+NeMo Gym publishes a pre-built container to NGC with each release, tagged with the release version (for example `v0.5.1`):
+
+```bash
+docker run --gpus all -it --rm \
+  -v "$PWD:/workspace" \
+  --shm-size=128g \
+  --ipc=host \
+  -p 8888:8888 \
+  -p 6006:6006 \
+  --ulimit memlock=-1 \
+  --ulimit stack=67108864 \
+  nvcr.io/nvidian/nemo-gym:v0.5.1
+```
+
+The image's default entrypoint is `gym`, so it drops you straight into the CLI. To get a shell instead, override the entrypoint:
+
+```bash
+docker run --gpus all -it --rm \
+  --entrypoint /bin/bash \
+  -v "$PWD:/workspace" \
+  --shm-size=128g \
+  --ipc=host \
+  -p 8888:8888 \
+  -p 6006:6006 \
+  --ulimit memlock=-1 \
+  --ulimit stack=67108864 \
+  nvcr.io/nvidian/nemo-gym:v0.5.1
+```
+
+<Note>
+The image ships the `enroot` sandbox backend along with `nvidia-container-toolkit`,
+so enroot's NVIDIA GPU hook (`/etc/enroot/hooks.d/98-nvidia.sh`) can find
+`nvidia-container-cli` and inject GPUs into enroot sandboxes. If your workload
+doesn't need GPUs inside enroot sandboxes (for example CPU-only
+SWE-bench-style tasks) and you see hook-related errors, you can remove the
+hook: `rm /etc/enroot/hooks.d/98-nvidia.sh`.
+</Note>
+
+### NeMo RL recipe containers
 
 For NeMo Gym **v0.3.0** with the Nemotron 3 Ultra recipe, build the container from the NeMo RL `ultra-v3` branch (there is no pre-built NGC tag for this pairing):
 
@@ -59,7 +101,7 @@ docker buildx build \
   .
 ```
 
-For other recipes (for example Nemotron 3 Nano or Super), use the NGC container listed in the compatibility table for that recipe.
+For other Gym versions and recipes (for example Nemotron 3 Nano), use the container listed in the compatibility table for that pairing.
 
 </Tab>
 </Tabs>
@@ -73,8 +115,8 @@ gym --version
 You should see output like:
 
 ```text
-NeMo Gym v0.4.0
-Python 3.12.x
+NeMo Gym v0.5.1
+Python 3.13.14
 Installation: /path/to/Gym
 ```
 

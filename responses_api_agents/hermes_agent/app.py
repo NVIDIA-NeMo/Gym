@@ -20,22 +20,18 @@ import shutil
 import sys
 import tempfile
 from asyncio import Semaphore
+from collections.abc import Mapping
 from time import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from uuid import uuid4
 
 import model_tools  # noqa: F401  # fail-fast if hermes-agent isn't installed  # pyright: ignore[reportMissingImports]
 from fastapi import Request
-from pydantic import ConfigDict
+from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
-    BaseResponsesAPIAgentConfig,
-    Body,
-    SimpleResponsesAPIAgent,
-)
+from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -46,9 +42,18 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
+    NeMoGymSummary,
+)
+from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.rollout_observability import (
+    AgentEpisode,
+    AgentObservationBundle,
+    ObservationGap,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from responses_api_agents.hermes_agent.observability import HermesAgentObserver
 
 
 def _trajectory_to_output_items(messages, n_input):
@@ -61,6 +66,16 @@ def _trajectory_to_output_items(messages, n_input):
         if isinstance(content, list):
             content = "".join(c.get("text", "") if isinstance(c, dict) else getattr(c, "text", "") for c in content)
         if role == "assistant":
+            reasoning_text = item.get("reasoning") or ""
+            if reasoning_text:
+                content = ResponsesConverter._parse_think_tags(content)[1]
+                output_items.append(
+                    NeMoGymResponseReasoningItem(
+                        id=f"rsn-{len(output_items)}",
+                        summary=[NeMoGymSummary(type="summary_text", text=reasoning_text)],
+                        type="reasoning",
+                    )
+                )
             output_items.append(
                 NeMoGymResponseOutputMessageForTraining(
                     id=f"msg-{len(output_items)}",
@@ -101,6 +116,7 @@ def _trajectory_to_output_items(messages, n_input):
 
 
 LOG = logging.getLogger(__name__)
+_INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
 # if ray close sys.stderr mid-request, write to the original fd
@@ -154,8 +170,10 @@ def _split_input_to_user_and_history(input_items) -> tuple[str, list[dict], Opti
 class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
+    model: Optional[str] = None
     concurrency: int = 32
     max_turns: int = 90
+    max_tokens: Optional[int] = None
     enabled_toolsets: Optional[list[str]] = None
     disabled_toolsets: Optional[list[str]] = None
     temperature: float | None = None
@@ -164,6 +182,8 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     system_prompt: Optional[str] = None
     compression_enabled: bool = True
     compression_threshold: float = 0.85
+    chat_template_kwargs_enabled: bool = True
+    api_key: Optional[str] = None
     delegation_max_iterations: int = 50
     checkpoints_enabled: bool = False
 
@@ -176,6 +196,10 @@ class HermesAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     turns_used: int = 0
     finished_naturally: bool = False
+    ng_agent_observations: AgentObservationBundle | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
 
 class HermesAgent(SimpleResponsesAPIAgent):
@@ -184,6 +208,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
     # Set of agents currently running run_conversation, plus a flag tracking whether the single
     # shared SIGTERM dispatcher has been installed on the event loop. See _ensure_sigterm_handler.
     active_agents: set = None
+    interrupted_agents: set = None
     sigterm_installed: bool = False
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -199,6 +224,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         def _dispatch():
             for ag in list(self.active_agents):
+                self.interrupted_agents.add(id(ag))
                 if hasattr(ag, "interrupt"):
                     ag.interrupt("timeout")
 
@@ -212,7 +238,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         import yaml
 
         config: dict[str, Any] = {
-            "model": str(self.config.model_server.name),
+            "model": self._model_name(),
             "provider": "auto",
             "toolsets": ["hermes-cli"],
             "agent": {"max_turns": self.config.max_turns},
@@ -240,6 +266,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
         self.active_agents = set()
+        self.interrupted_agents = set()
         # hermes-agent reads these from env (cli.py / batch_runner.py); env vars are
         # process-global, so multiple HermesAgent instances in one process share them
         os.environ["TERMINAL_ENV"] = self.config.terminal_backend
@@ -252,19 +279,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
             _f.write(self._build_config())
         os.environ["HERMES_HOME"] = hermes_home
 
-    def _resolve_model_base_url(self) -> str:
-        # aiagent builds its own openai client; resolve policy_model url
-        model_server_cfg = get_first_server_config_dict(
-            self.server_client.global_config_dict,
-            self.config.model_server.name,
-        )
-        base = self.server_client._build_server_base_url(model_server_cfg)
-        return f"{base}/v1"
+    def _model_name(self) -> str:
+        return self.config.model or str(self.config.model_server.name)
 
-    async def responses(
+    async def _create_response(
         self,
-        request: Request,
-        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        rollout_id: Optional[str] = None,
+        observation_collector: Optional[Callable[[AgentObservationBundle], None]] = None,
     ) -> NeMoGymResponse:
         from run_agent import AIAgent  # from hermes-agent on path  # pyright: ignore[reportMissingImports]
 
@@ -275,17 +298,18 @@ class HermesAgent(SimpleResponsesAPIAgent):
         user_message, history, input_system = _split_input_to_user_and_history(body.input)
         system_message = self.config.system_prompt or input_system
 
-        base_url = self._resolve_model_base_url()
-        model_name = str(self.config.model_server.name)
+        base_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
+        model_name = self._model_name()
 
         agent = AIAgent(
             base_url=base_url,
-            api_key="gym",  # pragma: allowlist secret
+            api_key=self.config.api_key or os.environ.get("OPENAI_API_KEY", "gym"),  # pragma: allowlist secret
             model=model_name,
             use_streaming=False,
             temperature=self.config.temperature,
             insert_reasoning=True,
             max_iterations=self.config.max_turns,
+            max_tokens=self.config.max_tokens,
             enabled_toolsets=self.config.enabled_toolsets,
             disabled_toolsets=self.config.disabled_toolsets,
             quiet_mode=True,
@@ -298,19 +322,31 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         def _patched_build_api_kwargs(api_messages):
             kw = _original_build_api_kwargs(api_messages)
+            if not self.config.chat_template_kwargs_enabled:
+                return kw
             ctk = kw.setdefault("extra_body", {}).setdefault("chat_template_kwargs", {})
             ctk.setdefault("enable_thinking", True)
             ctk["truncate_history_thinking"] = False
             return kw
 
         agent._build_api_kwargs = _patched_build_api_kwargs
+        observer = None
+        if observation_collector is not None:
+            try:
+                observer = HermesAgentObserver(model_ref=self.config.model_server).instrument(agent)
+            except Exception:
+                LOG.exception("failed to initialize Hermes observability")
 
         # Interrupt the agent cleanly on SIGTERM so run_conversation returns with partial messages
         # instead of being killed mid-turn (which would leave response.json unwritten). A single
         # shared dispatcher interrupts every in-flight agent; we just register this one in the set.
         self._ensure_sigterm_handler()
+        agent_id = id(agent)
         self.active_agents.add(agent)
 
+        result = None
+        agent_error: Optional[BaseException] = None
+        interrupted_by_dispatch = False
         try:
             result = await asyncio.to_thread(
                 agent.run_conversation,
@@ -318,8 +354,33 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 system_message,
                 history,
             )
+        except BaseException as exc:
+            agent_error = exc
+            raise
         finally:
             self.active_agents.discard(agent)
+            interrupted_by_dispatch = agent_id in self.interrupted_agents
+            self.interrupted_agents.discard(agent_id)
+            if observation_collector is not None:
+                try:
+                    observations = (
+                        observer.finish(result, error=agent_error)
+                        if observer is not None
+                        else AgentObservationBundle(
+                            source="hermes",
+                            gaps=[ObservationGap(code="observation_capture_failed")],
+                        )
+                    )
+                except Exception:
+                    LOG.exception("failed to finish Hermes observability")
+                    observations = AgentObservationBundle(
+                        source="hermes",
+                        gaps=[ObservationGap(code="observation_capture_failed")],
+                    )
+                try:
+                    observation_collector(observations)
+                except Exception:
+                    LOG.exception("failed to return Hermes observations")
 
         messages = result.get("messages") or []
         # aiagent omits system from returned messages
@@ -362,12 +423,47 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 )
             )
 
+        # The agent ran out of turns / blew its context window if run_conversation reports it did
+        # not complete (api_call_count >= max_iterations). Mark the response incomplete so a
+        # downstream consumer (e.g. anyswe) can mask an accidental pass instead of scoring it 1.0.
+        agent_completed = bool(result.get("completed", True))
+
+        # Expose harness run outcome fields for diagnosability
+        was_interrupted = bool(result.get("interrupted")) or interrupted_by_dispatch
+
+        harness_error = result.get("error")
+        agent_failed = bool(harness_error) or bool(result.get("failed"))
+        metadata: dict[str, str] = {
+            "interrupted": "true" if was_interrupted else "false",
+            # `failed` = the underlying run flagged an API/provider failure (bad response shape,
+            # rate limit, unrecoverable truncation) — the clean signal for an infra failure vs a
+            # legitimate stop. `partial` = the response was truncated at the output-token limit.
+            "failed": "true" if result.get("failed") else "false",
+            "partial": "true" if result.get("partial") else "false",
+        }
+        # Turn count is `api_calls` in the result dict (present on every return).
+        if isinstance(result.get("api_calls"), int):
+            metadata["turns"] = str(result["api_calls"])
+        if harness_error:
+            metadata["hermes_error"] = str(harness_error)[:2000]
+
+        # Populate the structured error field too. `code` must be one of OpenAI's Literals, so we
+        # use the generic "server_error"; the real text lives in `message`.
+        response_error = None
+        if harness_error:
+            from openai.types.responses import ResponseError  # pyright: ignore[reportMissingImports]
+
+            response_error = ResponseError(code="server_error", message=str(harness_error)[:2000])
+
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=model_name,
             object="response",
             output=output_items,
+            status="failed" if agent_failed else ("completed" if agent_completed else "incomplete"),
+            error=response_error,
+            metadata=metadata,
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
@@ -379,6 +475,58 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 total_tokens=0,
             ),
         )
+
+    async def responses(
+        self,
+        request: Request,
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+    ) -> NeMoGymResponse:
+        path_params = getattr(request, "path_params", None)
+        rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
+        if not isinstance(rollout_id, str):
+            return await self._create_response(body)
+        episode = await self._create_episode(body, rollout_id=rollout_id)
+        return episode.response.model_copy(
+            update={_INTERNAL_OBSERVATIONS_KEY: episode.observations.model_dump(mode="json")}
+        )
+
+    async def _create_episode(
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        rollout_id: str,
+    ) -> AgentEpisode:
+        observations: Optional[AgentObservationBundle] = None
+
+        def collect(bundle: AgentObservationBundle) -> None:
+            nonlocal observations
+            observations = bundle
+
+        response = await self._create_response(
+            body,
+            rollout_id=rollout_id,
+            observation_collector=collect,
+        )
+        if observations is None:
+            observations = AgentObservationBundle(
+                source="hermes",
+                gaps=[ObservationGap(code="observation_capture_failed")],
+            )
+        observations.gaps.append(
+            ObservationGap(
+                code=(
+                    "no_sandbox_runtime"
+                    if self.config.terminal_backend == "local"
+                    else "sandbox_observation_unavailable"
+                ),
+                detail=(
+                    None
+                    if self.config.terminal_backend == "local"
+                    else f"terminal_backend={self.config.terminal_backend}"
+                ),
+            )
+        )
+        return AgentEpisode(response=response, observations=observations)
 
     async def run(self, request: Request, body: HermesAgentRunRequest) -> HermesAgentVerifyResponse:
         async with self.sem:
@@ -393,15 +541,22 @@ class HermesAgent(SimpleResponsesAPIAgent):
             await raise_for_status(seed_resp)
             cookies = seed_resp.cookies
 
+            rollout_id = self.rollout_id_from_run(body)
             agent_resp = await self.server_client.post(
                 server_name=self.config.name,
-                url_path="/v1/responses",
+                url_path=self.url_path_for_run("/v1/responses", body),
                 json=body.responses_create_params,
                 cookies=cookies,
             )
             await raise_for_status(agent_resp)
             cookies = agent_resp.cookies
             agent_resp_json = await get_response_json(agent_resp)
+            raw_observations = (
+                agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None) if rollout_id is not None else None
+            )
+            observations = (
+                AgentObservationBundle.model_validate(raw_observations) if isinstance(raw_observations, dict) else None
+            )
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -421,9 +576,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
             last = gym_resp.output[-1] if gym_resp.output else None
             naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
 
-            return HermesAgentVerifyResponse.model_validate(
-                verify_json | {"turns_used": turns, "finished_naturally": naturally}
-            )
+            result = verify_json | {"turns_used": turns, "finished_naturally": naturally}
+            if observations is not None:
+                result["ng_agent_observations"] = observations.model_dump(mode="json")
+            return HermesAgentVerifyResponse.model_validate(result)
 
 
 if __name__ == "__main__":

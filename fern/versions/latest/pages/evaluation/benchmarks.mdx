@@ -8,9 +8,9 @@ position: 2
 New to the concepts? Read [Environments vs Benchmarks](/about/concepts/evaluation#environments-vs-benchmarks) first.
 </Info>
 
-A benchmark is a fixed evaluation configuration built on top of an environment's resources server. It adds a frozen dataset split, a `prepare_script` to reproduce that data, and a documented repeat count — so different models and harnesses can be compared fairly across runs and teams.
+A benchmark is a versioned evaluation protocol built on top of an environment's resources server. It declares a canonical dataset split and prompt configuration, a `prepare_script` that reproduces the data, and a documented repeat count so models and harnesses can be compared fairly across runs and teams.
 
-All environments can be used for training. A benchmark is the evaluation-configured overlay on top of the same verifier: same resources server, fixed data.
+All environments can be used for training. A benchmark is the evaluation-configured overlay on top of the same verifier: the same resources server plus a versioned comparison protocol. Benchmarks are not permanently frozen; corrections and improvements may change their data or prompts, but comparison-affecting changes require a new version.
 
 ## How Benchmarks Relate to Environments
 
@@ -37,13 +37,16 @@ aime24_math_with_judge_simple_agent:
 Use the CLI to browse what's available before running:
 
 ```bash
-# List all benchmarks with domain and repeat count
+# List all benchmarks with domain and description
 gym list benchmarks
 
+# Inspect one benchmark, including its agent harness
+gym list benchmarks aime24
+
 # Filter to a capability area
-gym search math
-gym search coding
-gym search safety
+gym search benchmarks math
+gym search benchmarks coding
+gym search benchmarks safety
 
 # Machine-readable output for scripting or CI
 gym list benchmarks --json
@@ -66,7 +69,7 @@ For external benchmarks, reproduce the original reported numbers outside Gym bef
 
 ## Benchmark Categories
 
-NeMo Gym includes 80+ benchmarks across six categories. Use `gym list benchmarks` to browse the full list with domains and repeat counts.
+NeMo Gym includes 80+ benchmarks across six categories. Use `gym list benchmarks` to browse the full list with domains and descriptions.
 
 **Math & Science**
 AIME, IMO, formal proofs (Lean4), physics (critpt, ugphysics), chemistry (ether0, BunsenBench), FrontierScience, and multilingual math. Verification ranges from exact match and math-verify to LLM judges for open-ended proofs.
@@ -106,7 +109,7 @@ Merge shard outputs, customize per-environment key metrics, and compute summary 
 Use BLADE to identify failure modes, sometimes-pass tasks, and what intervention to prioritize next.
 </Card>
 
-<Card title="Reward Profiling" href="/reference/cli-commands#eval-profile">
+<Card title="Reward Profiling" href="/reference/cli-commands#gym-eval-profile">
 Compute pass@1, pass@k, and per-task variance with <code>gym eval profile</code>.
 </Card>
 

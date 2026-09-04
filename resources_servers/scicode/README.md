@@ -7,7 +7,7 @@ ground-truth targets in `test_data.h5` and returns the reward.
 
 - Task type: multi-step code generation (one LLM call per sub-step) + local code execution
 - Domain: `coding`
-- Tasks: 80 problems / 341 sub-steps (`validation` + `test`, the split nemo-skills calls `test_aai`)
+- Tasks: 65 problems / 288 evaluated sub-steps (`test` only, matching the current AA Intelligence Index setup)
 - Reward: binary per problem — `1.0` iff every sub-step passes its tests
 
 > **Run commands and `env.yaml` setup**: see [`benchmarks/scicode/README.md`](../../benchmarks/scicode/README.md),
@@ -54,7 +54,7 @@ fails fast with a clear error rather than scoring everything as wrong.
 
 Two JSONL files coexist with different shapes:
 
-- **`benchmarks/scicode/data/scicode_benchmark.jsonl`** (full 80-row dataset, gitignored; produced by
+- **`benchmarks/scicode/data/scicode_benchmark.jsonl`** (65-row test split, gitignored; produced by
   `prepare.py`). Flat-field: each row has `problem_id`, `sub_steps`, `required_dependencies`, `uuid`.
 - **`resources_servers/scicode/data/example.jsonl`** (5-row fixture, committed).
 

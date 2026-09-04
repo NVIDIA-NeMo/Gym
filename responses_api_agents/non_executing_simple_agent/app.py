@@ -71,7 +71,7 @@ class NonExecutingSimpleAgent(SimpleResponsesAPIAgent):
 
         model_response = await self.server_client.post(
             server_name=self.config.model_server.name,
-            url_path="/v1/responses",
+            url_path=self.url_path_for_request("/v1/responses", request),
             json=body,
         )
         await raise_for_status(model_response)
@@ -108,7 +108,7 @@ class NonExecutingSimpleAgent(SimpleResponsesAPIAgent):
 
         response = await self.server_client.post(
             server_name=self.config.name,
-            url_path="/v1/responses",
+            url_path=self.url_path_for_run("/v1/responses", body),
             json=body.responses_create_params,
             cookies=cookies,
         )

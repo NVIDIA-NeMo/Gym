@@ -13,7 +13,7 @@ import logging
 import re
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import ConfigDict
 
@@ -21,6 +21,7 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import (
@@ -84,6 +85,7 @@ def extract_sql_from_response(text: Optional[str]) -> str:
 
 
 class BirdSqlResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     name: str = "bird_sql"
     bird_sql_dir: str = "resources_servers/bird_sql/.bird_sql"
     max_concurrency: int = 32

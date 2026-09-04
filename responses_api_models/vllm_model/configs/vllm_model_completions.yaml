@@ -1,0 +1,20 @@
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: false
+      # vLLM /v1/completions does not run the reasoning parser. <think>...</think>
+      # blocks (if the base model emits them) come back inline; VLLMConverter
+      # extracts them downstream.
+      uses_reasoning_parser: false
+      uses_interleaved_reasoning: false
+      # Drive vLLM /v1/completions instead of /v1/chat/completions. Primary
+      # use case: base (non-instruct) models with caller-rendered prompts.
+      # The caller's messages must be either a single user message or
+      # [system, user] — anything else (tools, multi-turn, audio) is rejected.
+      use_completions_api: true
+      chat_template_kwargs: null
+      extra_body: null

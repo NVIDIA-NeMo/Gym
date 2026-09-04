@@ -15,6 +15,9 @@ rollout on three independent `{0, 1}` components:
 
 Each component is surfaced both as a top-level numeric field on the verify response and
 inside the `reward_components` field, alongside the summed scalar `reward`.
+The response subclasses `BaseMultiRewardVerifyResponse`, which makes
+`reward_components` required and establishes the shared multi-reward contract. Component
+keys should remain consistent across every task in the environment.
 
 - **Evaluation**: because the components are top-level numeric fields, NeMo Gym's
   aggregate-metrics step reports an independent pass rate for each one. This shows *how*

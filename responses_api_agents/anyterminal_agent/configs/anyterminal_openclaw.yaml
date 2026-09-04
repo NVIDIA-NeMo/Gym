@@ -1,0 +1,37 @@
+anyterminal_openclaw:
+  responses_api_agents:
+    anyterminal_agent:
+      entrypoint: app.py
+      domain: coding
+      description: Terminal Bench run by OpenClaw natively inside the task container.
+      value: Evaluate terminal-task capabilities on Terminal Bench with any Gym agent.
+
+      agent_server_module: responses_api_agents.openclaw_agent.app
+      agent_server_class: OpenClawAgent
+      agent_config_class: OpenClawAgentConfig
+      agent_kwargs:
+        model: model
+        openclaw_version: "2026.6.11"
+        timeout: 3600
+        setup_timeout: 1200
+        thinking: "off"
+        node_bin_dir: "/agent_deps_mount/bin"
+        openclaw_config:
+          agents:
+            defaults:
+              workspace: "."
+          tools:
+            profile: coding
+
+      container_formatter: "docker://{docker_image}"
+
+      concurrency: 6
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/anyterminal_agent/data/terminal_bench.jsonl

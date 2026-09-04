@@ -1,0 +1,20 @@
+# Chain to the ToolSandbox resources server config
+config_paths:
+  - resources_servers/toolsandbox/configs/toolsandbox.yaml
+
+toolsandbox_benchmark_resources_server:
+  _inherit_from: toolsandbox
+
+toolsandbox_benchmark_agent:
+  _inherit_from: toolsandbox_agent
+  responses_api_agents:
+    toolsandbox_agent:
+      resources_server:
+        name: toolsandbox_benchmark_resources_server
+      datasets:
+      - name: toolsandbox
+        type: benchmark
+        jsonl_fpath: benchmarks/toolsandbox/data/toolsandbox_benchmark.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/toolsandbox/prepare.py
+        num_repeats: 1
