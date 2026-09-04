@@ -3,6 +3,13 @@
 Runs a [LangChain DeepAgents](https://python.langchain.com/docs/experimental/deep_agents/) agent as a
 native NeMo Gym agent server — model calls go through Gym's own `model_server` (on-policy).
 
+`app.py`'s `DeepAgentsAgent` is the generic base: it owns the Gym Responses API bridge and the request/response
+plumbing, but does not itself define a `deepagents` graph. `reasoning_search_agent.py` is one concrete
+subclass — a sample usage wiring `TavilySearch` in via `build_agent()` — not the thing being wrapped. To
+run a different `deepagents` graph, subclass `DeepAgentsAgent` the same way rather than modifying
+`reasoning_search_agent.py`; this mirrors `langgraph_agent/`, whose `app.py` base likewise ships several
+concrete subclasses (`orchestrator_agent.py`, `reflection_agent.py`, etc.) side by side in one directory.
+
 ## Quick start
 
 ### env.yaml
@@ -67,6 +74,24 @@ gym eval run --no-serve --agent reasoning_gym_langchain_deepagents_agent_model_s
 
 Expect a `mean/reward` comparable to `examples/langchain_deepagent`'s documented baseline (1.0 over the
 same 5 rows) — the underlying agent and model are unchanged, only the calling architecture differs.
+
+## Tool ownership: agent vs. resources server
+
+Tools belong on the agent by design. `reasoning_search_agent.py` above wires `TavilySearch` straight into
+`create_deep_agent(tools=[...])` inside the agent server, calling the Tavily API directly with
+`tavily_api_key`. The `tavily_search` resources server it can pair with does define its own `web_search`
+endpoint, but this agent never calls it — only its `verify()` endpoint is used, for grading.
+
+This is the default shape because tool definitions (schemas, call handling, framework-specific bindings
+like `langchain_tavily.TavilySearch`) are inherently agent-harness concerns — they travel with the
+framework you're wrapping, not with task verification. Keeping them in the agent server also lets the same
+resources server pair with agent servers that expose the same capability differently (e.g. a different
+search tool implementation, or a framework with its own native tool-calling conventions).
+
+If you do want a tool centralized in the resources server instead — e.g. so it's shared identically across
+multiple agent harnesses, or so its implementation can be versioned/tested alongside the verifier — that's
+a supported alternative, not the default. See other resources servers (e.g. `tavily_search`'s own
+tool-call endpoints when used with non-deepagents agents) for that pattern.
 
 ## Config fields
 
