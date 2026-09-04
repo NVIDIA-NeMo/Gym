@@ -1069,11 +1069,10 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
     base_url: str
     api_key: str
-    no_infinite_endpoint_retries: bool = False
 
     internal: bool = Field(
         default=False,
-        description="Set this to true if this particular client is only used to call internal NeMo Gym servers.",
+        description="Set this to true for internal NeMo Gym servers, which may retry indefinitely.",
     )
 
     max_connection_retries: Optional[int] = Field(
@@ -1108,8 +1107,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             response = await request(**request_kwargs)
 
             if response.status in RETRY_ERROR_CODES:
-                # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
-                if response.status in RATE_LIMIT_ERROR_CODES and not self.no_infinite_endpoint_retries:
+                # Internal NeMo Gym servers extend max tries for retryable errors.
+                if response.status in RATE_LIMIT_ERROR_CODES and self.internal:
                     max_num_tries += 1
 
                 content = (await response.content.read()).decode()

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from copy import deepcopy
-from types import UnionType
+from types import SimpleNamespace, UnionType
 from typing import (
     Annotated,
     Any,
@@ -27,7 +27,7 @@ from typing import (
     get_origin,
     get_type_hints,
 )
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import openai
 import pytest
@@ -127,21 +127,16 @@ class TestOpenAIUtils:
     async def test_NeMoGymAsyncOpenAI(self) -> None:
         NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
 
-    async def test_no_infinite_endpoint_retries(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        response = MagicMock(status=504)
-        response.content.read = AsyncMock(return_value=b"gateway timeout")
-        request = AsyncMock(return_value=response)
+    async def test_external_endpoint_retries_are_bounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        response = SimpleNamespace(status=504, content=SimpleNamespace(read=AsyncMock(return_value=b"")))
+        request = AsyncMock(side_effect=[response] * MAX_NUM_TRIES + [SimpleNamespace(status=200)])
         monkeypatch.setattr("nemo_gym.openai_utils.request", request)
         monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
-        monkeypatch.setattr(
-            "nemo_gym.openai_utils.raise_for_status", AsyncMock(side_effect=RuntimeError("gateway timeout"))
-        )
+        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", AsyncMock(side_effect=RuntimeError))
 
-        client = NeMoGymAsyncOpenAI(
-            api_key="abc", base_url="https://example.com/v1", no_infinite_endpoint_retries=True
-        )
-        with pytest.raises(RuntimeError, match="gateway timeout"):
-            await client._request_with_retry(method="POST", url="https://example.com/v1/chat/completions")
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+        with pytest.raises(RuntimeError):
+            await client._request_with_retry()
 
         assert request.await_count == MAX_NUM_TRIES
 

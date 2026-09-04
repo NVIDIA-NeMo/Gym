@@ -153,8 +153,6 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     base_url: Union[str, List[str]]
     api_key: str
     model: str
-    # Do not increment max_num_tries for retryable endpoint errors.
-    no_infinite_endpoint_retries: bool = False
     return_token_id_information: bool
     # Request inline prompt and generation token IDs from compatible vLLM endpoints.
     request_prompt_and_generation_token_ids: bool = False
@@ -301,7 +299,6 @@ class VLLMModel(SimpleResponsesAPIModel):
             NeMoGymAsyncOpenAI(
                 base_url=base_url,
                 api_key=self.config.api_key,
-                no_infinite_endpoint_retries=self.config.no_infinite_endpoint_retries,
                 default_headers=self.config.default_headers,
                 max_connection_retries=(
                     self.config.endpoint_connection_retries if self.config.endpoint_file else None
@@ -1481,7 +1478,6 @@ class VLLMModel(SimpleResponsesAPIModel):
             NeMoGymAsyncOpenAI(
                 base_url=url,
                 api_key=self.config.api_key,
-                no_infinite_endpoint_retries=self.config.no_infinite_endpoint_retries,
                 default_headers=self.config.default_headers,
                 max_connection_retries=self.config.endpoint_connection_retries,
             )
