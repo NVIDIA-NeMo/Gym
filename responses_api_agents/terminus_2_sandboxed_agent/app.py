@@ -93,7 +93,7 @@ class Terminus2AgentVerifyResponse(BaseVerifyResponse):
     model_call_time_pct: float
     terminus2_time_taken: float
     model_calls_gt_10min: int
-    usages: List[NeMoGymResponseUsage]
+    usages: List[Optional[NeMoGymResponseUsage]]
     num_proactive_compactions: int
     num_compactions: int
     error: Optional[str]
