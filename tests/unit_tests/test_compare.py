@@ -27,7 +27,7 @@ from nemo_gym.comparison.loading import (
     resolve_agent_selections,
 )
 from nemo_gym.comparison.report import render_markdown, summary_lines, write_reports
-from nemo_gym.comparison.runner import build_comparison_result, resolve_output_dir
+from nemo_gym.comparison.runner import build_comparison_result, resolve_output_dir, run_comparison
 from nemo_gym.comparison.schema import ComparisonConfig
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.path_utils import aggregate_metrics_path_for
@@ -1027,3 +1027,112 @@ class TestReportEdgeCases:
         markdown = render_markdown(result)
         assert "## Warnings" in markdown
         assert "extra" in markdown
+
+
+class TestStatsWiring:
+    """`gym eval compare`'s default statistics step (`cli.eval._run_stats_step_for_compare`).
+
+    This is a side effect layered on top of `compare`, not a change to it: `compare_report.*` --
+    same schema, same bytes -- is asserted unaffected. The statistics themselves are
+    `nemo_gym.statistical_tests`'s own responsibility and are tested there; this only checks the
+    wiring (where the extra artifacts land, and that nothing about `compare`'s own output moved).
+    """
+
+    def _config(self, tmp_path: Path) -> ComparisonConfig:
+        baseline = _write_run(
+            tmp_path,
+            "run_a",
+            [
+                _entry(
+                    agent_metrics={"mean/reward": 0.75},
+                    key_metrics={"mean/reward": 0.75},
+                    groups=[_group(i, [1.0, 1.0] if i % 2 == 0 else [0.0, 1.0]) for i in range(6)],
+                )
+            ],
+        )
+        candidate = _write_run(
+            tmp_path,
+            "run_b",
+            [
+                _entry(
+                    agent_metrics={"mean/reward": 0.5},
+                    key_metrics={"mean/reward": 0.5},
+                    groups=[_group(i, [1.0, 0.0] if i % 2 == 0 else [0.0, 0.0]) for i in range(6)],
+                )
+            ],
+        )
+        return ComparisonConfig.model_validate(
+            {
+                "baseline_rollouts_jsonl_fpath": str(baseline),
+                "candidate_rollouts_jsonl_fpaths": [str(candidate)],
+            }
+        )
+
+    def test_compare_report_is_byte_identical_with_or_without_the_stats_step(self, tmp_path):
+        from nemo_gym.cli.eval import _run_stats_step_for_compare
+
+        config = self._config(tmp_path)
+        result, written = run_comparison(config, "gym eval compare ...")
+        (compare_json,) = [p for p in written if p.name == "compare_report.json"]
+        before = compare_json.read_bytes()
+
+        _run_stats_step_for_compare(config, {})
+
+        after = compare_json.read_bytes()
+        assert before == after
+        # And the schema itself never gained a statistics field.
+        payload = orjson.loads(before)
+        assert set(payload.keys()) == {
+            "schema_version",
+            "generated_at",
+            "nemo_gym_version",
+            "command",
+            "baseline",
+            "candidates",
+            "comparisons",
+            "skipped_agents",
+            "warnings",
+        }
+        assert "statistical_tests" not in payload["comparisons"][0]
+
+    def test_stats_step_writes_its_own_subdirectory_next_to_compare_report(self, tmp_path):
+        from nemo_gym.cli.eval import _run_stats_step_for_compare
+        from nemo_gym.statistical_tests.schema import STATS_SUBDIR_NAME
+
+        config = self._config(tmp_path)
+        run_comparison(config, "gym eval compare ...")
+        _run_stats_step_for_compare(config, {})
+
+        run_b_dir = tmp_path / "run_b"
+        assert {"compare_report.md", "compare_report.json", STATS_SUBDIR_NAME}.issubset(
+            {p.name for p in run_b_dir.iterdir()}
+        )
+        stats_files = list((run_b_dir / STATS_SUBDIR_NAME).iterdir())
+        assert stats_files, "expected at least one statistical_tests/ artifact"
+
+    def test_stats_output_dir_flag_redirects_without_nesting(self, tmp_path):
+        from nemo_gym.cli.eval import _run_stats_step_for_compare
+        from nemo_gym.statistical_tests.schema import STATS_SUBDIR_NAME
+
+        config = self._config(tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        run_comparison(config, "gym eval compare ...")
+        _run_stats_step_for_compare(config, {"stats_output_dirpath": str(elsewhere)})
+
+        assert elsewhere.is_dir()
+        assert not (elsewhere / STATS_SUBDIR_NAME).exists()
+        assert list(elsewhere.iterdir())
+
+    def test_metric_and_margin_overrides_flow_through(self, tmp_path):
+        from nemo_gym.cli.eval import _run_stats_step_for_compare
+        from nemo_gym.statistical_tests.schema import STATS_SUBDIR_NAME
+
+        config = self._config(tmp_path)
+        run_comparison(config, "gym eval compare ...")
+        _run_stats_step_for_compare(config, {"metric": ["reward"], "margin": 0.5, "alpha": 0.2})
+
+        (stats_json,) = (tmp_path / "run_b" / STATS_SUBDIR_NAME).glob("*.json")
+        payload = orjson.loads(stats_json.read_bytes())
+        assert payload["results"][0]["metric"] == "reward"
+        assert payload["results"][0]["margin"] == 0.5
+        assert payload["results"][0]["alpha"] == 0.2

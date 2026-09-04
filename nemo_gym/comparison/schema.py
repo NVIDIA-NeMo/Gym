@@ -20,11 +20,11 @@ restriction later is a behavior change rather than a schema change.
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.config_types import RunSelectionConfig
 
 
 ReportFormat = Literal["md", "json", "both"]
@@ -38,7 +38,7 @@ MAX_CANDIDATES = 1
 MAX_FLIPS_SHOWN = 10
 
 
-class ComparisonConfig(BaseNeMoGymCLIConfig):
+class ComparisonConfig(RunSelectionConfig):
     """Compare a baseline eval run against a candidate run.
 
     Reads only each run's `<stem>_aggregate_metrics.json`, derived from the rollouts JSONL path you
@@ -57,39 +57,7 @@ class ComparisonConfig(BaseNeMoGymCLIConfig):
     set `baseline_aggregate_metrics_fpath` and `candidate_aggregate_metrics_fpaths`.
     """
 
-    baseline_rollouts_jsonl_fpath: str = Field(
-        description="Baseline run's rollouts JSONL, as passed to `gym eval run --output`. Used to derive "
-        "`<stem>_aggregate_metrics.json`; the JSONL itself is not read."
-    )
-    candidate_rollouts_jsonl_fpaths: List[str] = Field(
-        min_length=1,
-        description="Candidate runs' rollouts JSONL paths (comma-separated via --candidates).",
-    )
-    baseline_aggregate_metrics_fpath: Optional[str] = Field(
-        default=None,
-        description="Override for the baseline's aggregate-metrics JSON. Defaults to the "
-        "`<stem>_aggregate_metrics.json` sibling of baseline_rollouts_jsonl_fpath.",
-    )
-    candidate_aggregate_metrics_fpaths: Optional[List[str]] = Field(
-        default=None,
-        description="Overrides for the candidates' aggregate-metrics JSON files. When set, must have the "
-        "same length as candidate_rollouts_jsonl_fpaths.",
-    )
-
-    agent_name: Optional[str] = Field(
-        default=None,
-        description="Agent to compare on every side. When unset, compares every agent name present in all "
-        "runs. Overridden per side by baseline_agent_name / candidate_agent_names.",
-    )
-    baseline_agent_name: Optional[str] = Field(
-        default=None,
-        description="Agent to read from the baseline's metrics. Takes precedence over agent_name.",
-    )
-    candidate_agent_names: Optional[List[str]] = Field(
-        default=None,
-        description="Agent to read from each candidate's metrics, by position. When set, must have the same "
-        "length as candidate_rollouts_jsonl_fpaths. Takes precedence over agent_name.",
-    )
+    MAX_CANDIDATES: ClassVar[int] = MAX_CANDIDATES
 
     output_dirpath: Optional[str] = Field(
         default=None,
@@ -100,25 +68,6 @@ class ComparisonConfig(BaseNeMoGymCLIConfig):
         default="both",
         description="Which report artifacts to write: `md`, `json`, or `both`.",
     )
-
-    @model_validator(mode="after")
-    def _check_candidate_parallel_lists(self) -> "ComparisonConfig":
-        num_candidates = len(self.candidate_rollouts_jsonl_fpaths)
-        if num_candidates > MAX_CANDIDATES:
-            raise ValueError(
-                f"{num_candidates} candidates were given, but comparing more than {MAX_CANDIDATES} candidate "
-                "is not supported yet. Give a single candidate run."
-            )
-        for field_name, value in (
-            ("candidate_agent_names", self.candidate_agent_names),
-            ("candidate_aggregate_metrics_fpaths", self.candidate_aggregate_metrics_fpaths),
-        ):
-            if value is not None and len(value) != num_candidates:
-                raise ValueError(
-                    f"{field_name} has {len(value)} entries but {num_candidates} candidate run(s) were given. "
-                    "Give one entry per candidate, in the same order."
-                )
-        return self
 
 
 class MetricValue(BaseModel):

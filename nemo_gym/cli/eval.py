@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from copy import deepcopy
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import Field
@@ -602,16 +602,67 @@ Agent-level metrics: {agent_level_metrics_fpath}
 Repeat-level metrics: {repeat_level_metrics_fpath}""")
 
 
+def _run_stats_step_for_compare(config: Any, overrides: Dict[str, Any]) -> None:
+    """Build the `stat-test` config for `gym eval compare`'s default stats step and run it.
+
+    `overrides` carries the raw stats-flag values off `eval compare`'s own global config dict
+    (`metric`/`margin`/`alpha`/`stats_output_dirpath`) -- `stats_output_dirpath` is remapped to
+    `output_dirpath` here since `--output-dir` on `compare` must keep controlling only
+    `compare_report.*`, not this step's own output location.
+    """
+    from nemo_gym.statistical_tests.registry import resolve_stat_test
+    from nemo_gym.statistical_tests.schema import DEFAULT_STAT_TEST
+
+    stats_config_dict = config.model_dump(exclude={"output_dirpath"})
+    stats_config_dict.update({k: v for k, v in overrides.items() if k != "stats_output_dirpath"})
+    if overrides.get("stats_output_dirpath"):
+        stats_config_dict["output_dirpath"] = overrides["stats_output_dirpath"]
+    test = resolve_stat_test(stats_config_dict.get("test") or DEFAULT_STAT_TEST)
+    stat_test(test.config_type.model_validate(stats_config_dict))
+
+
 @exit_cleanly_on_config_error
 def compare() -> None:  # pragma: no cover
     from nemo_gym.comparison.report import render_key_metrics_tables, summary_lines
     from nemo_gym.comparison.runner import invoked_command, run_comparison
     from nemo_gym.comparison.schema import ComparisonConfig
 
-    config = ComparisonConfig.model_validate(get_global_config_dict())
+    global_config_dict = get_global_config_dict()
+    config = ComparisonConfig.model_validate(global_config_dict)
 
     result, written = run_comparison(config, invoked_command())
 
     for table in render_key_metrics_tables(result):
         print_rich_table(table)
     print("\n".join(summary_lines(result, written)))
+
+    if not global_config_dict.get("no_stats", False):
+        _run_stats_step_for_compare(
+            config,
+            {
+                "metric": global_config_dict.get("metric"),
+                "margin": global_config_dict.get("margin"),
+                "alpha": global_config_dict.get("alpha", 0.05),
+                "stats_output_dirpath": global_config_dict.get("stats_output_dirpath"),
+            },
+        )
+
+
+@exit_cleanly_on_config_error
+def stat_test(config: Optional[Any] = None) -> None:  # pragma: no cover
+    from nemo_gym.statistical_tests.common import invoked_command
+    from nemo_gym.statistical_tests.registry import resolve_stat_test, run_stat_test
+    from nemo_gym.statistical_tests.schema import DEFAULT_STAT_TEST
+
+    standalone = config is None
+    if standalone:
+        global_config_dict = get_global_config_dict()
+        test = resolve_stat_test(global_config_dict.get("test") or DEFAULT_STAT_TEST)
+        config = test.config_type.model_validate(global_config_dict)
+    else:
+        test = resolve_stat_test(config.test)
+
+    # Record whichever command actually ran: sys.argv holds *its* overrides, not stat-test's.
+    report, written = run_stat_test(test, config, invoked_command("stat-test" if standalone else "compare"))
+
+    print("\n".join(test.summary(report, written)))
