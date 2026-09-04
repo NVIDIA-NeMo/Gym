@@ -468,6 +468,14 @@ class RewardProfiler:
                 task_idx_to_rollout_infos[group_key],
                 key=lambda r: r[ROLLOUT_INDEX_KEY_NAME],
             )
+            group_metrics["raw_rewards_and_lengths"] = [
+                {
+                    key: info[key]
+                    for key in (ROLLOUT_INDEX_KEY_NAME, "reward", "input_tokens", "output_tokens", "total_tokens")
+                    if key in info
+                }
+                for info in group_metrics["rollout_infos"]
+            ]
 
         agent_level_df = df.drop(columns=[ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME]).groupby("agent_name")
         agent_level_metrics = self.calculate_metrics_single_df(agent_level_df)
