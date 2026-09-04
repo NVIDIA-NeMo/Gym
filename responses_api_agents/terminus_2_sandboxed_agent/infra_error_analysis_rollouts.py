@@ -15,6 +15,7 @@ args = parser.parse_args()
 
 
 f_out_path = "temp.jsonl"
+num_wrote_out = 0
 counts = Counter()
 with open(args.fpath, "rb") as f, open(f_out_path, "wb") if args.group_to_write_out else nullcontext() as f_out:
     for i, line in enumerate(f):
@@ -53,7 +54,8 @@ with open(args.fpath, "rb") as f, open(f_out_path, "wb") if args.group_to_write_
         counts.update(count_dict)
         counts["Total samples with reward=0"] += 1
 
-        if args.group_to_write_out:
+        if args.group_to_write_out and count_dict[args.group_to_write_out]:
+            num_wrote_out += 1
             row = row | counts
             f_out.write(orjson.dumps(row) + b"\n")
 
@@ -64,4 +66,4 @@ for k, v in counts.items():
 print(print_str)
 
 if args.group_to_write_out:
-    print(f"Wrote out {stat(f_out_path).st_size / 1024**2} MB to {f_out_path}")
+    print(f"Wrote out {num_wrote_out} rows ({stat(f_out_path).st_size / 1024**2} MB) to {f_out_path}")
