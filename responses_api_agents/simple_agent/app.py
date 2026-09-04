@@ -92,7 +92,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         model_calls: list[ModelCallRef] = []
         turns: list[TrajectoryTurn] = []
         trajectory_gaps: list[ObservationGap] = []
-        body = body.model_copy(deep=True)
+        body = body.model_copy()
 
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
