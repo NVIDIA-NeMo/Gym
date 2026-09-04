@@ -58,7 +58,12 @@ per-kind no-answer rates) is done downstream by the recipe's `sdg/score_if.py`.
   chat requests with `extra="forbid"`, and stock nv-OpenHands sends `aws_region_name: null` and `name` on tool messages, both
   outside the OpenAI chat schema; the fork omits them (in `LLM.completion` and in `nemo_gym_client.py`, which the OpenCode and
   Terminus agents use instead of `LLM.completion`).
-- From `swe_agents` on this branch: the hook `resolved_tool_name_overrides`, and `_dump_tool_for_replay`, which dumps the
+- `empty_response_retries` (config, default 0; this config sets 2): exported to the agent as `OPENCODE_EMPTY_RESPONSE_RETRIES`.
+  The OpenCode agent has no finish tool, so a tool-free reply ends the episode; a reply with neither content nor tool calls
+  (a reasoning-only turn, roughly one turn in ten for nemotron-3.5-lightning) would end it by accident. With N > 0 the fork's
+  agent re-issues the identical request up to N times (no message is added) and only a still-empty reply reaches the finish path.
+- From `swe_agents` on this branch: the hook `resolved_agent_env` (extra environment variables exported to the agent process, used
+  here for `TOOL_NAME_OVERRIDES` and `OPENCODE_EMPTY_RESPONSE_RETRIES`), and `_dump_tool_for_replay`, which dumps the
   response tools so they re-validate under the pinned openai 2.44.0 schema (`defer_loading` is a non-nullable bool there).
 
 ## Tests

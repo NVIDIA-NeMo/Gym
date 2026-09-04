@@ -44,6 +44,14 @@ class SWEIFWrapperConfig(swe.SWEBenchWrapperConfig):
             "verify response."
         ),
     )
+    empty_response_retries: int = Field(
+        default=0,
+        description=(
+            "Exported to the agent as OPENCODE_EMPTY_RESPONSE_RETRIES: the OpenCode agent of the pinned nv-OpenHands fork "
+            "re-issues the identical request up to this many times when the model returns neither content nor tool calls "
+            "(a reasoning-only turn), instead of ending the episode on it. 0 (default) keeps the harness behaviour."
+        ),
+    )
 
 
 class SWEIFVerifyResponse(swe.SWEBenchVerifyResponse):
@@ -68,14 +76,19 @@ class SWEIFWrapper(swe.SWEBenchWrapper):
         tag_replay_observation_suffix(messages, spec)
         return orjson.dumps(messages).decode()
 
-    # ---- per-row instruction surfaces: tool binding and prompt templates
+    # ---- per-row instruction surfaces (tool binding, prompt templates) and the agent environment
     def _setup_params(self, body: swe.NeMoGymResponseCreateParamsNonStreaming):
         params, dataset_processor = super()._setup_params(body)
         md = body.metadata or {}
         changed = False
+        agent_env: Dict[str, str] = {}
         overrides = normalize_tool_name_overrides(md.get("tool_name_overrides"))
         if overrides:
-            params.resolved_tool_name_overrides = overrides
+            agent_env["TOOL_NAME_OVERRIDES"] = overrides
+        if self.config.empty_response_retries > 0:
+            agent_env["OPENCODE_EMPTY_RESPONSE_RETRIES"] = str(self.config.empty_response_retries)
+        if agent_env:
+            params.resolved_agent_env = agent_env
             changed = True
         sp_path, up_path = write_row_templates(
             params.persistent_dir, md.get("system_prompt_template_text"), md.get("user_prompt_template_text")
@@ -92,8 +105,8 @@ class SWEIFWrapper(swe.SWEBenchWrapper):
                     "swe_if_agents needs agent_framework: openhands "
                     "(per-row tool names and templates are OpenHands features)"
                 )
-            # The base built the agent command before it knew about the row's surfaces: rebuild from the amended
-            # params so the mounts and exports see them.
+            # The base built the agent command before it knew about the row's surfaces and the agent environment:
+            # rebuild from the amended params so the mounts and exports see them.
             params.agent_command = swe.OpenHandsHarnessProcessor(config=params).get_run_command()
             params.agent_apptainer_command_str = self._build_apptainer_command(params, params.agent_command)
             params.agent_script = params.agent_script_path.read_text()

@@ -276,11 +276,10 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
     resolved_agent_cls: str = "CodeActAgent"
     resolved_diversify_tool_names: Optional[bool] = False
     resolved_camel_case_tool_names: Optional[bool] = False
-    # Explicit per-instance tool names for the OpenHands agent: a JSON object mapping tool-name identifiers
-    # (e.g. BASH_TOOL_NAME) to the concrete names the episode must expose. Exported as TOOL_NAME_OVERRIDES to the agent
-    # process; takes precedence over DIVERSIFY_TOOL_NAMES / CAMEL_CASE_TOOL_NAMES in nv-OpenHands. Set per request by
-    # wrappers that need a fixed binding (see responses_api_agents/swe_if_agents); None = harness defaults.
-    resolved_tool_name_overrides: Optional[str] = None
+    # Extra environment variables exported to the OpenHands agent process for this instance (name -> value), e.g.
+    # TOOL_NAME_OVERRIDES (explicit per-episode tool names, identifier-keyed JSON) or OPENCODE_EMPTY_RESPONSE_RETRIES.
+    # Set per request by wrappers that need them (see responses_api_agents/swe_if_agents); None = harness defaults.
+    resolved_agent_env: Optional[Dict[str, str]] = None
 
     # Set later
     eval_command: Optional[ExecuteContainerCommandArgs] = None
@@ -1870,10 +1869,9 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
         else:
             camel_case_tool_names_cmd = ""
 
-        if self.config.resolved_tool_name_overrides:
-            tool_name_overrides_cmd = f"export TOOL_NAME_OVERRIDES={shlex.quote(self.config.resolved_tool_name_overrides)} && "
-        else:
-            tool_name_overrides_cmd = ""
+        agent_env_cmd = "".join(
+            f"export {name}={shlex.quote(str(value))} && " for name, value in (self.config.resolved_agent_env or {}).items()
+        )
 
         workspace_check_cmd = ""
 
@@ -1918,7 +1916,7 @@ AGENT_FRAMEWORK_COMMIT={commit} \\
             f"{crypto_fix_cmd}"
             f"{diversify_tool_names_cmd}"
             f"{camel_case_tool_names_cmd}"
-            f"{tool_name_overrides_cmd}"
+            f"{agent_env_cmd}"
             f"echo {shlex.quote(config_str)} >{config_file_path} && "
             f"{baseline_fix_cmd}"
             # f" export EVAL_OUTPUT_DIR={eval_dir_in_openhands} && "

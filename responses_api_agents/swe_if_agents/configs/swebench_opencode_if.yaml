@@ -15,7 +15,7 @@ swe_agents:
       agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
       agent_framework_repo: https://github.com/jialeiwang/nv-OpenHands.git
-      agent_framework_commit: fe33c54cf5f2018aa3eec15a1b62ff7c476e9d4f  # pragma: allowlist secret
+      agent_framework_commit: 77a7d354c5a37739d77e23e5fc538dbc3baebfc6  # pragma: allowlist secret
 
       # Container configuration
       container_formatter: ???
@@ -37,6 +37,7 @@ swe_agents:
 
       # Grade the row's constraints and attach if_constraints to the verify response (reward stays the SWE-bench outcome).
       if_grading: true
+      empty_response_retries: 2   # re-sample reasoning-only (empty) replies instead of ending the episode; 0 = off
 
       # Optional model server reference
       model_server:

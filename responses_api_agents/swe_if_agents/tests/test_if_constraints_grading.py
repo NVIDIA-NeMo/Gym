@@ -320,7 +320,7 @@ def test_app_py_wiring():
     assert "if_constraints: Optional[List[Dict[str, Any]]] = None" in src
     assert "records = grade_row(" in src and "if_constraints=records" in src
     assert "reward=" not in src.split("async def run(")[1], "run() must not recompute the reward"
-    assert "resolved_tool_name_overrides" in src and "write_row_templates(" in src and "tag_replay_observation_suffix(" in src
+    assert "resolved_agent_env" in src and "write_row_templates(" in src and "tag_replay_observation_suffix(" in src
 
 
 
