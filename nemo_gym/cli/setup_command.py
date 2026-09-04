@@ -131,6 +131,8 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     resolved_dir_path = dir_path.resolve()
     gym_source_root = PARENT_DIR.resolve()
+    # TODO: Move the conversational tool use simulation server to Gym's standard two-level
+    # ``<server_type>/<server_name>`` hierarchy, then remove this editable-checkout fallback.
     # Most server directories are ``<server_type>/<name>``, but some built-ins (for example,
     # conversational_tool_use/simulation) are nested more deeply.  Keep the historical two-level
     # check for external projects, and also recognize any server contained in this editable Gym

@@ -415,6 +415,8 @@ class RunHelper:  # pragma: no cover
             server_rel_path = Path(first_key, second_key)
             dir_path = _resolve_server_dir(server_rel_path)
 
+            # TODO: Move the conversational tool use simulation server to Gym's standard two-level
+            # ``<server_type>/<server_name>`` hierarchy, then remove this variable-depth path handling.
             # Child apps may import through their top-level component package (for example,
             # ``responses_api_agents.conversational_tool_use``). Derive the component root from
             # the full relative path rather than assuming every server is exactly two levels deep.
