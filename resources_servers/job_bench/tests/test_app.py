@@ -86,3 +86,34 @@ def test_judge_failure_is_not_scored(monkeypatch, tmp_path: Path) -> None:
 
     with pytest.raises(JudgeError, match="judge unavailable"):
         server._judge(output_dir, rubrics_file)
+
+
+def test_unparseable_judge_response_is_scored_as_failure(monkeypatch, tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "answer.txt").write_text("answer", encoding="utf-8")
+    rubrics_file = tmp_path / "RUBRICS.json"
+    rubric = {"rubric": "required", "weight": 1}
+    rubrics_file.write_text(json.dumps({"rubrics": [rubric]}), encoding="utf-8")
+    monkeypatch.setattr(app.judge, "extract_all_file_contents", lambda _: "answer")
+    monkeypatch.setattr(app.judge, "collect_image_attachments", lambda _: [])
+    monkeypatch.setattr(
+        app.judge,
+        "judge_rubric",
+        lambda *_args: (
+            app.judge.build_failed_rubric_result(0, rubric, "unparseable response"),
+            {"api_exit_code": 1, "error": "unparseable response"},
+        ),
+    )
+    server = app.JobBenchResourcesServer.model_construct(
+        config=app.JobBenchConfig.model_construct(
+            judge_model="grok-4.3",
+            judge_base_url="https://api.x.ai/v1",
+            judge_api_key="test",
+            max_judge_workers=1,
+        )
+    )
+
+    scorecard, _ = server._judge(output_dir, rubrics_file)
+
+    assert scorecard["normalized_score"] == 0

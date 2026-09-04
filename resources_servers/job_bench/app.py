@@ -155,7 +155,7 @@ class JobBenchResourcesServer(SimpleResourcesServer):
                 for index, rubric in enumerate(rubrics)
             ]
             judged = [future.result() for future in futures]
-        errors = [debug["error"] for _, debug in judged if debug["api_exit_code"]]
+        errors = [debug["error"] for _, debug in judged if debug["api_exit_code"] == 2]
         if errors:
             raise JudgeError("; ".join(errors))
         results = [result for result, _ in judged]
