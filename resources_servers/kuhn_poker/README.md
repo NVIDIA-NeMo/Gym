@@ -4,7 +4,7 @@ This environment implements seeded, two-player Kuhn Poker using NeMo Gym's
 alternating-turn multi-agent API. The resources server owns the deal, legal
 actions, turn order, invalid-move handling, and zero-sum rewards. Player 0 and
 Player 1 are independent keyboard-agent servers, each running in its own
-terminal. A dedicated rollout-orchestrator server owns `/run` and sends the
+terminal. A dedicated processor server owns `/run` and sends the
 active seat's private observation to that seat's standard `/v1/responses`
 endpoint. The participant agents make one policy decision per request and do
 not implement the rollout loop.
@@ -12,17 +12,17 @@ not implement the rollout loop.
 The initial integration is interactive. One Gym rollout represents one hand and
 stores both seat trajectories in `agent_trajectories`, both chip payoffs in
 `agent_rewards`, and Player 0's payoff in the legacy scalar `reward`. Dataset
-rows select this rollout protocol with `orchestrator_ref`.
+rows select this rollout protocol with `processor_ref`.
 
 ## Run everything in one terminal
 
-Omit `--no-serve` to start the head server, resources server, orchestrator, and
+Omit `--no-serve` to start the head server, resources server, processor, and
 both keyboard agents; play one hand; and shut everything down from one command:
 
 ```bash
 gym eval run \
   --config resources_servers/kuhn_poker/configs/kuhn_poker.yaml \
-  --agent kuhn_poker_orchestrator \
+  --agent kuhn_poker_processor \
   --split validation \
   --output results/kuhn_poker.jsonl \
   --concurrency 1 \
@@ -42,7 +42,7 @@ provider configured by `policy_base_url`, `policy_api_key`, and
 ```bash
 gym eval run \
   --config resources_servers/kuhn_poker/configs/kuhn_poker_llm.yaml \
-  --agent kuhn_poker_orchestrator \
+  --agent kuhn_poker_processor \
   --split validation \
   --output results/kuhn_poker_llm.jsonl \
   --concurrency 1 \
@@ -60,13 +60,13 @@ The examples below use head-server port `11001`; use the default `11000` if it
 is free. Every command must use the same config and head-server address. Stop
 any previously running Kuhn Poker servers before starting.
 
-1. Start the shared head server, environment, and orchestrator together in the
+1. Start the shared head server, environment, and processor together in the
    coordinator terminal (Terminal 1):
 
    ```bash
    gym env head \
      --instance kuhn_poker \
-     --instance kuhn_poker_orchestrator \
+     --instance kuhn_poker_processor \
      --config resources_servers/kuhn_poker/configs/kuhn_poker.yaml \
      +head_server.host=127.0.0.1 +head_server.port=11001
    ```
@@ -92,7 +92,7 @@ any previously running Kuhn Poker servers before starting.
 
    ```bash
    gym eval run --no-serve \
-     --agent kuhn_poker_orchestrator \
+     --agent kuhn_poker_processor \
      --input resources_servers/kuhn_poker/data/example.jsonl \
      --output results/kuhn_poker.jsonl \
      --concurrency 1 \
@@ -102,7 +102,7 @@ any previously running Kuhn Poker servers before starting.
 The active player's prompt includes only that player's private card and the
 public betting history. Invalid or ambiguous bracketed actions are retried once
 by default, then the acting player forfeits. The participant communication uses
-the standard `/v1/responses` endpoint; the orchestrator owns the episode-level
+the standard `/v1/responses` endpoint; the processor owns the episode-level
 `/run` endpoint.
 
 Prefetching beforehand is optional:

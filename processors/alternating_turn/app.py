@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Alternating-turn rollout orchestration for independently hosted agents."""
+"""Alternating-turn rollout processing for independently hosted agents."""
 
 import asyncio
 import json
@@ -25,7 +25,6 @@ from fastapi import Body, Request
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_rollout_orchestrator import BaseRolloutOrchestratorConfig, SimpleRolloutOrchestrator
 from nemo_gym.config_types import (
     AgentServerRef,
     AggregateMetrics,
@@ -41,18 +40,19 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.processors.base import BaseProcessor, BaseProcessorConfig
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
-class AlternatingTurnOrchestratorConfig(BaseRolloutOrchestratorConfig):
+class AlternatingTurnProcessorConfig(BaseProcessorConfig):
     resources_server: ResourcesServerRef
     agents: dict[str, AgentServerRef] = Field(min_length=2)
     focal_agent: str
     max_turns: int = Field(16, ge=1)
 
     @model_validator(mode="after")
-    def validate_focal_agent(self) -> "AlternatingTurnOrchestratorConfig":
+    def validate_focal_agent(self) -> "AlternatingTurnProcessorConfig":
         if self.focal_agent not in self.agents:
             raise ValueError(f"focal_agent {self.focal_agent!r} must be present in agents")
         return self
@@ -119,8 +119,8 @@ def _turn_response_params(
     return base.model_copy(deep=True, update={"input": turn_input})
 
 
-class AlternatingTurnOrchestrator(SimpleRolloutOrchestrator):
-    config: AlternatingTurnOrchestratorConfig
+class AlternatingTurnProcessor(BaseProcessor):
+    config: AlternatingTurnProcessorConfig
     _episode_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
 
     async def run(self, request: Request, body: AlternatingTurnRunRequest) -> AlternatingTurnRunResponse:
@@ -250,4 +250,4 @@ class AlternatingTurnOrchestrator(SimpleRolloutOrchestrator):
 
 
 if __name__ == "__main__":
-    AlternatingTurnOrchestrator.run_webserver()
+    AlternatingTurnProcessor.run_webserver()

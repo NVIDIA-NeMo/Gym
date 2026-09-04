@@ -31,14 +31,14 @@ from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.config_types import (
     AGENT_REF_KEY,
-    ORCHESTRATOR_REF_KEY,
+    PROCESSOR_REF_KEY,
     BaseNeMoGymCLIConfig,
     BenchmarkDatasetConfig,
     DatasetConfig,
     DatasetType,
     DownloadJsonlDatasetGitlabConfig,
     DownloadJsonlDatasetHuggingFaceConfig,
-    RolloutOrchestratorServerRef,
+    ProcessorServerRef,
     ServerInstanceConfig,
 )
 from nemo_gym.gitlab_utils import download_jsonl_dataset
@@ -393,12 +393,12 @@ class TrainDataProcessor(BaseModel):
         # in-process, e.g. tau2 — and, transitionally, legacy configs that have not moved their
         # datasets yet), or by rollout orchestrators. Model servers cannot declare datasets.
         rollout_configs: List[ServerInstanceConfig] = [
-            c for c in server_instance_configs if c.SERVER_TYPE in {"responses_api_agents", "rollout_orchestrators"}
+            c for c in server_instance_configs if c.SERVER_TYPE in {"responses_api_agents", "processors"}
         ]
         declaring_configs: List[ServerInstanceConfig] = [
             c
             for c in server_instance_configs
-            if c.SERVER_TYPE in ("responses_api_agents", "resources_servers", "rollout_orchestrators")
+            if c.SERVER_TYPE in ("responses_api_agents", "resources_servers", "processors")
         ]
         model_configs_with_data = [
             c for c in server_instance_configs if c.SERVER_TYPE == "responses_api_models" and c.datasets
@@ -421,7 +421,7 @@ class TrainDataProcessor(BaseModel):
         for declaring_config in declaring_configs:
             if declaring_config.datasets:
                 declaring_configs_with_data.append(declaring_config)
-            elif declaring_config.SERVER_TYPE in {"responses_api_agents", "rollout_orchestrators"}:
+            elif declaring_config.SERVER_TYPE in {"responses_api_agents", "processors"}:
                 rollout_configs_without_data.append(declaring_config)
 
         # NOTE(dataset-decoupling): the deprecation warning for datasets declared on agents that
@@ -880,9 +880,9 @@ This could be due to a change in how metrics are calculated, leading to outdated
                             validate_prompt_compatibility([row], prompt_cfg)
                             row = apply_prompt_to_row(row, prompt_cfg)
 
-                        if c.SERVER_TYPE == "rollout_orchestrators":
-                            row[ORCHESTRATOR_REF_KEY] = RolloutOrchestratorServerRef(
-                                type="rollout_orchestrators",
+                        if c.SERVER_TYPE == "processors":
+                            row[PROCESSOR_REF_KEY] = ProcessorServerRef(
+                                type="processors",
                                 name=c.name,
                             ).model_dump()
                             if row.pop(AGENT_REF_KEY, None) is not None:
@@ -891,7 +891,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                         else:
                             if row.pop(AGENT_REF_KEY, None) is not None:
                                 legacy_agent_ref_rows += 1
-                            row.pop(ORCHESTRATOR_REF_KEY, None)
+                            row.pop(PROCESSOR_REF_KEY, None)
                             row[TASK_SOURCE_KEY_NAME] = c.name
                         # num_repeats duplicates each line consecutively; validate only the first
                         # copy so reports count each source row once, with its jsonl line index.

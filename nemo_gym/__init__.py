@@ -26,7 +26,7 @@ from typing import Callable, List, Optional, Union
 # |- nemo_gym (ROOT_DIR)
 # |- responses_api_models
 # |- responses_api_agents
-# |- rollout_orchestrators
+# |- processors
 # ...
 ROOT_DIR = Path(__file__).absolute().parent
 PARENT_DIR = ROOT_DIR.parent

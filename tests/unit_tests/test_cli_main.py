@@ -129,13 +129,13 @@ class TestConfigFlag:
                 "--instance",
                 "kuhn_poker",
                 "--instance",
-                "kuhn_poker_orchestrator",
+                "kuhn_poker_processor",
             ],
         )
         assert target == "nemo_gym.cli.env:run_head"
         assert set(overrides) == {
             "+config_paths=[kuhn.yaml]",
-            '+instances=["kuhn_poker", "kuhn_poker_orchestrator"]',
+            '+instances=["kuhn_poker", "kuhn_poker_processor"]',
         }
 
     def test_config_rejected_on_non_config_command(self, monkeypatch: MonkeyPatch) -> None:

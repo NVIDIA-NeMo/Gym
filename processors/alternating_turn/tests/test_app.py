@@ -12,9 +12,9 @@ from nemo_gym.config_types import AgentServerRef, AggregateMetricsRequest, Resou
 from nemo_gym.multi_agent import AgentTurn
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
-from rollout_orchestrators.alternating_turn.app import (
-    AlternatingTurnOrchestrator,
-    AlternatingTurnOrchestratorConfig,
+from processors.alternating_turn.app import (
+    AlternatingTurnProcessor,
+    AlternatingTurnProcessorConfig,
     AlternatingTurnRunRequest,
     _turn_response_params,
 )
@@ -52,8 +52,8 @@ def _agent_response(action: str) -> dict:
     }
 
 
-def _orchestrator(max_turns: int = 8) -> AlternatingTurnOrchestrator:
-    config = AlternatingTurnOrchestratorConfig(
+def _processor(max_turns: int = 8) -> AlternatingTurnProcessor:
+    config = AlternatingTurnProcessorConfig(
         host="",
         port=0,
         entrypoint="",
@@ -66,11 +66,11 @@ def _orchestrator(max_turns: int = 8) -> AlternatingTurnOrchestrator:
         focal_agent="player0",
         max_turns=max_turns,
     )
-    return AlternatingTurnOrchestrator(config=config, server_client=MagicMock(spec=ServerClient))
+    return AlternatingTurnProcessor(config=config, server_client=MagicMock(spec=ServerClient))
 
 
-def test_run_route_belongs_to_orchestrator() -> None:
-    paths = {route.path for route in _orchestrator().setup_webserver().routes}
+def test_run_route_belongs_to_processor() -> None:
+    paths = {route.path for route in _processor().setup_webserver().routes}
     assert "/run" in paths
     assert "/v1/responses" not in paths
 
@@ -91,8 +91,8 @@ def test_turn_response_params_preserves_only_that_participants_history() -> None
 
 
 def test_http_run_route_executes_rollout_wrapper() -> None:
-    orchestrator = _orchestrator()
-    orchestrator.server_client.post = AsyncMock(
+    processor = _processor()
+    processor.server_client.post = AsyncMock(
         side_effect=[
             _FakeHttpResponse({"active_agent": "player0", "observation": "P0", "info": {}}),
             _FakeHttpResponse(_agent_response("[bet]")),
@@ -107,7 +107,7 @@ def test_http_run_route_executes_rollout_wrapper() -> None:
         ]
     )
 
-    response = TestClient(orchestrator.setup_webserver()).post(
+    response = TestClient(processor.setup_webserver()).post(
         "/run",
         json={"responses_create_params": {"input": "play"}},
     )
@@ -118,7 +118,7 @@ def test_http_run_route_executes_rollout_wrapper() -> None:
 
 @pytest.mark.asyncio
 async def test_default_aggregate_metrics() -> None:
-    result = await _orchestrator().aggregate_metrics(
+    result = await _processor().aggregate_metrics(
         AggregateMetricsRequest(
             verify_responses=[
                 {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0},
@@ -130,7 +130,7 @@ async def test_default_aggregate_metrics() -> None:
 
 @pytest.mark.asyncio
 async def test_aggregate_metrics_reports_each_agent() -> None:
-    result = await _orchestrator().aggregate_metrics(
+    result = await _processor().aggregate_metrics(
         AggregateMetricsRequest(
             verify_responses=[
                 {
@@ -160,7 +160,7 @@ async def test_aggregate_metrics_reports_each_agent() -> None:
 
 def test_focal_agent_must_have_a_server() -> None:
     with pytest.raises(ValidationError, match="focal_agent"):
-        AlternatingTurnOrchestratorConfig(
+        AlternatingTurnProcessorConfig(
             host="",
             port=0,
             entrypoint="",
@@ -175,8 +175,8 @@ def test_focal_agent_must_have_a_server() -> None:
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_routes_private_observations_and_preserves_cookies() -> None:
-    orchestrator = _orchestrator()
+async def test_processor_routes_private_observations_and_preserves_cookies() -> None:
+    processor = _processor()
     calls = []
     responses = [
         _FakeHttpResponse(
@@ -213,12 +213,12 @@ async def test_orchestrator_routes_private_observations_and_preserves_cookies() 
         calls.append((server_name, url_path, json, cookies))
         return responses.pop(0)
 
-    orchestrator.server_client.post = AsyncMock(side_effect=post)
+    processor.server_client.post = AsyncMock(side_effect=post)
     request = MagicMock()
     request.cookies = {"incoming": "cookie"}
     body = AlternatingTurnRunRequest(responses_create_params={"input": [{"role": "user", "content": "play"}]})
 
-    result = await orchestrator.run(request, body)
+    result = await processor.run(request, body)
 
     assert result.agent_rewards == {"player0": 1.0, "player1": -1.0}
     assert result.reward == 1.0
@@ -241,7 +241,7 @@ async def test_orchestrator_routes_private_observations_and_preserves_cookies() 
 
 @pytest.mark.asyncio
 async def test_turn_limit_truncates_and_closes_environment() -> None:
-    orchestrator = _orchestrator(max_turns=1)
+    processor = _processor(max_turns=1)
     paths = []
     responses = [
         _FakeHttpResponse({"active_agent": "player0", "observation": "P0", "info": {}}),
@@ -263,12 +263,12 @@ async def test_turn_limit_truncates_and_closes_environment() -> None:
         paths.append(url_path)
         return responses.pop(0)
 
-    orchestrator.server_client.post = AsyncMock(side_effect=post)
+    processor.server_client.post = AsyncMock(side_effect=post)
     request = MagicMock()
     request.cookies = {}
     body = AlternatingTurnRunRequest(responses_create_params={"input": "play"})
 
-    result = await orchestrator.run(request, body)
+    result = await processor.run(request, body)
 
     assert result.truncated is True
     assert result.terminated is False

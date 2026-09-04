@@ -1353,10 +1353,10 @@ class TestCollateTaskSourceStamping:
         assert rows[0]["task_source"] == "tau2_agent"
         assert "agent_ref" not in rows[0]
 
-    def test_orchestrator_declared_dataset_stamps_orchestrator_ref(self, tmp_path, monkeypatch) -> None:
-        orchestrator = _instance(
-            "turn_orchestrator",
-            "rollout_orchestrators",
+    def test_processor_declared_dataset_stamps_processor_ref(self, tmp_path, monkeypatch) -> None:
+        processor = _instance(
+            "turn_processor",
+            "processors",
             {
                 "entrypoint": "app.py",
                 "resources_server": {"type": "resources_servers", "name": "game"},
@@ -1369,12 +1369,12 @@ class TestCollateTaskSourceStamping:
             },
         )
 
-        paths = self._collate(tmp_path, monkeypatch, [orchestrator])
+        paths = self._collate(tmp_path, monkeypatch, [processor])
         rows = self._read(paths[0])
 
-        assert rows[0]["orchestrator_ref"] == {
-            "type": "rollout_orchestrators",
-            "name": "turn_orchestrator",
+        assert rows[0]["processor_ref"] == {
+            "type": "processors",
+            "name": "turn_processor",
         }
         assert "agent_ref" not in rows[0]
         assert "task_source" not in rows[0]

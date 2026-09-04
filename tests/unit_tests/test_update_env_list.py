@@ -57,7 +57,7 @@ def test_visit_agent_datasets_reads_rollout_orchestrator_datasets() -> None:
     metadata = visit_agent_datasets(
         {
             "coordinator": {
-                "rollout_orchestrators": {
+                "processors": {
                     "alternating_turn": {
                         "datasets": [{"name": "example", "type": "example"}],
                     }

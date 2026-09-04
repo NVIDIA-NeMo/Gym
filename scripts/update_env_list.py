@@ -155,7 +155,7 @@ def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cov
     for v1 in data.values():
         if not isinstance(v1, dict):
             continue
-        for server_group in ("responses_api_agents", "rollout_orchestrators"):
+        for server_group in ("responses_api_agents", "processors"):
             v2 = v1.get(server_group)
             if not isinstance(v2, dict):
                 continue

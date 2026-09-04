@@ -1,1 +1,1 @@
-{"responses_create_params":{"input":[{"role":"user","content":"Play one seeded hand of Kuhn Poker."}]},"verifier_metadata":{"seed":0},"orchestrator_ref":{"type":"rollout_orchestrators","name":"kuhn_poker_orchestrator"}}
+{"responses_create_params":{"input":[{"role":"user","content":"Play one seeded hand of Kuhn Poker."}]},"verifier_metadata":{"seed":0},"processor_ref":{"type":"processors","name":"kuhn_poker_processor"}}

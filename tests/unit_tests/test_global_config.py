@@ -34,7 +34,7 @@ from nemo_gym.config_types import (
     ConfigPathNotFoundError,
     MalformedConfigPathsError,
     NoServerInstancesError,
-    RolloutOrchestratorServerInstanceConfig,
+    ProcessorServerInstanceConfig,
     ServerRefNotFoundError,
     UnsupportedAgentOverrideError,
     UnsupportedAgentPairingError,
@@ -62,12 +62,12 @@ from nemo_gym.server_utils import (
 
 
 class TestGlobalConfig:
-    def test_rollout_orchestrator_is_a_server_instance(self) -> None:
+    def test_processor_is_a_server_instance(self) -> None:
         server, error = maybe_get_server_instance_config(
-            "turn_orchestrator",
+            "turn_processor",
             OmegaConf.create(
                 {
-                    "rollout_orchestrators": {
+                    "processors": {
                         "alternating_turn": {
                             "entrypoint": "app.py",
                         }
@@ -77,8 +77,8 @@ class TestGlobalConfig:
         )
 
         assert error is None
-        assert isinstance(server, RolloutOrchestratorServerInstanceConfig)
-        assert server.SERVER_TYPE == "rollout_orchestrators"
+        assert isinstance(server, ProcessorServerInstanceConfig)
+        assert server.SERVER_TYPE == "processors"
 
     def _mock_versions_for_testing(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.global_config, "openai_version", "test openai version")

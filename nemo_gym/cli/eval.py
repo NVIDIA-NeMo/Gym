@@ -355,7 +355,7 @@ def _validate_split_datasets_declared(split: str, server_instance_configs: Seque
     declared_types: set = set()
     example_fpaths: List[str] = []
     for c in server_instance_configs:
-        if c.SERVER_TYPE not in ("responses_api_agents", "resources_servers", "rollout_orchestrators"):
+        if c.SERVER_TYPE not in ("responses_api_agents", "resources_servers", "processors"):
             continue
         for d in c.datasets or []:
             declared_types.add(d.type)

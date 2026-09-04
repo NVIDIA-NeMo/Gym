@@ -63,7 +63,7 @@ class TestValidateSplitDatasetsDeclared:
 
     def test_passes_for_rollout_orchestrator_dataset(self) -> None:
         orchestrator = SimpleNamespace(
-            SERVER_TYPE="rollout_orchestrators",
+            SERVER_TYPE="processors",
             name="turn_orchestrator",
             datasets=[
                 SimpleNamespace(

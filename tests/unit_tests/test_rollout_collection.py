@@ -38,7 +38,7 @@ from nemo_gym.config_types import AggregateMetricScope, ConfigError, ConfigPathN
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
-    ORCHESTRATOR_REF_KEY_NAME,
+    PROCESSOR_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
@@ -229,8 +229,8 @@ class TestRolloutCollection:
             }
         )
 
-        assert _processor_server_name("simple", config) == "simple__processor"
-        assert _processor_server_name("other", config) == "other"
+        assert _processor_server_name("simple", AGENT_REF_KEY_NAME, config) == "simple__processor"
+        assert _processor_server_name("other", AGENT_REF_KEY_NAME, config) == "other"
 
     def test_rollout_request_debug_summary_compact(self) -> None:
         row = {
@@ -801,9 +801,9 @@ class TestRolloutCollection:
         assert "do not log this" not in captured.out
         assert "[rollout_collection] /run failed" in captured.out
 
-    async def test_run_examples_prefers_orchestrator_ref(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_run_examples_prefers_processor_ref(self, monkeypatch: pytest.MonkeyPatch) -> None:
         row = {
-            ORCHESTRATOR_REF_KEY_NAME: {"name": "turn_orchestrator"},
+            PROCESSOR_REF_KEY_NAME: {"name": "turn_processor"},
             AGENT_REF_KEY_NAME: {"name": "legacy_agent"},
         }
         response = MagicMock()
@@ -811,7 +811,7 @@ class TestRolloutCollection:
         mock_server_client = MagicMock()
         mock_server_client.post = AsyncMock(return_value=response)
         mock_server_client.global_config_dict = OmegaConf.create(
-            {"turn_orchestrator": {"rollout_orchestrators": {"alternating_turn": {}}}}
+            {"turn_processor": {"processors": {"alternating_turn": {}}}}
         )
         monkeypatch.setattr(
             nemo_gym.rollout_collection,
@@ -824,7 +824,7 @@ class TestRolloutCollection:
 
         assert returned_row is row
         assert result == {"reward": 1.0}
-        assert mock_server_client.post.await_args.kwargs["server_name"] == "turn_orchestrator"
+        assert mock_server_client.post.await_args.kwargs["server_name"] == "turn_processor"
 
     async def test_run_examples_records_agent_http_failure_as_a_failure_row(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1689,13 +1689,13 @@ class TestRolloutCollection:
         # Seeds should track rollout index within each task (0, 1, 2 per task).
         assert seeds_seen == [0, 1, 2, 0, 1, 2]
 
-    def test_preprocess_rows_accepts_orchestrator_without_agent_ref(self, tmp_path: Path) -> None:
+    def test_preprocess_rows_accepts_processor_without_agent_ref(self, tmp_path: Path) -> None:
         fpath = tmp_path / "input.jsonl"
         fpath.write_text(
             json.dumps(
                 {
                     "responses_create_params": {"input": []},
-                    ORCHESTRATOR_REF_KEY_NAME: {"name": "turn_orchestrator"},
+                    PROCESSOR_REF_KEY_NAME: {"name": "turn_processor"},
                 }
             )
             + "\n"
@@ -1707,7 +1707,7 @@ class TestRolloutCollection:
 
         rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
 
-        assert rows[0][ORCHESTRATOR_REF_KEY_NAME]["name"] == "turn_orchestrator"
+        assert rows[0][PROCESSOR_REF_KEY_NAME]["name"] == "turn_processor"
         assert AGENT_REF_KEY_NAME not in rows[0]
 
     def test_preprocess_rows_num_repeats_dict_form(self, tmp_path: Path) -> None:

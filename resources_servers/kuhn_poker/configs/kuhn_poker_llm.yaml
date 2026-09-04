@@ -46,8 +46,8 @@ kuhn_player1:
         name: policy_model
       max_steps: 1
 
-kuhn_poker_orchestrator:
-  rollout_orchestrators:
+kuhn_poker_processor:
+  processors:
     alternating_turn:
       entrypoint: app.py
       resources_server:

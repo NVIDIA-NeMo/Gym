@@ -383,7 +383,7 @@ class TestEnvironmentCatalog:
         )
         assert set(deduplicated) == {("benchmark", "resources_servers/mcqa/science")}
 
-    def test_discovers_resource_workload_with_orchestrator_dataset(self, tmp_path: Path, monkeypatch) -> None:
+    def test_discovers_resource_workload_with_processor_dataset(self, tmp_path: Path, monkeypatch) -> None:
         configs = tmp_path / "resources_servers" / "game" / "configs"
         configs.mkdir(parents=True)
         configs.joinpath("game.yaml").write_text(
@@ -391,7 +391,7 @@ class TestEnvironmentCatalog:
             "  resources_servers:\n"
             "    game: {entrypoint: app.py, domain: games}\n"
             "coordinator:\n"
-            "  rollout_orchestrators:\n"
+            "  processors:\n"
             "    turns:\n"
             "      datasets:\n"
             "      - {name: example, type: example, jsonl_fpath: example.jsonl}\n",
@@ -422,8 +422,8 @@ class TestReadEnvironmentDetails:
             "      datasets:\n"
             "      - {name: train, type: train}\n"
             "      - {name: example, type: example}\n"
-            "env_orchestrator:\n"
-            "  rollout_orchestrators:\n"
+            "env_processor:\n"
+            "  processors:\n"
             "    alternating_turn: {}\n"
         )
 
@@ -433,5 +433,5 @@ class TestReadEnvironmentDetails:
         assert details["value"] == "The value"
         assert details["resources_servers"] == ["my_rs"]
         assert details["agent"] == "simple_agent"
-        assert details["orchestrator"] == "alternating_turn"
+        assert details["processor"] == "alternating_turn"
         assert details["datasets"] == ["train", "example"]

@@ -57,7 +57,7 @@ from nemo_gym.global_config import (
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ATTEMPT_INDEX_KEY_NAME,
-    ORCHESTRATOR_REF_KEY_NAME,
+    PROCESSOR_REF_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -822,16 +822,16 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
 def _rollout_target(row: Dict[str, Any]) -> Tuple[str, str]:
     """Return the rollout server name and the row key that selected it."""
-    for ref_key in (ORCHESTRATOR_REF_KEY_NAME, AGENT_REF_KEY_NAME):
+    for ref_key in (PROCESSOR_REF_KEY_NAME, AGENT_REF_KEY_NAME):
         ref = row.get(ref_key)
         if isinstance(ref, dict) and ref.get("name"):
             return ref["name"], ref_key
-    raise ValueError("A rollout row must include orchestrator_ref or agent_ref with a name.")
+    raise ValueError("A rollout row must include processor_ref or agent_ref with a name.")
 
 
 def _processor_server_name(target_name: str, target_ref_key: str, global_config_dict: DictConfig) -> str:
     """Return the processor that owns ``/run`` for a rollout target."""
-    if target_ref_key == ORCHESTRATOR_REF_KEY_NAME:
+    if target_ref_key == PROCESSOR_REF_KEY_NAME:
         return target_name
 
     processor_name = f"{target_name}__processor"
@@ -849,7 +849,7 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
-        ("orchestrator_name" if target_ref_key == ORCHESTRATOR_REF_KEY_NAME else "agent_name"): target_name,
+        ("processor_name" if target_ref_key == PROCESSOR_REF_KEY_NAME else "agent_name"): target_name,
     }
     return {k: v for k, v in summary.items() if v is not None}
 
@@ -1077,13 +1077,13 @@ class RolloutCollectionHelper(BaseModel):
         rows: List[Dict] = []
         overridden_agents: set[Tuple[str, str]] = set()
         for row_idx, row_str, row in tqdm(raw_rows, desc="Preprocessing and repeating rows"):
-            orchestrator_name = (row.get(ORCHESTRATOR_REF_KEY_NAME) or {}).get("name")
+            processor_name = (row.get(PROCESSOR_REF_KEY_NAME) or {}).get("name")
             agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-            basis = orchestrator_name or agent_name or row.get(TASK_SOURCE_KEY_NAME)
+            basis = processor_name or agent_name or row.get(TASK_SOURCE_KEY_NAME)
 
-            # agent_map and fan_out route participant agents. An explicit orchestrator_ref
+            # agent_map and fan_out route participant agents. An explicit processor_ref
             # remains the rollout target even when agent_name shorthand is configured.
-            if config.agent_map and orchestrator_name is None:
+            if config.agent_map and processor_name is None:
                 mapped = next(
                     (
                         config.agent_map[key]
@@ -1101,8 +1101,8 @@ class RolloutCollectionHelper(BaseModel):
                     row[AGENT_REF_KEY_NAME] = {"name": agent_name}
 
             targets: List[Optional[str]]
-            if orchestrator_name is not None:
-                targets = [orchestrator_name]
+            if processor_name is not None:
+                targets = [processor_name]
             elif config.fan_out and basis is not None and basis in config.fan_out:
                 targets = list(config.fan_out[basis])
             elif agent_name is not None:
@@ -1154,7 +1154,7 @@ class RolloutCollectionHelper(BaseModel):
                     # Restamp only when fan-out routes this copy somewhere else; otherwise keep
                     # the row's agent_ref dict byte-for-byte (it may carry extra fields like type).
                     if (
-                        orchestrator_name is None
+                        processor_name is None
                         and target is not None
                         and (row.get(AGENT_REF_KEY_NAME) or {}).get("name") != target
                     ):
@@ -1185,7 +1185,7 @@ class RolloutCollectionHelper(BaseModel):
             raise ValueError(
                 f"No agent specified and no rollout orchestrator specified for rows {row_idxs_missing_rollout_ref}. "
                 "Provide +agent_name (or +agent_map with a _default entry), or include "
-                "orchestrator_ref, agent_ref, or task_source in the data."
+                "processor_ref, agent_ref, or task_source in the data."
             )
 
         if agents_missing_from_num_repeats:
@@ -1844,7 +1844,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             ts
             for row in examples
             if (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is None
-            and (row.get(ORCHESTRATOR_REF_KEY_NAME) or {}).get("name") is None
+            and (row.get(PROCESSOR_REF_KEY_NAME) or {}).get("name") is None
             and (ts := row.get(TASK_SOURCE_KEY_NAME)) is not None
         }
         if not unresolved:
@@ -1880,9 +1880,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             raise ValueError("Cannot resolve task_source to an agent: " + "; ".join(errors))
 
         for row in examples:
-            if (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is None and (
-                row.get(ORCHESTRATOR_REF_KEY_NAME) or {}
-            ).get("name") is None:
+            if (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is None and (row.get(PROCESSOR_REF_KEY_NAME) or {}).get(
+                "name"
+            ) is None:
                 ts = row.get(TASK_SOURCE_KEY_NAME)
                 if ts is not None:
                     row[AGENT_REF_KEY_NAME] = {"name": resolution[ts]}
@@ -1898,7 +1898,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         requested = {
             name
             for row in examples
-            if (row.get(ORCHESTRATOR_REF_KEY_NAME) or {}).get("name") is None
+            if (row.get(PROCESSOR_REF_KEY_NAME) or {}).get("name") is None
             and (name := (row.get(AGENT_REF_KEY_NAME) or {}).get("name")) is not None
         }
         available = {
@@ -1922,20 +1922,20 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 "Include the agent's config in the run, or re-route with +agent_map/+agent_name."
             )
 
-        requested_orchestrators = {
-            name for row in examples if (name := (row.get(ORCHESTRATOR_REF_KEY_NAME) or {}).get("name")) is not None
+        requested_processors = {
+            name for row in examples if (name := (row.get(PROCESSOR_REF_KEY_NAME) or {}).get("name")) is not None
         }
-        available_orchestrators = {
+        available_processors = {
             str(name)
             for name, block in global_config_dict.items()
-            if isinstance(block, DictConfig) and "rollout_orchestrators" in block
+            if isinstance(block, DictConfig) and "processors" in block
         }
-        unknown_orchestrators = sorted(requested_orchestrators - available_orchestrators)
-        if unknown_orchestrators:
+        unknown_processors = sorted(requested_processors - available_processors)
+        if unknown_processors:
             raise ValueError(
-                "Rows reference rollout orchestrators not present in the running config: "
-                f"{', '.join(repr(name) for name in unknown_orchestrators)}. "
-                "Include the orchestrator's config in the run."
+                "Rows reference processors not present in the running config: "
+                f"{', '.join(repr(name) for name in unknown_processors)}. "
+                "Include the processor's config in the run."
             )
 
     @staticmethod
@@ -1946,7 +1946,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         routes = {
             (name, row.get(TASK_SOURCE_KEY_NAME))
             for row in examples
-            if (row.get(ORCHESTRATOR_REF_KEY_NAME) or {}).get("name") is None
+            if (row.get(PROCESSOR_REF_KEY_NAME) or {}).get("name") is None
             and (name := (row.get(AGENT_REF_KEY_NAME) or {}).get("name")) is not None
         }
         rejected: Dict[Tuple[str, str], str] = {}
