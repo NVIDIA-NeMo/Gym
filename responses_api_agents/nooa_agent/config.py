@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import keyword
 from collections.abc import Callable
 from typing import Any, Literal
 
@@ -62,6 +63,8 @@ class NOOAInvocationConfig(BaseModel):
     execution_mode: Literal["embedded"] = "embedded"
     init_kwargs: dict[str, Any] = Field(default_factory=dict)
     arguments: dict[str, NOOAArgumentBinding]
+    tool_namespace: str = "resources"
+    allowed_tools: list[str] = Field(default_factory=list)
 
     @field_validator("agent_class")
     @classmethod
@@ -78,11 +81,25 @@ class NOOAInvocationConfig(BaseModel):
             raise ValueError("entrypoint must be a public Python method name")
         return value
 
+    @field_validator("tool_namespace")
+    @classmethod
+    def validate_tool_namespace(cls, value: str) -> str:
+        if not value.isidentifier() or keyword.iskeyword(value) or value.startswith("_"):
+            raise ValueError("tool_namespace must be a public Python identifier")
+        return value
+
     @model_validator(mode="after")
-    def validate_argument_names(self) -> "NOOAInvocationConfig":
+    def validate_names(self) -> "NOOAInvocationConfig":
         invalid = sorted(name for name in self.arguments if not name.isidentifier() or name.startswith("_"))
         if invalid:
             raise ValueError(f"argument mapping names must be public Python identifiers: {invalid}")
+        invalid_tools = sorted(
+            name
+            for name in self.allowed_tools
+            if not name.isidentifier() or keyword.iskeyword(name) or name.startswith("_")
+        )
+        if invalid_tools or len(set(self.allowed_tools)) != len(self.allowed_tools):
+            raise ValueError(f"allowed_tools must contain unique public Python identifiers: invalid={invalid_tools}")
         if "llm" in self.init_kwargs:
             raise ValueError("init_kwargs.llm is reserved; Gym always injects the rollout LLM")
         return self

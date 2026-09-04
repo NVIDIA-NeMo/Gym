@@ -23,7 +23,7 @@ class WeatherAgent(Agent):
     async def answer(self, question: str) -> str:
         """Answer `question`.
 
-        Extract the requested city, call `self.gym_tools.get_weather(city=...)`, and
+        Extract the requested city, call `self.weather.get_weather(city=...)`, and
         return a concise answer grounded in the tool result.
         """
 

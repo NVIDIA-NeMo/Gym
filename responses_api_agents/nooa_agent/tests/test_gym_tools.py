@@ -13,14 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import inspect
 import json
 from http.cookies import SimpleCookie
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from nooa.agentdoc import doc
 
-from responses_api_agents.nooa_agent.gym_tools import GymToolExecution, GymTools
+from responses_api_agents.nooa_agent.gym_tools import GymToolExecution, build_tool_namespace
 
 
 class FakeContent:
@@ -57,15 +60,17 @@ def weather_tool() -> dict:
     }
 
 
-def make_tools(response: FakeResponse) -> tuple[GymTools, MagicMock, dict[str, str], list[GymToolExecution]]:
+def make_tools(response: FakeResponse) -> tuple[Any, MagicMock, dict[str, str], list[GymToolExecution]]:
     client = MagicMock()
     client.post = AsyncMock(return_value=response)
     cookies = {"session": "old"}
     observations: list[GymToolExecution] = []
-    tools = GymTools(
+    tools = build_tool_namespace(
+        namespace_name="weather",
         server_client=client,
         resources_server_name="weather_resources",
         tools=[weather_tool()],
+        allowed_tools=frozenset({"get_weather"}),
         cookies=cookies,
         observations=observations,
     )
@@ -78,7 +83,7 @@ async def test_generated_method_has_typed_signature_and_routes_with_cookies() ->
         FakeResponse({"city": "Paris", "weather": "cold"}, cookie=("session", "new"))
     )
 
-    output = await tools.get_weather(city="Paris")
+    output = await tools.get_weather("Paris")
 
     signature = inspect.signature(tools.get_weather)
     assert signature.parameters["city"].annotation is str
@@ -126,15 +131,117 @@ async def test_resource_http_error_is_returned_and_observed() -> None:
         ([{"type": "web_search_preview"}], "function tools only"),
         ([weather_tool(), weather_tool()], "duplicate"),
         ([weather_tool() | {"name": "_private"}], "public Python identifier"),
-        ([weather_tool() | {"parameters": {"type": "array"}}], "object JSON Schema"),
+        ([weather_tool() | {"name": "verify"}], "reserved by Gym"),
+        ([weather_tool() | {"name": "class"}], "public Python identifier"),
+        ([weather_tool() | {"parameters": {"type": "array"}}], "closed object JSON Schema"),
+        (
+            [weather_tool() | {"parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}],
+            "additionalProperties=false",
+        ),
     ],
 )
 def test_rejects_unsupported_or_colliding_tool_definitions(tools: list[dict], message: str) -> None:
     with pytest.raises(ValueError, match=message):
-        GymTools(
+        build_tool_namespace(
+            namespace_name="resources",
             server_client=MagicMock(),
             resources_server_name="resources",
             tools=tools,
+            allowed_tools=frozenset(str(tool.get("name")) for tool in tools),
             cookies={},
             observations=[],
         )
+
+
+@pytest.mark.asyncio
+async def test_transport_failure_is_recorded_before_propagation() -> None:
+    tools, client, _, observations = make_tools(FakeResponse({}))
+    client.post.side_effect = ConnectionError("connection lost")
+
+    with pytest.raises(ConnectionError, match="connection lost"):
+        await tools.get_weather(city="Paris")
+
+    assert len(observations) == 1
+    assert observations[0].status == "failed"
+    assert observations[0].error_type == "ConnectionError"
+    assert observations[0].output is None
+
+
+@pytest.mark.asyncio
+async def test_cancellation_is_recorded_before_propagation() -> None:
+    tools, client, _, observations = make_tools(FakeResponse({}))
+    client.post.side_effect = asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await tools.get_weather(city="Paris")
+
+    assert len(observations) == 1
+    assert observations[0].status == "cancelled"
+    assert observations[0].error_type == "CancelledError"
+    assert observations[0].output is None
+
+
+def test_semantic_namespace_has_clean_agentdoc_surface() -> None:
+    tools, _, _, _ = make_tools(FakeResponse({}))
+
+    rendered = doc(tools)
+
+    assert "class WeatherTools:" in rendered
+    assert "async def get_weather(self, city: str, units: str = None)" in rendered
+    assert "Return the weather for a city." in rendered
+    assert "server_client" not in rendered
+    assert "cookies" not in rendered
+    assert "observations" not in rendered
+    assert "dispatcher" not in rendered
+
+
+def test_generated_method_accepts_positional_arguments() -> None:
+    tools, _, _, _ = make_tools(FakeResponse({}))
+
+    signature = inspect.signature(tools.get_weather)
+
+    assert signature.parameters["city"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert signature.parameters["units"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+
+
+def test_rejects_row_tool_not_in_trusted_allowlist() -> None:
+    with pytest.raises(ValueError, match="not authorized"):
+        build_tool_namespace(
+            namespace_name="weather",
+            server_client=MagicMock(),
+            resources_server_name="resources",
+            tools=[weather_tool()],
+            allowed_tools=frozenset(),
+            cookies={},
+            observations=[],
+        )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_resource_calls_are_serialized() -> None:
+    active = 0
+    maximum_active = 0
+
+    async def post(**kwargs: Any) -> FakeResponse:
+        nonlocal active, maximum_active
+        active += 1
+        maximum_active = max(maximum_active, active)
+        await asyncio.sleep(0)
+        active -= 1
+        return FakeResponse({"city": kwargs["json"]["city"]})
+
+    client = MagicMock()
+    client.post = AsyncMock(side_effect=post)
+    tools = build_tool_namespace(
+        namespace_name="weather",
+        server_client=client,
+        resources_server_name="resources",
+        tools=[weather_tool()],
+        allowed_tools=frozenset({"get_weather"}),
+        cookies={},
+        observations=[],
+    )
+
+    await asyncio.gather(tools.get_weather("Paris"), tools.get_weather("Berlin"))
+
+    assert maximum_active == 1

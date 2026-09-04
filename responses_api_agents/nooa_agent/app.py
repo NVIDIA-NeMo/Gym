@@ -33,11 +33,16 @@ from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 from responses_api_agents.nooa_agent.observability import project_nooa_result
-from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunRequest, NOOARunResult
+from responses_api_agents.nooa_agent.runner import (
+    EmbeddedNOOARunner,
+    NOOARunFailure,
+    NOOARunRequest,
+    NOOARunResult,
+)
 
 
 NOOA_TERMINATION_REASON_KEY = "nooa_termination_reason"
@@ -69,6 +74,29 @@ def _is_transient_infrastructure_error(error: BaseException) -> bool:
     if error.__cause__ is not None and _is_transient_infrastructure_error(error.__cause__):
         return True
     return error.__context__ is not None and _is_transient_infrastructure_error(error.__context__)
+
+
+def _partial_run_result(error: BaseException | None) -> NOOARunResult | None:
+    """Find partial NOOA evidence attached directly or through exception chaining."""
+
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, NOOARunFailure):
+            return error.result
+        partial = getattr(error, "nooa_run_result", None)
+        if isinstance(partial, NOOARunResult):
+            return partial
+        error = error.__cause__ or error.__context__
+    return None
+
+
+def _underlying_error(error: BaseException) -> BaseException:
+    """Unwrap adapter transport containers while preserving the original type/message."""
+
+    while isinstance(error, NOOARunFailure):
+        error = error.error
+    return error
 
 
 class NOOAAgentRunRequest(BaseRunRequest):
@@ -145,9 +173,8 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             return_value=result.return_value,
             model_responses=result.model_responses,
             tool_executions=result.tool_executions,
-            timeline=result.timeline,
-            nooa_events=result.nooa_events,
-            model_ref=self.config.model_server,
+            trace=result.trace,
+            result_present=result.completed,
             termination_reason=result.termination_reason,
             termination_error=result.termination_error,
             observation_gaps=result.observation_gaps,
@@ -193,24 +220,28 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             async with self.sem:
                 result = await self._run_once(request, body, record)
         except _TransientInfrastructureError as error:
-            cause = error.__cause__ or error
+            cause = _underlying_error(error.__cause__ or error)
             result = self._failure_response(
                 record,
                 f"{type(cause).__name__}: {cause}",
                 failure_class="transient",
+                partial=_partial_run_result(error),
             )
-        except _EpisodeTimeoutExceeded:
+        except _EpisodeTimeoutExceeded as error:
             result = self._failure_response(
                 record,
                 f"NOOA episode exceeded run_timeout_secs={self.config.run_timeout_secs}s",
                 failure_class="timeout_exceeded",
                 terminal=True,
+                partial=_partial_run_result(error),
             )
         except Exception as error:  # noqa: BLE001 -- isolate one rollout from the batch
+            cause = _underlying_error(error)
             result = self._failure_response(
                 record,
-                f"{type(error).__name__}: {error}",
+                f"{type(cause).__name__}: {cause}",
                 failure_class="legitimate",
+                partial=_partial_run_result(error),
             )
 
         for name, value in (result.model_extra or {}).pop("_response_cookies", {}).items():
@@ -228,8 +259,13 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         except _EpisodeTimeoutExceeded:
             raise
         except Exception as error:
-            if _is_transient_infrastructure_error(error):
-                raise _TransientInfrastructureError(str(error)) from error
+            cause = _underlying_error(error)
+            if _is_transient_infrastructure_error(cause):
+                wrapped = _TransientInfrastructureError(str(cause))
+                partial = _partial_run_result(error)
+                if partial is not None:
+                    wrapped.nooa_run_result = partial  # type: ignore[attr-defined]
+                raise wrapped from error
             raise
 
     async def _run_once_unclassified(
@@ -268,15 +304,18 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 "verification_skipped": True,
             }
         else:
-            verify = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=record | {"response": response_json},
-                cookies=resource_cookies,
-            )
-            await raise_for_status(verify)
-            _merge_cookies(resource_cookies, verify)
-            result = await get_response_json(verify)
+            try:
+                verify = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/verify",
+                    json=record | {"response": response_json},
+                    cookies=resource_cookies,
+                )
+                await raise_for_status(verify)
+                _merge_cookies(resource_cookies, verify)
+                result = await get_response_json(verify)
+            except Exception as error:
+                raise NOOARunFailure(error, run_result) from error
         if run_result.termination_reason is not None:
             result[NOOA_TERMINATION_REASON_KEY] = run_result.termination_reason
             result[NOOA_TERMINATION_ERROR_KEY] = run_result.termination_error
@@ -291,6 +330,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         *,
         failure_class: str,
         terminal: bool = False,
+        partial: NOOARunResult | None = None,
     ) -> NOOAAgentVerifyResponse:
         response = NeMoGymResponse(
             id="nooa_agent_failure",
@@ -314,6 +354,26 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             NG_FAILURE_CLASS_KEY: failure_class,
             "error": error,
         }
+        if partial is not None:
+            response, observations = project_nooa_result(
+                responses_create_params=record["responses_create_params"],
+                return_value=partial.return_value,
+                model_responses=partial.model_responses,
+                tool_executions=partial.tool_executions,
+                trace=partial.trace,
+                result_present=partial.completed,
+                termination_reason=partial.termination_reason,
+                termination_error=partial.termination_error,
+                observation_gaps=[
+                    *partial.observation_gaps,
+                    ObservationGap(code=failure_class, detail=error),
+                ],
+            )
+            if partial.termination_reason is not None:
+                routing[NOOA_TERMINATION_REASON_KEY] = partial.termination_reason
+                routing[NOOA_TERMINATION_ERROR_KEY] = partial.termination_error
+            routing["ng_agent_observations"] = observations.model_dump(mode="json")
+            routing["_response_cookies"] = partial.model_cookies | partial.resource_cookies
         if terminal:
             routing[NG_TERMINAL_KEY] = True
         return NOOAAgentVerifyResponse.model_validate(

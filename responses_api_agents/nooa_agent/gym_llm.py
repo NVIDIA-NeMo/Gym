@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from typing import Any
 
 from nooa.unifiedllm import LLMResponse, Tool, ToolCall, UnifiedLLM
@@ -30,7 +29,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_observability import ObservationGap
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
-from responses_api_agents.nooa_agent.observability import TraceEvent
+from responses_api_agents.nooa_agent.observability import GymTraceHooks
 
 
 class PolicyCallBudgetExceeded(RuntimeError):
@@ -134,9 +133,8 @@ class GymResponsesLLM(UnifiedLLM):
         request_collector: list[NeMoGymResponseCreateParamsNonStreaming],
         response_collector: list[NeMoGymResponse],
         cookies: dict[str, str],
-        timeline: list[TraceEvent] | None = None,
+        trace_hooks: GymTraceHooks | None = None,
         observation_gaps: list[ObservationGap] | None = None,
-        invocation_id: Callable[[], str] | None = None,
         model: str = "gym-policy",
     ) -> None:
         super().__init__(model=model)
@@ -147,9 +145,8 @@ class GymResponsesLLM(UnifiedLLM):
         self._request_collector = request_collector
         self._response_collector = response_collector
         self._cookies = cookies
-        self._timeline = timeline
+        self._trace_hooks = trace_hooks
         self._observation_gaps = observation_gaps
-        self._invocation_id = invocation_id or (lambda: "root")
         self._prior_outputs: list[dict[str, Any]] = []
         self._reported_unrestored_outputs: set[int] = set()
         self._calls = 0
@@ -217,8 +214,8 @@ class GymResponsesLLM(UnifiedLLM):
         response = NeMoGymResponse.model_validate(raw)
         self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
         self._response_collector.append(response)
-        if self._timeline is not None:
-            self._timeline.append(TraceEvent(kind="model", value=response, invocation_id=self._invocation_id()))
+        if self._trace_hooks is not None:
+            self._trace_hooks.record_model_response(response)
 
         dumped_output = [item.model_dump(mode="json", exclude_none=True) for item in response.output]
         self._prior_outputs.extend(dumped_output)
@@ -259,6 +256,7 @@ class GymResponsesLLM(UnifiedLLM):
     def _restore_prior_output_metadata(self, input_items: list[dict[str, Any]]) -> None:
         """Replace NOOA's normalized history items with the exact prior Gym outputs."""
 
+        consumed_indices: set[int] = set()
         for output_index, raw in enumerate(self._prior_outputs):
             item_type = raw.get("type")
             identity = raw.get("call_id") or raw.get("id")
@@ -266,7 +264,8 @@ class GymResponsesLLM(UnifiedLLM):
                 (
                     index
                     for index, item in enumerate(input_items)
-                    if item.get("type") == item_type
+                    if index not in consumed_indices
+                    and item.get("type") == item_type
                     and identity is not None
                     and (item.get("call_id") or item.get("id")) == identity
                 ),
@@ -282,13 +281,15 @@ class GymResponsesLLM(UnifiedLLM):
                     (
                         index
                         for index, item in enumerate(input_items)
-                        if item.get("role") == "assistant"
+                        if index not in consumed_indices
+                        and item.get("role") == "assistant"
                         and _assistant_content_matches(item.get("content"), raw_text)
                     ),
                     None,
                 )
             if replacement_index is not None:
                 input_items[replacement_index] = raw
+                consumed_indices.add(replacement_index)
             elif (
                 self._observation_gaps is not None
                 and "prompt_token_ids" in raw

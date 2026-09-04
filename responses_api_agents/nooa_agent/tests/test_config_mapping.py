@@ -239,3 +239,9 @@ def test_rejects_private_or_invalid_argument_names() -> None:
 def test_load_agent_class_rejects_non_agent_class() -> None:
     with pytest.raises(ValueError, match="subclass of nooa.Agent"):
         load_agent_class(f"{__name__}:NotAnAgent")
+
+
+@pytest.mark.parametrize("name", ["_private", "not-valid", "class"])
+def test_rejects_invalid_tool_namespace(name: str) -> None:
+    with pytest.raises(ValidationError, match="tool_namespace"):
+        invocation_config(tool_namespace=name)

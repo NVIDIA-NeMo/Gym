@@ -265,3 +265,51 @@ def test_rejects_synchronous_policy_calls() -> None:
 
     with pytest.raises(RuntimeError, match="async"):
         llm.call([])
+
+
+@pytest.mark.asyncio
+async def test_duplicate_assistant_text_restores_each_prior_output_once() -> None:
+    first = NeMoGymResponseOutputMessageForTraining(
+        id="msg-1",
+        content=[NeMoGymResponseOutputText(annotations=[], text="same")],
+        prompt_token_ids=[1],
+        generation_token_ids=[2],
+        generation_log_probs=[-0.1],
+    )
+    second = NeMoGymResponseOutputMessageForTraining(
+        id="msg-2",
+        content=[NeMoGymResponseOutputText(annotations=[], text="same")],
+        prompt_token_ids=[3],
+        generation_token_ids=[4],
+        generation_log_probs=[-0.2],
+    )
+    responses = [model_response(first, response_id="response-1"), model_response(second, response_id="response-2")]
+    server_client = MagicMock()
+    server_client.post = AsyncMock(
+        side_effect=[FakeHTTPResponse(responses[0]), FakeHTTPResponse(responses[1]), FakeHTTPResponse(responses[1])]
+    )
+    gaps: list[ObservationGap] = []
+    llm = GymResponsesLLM(
+        server_client=server_client,
+        model_server_name="policy_model",
+        model_url_path="/v1/responses",
+        max_steps=3,
+        request_collector=[],
+        response_collector=[],
+        cookies={},
+        observation_gaps=gaps,
+    )
+
+    await llm.acall([{"role": "user", "content": "first"}])
+    await llm.acall([{"role": "assistant", "content": "same"}])
+    await llm.acall(
+        [
+            {"role": "assistant", "content": "same"},
+            {"role": "assistant", "content": "same"},
+        ]
+    )
+
+    restored = server_client.post.await_args_list[2].kwargs["json"].input
+    assert [item.id for item in restored] == ["msg-1", "msg-2"]
+    assert [item.generation_token_ids for item in restored] == [[2], [4]]
+    assert gaps == []

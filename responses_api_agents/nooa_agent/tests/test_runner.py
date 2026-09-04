@@ -20,6 +20,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from nooa import Agent
+from nooa.agentdoc import doc
+from nooa.runtime.hooks import get_hooks, set_hooks
+from nooa.tracing import get_session
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.openai_utils import (
@@ -29,7 +32,7 @@ from nemo_gym.openai_utils import (
 )
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.gym_llm import InvalidPolicyOutputError, PolicyCallBudgetExceeded
-from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunRequest
+from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunFailure, NOOARunRequest
 
 
 class ValidAgent(Agent):
@@ -44,20 +47,25 @@ class FakeAgent:
     instances = 0
 
     def __init__(self, *, llm: Any, label: str) -> None:
-        type(self).instances += 1
+        FakeAgent.instances += 1
         self.llm = llm
         self.label = label
-        self.gym_tools: Any = None
         self.event_manager = FakeEventManager()
 
     async def analyze(self, text: str, customer_id: str) -> str:
-        weather = await self.gym_tools.get_weather(city=customer_id)
+        weather = await self.weather.get_weather(city=customer_id)
         return f"{text}: {weather['weather']}"
+
+
+class ExplodingAgent(FakeAgent):
+    async def analyze(self, text: str, customer_id: str) -> str:
+        await self.weather.get_weather(city=customer_id)
+        raise RuntimeError("agent exploded")
 
 
 class BudgetExhaustedAgent(FakeAgent):
     async def analyze(self, text: str, customer_id: str) -> str:
-        await self.gym_tools.get_weather(city=customer_id)
+        await self.weather.get_weather(city=customer_id)
         raise PolicyCallBudgetExceeded("NOOA policy call budget exhausted after 1 calls")
 
 
@@ -99,6 +107,8 @@ def make_runner() -> tuple[EmbeddedNOOARunner, MagicMock]:
             "agent_class": f"{__name__}:ValidAgent",
             "entrypoint": "analyze",
             "init_kwargs": {"label": "configured"},
+            "tool_namespace": "weather",
+            "allowed_tools": ["get_weather"],
             "arguments": {
                 "text": {
                     "source": "responses_create_params.input",
@@ -145,7 +155,7 @@ def row(customer_id: str) -> Row:
 
 
 @pytest.mark.asyncio
-async def test_embedded_runner_maps_full_row_and_attaches_gym_tools() -> None:
+async def test_embedded_runner_maps_full_row_and_attaches_named_tools() -> None:
     runner, client = make_runner()
 
     result = await runner.run(
@@ -161,6 +171,10 @@ async def test_embedded_runner_maps_full_row_and_attaches_gym_tools() -> None:
     assert result.return_value == "Check delivery: cold"
     assert result.agent.label == "configured"
     assert result.agent.llm.model == "gym-policy"
+    rendered = doc(type(result.agent))
+    assert "weather: WeatherTools" in rendered
+    assert "async def get_weather(self, city: str)" in rendered
+    assert "dispatcher" not in rendered
     assert result.tool_executions[0].name == "get_weather"
     assert client.post.await_args.kwargs["json"] == {"city": "Paris"}
 
@@ -210,7 +224,7 @@ async def test_policy_budget_exhaustion_returns_partial_execution() -> None:
     assert result.termination_reason == "policy_budget_exceeded"
     assert "exhausted after 1 calls" in result.termination_error
     assert result.tool_executions[0].name == "get_weather"
-    assert [event.kind for event in result.timeline] == ["tool"]
+    assert [item.type for item in result.trace.output] == ["function_call", "function_call_output"]
 
 
 @pytest.mark.asyncio
@@ -239,7 +253,7 @@ async def test_real_nooa_codeact_rollout_calls_generated_gym_tool() -> None:
         call_id="code-1",
         name="execute_python",
         arguments=json.dumps(
-            {"code": 'weather = await self.gym_tools.get_weather(city="Paris")\nprint(weather["weather"])'}
+            {"code": 'weather = await self.weather.get_weather(city="Paris")\nprint(weather["weather"])'}
         ),
         prompt_token_ids=[1, 2],
         generation_token_ids=[3, 4],
@@ -298,6 +312,8 @@ async def test_real_nooa_codeact_rollout_calls_generated_gym_tool() -> None:
         {
             "agent_class": "responses_api_agents.nooa_agent.example_agent:WeatherAgent",
             "entrypoint": "answer",
+            "tool_namespace": "weather",
+            "allowed_tools": ["get_weather"],
             "arguments": {
                 "question": {
                     "source": "responses_create_params.input",
@@ -346,4 +362,171 @@ async def test_real_nooa_codeact_rollout_calls_generated_gym_tool() -> None:
     )
     assert "cold" in str(python_output.content)
     assert result.tool_executions[0].name == "get_weather"
-    assert [event.kind for event in result.timeline] == ["model", "tool", "model"]
+    assert result.trace.invocations
+    root = next(invocation for invocation in result.trace.invocations if invocation.parent_invocation_id is None)
+    assert root.status == "completed"
+    assert [reference.response_id for reference in root.model_calls] == ["resp-1", "resp-2"]
+    assert result.tool_executions[0].invocation_id == root.invocation_id
+    assert [item.type for item in result.trace.output] == [
+        "function_call",
+        "function_call",
+        "function_call_output",
+        "function_call",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_real_runner_composes_and_restores_preexisting_nooa_hooks() -> None:
+    calls: list[str] = []
+
+    class ExistingHooks:
+        def before_agent_call(self, **kwargs: Any) -> str:
+            calls.append(f"before:{kwargs['method_name']}:{get_session()}")
+            return kwargs["call_id"]
+
+        def after_agent_call(self, *, context: Any, **kwargs: Any) -> None:
+            calls.append(f"after:{kwargs['method_name']}:{context}")
+
+        def before_generation(self, **kwargs: Any) -> None:
+            return None
+
+        def after_generation(self, **kwargs: Any) -> None:
+            return None
+
+        def before_code_execution(self, **kwargs: Any) -> None:
+            return None
+
+        def after_code_execution(self, **kwargs: Any) -> None:
+            return None
+
+        def before_method_invocation(self, **kwargs: Any) -> None:
+            return None
+
+        def after_method_invocation(self, **kwargs: Any) -> None:
+            return None
+
+        def before_tool_execution(self, **kwargs: Any) -> None:
+            return None
+
+        def after_tool_execution(self, **kwargs: Any) -> None:
+            return None
+
+        def on_messages_built(self, **kwargs: Any) -> None:
+            return None
+
+    execute_output = NeMoGymResponseFunctionToolCallForTraining(
+        id="fc-1",
+        call_id="return-1",
+        name="return_result",
+        arguments=json.dumps({"result": "cold"}),
+        prompt_token_ids=[1],
+        generation_token_ids=[2],
+        generation_log_probs=[-0.1],
+    )
+    model_result = NeMoGymResponse(
+        id="resp-1",
+        created_at=0,
+        model="policy",
+        object="response",
+        output=[execute_output],
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+    )
+
+    class RoutedClient:
+        async def post(self, *, server_name: str, **kwargs: Any) -> Any:
+            payload = model_result.model_dump(mode="json")
+
+            class ModelContent:
+                async def read(self) -> bytes:
+                    return json.dumps(payload).encode()
+
+            response = FakeResponse()
+            response.content = ModelContent()
+            return response
+
+    invocation = NOOAInvocationConfig.model_validate(
+        {
+            "agent_class": "responses_api_agents.nooa_agent.example_agent:WeatherAgent",
+            "entrypoint": "answer",
+            "tool_namespace": "weather",
+            "allowed_tools": ["get_weather"],
+            "arguments": {
+                "question": {
+                    "source": "responses_create_params.input",
+                    "transform": "latest_user_text",
+                }
+            },
+        }
+    )
+    runner = EmbeddedNOOARunner(
+        invocation=invocation,
+        server_client=RoutedClient(),
+        model_server_name="policy",
+        resources_server_name="weather",
+        max_steps=1,
+    )
+    existing = ExistingHooks()
+    set_hooks(existing)  # type: ignore[arg-type]
+    try:
+        result = await runner.run(
+            NOOARunRequest(
+                row=row("Paris"),
+                rollout_id="composed-hooks",
+                task_id="task",
+                model_url_path="/ng-rollout/composed-hooks/v1/responses",
+            )
+        )
+        assert result.return_value == "cold"
+        assert calls[0] == "before:answer:composed-hooks"
+        assert calls[-1].startswith("after:answer:")
+        assert get_hooks() is existing
+    finally:
+        set_hooks(None)
+
+
+@pytest.mark.asyncio
+async def test_unexpected_failure_carries_partial_tool_evidence_and_cookies() -> None:
+    runner, _ = make_runner()
+    runner._agent_class = ExplodingAgent
+    request = NOOARunRequest(
+        row=row("Paris"),
+        rollout_id="failed-run",
+        task_id="task",
+        model_url_path="/failed-run/v1/responses",
+        resource_cookies={"session": "seeded"},
+    )
+
+    with pytest.raises(NOOARunFailure, match="agent exploded") as raised:
+        await runner.run(request)
+
+    partial = raised.value.result
+    assert partial.return_value is None
+    assert partial.tool_executions[0].name == "get_weather"
+    assert [item.type for item in partial.trace.output] == ["function_call", "function_call_output"]
+    assert partial.resource_cookies == {"session": "seeded"}
+
+
+def test_runner_rejects_tool_namespace_collision_at_startup() -> None:
+    invocation = NOOAInvocationConfig.model_validate(
+        {
+            "agent_class": f"{__name__}:ValidAgent",
+            "entrypoint": "analyze",
+            "init_kwargs": {"label": "configured"},
+            "tool_namespace": "analyze",
+            "arguments": {
+                "text": {"source": "responses_create_params.input", "transform": "latest_user_text"},
+                "customer_id": {"source": "customer_id"},
+            },
+        }
+    )
+
+    with pytest.raises(ValueError, match="collides with an existing agent attribute"):
+        EmbeddedNOOARunner(
+            invocation=invocation,
+            server_client=MagicMock(),
+            model_server_name="policy",
+            resources_server_name="resources",
+            max_steps=1,
+        )

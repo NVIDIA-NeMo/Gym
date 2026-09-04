@@ -19,12 +19,15 @@ isolation. Only load agent classes you trust.
 
 For `/run`, Gym passes the complete dataset row to the adapter. The adapter seeds the Resources server
 session, maps row fields to the configured NOOA method, constructs a fresh agent with a Gym-backed LLM,
-and attaches the row's function tools under `self.gym_tools`. After execution, Gym projects the model
+and attaches the row's function tools under the configured semantic namespace (for example, `self.weather`). After execution, Gym projects the model
 and resource evidence into a Responses object, asks the Resources server to verify it, and writes reward
 and trajectory attachments.
 
 All NOOA policy calls use Gym's Responses-compatible Model Server path. The adapter does not use
-NOOA/LiteLLM's HTTP transport.
+NOOA/LiteLLM's HTTP transport. During each rollout, a scoped NOOA `InstrumentationHooks` observer projects
+NOOA-owned call IDs and parent relationships into Gym observation schemas. It composes with native
+OpenInference tracing and is removed automatically when the rollout exits; Gym does not reconstruct a
+second lifecycle from NOOA events.
 
 ## Run the included example
 
@@ -51,8 +54,16 @@ gym eval run --no-serve \
   --limit 1
 ```
 
-The model-generated code calls `self.gym_tools.get_weather(...)`; Gym routes that call to the Resources
+The model-generated code calls `self.weather.get_weather(...)`; Gym routes that call to the Resources
 server and verifies the projected answer.
+
+### Run the NOOA capability smoke evaluation
+
+The repository also includes a Gym-native copy of NOOA's `calculate_simple` capability fixture. It maps
+the original typed `CalculateSingleAgent.calculate(a, b, calculation)` method into Gym rows and uses the
+`nooa_capability` Resources server to preserve NOOA v0.0.9 `ExactMatchScorer` semantics. See the
+[capability evaluation README](../../../../../responses_api_agents/nooa_agent/capabilities/README.md) for
+commands, provenance, and the staged expansion plan.
 
 To collect model-call observability in an all-in-one run, provide a writable capture directory:
 
@@ -92,6 +103,7 @@ feedback_nooa:
         entrypoint: analyze_feedback
         init_kwargs:
           language: en
+        tool_namespace: feedback
         arguments:
           text:
             source: responses_create_params.input
@@ -126,7 +138,7 @@ from nooa import Agent, CodeActStrategy, strategy
 class FeedbackAgent(Agent):
     @strategy(CodeActStrategy())
     async def analyze_feedback(self, text: str, customer_id: str) -> str:
-        """Look up the customer with self.gym_tools.get_customer, then analyze the feedback."""
+        """Look up the customer with self.feedback.get_customer, then analyze the feedback."""
 
         ...
 ```
@@ -174,7 +186,7 @@ missing-source error. Use `/run` for mappings such as `customer_id`.
 ## Generated Gym tools
 
 Each strict Responses function tool becomes an async method at
-`self.gym_tools.<function_name>(**arguments)`. The proxy:
+`self.<tool_namespace>.<function_name>(...)`. The namespace name is trusted configuration, not row data. Its public methods use positional-or-keyword Python signatures generated from closed object schemas (`additionalProperties: false`); control endpoints and invalid Python identifiers are rejected. Transport clients, cookies, and observation state stay off the public object. The proxy:
 
 - validates arguments against the advertised object JSON Schema;
 - carries the rollout's Resources server cookie jar;
@@ -196,17 +208,18 @@ conversion path.
 With model-call capture enabled, rollout collection joins each NOOA model reference to its captured
 request by exact response ID. Resource calls include output, status, timestamps, and duration.
 
-NOOA's generated method returns a Python value after its final policy tool call. When no final
-model-authored assistant message exists, the adapter adds that value as a synthetic assistant message
-and records `non_trainable_fallback_output`. The preceding model-authored items remain trainable; the
-synthetic fallback does not.
+NOOA's typed method return is the authoritative benchmark answer. If the last completed model-authored
+message is not an exact textual representation of that value, the adapter appends a synthetic assistant
+message and records `non_trainable_terminal_output`. Earlier model-authored items remain training evidence;
+the synthetic terminal item does not carry model token metadata.
 
 ## Limits and troubleshooting
 
 - `max_steps` is the total model-call budget for one NOOA rollout, including nested generated calls.
-- `run_timeout_secs` covers seed, execution, and verification; timeout failures are terminal rollout
-  failures.
-- Each rollout gets a fresh agent, event tracker, LLM, tool proxy, and cookie jars.
+- `run_timeout_secs` bounds NOOA execution. Seed and verification are outside that episode budget;
+  downstream timeout failures remain retryable infrastructure failures.
+- Each rollout gets a fresh agent, scoped hook observer, LLM, semantic tool namespace, and separate model
+  and resource cookie jars. When response cookies share a name, the resource-side value wins.
 - NOOA currently depends on a newer LiteLLM package whose OpenAI requirement exceeds Gym's tested SDK
   window. `overrides.txt` intentionally keeps Gym's OpenAI version because this adapter bypasses
   LiteLLM transport. Do not remove the override without running Gym's OpenAI schema tests.

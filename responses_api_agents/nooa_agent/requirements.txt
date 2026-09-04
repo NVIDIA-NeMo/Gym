@@ -1,2 +1,3 @@
 -e nemo-gym[dev] @ ../../
-nooa==0.0.9
+# hooks_scope/session_scope are required by the native lifecycle projection.
+nooa>=0.0.10,<0.1

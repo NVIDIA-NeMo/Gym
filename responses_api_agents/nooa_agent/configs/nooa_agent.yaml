@@ -12,6 +12,8 @@ nooa_agent:
         agent_class: responses_api_agents.nooa_agent.example_agent:WeatherAgent
         entrypoint: answer
         init_kwargs: {}
+        allowed_tools: [get_weather]
+        tool_namespace: weather
         arguments:
           question:
             source: responses_create_params.input

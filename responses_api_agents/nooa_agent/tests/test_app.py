@@ -33,7 +33,9 @@ from responses_api_agents.nooa_agent.app import (
     NOOAAgentRunRequest,
 )
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
-from responses_api_agents.nooa_agent.runner import NOOARunResult
+from responses_api_agents.nooa_agent.gym_tools import GymToolExecution
+from responses_api_agents.nooa_agent.observability import NOOATraceSnapshot
+from responses_api_agents.nooa_agent.runner import NOOARunFailure, NOOARunResult
 
 
 class FakeHTTPResponse:
@@ -65,6 +67,7 @@ def config(**overrides: object) -> NOOAAgentConfig:
         "nooa": {
             "agent_class": "responses_api_agents.nooa_agent.example_agent:WeatherAgent",
             "entrypoint": "answer",
+            "tool_namespace": "weather",
             "arguments": {
                 "question": {
                     "source": "responses_create_params.input",
@@ -115,8 +118,8 @@ def runner_result(run_request: object) -> NOOARunResult:
         tool_executions=[],
         model_cookies=run_request.model_cookies,
         resource_cookies=run_request.resource_cookies,
-        timeline=[],
-        nooa_events=[],
+        trace=NOOATraceSnapshot(),
+        completed=True,
     )
 
 
@@ -366,3 +369,149 @@ async def test_skip_verification_and_aggregate_metrics_proxy() -> None:
     # Skip mode uses Gym's local aggregate implementation and must not make another server call.
     await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
     assert client.post.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_unexpected_failure_retains_partial_observations_and_cookies() -> None:
+    agent, _ = make_agent()
+    partial = runner_result(
+        SimpleNamespace(
+            model_cookies={"model": "kept"},
+            resource_cookies={"tool": "kept"},
+        )
+    )
+    partial.tool_executions.append(
+        GymToolExecution(
+            tool_call_id="tool-1",
+            name="lookup",
+            arguments={},
+            output="partial",
+            status="completed",
+            started_at=1.0,
+            completed_at=2.0,
+            duration_ms=1000.0,
+        )
+    )
+    agent.runner.run = AsyncMock(side_effect=NOOARunFailure(RuntimeError("boom"), partial))
+    outgoing = Response()
+
+    result = await agent.run(request(), outgoing, body())
+
+    assert result.reward == 0.0
+    assert result.model_extra[NG_FAILURE_CLASS_KEY] == "legitimate"
+    assert result.ng_agent_observations is not None
+    tool = next(record for record in result.ng_agent_observations.records if record.kind == "tool_call")
+    assert tool.tool_name == "lookup"
+    cookies = outgoing.headers.getlist("set-cookie")
+    assert any("model=model-cookie" in cookie for cookie in cookies)
+    assert any("tool=kept" in cookie for cookie in cookies)
+
+
+@pytest.mark.asyncio
+async def test_episode_timeout_retains_partial_observations_and_cookies() -> None:
+    agent, _ = make_agent()
+    agent.config.run_timeout_secs = 0.001
+    partial = runner_result(
+        SimpleNamespace(
+            model_cookies={"model": "before-timeout"},
+            resource_cookies={"tool": "before-timeout"},
+        )
+    )
+    partial.tool_executions.append(
+        GymToolExecution(
+            tool_call_id="tool-timeout",
+            name="lookup",
+            arguments={},
+            output="partial",
+            status="completed",
+            started_at=1.0,
+            completed_at=2.0,
+            duration_ms=1000.0,
+        )
+    )
+
+    async def blocked(*args: object, **kwargs: object) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as error:
+            error.nooa_run_result = partial
+            raise
+
+    agent.runner.run = AsyncMock(side_effect=blocked)
+    outgoing = Response()
+
+    result = await agent.run(request(), outgoing, body())
+
+    assert result.reward == 0.0
+    assert result.model_extra[NG_FAILURE_CLASS_KEY] == "timeout_exceeded"
+    assert result.model_extra[NG_TERMINAL_KEY] is True
+    assert result.ng_agent_observations is not None
+    tool = next(record for record in result.ng_agent_observations.records if record.kind == "tool_call")
+    assert tool.tool_call_id == "tool-timeout"
+    cookies = outgoing.headers.getlist("set-cookie")
+    assert any("model=model-cookie" in cookie for cookie in cookies)
+    assert any("tool=before-timeout" in cookie for cookie in cookies)
+
+
+@pytest.mark.asyncio
+async def test_verification_failure_retains_completed_episode_evidence() -> None:
+    agent, client = make_agent()
+    partial = runner_result(
+        SimpleNamespace(
+            model_cookies={"model": "kept"},
+            resource_cookies={"tool": "kept"},
+        )
+    )
+    partial.tool_executions.append(
+        GymToolExecution(
+            tool_call_id="tool-before-verify",
+            name="lookup",
+            arguments={},
+            output="complete",
+            status="completed",
+            started_at=1.0,
+            completed_at=2.0,
+            duration_ms=1000.0,
+        )
+    )
+    agent.runner.run = AsyncMock(return_value=partial)
+    client.post.side_effect = [FakeHTTPResponse({}), ConnectionError("verify unavailable")]
+    outgoing = Response()
+
+    result = await agent.run(request(), outgoing, body())
+
+    assert result.reward == 0.0
+    assert result.model_extra[NG_FAILURE_CLASS_KEY] == "transient"
+    assert result.ng_agent_observations is not None
+    tool = next(record for record in result.ng_agent_observations.records if record.kind == "tool_call")
+    assert tool.tool_call_id == "tool-before-verify"
+    cookies = outgoing.headers.getlist("set-cookie")
+    assert any("model=model-cookie" in cookie for cookie in cookies)
+    assert any("tool=kept" in cookie for cookie in cookies)
+
+
+@pytest.mark.asyncio
+async def test_verification_failure_preserves_prior_nooa_termination_classification() -> None:
+    agent, client = make_agent()
+    partial = runner_result(
+        SimpleNamespace(
+            model_cookies={"model": "kept"},
+            resource_cookies={"tool": "kept"},
+        )
+    )
+    partial.completed = False
+    partial.return_value = None
+    partial.termination_reason = "policy_budget_exceeded"
+    partial.termination_error = "NOOA policy call budget exhausted after 1 calls"
+    agent.runner.run = AsyncMock(return_value=partial)
+    client.post.side_effect = [FakeHTTPResponse({}), ConnectionError("verify unavailable")]
+
+    result = await agent.run(request(), Response(), body())
+
+    assert result.model_extra[NG_FAILURE_CLASS_KEY] == "transient"
+    assert result.model_extra[NOOA_TERMINATION_REASON_KEY] == "policy_budget_exceeded"
+    assert "exhausted after 1 calls" in result.model_extra[NOOA_TERMINATION_ERROR_KEY]
+    assert [gap.code for gap in result.ng_agent_observations.gaps] == [
+        "transient",
+        "policy_budget_exceeded",
+    ]
