@@ -625,6 +625,36 @@ class TestMultiplicitySemantics:
         a = reward_mod._action_reward(calls, gold)
         assert a["bad_writes"] == 1 and a["strict"] == 0.0
 
+    def test_asymmetric_specs_assign_optimally(self, configured_engine) -> None:
+        # One loose gold (compare_args=[]) next to a fully-specified one: greedy
+        # consumption would let the loose gold steal the strict gold's call when
+        # the agent makes both correct calls in reversed order. The bipartite
+        # assignment credits both, and order alone is flagged.
+        gold = [
+            {"name": "get_deposit_closure_quote", "arguments": {"deposit_ids": ["FD1"]}, "compare_args": []},
+            {"name": "get_deposit_closure_quote", "arguments": {"deposit_ids": ["FD2"]}},
+        ]
+        reversed_calls = [
+            {
+                "name": "get_deposit_closure_quote",
+                "arguments": {"deposit_ids": ["FD2"]},
+                "result": "{}",
+                "error": False,
+            },
+            {
+                "name": "get_deposit_closure_quote",
+                "arguments": {"deposit_ids": ["FD1"]},
+                "result": "{}",
+                "error": False,
+            },
+        ]
+        a = reward_mod._action_reward(reversed_calls, gold)
+        assert a["action_frac"] == 1.0  # both golds credited despite the overlap
+        assert reward_mod._gold_order_violated(reversed_calls, gold)
+        canonical = list(reversed(reversed_calls))
+        a = reward_mod._action_reward(canonical, gold)
+        assert a["action_frac"] == 1.0 and a["seq_frac"] == 1.0 and a["strict"] == 1.0
+
     def test_out_of_order_still_detected(self, configured_engine) -> None:
         calls = self._calls([self.GOLD[1], self.GOLD[0], self.GOLD[2]])
         # All three golds match (read x2, write x1) but not in canonical order.

@@ -123,21 +123,30 @@ def _matches(gold: dict, call: dict) -> bool:
 def _match_gold_calls(calls: list[dict], gold_actions: list[dict]) -> tuple[int, int, set[int]]:
     """Multiplicity-consistent matching shared by ACTION scoring and the efficiency cost.
 
-    Each gold action (in canonical order) consumes the first not-yet-consumed matching
-    call, so a gold list that repeats an action (read-after-write verification) needs
-    the agent to repeat it, and one call never satisfies two gold entries. Returns
-    (matched, lcs, consumed_call_indices): ``matched`` counts consumed golds, ``lcs``
-    is the in-order match count (longest common subsequence), and a trajectory is
-    out-of-order exactly when ``lcs < matched``.
+    Each gold action consumes its own call under a maximum bipartite assignment
+    (Kuhn's augmenting paths), so a gold list that repeats an action
+    (read-after-write verification) needs the agent to repeat it, one call never
+    satisfies two gold entries, and the count cannot depend on gold declaration
+    order even when argument specs overlap (e.g. one gold with ``compare_args: []``
+    next to a fully-specified one). Returns (matched, lcs, consumed_call_indices):
+    ``matched`` counts assigned golds, ``lcs`` is the in-order match count (longest
+    common subsequence). Since the LCS is itself a valid assignment, ``matched >=
+    lcs`` always, and a trajectory is out-of-order exactly when ``lcs < matched``.
     """
-    consumed: set[int] = set()
-    matched = 0
-    for gold in gold_actions:
-        for i, call in enumerate(calls):
-            if i not in consumed and _matches(gold, call):
-                consumed.add(i)
-                matched += 1
-                break
+    edges = [[ci for ci, call in enumerate(calls) if _matches(gold, call)] for gold in gold_actions]
+    call_owner: list[int] = [-1] * len(calls)
+
+    def _assign(gi: int, visited: list[bool]) -> bool:
+        for ci in edges[gi]:
+            if not visited[ci]:
+                visited[ci] = True
+                if call_owner[ci] == -1 or _assign(call_owner[ci], visited):
+                    call_owner[ci] = gi
+                    return True
+        return False
+
+    matched = sum(1 for gi in range(len(gold_actions)) if _assign(gi, [False] * len(calls)))
+    consumed = {ci for ci, owner in enumerate(call_owner) if owner != -1}
     m = len(calls)
     prev_row = [0] * (m + 1)
     for g in gold_actions:
