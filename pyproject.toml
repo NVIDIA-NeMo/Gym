@@ -172,10 +172,10 @@ dependencies = [
 
     # mlflow-skinny: used for interacting with the Gitlab model registry. We use the "skinny" version that does not have unnecessary dependencies.
     # mlflow dependency is necessary for importing. However, all of mlflow's dependencies that don't overlap with mlflow-skinny are excluded below.
-    # Updated Wed Sep 02, 2026 with mlflow>=3.15.2 (security bump)
+    # Updated Fri Sep 04, 2026 with mlflow>=3.16.0 (security bump)
     # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/c6ce84e817897e1a0461632f8a06d4e5e4ac3726/LICENSE.txt
-    "mlflow-skinny>=3.15.2",
-    "mlflow>=3.15.2",
+    "mlflow-skinny>=3.16.0",
+    "mlflow>=3.16.0",
 
     # scipy: t-distribution confidence intervals for repeat-level reward metrics in
     # nemo_gym/reward_profile.py. Lower bound is the first release with cp313 wheels;
@@ -248,9 +248,9 @@ dependencies = [
     "wandb",
 
     # GitPython: Git interaction library (transitive dependency of wandb, pinned for security)
-    # Updated: Mon Aug 04, 2026 with GitPython>=3.1.57
+    # Updated: Fri Sep 04, 2026 with GitPython>=3.1.61
     # License: BSD 3-Clause https://github.com/gitpython-developers/GitPython/blob/main/LICENSE
-    "GitPython>=3.1.57",
+    "GitPython>=3.1.61",
 
     # pyasn1: ASN.1 library (transitive dependency via google-auth, pinned for security)
     # Updated: Tue Jul 29, 2026 with pyasn1>=0.6.4
@@ -503,7 +503,7 @@ nemo-lens = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "b85578fc2b
 # files. (Adding `environments` to packages.find above is what makes that tree ship at all.) Bulk
 # train/validation JSONL is intentionally not committed to git, so it is excluded automatically.
 # Only nemo_gym's own non-package resource scripts need an explicit entry here.
-nemo_gym = ["resources/*.py"]
+nemo_gym = ["resources/*.py", "token_id_capture/staging/conformance/golden_vectors.json"]
 
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
@@ -623,6 +623,24 @@ include = [
     "environments.*",
     "nemo_gym",
     "nemo_gym.*",
+]
+# SWE harnesses create mutable runtime trees inside their package directory.
+# Package discovery must never race or ship those caches and rollout outputs.
+exclude = [
+    "responses_api_agents.swe_agents.results",
+    "responses_api_agents.swe_agents.results.*",
+    "responses_api_agents.swe_agents.swe_openhands_setup",
+    "responses_api_agents.swe_agents.swe_openhands_setup.*",
+    "responses_api_agents.swe_agents.swe_opencode_setup",
+    "responses_api_agents.swe_agents.swe_opencode_setup.*",
+    "responses_api_agents.swe_agents.swe_r2e_gym_setup",
+    "responses_api_agents.swe_agents.swe_r2e_gym_setup.*",
+    "responses_api_agents.swe_agents.swe_rebench_setup",
+    "responses_api_agents.swe_agents.swe_rebench_setup.*",
+    "responses_api_agents.swe_agents.swe_swebench_multilingual_setup",
+    "responses_api_agents.swe_agents.swe_swebench_multilingual_setup.*",
+    "responses_api_agents.swe_agents.swe_swebench_setup",
+    "responses_api_agents.swe_agents.swe_swebench_setup.*",
 ]
 
 ################################################
