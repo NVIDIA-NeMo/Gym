@@ -85,6 +85,7 @@ class CompetitiveCodingChallengesResourcesServerConfig(BaseResourcesServerConfig
     num_parallel_requests: int = 16
     time_scale: float = 2.0
     shared_dir: str = "/tmp"
+    local_compile_dir: Optional[str] = None
     reward_mode: Literal["binary", "fraction"] = "binary"
 
 
@@ -288,6 +289,7 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
                 "test_batch_size": self.config.test_batch_size,
                 "time_scale": self.config.time_scale,
                 "shared_dir": self.config.shared_dir,
+                "local_compile_dir": self.config.local_compile_dir,
                 "run_all_tests": self.config.reward_mode == "fraction",
             },
             num_parallel_requests=self.config.num_parallel_requests,

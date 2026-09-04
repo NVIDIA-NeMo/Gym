@@ -5,6 +5,7 @@ import glob
 import json
 import os
 import re
+import shlex
 import shutil
 import threading
 import time
@@ -151,6 +152,7 @@ class CCCEvaluatorConfig(BaseEvaluatorConfig):
     time_scale: float = 2.0
     overwrite: bool = False
     shared_dir: str = "/tmp"
+    local_compile_dir: str | None = None
     run_all_tests: bool = False
 
 
@@ -173,6 +175,53 @@ def _get_thread_test_sandbox() -> LocalSandbox:
         sandbox = LocalSandbox()
         _test_sandbox_tls.sandbox = sandbox
     return sandbox
+
+
+def _compile_in_sandbox(
+    tls: threading.local,
+    sandbox: LocalSandbox,
+    work_dir: str,
+    local_compile_dir: str | None,
+    *,
+    timeout: int = 120,
+    ignore_failure: bool = False,
+) -> dict:
+    """Compile in node-local storage and publish the result to ``work_dir``.
+
+    ``work_dir`` remains on shared storage so a later sandbox request can run on
+    any node. When ``local_compile_dir`` is configured, the compiler only works
+    in a request-unique directory below that node-local root. The completed tree
+    is copied back once after compilation.
+    """
+    quoted_work_dir = shlex.quote(work_dir)
+    if not local_compile_dir:
+        command = f"cd {quoted_work_dir} && ./compile.sh"
+    else:
+        local_work_dir = os.path.join(local_compile_dir, os.path.basename(work_dir.rstrip(os.sep)))
+        quoted_local_work_dir = shlex.quote(local_work_dir)
+        command = f"""
+shared_work_dir={quoted_work_dir}
+local_work_dir={quoted_local_work_dir}
+cleanup_local_compile_dir() {{
+  rm -rf -- "$local_work_dir"
+}}
+trap cleanup_local_compile_dir EXIT
+mkdir -p -- "$local_work_dir"
+cp -a -- "$shared_work_dir"/. "$local_work_dir"/
+cd "$local_work_dir"
+compile_status=0
+./compile.sh || compile_status=$?
+publish_status=0
+cp -a -- "$local_work_dir"/. "$shared_work_dir"/ || publish_status=$?
+if [ "$publish_status" -ne 0 ]; then
+  exit "$publish_status"
+fi
+exit "$compile_status"
+""".strip()
+
+    if ignore_failure:
+        command = f"({command}) || true"
+    return _exec_sync(tls, sandbox, command, language="shell", timeout=timeout)
 
 
 def wait_for_sandbox(sandbox, timeout: int = 240, poll: float = 1.0):
@@ -343,6 +392,7 @@ def _precompile_problem(
     run_code: str,
     sandbox: LocalSandbox,
     shared_dir: str,
+    local_compile_dir: str | None,
 ) -> str:
     if getattr(sandbox, "_owner_tid", None) != threading.get_ident():
         sandbox = LocalSandbox()
@@ -366,48 +416,80 @@ def _precompile_problem(
             f.write(script_content)
         os.chmod(script_path, 0o755)
 
-    _exec_sync(_precompile_loop_tls, sandbox, f"cd {pre_dir} && ./compile.sh || true", language="shell", timeout=120)
+    _compile_in_sandbox(
+        _precompile_loop_tls,
+        sandbox,
+        pre_dir,
+        local_compile_dir,
+        timeout=120,
+        ignore_failure=True,
+    )
     return pre_dir
 
 
+def _test_result_from_compile(compile_result: dict) -> dict:
+    return {
+        "compile_success": not compile_result.get("stderr"),
+        "compile_stdout": compile_result.get("stdout", ""),
+        "compile_stderr": compile_result.get("stderr", ""),
+        "run_stdout": "",
+        "run_stderr": "",
+        "error": "",
+        "score": 0.0,
+    }
+
+
+def _compile_solution_once(
+    problem_id: str,
+    task_type: str,
+    generated_code: str,
+    precompiled_dir: str,
+    shared_dir: str,
+    local_compile_dir: str | None,
+) -> tuple[str, dict]:
+    """Compile one generated solution and publish a reusable shared artifact."""
+    solution_dir = f"{shared_dir}/ccc_solution_{os.getpid()}_{time.time_ns()}"
+    try:
+        os.makedirs(os.path.join(solution_dir, "graders"), exist_ok=True)
+        if precompiled_dir and os.path.isdir(precompiled_dir):
+            shutil.copytree(precompiled_dir, solution_dir, dirs_exist_ok=True)
+        if task_type == "SIMULATION":
+            with open(os.path.join(solution_dir, "solution.odo"), "w", encoding="utf-8") as f:
+                f.write(generated_code)
+        else:
+            with open(os.path.join(solution_dir, "graders", f"{problem_id}.cpp"), "w", encoding="utf-8") as f:
+                f.write(generated_code)
+
+        sandbox = _get_thread_test_sandbox()
+        compile_result = _compile_in_sandbox(
+            _test_loop_tls,
+            sandbox,
+            solution_dir,
+            local_compile_dir,
+            timeout=120,
+        )
+        return solution_dir, compile_result
+    except Exception:
+        shutil.rmtree(solution_dir, ignore_errors=True)
+        raise
+
+
 def run_test_case(task_args: dict, worker_id: int) -> dict:
+    result = _test_result_from_compile(task_args["compile_result"])
+    if not result["compile_success"]:
+        return result
+
     unique_dir = f"{task_args['shared_dir']}/ccc_run_{worker_id}_{os.getpid()}_{time.time_ns()}"
     try:
-        precompiled_dir = task_args.get("precompiled_dir")
-        os.makedirs(unique_dir, exist_ok=True)
-        os.makedirs(os.path.join(unique_dir, "graders"), exist_ok=True)
+        compiled_solution_dir = task_args["compiled_solution_dir"]
+        shutil.copytree(compiled_solution_dir, unique_dir)
         os.makedirs(os.path.join(unique_dir, "tmp"), exist_ok=True)
-        if precompiled_dir and os.path.isdir(precompiled_dir):
-            shutil.copytree(precompiled_dir, unique_dir, dirs_exist_ok=True)
-        if task_args.get("task_type") == "SIMULATION":
-            with open(os.path.join(unique_dir, "solution.odo"), "w", encoding="utf-8") as f:
-                f.write(task_args["generated_code"])
-        else:
-            with open(
-                os.path.join(unique_dir, "graders", f"{task_args['problem_id']}.cpp"), "w", encoding="utf-8"
-            ) as f:
-                f.write(task_args["generated_code"])
         with open(os.path.join(unique_dir, "input.txt"), "w", encoding="latin1") as f:
             f.write(task_args["test_input"])
         with open(os.path.join(unique_dir, "correct_output.txt"), "w", encoding="latin1") as f:
             f.write(task_args["test_output"])
 
         sandbox = _get_thread_test_sandbox()
-        compile_result = _exec_sync(
-            _test_loop_tls, sandbox, f"cd {unique_dir} && ./compile.sh", language="shell", timeout=120
-        )
-        result = {
-            "compile_success": not compile_result.get("stderr"),
-            "compile_stdout": compile_result.get("stdout", ""),
-            "compile_stderr": compile_result.get("stderr", ""),
-            "run_stdout": "",
-            "run_stderr": "",
-            "error": "",
-            "score": 0.0,
-        }
-        if not result["compile_success"]:
-            return result
-
         run_timeout = max(30, int(30 * float(task_args.get("time_scale", 1.0))))
         run_start = time.monotonic()
         run_result = _exec_sync(
@@ -556,18 +638,15 @@ class CCCEvaluator(BaseEvaluator):
             problem_metadata["run"],
             self.sandbox,
             self.eval_cfg.shared_dir,
+            self.eval_cfg.local_compile_dir,
         )
         self.precompiled_cache[cache_key] = {"grader": grader_dir}
         return grader_dir
 
-    def _build_test_task(
-        self, problem_id: str, pre_dir: str, completion: str, test_data: dict, task_type: str = "Batch"
-    ):
+    def _build_test_task(self, compiled_solution_dir: str, compile_result: dict, test_data: dict):
         return {
-            "generated_code": completion,
-            "task_type": task_type,
-            "problem_id": problem_id,
-            "precompiled_dir": pre_dir,
+            "compiled_solution_dir": compiled_solution_dir,
+            "compile_result": compile_result,
             "test_input": test_data["input"],
             "test_output": test_data["output"],
             "time_scale": self.eval_cfg.time_scale,
@@ -589,31 +668,14 @@ class CCCEvaluator(BaseEvaluator):
             return float(sum(1 for out in outputs if float(out.get("score", 0.0)) > 0.0))
         raise ValueError(f"Unsupported aggregation: {aggregation}")
 
-    async def _evaluate_entry(self, entry: dict) -> dict:
-        await self._initialize_runtime()
-
-        problem_id = entry.get("problem_id") or entry.get("ioi_id")
-        if not problem_id:
-            raise ValueError("Missing 'problem_id' field in entry")
-
-        competition_id = self._get_competition_id(entry)
-        problem_metadata = self.get_problem_metadata(problem_id, competition_id)
-        task_config = extract_task_config(problem_metadata)
-        task_type = str(task_config.get("task_type", "Batch"))
-        if task_type == "SIMULATION":
-            completion = extract_final_code_block((entry.get("generation") or ""), ("txt", "text", "plain"))
-        elif task_type == "MULTIFILE":
-            completion = extract_final_code_block((entry.get("generation") or ""), ("cpp",))
-        else:
-            completion = add_includes(
-                extract_final_code_block((entry.get("generation") or ""), ("cpp",)),
-                problem_metadata.get("problem_header_include"),
-                problem_id,
-            )
-        cache_key = self._cache_key(problem_id, competition_id)
-        pre_dir = await asyncio.to_thread(self._get_precompiled_dir, cache_key, problem_id, problem_metadata)
-        time_scale = self.eval_cfg.time_scale * (0.5 if float(entry.get("total_time") or 0.0) > 300.0 else 1.0)
-
+    async def _evaluate_compiled_solution(
+        self,
+        entry: dict,
+        problem_metadata: dict,
+        compiled_solution_dir: str,
+        compile_result: dict,
+        time_scale: float,
+    ) -> dict:
         subtask_state = {
             subtask_name: {
                 "aggregation": subtask_meta["aggregation"],
@@ -650,7 +712,7 @@ class CCCEvaluator(BaseEvaluator):
                 if not should_run:
                     continue
                 batch.append((test_name, test_data))
-                task = self._build_test_task(problem_id, pre_dir, completion, test_data, task_type=task_type)
+                task = self._build_test_task(compiled_solution_dir, compile_result, test_data)
                 task["time_scale"] = time_scale
                 tasks.append(task)
             if not batch:
@@ -690,6 +752,50 @@ class CCCEvaluator(BaseEvaluator):
             "total_test_execution_time_s": sum(all_run_times),
             "mean_test_execution_time_s": sum(all_run_times) / num_tests_run if num_tests_run else 0.0,
         }
+
+    async def _evaluate_entry(self, entry: dict) -> dict:
+        await self._initialize_runtime()
+
+        problem_id = entry.get("problem_id") or entry.get("ioi_id")
+        if not problem_id:
+            raise ValueError("Missing 'problem_id' field in entry")
+
+        competition_id = self._get_competition_id(entry)
+        problem_metadata = self.get_problem_metadata(problem_id, competition_id)
+        task_config = extract_task_config(problem_metadata)
+        task_type = str(task_config.get("task_type", "Batch"))
+        if task_type == "SIMULATION":
+            completion = extract_final_code_block((entry.get("generation") or ""), ("txt", "text", "plain"))
+        elif task_type == "MULTIFILE":
+            completion = extract_final_code_block((entry.get("generation") or ""), ("cpp",))
+        else:
+            completion = add_includes(
+                extract_final_code_block((entry.get("generation") or ""), ("cpp",)),
+                problem_metadata.get("problem_header_include"),
+                problem_id,
+            )
+        cache_key = self._cache_key(problem_id, competition_id)
+        pre_dir = await asyncio.to_thread(self._get_precompiled_dir, cache_key, problem_id, problem_metadata)
+        time_scale = self.eval_cfg.time_scale * (0.5 if float(entry.get("total_time") or 0.0) > 300.0 else 1.0)
+        compiled_solution_dir, compile_result = await asyncio.to_thread(
+            _compile_solution_once,
+            problem_id,
+            task_type,
+            completion,
+            pre_dir,
+            self.eval_cfg.shared_dir,
+            self.eval_cfg.local_compile_dir,
+        )
+        try:
+            return await self._evaluate_compiled_solution(
+                entry,
+                problem_metadata,
+                compiled_solution_dir,
+                compile_result,
+                time_scale,
+            )
+        finally:
+            shutil.rmtree(compiled_solution_dir, ignore_errors=True)
 
     async def eval_full(self, input_files):  # type: ignore[override]
         await self._initialize_runtime()

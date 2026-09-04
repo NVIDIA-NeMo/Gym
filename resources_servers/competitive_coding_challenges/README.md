@@ -24,14 +24,16 @@ competitive_coding_challenges
     num_parallel_requests: 16
     time_scale: 2.0
     shared_dir: ${oc.env:SHARED_TEMP_DIR,/tmp}
+    local_compile_dir: ${oc.env:LOCAL_COMPILE_DIR,null}
 ```
 
 You must set the following at runtime:
-- `export SHARED_TEMP_DIR=` local directory for code execution to store compilation files and share between ray instances and nodes
+- `export SHARED_TEMP_DIR=` shared directory for code-execution artifacts that must be visible to all Ray nodes
 - `export CCC_TEST_FILE=` path to metadata.jsonl file which contains data test cases and necessary execution artifacts
 
 and optionally can set to following:
 - `export CCC_LOG_JSONL_PATH=` set path to view generations and runtime/compilation information (ex: stderr, stdout)
+- `export LOCAL_COMPILE_DIR=` node-local directory where compilation is staged before completed artifacts are published to `SHARED_TEMP_DIR`
 - `test_batch_size` per problem test case parallelism
 - `num_parallel_requests` number of problems to evaluate in parallel
 - `time_scale` timeout limit factor, multiply's each problem's inherent time limit
