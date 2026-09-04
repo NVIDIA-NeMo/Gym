@@ -167,6 +167,22 @@ class StageResume:
             setattr(self, name, {stage: value for stage, value in values.items() if stage <= index})
 
 
+# Classes worth re-dispatching inside the same process. Deliberately narrower
+# than "not terminal": _is_terminal_failure also spares reference_missing /
+# eval_missing / transport_ineligible on the grounds that the deliverable tree
+# may be repaired *between* runs. Nothing repairs it mid-process, so retrying
+# those here only burns dispatch budget.
+_IN_PROCESS_RETRYABLE_CLASSES = frozenset({"timeout_exceeded", "transient"})
+
+
+def _is_in_process_retryable(row: Mapping[str, Any]) -> bool:
+    return (
+        not _is_success_row(row)
+        and not row.get(NG_NO_PERSIST_KEY)
+        and row.get(NG_FAILURE_CLASS_KEY) in _IN_PROCESS_RETRYABLE_CLASSES
+    )
+
+
 def _is_success_row(row: Mapping[str, Any]) -> bool:
     """A row is a success iff it carries neither a failure class nor no-persist."""
     return (
@@ -570,6 +586,11 @@ class MultiStageRunConfig:
     # Judge a task's cached deliverable in later stages instead of re-running the
     # policy. Falls back to a fresh rollout when the deliverable is missing.
     reuse_cached_deliverables: bool = True
+    # Re-dispatch retryable rows inside the same process, up to
+    # NEMO_GYM_MAX_ROLLOUT_ATTEMPTS, applying the same gate a resume would.
+    # Off by default: without it the attempt cap only advances across resumes,
+    # so a timed-out row is lost whenever a run exits cleanly.
+    retry_inprocess: bool = False
 
 
 # Failure classes a partial-calibration policy may newly waive. A waived row is
@@ -701,6 +722,7 @@ def parse_multistage_config(raw: Mapping[str, Any]) -> MultiStageRunConfig:
         nested_tasks=bool(raw.get("nested_tasks", False)),
         seed=raw.get("seed"),
         reuse_cached_deliverables=bool(raw.get("reuse_cached_deliverables", True)),
+        retry_inprocess=bool(raw.get("retry_inprocess", False)),
     )
 
 
@@ -918,6 +940,7 @@ async def run_multistage_stages(
                     sidecar_produced_by_stage.setdefault(stage_index, set()).add((task_id, int(key[1] or 0)))
 
     max_attempts = _get_max_rollout_attempts()
+    retry_inprocess = bool(getattr(multistage_config, "retry_inprocess", False))
     for index, stage in enumerate(multistage_config.stages):
         # A sidecar reuse flag is emitted only after the policy artifact exists.
         # Treat it as produced from this stage onward even when the judging row
@@ -1116,6 +1139,63 @@ async def run_multistage_stages(
         )
         if resume is not None:
             resume.on_rows(index, new_tagged)
+
+        # In-process retry: re-dispatch rows that came back retryable, applying the
+        # same gate a resume would (success / terminal / max-attempt), until the cap
+        # is reached or the dispatch budget runs out. Without this, max_attempts only
+        # ever advances across resumes, so a timed-out row is lost whenever a run
+        # exits cleanly -- the whole point of the cap never fires inside a leg.
+        if retry_inprocess and pairs and resume is not None:
+            while True:
+                attempts_now = resume.attempts_by_stage.get(index, {})
+                retry_rows = []
+                for row in new_tagged:
+                    if not _is_in_process_retryable(row):
+                        continue
+                    key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+                    if attempts_now.get(key, 0) >= max_attempts:
+                        continue
+                    source = next(
+                        (r for r in pending_rows if (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) == key),
+                        None,
+                    )
+                    if source is None:
+                        continue
+                    retry_row = dict(source)
+                    attempt = attempts_now.get(key, 0)
+                    if attempt > 0:
+                        retry_row[ATTEMPT_INDEX_KEY_NAME] = attempt
+                    # A failed judging attempt keeps its policy artifact: rejudge it
+                    # rather than rerunning the agent, exactly as resume does.
+                    if key in resume.reuse_cached_keys.get(index, frozenset()):
+                        retry_row["reuse_cached_deliverable"] = True
+                    retry_rows.append(retry_row)
+                if not retry_rows:
+                    break
+                retry_pairs = await run_rollouts(retry_rows)
+                if not retry_pairs:
+                    # Budget exhausted: run_rollouts recomputes remaining_budget_s on
+                    # every call and dispatches nothing once it is gone.
+                    break
+                retried = tag_results(
+                    retry_pairs,
+                    index,
+                    expected_final_stage_index=total_stages - 1,
+                    expected_stage_row_count=expected_stage_row_count,
+                )
+                resume.on_rows(index, retried)
+                _emit(
+                    "stage_retry",
+                    index=index,
+                    total_stages=total_stages,
+                    num_retried=len(retry_rows),
+                    num_recovered=sum(1 for r in retried if _is_success_row(r)),
+                )
+                # Later attempt wins for a key; earlier attempts stay in the sidecar.
+                superseded = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in retried}
+                new_tagged = [
+                    r for r in new_tagged if (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) not in superseded
+                ] + retried
         # A verify-side failure can still carry a complete, reusable policy
         # artifact. Make it available immediately to later stages in this same
         # process; startup-only sidecar loading covers only resumed runs.
@@ -2232,6 +2312,13 @@ def _log_event(name: str, data: dict) -> None:  # pragma: no cover
             f"[multistage-elo] stage {data['index'] + 1}/{data['total_stages']} accepted partial calibration: "
             f"success coverage {data.get('success_fraction', 0):.1%}, omitted "
             f"{data.get('num_omitted')} rollout(s)",
+            file=sys.stderr,
+            flush=True,
+        )
+    elif name == "stage_retry":
+        print(
+            f"[multistage-elo] stage {data['index'] + 1}/{data['total_stages']} in-process retry: "
+            f"re-dispatched {data.get('num_retried')} rollout(s), recovered {data.get('num_recovered')}",
             file=sys.stderr,
             flush=True,
         )
