@@ -588,6 +588,49 @@ class TestDeterministicFloors:
         assert reward_mod.score_trajectory(transferred)["strict"] == 1.0
 
 
+class TestMultiplicitySemantics:
+    """Review round 3: one consumption-based multiplicity semantics for every signal."""
+
+    GOLD = [
+        {"name": "get_account_balance", "arguments": {"account_ids": ["SB1"]}},
+        {"name": "toggle_card_freeze", "arguments": {"card_id": "C1"}},
+        {"name": "get_account_balance", "arguments": {"account_ids": ["SB1"]}},
+    ]
+
+    def _calls(self, golds):
+        return [dict(g, result="{}", error=False) for g in golds]
+
+    def test_byte_perfect_repeat_gold_scores_clean(self, configured_engine) -> None:
+        calls = self._calls(self.GOLD)
+        assert not reward_mod._gold_order_violated(calls, self.GOLD)
+        cost, detail = reward_mod._efficiency_cost(calls, self.GOLD, [], None)
+        assert cost == 0.0 and detail["eff_duplicates"] == 0.0 and detail["eff_order"] == 0.0
+        a = reward_mod._action_reward(calls, self.GOLD)
+        assert a["strict"] == 1.0 and a["action_frac"] == 1.0 and a["seq_frac"] == 1.0
+
+    def test_skipping_a_mandated_repeat_is_consistent(self, configured_engine) -> None:
+        calls = self._calls(self.GOLD[:2])
+        a = reward_mod._action_reward(calls, self.GOLD)
+        # One call never satisfies two gold entries: every signal agrees now.
+        assert abs(a["action_frac"] - 2 / 3) < 1e-9
+        assert abs(a["seq_frac"] - 2 / 3) < 1e-9
+        assert a["strict"] == 0.0
+        assert not reward_mod._gold_order_violated(calls, self.GOLD)
+
+    def test_unmandated_duplicate_is_still_charged(self, configured_engine) -> None:
+        gold = self.GOLD[:2]
+        calls = self._calls([gold[0], gold[1], gold[1]])  # repeats the write beyond gold
+        cost, detail = reward_mod._efficiency_cost(calls, gold, [], None)
+        assert detail["eff_duplicates"] == 1.0 and cost > 0.0
+        a = reward_mod._action_reward(calls, gold)
+        assert a["bad_writes"] == 1 and a["strict"] == 0.0
+
+    def test_out_of_order_still_detected(self, configured_engine) -> None:
+        calls = self._calls([self.GOLD[1], self.GOLD[0], self.GOLD[2]])
+        # All three golds match (read x2, write x1) but not in canonical order.
+        assert reward_mod._gold_order_violated(calls, self.GOLD)
+
+
 class TestShippedDataIntegrity:
     """Contract checks over the in-tree dataset (no model calls, engine only)."""
 
@@ -630,5 +673,9 @@ class TestShippedDataIntegrity:
                 }
                 score = reward_mod.score_trajectory(store)
                 assert score["strict"] == 1.0, f"{row['task_id']}: gold replay strict={score['strict']}"
+                # A byte-perfect gold replay must earn exactly 1.0: no false
+                # duplicate or out-of-order efficiency penalty (67 tasks repeat a
+                # gold action as a read-after-write verification step).
+                assert score["score"] == 1.0, f"{row['task_id']}: gold replay score={score['score']}"
         finally:
             engine.configure()

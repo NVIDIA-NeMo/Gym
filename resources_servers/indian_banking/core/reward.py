@@ -104,6 +104,53 @@ def _replay_gold(customer, gold_actions: list[dict]) -> tuple[dict, list[bool]]:
     return gold_world, errors
 
 
+def _matches(gold: dict, call: dict) -> bool:
+    """One gold action vs one agent call: same tool, soft-compared arguments.
+
+    An errored call satisfies a gold action only if the task explicitly marks that
+    action with ``expect_error: true`` (deliberate error-path tasks). Never inferred."""
+    if gold["name"] != call["name"]:
+        return False
+    if call.get("error") and not gold.get("expect_error"):
+        return False
+    return args_match(
+        gold.get("arguments") or {},
+        call.get("arguments") or {},
+        gold.get("compare_args"),
+    )
+
+
+def _match_gold_calls(calls: list[dict], gold_actions: list[dict]) -> tuple[int, int, set[int]]:
+    """Multiplicity-consistent matching shared by ACTION scoring and the efficiency cost.
+
+    Each gold action (in canonical order) consumes the first not-yet-consumed matching
+    call, so a gold list that repeats an action (read-after-write verification) needs
+    the agent to repeat it, and one call never satisfies two gold entries. Returns
+    (matched, lcs, consumed_call_indices): ``matched`` counts consumed golds, ``lcs``
+    is the in-order match count (longest common subsequence), and a trajectory is
+    out-of-order exactly when ``lcs < matched``.
+    """
+    consumed: set[int] = set()
+    matched = 0
+    for gold in gold_actions:
+        for i, call in enumerate(calls):
+            if i not in consumed and _matches(gold, call):
+                consumed.add(i)
+                matched += 1
+                break
+    m = len(calls)
+    prev_row = [0] * (m + 1)
+    for g in gold_actions:
+        row = [0] * (m + 1)
+        for ci in range(1, m + 1):
+            if _matches(g, calls[ci - 1]):
+                row[ci] = prev_row[ci - 1] + 1
+            else:
+                row[ci] = max(prev_row[ci], row[ci - 1])
+        prev_row = row
+    return matched, prev_row[m], consumed
+
+
 def _action_reward(calls: list[dict], gold_actions: list[dict]) -> dict:
     """Score ACTION. Returns strict, action_frac, name_frac, seq_frac, purity_ok, bad_writes, n_writes."""
     if not gold_actions:
@@ -117,56 +164,30 @@ def _action_reward(calls: list[dict], gold_actions: list[dict]) -> dict:
             "n_writes": 0,
         }
 
-    def matches(gold: dict, call: dict) -> bool:
-        if gold["name"] != call["name"]:
-            return False
-        # An errored call satisfies a gold action only if the task explicitly marks
-        # that action with ``expect_error: true`` (tasks that deliberately exercise
-        # an error path). Never inferred from the gold replay.
-        if call.get("error") and not gold.get("expect_error"):
-            return False
-        return args_match(
-            gold.get("arguments") or {},
-            call.get("arguments") or {},
-            gold.get("compare_args"),
-        )
-
-    matched = 0
+    matched, lcs, consumed = _match_gold_calls(calls, gold_actions)
     named = 0
     called_names = {c["name"] for c in calls}
     for gold in gold_actions:
-        if any(matches(gold, c) for c in calls):
-            matched += 1
         if gold["name"] in called_names:
             named += 1
     action_frac = matched / len(gold_actions)
     name_frac = named / len(gold_actions)
     all_gold_found = matched == len(gold_actions)
+    seq_frac = lcs / len(gold_actions)
 
-    # LCS(gold, calls)/n_gold: in-order match fraction.
-    m = len(calls)
-    prev_row = [0] * (m + 1)
-    for g in gold_actions:
-        row = [0] * (m + 1)
-        for ci in range(1, m + 1):
-            if matches(g, calls[ci - 1]):
-                row[ci] = prev_row[ci - 1] + 1
-            else:
-                row[ci] = max(prev_row[ci], row[ci - 1])
-        prev_row = row
-    seq_frac = prev_row[m] / len(gold_actions)
-
-    # Write purity, counted rather than short-circuited.
-    gold_writes = [g for g in gold_actions if g["name"] in engine.WRITE_TOOLS]
+    # Write purity, counted rather than short-circuited. Consumption-consistent
+    # with the match above: a non-errored write call that no gold action consumed
+    # is a wrong write - including a repeat of a legitimate write beyond the
+    # number of times gold asks for it.
     n_writes = 0
     bad_writes = 0
-    for c in calls:
+    for i, c in enumerate(calls):
         if c["name"] not in engine.WRITE_TOOLS:
             continue
         if c.get("error"):
             continue  # an errored write mutated nothing; retry-after-error is not a wrong write
         n_writes += 1
-        if not any(matches(g, c) for g in gold_writes):
+        if i not in consumed:
             bad_writes += 1
 
     strict_ok = all_gold_found and bad_writes == 0
@@ -184,20 +205,14 @@ def _action_reward(calls: list[dict], gold_actions: list[dict]) -> dict:
 
 
 def _gold_order_violated(calls: list[dict], gold_actions: list[dict]) -> bool:
-    """True if matched gold actions were called out of canonical order (False if <2 matched)."""
+    """True if the matched gold actions cannot all be realised in canonical order.
+
+    Consumption-aware: a gold list that legitimately repeats an action maps each
+    repeat to its own call, so a byte-perfect replay of gold is never out of order."""
     if len(gold_actions) < 2:
         return False
-    positions = []
-    for gold in gold_actions:
-        for i, c in enumerate(calls):
-            if c["name"] == gold["name"] and args_match(
-                gold.get("arguments") or {}, c.get("arguments") or {}, gold.get("compare_args")
-            ):
-                positions.append(i)
-                break
-    if len(positions) < 2:
-        return False
-    return positions != sorted(positions)
+    matched, lcs, _ = _match_gold_calls(calls, gold_actions)
+    return lcs < matched
 
 
 def _efficiency_cost(
@@ -212,12 +227,15 @@ def _efficiency_cost(
     """
     n_gold = max(1, len(gold_actions))
 
+    _, _, consumed = _match_gold_calls(calls, gold_actions)
     seen: set[str] = set()
     duplicates = 0
     writes = 0
-    for c in calls:
+    for i, c in enumerate(calls):
         key = f"{c['name']}|{json.dumps(c.get('arguments') or {}, sort_keys=True, default=str)}"
-        if key in seen:
+        # A repeat the gold list itself asks for (consumed by a gold action, e.g. a
+        # read-after-write verification step) is mandated behaviour, not waste.
+        if key in seen and i not in consumed:
             duplicates += 1
         seen.add(key)
         if c["name"] in engine.WRITE_TOOLS:
