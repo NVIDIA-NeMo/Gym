@@ -37,7 +37,7 @@ from uuid import uuid4
 
 from fastapi import Request
 from omegaconf import ListConfig
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -107,6 +107,18 @@ class SandboxAgentConfig(BaseResponsesAPIAgentConfig):
     eval_timeout: int = 1800
     rollout_timeout: int = 2400
 
+    @model_validator(mode="after")
+    def validate_mode_config(self):
+        required = ["model_server"]
+        if self.mode == "agent_only_runner":
+            required += ["resources_server", "agent_module", "agent_class", "agent_config_class"]
+        else:
+            required += ["nested_config_paths", "nested_agent_name"]
+        missing = [name for name in required if not getattr(self, name)]
+        if missing:
+            raise ValueError(f"{self.mode} requires: {', '.join(missing)}")
+        return self
+
 
 class SandboxAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
@@ -168,14 +180,12 @@ class SandboxAgent(SimpleResponsesAPIAgent):
         base = re.sub(r"/v1/?$", "", str(base))
         parsed = urlsplit(base if "://" in base else f"http://{base}")
         host = parsed.hostname or ""
-        try:
-            if host in ("127.0.0.1", "localhost", "0.0.0.0"):
+        if host in ("127.0.0.1", "localhost", "0.0.0.0"):
+            try:
                 # loopback binds are unreachable from a sandbox
                 host = socket.gethostbyname(socket.gethostname())
-            else:
-                host = socket.gethostbyname(host)
-        except OSError:
-            pass
+            except OSError:
+                pass
         netloc = f"{host}:{parsed.port}" if parsed.port else host
         return urlunsplit((parsed.scheme or "http", netloc, parsed.path, parsed.query, parsed.fragment))
 
@@ -368,13 +378,6 @@ class SandboxAgent(SimpleResponsesAPIAgent):
                 LOG.warning("runner incomplete: %s", (r.stderr or r.stdout or "")[-6000:])
 
             resp = NeMoGymResponse.model_validate(await self._download_json(handle, "/work/response.json"))
-
-            if meta.get("patch_workdir"):
-                wd = meta["patch_workdir"]
-                r = await self._provider.exec(
-                    handle, f"git -C {wd} add -A . && git -C {wd} diff --cached", timeout_s=120
-                )
-                resp.metadata = (resp.metadata or {}) | {"model_patch": r.stdout or ""}
 
             grade_raw = meta.get("sandbox_eval")
             grade_spec = json.loads(grade_raw) if isinstance(grade_raw, str) else grade_raw
