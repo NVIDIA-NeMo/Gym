@@ -33,9 +33,11 @@ from nemo_gym.config_types import (
     AggregateMetricsRequest,
     ResourcesServerRef,
 )
-from nemo_gym.multi_agent import AgentActResponse, AgentTurn, MultiAgentResetResponse, MultiAgentStepResponse
+from nemo_gym.multi_agent import AgentTurn, MultiAgentResetResponse, MultiAgentStepResponse
 from nemo_gym.openai_utils import (
+    NeMoGymEasyInputMessage,
     NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
@@ -94,6 +96,27 @@ def _episode_response(trajectories: dict[str, list[AgentTurn]]) -> NeMoGymRespon
         tool_choice="none",
         tools=[],
     )
+
+
+def _turn_response_params(
+    base: NeMoGymResponseCreateParamsNonStreaming,
+    history: list[AgentTurn],
+    observation: str,
+) -> NeMoGymResponseCreateParamsNonStreaming:
+    """Build one participant policy request using the standard Responses contract."""
+    if isinstance(base.input, str):
+        turn_input = [NeMoGymEasyInputMessage(role="user", content=base.input)]
+    else:
+        turn_input = list(base.input)
+    for turn in history:
+        turn_input.extend(
+            [
+                NeMoGymEasyInputMessage(role="user", content=turn.observation),
+                NeMoGymEasyInputMessage(role="assistant", content=turn.action),
+            ]
+        )
+    turn_input.append(NeMoGymEasyInputMessage(role="user", content=observation))
+    return base.model_copy(deep=True, update={"input": turn_input})
 
 
 class AlternatingTurnOrchestrator(SimpleRolloutOrchestrator):
@@ -162,19 +185,23 @@ class AlternatingTurnOrchestrator(SimpleRolloutOrchestrator):
                 if observation is None:
                     raise RuntimeError(f"Environment returned no observation for active agent {active_agent!r}.")
 
-                act_resp = await self.server_client.post(
+                policy_params = _turn_response_params(
+                    body.responses_create_params,
+                    trajectories[active_agent],
+                    observation,
+                )
+                agent_resp = await self.server_client.post(
                     server_name=self.config.agents[active_agent].name,
-                    url_path="/act",
-                    json={
-                        "agent_id": active_agent,
-                        "observation": observation,
-                        "history": [turn.model_dump() for turn in trajectories[active_agent]],
-                    },
+                    url_path="/v1/responses",
+                    json=policy_params.model_dump(mode="json", exclude_none=True),
                     cookies=agent_cookies[active_agent],
                 )
-                await raise_for_status(act_resp)
-                action = AgentActResponse.model_validate(await get_response_json(act_resp)).action
-                agent_cookies[active_agent] = act_resp.cookies
+                await raise_for_status(agent_resp)
+                agent_response = NeMoGymResponse.model_validate(await get_response_json(agent_resp))
+                action = agent_response.output_text.strip()
+                if not action:
+                    raise RuntimeError(f"Agent {active_agent!r} returned no output text.")
+                agent_cookies[active_agent] = agent_resp.cookies
                 trajectories[active_agent].append(AgentTurn(observation=observation, action=action))
 
                 step_resp = await self.server_client.post(

@@ -9,11 +9,14 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from nemo_gym.config_types import AgentServerRef, AggregateMetricsRequest, ResourcesServerRef
+from nemo_gym.multi_agent import AgentTurn
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from rollout_orchestrators.alternating_turn.app import (
     AlternatingTurnOrchestrator,
     AlternatingTurnOrchestratorConfig,
     AlternatingTurnRunRequest,
+    _turn_response_params,
 )
 
 
@@ -26,6 +29,27 @@ class _FakeHttpResponse:
 
     async def read(self):
         return json.dumps(self._payload).encode()
+
+
+def _agent_response(action: str) -> dict:
+    return {
+        "id": "response",
+        "created_at": 0,
+        "model": "policy",
+        "object": "response",
+        "output": [
+            {
+                "id": "message",
+                "content": [{"annotations": [], "text": action, "type": "output_text"}],
+                "role": "assistant",
+                "status": "completed",
+                "type": "message",
+            }
+        ],
+        "parallel_tool_calls": False,
+        "tool_choice": "none",
+        "tools": [],
+    }
 
 
 def _orchestrator(max_turns: int = 8) -> AlternatingTurnOrchestrator:
@@ -51,12 +75,27 @@ def test_run_route_belongs_to_orchestrator() -> None:
     assert "/v1/responses" not in paths
 
 
+def test_turn_response_params_preserves_only_that_participants_history() -> None:
+    params = _turn_response_params(
+        NeMoGymResponseCreateParamsNonStreaming(input="Play Kuhn Poker."),
+        [AgentTurn(observation="Your card is J.", action="[check]")],
+        "Your card is J. Player 1 chose [bet].",
+    )
+
+    assert [(message.role, message.content) for message in params.input] == [
+        ("user", "Play Kuhn Poker."),
+        ("user", "Your card is J."),
+        ("assistant", "[check]"),
+        ("user", "Your card is J. Player 1 chose [bet]."),
+    ]
+
+
 def test_http_run_route_executes_rollout_wrapper() -> None:
     orchestrator = _orchestrator()
     orchestrator.server_client.post = AsyncMock(
         side_effect=[
             _FakeHttpResponse({"active_agent": "player0", "observation": "P0", "info": {}}),
-            _FakeHttpResponse({"action": "[bet]"}),
+            _FakeHttpResponse(_agent_response("[bet]")),
             _FakeHttpResponse(
                 {
                     "rewards": {"player0": 1.0, "player1": -1.0},
@@ -144,7 +183,7 @@ async def test_orchestrator_routes_private_observations_and_preserves_cookies() 
             {"active_agent": "player0", "observation": "P0 private", "info": {"seed": 0}},
             {"session": "reset"},
         ),
-        _FakeHttpResponse({"action": "[check]"}, {"player0": "cookie"}),
+        _FakeHttpResponse(_agent_response("[check]"), {"player0": "cookie"}),
         _FakeHttpResponse(
             {
                 "active_agent": "player1",
@@ -156,7 +195,7 @@ async def test_orchestrator_routes_private_observations_and_preserves_cookies() 
             },
             {"session": "step-1"},
         ),
-        _FakeHttpResponse({"action": "[check]"}, {"player1": "cookie"}),
+        _FakeHttpResponse(_agent_response("[check]"), {"player1": "cookie"}),
         _FakeHttpResponse(
             {
                 "active_agent": None,
@@ -186,16 +225,16 @@ async def test_orchestrator_routes_private_observations_and_preserves_cookies() 
     assert result.terminated is True
     assert [(server, path) for server, path, _, _ in calls] == [
         ("environment", "/reset"),
-        ("player0_server", "/act"),
+        ("player0_server", "/v1/responses"),
         ("environment", "/step"),
-        ("player1_server", "/act"),
+        ("player1_server", "/v1/responses"),
         ("environment", "/step"),
     ]
     assert calls[0][3] == {"incoming": "cookie"}
     assert calls[2][3] == {"session": "reset"}
     assert calls[4][3] == {"session": "step-1"}
-    assert calls[1][2]["observation"] == "P0 private"
-    assert calls[3][2]["observation"] == "P1 private"
+    assert calls[1][2]["input"][-1]["content"] == "P0 private"
+    assert calls[3][2]["input"][-1]["content"] == "P1 private"
     assert "P1 private" not in json.dumps(calls[1][2])
     assert "P0 private" not in json.dumps(calls[3][2])
 
@@ -206,7 +245,7 @@ async def test_turn_limit_truncates_and_closes_environment() -> None:
     paths = []
     responses = [
         _FakeHttpResponse({"active_agent": "player0", "observation": "P0", "info": {}}),
-        _FakeHttpResponse({"action": "[check]"}),
+        _FakeHttpResponse(_agent_response("[check]")),
         _FakeHttpResponse(
             {
                 "active_agent": "player1",
@@ -233,4 +272,4 @@ async def test_turn_limit_truncates_and_closes_environment() -> None:
 
     assert result.truncated is True
     assert result.terminated is False
-    assert paths == ["/reset", "/act", "/step", "/close"]
+    assert paths == ["/reset", "/v1/responses", "/step", "/close"]

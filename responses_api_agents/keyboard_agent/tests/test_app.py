@@ -4,9 +4,8 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi import HTTPException
 
-from nemo_gym.multi_agent import AgentActRequest
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.keyboard_agent.app import KeyboardAgent, KeyboardAgentConfig
 
@@ -23,27 +22,39 @@ def _agent() -> KeyboardAgent:
     return KeyboardAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
 
-def test_act_route_is_registered() -> None:
-    assert "/act" in {route.path for route in _agent().setup_webserver().routes}
+def test_responses_route_is_registered() -> None:
+    paths = {route.path for route in _agent().setup_webserver().routes}
+    assert "/v1/responses" in paths
+    assert "/act" not in paths
 
 
 @pytest.mark.asyncio
-async def test_act_reads_action_from_own_terminal() -> None:
+async def test_responses_reads_action_from_own_terminal() -> None:
     agent = _agent()
-    request = AgentActRequest(agent_id="player0", observation="Your card is K.")
+    request = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {"role": "user", "content": "Earlier observation."},
+            {"role": "assistant", "content": "[check]"},
+            {"role": "user", "content": "Your card is K."},
+        ]
+    )
 
     with patch("builtins.input", return_value="[bet]") as mocked_input:
-        response = await agent.act(request)
+        response = await agent.responses(request)
 
-    assert response.action == "[bet]"
+    assert response.output_text == "[bet]"
     assert "Player 0 (player0)" in mocked_input.call_args.args[0]
     assert "Your card is K." in mocked_input.call_args.args[0]
+    assert "Earlier observation." not in mocked_input.call_args.args[0]
 
 
 @pytest.mark.asyncio
-async def test_rejects_another_agents_request() -> None:
+async def test_responses_accepts_string_input() -> None:
     agent = _agent()
-    request = AgentActRequest(agent_id="player1", observation="private")
+    request = NeMoGymResponseCreateParamsNonStreaming(input="Your card is Q.")
 
-    with pytest.raises(HTTPException, match="controls player0"):
-        await agent.act(request)
+    with patch("builtins.input", return_value="[check]") as mocked_input:
+        response = await agent.responses(request)
+
+    assert response.output_text == "[check]"
+    assert "Your card is Q." in mocked_input.call_args.args[0]
