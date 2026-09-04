@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import (
@@ -21,6 +21,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.judge import JudgeError
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
@@ -96,20 +97,22 @@ class JobBenchResourcesServer(SimpleResourcesServer):
             entrypoint=None,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
-        await sandbox.start(spec)
-
-        with tempfile.TemporaryDirectory() as temporary_dir:
-            archive = Path(temporary_dir) / "task.tar.gz"
-            with tarfile.open(archive, "w:gz", dereference=True) as tar:
-                tar.add(task_dir / "task_folder", arcname="task")
-            await sandbox.upload(archive, "/tmp/task.tar.gz")
-        result = await sandbox.exec(
-            "mkdir -p /workspace/output && tar -xzf /tmp/task.tar.gz -C /workspace",
-            cwd="/",
-        )
-        if result.return_code != 0:
+        try:
+            await sandbox.start(spec)
+            with tempfile.TemporaryDirectory() as temporary_dir:
+                archive = Path(temporary_dir) / "task.tar.gz"
+                with tarfile.open(archive, "w:gz", dereference=True) as tar:
+                    tar.add(task_dir / "task_folder", arcname="task")
+                await sandbox.upload(archive, "/tmp/task.tar.gz")
+            result = await sandbox.exec(
+                "mkdir -p /workspace/output && tar -xzf /tmp/task.tar.gz -C /workspace",
+                cwd="/",
+            )
+            if result.return_code != 0:
+                raise RuntimeError(f"Failed to seed Job-Bench task: {result.stderr}")
+        except Exception:
             await sandbox.stop()
-            raise RuntimeError(f"Failed to seed Job-Bench task: {result.stderr}")
+            raise
 
         session_id = request.session[SESSION_ID_KEY]
         self._sandboxes[session_id] = sandbox
@@ -151,11 +154,17 @@ class JobBenchResourcesServer(SimpleResourcesServer):
                 )
                 for index, rubric in enumerate(rubrics)
             ]
-            results = [future.result()[0] for future in futures]
+            judged = [future.result() for future in futures]
+        errors = [debug["error"] for _, debug in judged if debug["api_exit_code"]]
+        if errors:
+            raise JudgeError("; ".join(errors))
+        results = [result for result, _ in judged]
         return judge.build_scorecard(results), results
 
     async def verify(self, request: Request, body: JobBenchVerifyRequest) -> JobBenchVerifyResponse:
-        sandbox = self._sandboxes.pop(request.session[SESSION_ID_KEY])
+        sandbox = self._sandboxes.pop(request.session[SESSION_ID_KEY], None)
+        if sandbox is None:
+            raise HTTPException(status_code=400, detail="Job-Bench session is not active")
         try:
             with tempfile.TemporaryDirectory() as temporary_dir:
                 local_dir = Path(temporary_dir)
