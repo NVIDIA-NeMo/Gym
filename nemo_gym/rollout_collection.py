@@ -1171,7 +1171,7 @@ class RolloutCollectionHelper(BaseModel):
 
         if row_idxs_missing_rollout_ref:
             raise ValueError(
-                f"No rollout target specified for rows {row_idxs_missing_rollout_ref}. "
+                f"No agent specified and no rollout orchestrator specified for rows {row_idxs_missing_rollout_ref}. "
                 "Provide +agent_name (or +agent_map with a _default entry), or include "
                 "orchestrator_ref, agent_ref, or task_source in the data."
             )
@@ -1868,10 +1868,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             raise ValueError("Cannot resolve task_source to an agent: " + "; ".join(errors))
 
         for row in examples:
-            if (
-                (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is None
-                and (row.get(ORCHESTRATOR_REF_KEY_NAME) or {}).get("name") is None
-            ):
+            if (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is None and (
+                row.get(ORCHESTRATOR_REF_KEY_NAME) or {}
+            ).get("name") is None:
                 ts = row.get(TASK_SOURCE_KEY_NAME)
                 if ts is not None:
                     row[AGENT_REF_KEY_NAME] = {"name": resolution[ts]}
@@ -1912,9 +1911,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             )
 
         requested_orchestrators = {
-            name
-            for row in examples
-            if (name := (row.get(ORCHESTRATOR_REF_KEY_NAME) or {}).get("name")) is not None
+            name for row in examples if (name := (row.get(ORCHESTRATOR_REF_KEY_NAME) or {}).get("name")) is not None
         }
         available_orchestrators = {
             str(name)
