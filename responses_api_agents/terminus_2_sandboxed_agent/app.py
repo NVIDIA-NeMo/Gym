@@ -166,6 +166,7 @@ class NeMoGymLLM(BaseLLM):
         self._model_output_limit = model_output_limit
         self._llm_request_timeout = llm_request_timeout
         self.trajectory: list[NeMoGymResponseOutputItem] = []
+        self.usages: list[NeMoGymResponseUsage] = []
         self._times_spent = []
         self._last_input_items = []
         self._model_calls_gt_10min = 0
@@ -223,6 +224,7 @@ class NeMoGymLLM(BaseLLM):
             self.trajectory.extend([*input_items, *response.output])
         else:
             self.trajectory.extend([input_items[-1], *response.output])
+        self.usages.append(response.usage)
         self._last_input_items = input_items.copy()
 
         usage = response.usage
