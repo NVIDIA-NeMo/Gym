@@ -68,8 +68,6 @@ class TestCLISetupCommandSetupEnvCommand:
     def _run_setup(self, command: str, bin_dir: Path) -> subprocess.CompletedProcess:
         env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
-        # Callers append the server start to the setup command, so it is appended here too: it must
-        # not run when the build failed.
         return subprocess.run(
             ["/bin/bash", "-c", f"{command} && echo STARTED"],
             env=env,
@@ -148,9 +146,7 @@ class TestCLISetupCommandSetupEnvCommand:
         assert result.returncode != 0
         assert "STARTED" not in result.stdout
         assert "Removing incomplete venv" in result.stderr
-        # Without the cleanup this venv is seed-only but still satisfies `skip_venv_if_present`.
         assert not (server_dir / ".venv").exists()
-        # Cleanup is scoped to the venv this command built, so a concurrent build is untouched.
         assert other_server_venv_path.exists()
 
     def test_successful_install_keeps_the_venv(self, tmp_path: Path) -> None:

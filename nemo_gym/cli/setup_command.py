@@ -175,13 +175,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
 
         prefix_cmd = f" > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
-        # `uv venv --seed` writes bin/python and bin/activate before the dependency install runs,
-        # and those two files are exactly what `should_skip_venv_setup` above tests for. A build
-        # that dies during the install therefore leaves behind a venv that later runs cannot tell
-        # apart from a complete one, so they skip it and the server dies at startup instead. Delete
-        # it here, the one place where the incompleteness is actually known, so the next run starts
-        # clean. Only the venv this command is building is removed, which keeps the cleanup as
-        # narrow as possible when several jobs share a checkout.
+        # The braces keep `||` bound to the build, so a failed `cd` deletes nothing.
         quoted_venv_path = shlex.quote(str(venv_path))
         cleanup_cmd = (
             f"{{ echo 'Removing incomplete venv:' {quoted_venv_path} >&2; "
