@@ -900,6 +900,70 @@ Use the name the composed config reports."""
             replacements = ", ".join(f"`{legacy}` -> `{active_aliases[legacy]}`" for legacy in sorted(deprecated_uses))
             logger.warning(f"Legacy agent names are deprecated; use {replacements}.")
 
+    @staticmethod
+    def normalize_simple_agent_rollouts(global_config_dict: DictConfig) -> None:
+        """Add a processor sidecar for each legacy SimpleAgent instance.
+
+        Existing names remain policy-agent names so config references, dataset routing,
+        and CLI selections remain stable. Rollout collection redirects their episode
+        requests to the generated ``__processor`` instance.
+        """
+        for instance_name in list(global_config_dict):
+            instance = global_config_dict.get(instance_name)
+            if not isinstance(instance, DictConfig):
+                continue
+            agents = instance.get("responses_api_agents")
+            if not isinstance(agents, DictConfig) or list(agents) != ["simple_agent"]:
+                continue
+            if OmegaConf.is_missing(agents, "simple_agent"):
+                continue
+
+            simple_agent = agents["simple_agent"]
+            if not isinstance(simple_agent, DictConfig):
+                continue
+            resources_server = simple_agent.get("resources_server")
+            if not isinstance(resources_server, DictConfig):
+                continue
+
+            processor_name = f"{instance_name}__processor"
+            if processor_name in global_config_dict:
+                existing = global_config_dict[processor_name]
+                existing_config = (
+                    existing.get("processors", {}).get("single_agent_turn")
+                    if isinstance(existing, DictConfig)
+                    else None
+                )
+                existing_agent_name = (
+                    existing_config.get("agent_server", {}).get("name")
+                    if isinstance(existing_config, DictConfig)
+                    else None
+                )
+                if existing_agent_name == instance_name:
+                    continue
+                raise ConfigError(
+                    f"Cannot normalize SimpleAgent instance `{instance_name}`: generated processor name "
+                    f"`{processor_name}` is already present."
+                )
+
+            processor_config = {
+                "entrypoint": "app.py",
+                "agent_server": {
+                    "type": "responses_api_agents",
+                    "name": instance_name,
+                },
+                "resources_server": OmegaConf.to_container(resources_server, resolve=False),
+            }
+            for key in ("skip_verification", "skip_verification_reward", "token_id_capture"):
+                if key in simple_agent:
+                    processor_config[key] = simple_agent[key]
+
+            with open_dict(global_config_dict):
+                global_config_dict[processor_name] = {
+                    "processors": {
+                        "single_agent_turn": processor_config,
+                    }
+                }
+
     def _raise_on_unsupported_pairing(
         self, global_config_dict: DictConfig, source: _AgentInstance, targets: List[_AgentInstance]
     ) -> None:
@@ -1211,6 +1275,7 @@ Pass each config with --config (it builds the list for you), e.g.:
         # missing-value check below (it removes the unbound agent instance that still carries '???').
         self.compose_unbound_agent(global_config_dict, held_agent_overrides)
         self.apply_legacy_agent_aliases(global_config_dict)
+        self.normalize_simple_agent_rollouts(global_config_dict)
 
         # Fail fast with one actionable error if any required value is still '???'. Runs *after*
         # _recursively_swap_keys so that _delete_key/_inherit_from/_copy have been applied first —
@@ -1750,7 +1815,12 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
     errors = error.errors()
 
     # Identify the actual server type from the error (excluding Union discriminator noise)
-    server_type_keys = ["responses_api_models", "resources_servers", "responses_api_agents"]
+    server_type_keys = [
+        "responses_api_models",
+        "resources_servers",
+        "responses_api_agents",
+        "processors",
+    ]
     actual_server_type = None
 
     # Example error structure: ('ResponsesAPIAgentServerInstanceConfig', 'responses_api_agents', 'simple_agent', 'datasets', 0, 'license')
