@@ -117,11 +117,15 @@ class WorkspaceBenchResourcesServer(SimpleResourcesServer):
             with tempfile.TemporaryDirectory() as temporary_dir:
                 archive = Path(temporary_dir) / "input.tar.gz"
                 manifest = metadata.get("data_manifest") or []
-                with tarfile.open(archive, "w:gz", dereference=True) as tar:
-                    for item in manifest:
-                        source = task_dir / item["stored_relpath"]
-                        if source.is_file():
-                            tar.add(source, arcname=item["filename"])
+
+                def build_archive() -> None:
+                    with tarfile.open(archive, "w:gz", dereference=True) as tar:
+                        for item in manifest:
+                            source = task_dir / item["stored_relpath"]
+                            if source.is_file():
+                                tar.add(source, arcname=item["filename"])
+
+                await asyncio.to_thread(build_archive)
                 await sandbox.upload(archive, "/tmp/input.tar.gz")
             result = await sandbox.exec(
                 "mkdir -p /workspace/input /workspace/output /workspace/.opencode "
@@ -189,11 +193,15 @@ class WorkspaceBenchResourcesServer(SimpleResourcesServer):
                 if result.return_code != 0:
                     raise RuntimeError(f"Failed to collect Workspace-Bench files: {result.stderr}")
                 await sandbox.download("/tmp/workspace.tar.gz", archive)
-                with tarfile.open(archive, "r:gz") as tar:
-                    tar.extractall(local_dir, filter="data")
-                metadata = json.loads((Path(body.task_dir) / "metadata.json").read_text(encoding="utf-8"))
-                (local_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
-                shutil.copytree(local_dir / "input", local_dir / "data")
+
+                def prepare_judge_input() -> None:
+                    with tarfile.open(archive, "r:gz") as tar:
+                        tar.extractall(local_dir, filter="data")
+                    metadata = json.loads((Path(body.task_dir) / "metadata.json").read_text(encoding="utf-8"))
+                    (local_dir / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+                    shutil.copytree(local_dir / "input", local_dir / "data")
+
+                await asyncio.to_thread(prepare_judge_input)
                 async with self._semaphore:
                     rubrics, dependency_graph = await asyncio.to_thread(self._judge, local_dir)
         finally:
