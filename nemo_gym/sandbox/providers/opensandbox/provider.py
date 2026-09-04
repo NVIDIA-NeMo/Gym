@@ -403,7 +403,9 @@ class OpenSandboxConnectionConfig:
     ``transport_backend`` is "httpx" or "aiohttp" (via the optional
     ``httpx-aiohttp`` bridge, falling back to httpx when it is absent).
     The pool is shared, so ``max_connections`` also caps in-flight sandbox
-    operations per process; null means no cap.
+    operations per process; null means no cap. ``tls_verify`` applies to every
+    connection the provider opens (SDK transport and PTY sockets) and is off by
+    default; set it for endpoints whose certificate the client can verify.
     """
 
     domain: str | None = None
@@ -420,6 +422,7 @@ class OpenSandboxConnectionConfig:
     max_connections: int | None = 100
     connect_retries: int = 2
     transport_backend: str = "httpx"
+    tls_verify: bool = False
 
 
 @dataclass(frozen=True)
@@ -721,17 +724,18 @@ class OpenSandboxProvider:
             max_keepalive_connections=max_keepalive,
             keepalive_expiry=self._connection.keepalive_expiry_s,
         )
+        verify = self._connection.tls_verify
         if self._connection.transport_backend == "aiohttp":
             try:
                 from httpx_aiohttp import AiohttpTransport
 
-                return AiohttpTransport(limits=limits, retries=self._connection.connect_retries)
+                return AiohttpTransport(verify=verify, limits=limits, retries=self._connection.connect_retries)
             except ImportError:
                 LOGGER.warning(
                     "connection.transport_backend=aiohttp requested but httpx-aiohttp "
                     "is not installed; falling back to the httpx transport"
                 )
-        return httpx.AsyncHTTPTransport(limits=limits, retries=self._connection.connect_retries)
+        return httpx.AsyncHTTPTransport(verify=verify, limits=limits, retries=self._connection.connect_retries)
 
     async def _retire_closed_pty_sessions(self) -> None:
         """Release sessions that ended on their own; their aiohttp client is
@@ -1467,8 +1471,11 @@ class OpenSandboxProvider:
         )
 
     def _pty_http_client(self) -> Any:
+        """Return the aiohttp client for one PTY session (same ``tls_verify`` as the SDK transport)."""
         import aiohttp
 
+        if not self._connection.tls_verify:
+            return aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False))
         return aiohttp.ClientSession()
 
     async def _pty_target(self, handle: SandboxHandle) -> tuple[str, dict[str, str], float | None]:
