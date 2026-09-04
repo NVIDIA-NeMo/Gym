@@ -41,7 +41,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import verifier as tv   # byte-identical copy of the recipe verifier (verifier_impl/template_verifiers.py)
+from . import verifier as tv   # byte-identical copy of the recipe verifier package (verifier_impl/verifier/)
 
 GRADING_ERROR_ID = "<grading_error>"
 

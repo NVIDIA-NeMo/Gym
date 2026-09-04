@@ -23,13 +23,11 @@ dataset aggregates are computed by a separate offline script from the attached r
 
 Provenance of the vendored verifier
 -----------------------------------
-`verifier.py` in this package is a byte-identical copy of the canonical verifier
-
-  /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/work/logbook/problems/P0000-one-off-task/experiments/E260823-agentic-if-understand-lin-work/runs/2026-08-31-constraint-design/verifier_impl/template_verifiers.py
-
-(its specification is VERIFIER_SPEC.md and its validation record VALIDATION.md in the same
-directory). The copy carries no header of its own so that a byte-comparison test can hold it to the
-canonical file; do not edit it here, re-copy it from the canonical location instead.
+`verifier/` in this package (core.py, matchers.py, triggers.py, templates.py, __init__.py) is a byte-identical copy of
+the canonical verifier package of the recipe, file by file:
+  /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/agentic-if/recipes/if-constraint-design/verifier_impl/verifier/
+The recipe is the implementation (owner rule 2026-09-03); the tests compare the two directories. Adding a matcher or a
+trigger happens in the recipe's registries (see its VERIFIER_SPEC.md) and is then re-vendored here.
 
 `grader.py` is a port of the grading path of the offline scorer
 

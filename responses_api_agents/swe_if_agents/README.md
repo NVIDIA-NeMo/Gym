@@ -32,8 +32,8 @@ generated continuation and the grades cover those turns.
 
 ## Grading (`if_constraints/`)
 
-`verifier.py` is a byte-identical copy of the recipe verifier
-(`agentic-if/recipes/if-constraint-design/verifier_impl/template_verifiers.py`); `grader.py` segments the generated output
+`verifier/` is a byte-identical, file-by-file copy of the recipe's verifier package
+(`agentic-if/recipes/if-constraint-design/verifier_impl/verifier/`: registries of matchers, triggers and templates); `grader.py` segments the generated output
 into assistant turns (a turn = one message and/or one tool-call group; the final turn is the last one without a tool call),
 re-indexes a continuation from zero, and grades every constraint. Each record:
 
