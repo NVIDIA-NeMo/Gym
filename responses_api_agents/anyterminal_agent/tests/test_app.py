@@ -269,7 +269,7 @@ class TestSetupParams:
         assert params.tb_agent_timeout == 900
 
     def test_global_agent_timeout_overrides_per_task_timeout(self, tmp_path: Path) -> None:
-        agent = _make_setup_agent(tmp_path, global_agent_timeout=7200, tb_sandbox_ttl=12000)
+        agent = _make_setup_agent(tmp_path, global_agent_timeout=7200)
         body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path), "agent_timeout_sec": "900"})
 
         params = agent._setup_params(body)
@@ -277,19 +277,28 @@ class TestSetupParams:
         assert params.tb_agent_timeout == 7200
 
     def test_global_agent_timeout_applies_without_per_task_timeout(self, tmp_path: Path) -> None:
-        agent = _make_setup_agent(tmp_path, global_agent_timeout=7200, tb_sandbox_ttl=12000)
+        agent = _make_setup_agent(tmp_path, global_agent_timeout=7200)
         body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
 
         params = agent._setup_params(body)
 
         assert params.tb_agent_timeout == 7200
 
-    def test_global_agent_timeout_exceeding_sandbox_ttl_is_rejected(self, tmp_path: Path) -> None:
-        agent = _make_setup_agent(tmp_path, global_agent_timeout=7200)
-        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+    def test_sandbox_ttl_is_derived_when_timeouts_would_outlive_it(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path, global_agent_timeout=12500)
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path), "verifier_timeout_sec": "900"})
 
-        with pytest.raises(ValueError, match="tb_sandbox_ttl"):
-            agent._setup_params(body)
+        params = agent._setup_params(body)
+
+        assert params.tb_sandbox_ttl == 12500 + 900 + 600
+
+    def test_sandbox_ttl_default_kept_when_already_sufficient(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path)
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path), "agent_timeout_sec": "900"})
+
+        params = agent._setup_params(body)
+
+        assert params.tb_sandbox_ttl == 7200
 
     def test_global_agent_timeout_rejects_zero(self) -> None:
         with pytest.raises(ValidationError, match="global_agent_timeout"):

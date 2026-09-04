@@ -835,14 +835,14 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
         if problem_info.get("verifier_timeout_sec"):
             config_overrides["tb_eval_timeout"] = int(float(problem_info["verifier_timeout_sec"]))
 
+        # The container must outlive the task, or it gets torn down mid-run and the task scores as
+        # a real failure instead of the infra issue it is. Mirrors anyswe_agent's derivation
+        # (swebench_agent_timeout + swebench_tests_timeout + 600).
         effective_agent_timeout = config_overrides.get("tb_agent_timeout", self.config.tb_agent_timeout)
         effective_eval_timeout = config_overrides.get("tb_eval_timeout", self.config.tb_eval_timeout)
-        if effective_agent_timeout + effective_eval_timeout >= self.config.tb_sandbox_ttl:
-            raise ValueError(
-                f"[{task_name}] tb_agent_timeout ({effective_agent_timeout}) + tb_eval_timeout "
-                f"({effective_eval_timeout}) >= tb_sandbox_ttl ({self.config.tb_sandbox_ttl}); "
-                "the container would be killed before the run can finish. Raise tb_sandbox_ttl."
-            )
+        required_ttl = effective_agent_timeout + effective_eval_timeout + 600
+        if required_ttl > self.config.tb_sandbox_ttl:
+            config_overrides["tb_sandbox_ttl"] = required_ttl
 
         server_config = self._server.model_dump()
         if not self.config.sandbox_model_base_url and rollout_id and server_config["model_server_url"]:
