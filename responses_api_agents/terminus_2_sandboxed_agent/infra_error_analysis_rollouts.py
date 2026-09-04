@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from os import stat
 
 import orjson
+from tqdm.auto import tqdm
 
 
 parser = ArgumentParser()
@@ -18,7 +19,7 @@ f_out_path = "temp.jsonl"
 num_wrote_out = 0
 counts = Counter()
 with open(args.fpath, "rb") as f, open(f_out_path, "wb") if args.group_to_write_out else nullcontext() as f_out:
-    for i, line in enumerate(f):
+    for i, line in tqdm(enumerate(f)):
         row = orjson.loads(line)
 
         if row["reward"] != 0:
