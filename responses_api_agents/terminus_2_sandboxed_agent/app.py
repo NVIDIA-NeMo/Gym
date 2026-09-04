@@ -247,7 +247,7 @@ class NeMoGymLLM(BaseLLM):
         content, reasoning_content = self._response_text(response)
 
         # @bxyu-nvidia: Gym will return an empty model response when context length is exceeded
-        if not (content or reasoning_content):
+        if not (content or reasoning_content) or response.incomplete_details:
             self._num_compactions += 1
             raise ContextLengthExceededError
 
