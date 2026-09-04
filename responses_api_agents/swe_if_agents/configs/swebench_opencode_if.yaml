@@ -14,7 +14,7 @@ swe_agents:
       agent_framework: openhands
       agent_config: responses_api_agents/swe_agents/configs/oh_config.toml
       agent_max_turns: 100
-      agent_framework_repo: /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/gym_workdir/nv-OpenHands-fork.git
+      agent_framework_repo: https://github.com/jialeiwang/nv-OpenHands.git
       agent_framework_commit: fe33c54cf5f2018aa3eec15a1b62ff7c476e9d4f  # pragma: allowlist secret
 
       # Container configuration

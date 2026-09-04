@@ -53,8 +53,8 @@ per-kind no-answer rates) is done downstream by the recipe's `sdg/score_if.py`.
 
 - `agent_framework: openhands` with an nv-OpenHands checkout that honours `TOOL_NAME_OVERRIDES` and `observation_suffix`:
   branch `swe-if-agents` of the nv-OpenHands fork = `sdevare-nv/nv-OpenHands` @ `7466868e2` plus five commits
-  (`configs/swebench_opencode_if.yaml` pins it; for cluster runs the repo is a bare mirror on lustre, for a pull request point
-  it at the GitHub fork). Two of the five commits are schema fixes, not features: since Gym PR #2456 the model server validates
+  (`configs/swebench_opencode_if.yaml` pins it at the GitHub fork `jialeiwang/nv-OpenHands`, branch `swe-if-agents`, which builds on
+  the upstream branch `codex-opencode-tool-parity` of `sdevare-nv/nv-OpenHands`). Two of the five commits are schema fixes, not features: since Gym PR #2456 the model server validates
   chat requests with `extra="forbid"`, and stock nv-OpenHands sends `aws_region_name: null` and `name` on tool messages, both
   outside the OpenAI chat schema; the fork omits them (in `LLM.completion` and in `nemo_gym_client.py`, which the OpenCode and
   Terminus agents use instead of `LLM.completion`).
