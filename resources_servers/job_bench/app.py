@@ -116,7 +116,8 @@ class JobBenchResourcesServer(SimpleResourcesServer):
 
         session_id = request.session[SESSION_ID_KEY]
         self._sandboxes[session_id] = sandbox
-        return JobBenchSeedResponse(sandbox_handle=sandbox._handle.sandbox_id)
+        descriptor = await sandbox.serialize()
+        return JobBenchSeedResponse(sandbox_handle=descriptor["sandbox_id"])
 
     def _judge(self, output_dir: Path, rubrics_file: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         rubrics_data = json.loads(rubrics_file.read_text(encoding="utf-8"))
