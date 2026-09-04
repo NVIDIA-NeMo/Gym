@@ -21,13 +21,22 @@ Semantics deliberately documented here
   non-empty info-string; closing = line of exactly three backticks. Closing fences and unpaired openers never count.
 - `json_schema` parses the WHOLE message: a valid object followed by trailing garbage fails; non-dict JSON fails.
 """
+
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
-from .core import (NO_ANSWER_POLICIES, SILENT_TURN_FAILS, SILENT_TURN_NOT_GRADABLE, _SCRIPT_NAME_PREFIXES,
-                   _count_paired_fences, _length_count, _script_matches)
+from .core import (
+    _SCRIPT_NAME_PREFIXES,
+    NO_ANSWER_POLICIES,
+    SILENT_TURN_FAILS,
+    SILENT_TURN_NOT_GRADABLE,
+    _count_paired_fences,
+    _length_count,
+    _script_matches,
+)
+
 
 _REGEX_META = re.compile(r"[\\^$.|?*+()\[\]{}]")
 
@@ -42,7 +51,7 @@ def _literal(pattern):
 # --------------------------------------------------------------------------- #
 def _m_exact(value, s):
     want = str(value).strip()
-    ok = (s == want)
+    ok = s == want
     return ok, ("ok" if ok else "expected exactly %r, got %r" % (want, s[:80]))
 
 
@@ -85,8 +94,7 @@ def _m_json_schema(value, s):
 def _m_fenced(value, s):
     n = _count_paired_fences(s, str(value))
     ok = n >= 1
-    return ok, ("ok (%d paired fence(s))" % n if ok
-                else "no paired fence with info-string matching %r" % (value,))
+    return ok, ("ok (%d paired fence(s))" % n if ok else "no paired fence with info-string matching %r" % (value,))
 
 
 def _m_length_bound(value, s):
@@ -100,8 +108,7 @@ def _m_length_bound(value, s):
         ok = count >= n
     else:
         raise ValueError("length_bound: unknown dir %r" % (direction,))
-    return ok, ("ok (%d %s)" % (count, unit) if ok
-                else "%d %s violates %s %d" % (count, unit, direction, n))
+    return ok, ("ok (%d %s)" % (count, unit) if ok else "%d %s violates %s %d" % (count, unit, direction, n))
 
 
 def _length_bound_silent_turn(value):
@@ -116,22 +123,29 @@ def _m_language(value, s):
     alpha = [ch for ch in s if ch.isalpha()]
     in_script = sum(1 for ch in alpha if _script_matches(ch, prefixes))
     ok = len(alpha) > 0 and in_script * 2 > len(alpha)  # STRICT majority
-    return ok, ("ok (%d/%d %s)" % (in_script, len(alpha), value) if ok
-                else "no strict %s majority (%d of %d alphabetic chars)"
-                % (value, in_script, len(alpha)))
+    return ok, (
+        "ok (%d/%d %s)" % (in_script, len(alpha), value)
+        if ok
+        else "no strict %s majority (%d of %d alphabetic chars)" % (value, in_script, len(alpha))
+    )
 
 
 def _m_sentinel_exclusive(value, s):
     token = str(value)
     ok = (token not in s) or (s == token)
-    return ok, ("ok" if ok
-                else "contains sentinel %r but message is not exactly it" % (token,))
+    return ok, ("ok" if ok else "contains sentinel %r but message is not exactly it" % (token,))
 
 
 # --------------------------------------------------------------------------- #
 # witnesses / violations (one compliant and one non-compliant text per value; None = none can be built generically)
 # --------------------------------------------------------------------------- #
-_SCRIPT_SAMPLE = {"latin": "hello world", "han": "你好世界", "kana": "こんにちは", "hangul": "안녕하세요", "cyrillic": "привет мир"}
+_SCRIPT_SAMPLE = {
+    "latin": "hello world",
+    "han": "你好世界",
+    "kana": "こんにちは",
+    "hangul": "안녕하세요",
+    "cyrillic": "привет мир",
+}
 
 
 def _units(n, unit):
@@ -201,6 +215,7 @@ class Matcher:
     Optional (used by the pools, the gate, the phrasing layer and the conformance tests): `value_key(value) -> str`,
     `witness(value) -> Optional[str]` (a text that passes), `violation(value) -> Optional[str]` (a text that fails),
     `examples` (values the conformance test runs), `instruction_kind` (phrasing key; defaults to the name)."""
+
     name: str
     check: Callable[[Any, str], Tuple[bool, str]]
     silent_turn: Any
@@ -213,7 +228,10 @@ class Matcher:
 
     def __post_init__(self):
         if not (callable(self.silent_turn) or self.silent_turn in NO_ANSWER_POLICIES):
-            raise ValueError("matcher %r: silent_turn must be SILENT_TURN_FAILS, SILENT_TURN_NOT_GRADABLE or a callable" % (self.name,))
+            raise ValueError(
+                "matcher %r: silent_turn must be SILENT_TURN_FAILS, SILENT_TURN_NOT_GRADABLE or a callable"
+                % (self.name,)
+            )
         if not self.instruction_kind:
             object.__setattr__(self, "instruction_kind", self.name)
 
@@ -221,29 +239,107 @@ class Matcher:
         return self.silent_turn(value) if callable(self.silent_turn) else self.silent_turn
 
 
-MATCHERS: Dict[str, Matcher] = {m.name: m for m in (
-    Matcher("exact", _m_exact, SILENT_TURN_FAILS, "the whole visible text equals the value (after strip)",
-            witness=lambda v: str(v), violation=lambda v: str(v) + " and more", examples=("DONE", "[SILENT]")),
-    Matcher("prefix", _m_prefix, SILENT_TURN_FAILS, "the visible text starts with the value",
-            witness=lambda v: str(v) + " done", violation=lambda v: "x " + str(v), examples=("OK:", "[LOG]")),
-    Matcher("suffix", _m_suffix, SILENT_TURN_FAILS, "the visible text ends with the value",
-            witness=lambda v: "done " + str(v), violation=lambda v: str(v) + " x", examples=("END", ".")),
-    Matcher("regex", _m_regex, SILENT_TURN_FAILS, "re.search(value) finds a match in the visible text",
-            witness=_w_regex, violation=_v_regex, examples=("hello", r"^TL;DR:")),
-    Matcher("forbidden", _m_forbidden, SILENT_TURN_NOT_GRADABLE, "re.search(value) finds NO match in the visible text",
-            witness=lambda v: None if re.search(str(v), "done") else "done", violation=_v_forbidden, examples=(";", r"(?i)\bin summary\b")),
-    Matcher("json_schema", _m_json_schema, SILENT_TURN_FAILS, "the visible text is one JSON object containing value['required'] keys",
-            value_key=lambda v: "any", witness=_w_json_schema, violation=lambda v: "not json", examples=({"required": ["status", "files"]},)),
-    Matcher("fenced", _m_fenced, SILENT_TURN_FAILS, "at least one paired code fence whose info string matches the value regex",
-            witness=_w_fenced, violation=lambda v: "no fence here", examples=("json", "diff")),
-    Matcher("length_bound", _m_length_bound, _length_bound_silent_turn, "count of value['unit'] is <= n (dir max) or >= n (dir min)",
-            value_key=_vk_length_bound, witness=_w_length_bound, violation=_v_length_bound,
-            examples=({"n": 3, "unit": "words", "dir": "max"}, {"n": 2, "unit": "sentences", "dir": "min"}, {"n": 1, "unit": "lines", "dir": "max"})),
-    Matcher("language", _m_language, SILENT_TURN_FAILS, "a strict majority of alphabetic characters belongs to the named script",
-            witness=lambda v: _SCRIPT_SAMPLE.get(str(v)), violation=_v_language, examples=tuple(_SCRIPT_SAMPLE)),
-    Matcher("sentinel_exclusive", _m_sentinel_exclusive, SILENT_TURN_NOT_GRADABLE, "if the sentinel token appears, the text is exactly the token",
-            witness=lambda v: str(v), violation=lambda v: str(v) + " and more", examples=("HEARTBEAT_OK",)),
-)}
+MATCHERS: Dict[str, Matcher] = {
+    m.name: m
+    for m in (
+        Matcher(
+            "exact",
+            _m_exact,
+            SILENT_TURN_FAILS,
+            "the whole visible text equals the value (after strip)",
+            witness=lambda v: str(v),
+            violation=lambda v: str(v) + " and more",
+            examples=("DONE", "[SILENT]"),
+        ),
+        Matcher(
+            "prefix",
+            _m_prefix,
+            SILENT_TURN_FAILS,
+            "the visible text starts with the value",
+            witness=lambda v: str(v) + " done",
+            violation=lambda v: "x " + str(v),
+            examples=("OK:", "[LOG]"),
+        ),
+        Matcher(
+            "suffix",
+            _m_suffix,
+            SILENT_TURN_FAILS,
+            "the visible text ends with the value",
+            witness=lambda v: "done " + str(v),
+            violation=lambda v: str(v) + " x",
+            examples=("END", "."),
+        ),
+        Matcher(
+            "regex",
+            _m_regex,
+            SILENT_TURN_FAILS,
+            "re.search(value) finds a match in the visible text",
+            witness=_w_regex,
+            violation=_v_regex,
+            examples=("hello", r"^TL;DR:"),
+        ),
+        Matcher(
+            "forbidden",
+            _m_forbidden,
+            SILENT_TURN_NOT_GRADABLE,
+            "re.search(value) finds NO match in the visible text",
+            witness=lambda v: None if re.search(str(v), "done") else "done",
+            violation=_v_forbidden,
+            examples=(";", r"(?i)\bin summary\b"),
+        ),
+        Matcher(
+            "json_schema",
+            _m_json_schema,
+            SILENT_TURN_FAILS,
+            "the visible text is one JSON object containing value['required'] keys",
+            value_key=lambda v: "any",
+            witness=_w_json_schema,
+            violation=lambda v: "not json",
+            examples=({"required": ["status", "files"]},),
+        ),
+        Matcher(
+            "fenced",
+            _m_fenced,
+            SILENT_TURN_FAILS,
+            "at least one paired code fence whose info string matches the value regex",
+            witness=_w_fenced,
+            violation=lambda v: "no fence here",
+            examples=("json", "diff"),
+        ),
+        Matcher(
+            "length_bound",
+            _m_length_bound,
+            _length_bound_silent_turn,
+            "count of value['unit'] is <= n (dir max) or >= n (dir min)",
+            value_key=_vk_length_bound,
+            witness=_w_length_bound,
+            violation=_v_length_bound,
+            examples=(
+                {"n": 3, "unit": "words", "dir": "max"},
+                {"n": 2, "unit": "sentences", "dir": "min"},
+                {"n": 1, "unit": "lines", "dir": "max"},
+            ),
+        ),
+        Matcher(
+            "language",
+            _m_language,
+            SILENT_TURN_FAILS,
+            "a strict majority of alphabetic characters belongs to the named script",
+            witness=lambda v: _SCRIPT_SAMPLE.get(str(v)),
+            violation=_v_language,
+            examples=tuple(_SCRIPT_SAMPLE),
+        ),
+        Matcher(
+            "sentinel_exclusive",
+            _m_sentinel_exclusive,
+            SILENT_TURN_NOT_GRADABLE,
+            "if the sentinel token appears, the text is exactly the token",
+            witness=lambda v: str(v),
+            violation=lambda v: str(v) + " and more",
+            examples=("HEARTBEAT_OK",),
+        ),
+    )
+}
 # `empty` ("say nothing") was REMOVED on 2026-09-03 (decision D15): a silent turn cannot be told apart from a deliberate
 # silence; the legitimate silence rule is an explicit token graded by `exact` (e.g. [SILENT]).
 

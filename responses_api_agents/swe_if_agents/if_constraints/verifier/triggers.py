@@ -13,11 +13,13 @@ select, add one Trigger(...) entry with examples, run `test_registry_conformance
 trajectory although it should — today only `position: final` uses it (an episode with no final message): the template
 then counts one no-answer and, under the `fail` policy, appends one failed step on the last turn.
 """
+
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .core import DEFAULT_RESOLVER, NO_FINAL_DETAIL, ToolCall, Turn, _resolve, _tool_trigger_fires
+
 
 POSITIONS = ("any_turn", "first_turn", "final")
 
@@ -31,9 +33,11 @@ def _sel_position(turns, trigger, resolver):
         raise ValueError("unknown position %r" % (position,))
     out = []
     for turn in turns:
-        fires = (position == "any_turn"
-                 or (position == "first_turn" and turn.index == 0)
-                 or (position == "final" and turn.is_final))
+        fires = (
+            position == "any_turn"
+            or (position == "first_turn" and turn.index == 0)
+            or (position == "final" and turn.is_final)
+        )
         if fires:
             out.append((turn, "turn %d (position=%s): " % (turn.index, position)))
     return out
@@ -50,8 +54,11 @@ def _missing_position(turns, trigger, resolver):
 def _sel_tool(turns, trigger, resolver):
     resolved = _resolve(trigger["tool"], resolver)
     arg_pred = trigger.get("arg_predicate")
-    return [(turn, "turn %d triggered by tool %s: " % (turn.index, resolved))
-            for turn in turns if _tool_trigger_fires(turn, resolved, arg_pred)]
+    return [
+        (turn, "turn %d triggered by tool %s: " % (turn.index, resolved))
+        for turn in turns
+        if _tool_trigger_fires(turn, resolved, arg_pred)
+    ]
 
 
 def _sel_prev_tool(turns, trigger, resolver):
@@ -95,6 +102,7 @@ class Trigger:
     `select(turns, trigger, resolver) -> [(turn, detail_prefix)]`; `owns` = modifier keys this kind accepts beside its own;
     `doc`, one line; `missing` (optional), see the module docstring; `examples` = ((trigger_dict, expected_turn_indices),
     ...) evaluated on `example_trace()` by the conformance test."""
+
     key: str
     select: Callable[[List[Turn], Dict[str, Any], Dict[str, str]], List[Tuple[Turn, str]]]
     doc: str
@@ -103,22 +111,55 @@ class Trigger:
     examples: Tuple[Tuple[Dict[str, Any], Tuple[int, ...]], ...] = ()
 
 
-TRIGGERS: Dict[str, Trigger] = {t.key: t for t in (
-    Trigger("position", _sel_position, "a turn by position: any_turn, first_turn (index 0) or final (the last tool-free turn)",
+TRIGGERS: Dict[str, Trigger] = {
+    t.key: t
+    for t in (
+        Trigger(
+            "position",
+            _sel_position,
+            "a turn by position: any_turn, first_turn (index 0) or final (the last tool-free turn)",
             missing=_missing_position,
-            examples=(({"position": "any_turn"}, (0, 1, 2, 3)), ({"position": "first_turn"}, (0,)), ({"position": "final"}, (3,)))),
-    Trigger("tool", _sel_tool, "a turn that calls the tool (identifier, ANY_TOOL or NO_TOOL), optionally filtered by arg_predicate",
+            examples=(
+                ({"position": "any_turn"}, (0, 1, 2, 3)),
+                ({"position": "first_turn"}, (0,)),
+                ({"position": "final"}, (3,)),
+            ),
+        ),
+        Trigger(
+            "tool",
+            _sel_tool,
+            "a turn that calls the tool (identifier, ANY_TOOL or NO_TOOL), optionally filtered by arg_predicate",
             owns=("arg_predicate",),
-            examples=(({"tool": "BASH_TOOL_NAME"}, (0, 2)), ({"tool": "ANY_TOOL"}, (0, 1, 2)), ({"tool": "NO_TOOL"}, (3,)),
-                      ({"tool": "BASH_TOOL_NAME", "arg_predicate": {"field": "command", "regex": "pytest"}}, (2,)))),
-    Trigger("prev_tool", _sel_prev_tool, "a turn whose PREVIOUS turn called the tool (never turn 0)",
-            examples=(({"prev_tool": "BASH_TOOL_NAME"}, (1, 3)),)),
-    Trigger("prev_message", _sel_prev_message, "a turn preceded by a user/system message matching the regex",
-            examples=(({"prev_message": "please"}, (2,)),)),
-    Trigger("all_of", _sel_all_of, "the intersection of two or more triggers",
-            examples=(({"all_of": [{"tool": "ANY_TOOL"}, {"position": "any_turn"}]}, (0, 1, 2)),
-                      ({"all_of": [{"tool": "BASH_TOOL_NAME"}, {"prev_tool": "BASH_TOOL_NAME"}]}, ()))),
-)}
+            examples=(
+                ({"tool": "BASH_TOOL_NAME"}, (0, 2)),
+                ({"tool": "ANY_TOOL"}, (0, 1, 2)),
+                ({"tool": "NO_TOOL"}, (3,)),
+                ({"tool": "BASH_TOOL_NAME", "arg_predicate": {"field": "command", "regex": "pytest"}}, (2,)),
+            ),
+        ),
+        Trigger(
+            "prev_tool",
+            _sel_prev_tool,
+            "a turn whose PREVIOUS turn called the tool (never turn 0)",
+            examples=(({"prev_tool": "BASH_TOOL_NAME"}, (1, 3)),),
+        ),
+        Trigger(
+            "prev_message",
+            _sel_prev_message,
+            "a turn preceded by a user/system message matching the regex",
+            examples=(({"prev_message": "please"}, (2,)),),
+        ),
+        Trigger(
+            "all_of",
+            _sel_all_of,
+            "the intersection of two or more triggers",
+            examples=(
+                ({"all_of": [{"tool": "ANY_TOOL"}, {"position": "any_turn"}]}, (0, 1, 2)),
+                ({"all_of": [{"tool": "BASH_TOOL_NAME"}, {"prev_tool": "BASH_TOOL_NAME"}]}, ()),
+            ),
+        ),
+    )
+}
 
 
 def trigger_kind(trigger, allowed=None):
@@ -157,6 +198,11 @@ def example_trace():
     return [
         Turn(0, "Starting.", [ToolCall("bash", {"command": "ls"})]),
         Turn(1, "Reading.", [ToolCall("read", {"path": "a.py"})]),
-        Turn(2, "Testing.", [ToolCall("bash", {"command": "pytest -q"})], preceding_messages=[("user", "please run the tests")]),
+        Turn(
+            2,
+            "Testing.",
+            [ToolCall("bash", {"command": "pytest -q"})],
+            preceding_messages=[("user", "please run the tests")],
+        ),
         Turn(3, "Done.", [], is_final=True),
     ]

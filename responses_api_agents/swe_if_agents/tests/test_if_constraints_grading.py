@@ -37,11 +37,13 @@ Checks:
   (d) the vendored verifier/ package is byte-identical, file by file, to the recipe's verifier_impl/verifier/;
   (e) app.py compiles and carries the if_constraints field and the grade_row call.
 """
+
 import copy
 import json
 import os
 import sys
 from pathlib import Path
+
 
 DEFAULT_GYM_DIR = "/lustre/fsw/portfolios/llmservice/users/charlwang/cluster/gym_workdir/gym_swe_if_agents"
 LOGBOOK_RUN_DIR = (
@@ -50,8 +52,11 @@ LOGBOOK_RUN_DIR = (
 )
 R7_RUN_DIR = "/lustre/fsw/portfolios/llmservice/users/charlwang/cluster/work/data/runs/P0000-one-off-task/2026-09-02_r7-sdg-turn-output-samples"
 
-RECIPE_DIR = os.environ.get("IFCD_RECIPE_DIR") or "/lustre/fsw/portfolios/llmservice/users/charlwang/cluster/agentic-if/recipes/if-constraint-design"
-CANONICAL_VERIFIER = f"{RECIPE_DIR}/verifier_impl/verifier"   # the recipe's verifier PACKAGE (2026-09-04)   # the recipe IS the implementation (owner rule 2026-09-03); the logbook copy is deprecated
+RECIPE_DIR = (
+    os.environ.get("IFCD_RECIPE_DIR")
+    or "/lustre/fsw/portfolios/llmservice/users/charlwang/cluster/agentic-if/recipes/if-constraint-design"
+)
+CANONICAL_VERIFIER = f"{RECIPE_DIR}/verifier_impl/verifier"  # the recipe's verifier PACKAGE (2026-09-04)   # the recipe IS the implementation (owner rule 2026-09-03); the logbook copy is deprecated
 
 # (tag, params file, rolled-out results, offline scorer report)
 BATCHES = [
@@ -85,6 +90,7 @@ if str(GYM_DIR) not in sys.path:
 
 from responses_api_agents.swe_if_agents.if_constraints import grade_row  # noqa: E402
 from responses_api_agents.swe_if_agents.if_constraints.grader import GRADING_ERROR_ID  # noqa: E402
+
 
 VENDORED_VERIFIER = GYM_DIR / "responses_api_agents" / "swe_if_agents" / "if_constraints" / "verifier"
 APP_PY = GYM_DIR / "responses_api_agents" / "swe_if_agents" / "app.py"
@@ -150,7 +156,9 @@ def _check_parity(tag, params_path, results_path, scores_path):
         assert iid in params, f"{tag}: row without params item ({iid!r})"
         param = params[iid]
         # the offline scorer resolved tool identifiers with param['tool_names']; the gym uses the row's binding
-        assert json.loads(md["tool_name_overrides"]) == param["tool_names"], f"{tag}/{iid}: row binding differs from params"
+        assert json.loads(md["tool_name_overrides"]) == param["tool_names"], (
+            f"{tag}/{iid}: row binding differs from params"
+        )
         metadata = _embed_constraints(md, param)
         records = grade_row(metadata, row["responses_create_params"]["input"], row["response"]["output"])
         assert isinstance(records, list), f"{tag}/{iid}: grade_row returned {type(records).__name__}"
@@ -179,13 +187,28 @@ def _check_parity(tag, params_path, results_path, scores_path):
             assert got["graded_turns"] == expected["n_graded_turns"], (
                 f"{where}: graded_turns {got['graded_turns']} vs {expected['n_graded_turns']}"
             )
-            offline_continuation = expected["n_prefix_turns_skipped"] > 0 or "continuation only" in expected["prefix_note"]
+            offline_continuation = (
+                expected["n_prefix_turns_skipped"] > 0 or "continuation only" in expected["prefix_note"]
+            )
             assert got["continuation_only"] == offline_continuation, (
                 f"{where}: continuation_only {got['continuation_only']} vs offline note {expected['prefix_note']!r}"
             )
-            assert set(got) - {"error"} == {   # `error` is present only for a retired or unknown matcher (not applicable, row kept)
-                "id", "trigger", "match", "instruction", "no_answer", "n_steps", "n_pass", "n_silent", "step_avg", "all_pass",
-                "graded_turns", "continuation_only", "steps",
+            assert set(got) - {
+                "error"
+            } == {  # `error` is present only for a retired or unknown matcher (not applicable, row kept)
+                "id",
+                "trigger",
+                "match",
+                "instruction",
+                "no_answer",
+                "n_steps",
+                "n_pass",
+                "n_silent",
+                "step_avg",
+                "all_pass",
+                "graded_turns",
+                "continuation_only",
+                "steps",
             }, f"{where}: record keys {sorted(got)}"
         n_constraints_total += len(records)
         n_rows += 1
@@ -198,7 +221,9 @@ def _check_parity(tag, params_path, results_path, scores_path):
         f"{tag}: {n_constraints_total} constraints vs offline aggregate {scores['aggregate']['n_constraints']}"
     )
     assert n_rows == len(offline), f"{tag}: {n_rows} rows graded vs {len(offline)} offline items"
-    summary = f"{tag}: {n_rows} rows, {n_constraints_total} constraints identical to the offline scorer\n" + "\n".join(lines)
+    summary = f"{tag}: {n_rows} rows, {n_constraints_total} constraints identical to the offline scorer\n" + "\n".join(
+        lines
+    )
     return True, summary
 
 
@@ -235,24 +260,50 @@ def test_error_record_on_malformed_sdg_item():
 
 def test_error_record_on_constraint_without_verifier_parameter():
     md = {"sdg_item": json.dumps({"type": "fresh", "constraints": [{"id": "x#c1"}]})}
-    out = grade_row(md, [], [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]}])
+    out = grade_row(
+        md, [], [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]}]
+    )
     assert isinstance(out, list) and len(out) == 1 and out[0]["id"] == GRADING_ERROR_ID, out
 
 
 # ------------------------------------------------------------------ small synthetic checks of the record shape
 def _synthetic_row():
     constraints = [
-        {"id": "t#c1", "verifier_parameter": {"template": "turn_output", "trigger": {"position": "final"},
-                                              "obligation": {"match": "exact", "value": "DONE"}},
-         "reference_instruction": "End your final message with exactly DONE.", "surface": "system_prompt", "position": None},
-        {"id": "t#c2", "verifier_parameter": {"template": "turn_output", "trigger": {"tool": "GREP_TOOL_NAME"},
-                                              "obligation": {"match": "prefix", "value": "[SEARCH]"}},
-         "reference_instruction": "Start every message that calls the search tool with [SEARCH].", "surface": "system_prompt", "position": None},
+        {
+            "id": "t#c1",
+            "verifier_parameter": {
+                "template": "turn_output",
+                "trigger": {"position": "final"},
+                "obligation": {"match": "exact", "value": "DONE"},
+            },
+            "reference_instruction": "End your final message with exactly DONE.",
+            "surface": "system_prompt",
+            "position": None,
+        },
+        {
+            "id": "t#c2",
+            "verifier_parameter": {
+                "template": "turn_output",
+                "trigger": {"tool": "GREP_TOOL_NAME"},
+                "obligation": {"match": "prefix", "value": "[SEARCH]"},
+            },
+            "reference_instruction": "Start every message that calls the search tool with [SEARCH].",
+            "surface": "system_prompt",
+            "position": None,
+        },
     ]
     md = {
         "tool_name_overrides": json.dumps({"GREP_TOOL_NAME": "find_pattern", "BASH_TOOL_NAME": "shell"}),
-        "sdg_item": json.dumps({"type": "fresh", "phrasing_source": "template", "seed": 1, "prefix": None,
-                                "constraint_ids": [c["id"] for c in constraints], "constraints": constraints}),
+        "sdg_item": json.dumps(
+            {
+                "type": "fresh",
+                "phrasing_source": "template",
+                "seed": 1,
+                "prefix": None,
+                "constraint_ids": [c["id"] for c in constraints],
+                "constraints": constraints,
+            }
+        ),
     }
     output = [
         {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "[SEARCH] looking"}]},
@@ -268,10 +319,16 @@ def _synthetic_row():
 
 def test_synthetic_record_shape_and_binding():
     md, output = _synthetic_row()
-    out = grade_row(md, [{"type": "message", "role": "system", "content": "s"}, {"type": "message", "role": "user", "content": "u"}], output)
+    out = grade_row(
+        md,
+        [{"type": "message", "role": "system", "content": "s"}, {"type": "message", "role": "user", "content": "u"}],
+        output,
+    )
     assert [c["id"] for c in out] == ["t#c1", "t#c2"], out
     final, grep = out
-    assert final["n_steps"] == 1 and final["n_pass"] == 1 and final["all_pass"] is True and final["step_avg"] == 1.0, final
+    assert final["n_steps"] == 1 and final["n_pass"] == 1 and final["all_pass"] is True and final["step_avg"] == 1.0, (
+        final
+    )
     assert final["graded_turns"] == 3 and final["continuation_only"] is False, final
     # the search tool is bound to `find_pattern`; both calls fire the trigger, only the first message is tagged
     assert grep["n_steps"] == 2 and grep["n_pass"] == 1 and grep["all_pass"] is False and grep["step_avg"] == 0.5, grep
@@ -302,7 +359,9 @@ def test_continuation_turn_indices_relative_to_continuation():
     # same continuation, but the recorded output reproduces the replayed prefix at its head
     out_with_prefix = grade_row(md, prefix, prefix[2:] + output)
     assert all(c["continuation_only"] is True and c["graded_turns"] == 3 for c in out_with_prefix), out_with_prefix
-    assert [(s["turn"], s["reward"]) for s in out_with_prefix[1]["steps"]] == [(0, 1), (1, 0)], out_with_prefix[1]["steps"]
+    assert [(s["turn"], s["reward"]) for s in out_with_prefix[1]["steps"]] == [(0, 1), (1, 0)], out_with_prefix[1][
+        "steps"
+    ]
 
 
 # ------------------------------------------------------------------ (d) vendored verifier parity
@@ -313,7 +372,9 @@ def test_vendored_verifier_is_byte_identical():
     canonical_files = sorted(p.name for p in Path(CANONICAL_VERIFIER).glob("*.py"))
     assert vendored_files == canonical_files and vendored_files, (vendored_files, canonical_files)
     for name in vendored_files:
-        assert (VENDORED_VERIFIER / name).read_bytes() == (Path(CANONICAL_VERIFIER) / name).read_bytes(), f"vendored verifier/{name} differs from the canonical copy"
+        assert (VENDORED_VERIFIER / name).read_bytes() == (Path(CANONICAL_VERIFIER) / name).read_bytes(), (
+            f"vendored verifier/{name} differs from the canonical copy"
+        )
 
 
 # ------------------------------------------------------------------ (e) app.py wiring (static)
@@ -327,7 +388,6 @@ def test_app_py_wiring():
     assert "resolved_agent_env" in src and "write_row_templates(" in src and "tag_replay_observation_suffix(" in src
 
 
-
 # ------------------------------------------------------------------ plain-python runner
 def main() -> int:
     checks = [
@@ -336,7 +396,10 @@ def main() -> int:
         ("(b) None without sdg_item", test_none_without_sdg_item),
         ("(b) None without constraints", test_none_without_constraints),
         ("(c) error record on malformed sdg_item", test_error_record_on_malformed_sdg_item),
-        ("(c) error record on constraint without verifier_parameter", test_error_record_on_constraint_without_verifier_parameter),
+        (
+            "(c) error record on constraint without verifier_parameter",
+            test_error_record_on_constraint_without_verifier_parameter,
+        ),
         ("synthetic record shape and tool binding", test_synthetic_record_shape_and_binding),
         ("continuation turn indices", test_continuation_turn_indices_relative_to_continuation),
         ("(d) vendored verifier byte-identical", test_vendored_verifier_is_byte_identical),

@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from responses_api_agents.swe_if_agents.hooks import (  # noqa: E402
     normalize_tool_name_overrides,
@@ -20,6 +21,7 @@ from responses_api_agents.swe_if_agents.hooks import (  # noqa: E402
     tag_replay_observation_suffix,
     write_row_templates,
 )
+
 
 NOTE = "<user_note>from now on...</user_note>"
 

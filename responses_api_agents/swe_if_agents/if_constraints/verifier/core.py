@@ -3,15 +3,17 @@
 No registry lives here. `matchers.py`, `triggers.py` and `templates.py` build on this module; `__init__.py` exposes the
 public API (`grade`, `grade_ext`, ...). Stdlib only; python 3.9 compatible (no match statements, no `X | None`).
 """
+
 import re
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple
 
+
 # --------------------------------------------------------------------------- #
 # Pseudo tool identifiers (never resolved through the resolver)
 # --------------------------------------------------------------------------- #
-NO_TOOL = "NO_TOOL"    # trigger: a turn with zero tool calls
+NO_TOOL = "NO_TOOL"  # trigger: a turn with zero tool calls
 ANY_TOOL = "ANY_TOOL"  # trigger: a turn with >= 1 tool call
 
 # --------------------------------------------------------------------------- #
@@ -58,32 +60,34 @@ DEFAULT_RESOLVER = {
 # --------------------------------------------------------------------------- #
 @dataclass
 class ToolCall:
-    name: str                       # concrete emitted tool name (post-diversification)
+    name: str  # concrete emitted tool name (post-diversification)
     args: Dict[str, Any] = field(default_factory=dict)  # parsed args; {} if unparseable
 
 
 @dataclass
 class Turn:
-    index: int                      # 0-based assistant-turn index
-    visible_text: str = ""          # model-authored visible text; reasoning EXCLUDED
+    index: int  # 0-based assistant-turn index
+    visible_text: str = ""  # model-authored visible text; reasoning EXCLUDED
     tool_calls: List[ToolCall] = field(default_factory=list)
-    is_final: bool = False          # last assistant turn of the episode
+    is_final: bool = False  # last assistant turn of the episode
     # (role, text) messages between the previous assistant turn and this one
     preceding_messages: List[Tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
 class GradedStep:
-    turn: int                       # assistant-turn index; -1 for trajectory-scoped
-    reward: int                     # 1 or 0
-    detail: str                     # short reason, human-readable
+    turn: int  # assistant-turn index; -1 for trajectory-scoped
+    reward: int  # 1 or 0
+    detail: str  # short reason, human-readable
 
 
 # --------------------------------------------------------------------------- #
 # No-answer policies (what a silent in-scope turn means for a matcher)
 # --------------------------------------------------------------------------- #
-SILENT_TURN_FAILS = "fail"                # the rule needs an answer: a silent turn is a graded step with reward 0
-SILENT_TURN_NOT_GRADABLE = "ungradable"   # silence cannot violate the rule: a silent turn is not a step; only turns with text are graded
+SILENT_TURN_FAILS = "fail"  # the rule needs an answer: a silent turn is a graded step with reward 0
+SILENT_TURN_NOT_GRADABLE = (
+    "ungradable"  # silence cannot violate the rule: a silent turn is not a step; only turns with text are graded
+)
 NO_ANSWER_POLICIES = (SILENT_TURN_FAILS, SILENT_TURN_NOT_GRADABLE)
 
 SILENT_DETAIL = "silent turn: no visible text (a required shape needs an answer)"
@@ -103,7 +107,7 @@ def is_silent_step(step):
 # start with FULLWIDTH/HALFWIDTH, so those prefixes are listed explicitly.
 _SCRIPT_NAME_PREFIXES = {
     "latin": ("LATIN", "FULLWIDTH LATIN"),
-    "han": ("CJK",),                    # CJK UNIFIED IDEOGRAPH, CJK COMPATIBILITY ...
+    "han": ("CJK",),  # CJK UNIFIED IDEOGRAPH, CJK COMPATIBILITY ...
     "kana": ("HIRAGANA", "KATAKANA", "HALFWIDTH KATAKANA"),
     "hangul": ("HANGUL", "HALFWIDTH HANGUL"),
     "cyrillic": ("CYRILLIC",),
@@ -120,18 +124,18 @@ def _script_matches(ch, prefixes):
 
 def _count_paired_fences(s, info_pattern):
     """Number of properly PAIRED fences whose info-string matches info_pattern."""
-    open_info = None       # info-string of the currently open fence, else None
+    open_info = None  # info-string of the currently open fence, else None
     matched = 0
     for line in s.splitlines():
         stripped = line.strip()
         if open_info is None:
             if stripped.startswith("```"):
                 info = stripped[3:].strip()
-                if info:                 # opener requires a NON-EMPTY info-string
+                if info:  # opener requires a NON-EMPTY info-string
                     open_info = info
                 # bare ``` outside a fence: neither opener nor a countable match
         else:
-            if stripped == "```":        # closing = line of exactly three backticks
+            if stripped == "```":  # closing = line of exactly three backticks
                 if re.search(info_pattern, open_info):
                     matched += 1
                 open_info = None

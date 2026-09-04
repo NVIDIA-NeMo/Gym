@@ -36,12 +36,14 @@ can carry the per-constraint grades directly. Semantics, in the order they apply
 
 The public entry point is `grade_row`; it never raises.
 """
+
 from __future__ import annotations
 
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import verifier as tv   # byte-identical copy of the recipe verifier package (verifier_impl/verifier/)
+from . import verifier as tv  # byte-identical copy of the recipe verifier package (verifier_impl/verifier/)
+
 
 GRADING_ERROR_ID = "<grading_error>"
 
@@ -98,7 +100,9 @@ def to_tv_turns(segs: List[dict], persona: str = "opencode", finish: str = "fini
         turns.append(tv.Turn(index=i, visible_text=visible, tool_calls=calls, is_final=False, preceding_messages=[]))
     if turns:
         last = turns[-1]
-        genuine = (len(last.tool_calls) == 0) if persona == "opencode" else any(c.name == finish for c in last.tool_calls)
+        genuine = (
+            (len(last.tool_calls) == 0) if persona == "opencode" else any(c.name == finish for c in last.tool_calls)
+        )
         last.is_final = bool(genuine)
     return turns
 
@@ -160,7 +164,9 @@ def _item_type(sdg_item: dict) -> str:
 
 
 # ------------------------------------------------------------------ grading
-def _grade(metadata: Dict[str, Any], input_items: Optional[List[dict]], output_items: List[dict]) -> Optional[List[dict]]:
+def _grade(
+    metadata: Dict[str, Any], input_items: Optional[List[dict]], output_items: List[dict]
+) -> Optional[List[dict]]:
     sdg_item = _parse_json_field(metadata.get("sdg_item"), "sdg_item")
     if not isinstance(sdg_item, dict):
         return None
@@ -188,10 +194,12 @@ def _grade(metadata: Dict[str, Any], input_items: Optional[List[dict]], output_i
     for c in constraints:
         vp = c["verifier_parameter"]
         try:
-            steps, q = tv.grade_ext(graded, vp, resolver=resolver)   # q = silent in-scope turns (no-answer count; owner ruling 2026-09-03)
+            steps, q = tv.grade_ext(
+                graded, vp, resolver=resolver
+            )  # q = silent in-scope turns (no-answer count; owner ruling 2026-09-03)
             kind = tv.no_answer_policy(vp)
             err = None
-        except ValueError as e:   # a retired or unknown matcher (e.g. `empty`, removed 2026-09-03): this constraint is not applicable, the row is not lost
+        except ValueError as e:  # a retired or unknown matcher (e.g. `empty`, removed 2026-09-03): this constraint is not applicable, the row is not lost
             steps, q, kind, err = [], 0, None, "%s: %s" % (type(e).__name__, e)
         n = len(steps)
         p = sum(1 for s in steps if s.reward >= 1)
@@ -216,7 +224,9 @@ def _grade(metadata: Dict[str, Any], input_items: Optional[List[dict]], output_i
     return records
 
 
-def grade_row(metadata: Optional[Dict[str, Any]], input_items: Optional[List[dict]], output_items: List[dict]) -> Optional[List[dict]]:
+def grade_row(
+    metadata: Optional[Dict[str, Any]], input_items: Optional[List[dict]], output_items: List[dict]
+) -> Optional[List[dict]]:
     """Return the `if_constraints` records for one episode, or None when the row carries no constraints.
 
     metadata     : the row's request metadata (`responses_create_params.metadata`); values are strings, structured

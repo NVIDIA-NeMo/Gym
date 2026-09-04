@@ -16,21 +16,73 @@ policy those turns are also among the returned steps (reward 0), under `ungradab
 Adding a matcher, a trigger (conditioner) or a template = one registry entry in the corresponding module, with examples;
 `test_registry_conformance.py` checks every entry. Stdlib only; python 3.9 compatible.
 """
+
 from typing import Any, Dict, List, Optional, Tuple
 
-from .core import (ANY_TOOL, DEFAULT_RESOLVER, NO_ANSWER_POLICIES, NO_FINAL_DETAIL, NO_TOOL, SILENT_DETAIL,  # noqa: F401
-                   SILENT_TURN_FAILS, SILENT_TURN_NOT_GRADABLE, GradedStep, ToolCall, Turn, is_silent_step,
-                   _count_paired_fences, _count_sentences, _flatten_calls, _length_count, _matching_calls, _resolve,
-                   _script_matches, _tool_trigger_fires, _SCRIPT_NAME_PREFIXES)
+from .core import (  # noqa: F401
+    _SCRIPT_NAME_PREFIXES,
+    ANY_TOOL,
+    DEFAULT_RESOLVER,
+    NO_ANSWER_POLICIES,
+    NO_FINAL_DETAIL,
+    NO_TOOL,
+    SILENT_DETAIL,
+    SILENT_TURN_FAILS,
+    SILENT_TURN_NOT_GRADABLE,
+    GradedStep,
+    ToolCall,
+    Turn,
+    _count_paired_fences,
+    _count_sentences,
+    _flatten_calls,
+    _length_count,
+    _matching_calls,
+    _resolve,
+    _script_matches,
+    _tool_trigger_fires,
+    is_silent_step,
+)
 from .matchers import MATCHERS, Matcher, _apply_matcher, no_answer_policy, value_key  # noqa: F401
-from .triggers import POSITIONS, TRIGGERS, Trigger, example_trace, missing_target, select_turns, trigger_kind  # noqa: F401
 from .templates import TEMPLATES, Template, _grade_visible, _require_visible_target  # noqa: F401
+from .triggers import (  # noqa: F401
+    POSITIONS,
+    TRIGGERS,
+    Trigger,
+    example_trace,
+    missing_target,
+    select_turns,
+    trigger_kind,
+)
+
 
 __all__ = [
-    "grade", "grade_ext", "Turn", "ToolCall", "GradedStep", "DEFAULT_RESOLVER", "NO_TOOL", "ANY_TOOL",
-    "MATCHERS", "Matcher", "TRIGGERS", "Trigger", "TEMPLATES", "Template",
-    "SILENT_TURN_FAILS", "SILENT_TURN_NOT_GRADABLE", "NO_ANSWER_POLICIES", "SILENT_DETAIL", "NO_FINAL_DETAIL",
-    "no_answer_policy", "is_silent_step", "value_key", "select_turns", "missing_target", "trigger_kind", "example_trace", "POSITIONS",
+    "grade",
+    "grade_ext",
+    "Turn",
+    "ToolCall",
+    "GradedStep",
+    "DEFAULT_RESOLVER",
+    "NO_TOOL",
+    "ANY_TOOL",
+    "MATCHERS",
+    "Matcher",
+    "TRIGGERS",
+    "Trigger",
+    "TEMPLATES",
+    "Template",
+    "SILENT_TURN_FAILS",
+    "SILENT_TURN_NOT_GRADABLE",
+    "NO_ANSWER_POLICIES",
+    "SILENT_DETAIL",
+    "NO_FINAL_DETAIL",
+    "no_answer_policy",
+    "is_silent_step",
+    "value_key",
+    "select_turns",
+    "missing_target",
+    "trigger_kind",
+    "example_trace",
+    "POSITIONS",
 ]
 
 
