@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+  - resources_servers/job_bench/configs/job_bench.yaml
+
+job_bench_opencode_resources_server:
+  _inherit_from: job_bench_resources_server
+  resources_servers:
+    job_bench:
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
+
+job_bench_opencode_sandboxed_agent:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      # JobBench's OpenCode runner allows 2h per task before the first retry.
+      sandbox_timeout: 7200
+
+      # Several JobBench tasks expect the agent to rediscover reference material
+      # online, so the browsing tools the SWE presets disable are turned back on.
+      # These merge into the base opencode_config; the permission block is kept.
+      opencode_config:
+        tools:
+          webfetch: true
+          websearch: true
+
+      resources_server:
+        type: resources_servers
+        name: job_bench_opencode_resources_server
+      datasets:
+        - name: job_bench_main
+          type: benchmark
+          jsonl_fpath: benchmarks/job_bench/data/job_bench_main_benchmark.jsonl
+          prepare_script: benchmarks/job_bench/prepare.py
+          num_repeats: 1
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/job_bench/data/example.jsonl

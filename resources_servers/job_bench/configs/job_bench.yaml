@@ -1,0 +1,49 @@
+job_bench_resources_server:
+  resources_servers:
+    job_bench:
+      allowed_agents: [opencode_sandboxed_agent]
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: JobBench multi-source data preprocessing tasks across 35 white-collar professions, graded by rubric LLM judge
+      value: Measures agentic competence on the tedious real-world office work practitioners most want automated
+
+      cache_dir: resources_servers/job_bench/data/cache/tasks
+      archives_dir: resources_servers/job_bench/data/cache/archives
+      split: main
+      # Defaults to the published count for the split (main=65, easy=63).
+      expected_task_count: null
+
+      # Upstream withholds files_required_to_search/ so the agent must rediscover
+      # those references online. Turning this on makes runs hermetic but no longer
+      # comparable to the JobBench leaderboard.
+      include_search_files: false
+
+      judge_model_server:
+        type: responses_api_models
+        name: ???
+      judge_concurrency: 10
+      judge_max_tokens: 200000
+      judge_temperature: 0.0
+      max_chars_per_file: 200000
+      max_vision_images: 8
+      include_rubric_details_in_response: true
+
+      sandbox_provider: sandbox
+      sandbox_image: ${oc.env:JOB_BENCH_SANDBOX_IMAGE,job-bench-sandbox:latest}
+      # JobBench's runner grants the open internet, and several tasks need live
+      # search. Set true for a hermetic run, at the cost of those tasks.
+      enforce_agent_no_network: false
+      sandbox_model_server: null
+      max_output_mib: 512
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 2.0
+          memory_mib: 8192
+          disk_gib: 30
+        provider_options: {}
+        metadata:
+          benchmark: job-bench
+          istio.io/dataplane-mode: none
