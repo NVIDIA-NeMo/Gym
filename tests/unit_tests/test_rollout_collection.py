@@ -91,12 +91,16 @@ class TestRolloutCollection:
             AGENT_REF_KEY_NAME: {"name": "my_agent"},
             TASK_INDEX_KEY_NAME: 12,
             ROLLOUT_INDEX_KEY_NAME: 3,
+            "dataset": "example_dataset@v1",
+            "metadata": {"uuid": "row-uuid", "private_detail": "do not include"},
             "env_specific_metadata": "do not include",
             "responses_create_params": {"input": "large prompt", "tools": ["large schema"]},
         }
 
         assert _rollout_request_debug_summary(row) == {
             "agent_name": "my_agent",
+            "dataset": "example_dataset@v1",
+            "dataset_uuid": "row-uuid",
             TASK_INDEX_KEY_NAME: 12,
             ROLLOUT_INDEX_KEY_NAME: 3,
         }
@@ -304,6 +308,8 @@ class TestRolloutCollection:
             AGENT_REF_KEY_NAME: {"name": "my_agent"},
             TASK_INDEX_KEY_NAME: 7,
             ROLLOUT_INDEX_KEY_NAME: 0,
+            "dataset": "example_dataset@v1",
+            "metadata": {"uuid": "row-uuid", "private_detail": "do not log"},
             "env_specific_metadata": "do not log this either",
             "responses_create_params": {"input": "do not log this"},
         }
@@ -336,6 +342,9 @@ class TestRolloutCollection:
             assert '"_ng_task_index": 7' in captured.out
             assert '"_ng_rollout_index": 0' in captured.out
             assert '"agent_name": "my_agent"' in captured.out
+            assert '"dataset": "example_dataset@v1"' in captured.out
+            assert '"dataset_uuid": "row-uuid"' in captured.out
+            assert "private_detail" not in captured.out
             assert "env_specific_metadata" not in captured.out
             assert "do not log this either" not in captured.out
             assert "responses_create_params" not in captured.out

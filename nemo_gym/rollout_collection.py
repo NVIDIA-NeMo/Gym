@@ -510,10 +510,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
 def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
+    metadata = row.get("metadata") or {}
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
         "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
+        "dataset": row.get("dataset"),
+        "dataset_uuid": metadata.get("uuid") if isinstance(metadata, dict) else None,
     }
     return {k: v for k, v in summary.items() if v is not None}
 
