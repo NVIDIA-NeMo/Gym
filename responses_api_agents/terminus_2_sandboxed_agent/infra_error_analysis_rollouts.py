@@ -48,5 +48,5 @@ with open(args.fpath, "rb") as f:
 
 print_str = ""
 for k, v in counts.items():
-    print_str += f"{k}: {v}\n"
+    print_str += f"{k}: {v} ({int(100 * v / counts['Total samples with reward=0'])}%)\n"
 print(print_str)
