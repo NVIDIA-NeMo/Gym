@@ -1,0 +1,14 @@
+{
+  "source_repository": "osworld_internal",
+  "source_branch": "nemotron-v3",
+  "source_commit": "3b775dc538931ead0cb6b4922349da9c6d493dab",
+  "policy_transport_endpoint": "/v1/chat/completions",
+  "policy_chat_template_source": "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16@24e67ea000b7c2837fc8f9488aa2008524fac8ba:chat_template.jinja",
+  "policy_chat_template_sha256": "41428e0c65e312c359df2495ef5284769a9520b15a693deda4c34a1538208faa",
+  "policy_chat_template_kwargs": {
+    "truncate_history_thinking": false
+  },
+  "responses_system_prompt_sha256": "8332b42f09c577837b1e50bb5c04c857f8942eda6ea692b32eba38deb8cb0d36",
+  "responses_tool_contract_canonical_sha256": "12d525341f568cf3638e1b9dc99058fadf59e3bfa3719d9e88cb021e0e192f09",
+  "judge_system_prompt_sha256": "d5548ef2bb6f0641bc9ff116fe721bf540d096502e2040890b2bf1c8560d3325"
+}

@@ -13,14 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import json
 import multiprocessing
 import socket
 from concurrent.futures import ProcessPoolExecutor
+from typing import Literal
 from unittest.mock import AsyncMock, MagicMock
 
 from aiohttp import ClientOSError, ClientResponseError, RequestInfo
+from fastapi.exceptions import RequestValidationError
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
+from pydantic import BaseModel, Field, ValidationError
 from pytest import CaptureFixture, MonkeyPatch, raises
 from yarl import URL
 
@@ -42,8 +46,11 @@ from nemo_gym.server_utils import (
     SimpleServer,
     _format_upstream_error_log,
     _make_keepalive_socket_factory,
+    _validation_body_shape,
+    _validation_errors_for_log,
     initialize_ray,
     raise_for_status,
+    set_global_aiohttp_client,
 )
 
 
@@ -64,6 +71,74 @@ def _return_exception_from_child_process(error: ClientResponseError) -> ClientRe
 
 
 class TestServerUtils:
+    def test_validation_diagnostics_report_shape_without_payload(self) -> None:
+        secret_image = "data:image/png;base64," + ("A" * 10_000)
+
+        class Payload(BaseModel):
+            screenshots: list[str] = Field(max_length=1)
+
+        try:
+            Payload(screenshots=[secret_image, secret_image])
+        except ValidationError as exc:
+            diagnostics = {
+                "errors": _validation_errors_for_log(exc),
+                "body": _validation_body_shape({"screenshots": [secret_image, secret_image]}),
+            }
+        else:  # pragma: no cover - guards the test fixture itself.
+            raise AssertionError("expected validation failure")
+
+        serialized = json.dumps(diagnostics)
+        assert secret_image not in serialized
+        assert "base64" not in serialized
+        assert diagnostics["errors"] == [
+            {
+                "type": "too_long",
+                "loc": ("screenshots",),
+                "msg": "List should have at most 1 item after validation, not 2",
+                "ctx": {"field_type": "List", "max_length": 1, "actual_length": 2},
+            }
+        ]
+        assert diagnostics["body"]["fields"]["screenshots"] == {"type": "array", "length": 2}
+
+        assert _validation_body_shape({"nested": {"opaque_value": "not logged"}}) == {
+            "type": "object",
+            "field_count": 1,
+            "fields": {"nested": {"type": "object", "field_count": 1, "fields": ["opaque_value"]}},
+        }
+        assert _validation_body_shape("opaque") == {"type": "string", "length": 6}
+        assert _validation_body_shape(b"opaque") == {"type": "bytes", "length": 6}
+        assert _validation_body_shape(42) == {"type": "int"}
+
+    def test_validation_diagnostics_keep_schema_context_but_not_input_context(self) -> None:
+        class Payload(BaseModel):
+            mode: Literal["a", "b", "c"]
+
+        try:
+            Payload(mode="rejected-input")
+        except ValidationError as exc:
+            [diagnostic] = _validation_errors_for_log(exc)
+        else:  # pragma: no cover - guards the test fixture itself.
+            raise AssertionError("expected validation failure")
+
+        assert diagnostic["ctx"] == {"expected": "'a', 'b' or 'c'"}
+        assert "rejected-input" not in json.dumps(diagnostic)
+
+        custom_error = RequestValidationError(
+            [
+                {
+                    "type": "custom_error",
+                    "loc": ("body", "mode"),
+                    "msg": "Custom validation failed",
+                    "input": "request-secret",
+                    "ctx": {"expected": "request-derived-context"},
+                }
+            ]
+        )
+        [custom_diagnostic] = _validation_errors_for_log(custom_error)
+        serialized = json.dumps(custom_diagnostic)
+        assert "request-secret" not in serialized
+        assert "request-derived-context" not in serialized
+
     async def test_raise_for_status_preserves_message_across_process_boundary(self) -> None:
         headers = CIMultiDictProxy(
             CIMultiDict(
@@ -456,9 +531,23 @@ class TestServerUtils:
 
     def test_GlobalAIOHTTPAsyncClientConfig_keepalive_defaults(self) -> None:
         cfg = GlobalAIOHTTPAsyncClientConfig()
+        assert cfg.global_aiohttp_client_trust_env is False
         assert cfg.global_aiohttp_tcp_keepalive_idle_seconds == 60
         assert cfg.global_aiohttp_tcp_keepalive_interval_seconds == 10
         assert cfg.global_aiohttp_tcp_keepalive_probes == 3
+
+    def test_global_aiohttp_client_can_trust_proxy_environment(self, monkeypatch: MonkeyPatch) -> None:
+        client = MagicMock()
+        client_session_ctor = MagicMock(return_value=client)
+        monkeypatch.setattr(nemo_gym.server_utils, "ClientSession", client_session_ctor)
+        monkeypatch.setattr(nemo_gym.server_utils, "TCPConnector", MagicMock())
+        monkeypatch.setattr(nemo_gym.server_utils, "DummyCookieJar", MagicMock())
+        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+
+        result = set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig(global_aiohttp_client_trust_env=True))
+
+        assert result is client
+        assert client_session_ctor.call_args.kwargs["trust_env"] is True
 
     def test_keepalive_socket_factory_uses_configured_values(self, monkeypatch: MonkeyPatch) -> None:
         mock_sock = MagicMock()

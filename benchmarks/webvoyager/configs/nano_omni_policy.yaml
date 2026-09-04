@@ -1,0 +1,8 @@
+# WebVoyager-specific vLLM transport alignment. Layer this after the generic
+# vllm_model config so the final OpenAI Chat Completions request retains prior
+# assistant reasoning, matching the pinned Nano Omni reference runner.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      chat_template_kwargs:
+        truncate_history_thinking: false

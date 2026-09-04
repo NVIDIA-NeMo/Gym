@@ -1,0 +1,55 @@
+# Public Nano Omni v3 profile for web-runtime alignment.
+#
+# The checkpoint, tokenizer, and chat template are pinned public assets. The
+# small reasoning-parser plugin is public too, but vLLM requires a local file
+# path, so operators download it once and expose that path through the required
+# NANO_V3_REASONING_PARSER_PLUGIN environment variable.
+Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16-alignment:
+  responses_api_models:
+    local_vllm_model:
+      entrypoint: app.py
+      model: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      replace_developer_role_with_system: false
+      debug: false
+
+      extra_body:
+        temperature: 0.1
+        top_p: 0.95
+        # The pinned native client sends max_tokens=16384 on every policy
+        # request. Pin the equivalent Responses value so the wire contract is
+        # independent of a server-side generation_config default.
+        max_output_tokens: 16384
+        chat_template_kwargs:
+          truncate_history_thinking: false
+
+      hf_home: null
+      vllm_serve_env_vars:
+        VLLM_RAY_DP_PACK_STRATEGY: strict
+
+      vllm_serve_kwargs:
+        revision: 24e67ea000b7c2837fc8f9488aa2008524fac8ba  # pragma: allowlist secret
+        data_parallel_size: 1
+        tensor_parallel_size: 8
+        pipeline_parallel_size: 1
+        max_model_len: 128000
+        max_num_seqs: 32
+        gpu_memory_utilization: 0.9
+        enable_auto_tool_choice: true
+        trust_remote_code: true
+
+        # Use the tokenizer and standalone chat_template.jinja published with
+        # the same immutable model revision. A reference-score experiment may
+        # override these with separately provenance-bound serving assets.
+        tokenizer: nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16
+        tokenizer_revision: 24e67ea000b7c2837fc8f9488aa2008524fac8ba  # pragma: allowlist secret
+        # NVIDIA's public Nano v3 tool-calling recipe and the pinned
+        # WebVoyager reference launcher both use the built-in Qwen3 parser.
+        tool_call_parser: qwen3_coder
+        reasoning_parser_plugin: ${oc.env:NANO_V3_REASONING_PARSER_PLUGIN}
+        reasoning_parser: nano_v3
+
+        model_loader_extra_config:
+          enable_multithread_load: true
+          num_threads: 16

@@ -1,0 +1,135 @@
+---
+title: "Evaluate WebVoyager"
+description: "Prepare and run the 552-task visual-browser WebVoyager benchmark end to end."
+position: 3
+---
+
+# Evaluate WebVoyager
+
+WebVoyager evaluates multimodal agents on live public websites. NeMo Gym uses
+one `visual_browser` runtime: headed Chromium under Xvfb, Playwright browser
+lifecycle and navigation, and visible coordinate input through PyAutoGUI.
+
+Nano Omni and Qwen3.5 use different model-output adapters, but they consume the
+same 552 tasks and drive the same browser, proxy/CAPTCHA, action executor, and
+Gemini judge. The earlier BrowserGym-compatible path is not included.
+
+## Validation evidence
+
+The latest pre-merge full-population runs used the same hash-pinned tasks and
+`visual_browser` runtime:
+
+| Policy | Result | Completeness |
+| --- | ---: | --- |
+| Qwen3.5-122B-A10B-FP8 | 300/552, 54.35% | 552 valid unique; no missing, invalid, or duplicate-valid tasks |
+| Nano Omni tuned checkpoint `iter_0004622` | 398/552, 72.10% | 552 valid unique; no missing, invalid, or duplicate-valid tasks |
+
+The runs used a frozen execution snapshot matching this implementation line
+before its PR history was reorganized. Treat the scores as end-to-end
+integration evidence rather than stable live-site leaderboard claims.
+
+## Install and prepare
+
+Run from a clean Gym checkout on Linux:
+
+```bash
+uv lock --check
+uv sync --frozen --extra dev
+command -v Xvfb
+command -v xvfb-run
+command -v xclip
+uv run --project resources_servers/visual_browser playwright install chromium
+./.venv/bin/gym eval prepare --benchmark webvoyager
+```
+
+The prepare command downloads the hash-pinned maintained source, verifies its
+SHA-256 and 552-task denominator, and writes
+`benchmarks/webvoyager/data/webvoyager.jsonl`.
+
+## Configure external services
+
+Keep credentials in environment variables:
+
+```bash
+export WA_BROWSER_PROXY_SERVER="proxy-host.example:19407"
+export WA_CAPTCHA_PROVIDER="capsolver"
+read -rsp "CapSolver API key: " CAPSOLVER_API_KEY
+export CAPSOLVER_API_KEY
+printf '\n'
+
+export WEBARENA_JUDGE_BASE_URL="https://inference-api.nvidia.com/v1"
+export WEBARENA_JUDGE_MODEL="gcp/google/gemini-3-flash-preview"
+read -rsp "Judge API key: " WEBARENA_JUDGE_API_KEY
+export WEBARENA_JUDGE_API_KEY
+printf '\n'
+```
+
+Verify the proxy exits through the intended region and preflight the CapSolver
+account before running browser tasks.
+
+## Select the policy
+
+For Qwen3.5-122B-A10B-FP8, Gym launches the checked-in TP8 local-vLLM profile:
+
+```bash
+./.venv/bin/python benchmarks/webvoyager/prepare.py \
+  --profile qwen35_122b_a10b \
+  --rollout-output "$PWD/results/webvoyager/qwen/rollouts.jsonl" \
+  --force-env
+```
+
+For Nano Omni, configure `POLICY_BASE_URL`, `POLICY_API_KEY`, and
+`POLICY_MODEL_NAME`, then use `--profile nano_omni`.
+
+<Note>
+
+Tokenizer, chat template, multimodal processor, reasoning parser, and
+tool-call parser are policy-server assets. They are not loaded by the browser
+or judge, and must match the selected model recipe.
+
+</Note>
+
+## Start and smoke
+
+```bash
+cd benchmarks/webvoyager
+../../.venv/bin/gym env prefetch
+xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
+  ../../.venv/bin/gym env start
+```
+
+From a second terminal in the same directory:
+
+```bash
+../../.venv/bin/gym eval run --no-serve -v \
+  --limit 1 \
+  --concurrency 1 \
+  --output ../../results/webvoyager/smoke/rollouts.jsonl
+```
+
+The smoke is healthy when it resolves a reward, executes a browser action, and
+releases the browser without a masked infrastructure failure.
+
+## Full population and reconciliation
+
+Run all tasks with `--concurrency 1` for one resource process. For throughput,
+launch isolated processes or containers; every worker needs a distinct
+DISPLAY, HOME, temporary directory, artifact directory, ports, and rollout
+file. Do not place multiple PyAutoGUI sessions on one display.
+
+Reconcile worker outputs against the pinned denominator:
+
+```bash
+./.venv/bin/python benchmarks/webvoyager/summarize.py \
+  results/webvoyager/full/workers \
+  --dataset benchmarks/webvoyager/data/webvoyager.jsonl \
+  --output results/webvoyager/full/summary.json \
+  --missing-output results/webvoyager/full/retry.jsonl
+```
+
+A reportable result has all 552 task IDs exactly once and no unresolved
+missing, duplicate, unexpected, masked, or infrastructure rows.
+
+For policy-specific serving parameters, training failure semantics, AgentEnv
+integration, and complete copyable commands, see the
+[repository runbook](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/webvoyager/runbook.md).
