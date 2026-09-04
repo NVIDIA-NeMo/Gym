@@ -352,6 +352,8 @@ class AnyTerminalAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_model_base_url: Optional[str] = None
     agent_runtime_source: str = "auto"
     tb_agent_timeout: int = 1800
+    # When set, overrides the per-task agent_timeout_sec from the dataset for every task.
+    global_agent_timeout: Optional[int] = Field(default=None, gt=0)
     tb_eval_timeout: int = 300
     tb_sandbox_ttl: int = 7200
     agent_overhead_mb: int = 2048  # extra container memory on top of the task's memory_mb for the
@@ -597,7 +599,7 @@ class RunTerminalAgent(BaseModel):
         if result.return_code != 0:
             detail = result.stderr or result.stdout or ""
             print(f"[{cfg.task_name}] agent exit {result.return_code}: {detail[-2000:]}", flush=True)
-        return time.time() - t0, result.error_type == "timeout"
+        return time.time() - t0, result.error_type in ("timeout", "sandbox")
 
     async def _stage_tests(self, cfg: AnyTerminalInstanceConfig) -> None:
         """Copy the task's test files into the staging dir, visible to the sandbox at /tests."""
@@ -619,7 +621,7 @@ class RunTerminalAgent(BaseModel):
         result = await sandbox.exec(_apt_root_sandbox(cfg) + test_cmd, timeout_s=cfg.tb_eval_timeout, user="root")
         if result.return_code != 0:
             print(f"[{cfg.task_name}] eval exit {result.return_code}: {(result.stderr or '')[-2000:]}", flush=True)
-        return time.time() - t0, result.error_type == "timeout"
+        return time.time() - t0, result.error_type in ("timeout", "sandbox")
 
     async def process_single_datapoint(self) -> bool:
         cfg = self.config
@@ -824,12 +826,23 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
 
         agent_run_id = f"{task_name}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
 
-        # Per-task timeouts override config defaults when available.
+        # Per-task timeouts override config defaults when available, unless global_agent_timeout is set.
         config_overrides = {}
-        if problem_info.get("agent_timeout_sec"):
+        if self.config.global_agent_timeout is not None:
+            config_overrides["tb_agent_timeout"] = self.config.global_agent_timeout
+        elif problem_info.get("agent_timeout_sec"):
             config_overrides["tb_agent_timeout"] = int(float(problem_info["agent_timeout_sec"]))
         if problem_info.get("verifier_timeout_sec"):
             config_overrides["tb_eval_timeout"] = int(float(problem_info["verifier_timeout_sec"]))
+
+        # The container must outlive the task, or it gets torn down mid-run and the task scores as
+        # a real failure instead of the infra issue it is. Mirrors anyswe_agent's derivation
+        # (swebench_agent_timeout + swebench_tests_timeout + 600).
+        effective_agent_timeout = config_overrides.get("tb_agent_timeout", self.config.tb_agent_timeout)
+        effective_eval_timeout = config_overrides.get("tb_eval_timeout", self.config.tb_eval_timeout)
+        required_ttl = effective_agent_timeout + effective_eval_timeout + 600
+        if required_ttl > self.config.tb_sandbox_ttl:
+            config_overrides["tb_sandbox_ttl"] = required_ttl
 
         server_config = self._server.model_dump()
         if not self.config.sandbox_model_base_url and rollout_id and server_config["model_server_url"]:
