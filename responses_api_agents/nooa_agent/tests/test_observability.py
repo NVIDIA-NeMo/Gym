@@ -16,9 +16,13 @@
 from nooa.atif import AgentSchema, ObservationResultSchema, ObservationSchema, StepObject, ToolCallSchema, Trajectory
 
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentInvocation, ModelCallRef, ToolCallObservation
-from responses_api_agents.nooa_agent.observability import project_nooa_episode
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ModelCallRef, ToolCallObservation
+from responses_api_agents.nooa_agent.observability import (
+    adapt_response_for_verify,
+    finalize_observations,
+    project_nooa_episode,
+)
 
 
 def test_projects_atif_semantics_and_model_references() -> None:
@@ -152,3 +156,35 @@ def test_reports_ambiguous_model_ownership_for_nested_trajectories() -> None:
     assert invocations[1].parent_invocation_id == "root"
     assert all(not invocation.model_calls for invocation in invocations)
     assert [gap.code for gap in episode.observations.gaps] == ["model_call_ownership_unavailable"]
+
+
+def test_adapt_response_for_verify_adds_fallback_without_mutating_episode() -> None:
+    response = NeMoGymResponse(
+        id="nooa-test",
+        created_at=0,
+        model="nooa",
+        object="response",
+        output=[],
+        parallel_tool_calls=False,
+        tool_choice="none",
+        tools=[],
+    )
+
+    adapted, gaps = adapt_response_for_verify(response, "fallback answer")
+
+    assert adapted.output[0].content[0].text == "fallback answer"
+    assert [gap.code for gap in gaps] == ["non_trainable_fallback_output"]
+    assert response.output == []
+
+
+def test_finalize_observations_appends_termination_gap() -> None:
+    bundle = AgentObservationBundle(source="nooa", records=[], gaps=[])
+
+    finalized = finalize_observations(
+        bundle,
+        termination_reason="policy_budget_exceeded",
+        termination_error="budget exhausted",
+    )
+
+    assert finalized.gaps[0].code == "policy_budget_exceeded"
+    assert finalized.gaps[0].detail == "budget exhausted"

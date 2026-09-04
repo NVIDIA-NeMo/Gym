@@ -25,7 +25,7 @@ from nooa.atif import atif_scope
 from nemo_gym.rollout_observability import AgentEpisode, ModelCallRef
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
-from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM
+from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM, PolicyCallBudgetExceeded
 from responses_api_agents.nooa_agent.mapping import materialize_arguments
 from responses_api_agents.nooa_agent.observability import project_nooa_episode
 from responses_api_agents.nooa_agent.resource_tools import (
@@ -51,6 +51,8 @@ class NOOARunResult:
     return_value: Any
     model_cookies: dict[str, str]
     resource_cookies: dict[str, str]
+    termination_reason: str | None = None
+    termination_error: str | None = None
 
 
 class NOOARunner(Protocol):
@@ -101,10 +103,24 @@ class EmbeddedNOOARunner:
 
         arguments = materialize_arguments(request.row, self._invocation.arguments)
         entrypoint = getattr(agent, self._invocation.entrypoint)
+        termination_reason = None
+        termination_error = None
+        return_value = None
         with TemporaryDirectory(prefix="nemo-gym-nooa-") as directory:
             path = Path(directory) / "trajectory.json"
             async with atif_scope(agent, path=path) as exporter:
-                return_value = await entrypoint(**arguments)
+                try:
+                    return_value = await entrypoint(**arguments)
+                except PolicyCallBudgetExceeded as error:
+                    termination_reason = "policy_budget_exceeded"
+                    termination_error = str(error)
+                except ValueError as error:
+                    message = str(error)
+                    if "Gym model returned invalid" in message:
+                        termination_reason = "invalid_policy_output"
+                        termination_error = message
+                    else:
+                        raise
             trajectory = exporter.get_trajectory()
 
         episode = project_nooa_episode(
@@ -117,4 +133,6 @@ class EmbeddedNOOARunner:
             return_value=return_value,
             model_cookies=request.model_cookies,
             resource_cookies=request.resource_cookies,
+            termination_reason=termination_reason,
+            termination_error=termination_error,
         )
