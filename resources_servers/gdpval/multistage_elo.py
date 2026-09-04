@@ -73,11 +73,14 @@ class PartialStagePolicy:
     remain eligible, but every omission still counts against the configured
     coverage floors. Drained/no-persist and missing rows keep the stage open.
 
-    ``tolerate_unresolved`` drops that last rule: the coverage floors alone
-    decide the stage, whatever the cause of an omission. Set it on a
-    calibration stage whose omissions are structural -- a missing reference
-    deliverable never becomes present on retry, so holding the stage open for
-    it only converts a data gap into a hang.
+    ``tolerate_unresolved`` relaxes *only* the failure-class test: an unresolved
+    row that came back with any persisted failure class is accepted, subject to
+    the coverage floors. It never waives a row that never returned or that was
+    drained/no-persist -- their absence is the resume signal that lets the next
+    allocation re-dispatch them intact, so those keep the stage open exactly as
+    before. Set it on a calibration stage whose omissions are structural -- a
+    missing reference deliverable never becomes present on retry, so holding the
+    stage open for it only converts a data gap into a hang.
     """
 
     min_success_fraction: float = 1.0

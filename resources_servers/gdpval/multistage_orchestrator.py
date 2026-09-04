@@ -172,6 +172,10 @@ class StageResume:
 # eval_missing / transport_ineligible on the grounds that the deliverable tree
 # may be repaired *between* runs. Nothing repairs it mid-process, so retrying
 # those here only burns dispatch budget.
+# `incomplete`, `judge_invalid` and `legitimate` are retried across resumes up to
+# NEMO_GYM_MAX_ROLLOUT_ATTEMPTS but are excluded here too: they are a recorded
+# decision, pending evidence that an *immediate* re-dispatch recovers them
+# rather than reproducing the same outcome at full rollout cost.
 _IN_PROCESS_RETRYABLE_CLASSES = frozenset({"timeout_exceeded", "transient"})
 
 
@@ -321,15 +325,15 @@ def _partial_stage_outcome(
     included_rows = [successful_by_key[key] for key in included_keys]
     already_resolved_omitted_keys = set(omitted_keys) - set(unresolved_keys)
     result_by_key = {_stage_key(result): result for result in new_results}
-    if not policy.tolerate_unresolved:
-        for key in unresolved_keys:
-            result = result_by_key.get(key)
-            if (
-                result is None
-                or result.get(NG_NO_PERSIST_KEY)
-                or result.get(NG_FAILURE_CLASS_KEY) not in policy.waivable_failure_classes
-            ):
-                return None
+    for key in unresolved_keys:
+        result = result_by_key.get(key)
+        # A row that never returned, or that was drained before its POST, is the
+        # resume signal for the next allocation: its absence is what makes the
+        # sample re-dispatchable intact. `tolerate_unresolved` never waives those.
+        if result is None or result.get(NG_NO_PERSIST_KEY):
+            return None
+        if not policy.tolerate_unresolved and result.get(NG_FAILURE_CLASS_KEY) not in policy.waivable_failure_classes:
+            return None
 
     per_reference = {
         reference_id: {
@@ -378,14 +382,18 @@ def _cached_partial_snapshot_is_valid(
         "min_per_reference_success_fraction",
         "min_successful_rows_per_reference",
         "newly_waivable_failure_classes",
-        "tolerate_unresolved",
     }
-    if (
-        expected_policy is None
-        or not isinstance(policy_record, Mapping)
-        or not required_policy_fields <= set(policy_record)
-        or {field: policy_record[field] for field in required_policy_fields} != _partial_policy_record(expected_policy)
-    ):
+    if expected_policy is None or not isinstance(policy_record, Mapping):
+        return False
+    if not required_policy_fields <= set(policy_record):
+        return False
+    # `tolerate_unresolved` post-dates the first durable records, so it is read
+    # with a default: a legacy record round-trips as the off value instead of
+    # invalidating every resume of a run that already froze a partial outcome.
+    recorded_tolerate_unresolved = policy_record.get("tolerate_unresolved", False)
+    recorded_policy_fields = {field: policy_record[field] for field in required_policy_fields}
+    recorded_policy_fields["tolerate_unresolved"] = recorded_tolerate_unresolved
+    if recorded_policy_fields != _partial_policy_record(expected_policy):
         return False
     # The durable record spells the waiver set `newly_waivable_failure_classes`;
     # the config field is `waivable_failure_classes`. Map it back before parsing.
@@ -393,6 +401,7 @@ def _cached_partial_snapshot_is_valid(
         field: policy_record[field] for field in required_policy_fields if field != "newly_waivable_failure_classes"
     }
     replayed_policy_fields["waivable_failure_classes"] = policy_record["newly_waivable_failure_classes"]
+    replayed_policy_fields["tolerate_unresolved"] = recorded_tolerate_unresolved
     try:
         policy = _parse_partial_stage_policy(replayed_policy_fields)
     except (TypeError, ValueError):
@@ -609,6 +618,8 @@ def _validate_partial_stage_policy(policy: PartialStagePolicy) -> None:
     minimum_rows = policy.min_successful_rows_per_reference
     if isinstance(minimum_rows, bool) or not isinstance(minimum_rows, int) or minimum_rows <= 0:
         raise ValueError("partial_completion.min_successful_rows_per_reference must be a positive integer")
+    if not isinstance(policy.tolerate_unresolved, bool):
+        raise ValueError("partial_completion.tolerate_unresolved must be a boolean")
     waivable = policy.waivable_failure_classes
     if isinstance(waivable, (str, bytes)) or not isinstance(waivable, Sequence) or not waivable:
         raise ValueError("partial_completion.waivable_failure_classes must be a non-empty sequence of strings")
@@ -1145,38 +1156,42 @@ async def run_multistage_stages(
         # is reached or the dispatch budget runs out. Without this, max_attempts only
         # ever advances across resumes, so a timed-out row is lost whenever a run
         # exits cleanly -- the whole point of the cap never fires inside a leg.
+        # ``resume.attempts_by_stage`` is a startup snapshot that never mutates in
+        # process, so the cap has to be tracked locally. The total consumed for a
+        # key is: attempts recorded at startup + this leg's initial dispatch + the
+        # in-process retries made below.
+        inprocess_attempts: Dict[Tuple[Any, Any], int] = {}
         if retry_inprocess and pairs and resume is not None:
+            startup_attempts = resume.attempts_by_stage.get(index, {})
+            reuse_cached_keys_for_stage = resume.reuse_cached_keys.get(index, frozenset())
+            pending_by_key = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]): r for r in pending_rows}
             while True:
-                attempts_now = resume.attempts_by_stage.get(index, {})
                 retry_rows = []
                 for row in new_tagged:
                     if not _is_in_process_retryable(row):
                         continue
                     key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
-                    if attempts_now.get(key, 0) >= max_attempts:
+                    attempts_used = startup_attempts.get(key, 0) + 1 + inprocess_attempts.get(key, 0)
+                    if attempts_used >= max_attempts:
                         continue
-                    source = next(
-                        (r for r in pending_rows if (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) == key),
-                        None,
-                    )
+                    source = pending_by_key.get(key)
                     if source is None:
                         continue
                     retry_row = dict(source)
-                    attempt = attempts_now.get(key, 0)
-                    if attempt > 0:
-                        retry_row[ATTEMPT_INDEX_KEY_NAME] = attempt
+                    # 0-based index of the attempt about to be made, so each retry
+                    # gets its own rollout capture key.
+                    retry_row[ATTEMPT_INDEX_KEY_NAME] = attempts_used
                     # A failed judging attempt keeps its policy artifact: rejudge it
-                    # rather than rerunning the agent, exactly as resume does.
-                    if key in resume.reuse_cached_keys.get(index, frozenset()):
+                    # rather than rerunning the agent, exactly as resume does. The
+                    # flag may have been set on this very row moments ago, so honour
+                    # both it and the startup snapshot.
+                    if key in reuse_cached_keys_for_stage or row.get("reuse_cached_deliverable"):
                         retry_row["reuse_cached_deliverable"] = True
                     retry_rows.append(retry_row)
+                    inprocess_attempts[key] = inprocess_attempts.get(key, 0) + 1
                 if not retry_rows:
                     break
                 retry_pairs = await run_rollouts(retry_rows)
-                if not retry_pairs:
-                    # Budget exhausted: run_rollouts recomputes remaining_budget_s on
-                    # every call and dispatches nothing once it is gone.
-                    break
                 retried = tag_results(
                     retry_pairs,
                     index,
@@ -1184,13 +1199,17 @@ async def run_multistage_stages(
                     expected_stage_row_count=expected_stage_row_count,
                 )
                 resume.on_rows(index, retried)
-                _emit(
-                    "stage_retry",
-                    index=index,
-                    total_stages=total_stages,
-                    num_retried=len(retry_rows),
-                    num_recovered=sum(1 for r in retried if _is_success_row(r)),
-                )
+                # Once the dispatch budget is gone every row comes back drained
+                # without a POST; reporting those as re-dispatched is misleading.
+                num_dispatched = sum(1 for r in retried if not r.get(NG_NO_PERSIST_KEY))
+                if num_dispatched:
+                    _emit(
+                        "stage_retry",
+                        index=index,
+                        total_stages=total_stages,
+                        num_retried=num_dispatched,
+                        num_recovered=sum(1 for r in retried if _is_success_row(r)),
+                    )
                 # Later attempt wins for a key; earlier attempts stay in the sidecar.
                 superseded = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in retried}
                 new_tagged = [
@@ -1240,7 +1259,7 @@ async def run_multistage_stages(
                 not resolved
                 and result.get(NG_FAILURE_CLASS_KEY) is not None
                 and not result.get(NG_NO_PERSIST_KEY)
-                and prior_attempts.get(key, 0) + 1 >= max_attempts
+                and prior_attempts.get(key, 0) + 1 + inprocess_attempts.get(key, 0) >= max_attempts
             ):
                 resolved = True
             if resolved:
