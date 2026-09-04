@@ -1183,7 +1183,7 @@ class RolloutCollectionHelper(BaseModel):
 
         if row_idxs_missing_rollout_ref:
             raise ValueError(
-                f"No rollout target specified for rows {row_idxs_missing_rollout_ref}. "
+                f"No agent specified and no rollout orchestrator specified for rows {row_idxs_missing_rollout_ref}. "
                 "Provide +agent_name (or +agent_map with a _default entry), or include "
                 "orchestrator_ref, agent_ref, or task_source in the data."
             )
