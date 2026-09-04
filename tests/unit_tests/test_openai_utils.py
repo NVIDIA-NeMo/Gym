@@ -379,7 +379,8 @@ class TestNeMoGymChatCompletionSchemas:
             },
         ],
     )
-    def test_tool_calls_still_reject_other_unknown_fields(self, tool_call: dict[str, Any]) -> None:
+    def test_tool_calls_carry_other_unknown_fields(self, tool_call: dict[str, Any]) -> None:
+        """Unknown keys ride along; the tool call's own required shape is still enforced."""
         payload = {
             "messages": [
                 {
@@ -391,17 +392,29 @@ class TestNeMoGymChatCompletionSchemas:
             "model": "gpt-test",
         }
 
-        with pytest.raises(ValidationError):
-            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+        validated = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+        assert "not_a_real_field" in str(validated.messages[0]["tool_calls"][0])
 
-    def test_unknown_top_level_request_key_is_still_rejected(self) -> None:
-        """Normalizing the tool-call name must not loosen the request model."""
+    def test_unknown_top_level_request_key_is_carried(self) -> None:
+        """Vendor extensions the schema does not model are forwarded, not rejected."""
+        validated = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "model": "gpt-test",
+                "not_a_real_request_field": True,
+            }
+        )
+        assert validated.model_extra["not_a_real_request_field"] is True
+
+    def test_malformed_tool_call_is_still_rejected(self) -> None:
+        """Carrying unknown keys must not stop required fields being enforced."""
         with pytest.raises(ValidationError):
             NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
                 {
-                    "messages": [{"role": "user", "content": "hi"}],
+                    "messages": [
+                        {"role": "assistant", "content": "", "tool_calls": [{"id": "x", "type": "function"}]}
+                    ],
                     "model": "gpt-test",
-                    "not_a_real_request_field": True,
                 }
             )
 
