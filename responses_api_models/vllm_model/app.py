@@ -49,7 +49,7 @@ from nemo_gym.responses_converter import (
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     split_responses_input_output_items,  # noqa: F401
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.server_utils import PROPAGATE_HTTP_ERROR_ATTRIBUTE, SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import current_capture_context
 
 
@@ -156,6 +156,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     return_token_id_information: bool
     # Request inline prompt and generation token IDs from compatible vLLM endpoints.
     request_prompt_and_generation_token_ids: bool = False
+    propagate_context_overflow_errors: bool = False
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
@@ -833,6 +834,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "context length" in result_content_str or "max_tokens" in result_content_str
             )
             if is_out_of_context_length:
+                if self.config.propagate_context_overflow_errors:
+                    setattr(e, PROPAGATE_HTTP_ERROR_ATTRIBUTE, True)
+                    raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
                 return res
@@ -1146,6 +1150,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "context length" in result_content_str or "max_tokens" in result_content_str
             )
             if is_out_of_context_length:
+                if self.config.propagate_context_overflow_errors:
+                    setattr(e, PROPAGATE_HTTP_ERROR_ATTRIBUTE, True)
+                    raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
                 return res
