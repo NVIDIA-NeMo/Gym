@@ -51,28 +51,11 @@ from responses_api_agents.simple_agent_with_compaction.compaction.policies impor
 LOGGER = logging.getLogger(__name__)
 
 
-class ContextCompactionContract(BaseModel):
-    """Versioned marker that makes exact Gym evidence authoritative."""
+class RolloutTraceContract(BaseModel):
+    """Bind exact model-call trace evidence to one caller-owned rollout."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[2] = 2
-    mode: Literal["exact_trace_authority"] = "exact_trace_authority"
-    rollout_id: str
-    group_id: str | None = None
-    task_id: str | None = None
-    rollout_index: int | None = Field(default=None, ge=0)
-    attempt_index: int | None = Field(default=None, ge=0)
-    generation_contract: GenerationContract
-
-
-class TransportContextCompactionContract(BaseModel):
-    """Post-verification contract for the bounded Gym-to-NeMo-RL envelope."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: Literal[3] = 3
-    mode: Literal["exact_trace_authority"] = "exact_trace_authority"
     rollout_id: str
     group_id: str | None = None
     task_id: str | None = None
@@ -139,11 +122,11 @@ class ContextCompactedResponse(NeMoGymResponse):
     chunk_records: list[FinalizedChunkRecord] = Field(default_factory=list)
     boundary_events: list[RewriteBoundaryEvent] = Field(default_factory=list)
     guard_records: list[GuardOutcomeRecord] = Field(default_factory=list)
-    context_compaction_contract: ContextCompactionContract
+    rollout_trace_contract: RolloutTraceContract
 
 
 class ContextCompactedTransportResponse(NeMoGymResponse):
-    """Bounded exact-evidence response returned after resource verification."""
+    """Bounded exact-evidence response returned by the agent's run endpoint."""
 
     media_assets: dict[str, dict[str, Any]] = Field(default_factory=dict)
     model_call_metadata: list[ModelCallMetadata] = Field(default_factory=list)
@@ -152,13 +135,13 @@ class ContextCompactedTransportResponse(NeMoGymResponse):
     chunk_records: list[FinalizedChunkRecord] = Field(default_factory=list)
     boundary_events: list[RewriteBoundaryEvent] = Field(default_factory=list)
     guard_records: list[GuardOutcomeRecord] = Field(default_factory=list)
-    context_compaction_contract: TransportContextCompactionContract
+    rollout_trace_contract: RolloutTraceContract
 
 
 def build_transport_response(
     response: ContextCompactedResponse,
 ) -> ContextCompactedTransportResponse:
-    """Drop validation-only duplication after the resource verifier succeeds."""
+    """Drop validation-only duplication before returning an agent response."""
 
     result = response.model_dump(
         exclude={
@@ -182,9 +165,6 @@ def build_transport_response(
     result["model_call_metadata"] = [
         ModelCallMetadata.from_observed(evidence) for evidence in response.completion_evidence
     ]
-    result["context_compaction_contract"] = TransportContextCompactionContract.model_validate(
-        response.context_compaction_contract.model_dump() | {"schema_version": 3}
-    )
     return ContextCompactedTransportResponse.model_validate(result)
 
 
@@ -581,7 +561,7 @@ class ContextCompactionSession:
                 ),
                 "boundary_events": list(self.history_controller.boundary_events),
                 "guard_records": self.guard_records,
-                "context_compaction_contract": ContextCompactionContract(
+                "rollout_trace_contract": RolloutTraceContract(
                     rollout_id=self.rollout_id,
                     generation_contract=self.generation_contract,
                 ),

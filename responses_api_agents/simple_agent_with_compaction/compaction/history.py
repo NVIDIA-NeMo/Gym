@@ -489,7 +489,6 @@ class GenerationContract(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = 1
     model_contract_id: str
     tokenizer_contract_id: str
     template_contract_id: str
