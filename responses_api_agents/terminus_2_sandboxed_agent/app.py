@@ -344,7 +344,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             context = AgentContext()
             agent = NeMoGymTerminus2(
                 logs_dir=Path(log_dir),
-                model_name=self.config.model_server.name,
+                # Need `openai/` prefix for litellm's token calculation.
+                model_name=f"openai/{self.config.model_server.name}",
                 max_turns=self.config.max_turns,
                 parser_name=self.config.parser_name,
                 enable_summarize=self.config.enable_summarize,
