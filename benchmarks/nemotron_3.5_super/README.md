@@ -40,6 +40,24 @@ worker every 10 cycles regardless of load.
 - bug: https://github.com/vllm-project/router/issues/197
 - fix: https://github.com/vllm-project/router/pull/216 (unmerged upstream)
 
+#216 on its own is not enough, and for prefill-heavy benchmarks it is worse than not
+applying it. It makes the worker load counters honest, which switches on a second
+latent bug: `cache_aware` decides whether to use prefix affinity from the
+*fleet-wide* load spread, so one hot worker discards affinity for every request --
+including requests whose own worker is idle. Under P/D that gate is open almost
+permanently, because prefill worker load counts queued requests as well as running
+ones. Routing degenerates to shortest-queue, already-cached prompts get recomputed,
+prefill saturates and decode starves behind it.
+
+The pin therefore points at a branch carrying #216 plus a fix that applies the same
+load check per request, against the worker that request wants:
+
+- prefill fix: https://github.com/vllm-project/router/pull/238
+
+Both are plain commit SHAs fetched from `vllm-project/router`; a PR head is a ref
+there even when the branch lives on a contributor's fork. Repin to a released commit
+once these land upstream.
+
 Build the wheel once with `build_vllm_router_wheel.sh`, then pass it to the container
 build. The wheel is built inside the eval base image, so its extension module matches
 the Python that runs `vllm-router` at eval time:
