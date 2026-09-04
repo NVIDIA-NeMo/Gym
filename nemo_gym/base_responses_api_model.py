@@ -1313,7 +1313,7 @@ class _CaptureMiddleware:
                     defer_response = terminal is not None
                     if terminal is not None:
                         state["stream_terminal"] = terminal
-                if defer_response or not message.get("more_body", False):
+                if state["streaming"] and (defer_response or not message.get("more_body", False)):
                     deferred_response_messages.append(dict(message))
                     return
             await send(message)  # forward unchanged -> streaming is preserved
