@@ -91,6 +91,7 @@ class Terminus2AgentVerifyResponse(BaseVerifyResponse):
     model_call_time_pct: float
     terminus2_time_taken: float
     model_calls_gt_10min: int
+    num_proactive_compactions: int
     num_compactions: int
     error: Optional[str]
 
@@ -164,6 +165,7 @@ class NeMoGymLLM(BaseLLM):
         self._times_spent = []
         self._last_input_items = []
         self._model_calls_gt_10min = 0
+        self._num_compactions = 0
 
     @staticmethod
     def _input_items(message_history: list[dict[str, Any]], prompt: str) -> list[NeMoGymEasyInputMessage]:
@@ -232,6 +234,7 @@ class NeMoGymLLM(BaseLLM):
 
         # @bxyu-nvidia: Gym will return an empty model response when context length is exceeded
         if not (content or reasoning_content):
+            self._num_compactions += 1
             raise ContextLengthExceededError
 
         return LLMResponse(
@@ -256,7 +259,7 @@ class NeMoGymTerminus2(Terminus2):
         self._nemo_gym_llm = llm
         self._dump_trajectory_enabled = dump_trajectory
         self._times_spent = []
-        self._num_compactions = 0
+        self._num_proactive_compactions = 0
         super().__init__(*args, **kwargs)
 
     def _init_llm(self, *args: Any, **kwargs: Any) -> BaseLLM:
@@ -276,7 +279,7 @@ class NeMoGymTerminus2(Terminus2):
     async def _check_proactive_summarization(self, *args, **kwargs):
         res = await super()._check_proactive_summarization(*args, **kwargs)
         if res:
-            self._num_compactions += 1
+            self._num_proactive_compactions += 1
         return res
 
 
@@ -399,7 +402,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             "model_call_time_pct": 100 * total_model_call_time / total_time,
             "terminus2_time_taken": total_time,
             "model_calls_gt_10min": llm._model_calls_gt_10min,
-            "num_compactions": agent._num_compactions,
+            "num_proactive_compactions": agent._num_proactive_compactions,
+            "num_compactions": llm._num_compactions,
             "error": error,
         }
         return response, metrics
