@@ -173,6 +173,9 @@ class NeMoGymLLM(BaseLLM):
         self._model_calls_gt_10min = 0
         self._num_compactions = 0
 
+        self._is_compacting = False
+        self._just_compacted = False
+
     @staticmethod
     def _input_items(message_history: list[dict[str, Any]], prompt: str) -> list[NeMoGymEasyInputMessage]:
         messages = [*message_history, {"role": "user", "content": prompt}]
@@ -220,11 +223,15 @@ class NeMoGymLLM(BaseLLM):
         if not response:
             raise TimeoutError(f"Failed to query model endpoint due to timeouts after {max_attempts} attempts!")
 
-        if len(self._last_input_items) >= len(input_items):
-            # Compacted
+        if self._is_compacting:
+            self.trajectory.extend([input_items[-1], *response.output])
+            self._just_compacted = True
+        elif self._just_compacted:
             self.trajectory.extend([*input_items, *response.output])
+            self._just_compacted = False
         else:
             self.trajectory.extend([input_items[-1], *response.output])
+
         self.usages.append(response.usage)
         self._last_input_items = input_items.copy()
 
@@ -287,6 +294,12 @@ class NeMoGymTerminus2(Terminus2):
         res = await super()._check_proactive_summarization(*args, **kwargs)
         if res:
             self._num_proactive_compactions += 1
+        return res
+
+    async def _summarize(self, *args, **kwargs):
+        self._nemo_gym_llm._is_compacting = True
+        res = await super()._summarize(*args, **kwargs)
+        self._nemo_gym_llm._is_compacting = False
         return res
 
 
