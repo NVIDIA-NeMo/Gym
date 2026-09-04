@@ -32,10 +32,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -61,10 +62,40 @@ from resources_servers.genrm_compare.utils import (
 
 logger = logging.getLogger(__name__)
 
-# Cohort state for verify(): buffer by prompt_key until num_rollouts_per_prompt received (Difference 1)
-_cohort_lock: asyncio.Lock = asyncio.Lock()
-_cohort_buffers: Dict[str, List[Tuple[Any, asyncio.Future]]] = defaultdict(list)
-_cohort_jit_buffers: Dict[str, Tuple[List[float, float, float], List[int, int, int]]] = defaultdict(lambda: ([], []))
+
+@dataclass
+class _VerifyCohortState:
+    """Mutable state for one prompt cohort."""
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    buffer: List[Tuple[Any, asyncio.Future[float]]] = field(default_factory=list)
+    comparison_results: List[Tuple[float, float, float]] = field(default_factory=list)
+    comparison_metadata: List[Tuple[int, int, int]] = field(default_factory=list)
+    completed_rewards: Dict[int, float] = field(default_factory=dict)
+
+
+def _fail_pending_cohort(prompt_key: str, state: _VerifyCohortState, error: BaseException) -> None:
+    """Clear partial state and unblock every request waiting on this cohort."""
+    cohort_buffer = state.buffer
+    state.buffer = []
+    state.comparison_results = []
+    state.comparison_metadata = []
+
+    for _, future in cohort_buffer:
+        if future.done():
+            continue
+        if isinstance(error, asyncio.CancelledError):
+            future.cancel()
+        else:
+            future.set_exception(
+                RuntimeError(
+                    f"GenRM cohort {prompt_key!r} failed while computing rewards: {type(error).__name__}: {error}"
+                )
+            )
+            # A request may have disconnected before this cohort failed. Mark
+            # the exception retrieved to avoid an unobserved-future warning;
+            # active waiters still receive the exception when they await it.
+            future.exception()
 
 
 class GenRMCompareConfig(BaseResourcesServerConfig):
@@ -203,6 +234,13 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     """
 
     config: GenRMCompareConfig
+    # A verify request can be retried after the server has accepted it (for
+    # example, when the HTTP connection drops before the cohort reward is
+    # returned). Keep each cohort's mutation serialized and remember completed
+    # rollout rewards for the lifetime of this server process.
+    _verify_cohorts: Dict[str, _VerifyCohortState] = PrivateAttr(
+        default_factory=lambda: defaultdict(_VerifyCohortState)
+    )
 
     async def verify(self, body: GenRMCompareVerifyRequest) -> BaseVerifyResponse:
         """Verify a single rollout. When num_rollouts_per_prompt > 1, buffers by prompt and runs comparison when cohort is full."""
@@ -221,60 +259,99 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             input_messages if isinstance(input_messages, list) else list(input_messages),
             principle,
         )
-        future: asyncio.Future[float] = asyncio.get_running_loop().create_future()
+        state = self._verify_cohorts[prompt_key]
+        future: asyncio.Future[float] | None = None
+        completed_reward: float | None = None
 
-        _cohort_buffers[prompt_key].append((body, future))
+        async with state.lock:
+            if body.rollout_index is not None:
+                completed_reward = state.completed_rewards.get(body.rollout_index)
+                if completed_reward is None:
+                    for existing_body, existing_future in state.buffer:
+                        if existing_body.rollout_index == body.rollout_index:
+                            future = existing_future
+                            break
 
-        conversation_history = _input_to_conversation_history(getattr(body.responses_create_params, "input", []) or [])
-        buf = _cohort_buffers[prompt_key]
-        response_objs = [
-            (b.response.model_dump() if hasattr(b.response, "model_dump") else b.response) for b, _ in buf
-        ]
-        principle_val = getattr(body, "principle", None) or principle
+            if completed_reward is None and future is None:
+                future = asyncio.get_running_loop().create_future()
+                state.buffer.append((body, future))
 
-        existing_results, existing_metadata = _cohort_jit_buffers[prompt_key]
-        new_results, new_metadata = await self._run_jit_compare_using_most_recent_response_obj(
-            conversation_history, response_objs, existing_metadata, principle_val
-        )
-        existing_results.extend(new_results)
-        existing_metadata.extend(new_metadata)
+                try:
+                    conversation_history = _input_to_conversation_history(
+                        getattr(body.responses_create_params, "input", []) or []
+                    )
+                    response_objs = [
+                        (
+                            cohort_body.response.model_dump()
+                            if hasattr(cohort_body.response, "model_dump")
+                            else cohort_body.response
+                        )
+                        for cohort_body, _ in state.buffer
+                    ]
+                    principle_val = getattr(body, "principle", None) or principle
 
-        cohort_ready = False
-        if len(response_objs) >= cfg.num_rollouts_per_prompt:
-            assert len(response_objs) == cfg.num_rollouts_per_prompt
-            cohort_ready = True
+                    new_results, new_metadata = await self._run_jit_compare_using_most_recent_response_obj(
+                        conversation_history,
+                        response_objs,
+                        state.comparison_metadata,
+                        principle_val,
+                    )
+                    state.comparison_results.extend(new_results)
+                    state.comparison_metadata.extend(new_metadata)
 
-        # Only run for the final response
-        if cohort_ready:
-            existing_results, existing_metadata = _cohort_jit_buffers.pop(prompt_key)
+                    if len(response_objs) == cfg.num_rollouts_per_prompt:
+                        sorted_results = sorted(
+                            zip(state.comparison_results, state.comparison_metadata),
+                            key=lambda pair: (pair[1][2], pair[1][0], pair[1][1]),
+                        )
+                        comparison_results, comparison_metadata = zip(*sorted_results)
 
-            # Sort to match the ordering of the original `_run_compare` logic
-            existing_results, existing_metadata = zip(
-                *sorted(
-                    zip(existing_results, existing_metadata), key=lambda pair: (pair[1][2], pair[1][0], pair[1][1])
-                )
-            )
+                        rewards, _, _, _ = aggregate_scores(
+                            comparison_results=comparison_results,
+                            comparison_metadata=comparison_metadata,
+                            response_objs=response_objs,
+                            aggregator_method=cfg.aggregator_method,
+                            default_score=cfg.default_score,
+                            reasoning_bonus=cfg.reasoning_bonus,
+                            answer_bonus=cfg.answer_bonus,
+                            top_percentile=cfg.top_percentile,
+                            group_reasoning_length_penalty_coeff=cfg.group_reasoning_length_penalty_coeff,
+                            group_answer_length_penalty_coeff=cfg.group_answer_length_penalty_coeff,
+                            group_style_penalty_coeff=cfg.group_style_penalty_coeff,
+                        )
+                        if len(rewards) != len(state.buffer):
+                            raise RuntimeError(
+                                f"GenRM cohort {prompt_key!r} produced {len(rewards)} rewards "
+                                f"for {len(state.buffer)} rollouts"
+                            )
 
-            rewards, _, _, _ = aggregate_scores(
-                comparison_results=existing_results,
-                comparison_metadata=existing_metadata,
-                response_objs=response_objs,
-                aggregator_method=cfg.aggregator_method,
-                default_score=cfg.default_score,
-                reasoning_bonus=cfg.reasoning_bonus,
-                answer_bonus=cfg.answer_bonus,
-                top_percentile=cfg.top_percentile,
-                group_reasoning_length_penalty_coeff=cfg.group_reasoning_length_penalty_coeff,
-                group_answer_length_penalty_coeff=cfg.group_answer_length_penalty_coeff,
-                group_style_penalty_coeff=cfg.group_style_penalty_coeff,
-            )
+                        cohort_buffer = state.buffer
+                        state.buffer = []
+                        state.comparison_results = []
+                        state.comparison_metadata = []
+                        for reward, (cohort_body, cohort_future) in zip(rewards, cohort_buffer):
+                            if cohort_body.rollout_index is not None:
+                                state.completed_rewards[cohort_body.rollout_index] = reward
+                            if not cohort_future.done():
+                                cohort_future.set_result(reward)
+                    elif len(response_objs) > cfg.num_rollouts_per_prompt:
+                        raise RuntimeError(
+                            f"GenRM cohort {prompt_key!r} exceeded its configured size "
+                            f"({len(response_objs)} > {cfg.num_rollouts_per_prompt})"
+                        )
+                except asyncio.CancelledError as error:
+                    _fail_pending_cohort(prompt_key, state, error)
+                    raise
+                except Exception as error:
+                    _fail_pending_cohort(prompt_key, state, error)
+                    raise
 
-            cohort_buf = _cohort_buffers.pop(prompt_key)
-            for i, (_, f) in enumerate(cohort_buf):
-                if not f.done():
-                    f.set_result(rewards[i])
-
-        reward = await future
+        if completed_reward is not None:
+            reward = completed_reward
+        else:
+            assert future is not None
+            # A disconnected duplicate waiter must not cancel the shared cohort result.
+            reward = await asyncio.shield(future)
         return BaseVerifyResponse(
             responses_create_params=body.responses_create_params,
             response=body.response,

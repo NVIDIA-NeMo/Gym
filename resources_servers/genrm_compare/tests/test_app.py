@@ -189,6 +189,57 @@ class TestGenRMCompareResourcesServer:
             f"prompt_id::prompt-123::{prompt_hash}"
         )
 
+    def _make_cohort_server(self) -> GenRMCompareResourcesServer:
+        config = GenRMCompareConfig(
+            host="localhost",
+            port=8000,
+            entrypoint="app.py",
+            domain="rlhf",
+            name="genrm_compare",
+            genrm_model_server=ModelServerRef(type="responses_api_models", name="genrm_model"),
+            genrm_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=1024),
+            comparison_strategy="circular",
+            num_judges_per_comparison=1,
+            num_rollouts_per_prompt=2,
+        )
+        return GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+
+    def _make_verify_request(self, rollout_index: int, response_id: str) -> GenRMCompareVerifyRequest:
+        return GenRMCompareVerifyRequest.model_validate(
+            {
+                "responses_create_params": {
+                    "input": [{"role": "user", "content": "hello"}],
+                },
+                "response": {
+                    "id": response_id,
+                    "created_at": 0.0,
+                    "model": "dummy_model",
+                    "tools": [],
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "output": [],
+                    "object": "response",
+                },
+                TASK_INDEX_KEY_NAME: 7,
+                ROLLOUT_INDEX_KEY_NAME: rollout_index,
+            }
+        )
+
+    @staticmethod
+    async def _successful_jit_compare(*args, **kwargs):
+        response_objs = args[1]
+        if len(response_objs) == 1:
+            return [], []
+        return [(1.0, 2.0, 4.0)], [(0, 1, 0)]
+
+    @staticmethod
+    def _mock_rewards(monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            resources_servers.genrm_compare.app,
+            "aggregate_scores",
+            MagicMock(return_value=([0.25, 0.75], {}, [], [])),
+        )
+
     async def test_run_jit_compare_using_most_recent_response_obj(self, monkeypatch: MonkeyPatch) -> None:
         config = GenRMCompareConfig(
             host="localhost",
@@ -365,6 +416,122 @@ class TestGenRMCompareResourcesServer:
         expected_rewards = golden_rewards
         actual_rewards = [r.reward for r in results]
         assert expected_rewards == actual_rewards
+
+    async def test_verify_duplicate_rollout_is_idempotent(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._make_cohort_server()
+        monkeypatch.setattr(
+            server,
+            "_run_jit_compare_using_most_recent_response_obj",
+            self._successful_jit_compare,
+        )
+        self._mock_rewards(monkeypatch)
+
+        first = asyncio.create_task(server.verify(self._make_verify_request(0, "response-0")))
+        await asyncio.sleep(0)
+        duplicate = asyncio.create_task(server.verify(self._make_verify_request(0, "response-0-retry")))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(server.verify(self._make_verify_request(1, "response-1")))
+
+        first_result, duplicate_result, second_result = await asyncio.gather(first, duplicate, second)
+        assert first_result.reward == duplicate_result.reward == 0.25
+        assert second_result.reward == 0.75
+
+        completed_retry = await server.verify(self._make_verify_request(0, "response-0-late-retry"))
+        assert completed_retry.reward == 0.25
+
+    async def test_verify_jit_failure_clears_pending_cohort_for_retry(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._make_cohort_server()
+        should_fail = True
+
+        async def run_jit_compare(*args, **kwargs):
+            if len(args[1]) == 1:
+                return [], []
+            if should_fail:
+                raise RuntimeError("judge failed")
+            return await self._successful_jit_compare(*args, **kwargs)
+
+        monkeypatch.setattr(server, "_run_jit_compare_using_most_recent_response_obj", run_jit_compare)
+        self._mock_rewards(monkeypatch)
+
+        first = asyncio.create_task(server.verify(self._make_verify_request(0, "response-0")))
+        await asyncio.sleep(0)
+        with pytest.raises(RuntimeError, match="judge failed"):
+            await server.verify(self._make_verify_request(1, "response-1"))
+        with pytest.raises(RuntimeError, match="GenRM cohort.*judge failed"):
+            await asyncio.wait_for(first, timeout=1)
+
+        state = next(iter(server._verify_cohorts.values()))
+        assert state.buffer == []
+        assert state.comparison_results == []
+        assert state.comparison_metadata == []
+
+        should_fail = False
+        retried = await asyncio.gather(
+            server.verify(self._make_verify_request(0, "response-0-retry")),
+            server.verify(self._make_verify_request(1, "response-1-retry")),
+        )
+        assert [result.reward for result in retried] == [0.25, 0.75]
+
+    async def test_verify_jit_cancellation_clears_pending_cohort_for_retry(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._make_cohort_server()
+        judge_started = asyncio.Event()
+
+        async def blocked_jit_compare(*args, **kwargs):
+            if len(args[1]) == 1:
+                return [], []
+            judge_started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(server, "_run_jit_compare_using_most_recent_response_obj", blocked_jit_compare)
+        self._mock_rewards(monkeypatch)
+
+        first = asyncio.create_task(server.verify(self._make_verify_request(0, "response-0")))
+        await asyncio.sleep(0)
+        final = asyncio.create_task(server.verify(self._make_verify_request(1, "response-1")))
+        await asyncio.wait_for(judge_started.wait(), timeout=1)
+        final.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await final
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(first, timeout=1)
+
+        state = next(iter(server._verify_cohorts.values()))
+        assert state.buffer == []
+        assert state.comparison_results == []
+        assert state.comparison_metadata == []
+
+        monkeypatch.setattr(
+            server,
+            "_run_jit_compare_using_most_recent_response_obj",
+            self._successful_jit_compare,
+        )
+        retried = await asyncio.gather(
+            server.verify(self._make_verify_request(0, "response-0-retry")),
+            server.verify(self._make_verify_request(1, "response-1-retry")),
+        )
+        assert [result.reward for result in retried] == [0.25, 0.75]
+
+    async def test_cancelled_duplicate_does_not_cancel_shared_reward(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._make_cohort_server()
+        monkeypatch.setattr(
+            server,
+            "_run_jit_compare_using_most_recent_response_obj",
+            self._successful_jit_compare,
+        )
+        self._mock_rewards(monkeypatch)
+
+        first = asyncio.create_task(server.verify(self._make_verify_request(0, "response-0")))
+        await asyncio.sleep(0)
+        duplicate = asyncio.create_task(server.verify(self._make_verify_request(0, "response-0-retry")))
+        await asyncio.sleep(0)
+        duplicate.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await duplicate
+
+        second = asyncio.create_task(server.verify(self._make_verify_request(1, "response-1")))
+        first_result, second_result = await asyncio.gather(first, second)
+        assert first_result.reward == 0.25
+        assert second_result.reward == 0.75
 
 
 class TestRunSingleComparison:
