@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 
-UPSTREAM_COMMIT = "3fbd0f1a136720fece86786545983e26642c3db2"
+UPSTREAM_COMMIT = "3fbd0f1a136720fece86786545983e26642c3db2"  # pragma: allowlist secret
 UPSTREAM_URL = "https://github.com/OpenDataBox/Workspace-Bench.git"
 
 
