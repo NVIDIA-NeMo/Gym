@@ -1,3 +1,4 @@
 -e nemo-gym[dev] @ ../../
-# hooks_scope/session_scope are required by the native lifecycle projection.
-nooa>=0.0.10,<0.1
+# hooks_scope/session_scope landed after nooa 0.0.10; pin the merged implementation
+# until the first containing release is published.
+nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@e137e1b5eee3f36ad0bba08cea0931aa292563a4
