@@ -40,6 +40,8 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxPtyAttach,
     create_provider,
 )
+from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
+from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
 T = TypeVar("T")
@@ -374,6 +376,10 @@ class AsyncSandbox:
         self._closed = False
         self.pty = SandboxPty(self)
 
+    def _telemetry_provider_name(self) -> str:
+        """Provider name for span attributes (`docker`, `daytona`, `opensandbox`, ...)."""
+        return getattr(self._provider, "name", type(self._provider).__name__)
+
     def _require_handle(self) -> SandboxHandle:
         if self._handle is None or self._stopped:
             raise RuntimeError("Sandbox has not been started")
@@ -391,7 +397,15 @@ class AsyncSandbox:
         if requested_spec is None:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
 
-        handle = await self._provider.create(requested_spec)
+        if is_span_group_enabled(GymSpanGroup.SANDBOX):
+            with managed_span(
+                GymSpanGroup.SANDBOX,
+                "gym.sandbox.start",
+                **{"nemo.gym.sandbox.provider": self._telemetry_provider_name()},
+            ):
+                handle = await self._provider.create(requested_spec)
+        else:
+            handle = await self._provider.create(requested_spec)
         try:
             if requested_spec.files:
                 with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
@@ -412,6 +426,39 @@ class AsyncSandbox:
         return self
 
     async def exec(
+        self,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | float | None = 180,
+        user: str | int | None = None,
+    ) -> SandboxExecResult:
+        if not is_span_group_enabled(GymSpanGroup.SANDBOX):
+            return await self._exec_uninstrumented(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        # The command itself is deliberately not recorded. In a code-execution environment
+        # it is model output or task content, which must not land in a trace backend
+        # (`safe_set_span_attributes` would redact a key named `command`, not a value that
+        # happens to be one). Provider, exit code and duration are the useful,
+        # content-free parts.
+        with managed_span(
+            GymSpanGroup.SANDBOX,
+            "gym.sandbox.exec",
+            **{"nemo.gym.sandbox.provider": self._telemetry_provider_name()},
+        ) as span:
+            result = await self._exec_uninstrumented(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+            if span is not None:
+                safe_set_span_attributes(
+                    span,
+                    {
+                        "nemo.gym.sandbox.return_code": result.return_code,
+                        "nemo.gym.sandbox.error_type": result.error_type,
+                    },
+                )
+            return result
+
+    async def _exec_uninstrumented(
         self,
         command: str,
         *,
