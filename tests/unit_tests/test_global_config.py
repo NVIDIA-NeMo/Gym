@@ -25,6 +25,7 @@ from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
 import nemo_gym.global_config
 import nemo_gym.server_utils
 from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, RESULTS_DIR, WORKING_DIR
+from nemo_gym._config_aliases import LEGACY_AGENT_ALIASES, LEGACY_CONFIG_PATH_ALIASES
 from nemo_gym.config_types import (
     AgentCompositionError,
     AlmostServerError,
@@ -1872,6 +1873,67 @@ class TestConfigLoadErrors:
         message = str(exc_info.value)
         assert str(missing) in message
         assert message.count("  - ") == 1
+
+    @mark.parametrize(("legacy", "canonical"), LEGACY_CONFIG_PATH_ALIASES.items())
+    def test_load_extra_config_paths_resolves_legacy_alias(
+        self, caplog: LogCaptureFixture, legacy: str, canonical: str
+    ) -> None:
+        parser = GlobalConfigDictParser()
+
+        with caplog.at_level("WARNING"):
+            config_paths, configs = parser.load_extra_config_paths([legacy])
+
+        assert config_paths == [canonical]
+        assert len(configs) == 1
+        assert f"Config path `{legacy}` is deprecated; use `{canonical}`." in caplog.text
+
+    def test_existing_legacy_config_path_takes_precedence(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, caplog: LogCaptureFixture
+    ) -> None:
+        legacy = next(iter(LEGACY_CONFIG_PATH_ALIASES))
+        local_config = tmp_path / legacy
+        local_config.parent.mkdir(parents=True)
+        local_config.write_text("local: true\n")
+        monkeypatch.chdir(tmp_path)
+
+        parser = GlobalConfigDictParser()
+        with caplog.at_level("WARNING"):
+            config_paths, configs = parser.load_extra_config_paths([legacy])
+
+        assert config_paths == [legacy]
+        assert configs[0].local is True
+        assert "deprecated" not in caplog.text
+
+    @mark.parametrize(("legacy", "canonical"), LEGACY_AGENT_ALIASES.items())
+    def test_legacy_agent_names_route_to_canonical_instance(
+        self, caplog: LogCaptureFixture, legacy: str, canonical: str
+    ) -> None:
+        config = OmegaConf.create(
+            {
+                canonical: {},
+                "agent_name": legacy,
+                "agent_map": {"source": legacy},
+                "fan_out": {"source": [legacy]},
+            }
+        )
+
+        with caplog.at_level("WARNING"):
+            GlobalConfigDictParser.apply_legacy_agent_aliases(config)
+
+        assert config.agent_name == canonical
+        assert config.agent_map.source == canonical
+        assert config.agent_map[legacy] == canonical
+        assert config.fan_out.source == [canonical]
+        assert f"`{legacy}` -> `{canonical}`" in caplog.text
+
+    def test_legacy_agent_alias_follows_composed_agent_route(self) -> None:
+        legacy, canonical = next(iter(LEGACY_AGENT_ALIASES.items()))
+        composed = "reasoning_gym_custom_agent"
+        config = OmegaConf.create({composed: {}, "agent_map": {canonical: composed}})
+
+        GlobalConfigDictParser.apply_legacy_agent_aliases(config)
+
+        assert config.agent_map[legacy] == composed
 
     def test_load_extra_config_paths_malformed_yaml_raises_config_error(self, tmp_path: Path) -> None:
         bad = tmp_path / "bad.yaml"
