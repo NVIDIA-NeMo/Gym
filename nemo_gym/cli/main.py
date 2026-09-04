@@ -1013,6 +1013,19 @@ COMMANDS = {
             JSON,
         ),
     ),
+    "eval export": Command(
+        target="nemo_gym.cli.eval:export_rollouts_as_atif",
+        summary="Export supported Gym trajectories as ATIF.",
+        flags=(
+            _value_flag("format", "format", "Output trajectory format.", choices=("atif",)),
+            _value_flag("rollouts", "rollouts_jsonl_fpath", "Gym rollouts JSONL to export.", quote=True),
+            _value_flag("output-dir", "output_dirpath", "New directory for exported trajectories.", quote=True),
+            _value_flag("session-id", "session_id", "Stable identifier for the source evaluation run.", quote=True),
+            _value_flag(
+                "agent-version", "agent_version", "Version of the agent that produced the rollouts.", quote=True
+            ),
+        ),
+    ),
     "eval reverify": Command(
         target="nemo_gym.cli.eval:reverify_rollouts",
         summary="Re-verify existing rollouts to recompute rewards with an updated resources server",
