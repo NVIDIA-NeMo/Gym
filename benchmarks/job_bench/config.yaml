@@ -3,11 +3,6 @@ config_paths:
   - resources_servers/job_bench/configs/job_bench.yaml
   - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
-policy_model:
-  responses_api_models:
-    inference_provider:
-      uses_reasoning_parser: true
-
 job_bench_opencode_agent:
   _inherit_from: opencode_sandboxed_agent
   responses_api_agents:

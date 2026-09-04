@@ -11,7 +11,7 @@ export XAI_API_KEY=...
 export RAY_ENABLE_UV_RUN_RUNTIME_ENV=0
 uv run gym eval run \
   --benchmark job_bench \
-  --model-type inference_provider \
+  --model-type vllm_model \
   --model-url https://inference-api.nvidia.com/v1 \
   --model nvidia/moonshotai/kimi-k3 \
   --model-api-key "$NVIDIA_API_KEY" \
