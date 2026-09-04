@@ -1,17 +1,12 @@
 config_paths:
   - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
-  - responses_api_models/inference_provider/configs/inference_provider.yaml
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
   - resources_servers/workspace_bench/configs/workspace_bench.yaml
   - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 policy_base_url: ${oc.env:WORKSPACE_BENCH_POLICY_BASE_URL,https://inference-api.nvidia.com/v1}
 policy_api_key: ${oc.env:NVIDIA_API_KEY,''}
 policy_model_name: ${oc.env:WORKSPACE_BENCH_POLICY_MODEL,nvidia/moonshotai/kimi-k3}
-
-policy_model:
-  responses_api_models:
-    inference_provider:
-      uses_reasoning_parser: true
 
 workspace_bench_opencode_agent:
   _inherit_from: opencode_sandboxed_agent

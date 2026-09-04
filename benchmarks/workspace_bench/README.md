@@ -16,7 +16,7 @@ Set `default_host` to an address that OpenSandbox can use to reach the model ser
 ```bash
 export RAY_ENABLE_UV_RUN_RUNTIME_ENV=0
 uv run gym eval prepare --benchmark workspace_bench
-uv run gym eval run --benchmark workspace_bench --model-type inference_provider \
+uv run gym eval run --benchmark workspace_bench --model-type vllm_model \
   --split benchmark \
   --output results/workspace_bench_lite.jsonl \
   +default_host="$ROUTABLE_HOST_IP"
