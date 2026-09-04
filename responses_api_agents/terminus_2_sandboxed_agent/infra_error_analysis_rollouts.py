@@ -37,4 +37,4 @@ with open(fpath, "rb") as f:
         num_is_covered += is_covered
         total += 1
 
-print(gt_10, num_stuck, num_model_call_long, num_is_covered, total - 14)
+print(gt_10, num_stuck, num_model_call_long, num_is_covered, total)
