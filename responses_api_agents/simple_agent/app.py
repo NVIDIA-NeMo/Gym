@@ -353,6 +353,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server."""
+        return await self.proxy_aggregate_metrics(self.config.resources_server.name, body)
         if self.config.skip_verification:
             return await super().aggregate_metrics(body)
 
