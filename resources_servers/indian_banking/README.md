@@ -47,6 +47,8 @@ Each task's `evaluation_criteria` specifies `actions` (gold tool calls, optional
 | COMMUNICATE | Was every `communicate_info` item said to the customer, with no internal identifiers or tool names leaked? | Customer-facing assistant messages | strict and dense |
 | NL_ASSERTION | Are the `nl_assertions` satisfied? | Customer-facing transcript only, graded by the judge model | dense only |
 
+`reward_basis` is the authoritative selector: a task may carry `nl_assertions` or `communicate_info` even when the corresponding check is not in its basis - those fields then document the expected outcome (and remain available to custom evaluations) but do not enter `strict` or `dense`. The judge runs only when `NL_ASSERTION` is in the basis and assertions are present.
+
 An errored tool call never satisfies a gold action unless that gold action carries an explicit `expect_error: true` (tasks that deliberately exercise an error path, e.g. querying a nonexistent service request). A gold action that errors on replay without the marking is a data bug, and `tests/test_app.py::TestShippedDataIntegrity` fails on it.
 
 Three further deterministic floors gate `strict`: an episode with no non-empty customer-facing assistant message never passes (a mute agent cannot outscore a correct refusal-with-explanation); a task may declare `max_tool_calls` (e.g. `0` for a purely conversational task, failing any tool use) or `require_transfer: true` (the episode must end in `transfer_to_human_agents`, read from the engine's transfer flag). All three are code checks, independent of the judge.
