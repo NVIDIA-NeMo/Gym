@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from omegaconf import DictConfig
@@ -59,6 +60,21 @@ class TestValidateSplitDatasetsDeclared:
     def test_passes_when_a_dataset_of_the_split_type_is_declared(self) -> None:
         configs = [_make_agent_instance_config("my_agent", [{"name": "train_data", "type": "train"}])]
         _validate_split_datasets_declared("train", configs)
+
+    def test_passes_for_rollout_orchestrator_dataset(self) -> None:
+        orchestrator = SimpleNamespace(
+            SERVER_TYPE="rollout_orchestrators",
+            name="turn_orchestrator",
+            datasets=[
+                SimpleNamespace(
+                    name="validation",
+                    type="validation",
+                    jsonl_fpath="resources_servers/game/data/validation.jsonl",
+                )
+            ],
+        )
+
+        _validate_split_datasets_declared("validation", [orchestrator])
 
     def test_fails_fast_when_only_example_data_is_declared(self) -> None:
         configs = [

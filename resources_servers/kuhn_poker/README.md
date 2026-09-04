@@ -23,7 +23,7 @@ both keyboard agents; play one hand; and shut everything down from one command:
 gym eval run \
   --config resources_servers/kuhn_poker/configs/kuhn_poker.yaml \
   --agent kuhn_poker_orchestrator \
-  --input resources_servers/kuhn_poker/data/example.jsonl \
+  --split validation \
   --output results/kuhn_poker.jsonl \
   --concurrency 1 \
   +head_server.host=127.0.0.1 +head_server.port=11001
@@ -31,6 +31,28 @@ gym eval run \
 
 Both players' private prompts appear in this terminal. Use the workflow below
 when each player must have a separate terminal.
+
+## Run two LLM agents
+
+`kuhn_poker_llm.yaml` replaces the keyboard servers with two independent
+`simple_agent` instances. Both agents call the shared `policy_model` inference
+provider configured by `policy_base_url`, `policy_api_key`, and
+`policy_model_name` in `env.yaml`.
+
+```bash
+gym eval run \
+  --config resources_servers/kuhn_poker/configs/kuhn_poker_llm.yaml \
+  --agent kuhn_poker_orchestrator \
+  --split validation \
+  --output results/kuhn_poker_llm.jsonl \
+  --concurrency 1 \
+  +debug_mode=false
+```
+
+Each participant receives only its own observation and previous turns through
+its `/v1/responses` endpoint. The participant agent then calls the shared model
+server's `/v1/responses` endpoint. Keep `--concurrency 1` for this initial
+alternating-turn integration.
 
 ## Run an interactive hand in separate terminals
 
