@@ -15,7 +15,9 @@
 
 from unittest.mock import MagicMock, patch
 
-from nemo_gym.config_types import ResourcesServerRef
+import pytest
+
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.sandbox_agent.app import SandboxAgent, SandboxAgentConfig
 
@@ -27,6 +29,12 @@ def _config(**kwargs) -> SandboxAgentConfig:
         entrypoint="",
         name="sbx",
         resources_server=ResourcesServerRef(type="resources_servers", name="rs"),
+        model_server=ModelServerRef(type="responses_api_models", name="model"),
+        agent_module="responses_api_agents.opencode_agent.app",
+        agent_class="OpenCodeAgent",
+        agent_config_class="OpenCodeAgentConfig",
+        nested_config_paths=["config.yaml"],
+        nested_agent_name="nested_agent",
         sandbox_provider={"opensandbox": {}},
     )
     base.update(kwargs)
@@ -47,6 +55,19 @@ def test_config_defaults():
     assert cfg.mode == "agent_only_runner"
     assert cfg.sandbox_image == "python:3.12-slim"
     assert cfg.sandbox_python == "python3"
+
+
+@pytest.mark.parametrize(
+    ("mode", "kwargs", "missing"),
+    [
+        ("agent_only_runner", {"agent_module": None}, "agent_module"),
+        ("gym_runner", {"nested_agent_name": None}, "nested_agent_name"),
+        ("gym_runner", {"model_server": None}, "model_server"),
+    ],
+)
+def test_config_rejects_missing_mode_requirement(mode, kwargs, missing):
+    with pytest.raises(ValueError, match=missing):
+        _config(mode=mode, **kwargs)
 
 
 def test_gym_runner_config_and_script():
@@ -90,17 +111,17 @@ def test_runner_config_carries_agent_symbols():
     assert cmd == "/deps/bin/python3 /work/runner.py"
 
 
-def test_sandbox_model_url_rewrites_host_to_ip_and_preserves_port():
+def test_sandbox_model_url_preserves_remote_hostname_and_port():
     agent = _make_agent(model_server={"type": "responses_api_models", "name": "policy_model"})
     agent.server_client._build_server_base_url = MagicMock(return_value="http://model-host:8000")
     agent.server_client.global_config_dict = MagicMock()
     with (
         patch("responses_api_agents.sandbox_agent.app.get_first_server_config_dict", return_value={}),
-        patch("responses_api_agents.sandbox_agent.app.socket.gethostbyname", return_value="10.1.2.3"),
+        patch("responses_api_agents.sandbox_agent.app.socket.gethostbyname") as resolve,
     ):
         url = agent._sandbox_model_url(MagicMock())
-    # host rewritten to an IP the sandbox can reach, no /v1 appended, port kept
-    assert url == "http://10.1.2.3:8000"
+    assert url == "http://model-host:8000"
+    resolve.assert_not_called()
 
 
 def test_sandbox_model_url_prefers_backend_base_url_and_strips_v1():
@@ -111,22 +132,23 @@ def test_sandbox_model_url_prefers_backend_base_url_and_strips_v1():
             "responses_api_agents.sandbox_agent.app.get_first_server_config_dict",
             return_value={"base_url": "http://vllm-node:9000/v1"},
         ),
-        patch("responses_api_agents.sandbox_agent.app.socket.gethostbyname", return_value="10.1.2.3"),
+        patch("responses_api_agents.sandbox_agent.app.socket.gethostbyname") as resolve,
     ):
         url = agent._sandbox_model_url(MagicMock())
-    assert url == "http://10.1.2.3:9000"
+    assert url == "http://vllm-node:9000"
+    resolve.assert_not_called()
 
 
-def test_sandbox_model_url_falls_back_to_hostname_on_dns_failure():
+def test_sandbox_model_url_keeps_loopback_on_dns_failure():
     agent = _make_agent(model_server={"type": "responses_api_models", "name": "policy_model"})
-    agent.server_client._build_server_base_url = MagicMock(return_value="http://model-host:8000")
+    agent.server_client._build_server_base_url = MagicMock(return_value="http://localhost:8000")
     agent.server_client.global_config_dict = MagicMock()
     with (
         patch("responses_api_agents.sandbox_agent.app.get_first_server_config_dict", return_value={}),
         patch("responses_api_agents.sandbox_agent.app.socket.gethostbyname", side_effect=OSError),
     ):
         url = agent._sandbox_model_url(MagicMock())
-    assert url == "http://model-host:8000"
+    assert url == "http://localhost:8000"
 
 
 def test_gym_tar_built_on_init():
