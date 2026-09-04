@@ -1,16 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+from argparse import ArgumentParser
+
 import orjson
 
 
-fpath = "temp.jsonl"
+parser = ArgumentParser()
+parser.add_argument("--fpath", type=str, required=True)
+args = parser.parse_args()
+
 
 gt_10 = 0
 num_stuck = 0
 num_is_covered = 0
 num_model_call_long = 0
 total = 0
-with open(fpath, "rb") as f:
+with open(args.fpath, "rb") as f:
     for i, line in enumerate(f):
         row = orjson.loads(line)
 
