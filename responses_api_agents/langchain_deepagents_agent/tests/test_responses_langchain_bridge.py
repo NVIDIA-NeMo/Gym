@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages.tool import tool_call
 from langchain_core.runnables import RunnableConfig, ensure_config
 from langchain_core.runnables.config import var_child_runnable_config
 
@@ -48,6 +49,17 @@ def _fake_model_response(text: str = "ok", cookies: dict | None = None):
     resp.ok = True
     resp.cookies = cookies or {}
     resp.read = AsyncMock(return_value=orjson.dumps(to_responses([AIMessage(content=text)], "test-model")))
+    return resp
+
+
+def _fake_tool_call_response(name: str, args: dict, call_id: str = "call_1"):
+    """Like `_fake_model_response()`, but the model "decides" to call a tool instead of answering —
+    used to force the `task` tool so a real deepagents subagent invocation actually happens."""
+    resp = MagicMock()
+    resp.ok = True
+    resp.cookies = {}
+    message = AIMessage(content="", tool_calls=[tool_call(name=name, args=args, id=call_id)])
+    resp.read = AsyncMock(return_value=orjson.dumps(to_responses([message], "test-model")))
     return resp
 
 
@@ -271,6 +283,49 @@ async def test_agenerate_propagates_into_a_nested_runnable_call():
     await nested.ainvoke({}, config=config)
 
     assert post.call_args.kwargs["url_path"] == "/nested/v1/responses"
+
+
+@pytest.mark.asyncio
+async def test_task_tool_propagates_ambient_config_to_subagent_model_call():
+    """Proves the ambient-config mechanism reaches a real deepagents subagent invocation, not just a bare
+    `RunnableLambda` (see the test above) — deepagents' own `task`/`atask` tool
+    (deepagents/middleware/subagents.py) is what production actually routes nested calls through, and it
+    only stamps `{"configurable": {"ls_agent_type": "subagent"}}` explicitly onto the subagent's config,
+    relying on LangGraph's ambient-config merge for `model_url_path`/`model_cookies` to reach it."""
+    from deepagents import create_deep_agent
+
+    post = AsyncMock(
+        side_effect=[
+            # Main agent delegates to the subagent instead of answering directly.
+            _fake_tool_call_response("task", {"description": "look something up", "subagent_type": "web-searcher"}),
+            # Subagent's own model call, made from inside atask() — no tool calls, so its loop ends here.
+            _fake_model_response(text="found it"),
+            # Main agent's follow-up call once the subagent's result comes back as a tool message.
+            _fake_model_response(text="final answer"),
+        ]
+    )
+    model = _make_model(post)
+    agent = create_deep_agent(
+        model=model,
+        tools=[],
+        subagents=[
+            {
+                "name": "web-searcher",
+                "description": "Delegate any lookup to this subagent.",
+                "system_prompt": "Look things up and report back.",
+                "tools": [],
+            }
+        ],
+    )
+    config: RunnableConfig = {"configurable": {"model_url_path": "/v1/responses", "model_cookies": {"cookies": None}}}
+
+    await agent.ainvoke({"messages": [HumanMessage(content="look something up")]}, config=config)
+
+    # All three calls happened at all: if config propagation were broken, the subagent's model call
+    # would hit GymResponsesChatModel._agenerate()'s RuntimeError guard instead of reaching `post`.
+    assert post.call_count == 3
+    for call in post.call_args_list:
+        assert call.kwargs["url_path"] == "/v1/responses"
 
 
 @pytest.mark.asyncio
