@@ -2,17 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 from argparse import ArgumentParser
 from collections import Counter
+from contextlib import nullcontext
 
 import orjson
 
 
 parser = ArgumentParser()
 parser.add_argument("--fpath", type=str, required=True)
+parser.add_argument("--group-to-write-out", type=str, default=None)
 args = parser.parse_args()
 
 
 counts = Counter()
-with open(args.fpath, "rb") as f:
+with open(args.fpath, "rb") as f, open("temp.jsonl", "wb") if args.group_to_write_out else nullcontext() as f_out:
     for i, line in enumerate(f):
         row = orjson.loads(line)
 
@@ -29,22 +31,30 @@ with open(args.fpath, "rb") as f:
                 content = output_item["summary"][0]["text"]
                 stuck_count += "stuck" in content or "unresponsive" in content
 
-        is_gt_10 = count > 10
-        was_stuck = stuck_count > 10
-        model_call_long = row["model_calls_gt_10min"] >= 6
-        is_covered = is_gt_10 or was_stuck or model_call_long
         is_errored = bool(row["error"])
         is_timeout = is_errored and "raise TimeoutError from exc_val" in row["error"]
-        if not is_covered:
-            print(f"{i + 1}: {count > 10=} {was_stuck=} {model_call_long=}")
 
-        counts["Long model calls"] += model_call_long
-        counts["Model claims to be stuck"] += was_stuck
-        counts["No valid JSON found in response"] += is_gt_10
-        counts["Samples covered by the above errors"] += is_covered
-        counts["Errored (excluding timeout)"] += is_errored - is_timeout
-        counts["Timed out"] += is_timeout
+        count_dict = {
+            "Long model calls": row["model_calls_gt_10min"] >= 6,
+            "Model claims to be stuck": stuck_count > 10,
+            "No valid JSON found in response": count > 10,
+            "Errored (excluding timeout)": is_errored - is_timeout,
+            "Timed out": is_timeout,
+            "Total samples with reward=0": 1,
+        }
+        count_dict["Samples covered by the above errors"] = (
+            count_dict["Long model calls"] or count_dict["Model claims to be stuck"] or count_dict["Long model calls"]
+        )
+        if not count_dict["Samples covered by the above errors"]:
+            print(f"{i + 1}: {count_dict}")
+
+        counts.update(count_dict)
         counts["Total samples with reward=0"] += 1
+
+        if args.group_to_write_out:
+            row = row | counts
+            f_out.write(orjson.dumps(row) + b"\n")
+
 
 print_str = ""
 for k, v in counts.items():
