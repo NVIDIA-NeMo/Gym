@@ -38,7 +38,7 @@ OUTPUT_FPATH = DATA_DIR / "brokenarxiv_0526_benchmark.jsonl"
 
 HF_REPO_ID = "MathArena/brokenarxiv-0526"
 # Pin to a specific revision for reproducibility.
-HF_REVISION = "2761f4553fdc3c49cf9776e740bc8f641a8937aa"
+HF_REVISION = "2761f4553fdc3c49cf9776e740bc8f641a8937aa"  # pragma: allowlist secret
 
 
 def prepare() -> Path:
