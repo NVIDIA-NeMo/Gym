@@ -22,7 +22,7 @@ with open(args.fpath, "rb") as f, open(f_out_path, "wb") if args.group_to_write_
     for i, line in tqdm(enumerate(f)):
         row = orjson.loads(line)
 
-        if row["reward"] != 0:
+        if row["reward"] == 0:
             continue
 
         count = 0
