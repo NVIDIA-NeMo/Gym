@@ -21,13 +21,13 @@ constraint) together with the tool binding the episode runs under (`metadata.too
 list that `SWEBenchWrapper.run` attaches to the verify response. The outcome reward is not touched;
 dataset aggregates are computed by a separate offline script from the attached records.
 
-Provenance of the vendored verifier
------------------------------------
-`verifier/` in this package (core.py, matchers.py, triggers.py, templates.py, __init__.py) is a byte-identical copy of
-the canonical verifier package of the recipe, file by file:
-  /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/agentic-if/recipes/if-constraint-design/verifier_impl/verifier/
-The recipe is the implementation (owner rule 2026-09-03); the tests compare the two directories. Adding a matcher or a
-trigger happens in the recipe's registries (see its VERIFIER_SPEC.md) and is then re-vendored here.
+The verifier package
+--------------------
+`verifier/` (core.py, matchers.py, triggers.py, templates.py, __init__.py) is the constraint verifier's ONLY implementation
+(owner ruling 2026-09-04). Its specification, real-trace validation record and design rationale live in the recipe
+  /lustre/fsw/portfolios/llmservice/users/charlwang/cluster/agentic-if/recipes/if-constraint-design/verifier/VERIFIER_SPEC.md
+and the recipe's tooling imports this package. Adding a matcher or a trigger = one registry entry with examples here, checked
+by ../tests/test_verifier_registry.py; behavioural tests in ../tests/test_verifier.py.
 
 `grader.py` is a port of the grading path of the offline scorer
 

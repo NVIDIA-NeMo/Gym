@@ -31,7 +31,7 @@ can carry the per-constraint grades directly. Semantics, in the order they apply
    sequence) those turns are skipped; otherwise the output is taken to be the continuation only
    and every turn is graded. Graded turns are then re-indexed from zero, so the `turn` index of a
    step is always relative to the CONTINUATION, never to the whole conversation.
-4. Grading. `verifier.grade_ext` (the vendored recipe verifier) runs once per constraint with the verifier's default
+4. Grading. `verifier.grade_ext` (the constraint verifier package) runs once per constraint with the verifier's default
    resolver updated with the row's tool binding (`metadata.tool_name_overrides`).
 
 The public entry point is `grade_row`; it never raises.
@@ -42,7 +42,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import verifier as tv  # byte-identical copy of the recipe verifier package (verifier_impl/verifier/)
+from . import verifier as tv  # the constraint verifier: registries of matchers, triggers and templates
 
 
 GRADING_ERROR_ID = "<grading_error>"

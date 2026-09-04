@@ -34,7 +34,7 @@ Checks:
   (b) grade_row returns None when metadata has no sdg_item and when sdg_item has no constraints;
   (c) grade_row returns the error record (not an exception) on malformed sdg_item JSON and on a constraint without a
       verifier_parameter;
-  (d) the vendored verifier/ package is byte-identical, file by file, to the recipe's verifier_impl/verifier/;
+  (d) the verifier package is complete and importable (it is the only implementation; the recipe imports it);
   (e) app.py compiles and carries the if_constraints field and the grade_row call.
 """
 
@@ -52,11 +52,6 @@ LOGBOOK_RUN_DIR = (
 )
 R7_RUN_DIR = "/lustre/fsw/portfolios/llmservice/users/charlwang/cluster/work/data/runs/P0000-one-off-task/2026-09-02_r7-sdg-turn-output-samples"
 
-RECIPE_DIR = (
-    os.environ.get("IFCD_RECIPE_DIR")
-    or "/lustre/fsw/portfolios/llmservice/users/charlwang/cluster/agentic-if/recipes/if-constraint-design"
-)
-CANONICAL_VERIFIER = f"{RECIPE_DIR}/verifier_impl/verifier"  # the recipe's verifier PACKAGE (2026-09-04)   # the recipe IS the implementation (owner rule 2026-09-03); the logbook copy is deprecated
 
 # (tag, params file, rolled-out results, offline scorer report)
 BATCHES = [
@@ -92,7 +87,7 @@ from responses_api_agents.swe_if_agents.if_constraints import grade_row  # noqa:
 from responses_api_agents.swe_if_agents.if_constraints.grader import GRADING_ERROR_ID  # noqa: E402
 
 
-VENDORED_VERIFIER = GYM_DIR / "responses_api_agents" / "swe_if_agents" / "if_constraints" / "verifier"
+VERIFIER_PKG = GYM_DIR / "responses_api_agents" / "swe_if_agents" / "if_constraints" / "verifier"
 APP_PY = GYM_DIR / "responses_api_agents" / "swe_if_agents" / "app.py"
 
 
@@ -364,17 +359,18 @@ def test_continuation_turn_indices_relative_to_continuation():
     ]
 
 
-# ------------------------------------------------------------------ (d) vendored verifier parity
-def test_vendored_verifier_is_byte_identical():
-    assert VENDORED_VERIFIER.is_dir(), VENDORED_VERIFIER
-    assert os.path.isdir(CANONICAL_VERIFIER), CANONICAL_VERIFIER
-    vendored_files = sorted(p.name for p in VENDORED_VERIFIER.glob("*.py"))
-    canonical_files = sorted(p.name for p in Path(CANONICAL_VERIFIER).glob("*.py"))
-    assert vendored_files == canonical_files and vendored_files, (vendored_files, canonical_files)
-    for name in vendored_files:
-        assert (VENDORED_VERIFIER / name).read_bytes() == (Path(CANONICAL_VERIFIER) / name).read_bytes(), (
-            f"vendored verifier/{name} differs from the canonical copy"
-        )
+# ------------------------------------------------------------------ (d) verifier package completeness
+def test_verifier_package_is_complete():
+    """The verifier is implemented here (the design recipe imports this package): all five modules present, importable,
+    registries non-empty and cross-consistent."""
+    assert VERIFIER_PKG.is_dir(), VERIFIER_PKG
+    assert sorted(p.name for p in VERIFIER_PKG.glob("*.py")) == ["__init__.py", "core.py", "matchers.py", "templates.py", "triggers.py"]
+    from responses_api_agents.swe_if_agents.if_constraints import verifier as tv
+
+    assert tv.MATCHERS and tv.TRIGGERS and tv.TEMPLATES
+    assert all(m.name == name for name, m in tv.MATCHERS.items())
+    assert all(t.key == key for key, t in tv.TRIGGERS.items())
+    assert "turn_output" in tv.TEMPLATES and tv.TEMPLATES["turn_output"].applies_policy
 
 
 # ------------------------------------------------------------------ (e) app.py wiring (static)
@@ -402,7 +398,7 @@ def main() -> int:
         ),
         ("synthetic record shape and tool binding", test_synthetic_record_shape_and_binding),
         ("continuation turn indices", test_continuation_turn_indices_relative_to_continuation),
-        ("(d) vendored verifier byte-identical", test_vendored_verifier_is_byte_identical),
+        ("(d) verifier package complete", test_verifier_package_is_complete),
         ("(e) app.py wiring", test_app_py_wiring),
     ]
     n_pass = n_fail = 0

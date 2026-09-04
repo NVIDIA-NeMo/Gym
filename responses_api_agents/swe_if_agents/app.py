@@ -16,7 +16,7 @@ to grade:
 
 The task outcome reward is untouched: ``reward`` is the SWE-bench verdict. The IF grades are attached as
 ``if_constraints`` (one record per constraint, per gradable step) for downstream aggregation. Grading semantics
-live in ``if_constraints/`` (a vendored copy of the recipe verifier; see the README).
+live in ``if_constraints/`` (the constraint verifier package and its grader; see the README).
 
 Requires an nv-OpenHands checkout that understands ``TOOL_NAME_OVERRIDES`` and ``observation_suffix`` (the fork
 pinned in ``configs/swebench_opencode_if.yaml``).
