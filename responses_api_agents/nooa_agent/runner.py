@@ -24,7 +24,7 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentEpisode
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
-from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM, RolloutLLMState
+from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM, PolicyCallBudgetExceeded, RolloutLLMState
 from responses_api_agents.nooa_agent.observability import GymTraceHooks
 from responses_api_agents.nooa_agent.resource_tools import (
     ResourceToolDispatcher,
@@ -49,6 +49,8 @@ class NOOARunResult:
     return_value: Any
     model_cookies: dict[str, str]
     resource_cookies: dict[str, str]
+    termination_reason: str | None = None
+    termination_error: str | None = None
 
 
 class NOOARunner(Protocol):
@@ -101,8 +103,22 @@ class EmbeddedNOOARunner:
         agent = agent_class(llm=llm, **self._invocation.init_kwargs)
         validate_agent_resource_method_bindings(agent)
 
+        termination_reason = None
+        termination_error = None
+        return_value = None
         with hooks_scope(trace):
-            return_value = await self._invocation_adapter(agent, request.responses_create_params)
+            try:
+                return_value = await self._invocation_adapter(agent, request.responses_create_params)
+            except PolicyCallBudgetExceeded as error:
+                termination_reason = "policy_budget_exceeded"
+                termination_error = str(error)
+            except ValueError as error:
+                message = str(error)
+                if "Gym model returned invalid" in message:
+                    termination_reason = "invalid_policy_output"
+                    termination_error = message
+                else:
+                    raise
 
         episode = trace.project(
             create_params=request.responses_create_params,
@@ -113,4 +129,6 @@ class EmbeddedNOOARunner:
             return_value=return_value,
             model_cookies=request.model_cookies,
             resource_cookies=request.resource_cookies,
+            termination_reason=termination_reason,
+            termination_error=termination_error,
         )
