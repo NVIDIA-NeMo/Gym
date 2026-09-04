@@ -320,6 +320,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             model_name=self.config.model_server.name,
             model_context_limit=self.config.model_context_limit,
             model_output_limit=self.config.model_output_limit,
+            llm_request_timeout=self.config.llm_request_timeout,
         )
 
         with tempfile.TemporaryDirectory(prefix="nemo-gym-terminus-2-") as log_dir:
