@@ -14,10 +14,14 @@
 # limitations under the License.
 
 import asyncio
-from unittest.mock import MagicMock
+from contextlib import contextmanager
+from unittest.mock import AsyncMock, MagicMock
 
+import orjson
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig, ensure_config
+from langchain_core.runnables.config import var_child_runnable_config
 
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -29,13 +33,44 @@ from nemo_gym.openai_utils import (
 )
 from responses_api_agents.langchain_deepagents_agent.responses_langchain_bridge import (
     GymResponsesChatModel,
-    _request_context,
     _text,
     to_gym_input,
     to_langchain,
     to_langchain_ai_message,
     to_responses,
 )
+
+
+def _fake_model_response(text: str = "ok", cookies: dict | None = None):
+    """A minimal stand-in for aiohttp's ClientResponse, shaped like server_client.post()'s return value —
+    enough for raise_for_status()/get_response_json() to succeed against a real NeMoGymResponse body."""
+    resp = MagicMock()
+    resp.ok = True
+    resp.cookies = cookies or {}
+    resp.read = AsyncMock(return_value=orjson.dumps(to_responses([AIMessage(content=text)], "test-model")))
+    return resp
+
+
+def _make_model(post: AsyncMock) -> GymResponsesChatModel:
+    agent = MagicMock()
+    agent.server_client.post = post
+    agent.config.model_server.name = "policy_model"
+    return GymResponsesChatModel(agent=agent)
+
+
+@contextmanager
+def _ambient_config(config: RunnableConfig):
+    """Set the ambient `RunnableConfig` the way a real async call chain needs: `var_child_runnable_config`
+    set directly, so it stays visible across `await` points within this task. Verified against a real
+    `deepagents.create_deep_agent()` graph run that this is what actually reaches `_agenerate()` in
+    practice — `langchain_core.runnables.config.set_config_context` is a different tool: it wraps a
+    `contextvars.Context.run()` call, which only carries the value for a single *synchronous* callable, not
+    an `await`ed block, so it doesn't apply here."""
+    token = var_child_runnable_config.set(config)
+    try:
+        yield
+    finally:
+        var_child_runnable_config.reset(token)
 
 
 # --- to_langchain / to_responses / _text -----------------------------------------------------------
@@ -167,27 +202,105 @@ def test_bind_tools_unnests_chat_completions_shape_into_responses_shape():
     assert "function" not in tool_schema  # un-nested, not Chat-Completions-shaped
 
 
-# --- contextvar isolation under concurrency (the one unverified piece of the design) -----------------
+# --- RunnableConfig propagation into _agenerate() ------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_request_context_isolated_across_concurrent_requests():
+async def test_agenerate_reads_model_url_path_and_cookies_from_ambient_config():
+    post = AsyncMock(return_value=_fake_model_response())
+    model = _make_model(post)
+    config: RunnableConfig = {
+        "configurable": {"model_url_path": "/v1/responses", "model_cookies": {"cookies": {"sid": "seed"}}}
+    }
+
+    with _ambient_config(config):
+        await model._agenerate([HumanMessage(content="hi")])
+
+    assert post.call_args.kwargs["url_path"] == "/v1/responses"
+    assert post.call_args.kwargs["cookies"] == {"sid": "seed"}
+
+
+@pytest.mark.asyncio
+async def test_agenerate_raises_clear_error_without_ambient_config():
+    model = _make_model(AsyncMock())
+    with pytest.raises(RuntimeError, match="model_url_path"):
+        await model._agenerate([HumanMessage(content="hi")])
+
+
+@pytest.mark.asyncio
+async def test_agenerate_chains_model_cookies_across_sequential_calls_without_mutating_shared_config():
+    post = AsyncMock(
+        side_effect=[_fake_model_response(cookies={"sid": "turn1"}), _fake_model_response(cookies={"sid": "turn2"})]
+    )
+    model = _make_model(post)
+    cookie_holder = {"cookies": None}
+    config: RunnableConfig = {"configurable": {"model_url_path": "/v1/responses", "model_cookies": cookie_holder}}
+
+    with _ambient_config(config):
+        # First call: nothing chained yet (matches DeepAgentsAgent.responses() seeding `cookies: None` —
+        # never the resources-server's own session cookies).
+        await model._agenerate([HumanMessage(content="hi")])
+        assert post.call_args.kwargs["cookies"] is None
+
+        # Second call in the same rollout: picks up the first response's cookies.
+        await model._agenerate([HumanMessage(content="hi again")])
+        assert post.call_args.kwargs["cookies"] == {"sid": "turn1"}
+
+    # The mutation landed on the holder object referenced from `configurable`, not a replacement dict —
+    # this is what makes it visible to the next call without re-`.set()`ing the whole config.
+    assert cookie_holder["cookies"] == {"sid": "turn2"}
+
+
+@pytest.mark.asyncio
+async def test_agenerate_propagates_into_a_nested_runnable_call():
+    """Proves the ambient-config mechanism actually reaches a call made from inside another Runnable —
+    the shape of a deepagents subagent invoking its own nested model call — not just a direct call."""
+    from langchain_core.runnables import RunnableLambda
+
+    post = AsyncMock(return_value=_fake_model_response())
+    model = _make_model(post)
+
+    async def inner(_):
+        return await model._agenerate([HumanMessage(content="nested")])
+
+    nested = RunnableLambda(inner)
+    config: RunnableConfig = {
+        "configurable": {"model_url_path": "/nested/v1/responses", "model_cookies": {"cookies": None}}
+    }
+
+    await nested.ainvoke({}, config=config)
+
+    assert post.call_args.kwargs["url_path"] == "/nested/v1/responses"
+
+
+@pytest.mark.asyncio
+async def test_agenerate_isolated_across_concurrent_top_level_configs():
+    """Two staggered concurrent rollouts must never see each other's model_url_path/cookies — the
+    property the old ContextVar-based test checked, now verified against RunnableConfig instead."""
     seen = []
 
-    async def read_after_delay(value, delay):
-        token = _request_context.set(value)
-        try:
+    async def run_with_config(rollout_suffix: str, delay: float):
+        post = AsyncMock(return_value=_fake_model_response())
+        model = _make_model(post)
+        config: RunnableConfig = {
+            "configurable": {
+                "model_url_path": f"/rollout-{rollout_suffix}/v1/responses",
+                "model_cookies": {"cookies": {"a": rollout_suffix}},
+            }
+        }
+        with _ambient_config(config):
             await asyncio.sleep(delay)
-            seen.append(_request_context.get())
-        finally:
-            _request_context.reset(token)
+            await model._agenerate([HumanMessage(content="hi")])
+        seen.append((rollout_suffix, post.call_args.kwargs["url_path"], post.call_args.kwargs["cookies"]))
 
-    await asyncio.gather(
-        read_after_delay({"rollout_id": "r1", "cookies": {"a": "1"}}, 0.02),
-        read_after_delay({"rollout_id": "r2", "cookies": {"a": "2"}}, 0.0),
-    )
+    await asyncio.gather(run_with_config("r1", 0.02), run_with_config("r2", 0.0))
 
-    ids = {entry["rollout_id"] for entry in seen}
-    assert ids == {"r1", "r2"}
-    for entry in seen:
-        assert entry["cookies"]["a"] == entry["rollout_id"][-1]
+    for suffix, url_path, cookies in seen:
+        assert url_path == f"/rollout-{suffix}/v1/responses"
+        assert cookies == {"a": suffix}
+
+
+def test_ensure_config_with_no_ambient_context_has_no_configurable():
+    # Sanity check underpinning the RuntimeError test above: outside any `set_config_context`, there's no
+    # ambient RunnableConfig to accidentally read stale values from.
+    assert not ensure_config().get("configurable")

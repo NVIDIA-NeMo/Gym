@@ -21,32 +21,38 @@ concurrency). `GymResponsesChatModel` below reimplements the minimum LangChain m
 deepagents needs (`bind_tools()` + `_agenerate()`) on top of `server_client.post()`.
 
 `GymResponsesChatModel` is a singleton bound to the owning agent (constructed once, in the owning
-`DeepAgentsAgent.__init__`), and gets its per-request `rollout_id`/`model_url_path`/cookies from
-`_request_context`, a `ContextVar` set once per request by `DeepAgentsAgent.responses()`, rather than being
-rebuilt per request. Cookies specifically evolve within that: `_agenerate()` updates them from each model
-response before the next internal call, so a multi-turn rollout chains model-server session state instead
-of resending the original inbound cookies on every turn. This is safe under concurrent in-flight requests:
-`ContextVar` values are asyncio-task-local.
+`DeepAgentsAgent.__init__`), and gets its per-request `model_url_path`/cookies from the ambient
+`RunnableConfig`, set once per request by `DeepAgentsAgent.responses()` via
+`self.agent.ainvoke(..., config={"configurable": {...}})`, rather than being rebuilt per request.
+`_agenerate()` reads it back with `ensure_config()` — LangChain's own public helper for exactly this
+"ambient config for a call I don't control the calling convention of" case (it's what backs LangChain's
+`var_child_runnable_config` ContextVar internally). Using `RunnableConfig` instead of a Gym-specific
+ContextVar means nested/subagent model calls get `model_url_path`/cookies for free: `deepagents`' own
+`task`/`atask` subagent tools already rely on `configurable` merging automatically into subagent
+invocations (see `deepagents/middleware/subagents.py`), so no extra plumbing is needed for that case.
+
+Cookies specifically evolve within one rollout: `_agenerate()` writes each response's cookies into a
+mutable holder dict referenced from `configurable["model_cookies"]`, created fresh per request in
+`responses()`, so a multi-turn rollout chains model-server session state instead of resending the same
+cookies on every turn — without mutating the `RunnableConfig` itself (which nested/parallel branches may
+share by reference; only this one designated holder is mutable, everything else in `configurable` is not).
 """
 
 import json
 import time
 import uuid
-from contextvars import ContextVar
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.messages.tool import tool_call
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.runnables import ensure_config
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import Field
 
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputText
 from nemo_gym.server_utils import get_response_json, raise_for_status
-
-
-_request_context: ContextVar[dict] = ContextVar("langchain_deepagents_agent_request_context")
 
 
 def _text(content: Any) -> str:
@@ -178,7 +184,8 @@ def to_langchain_ai_message(gym_response: NeMoGymResponse) -> AIMessage:
 class GymResponsesChatModel(BaseChatModel):
     """LangChain-compatible chat model backed by Gym's own aiohttp-based server_client — see module
     docstring for why ChatOpenAI/langchain_openai can't be used here. A singleton per DeepAgentsAgent
-    instance; per-request rollout_id/cookies come from `_request_context`, not constructor fields."""
+    instance; per-request model_url_path/cookies come from the ambient `RunnableConfig`, not constructor
+    fields."""
 
     agent: Any = Field(default=None, exclude=True)  # the owning DeepAgentsAgent instance
 
@@ -201,7 +208,23 @@ class GymResponsesChatModel(BaseChatModel):
         return self.bind(**bind_kwargs, **kwargs)
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
-        ctx = _request_context.get()
+        # `BaseChatModel.ainvoke()` doesn't forward `configurable` into `_agenerate()`'s kwargs (it only
+        # extracts callbacks/tags/metadata/run_name/run_id before calling `agenerate_prompt`), so we pull
+        # the ambient config ourselves. `ensure_config()` with no argument reads whatever `RunnableConfig`
+        # is currently in scope (LangChain's own `var_child_runnable_config` ContextVar) — this is what
+        # `DeepAgentsAgent.responses()` set at the top of the request, and what deepagents' subagent tools
+        # merge into automatically for nested calls.
+        configurable = ensure_config().get("configurable") or {}
+        try:
+            model_url_path = configurable["model_url_path"]
+            model_cookies = configurable["model_cookies"]
+        except KeyError as e:
+            raise RuntimeError(
+                "GymResponsesChatModel called without model_url_path/model_cookies in "
+                "RunnableConfig['configurable'] — it must be invoked via DeepAgentsAgent.responses(), "
+                "which sets these once per request."
+            ) from e
+
         request_body: dict[str, Any] = {"input": to_gym_input(messages)}
         if "tools" in kwargs:
             request_body["tools"] = kwargs["tools"]
@@ -209,14 +232,15 @@ class GymResponsesChatModel(BaseChatModel):
             request_body["tool_choice"] = kwargs["tool_choice"]
         resp = await self.agent.server_client.post(
             server_name=self.agent.config.model_server.name,
-            url_path=ctx["model_url_path"],
+            url_path=model_url_path,
             json=request_body,
-            cookies=ctx["cookies"],
+            cookies=model_cookies["cookies"],
         )
         await raise_for_status(resp)
-        # `ctx` is the same dict object stored in `_request_context` (not a copy), so this mutation is
-        # visible to the next `_agenerate()` call for this rollout without a redundant `.set()` — matches
+        # `model_cookies` is the same holder dict object referenced from `configurable` (not a copy), so
+        # this mutation is visible to the next `_agenerate()` call for this rollout — matches
         # `simple_agent`'s pattern of chaining model-server cookies from each response into the next call.
-        ctx["cookies"] = resp.cookies
+        # It's a deliberate, narrow exception to treating `configurable` as otherwise immutable.
+        model_cookies["cookies"] = resp.cookies
         gym_response = NeMoGymResponse.model_validate(await get_response_json(resp))
         return ChatResult(generations=[ChatGeneration(message=to_langchain_ai_message(gym_response))])

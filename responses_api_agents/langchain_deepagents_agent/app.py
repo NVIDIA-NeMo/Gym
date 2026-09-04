@@ -28,17 +28,16 @@ and named to match how `deepagents`' own docs/examples name the object `create_d
 """
 
 from abc import abstractmethod
-from collections.abc import Mapping
 from typing import Any
 
 from fastapi import Body, Request, Response
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.runnables import RunnableConfig
 from pydantic import Field
 
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.langchain_deepagents_agent.responses_langchain_bridge import (
     GymResponsesChatModel,
-    _request_context,
     to_langchain,
     to_responses,
 )
@@ -86,23 +85,24 @@ class DeepAgentsAgent(SimpleAgent):
         for key, value in request.cookies.items():
             response.set_cookie(key, value)
 
-        path_params = getattr(request, "path_params", None)
-        rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
-
         if isinstance(body.input, str):
             input_items = [NeMoGymEasyInputMessage(role="user", content=body.input)]
         else:
             input_items = body.input
         input_messages = to_langchain(input_items)
 
-        model_url_path = self.url_path_for_request("/v1/responses", request)
-        token = _request_context.set(
-            {"rollout_id": rollout_id, "cookies": request.cookies, "model_url_path": model_url_path}
-        )
-        try:
-            final_state = await self.agent.ainvoke({"messages": input_messages})
-        finally:
-            _request_context.reset(token)
+        # `model_cookies` starts empty, not from `request.cookies` (those are resources-server session
+        # cookies chained from /seed_session — see the cookie-mirroring loop above — and are unrelated to
+        # the model server's own session). `GymResponsesChatModel._agenerate()` fills this holder in from
+        # each model response and reads it back on the next internal call within this rollout; see
+        # responses_langchain_bridge.py.
+        run_config: RunnableConfig = {
+            "configurable": {
+                "model_url_path": self.url_path_for_request("/v1/responses", request), # build outbound url to model server
+                "model_cookies": {"cookies": None},
+            }
+        }
+        final_state = await self.agent.ainvoke({"messages": input_messages}, config=run_config)
 
         new_messages = final_state["messages"][len(input_messages) :]
         return NeMoGymResponse.model_validate(to_responses(new_messages, self.config.model_server.name))

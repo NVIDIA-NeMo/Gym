@@ -73,3 +73,50 @@ async def test_responses_propagates_inbound_cookies_to_outgoing_response():
     await agent.responses(request, response, body)
     assert response.raw_headers  # a Set-Cookie header was added
     assert any(b"session=abc123" in value for _, value in response.raw_headers)
+
+
+# --- RunnableConfig construction ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_responses_seeds_model_cookies_empty_not_from_resources_server_cookies():
+    """`request.cookies` here are resources-server session cookies chained from /seed_session (see
+    SimpleAgent.run()'s self-POST) — they must never become the jar `_agenerate()` sends to the model
+    server. The model-server cookie holder starts `None`, matching SimpleAgent._create_episode's
+    `model_server_cookies = None`."""
+    from fastapi import Response
+
+    agent = _make_agent()
+    agent.agent = MagicMock()
+    agent.agent.ainvoke = AsyncMock(return_value={"messages": [AIMessage(content="done")]})
+
+    request = MagicMock()
+    request.cookies = {"session": "resources-server-cookie"}
+    request.path_params = {}
+    request.url.path = "/v1/responses"
+
+    await agent.responses(request, Response(), MagicMock(input="hello"))
+
+    run_config = agent.agent.ainvoke.call_args.kwargs["config"]
+    assert run_config["configurable"]["model_cookies"] == {"cookies": None}
+
+
+@pytest.mark.asyncio
+async def test_responses_forwards_capture_mode_path_into_model_url_path():
+    """A request arriving at .../training-token-capture/v1/responses must produce a model_url_path that
+    still carries that segment — dropping it silently stops training token IDs from being captured."""
+    from fastapi import Response
+
+    agent = _make_agent()
+    agent.agent = MagicMock()
+    agent.agent.ainvoke = AsyncMock(return_value={"messages": [AIMessage(content="done")]})
+
+    request = MagicMock()
+    request.cookies = {}
+    request.path_params = {"rollout_id": "abc123"}
+    request.url.path = "/ng-rollout/abc123/training-token-capture/v1/responses"
+
+    await agent.responses(request, Response(), MagicMock(input="hello"))
+
+    run_config = agent.agent.ainvoke.call_args.kwargs["config"]
+    assert "training-token-capture" in run_config["configurable"]["model_url_path"]
