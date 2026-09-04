@@ -22,7 +22,7 @@ from pytest import MonkeyPatch, approx
 
 import resources_servers.genrm_compare.app
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -159,13 +159,15 @@ class TestGenRMCompareResourcesServer:
                 ),
                 "principle": "Be concise",
                 TASK_INDEX_KEY_NAME: 7,
+                ATTEMPT_INDEX_KEY_NAME: 1,
                 ROLLOUT_INDEX_KEY_NAME: 2,
             }
         )
         assert task_request.task_index == 7
+        assert task_request.attempt_index == 1
         assert task_request.rollout_index == 2
         assert server._get_verify_cohort_key(task_request, input_messages, task_request.principle) == (
-            f"task_idx::7::{prompt_hash}"
+            f"task_idx::7::{prompt_hash}::attempt::1"
         )
 
         prompt_request = GenRMCompareVerifyRequest.model_validate(
@@ -186,8 +188,43 @@ class TestGenRMCompareResourcesServer:
             }
         )
         assert server._get_verify_cohort_key(prompt_request, input_messages, prompt_request.principle) == (
-            f"prompt_id::prompt-123::{prompt_hash}"
+            f"prompt_id::prompt-123::{prompt_hash}::attempt::0"
         )
+
+    async def test_new_attempt_discards_prior_cohort_state(self, config):
+        """A retry cannot append regenerated responses to its prior cohort."""
+        server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
+        input_messages = [NeMoGymEasyInputMessage(role="user", content="retry me", type="message")]
+        request = GenRMCompareVerifyRequest.model_validate(
+            {
+                "responses_create_params": NeMoGymResponseCreateParamsNonStreaming(input=input_messages),
+                "response": NeMoGymResponse(
+                    id="resp_retry",
+                    created_at=0.0,
+                    model="dummy_model",
+                    tools=[],
+                    parallel_tool_calls=True,
+                    tool_choice="auto",
+                    output=[],
+                    object="response",
+                ),
+                TASK_INDEX_KEY_NAME: 77,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+        )
+        base_key = server._get_verify_cohort_base_key(request, input_messages)
+        attempt_zero_key = server._activate_verify_cohort_attempt(request, input_messages)
+        pending = asyncio.get_running_loop().create_future()
+        resources_servers.genrm_compare.app._cohort_buffers[attempt_zero_key].append((request, pending))
+        resources_servers.genrm_compare.app._cohort_jit_buffers[attempt_zero_key][0].append((1.0, 1.0, 1.0))
+
+        retry = request.model_copy(update={"attempt_index": 1})
+        attempt_one_key = server._activate_verify_cohort_attempt(retry, input_messages)
+
+        assert attempt_one_key == f"{base_key}::attempt::1"
+        assert attempt_zero_key not in resources_servers.genrm_compare.app._cohort_buffers
+        assert attempt_zero_key not in resources_servers.genrm_compare.app._cohort_jit_buffers
+        assert isinstance(pending.exception(), RuntimeError)
 
     async def test_run_jit_compare_using_most_recent_response_obj(self, monkeypatch: MonkeyPatch) -> None:
         config = GenRMCompareConfig(

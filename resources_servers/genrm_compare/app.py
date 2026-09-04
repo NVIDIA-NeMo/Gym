@@ -44,7 +44,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -151,6 +151,7 @@ class GenRMCompareVerifyRequest(BaseVerifyRequest):
 
     principle: Optional[str] = None  # Principle for principle-based GenRM; forwarded by agent when provided
     task_index: Optional[int] = Field(default=None, alias=TASK_INDEX_KEY_NAME)
+    attempt_index: int = Field(default=0, alias=ATTEMPT_INDEX_KEY_NAME, ge=0)
     rollout_index: Optional[int] = Field(default=None, alias=ROLLOUT_INDEX_KEY_NAME)
     prompt_id: Optional[str] = None  # Optional stable prompt identifier from the caller
 
@@ -216,7 +217,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             )
 
         input_messages = getattr(body.responses_create_params, "input", None) or []
-        prompt_key = self._get_verify_cohort_key(
+        prompt_key = self._activate_verify_cohort_attempt(
             body,
             input_messages if isinstance(input_messages, list) else list(input_messages),
             principle,
@@ -292,13 +293,53 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         input_messages: List[Any],
         principle: Optional[str] = None,
     ) -> str:
-        """Prefer task-scoped keys when available so identical prompt text from different tasks does not collide."""
+        """Key one physical attempt of a logical prompt cohort."""
+        base_key = self._get_verify_cohort_base_key(body, input_messages, principle)
+        return f"{base_key}::attempt::{body.attempt_index}"
+
+    def _get_verify_cohort_base_key(
+        self,
+        body: GenRMCompareVerifyRequest,
+        input_messages: List[Any],
+        principle: Optional[str] = None,
+    ) -> str:
+        """Prefer task-scoped keys when available so identical prompts do not collide."""
         prompt_key = get_prompt_key_from_input(input_messages, principle)
         if body.task_index is not None:
             return f"task_idx::{body.task_index}::{prompt_key}"
         if body.prompt_id is not None:
             return f"prompt_id::{body.prompt_id}::{prompt_key}"
         return prompt_key
+
+    def _activate_verify_cohort_attempt(
+        self,
+        body: GenRMCompareVerifyRequest,
+        input_messages: List[Any],
+        principle: Optional[str] = None,
+    ) -> str:
+        """Activate an attempt and discard state retained by the prior attempt."""
+        base_key = self._get_verify_cohort_base_key(body, input_messages, principle)
+        attempt = body.attempt_index
+        if attempt > 0:
+            prior_attempt = attempt - 1
+            stale_key = f"{base_key}::attempt::{prior_attempt}"
+            stale_buffer = _cohort_buffers.pop(stale_key, [])
+            _cohort_jit_buffers.pop(stale_key, None)
+            if stale_buffer:
+                logger.warning(
+                    "Superseding GenRM cohort attempt %s with attempt %s (%s pending responses)",
+                    prior_attempt,
+                    attempt,
+                    len(stale_buffer),
+                )
+            for _, future in stale_buffer:
+                if not future.done():
+                    future.set_exception(
+                        RuntimeError(f"GenRM cohort attempt {prior_attempt} was superseded by attempt {attempt}")
+                    )
+                    future.exception()
+
+        return f"{base_key}::attempt::{attempt}"
 
     async def _run_jit_compare_using_most_recent_response_obj(
         self,
