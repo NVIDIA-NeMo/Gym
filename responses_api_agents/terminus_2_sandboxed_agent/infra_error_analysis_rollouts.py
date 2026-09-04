@@ -19,6 +19,9 @@ with open(args.fpath, "rb") as f:
     for i, line in enumerate(f):
         row = orjson.loads(line)
 
+        if row["reward"] != 0:
+            continue
+
         count = 0
         stuck_count = 0
         for output_item in row["response"]["output"]:
