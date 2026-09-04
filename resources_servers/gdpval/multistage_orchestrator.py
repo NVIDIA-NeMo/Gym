@@ -827,9 +827,11 @@ async def run_e2e_multistage(
     """
     from contextlib import nullcontext
 
-    from nemo_gym.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.base_responses_api_model import observability_enabled_from_config
+    from nemo_gym.rollout_collection import RolloutCollectionHelper, _attach_ng_perf
 
     multistage_config = parse_multistage_config(global_config_dict.get("multistage") or {})
+    observability_enabled = observability_enabled_from_config(global_config_dict)
 
     helper = RolloutCollectionHelper()
     materialized_rows = helper._preprocess_rows_from_config(rollout_collection_config)
@@ -857,9 +859,14 @@ async def run_e2e_multistage(
 
             semaphore = Semaphore(semaphore_size)
         results: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
-        for future in helper.run_examples(rows, semaphore=semaphore or nullcontext()):
-            row, result = await future
-            results.append((row, result))
+        for future in helper._run_examples_with_metadata(rows, semaphore=semaphore or nullcontext()):
+            completed = await future
+            _attach_ng_perf(
+                completed.result,
+                observability_enabled=observability_enabled,
+                rollout_latency_ms=completed.rollout_latency_ms,
+            )
+            results.append((completed.row, completed.result))
         return results
 
     output_fpath = Path(rollout_collection_config.output_jsonl_fpath)

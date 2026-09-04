@@ -10,22 +10,40 @@ INPUT_CONTAINER=$INPUT_CONTAINER
 OUTPUT_CONTAINER=$OUTPUT_CONTAINER
 MOUNTS=$MOUNTS
 GYM_CONFIG=$GYM_CONFIG
+VLLM_ROUTER_WHEEL=$VLLM_ROUTER_WHEEL
 NEMO_GYM_GIT_URL=${NEMO_GYM_GIT_URL:-https://github.com/NVIDIA-NeMo/Gym}
 NEMO_GYM_GIT_REF=${NEMO_GYM_GIT_REF:-main}
+TAU_2_MOUNT_BASE_GYM_DIR=${TAU_2_MOUNT_BASE_GYM_DIR:-""}
+
+
+if [[ -n "$TAU_2_MOUNT_BASE_GYM_DIR" ]]; then
+    MOUNTS="$MOUNTS,$TAU_2_MOUNT_BASE_GYM_DIR:$TAU_2_MOUNT_BASE_GYM_DIR"
+fi
+
+VLLM_ROUTER_WHEEL=$(readlink -f "$VLLM_ROUTER_WHEEL")
+MOUNTS="$MOUNTS,$(dirname "$VLLM_ROUTER_WHEEL"):$(dirname "$VLLM_ROUTER_WHEEL")"
+
+# pyxis --container-save exports the image when the step tears down, whatever the
+# inner script exited with, and it overwrites whatever already sits at the target.
+# So stage the build and publish only on success; otherwise a failed build silently
+# replaces a good container with a broken one.
+staged_container="$OUTPUT_CONTAINER.partial"
+rm -f "$staged_container"
+save_status=0
 
 srun --nodes=1 --ntasks=1 \
     --container-image=$INPUT_CONTAINER \
     --container-mounts=$MOUNTS \
     --no-container-mount-home \
-    --container-save=$OUTPUT_CONTAINER \
-    bash -s <<INNER_BUILD
+    --container-save="$staged_container" \
+    bash -s <<INNER_BUILD || save_status=$?
 set -xeuo pipefail
 
 # Hardlink, not clone to save space
 export UV_LINK_MODE=hardlink
 
-ray_dependency="ray[default]==2.55.1"
-uv pip install --system "\$ray_dependency" fastokens vllm-router
+uv pip install --system --reinstall-package vllm-router "$VLLM_ROUTER_WHEEL"
+uv pip show --system vllm-router
 
 apt-get update
 apt-get install -y --no-install-recommends \
@@ -33,8 +51,8 @@ apt-get install -y --no-install-recommends \
 rm -rf /var/lib/apt/lists/*
 
 cd /opt
-# Reuse the vLLM container's python3 so we strongly align the Python versions across vLLM and Gym.
-uv venv --python \$(which python3) Gym_venv
+# Python 3.13.14 is Gym main's Python version.
+uv venv --python 3.13.14 Gym_venv
 source Gym_venv/bin/activate
 
 # We use this flow to support use cases where env.yaml, etc config files are mounted
@@ -46,11 +64,7 @@ git remote add origin $NEMO_GYM_GIT_URL
 git fetch origin $NEMO_GYM_GIT_REF
 git checkout $NEMO_GYM_GIT_REF
 
-# See the script for more information.
-python benchmarks/nemotron_3.5_super/downgrade_python.py
-
 uv sync --active
-uv pip install "\$ray_dependency"
 
 ########################################
 # START Benchmark specific preparation
@@ -61,11 +75,17 @@ uv pip install gdown
 gdown --folder "https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR" \
     -O benchmarks/scicode/data
 
+if [[ -n "$TAU_2_MOUNT_BASE_GYM_DIR" ]]; then
+    echo "Copying Tau2 and Tau3 data from mounted Gym dir: $TAU_2_MOUNT_BASE_GYM_DIR"
+    cp -r "$TAU_2_MOUNT_BASE_GYM_DIR/benchmarks/tau2/nemo_gym_data" benchmarks/tau2/nemo_gym_data
+    cp -r "$TAU_2_MOUNT_BASE_GYM_DIR/responses_api_agents/tau2/tau2_data" responses_api_agents/tau2/tau2_data
+fi
+
 ########################################
 # END Benchmark specific preparation
 ########################################
 
-gym eval prepare --config $GYM_CONFIG
+gym eval prepare +num_prepare_benchmark_processes=4 --config $GYM_CONFIG
 
 gym env start \
     --config $GYM_CONFIG \
@@ -74,3 +94,11 @@ gym env start \
 
 echo ">>> Inner build complete. Container will now be packed into sqsh."
 INNER_BUILD
+
+if (( save_status != 0 )); then
+    rm -f "$staged_container"
+    echo "Build failed (exit $save_status). $OUTPUT_CONTAINER left untouched." >&2
+    exit "$save_status"
+fi
+mv -f "$staged_container" "$OUTPUT_CONTAINER"
+echo ">>> Published $OUTPUT_CONTAINER"

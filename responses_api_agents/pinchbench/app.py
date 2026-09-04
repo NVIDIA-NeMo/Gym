@@ -96,6 +96,7 @@ class PinchBenchAgentConfig(BaseResponsesAPIAgentConfig):
     max_concurrent: int = 4
     max_tokens: int = 16384
     context_window: int = 131072
+    provider_headers: Optional[dict[str, str]] = None
     openclaw_provider_timeout_seconds: Optional[int] = None
     openclaw_agent_timeout_seconds: Optional[int] = None
     openclaw_judge_timeout_seconds: Optional[int] = None
@@ -227,6 +228,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         }
         if self.config.openclaw_provider_timeout_seconds:
             env["PINCHBENCH_PROVIDER_TIMEOUT_SECONDS"] = str(self.config.openclaw_provider_timeout_seconds)
+        if self.config.provider_headers is not None:
+            env["PINCHBENCH_PROVIDER_HEADERS"] = json.dumps(self.config.provider_headers)
         if self.config.openclaw_agent_timeout_seconds:
             env["PINCHBENCH_AGENT_TIMEOUT_SECONDS"] = str(self.config.openclaw_agent_timeout_seconds)
         if self.config.openclaw_judge_timeout_seconds:
@@ -318,6 +321,11 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             api_key = os.environ.get("MODEL_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
             max_tokens = int(os.environ.get("PINCHBENCH_MAX_TOKENS", "65536"))
             context_window = int(os.environ.get("PINCHBENCH_CONTEXT_WINDOW", "131072"))
+            provider_headers = (
+                json.loads(os.environ["PINCHBENCH_PROVIDER_HEADERS"])
+                if os.environ.get("PINCHBENCH_PROVIDER_HEADERS")
+                else None
+            )
             provider_timeout_s = int(os.environ["PINCHBENCH_PROVIDER_TIMEOUT_SECONDS"]) if os.environ.get("PINCHBENCH_PROVIDER_TIMEOUT_SECONDS") else None
             agent_timeout_s = (
                 int(os.environ["PINCHBENCH_AGENT_TIMEOUT_SECONDS"])
@@ -364,6 +372,8 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             }
             if provider_timeout_s is not None:
                 custom_provider["timeoutSeconds"] = provider_timeout_s
+            if provider_headers is not None:
+                custom_provider["headers"] = provider_headers
             models = cfg.setdefault("models", {})
             models["mode"] = "merge"
             models.setdefault("providers", {})["custom"] = custom_provider

@@ -14,19 +14,19 @@
 # limitations under the License.
 
 import sys
+from glob import glob
 from pathlib import Path
-from time import time
+from shutil import rmtree
+from time import monotonic, time
 from traceback import format_exc
 from typing import Any, Dict, Optional, Tuple
 
 from fastapi import Request
-from pydantic import BaseModel
-from swebench.harness.constants import END_TEST_OUTPUT, MAP_REPO_TO_EXT, START_TEST_OUTPUT
+from pydantic import BaseModel, Field
 from swebench.harness.run_evaluation import make_test_spec
 from swebench.harness.test_spec.test_spec import LATEST, TestSpec
 
 from docker.models.containers import ExecResult
-from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -36,20 +36,36 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.rollout_observability import SandboxObservation
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
-from resources_servers.swebench.swebench_patches import run_instance
+from resources_servers.swebench.swebench_patches import (
+    patch_swebench_multilingual_golden_patch_pass,
+    patch_swebench_multilingual_log_parsing,
+    patch_swebench_multilingual_sandbox,
+    patch_swebench_verified_env_vars,
+    run_instance,
+)
 
 
 class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
+    apply_anti_cheating: bool = True
 
     evaluation_timeout: Optional[int] = None
 
     # Sandbox config
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
+
+    clear_swebench_debug_logs: bool = True
+
+    def model_post_init(self, context: Any, /) -> None:
+        if self.is_verifying_golden_patch and self.clear_swebench_debug_logs:
+            print("Turning off logs clear since `is_verifying_golden_patch=true`")
+            self.clear_swebench_debug_logs = False
 
 
 class SWEBenchInstanceRequest(BaseModel):
@@ -86,9 +102,14 @@ class SWEBenchVerifyResponse(BaseVerifyResponse):
     patch_verification_time_taken: float
 
     instance_id: str
+    test_output: str
     model_patch: Optional[str]
 
     log_dir: str
+
+    verifier_sandbox_observation: Optional[SandboxObservation] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 # @bxyu-nvidia: This is a wrapper that can be passed directly to a very lightly modified version of `run_instance`
@@ -99,6 +120,8 @@ class DockerContainer(BaseModel):
     instance_id: str
 
     _inner_container: AsyncSandbox
+    _eval_return_code: Optional[int] = None
+    _sandbox_error_type: Optional[str] = None
 
     async def exec_run(
         self,
@@ -106,11 +129,18 @@ class DockerContainer(BaseModel):
         workdir: Optional[str] = None,
         user: Optional[str] = None,
     ) -> ExecResult:
-        res = await self._inner_container.exec(
-            command=command,
-            cwd=workdir,
-            user=user,
-        )
+        try:
+            res = await self._inner_container.exec(
+                command=command,
+                cwd=workdir,
+                user=user,
+            )
+        except Exception as exc:
+            self._sandbox_error_type = self._sandbox_error_type or type(exc).__name__
+            print(f"Failed to exec in SWE Bench for {self.instance_id}", format_exc(), file=sys.stderr)
+            raise
+        if res.error_type is not None:
+            self._sandbox_error_type = self._sandbox_error_type or res.error_type
 
         return ExecResult(
             exit_code=res.return_code,
@@ -128,53 +158,74 @@ class DockerContainer(BaseModel):
                 # AsyncSandbox.exec takes timeout_s, not docker-py's timeout.
                 timeout_s=timeout,
             )
+            self._eval_return_code = res.return_code if res.error_type is None else None
+            if res.error_type is not None:
+                self._sandbox_error_type = res.error_type
             timed_out = False
 
             stdout = res.stdout or ""
             stderr = res.stderr or ""
 
-            # For RuboCop tests in SWE Multilingual specifically, there is an issue with the logs parsing if the stdout and stderr returned is not interleaved.
-            # We interleave the stderr inside the start and end tags in the stdout here instead. See `get_logs_eval`
-            if "rubocop" in self.instance_id and START_TEST_OUTPUT in stderr:
-                start, middle_end = stderr.split(START_TEST_OUTPUT)
-                middle, end = middle_end.split(END_TEST_OUTPUT)
-                test_output = start + START_TEST_OUTPUT + stdout + middle + END_TEST_OUTPUT + end
-            else:
-                test_output = stdout + stderr
+            maybe_test_output = patch_swebench_multilingual_log_parsing(stdout, stderr, self.instance_id)
+            test_output = maybe_test_output or (stdout + stderr)
         except TimeoutError:
             # Gym Sandbox API will throw a timeout error on actual timeout.
             timed_out = True
+            self._sandbox_error_type = "TimeoutError"
             test_output = ""
+        except Exception as exc:
+            self._sandbox_error_type = type(exc).__name__
+            print(
+                f"Failed to exec_run_with_timeout in SWE Bench for {self.instance_id}", format_exc(), file=sys.stderr
+            )
+            raise
 
         return (test_output, timed_out, time() - start_time)
 
     async def copy(self, src: Path, dest: Path) -> None:
         if "eval.sh" in str(src):
             data = src.read_text()
+            src.write_text(patch_swebench_multilingual_golden_patch_pass(data, self.instance_id))
 
-            # This init.d is necessary for some Java tests to properly pull from the maven mirror
-            # e.g. apache__lucene and apache__druid
-            #
-            # Lucene's applied Gradle scripts have their own buildscript scopes. Those scopes
-            # are not exposed through the root project's repository handler, so an init script
-            # cannot rewrite them before they resolve. Rewrite Maven Central references in all
-            # checked-in Gradle scripts before Gradle starts (but never mutate its cache).
-            lucene_mirror_setup = """if [ -d gradle ]; then
-  find . -path './.gradle' -prune -o -type f \\( -name '*.gradle' -o -name '*.gradle.kts' \\) -exec sed -i 's#mavenCentral()#maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }#g; s#https://repo.maven.apache.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g; s#https://repo1.maven.org/maven2#https://maven-central.storage-download.googleapis.com/maven2#g' {} +
-fi
-./gradlew --init-script /root/.gradle/init.d/maven_central_mirror.gradle test"""
-            data = data.replace("./gradlew test", lucene_mirror_setup)
-            # Run Maven tests without the daemon which causes issues with gson tests.
-            data = data.replace("mvnd test", "mvn test")
-            src.write_text(data)
-
-        await self._inner_container.upload(local_path=src, remote_path=str(dest))
+        try:
+            await self._inner_container.upload(local_path=src, remote_path=str(dest))
+        except Exception as exc:
+            self._sandbox_error_type = self._sandbox_error_type or type(exc).__name__
+            print(
+                f"Failed to upload to verification sandbox in SWE Bench for {self.instance_id}",
+                format_exc(),
+                file=sys.stderr,
+            )
+            raise
 
     async def cleanup(self) -> None:
         try:
             await self._inner_container.stop()
-        except:
+        except Exception as exc:
+            self._sandbox_error_type = self._sandbox_error_type or type(exc).__name__
             print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
+
+    def observation(self, *, wall_time_s: float, evaluation_completed: bool) -> SandboxObservation:
+        handle = self._inner_container._handle
+        normalized_error = self._sandbox_error_type.lower() if isinstance(self._sandbox_error_type, str) else ""
+        if "timeout" in normalized_error:
+            outcome = "timeout"
+        elif self._sandbox_error_type is not None:
+            outcome = "sandbox_error"
+        elif evaluation_completed:
+            outcome = "completed"
+        else:
+            outcome = "failed"
+
+        return SandboxObservation(
+            role="verifier",
+            provider=handle.provider_name if handle is not None else None,
+            sandbox_id=handle.sandbox_id if handle is not None else None,
+            outcome=outcome,
+            exit_code=self._eval_return_code,
+            wall_time_s=wall_time_s,
+            error_type=self._sandbox_error_type,
+        )
 
 
 # TODO @bxyu-nvidia: Eventually once the sandbox server infra is ready, these seed_session types need to upgrade to pass a sandbox spec.
@@ -200,12 +251,23 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         global_config_dict = get_global_config_dict()
         resolved_sandbox_provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
+        resources = dict(self.config.sandbox_config.get("resources", {}))
+
+        # Derive from the final resources map (after the multilingual bump);
+        # explicit sandbox_config.env keys win over the derived caps.
+        sandbox_resources = SandboxResources.from_mapping(resources)
+        env = dict(self.config.sandbox_config.get("env", {}))
+        if self.config.sandbox_config.get("derive_cpu_env", True):
+            env = cpu_cap_env(sandbox_resources.cpu) | env
+
+        patch_swebench_verified_env_vars(test_spec.repo, env)
+
         eval_sandbox_spec = SandboxSpec(
             image=test_spec.instance_image_key,
             ttl_s=self.config.sandbox_config.get("ttl_s", None),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s", None),
             workdir=None,  # Default to container's WORKDIR
-            env=dict(),
+            env=env,
             files=dict(),
             metadata=provider_default_metadata
             | self.config.sandbox_config.get("metadata", {})
@@ -213,30 +275,16 @@ class SwebenchResourcesServer(SimpleResourcesServer):
                 "nemo_gym_agent": self.config.name,
                 "instance_id": test_spec.instance_id[:63],
             },
-            resources=SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {})),
+            resources=sandbox_resources,
             entrypoint=None,
             provider_options=self.config.sandbox_config.get("provider_options", {}),
         )
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
         await eval_sandbox.start(eval_sandbox_spec)
 
-        if MAP_REPO_TO_EXT.get(test_spec.repo) == "java":
-            await self._apply_sandbox_patches(eval_sandbox)
+        await patch_swebench_multilingual_sandbox(test_spec.repo, test_spec.instance_id, eval_sandbox)
 
         return eval_sandbox
-
-    async def _apply_sandbox_patches(self, sandbox: AsyncSandbox) -> None:
-        base_path = PARENT_DIR / "responses_api_agents/swe_agents/maven_mirror"
-        settings_xml_path = base_path / "settings.xml"
-        init_gradle_path = base_path / "init.gradle"
-
-        await sandbox.exec("""mkdir -p /root/.m2 /root/.gradle/init.d""")
-
-        # This settings.xml is necessary for some Java tests to properly pull from the maven mirror
-        await sandbox.upload(settings_xml_path, "/root/.m2/settings.xml")
-
-        # This init.d is necessary for some Java tests to properly pull from the maven mirror
-        await sandbox.upload(init_gradle_path, "/root/.gradle/init.d/maven_central_mirror.gradle")
 
     def _make_test_spec(self, body: SWEBenchVerifyRequest) -> TestSpec:
         return make_test_spec(
@@ -252,11 +300,20 @@ class SwebenchResourcesServer(SimpleResourcesServer):
         eval_sandbox = await self._create_sandbox(test_spec)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
 
-        # @bxyu-nvidia: Activate the necessary conda environments for SWE Bench Verified Python instances
-        # This may be overfit and needs to be config'd or detected.
-        # TODO @bxyu-nvidia: This pattern is not yet supported because calls to sandbox.exec use separate processes
-        # For now, the activation is put on the harness side.
-        # await eval_sandbox.exec("source /opt/miniconda3/bin/activate && conda activate testbed")
+        if self.config.apply_anti_cheating:
+            # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
+            wd = (await eval_sandbox.exec("pwd")).stdout.strip()
+            anti_cheat_setup_fpath = Path(__file__).parent / "anti_cheat_setup.sh"
+            await eval_sandbox.upload(anti_cheat_setup_fpath, f"{wd}/anti_cheat_setup.sh")
+            result = await eval_sandbox.exec(
+                f"""git reset --hard && WORKING_DIRECTORY={wd} bash anti_cheat_setup.sh && rm anti_cheat_setup.sh"""
+            )
+            if result.return_code != 0:
+                print(f"""Failed to setup anti-cheating for {test_spec.instance_id}. Return code: {result.return_code}
+Stdout:
+{result.stdout}
+Stderr:
+{result.stderr}""")
 
         return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
 
@@ -284,15 +341,15 @@ class SwebenchResourcesServer(SimpleResourcesServer):
 
         test_spec = self._make_test_spec(body)
 
-        start_time = time()
+        verifier_sandbox_lifecycle_started_at = monotonic()
         eval_sandbox = await self._create_sandbox(test_spec)
-        eval_sandbox_start_time_taken = time() - start_time
+        eval_sandbox_start_time_taken = monotonic() - verifier_sandbox_lifecycle_started_at
 
         model_patch = ""
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
-            original_sandbox = self._session_id_to_sandbox[request.session[SESSION_ID_KEY]]
+            original_sandbox = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
             try:
                 original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
                 model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")
@@ -324,16 +381,41 @@ class SwebenchResourcesServer(SimpleResourcesServer):
             rewrite_reports=False,
         )
         patch_verification_time_taken = time() - start_time
+        verifier_sandbox_wall_time_s = monotonic() - verifier_sandbox_lifecycle_started_at
+
+        try:
+            verifier_sandbox_observation = mock_container.observation(
+                wall_time_s=verifier_sandbox_wall_time_s,
+                evaluation_completed=res["completed"],
+            )
+        except Exception:
+            verifier_sandbox_observation = None
+            print("Failed to build verification sandbox observation", format_exc(), file=sys.stderr)
+
+        log_dir = Path(__file__).parent / "logs/run_evaluation" / run_id
+
+        test_output_fpaths = glob(str(log_dir / "**" / "test_output.txt"), recursive=True)
+        test_output = ""
+        if test_output_fpaths:
+            test_output_fpath = Path(test_output_fpaths[0])
+            test_output = test_output_fpath.read_text()
+
+        if self.config.clear_swebench_debug_logs:
+            rmtree(str(log_dir), ignore_errors=True)
+            log_dir = ""
+
         return SWEBenchVerifyResponse(
             **body.model_dump(),
             # run_instance returns "completed"; the response field is "evaluation_completed".
-            evaluation_completed=res["completed"],
+            evaluation_completed=res["completed"] and mock_container._sandbox_error_type is None,
             resolved=res["resolved"],
             reward=int(res["resolved"]),
             eval_sandbox_start_time_taken=eval_sandbox_start_time_taken,
             patch_verification_time_taken=patch_verification_time_taken,
             model_patch=model_patch or None,
-            log_dir=str(Path(__file__).parent / "logs/run_evaluation" / run_id),
+            test_output=test_output,
+            log_dir=str(log_dir),
+            verifier_sandbox_observation=verifier_sandbox_observation,
         )
 
 
