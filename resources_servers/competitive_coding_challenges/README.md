@@ -23,11 +23,11 @@ competitive_coding_challenges
     test_batch_size: 32
     num_parallel_requests: 16
     time_scale: 2.0
-    shared_dir: ${oc.env:SHARED_TEMP_DIR,/tmp}
+    shared_dir: ${oc.env:CCC_SHARED_TEMP_DIR,/tmp}
 ```
 
 You must set the following at runtime:
-- `export SHARED_TEMP_DIR=` local directory for code execution to store compilation files and share between ray instances and nodes
+- `export CCC_SHARED_TEMP_DIR=` local directory for code execution to store compilation files and share between ray instances and nodes
 - `export CCC_TEST_FILE=` path to metadata.jsonl file which contains data test cases and necessary execution artifacts
 
 and optionally can set to following:
