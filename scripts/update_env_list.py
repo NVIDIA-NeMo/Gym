@@ -155,31 +155,32 @@ def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cov
     for v1 in data.values():
         if not isinstance(v1, dict):
             continue
-        v2 = v1.get("responses_api_agents")
-        if not isinstance(v2, dict):
-            continue
-        for v3 in v2.values():
-            if not isinstance(v3, dict):
+        for server_group in ("responses_api_agents", "processors"):
+            v2 = v1.get(server_group)
+            if not isinstance(v2, dict):
                 continue
-            datasets = v3.get("datasets")
-            if isinstance(datasets, list):
-                for entry in datasets:
-                    if isinstance(entry, dict):
-                        agent.types.append(entry.get("type"))
-                        if entry.get("type") == "train":
-                            agent.license = entry.get("license")
-                            source = entry.get("source")
-                            if isinstance(source, dict) and source.get("type") == "huggingface":
-                                agent.huggingface_repo_id = source.get("repo_id")
+            for v3 in v2.values():
+                if not isinstance(v3, dict):
+                    continue
+                datasets = v3.get("datasets")
+                if isinstance(datasets, list):
+                    for entry in datasets:
+                        if isinstance(entry, dict):
+                            agent.types.append(entry.get("type"))
+                            if entry.get("type") == "train":
+                                agent.license = entry.get("license")
+                                source = entry.get("source")
+                                if isinstance(source, dict) and source.get("type") == "huggingface":
+                                    agent.huggingface_repo_id = source.get("repo_id")
 
-                            # Backward compatibility for configs that still use the
-                            # deprecated parallel identifier fields.
-                            if not agent.huggingface_repo_id:
-                                hf_id = entry.get("huggingface_identifier")
-                                if isinstance(hf_id, dict):
-                                    agent.huggingface_repo_id = hf_id.get("repo_id")
-            elif v3.get("harbor_datasets") or v3.get("vf_env_id"):
-                agent.types.append("train")
+                                # Backward compatibility for configs that still use the
+                                # deprecated parallel identifier fields.
+                                if not agent.huggingface_repo_id:
+                                    hf_id = entry.get("huggingface_identifier")
+                                    if isinstance(hf_id, dict):
+                                        agent.huggingface_repo_id = hf_id.get("repo_id")
+                elif v3.get("harbor_datasets") or v3.get("vf_env_id"):
+                    agent.types.append("train")
     return agent
 
 

@@ -52,6 +52,7 @@ from nemo_gym.global_config import (
     MIN_STAT_NAME,
     P25_PREFIX,
     P75_PREFIX,
+    PROCESSOR_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SE_ACROSS_REPEATS_PREFIX,
     SEM_PREFIX,
@@ -419,8 +420,9 @@ class RewardProfiler:
             result = result | (result["response"].get("usage") or {})
 
             # agent_name is a temporary column used for aggregations below
+            rollout_ref = row.get(PROCESSOR_REF_KEY_NAME) or row[AGENT_REF_KEY_NAME]
             numeric_result = {
-                "agent_name": row["agent_ref"]["name"],
+                "agent_name": rollout_ref["name"],
                 TASK_INDEX_KEY_NAME: task_idx,
                 ROLLOUT_INDEX_KEY_NAME: rollout_idx,
             }

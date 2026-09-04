@@ -51,3 +51,19 @@ def test_visit_agent_datasets_retains_legacy_huggingface_fallback() -> None:
     assert metadata.types == ["train"]
     assert metadata.license == "Apache 2.0"
     assert metadata.huggingface_repo_id == "nvidia/legacy-dataset"
+
+
+def test_visit_agent_datasets_reads_rollout_orchestrator_datasets() -> None:
+    metadata = visit_agent_datasets(
+        {
+            "coordinator": {
+                "processors": {
+                    "alternating_turn": {
+                        "datasets": [{"name": "example", "type": "example"}],
+                    }
+                }
+            }
+        }
+    )
+
+    assert metadata.types == ["example"]

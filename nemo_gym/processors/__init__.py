@@ -8,6 +8,16 @@ from nemo_gym.processors.single_agent_turn import (
     SingleAgentTurnProcessor,
     SingleAgentTurnProcessorConfig,
 )
+from nemo_gym.processors.user_assistant import (
+    EpisodeEvent,
+    EpisodeStatus,
+    ParticipantTurn,
+    UserAssistantProcessor,
+    UserAssistantProcessorConfig,
+    UserAssistantRunRequest,
+    UserAssistantVerifyRequest,
+    UserAssistantVerifyResponse,
+)
 
 
 __all__ = [
@@ -15,4 +25,12 @@ __all__ = [
     "BaseProcessorConfig",
     "SingleAgentTurnProcessor",
     "SingleAgentTurnProcessorConfig",
+    "EpisodeEvent",
+    "EpisodeStatus",
+    "ParticipantTurn",
+    "UserAssistantProcessor",
+    "UserAssistantProcessorConfig",
+    "UserAssistantRunRequest",
+    "UserAssistantVerifyRequest",
+    "UserAssistantVerifyResponse",
 ]
