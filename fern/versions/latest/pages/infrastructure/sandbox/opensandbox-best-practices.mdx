@@ -1,0 +1,242 @@
+---
+title: "OpenSandbox Best Practices"
+description: "Resource requests vs limits, timeouts, retries, and the failure signatures that look like bugs but are not — lessons from running thousands of concurrent sandboxes."
+position: 2
+---
+
+One sandbox is one Kubernetes pod on a shared cluster. Your **requests** decide how much of the
+cluster you occupy, your **limits** decide what your commands may use, and both are shared with
+everyone else's runs. Most "OpenSandbox is flaky" reports trace back to one of the traps below.
+See the [OpenSandbox Provider](/infrastructure/sandbox/opensandbox) page for the config schema.
+
+## The short list
+
+1. **Start from the shipped config** — pass
+   `--config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml` and override only
+   the keys you need. Its connection settings are the ones that are hard to get right
+   ([connection fields](#connection-fields-that-must-be-right)).
+2. **Start with low requests and set limits to the max CPU/memory you need** — small
+   `resource_requests` so you pack densely, `resources` sized to your real peaks; never the same
+   map for both ([requests are not limits](#requests-are-not-limits)).
+3. **Check what CPU count your sandbox actually sees** — on many clusters it is the host's cores,
+   not your limit, and that varies cluster to cluster. Be mindful of it: leave `derive_cpu_env`
+   on and give agents a bash timeout ([host-core fan-out](#the-host-core-fan-out-trap)).
+4. **Use background execution** — the shipped default; keep the max poll interval in the tens of
+   seconds ([background execution and timeouts](#background-execution-and-timeouts)).
+5. **Retry creates, never commands** — a retried command can run twice
+   ([retries](#retries-creates-yes-commands-no)).
+6. **Turn on egress controls** for any benchmark where the agent must not reach the internet —
+   they are off by default ([egress controls](#egress-controls-are-off-by-default)).
+7. **Clean up zombie sandboxes** — reap an interrupted run by its `run` id, set `ttl_s` as the
+   backstop, and keep attribution on so the run is findable ([be a good tenant](#be-a-good-tenant)).
+8. **Check the failure table before filing a bug** — most alarming errors at scale are known and
+   benign ([failure signatures](#failure-signatures-that-are-not-what-they-look-like)). To see what
+   a sandbox is actually getting and using, and to tell an OOM from a timeout, see
+   [Debugging OpenSandbox Sandboxes](/infrastructure/sandbox/opensandbox-debugging).
+
+## Connection fields that must be right
+
+The shipped `nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml` has these set
+correctly; if you copy or override it, keep them.
+
+| Field | Set it to | Why |
+| --- | --- | --- |
+| `connection.domain` | the server's external address, via `OPENSANDBOX_DOMAIN` | The default is the in-cluster service DNS name, which resolves only from pods inside the cluster. From Slurm or a laptop every call fails to connect. |
+| `connection.use_server_proxy` | `true` | With `false`, exec, file and PTY calls dial the sandbox **pod's IP directly**. That only works from inside the cluster; from anywhere else the sandbox is created but every command hangs. Proxy mode routes everything through the server. |
+| `connection.transport_backend` | `aiohttp` | httpx's connection pool degrades badly at high concurrency; the aiohttp bridge (`httpx-aiohttp`, in the `sandbox` extra) does not. If the bridge is missing the provider falls back to httpx with a warning — treat that warning as a setup error. |
+| `connection.max_connections` | `null` | The pool is shared, so this also caps in-flight sandbox operations per process. The httpx default of 100 silently serializes a 1,000-sandbox run. |
+| `connection.keepalive_expiry_s` | below the server's idle timeout (shipped: `3.0`) | A pooled socket reused after the server closed it hangs the SDK. If a load balancer reaps idle connections anyway, set `disable_connection_pooling: true` and pay a handshake per request. |
+| `connection.protocol` | `http` unless you need TLS | TLS load-balancer listeners often have a fixed, short idle timeout that resets multi-minute streams. If you must use `https`, `background_exec: true` (below) is what keeps long commands alive. |
+
+## Requests are not limits
+
+`resources` becomes the pod's **limits**. Scheduling **requests** are a separate map under
+`provider_options.resource_requests`. If you set only `resources`, the server uses it as both.
+These are Kubernetes
+[requests and limits](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#requests-and-limits)
+applied to the sandbox container.
+
+```yaml
+sandbox_config:
+  resources:                # limits: what a command may burst to
+    cpu: 4
+    memory_mib: 16384
+    disk_gib: 30
+  provider_options:
+    resource_requests:      # requests: what the scheduler reserves for you
+      cpu: 0.5
+      memory_mib: 512
+      disk_gib: 30
+```
+
+<Warning>
+A sandbox requesting `4` CPU / `32Gi` occupies the cluster capacity of ~30 sandboxes requesting
+`0.5` / `512Mi`. One run configured that way pushes everyone else's creates into `Pending`, and
+what they see is "sandbox create timed out".
+</Warning>
+
+Low requests are safe because agent workloads are bursty: median memory use is ~1–2 GB against a
+16 GiB limit, with occasional 7–16 GB peaks during builds and tests. The limits cover the peaks;
+the small requests keep the cluster usable. The values above are the validated defaults for
+SWE-bench-style environments; raise a limit only after measuring `memory.peak` or CPU throttling
+inside the sandbox — not from a failure message.
+
+## The host-core fan-out trap
+
+What a sandbox reports as its CPU count **varies cluster to cluster**. On a plain Kubernetes node,
+`nproc`, `os.cpu_count()` and `os.cpus()` report the **host's** cores (often 128–192), not your
+limit. Clusters that run [LXCFS](https://linuxcontainers.org/lxcfs/introduction/) overlay
+`/proc/cpuinfo`, `/proc/meminfo` and `/sys/devices/system/cpu/online` with cgroup-aware values, so
+the same tools report your limit instead. Check before assuming either — run `nproc` and
+`python -c 'import os; print(os.cpu_count())'` in one sandbox on the cluster you are about to use.
+
+Where the host count leaks through, tools that size worker pools from it — old `jest`, Python
+`multiprocessing`, `pytest -n auto`, `make -j$(nproc)`, OpenBLAS — fan out to 100+ processes in a
+4-CPU, 16 GiB box. The result is an OOM kill, or a near-miss that thrashes at the memory ceiling
+and runs 10× slower. It depends on each repo's tooling, so it looks random.
+
+`derive_cpu_env` (default `true` in the SWE-bench configs) is the portable mitigation: it injects
+cap variables derived from `resources.cpu` — `OMP_NUM_THREADS`, `PYTHON_CPU_COUNT`,
+`PYTEST_XDIST_AUTO_NUM_WORKERS`, `GOMAXPROCS`, `CARGO_BUILD_JOBS`, `UV_THREADPOOL_SIZE`, and
+others; see `CPU_CAP_ENV_VARS` in `nemo_gym/sandbox/utils.py`. Explicit `sandbox_config.env` keys
+win. Leave it on even where LXCFS is present; it is harmless there and protects you when the same
+config moves to a cluster without it.
+
+Two things it cannot fix:
+
+- Runners that ignore the environment: old `jest`, plain `make`, `ninja`, and Python
+  `multiprocessing` before 3.13. On clusters without LXCFS, cap these in the task's setup command
+  or the image.
+- Agent-written runaway code. This is the majority of OOMs on coding benchmarks, and Kubernetes
+  group-OOM kills the **whole sandbox**, ending the rollout. Give agents a bash timeout (2 minutes
+  is the validated default; 8 minutes measured quality-negative) so runaway commands fail fast and
+  the agent recovers.
+
+## Background execution and timeouts
+
+With `operations.background_exec: false`, `exec()` holds one streaming response open for the
+whole command; any load balancer with a fixed idle timeout drops that stream mid-command and the
+client hangs. With `background_exec: true` (the shipped setting) the provider instead submits the
+command with `background=true`, gets an execution id back, polls its status with short GETs, and
+fetches the output once when the status reports finished. It costs a few extra round trips per
+command and survives any idle timeout.
+
+| Knob | Shipped | What it does |
+| --- | --- | --- |
+| `background_poll_initial_s` | `1.0` | Delay before the first status poll. Short, so the many sub-second commands an agent issues are detected promptly. |
+| `background_poll_interval_s` | `30.0` | Ceiling for the poll delay. Each idle poll multiplies the delay by 1.5 until it reaches this, so a long-running command settles at one poll per interval. Steady-state load on the shared server is roughly *running commands ÷ interval*: 1,500 sandboxes at 30 s is ~50 requests/s; at 1 s it would be 1,500. |
+| `status_poll_timeout_s` | `10.0` | Per-poll budget. A status poll is an idempotent GET, so a timed-out poll is retried under `operations.retries` instead of failing the command. Without this knob each poll against an unreachable sandbox hangs for the full `connection.request_timeout_s`, which is sized for long submits. |
+| `exec(timeout_s=...)` | per call | The command timeout is enforced by the server. The client keeps polling until the status reports finished or `timeout_s` + 60 s headroom passes, then raises `TimeoutError`. |
+
+`connection.request_timeout_s` still governs the submit and the final output fetch.
+
+### Which timeout you are waiting on
+
+Create is synchronous on the server: schedule the pod, lazy-load the image, start the exec daemon.
+On a healthy cluster that is p50 ≈ 7 s, p90 ≈ 20 s, p99 ≈ 2 min. On a full cluster, pods sit
+`Pending` for as long as your timeout allows.
+
+- `create.timeout_s` must exceed `ready_timeout_s`; it bounds the whole create including the
+  readiness wait (the shipped config: 1500 s over 1200 s).
+- `ttl_s` is the server-side backstop if your client dies. Set it above your longest rollout.
+
+<Warning>
+Creates failing every ~20 minutes with `Timeout on reading data from socket` is
+`create.request_timeout_s` (1200 s) echoing back: the cluster has no capacity, each create hangs
+for the full budget, and each retry adds another. Check cluster load; more retries or longer
+timeouts do not help a full cluster.
+</Warning>
+
+## Retries: creates yes, commands no
+
+`create.retries` is safe: a failed create leaves nothing behind. `operations.retries` (shipped:
+`5`, exponential backoff from `retry_delay_s` to `retry_max_delay_s`) covers the SDK calls after
+create — status and endpoint lookups, file transfer, close — plus a command submit that failed at
+TCP connect before the body reached the exec daemon. All of those are idempotent or provably never
+started, so retrying them is safe. `operations.command_retries`
+defaults to `0` and should stay there for agent commands, because a proxy `502` on
+`POST /command` does not mean the command never started — the server maps every transport error
+to 502, including a dropped read *after* the body reached the exec daemon, which runs commands on
+a context a dropped connection never cancels. A retried `git apply` runs twice. Raise it only for
+provably idempotent workloads.
+
+Keep `create.skip_health_check: false`. Skipping it lets your first command race a pod whose exec
+daemon is not listening yet, and the resulting 502 kills the rollout.
+
+## Egress controls are off by default
+
+Without a network policy the server creates **no egress sidecar**, and the sandbox has
+unrestricted internet access. For benchmarks that means an agent can `pip install` its way around
+a task, fetch the upstream fix from GitHub, or exfiltrate the test set. Harness-level deny lists
+(such as opencode's `git fetch` / `curl github.com` permission rules) are advisory; the network
+policy is the enforced layer.
+
+Enable it per sandbox with `provider_options.network_policy`. Rules are evaluated in order, match
+FQDNs or wildcard domains, and fall through to `default_action`:
+
+```yaml
+sandbox_config:
+  provider_options:
+    network_policy:
+      default_action: deny
+      egress:
+        - action: allow
+          target: pypi.org
+        - action: allow
+          target: "*.pythonhosted.org"
+        - action: allow
+          target: "*.internal.example.com"   # the hosts the harness itself must reach
+```
+
+What happens on create: the server injects the egress sidecar, drops `NET_ADMIN` from the sandbox
+container so only the sidecar can touch the network stack, and routes DNS through the sidecar.
+Things to know:
+
+- **`dns` vs `dns+nft` is a server setting, not yours.** In `dns` mode only name resolution is
+  filtered — a hard-coded IP bypasses it. `dns+nft` also enforces at the IP layer with nftables
+  (resolved IPs of allowed domains are admitted with a TTL), which is what a real default-deny
+  needs. Ask which mode your cluster runs before relying on the policy for anti-cheating.
+- **Allow what the harness needs, then test with one rollout.** Under `default_action: deny`,
+  anything the agent process calls out to — the Gym model server, a package index, an internal
+  artifact host — must be listed, or the first model call fails inside the sandbox with a
+  connection error that looks like an infrastructure outage.
+- A create with `network_policy` is rejected if the server has no egress image configured; that
+  is a cluster setup gap, not a config typo.
+- `OPENSANDBOX_EGRESS_*` variables in the sandbox `env` configure the sidecar (proxy behavior,
+  nameserver exemptions). Without a `network_policy` they are silently dropped, because there is
+  no sidecar to read them.
+
+## Be a good tenant
+
+- **Keep attribution on.** Inside Kubernetes (no Slurm variables, OS user `root`) set
+  `NEMO_GYM_TEAM` / `NEMO_GYM_USER` / `NEMO_GYM_WORKLOAD` on the pod, or nobody can tell whose run
+  is filling the cluster.
+- **Clean up interrupted runs** by the `run` id logged at the first create (`--reap` to delete,
+  omit to audit):
+
+  ```bash
+  python -m nemo_gym.sandbox.providers.opensandbox.cleanup_sandboxes \
+    --domain "$OPENSANDBOX_DOMAIN" --api-key "$OPENSANDBOX_API_KEY" \
+    --run-id <run-id> --user <user> --reap
+  ```
+
+- **No `apt-get` per sandbox.** A tool install per rollout is 10–40 s of network time times
+  thousands of rollouts, plus a failure point. Bake tools into the image; mount the agent binary
+  instead of downloading it.
+- **Stop sandboxes in the background.** Teardown is a provider round-trip you never need to wait
+  for; `ttl_s` reaps anything a background stop misses.
+
+## Failure signatures that are not what they look like
+
+| What you see | What it is | What to do |
+| --- | --- | --- |
+| `No such file or directory` for a file that is in the image (`/testbed`, `/tests/test.sh`, exit 127 on a present binary) during a large create burst | Lazy-loading image flake; the negative lookup got cached. The image is fine. | Retry after ≥60 s; if it fails twice, recreate the sandbox. |
+| Bursts of `502` on `/proxy/.../ping` right after create | Exec daemon not listening yet in a new pod. Self-healing. | Nothing. If it persists for minutes, the cluster is overloaded. |
+| `DELETE` → `404` / "Failed to terminate sandbox" | Already gone (TTL or earlier stop). | Nothing; the provider treats it as success. |
+| Status poll → `404 unknown execution` on a live sandbox | Stale sandbox→IP routing during create/delete storms. | Treat as a lost execution and recreate; do not tear down other sandboxes. |
+| `Server disconnected` / `Connection reset by peer` on a long stream | Load-balancer idle timeout or a server worker restart. | `background_exec: true`; keep `keepalive_expiry_s` below the server's idle timeout. |
+| `SandboxPtyError: PTY session already has an attached client` on every retry | The sandbox's backend died while the proxy still records the old attachment. | Report the death. Environments must catch `SandboxPtyError` in `verify()`; one unhandled 500 on `/run` can abort the whole eval. |
+| Whole sandbox dies with `137` after one heavy command | Group OOM kill (fan-out above). | Cap parallelism, bash timeout; more memory alone rarely fixes it. See [detecting OOM from the client](/infrastructure/sandbox/opensandbox-debugging#detecting-oom-from-the-client). |
+
+Sandboxes run with the default capability set — no `SYS_PTRACE`, no `SYS_ADMIN`. `strace`/`gdb`
+attach and mount namespaces fail for that reason, not because of your config.

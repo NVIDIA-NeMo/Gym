@@ -51,6 +51,17 @@ NeMo Gym is a component of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/main/a
 
 ## 📣 News
 
+* **[09/03/2026]** [Release v0.6.0](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.6.0):
+  Highlights:
+  - Use supported external agent harnesses during RL training while preserving exact token IDs across multi-step runs
+  - Compare fixed and routed model strategies on the same benchmark with Switchyard
+  - Validate and debug rollouts with automatic health checks, traces, and token, tool-call, turn, and latency diagnostics
+  - Evaluate multiple agents and datasets in one run with task-level harness routing
+  - Scale vLLM evaluation jobs across GPUs or Slurm nodes for higher rollout concurrency
+
+<details>
+<summary>Previous News</summary>
+
 * **[08/06/2026]** [Release v0.5.0](https://github.com/NVIDIA-NeMo/Gym/releases#release-v0.5.0):
   Highlights:
   - Seven sandbox providers: Docker, Daytona, ECS Fargate, Enroot, and OpenShell join OpenSandbox and Apptainer; large-scale OpenSandbox reliability significantly improved
@@ -58,9 +69,6 @@ NeMo Gym is a component of [NVIDIA NeMo](https://docs.nvidia.com/nemo/gym/main/a
   - Recompute rewards from stored rollouts without re-running inference with `gym eval reverify`
   - Rollout observability joined end-to-end: model-call capture, agent observations, and a standardized `ng_trajectory` schema
   - 21 new environments across six domains: Agentic, Knowledge and instruction following, Long context, Science and coding, Translation and multilingual, and Reasoning
-
-<details>
-<summary>Previous News</summary>
 
 * **[07/01/2026]** [Release v0.4.0](https://github.com/NVIDIA-NeMo/Gym/releases/tag/v0.4.0): Unified `gym` CLI, BLADE diagnostics, agent skill evaluation, pluggable sandboxes, more agent harnesses (OpenCode, OpenClaw, Pi), hosted inference providers, and new benchmarks.
 
