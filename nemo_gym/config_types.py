@@ -787,7 +787,7 @@ def is_almost_server(server_type_config_dict: Any) -> bool:
 ########################################
 
 AGENT_REF_KEY = "agent_ref"
-ORCHESTRATOR_REF_KEY = "orchestrator_ref"
+PROCESSOR_REF_KEY = "processor_ref"
 
 
 ########################################
