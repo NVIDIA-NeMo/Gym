@@ -54,7 +54,7 @@ with open(args.fpath, "rb") as f, open(f_out_path, "wb") if args.group_to_write_
 
         if args.group_to_write_out and count_dict[args.group_to_write_out]:
             num_wrote_out += 1
-            row = row | counts
+            row = row | count_dict
             f_out.write(orjson.dumps(row) + b"\n")
 
 
