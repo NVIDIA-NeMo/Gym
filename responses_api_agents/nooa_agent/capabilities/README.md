@@ -51,4 +51,4 @@ Run the full localhost topology (Gym CLI, NOOA agent server, OpenAI model proxy,
 bash tests/e2e/nooa_calculate_e2e_test.sh
 ```
 
-The test targets Linux CI and requires the repository-supported Python and `uv` versions. After the coordinated NOOA release, it installs the declared dependency by default. Before that release, set `NOOA_SOURCE_DIR` and optionally `SERVER_VENV` to a compatible checkout/environment.
+The test targets Linux CI with Gym's pinned Python 3.13 and `uv` versions. By default it creates isolated component environments from the committed requirements, including the immutable merged NOOA commit that provides scoped hooks. `NOOA_SOURCE_DIR` and `SERVER_VENV` are development-only overrides for coordinated local testing.

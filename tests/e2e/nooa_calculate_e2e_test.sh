@@ -12,6 +12,7 @@ HEAD_PORT="${HEAD_PORT:-11000}"
 MODEL_PID=""
 GYM_PID=""
 GYM_BIN="${GYM_BIN:-$ROOT_DIR/.venv/bin/gym}"
+PYTHON_BIN="${PYTHON_BIN:-$ROOT_DIR/.venv/bin/python}"
 SERVER_VENV="${SERVER_VENV:-}"
 
 show_log_tail() {
@@ -56,16 +57,17 @@ wait_for_url() {
   done
 }
 
-for command in curl python3 timeout; do
+for command in curl timeout; do
   command -v "$command" >/dev/null || { echo "Required command is not installed: $command" >&2; exit 1; }
 done
 [[ -x "$GYM_BIN" ]] || { echo "Gym executable is not available: $GYM_BIN" >&2; exit 1; }
+[[ -x "$PYTHON_BIN" ]] || { echo "Python executable is not available: $PYTHON_BIN" >&2; exit 1; }
 [[ "$E2E_DIR" == /* && "$E2E_DIR" != "/" ]] || { echo "E2E_DIR must be an absolute non-root path" >&2; exit 2; }
 rm -rf -- "$E2E_DIR"
 mkdir -p "$RESULTS_DIR" "$E2E_DIR/workspace"
 
-# Reuse the repository environment for all child processes and load the
-# coordinated unreleased NOOA API directly from its source checkout.
+# By default Gym creates isolated component environments from their committed
+# requirements. These overrides are only for coordinated local development.
 NOOA_SOURCE_DIR="${NOOA_SOURCE_DIR:-}"
 VENV_ROOT="$E2E_DIR/venvs"
 if [[ -n "$SERVER_VENV" ]]; then
@@ -89,13 +91,13 @@ export RAY_ENABLE_UV_RUN_RUNTIME_ENV=0
 export NOOA_E2E_CAPTURE_DIR="$RESULTS_DIR/model-calls"
 mkdir -p "$NOOA_E2E_CAPTURE_DIR"
 
-python3 "$ROOT_DIR/tests/e2e/deterministic_nooa_responses_server.py" --port "$MODEL_PORT" \
+"$PYTHON_BIN" "$ROOT_DIR/tests/e2e/deterministic_nooa_responses_server.py" --port "$MODEL_PORT" \
   > "$RESULTS_DIR/model.log" 2>&1 &
 MODEL_PID=$!
 wait_for_url "deterministic model" "http://127.0.0.1:${MODEL_PORT}/v1/models" "$MODEL_PID"
 
 cd "$E2E_DIR/workspace"
-python3 -c \
+"$PYTHON_BIN" -c \
   "import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])" \
   "$GYM_BIN" env start \
   --config "$ROOT_DIR/tests/e2e/nooa_calculate_e2e.yaml" \
@@ -122,5 +124,5 @@ timeout --signal=INT --kill-after=30s 180 "$GYM_BIN" eval run \
   "++head_server.host=127.0.0.1" \
   "++head_server.port=$HEAD_PORT"
 
-python3 "$ROOT_DIR/tests/e2e/verify_nooa_calculate_rollout.py" \
+"$PYTHON_BIN" "$ROOT_DIR/tests/e2e/verify_nooa_calculate_rollout.py" \
   --rollouts "$RESULTS_DIR/rollouts.jsonl"

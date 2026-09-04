@@ -83,7 +83,8 @@ gym eval run \
 
 Make the module containing your agent importable in the `nooa_agent` environment. Add its dependency to
 `responses_api_agents/nooa_agent/requirements.txt`, or package the adapter and your agent together when
-using an external component search path.
+using an external component search path. The current pinned NOOA implementation supports Python 3.12–3.13;
+use Gym's pinned Python 3.13 for the agent server environment.
 
 Reference the class and generated async method from a config overlay:
 
