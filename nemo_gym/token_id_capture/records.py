@@ -266,11 +266,28 @@ def response_to_output_items(payload: dict) -> list[dict]:
 
     Responses payloads already carry ``output``.
     Chat payloads carry ``choices[*].message``.
+    Anthropic Messages payloads carry top-level assistant content.
     Wrap each assistant message as a Responses ``message`` item.
     """
     output = payload.get("output")
     if isinstance(output, list) and output:
         return [item for item in output if isinstance(item, dict)]
+    if payload.get("type") == "message" and payload.get("role") == "assistant":
+        reasoning_items: list[dict] = []
+        message_content: list[Any] = []
+        for block in payload.get("content") or []:
+            if not isinstance(block, dict) or block.get("type") not in {"thinking", "redacted_thinking"}:
+                message_content.append(block)
+                continue
+            reasoning_item: dict[str, Any] = {"type": "reasoning", "summary": []}
+            if block.get("type") == "thinking" and isinstance(block.get("thinking"), str):
+                reasoning_item["summary"] = [{"type": "summary_text", "text": block["thinking"]}]
+            elif block.get("type") == "redacted_thinking" and block.get("data") is not None:
+                reasoning_item["encrypted_content"] = block["data"]
+            reasoning_items.append(reasoning_item)
+        if message_content:
+            reasoning_items.append({"type": "message", "role": "assistant", "content": message_content})
+        return reasoning_items
     items: list[dict] = []
     for choice in payload.get("choices") or []:
         message = (choice or {}).get("message") or {}
