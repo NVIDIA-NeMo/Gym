@@ -60,8 +60,10 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     tmux_pane_height: int
     dump_trajectory: bool = False
     debug: bool = False
-    model_context_limit: int = 1_000_000
-    model_output_limit: int | None = None
+    model_context_limit: int
+    model_output_limit: int | None
+
+    llm_request_timeout: int
 
     sandbox_provider: str
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
@@ -155,12 +157,14 @@ class NeMoGymLLM(BaseLLM):
         model_name: str,
         model_context_limit: int,
         model_output_limit: int | None,
+        llm_request_timeout: int,
     ):
         super().__init__()
         self._client = client
         self._model_name = model_name
         self._model_context_limit = model_context_limit
         self._model_output_limit = model_output_limit
+        self._llm_request_timeout = llm_request_timeout
         self.trajectory: list[NeMoGymResponseOutputItem] = []
         self._times_spent = []
         self._last_input_items = []
@@ -196,10 +200,10 @@ class NeMoGymLLM(BaseLLM):
         input_items = self._input_items(message_history, prompt)
         response = None
         start_time = perf_counter()
-        max_attempts = 10  # Hardcode 10 attempts for now
+        max_attempts = 10  # Harbor does 3 by default and Litellm does 3 by default. Hardcode 10 attempts for now.
         for _ in range(max_attempts):
             try:
-                async with asyncio.timeout(delay=60 * 10):  # Hardcoded to match litellm default timeout
+                async with asyncio.timeout(delay=self._llm_request_timeout):
                     response = NeMoGymResponse.model_validate(
                         await self._client.create_response(
                             model=self._model_name,
