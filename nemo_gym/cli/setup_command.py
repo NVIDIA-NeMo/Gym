@@ -129,7 +129,15 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
 
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
 
-    is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
+    resolved_dir_path = dir_path.resolve()
+    gym_source_root = PARENT_DIR.resolve()
+    # Most server directories are ``<server_type>/<name>``, but some built-ins (for example,
+    # conversational_tool_use/simulation) are nested more deeply.  Keep the historical two-level
+    # check for external projects, and also recognize any server contained in this editable Gym
+    # checkout so its requirements can install the local source instead of the PyPI package.
+    is_editable_install = (resolved_dir_path / "../../pyproject.toml").exists() or (
+        (gym_source_root / "pyproject.toml").exists() and resolved_dir_path.is_relative_to(gym_source_root)
+    )
 
     if should_skip_venv_setup:
         env_setup_cmd = f"source {venv_activate_fpath}"
@@ -165,7 +173,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 install_flags = _get_nemo_gym_install_flags()
                 version_spec = _get_nemo_gym_version_spec(is_editable_install)
                 install_cmd = (
-                    f"""(echo 'nemo-gym{version_spec}' && grep -v -F '../..' requirements.txt) | """
+                    f"""(echo 'nemo-gym{version_spec}' && (grep -v -F '../..' requirements.txt || [ $? -eq 1 ])) | """
                     f"""uv pip install {verbose_flag}{uv_pip_python_flag}{install_flags}{override_flag}-r /dev/stdin {" ".join(head_server_deps)}"""
                 )
         else:
