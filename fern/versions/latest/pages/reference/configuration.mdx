@@ -121,7 +121,13 @@ my_resource:                                  # Server ID (your choice — agent
       verified: false                         # Passed reward profiling and training checks (default: false)
       description: "Short description"        # Server description
       value: "What this improves"             # Training value provided
+      allowed_agents: [my_agent]              # Optional: agents that score this task correctly
 ```
+
+**`allowed_agents`** pins the agent harnesses that verify this server's tasks correctly. Omit it (the
+default) when any harness will do. When it is set, [`--agent-type`](/reference/cli-commands#swapping-the-agent)
+refuses to substitute an agent that is not listed. Declare it on every config that writes this server's
+block — server configs are self-contained, so a config written from scratch does not inherit it.
 
 **Domain values:** `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `translation`, `e2e`, `rlhf`, `other` (see `Domain`)
 

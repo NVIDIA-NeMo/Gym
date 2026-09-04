@@ -35,23 +35,14 @@ def test_instruction_joins_text_content():
 
 @pytest.mark.asyncio
 async def test_sandbox_environment_adapts_exec_and_is_dir():
-    sandbox = SimpleNamespace(pty=SimpleNamespace())
-    pty_calls = []
     sandbox_calls = []
-
-    async def pty_exec(command, **kwargs):
-        pty_calls.append((command, kwargs))
-        return SimpleNamespace(stdout="output", stderr=None, return_code=0)
 
     async def sandbox_exec(command, **kwargs):
         sandbox_calls.append((command, kwargs))
-        return SimpleNamespace(stdout="", stderr=None, return_code=0)
+        return SimpleNamespace(stdout="output", stderr=None, return_code=0)
 
-    sandbox.pty.exec = pty_exec
-    sandbox.exec = sandbox_exec
-    environment = NeMoGymSandboxEnvironment(
-        sandbox, logs_dir=SimpleNamespace(), pty_session="seeded-pty", session_id="session-1"
-    )
+    sandbox = SimpleNamespace(exec=sandbox_exec)
+    environment = NeMoGymSandboxEnvironment(sandbox, logs_dir=SimpleNamespace(), session_id="session-1")
 
     result = await environment.exec("pwd", timeout_sec=12, user="root", cwd="/work")
 
@@ -59,27 +50,26 @@ async def test_sandbox_environment_adapts_exec_and_is_dir():
     assert result.stderr == ""
     assert result.return_code == 0
     assert await environment.is_dir("/workspace")
-    assert pty_calls == [("pwd", {"session": "seeded-pty", "timeout_s": 12, "cwd": "/work"})]
-    assert sandbox_calls == [('test -d "/workspace"', {"user": None})]
+    assert sandbox_calls == [
+        ("pwd", {"timeout_s": 12, "cwd": "/work", "user": "root", "env": None}),
+        ('test -d "/workspace"', {"user": None}),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_sandbox_environment_uses_seeded_pty_for_stateful_commands():
-    sandbox = SimpleNamespace(pty=SimpleNamespace())
+async def test_sandbox_environment_uses_sandbox_exec_for_stateful_commands():
     calls = []
 
-    async def pty_exec(command, **kwargs):
+    async def sandbox_exec(command, **kwargs):
         calls.append((command, kwargs))
         return SimpleNamespace(stdout="output", stderr=None, return_code=0)
 
-    sandbox.pty.exec = pty_exec
-    environment = NeMoGymSandboxEnvironment(
-        sandbox, logs_dir=SimpleNamespace(), pty_session="seeded-pty", session_id="session-1"
-    )
+    sandbox = SimpleNamespace(exec=sandbox_exec)
+    environment = NeMoGymSandboxEnvironment(sandbox, logs_dir=SimpleNamespace(), session_id="session-1")
 
     await environment.exec("tmux new-session")
 
-    assert calls == [("tmux new-session", {"session": "seeded-pty", "timeout_s": None, "cwd": None})]
+    assert calls == [("tmux new-session", {"timeout_s": None, "cwd": None, "user": None, "env": None})]
 
 
 def test_agent_implements_required_responses_endpoint():
@@ -132,10 +122,16 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
         message_history=[{"role": "user", "content": "first"}, {"role": "assistant", "content": "answer 1"}],
         previous_response_id="resp_1",
     )
+    third = await llm.call(
+        "third",
+        message_history=[{"role": "user", "content": "compacted summary"}],
+        previous_response_id="resp_2",
+    )
 
     assert first.content == "answer 1"
     assert first.usage.prompt_tokens == 10
     assert second.content == "answer 2"
+    assert third.content == "answer 3"
     assert client.requests == [
         {"model": "policy_model", "input": [{"content": "first", "role": "user", "type": "message"}]},
         {
@@ -146,12 +142,19 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
                 {"content": "second", "role": "user", "type": "message"},
             ],
         },
+        {
+            "model": "policy_model",
+            "input": [
+                {"content": "compacted summary", "role": "user", "type": "message"},
+                {"content": "third", "role": "user", "type": "message"},
+            ],
+        },
     ]
     assert [item.content for item in llm.trajectory if isinstance(item, NeMoGymEasyInputMessage)] == [
         "first",
-        "first",
-        "answer 1",
         "second",
+        "compacted summary",
+        "third",
     ]
 
 
@@ -186,7 +189,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         sandbox_calls.append((command, kwargs))
         return SimpleNamespace(stdout="", stderr="", return_code=0)
 
-    sandbox = SimpleNamespace(exec=sandbox_exec, pty=SimpleNamespace())
+    sandbox = SimpleNamespace(exec=sandbox_exec)
 
     class FakeTerminus:
         session = SimpleNamespace()
@@ -194,6 +197,8 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         def __init__(self, **kwargs):
             self.kwargs = kwargs
             self._session = SimpleNamespace(stop=self.stop)
+            self._times_spent = [1.0, 3.0]
+            self._num_compactions = 2
 
         async def stop(self):
             return None
@@ -205,6 +210,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
             assert instruction == "solve this"
             assert self.kwargs["dump_trajectory"] is dump_trajectory
             await environment.exec("tmux run")
+            self.kwargs["llm"]._times_spent.extend([2.0, 4.0])
             context.n_input_tokens = 4
             context.n_output_tokens = 3
             self.kwargs["llm"].trajectory.append(
@@ -223,28 +229,37 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         n_output_tokens = None
         metadata = None
 
-    async def pty_exec(command, **kwargs):
-        sandbox_calls.append((command, kwargs))
-        return SimpleNamespace(stdout="", stderr="", return_code=0)
-
-    sandbox.pty.exec = pty_exec
     monkeypatch.setattr(app_module, "NeMoGymTerminus2", FakeTerminus)
     monkeypatch.setattr(app_module, "AgentContext", FakeContext)
     monkeypatch.setattr(Terminus2Agent, "base_url_for_run", lambda *_args, **_kwargs: "http://model")
     monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://model")
+    elapsed_times = iter([10.0, 20.0])
+    monkeypatch.setattr(app_module, "perf_counter", lambda: next(elapsed_times))
 
     async def request_json():
         return {"task_id": "task"}
 
     request = SimpleNamespace(json=request_json, session={app_module.SESSION_ID_KEY: "session-1"})
-    response, terminus2_completed = await server._execute(
+    response, metrics = await server._execute(
         request,
         NeMoGymResponseCreateParamsNonStreaming(input="solve this"),
         sandbox,
-        "seeded-pty",
     )
 
-    assert terminus2_completed is True
+    assert metrics == {
+        "terminus2_completed": True,
+        "command_exec_times": [1.0, 3.0],
+        "model_call_times": [2.0, 4.0],
+        "average_command_exec_time": 2.0,
+        "average_model_call_time": 3.0,
+        "total_command_exec_time": 4.0,
+        "total_model_call_time": 6.0,
+        "command_exec_time_pct": 40.0,
+        "model_call_time_pct": 60.0,
+        "terminus2_time_taken": 10.0,
+        "model_calls_gt_10min": 0,
+        "num_compactions": 2,
+    }
     assert response.output[-1].content[0].text == "done"
     assert response.usage.input_tokens == 4
     assert response.usage.output_tokens == 3
@@ -253,7 +268,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
     else:
         set_level.assert_not_called()
     assert sandbox_calls == [
-        ("mkdir -p /logs/agent", {"session": "seeded-pty", "timeout_s": None, "cwd": None}),
-        ("tmux setup", {"session": "seeded-pty", "timeout_s": None, "cwd": None}),
-        ("tmux run", {"session": "seeded-pty", "timeout_s": None, "cwd": None}),
+        ("mkdir -p /logs/agent", {"timeout_s": None, "cwd": None, "user": "root", "env": None}),
+        ("tmux setup", {"timeout_s": None, "cwd": None, "user": None, "env": None}),
+        ("tmux run", {"timeout_s": None, "cwd": None, "user": None, "env": None}),
     ]

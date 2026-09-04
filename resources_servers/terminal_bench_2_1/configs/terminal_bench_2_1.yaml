@@ -2,6 +2,7 @@
 terminal_bench_2_1_resources_server:          # instance name — how agents/CLI refer to this server
   resources_servers:                    # server type: resources_servers | responses_api_agents | responses_api_models
     terminal_bench_2_1:                      # implementation directory under resources_servers/
+      allowed_agents: [opencode_sandboxed_agent, terminus_2_sandboxed_agent]
       entrypoint: app.py                # server entry module
       domain: other                     # task domain; change to the closest supported domain
       verified: false                   # set true once the benchmark has been baselined and reviewed

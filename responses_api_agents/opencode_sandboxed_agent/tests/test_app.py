@@ -107,6 +107,14 @@ class TestOpenCodeSandboxedAgent:
         assert (await created_spec({"resources": {"cpu": 2}, "derive_cpu_env": False})).env == {}
         assert (await created_spec({"resources": {"memory_mib": 8192}})).env == {}
 
+        # Explicit sandbox_config.env is passed through and wins over the derived caps.
+        spec = await created_spec(
+            {"resources": {"cpu": 2}, "env": {"EXECD_API_GRACE_SHUTDOWN": "50ms", "OMP_NUM_THREADS": "4"}}
+        )
+        assert spec.env["EXECD_API_GRACE_SHUTDOWN"] == "50ms"
+        assert spec.env["OMP_NUM_THREADS"] == "4"
+        assert all(spec.env[name] == "2" for name in CPU_CAP_ENV_VARS if name != "OMP_NUM_THREADS")
+
     @fixture
     def opencode_export_test_data(self) -> Dict[str, Any]:
         test_data_path = Path(__file__).parent / "opencode_export_test_data.json"
@@ -189,14 +197,15 @@ class TestOpenCodeSandboxedAgent:
         sandbox_mock = MagicMock()
         sandbox_mock.exec = AsyncMock(
             side_effect=[
-                SimpleNamespace(stdout="OpenCode run finished", stderr="", return_code=0, error_type=None),
+                SimpleNamespace(
+                    stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
+                ),
+                SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
-                SimpleNamespace(stdout="my dir"),
             ]
         )
         sandbox_mock.download = AsyncMock()
-        pty_mock = AsyncMock()
-        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": (sandbox_mock, pty_mock)})
+        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
         monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
 
         monkeypatch.setattr(
@@ -458,6 +467,9 @@ class TestOpenCodeSandboxedAgent:
         sandbox._handle = SandboxHandle(sandbox_id="connected-sandbox", provider_name="opensandbox", raw=None)
         sandbox.exec = AsyncMock(
             side_effect=[
+                SimpleNamespace(
+                    stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
+                ),
                 SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
@@ -484,11 +496,7 @@ class TestOpenCodeSandboxedAgent:
 
         sandbox.download = AsyncMock(side_effect=download)
         sandbox.stop = AsyncMock(side_effect=RuntimeError("resource server already stopped the sandbox"))
-        sandbox.pty = AsyncMock()
-        sandbox.pty.exec.return_value = SimpleNamespace(
-            stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
-        )
-        server._start_sandbox = AsyncMock(return_value=(sandbox, AsyncMock()))
+        server._start_sandbox = AsyncMock(return_value=sandbox)
         monkeypatch.setattr(
             "responses_api_agents.opencode_sandboxed_agent.app.__file__",
             str(tmp_path / "app.py"),
@@ -551,15 +559,15 @@ class TestOpenCodeSandboxedAgent:
         assert sandbox_records[0].wall_time_s is None
         assert "sandbox_lifecycle_timing_unavailable" in {gap.code for gap in result.ng_agent_observations.gaps}
         assert "sandbox_cleanup_failed" not in {gap.code for gap in result.ng_agent_observations.gaps}
-        session_list_env = sandbox.exec.await_args_list[0].kwargs["env"]
-        export_env = sandbox.exec.await_args_list[1].kwargs["env"]
+        session_list_env = sandbox.exec.await_args_list[1].kwargs["env"]
+        export_env = sandbox.exec.await_args_list[2].kwargs["env"]
         remote_data_home = session_list_env["XDG_DATA_HOME"]
         assert remote_data_home.startswith("/tmp/nemo-gym-opencode-")
-        assert f"XDG_DATA_HOME={remote_data_home}" in sandbox.pty.exec.await_args.kwargs["command"]
+        assert f"XDG_DATA_HOME={remote_data_home}" in sandbox.exec.await_args_list[0].kwargs["command"]
         assert export_env["XDG_DATA_HOME"] == remote_data_home
         assert (
             "opencode export session-id > /tmp/opencode_export.json"
-            in sandbox.exec.await_args_list[1].kwargs["command"]
+            in sandbox.exec.await_args_list[2].kwargs["command"]
         )
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert server._sandbox_id_to_run_result == {}

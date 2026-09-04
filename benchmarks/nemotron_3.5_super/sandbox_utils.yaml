@@ -1,48 +1,48 @@
 config_paths:
 - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
-opencode_sandboxed_agent_swebench_verified:
+swebench_verified_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
       remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
       remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
 
-opencode_sandboxed_agent_swebench_multilingual:
+swebench_multilingual_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
       remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
       remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
 
-opencode_sandboxed_agent_deepswe:
+deepswe_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
       remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
       remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
 
-opencode_sandboxed_agent_swebench_pro:
+swebench_pro_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
       remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install_cached_opencode.sh
       remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
       remote_opencode_musl_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64-musl-v1.17.11
 
-opencode_sandboxed_agent_terminal_bench_2_1:
+terminal_bench_2_1_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
       remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
       remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
-opencode_terminal_bench_2_1_resources_server:
+terminal_bench_2_1_opencode_resources_server:
   resources_servers:
     terminal_bench_2_1:
       sandbox_config:
         metadata:
           nemo.nvidia.com/resources: custom
 
-terminus_2_sandboxed_agent_terminal_bench_2_1:
+terminal_bench_2_1_terminus_2_sandboxed_agent:
   responses_api_agents:
     terminus_2_sandboxed_agent:
       remote_tmux_binary_path: /mnt/s3-data/data/bxyu/tmux/tmux-3.7c-linux-x86_64
-terminus_2_sandboxed_terminal_bench_2_1_resources_server:
+terminal_bench_2_1_terminus_2_sandboxed_resources_server:
   resources_servers:
     terminal_bench_2_1:
       sandbox_config:

@@ -53,6 +53,20 @@ DIGEST_VERSION = 1
 _DIGEST_DOMAIN = b"nemo-gym-tokens"
 _EMPTY_DIGEST = hashlib.sha256(_DIGEST_DOMAIN).hexdigest()
 
+# Capture failure reasons shared by the built-in and external staging paths.
+# These strings are a wire contract: the training framework switches on them.
+# Never repurpose one.
+
+# Parent resolution could not admit the call. Written by ``resolve_parent``.
+UNRESOLVED_PARENT_REASON = "unresolved_parent"
+# The call was admitted but finished without worker commit coordinates.
+# Written by the capture middleware.
+UNCOMMITTED_CALL_REASON = "request_finished_without_staged_coordinates"
+# A committed ledger row lacks the served response id that terminal attribution joins on.
+LEDGER_ROW_MISSING_RESPONSE_ID_REASON = "ledger_row_missing_response_id"
+# A committed ledger row lacks the chain or cumulative digest that verification anchors on.
+LEDGER_ROW_MISSING_CHAIN_HASH_REASON = "ledger_row_missing_chain_hash"
+
 
 class ParentResolutionStatus(StrEnum):
     """Describe whether a model call has a proven captured predecessor."""

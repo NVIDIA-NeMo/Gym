@@ -5861,3 +5861,39 @@ class TestPrefixSupplyRejectsResponsesNative:
                 supply_prefix_token_ids=True,
                 is_responses_native=True,
             )
+
+
+class TestPreserveEnvelopeIdFollowsCaptureContext:
+    """The served envelope id is kept per request, not per server."""
+
+    def test_uncaptured_request_on_external_staging_server_mints_resp_id(self) -> None:
+        model = TestPrefixSupplyReachesTokenize._model()
+        model._external_capture_enabled = True
+
+        assert model._preserve_envelope_id() is False
+
+        captured = CaptureContext(
+            rollout_id="env-0",
+            model_call_id="call-a",
+            token_sink=None,
+            lineage_store=_TEST_LINEAGE,
+            external_staging=True,
+        )
+        token = set_token_sink(captured)
+        try:
+            assert model._preserve_envelope_id() is True
+        finally:
+            reset_token_sink(token)
+
+        local = CaptureContext(
+            rollout_id="env-0",
+            model_call_id="call-b",
+            token_sink=None,
+            lineage_store=_TEST_LINEAGE,
+            external_staging=False,
+        )
+        token = set_token_sink(local)
+        try:
+            assert model._preserve_envelope_id() is False
+        finally:
+            reset_token_sink(token)

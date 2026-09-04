@@ -77,12 +77,11 @@ from nemo_gym.token_id_capture import (
     stamp_lineage,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
+from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, conversation_digest
 from nemo_gym.token_id_capture.lineage import (
     FileLineageStore,
     LineageIndex,
     RolloutLineage,
-    assistant_fingerprint,
-    conversation_digest,
 )
 from nemo_gym.token_id_capture.protocols import TokenSource
 from nemo_gym.token_id_capture.store import make_token_store
@@ -448,6 +447,39 @@ def test_mask_fraction_limit_defaults_off_and_parses():
     assert default.token_id_capture.max_mask_fraction is None
     assert configured.token_id_capture.max_mask_fraction == 0.5
     assert configured.token_id_capture.mask_fraction_min_samples == 50
+
+
+def test_removed_gate_config_fails_loudly(tmp_path):
+    """Configs that still set the deleted ``gate`` block must not be silently ignored."""
+    with pytest.raises(ValueError, match="gate"):
+        TokenIdCaptureConfig.model_validate(
+            _block(gate={"enabled": True, "state_store_path": str(tmp_path / "gate.json")})
+        )
+
+
+def test_external_staging_requires_framework_owned_rebuild_and_active_capture():
+    with pytest.raises(ValueError, match="rebuild_response=false"):
+        TokenIdCaptureConfig.model_validate({"token_id_capture": {"enabled": True, "external_staging": True}})
+    with pytest.raises(ValueError, match="requires token_id_capture.enabled"):
+        TokenIdCaptureConfig.model_validate(
+            {
+                "token_id_capture": {
+                    "enabled": False,
+                    "rebuild_response": False,
+                    "external_staging": True,
+                }
+            }
+        )
+    config = TokenIdCaptureConfig.model_validate(
+        {
+            "token_id_capture": {
+                "enabled": True,
+                "rebuild_response": False,
+                "external_staging": True,
+            }
+        }
+    )
+    assert config.token_id_capture.external_staging is True
 
 
 def test_agent_capture_selection_uses_static_agent_config_or_all_agents():
