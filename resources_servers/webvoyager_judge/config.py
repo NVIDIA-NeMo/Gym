@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Configuration for the WebVoyager LLM-as-a-judge server."""
 
-from typing import ClassVar, Literal
+from typing import ClassVar
 
 from pydantic import Field
 
@@ -18,6 +18,5 @@ class WebVoyagerJudgeConfig(BaseResourcesServerConfig):
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     max_screenshots: int = Field(default=3, ge=1, le=200)
     require_screenshot: bool = True
-    verifier_version: str = "webvoyager-llm-judge-v1"
-    judge_profile: Literal["legacy", "native_v3"] = "legacy"
+    verifier_version: str = "webvoyager-gemini-v1"
     judge_call_timeout_secs: float = Field(default=270.0, gt=0.0)

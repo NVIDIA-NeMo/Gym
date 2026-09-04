@@ -25,7 +25,7 @@ from responses_api_agents.web_agent.app import (
     WebAgentRunRequest,
     _incomplete_model_reason,
     _merge_usage,
-    _native_parse_retry_messages,
+    _nano_omni_parse_retry_messages,
     _parse_response_action,
     _redact_old_images,
 )
@@ -121,7 +121,7 @@ def test_native_profile_reads_structured_function_calls_not_message_text():
 
     action = _parse_response_action(
         NeMoGymResponse.model_validate(payload),
-        WebActionProfile.NATIVE_TOOLCALL,
+        WebActionProfile.COMPUTER_USE,
     )
 
     assert action.name == "tabs_focus"
@@ -131,22 +131,22 @@ def test_native_profile_reads_structured_function_calls_not_message_text():
 def test_native_retry_feedback_contains_error_and_no_image() -> None:
     response = NeMoGymResponse.model_validate(_native_model_response("click", '{"x":0.2,"y":0.3}'))
 
-    messages = _native_parse_retry_messages(response, ValueError("unsupported native browser tool: 'click'"))
+    messages = _nano_omni_parse_retry_messages(response, ValueError("unsupported Nano Omni browser tool: 'click'"))
 
     assert [message.role for message in messages] == ["assistant", "user"]
-    assert "unsupported native browser tool" in messages[1].content
+    assert "unsupported Nano Omni browser tool" in messages[1].content
     assert "Use `left_click`, never `click`" in messages[1].content
     assert "arguments.actions" in messages[1].content
     assert "input_image" not in json.dumps([message.model_dump() for message in messages])
 
 
 @pytest.mark.asyncio
-async def test_native_parse_retry_injects_feedback_and_retry_temperature(caplog) -> None:
+async def test_nano_omni_parse_retry_injects_feedback_and_retry_temperature(caplog) -> None:
     agent = _agent(
         parse_retries=1,
         judge=True,
-        native_parse_retry_feedback=True,
-        native_parse_retry_temperature=0.2,
+        nano_omni_parse_retry_feedback=True,
+        nano_omni_parse_retry_temperature=0.2,
         model_retry_delay_secs=0,
     )
     calls = _wire(
@@ -186,9 +186,9 @@ async def test_native_parse_retry_injects_feedback_and_retry_temperature(caplog)
             task_id="Allrecipes--0",
             intent="Find a recipe",
             start_urls=["https://example.test"],
-            runtime_profile="native_visual",
+            runtime_profile="visual_browser",
             observation_profile="screenshot",
-            action_profile="native_toolcall",
+            action_profile="computer_use",
         ),
     )
 
@@ -255,9 +255,9 @@ async def test_native_nonterminal_action_that_terminates_retains_final_observati
             task_id="Allrecipes--0",
             intent="Find a recipe",
             start_urls=["https://example.test"],
-            runtime_profile="native_visual",
+            runtime_profile="visual_browser",
             observation_profile="screenshot",
-            action_profile="native_toolcall",
+            action_profile="computer_use",
         ),
     )
 
@@ -304,9 +304,9 @@ async def test_native_length_response_ends_as_valid_truncation_without_parse_ret
             task_id="Huggingface--18",
             intent="Find documentation",
             start_urls=["https://huggingface.co"],
-            runtime_profile="native_visual",
+            runtime_profile="visual_browser",
             observation_profile="screenshot",
-            action_profile="native_toolcall",
+            action_profile="computer_use",
         ),
     )
 
@@ -485,7 +485,7 @@ async def test_arena_family_rollout_uses_colocated_evaluator_and_closes_session(
         agent,
         {
             "/seed_session": [_seed()],
-            "/v1/responses": [_model_response("Thought: done\nAction: send_msg_to_user('answer')")],
+            "/v1/responses": [_native_model_response("terminate", '{"status":"success","answer":"answer"}')],
             "/step": [
                 {
                     "operation_id": "step-0",
@@ -532,7 +532,8 @@ async def test_arena_family_rollout_uses_colocated_evaluator_and_closes_session(
     assert result.artifact_session_id == "session-a"
     assert result.recording_artifacts[0].mime_type == "video/webm"
     step_body = next(body for _server, path, body in calls if path == "/step")
-    assert step_body["action"]["script"] == "send_msg_to_user('answer')"
+    assert step_body["action"]["name"] == "terminate"
+    assert step_body["action"]["answer"] == "answer"
     assert [path for _server, path, _body in calls][-2:] == ["/evaluate", "/close"]
     assert calls[-1][1] == "/close"
 
@@ -546,7 +547,7 @@ async def test_action_parse_failure_is_retried_without_stepping_browser():
             "/seed_session": [_seed()],
             "/v1/responses": [
                 _model_response("I forgot the action"),
-                _model_response("Thought: retry\nAction: send_msg_to_user('answer')"),
+                _native_model_response("terminate", '{"status":"success","answer":"answer"}'),
             ],
             "/step": [
                 {
@@ -583,7 +584,7 @@ async def test_webvoyager_routes_final_evidence_to_external_judge(caplog):
         agent,
         {
             "/seed_session": [_seed("Allrecipes--0")],
-            "/v1/responses": [_model_response("Thought: done\nAction: ANSWER; [42]")],
+            "/v1/responses": [_native_model_response("terminate", '{"status":"success","answer":"42"}')],
             "/step": [
                 {
                     "operation_id": "step-0",
@@ -619,7 +620,7 @@ async def test_webvoyager_routes_final_evidence_to_external_judge(caplog):
             task_id="Allrecipes--0",
             intent="Find the answer",
             start_urls=["https://example.test"],
-            action_profile="webvoyager_legacy",
+            action_profile=WebActionProfile.COMPUTER_USE,
         ),
     )
 
@@ -630,7 +631,9 @@ async def test_webvoyager_routes_final_evidence_to_external_judge(caplog):
     judge_call = next(call for call in calls if call[1] == "/verify")
     assert judge_call[0] == "judge"
     assert judge_call[2]["final_answer"] == "42"
-    assert len(judge_call[2]["screenshots"]) == 2
+    # Terminate reuses the last observation and does not manufacture a
+    # duplicate terminal screenshot.
+    assert len(judge_call[2]["screenshots"]) == 1
     judge_response = judge_call[2]["response"]
     assert judge_response["output"] == []
     assert "webvoyager_judge_evidence" not in judge_response
@@ -639,7 +642,7 @@ async def test_webvoyager_routes_final_evidence_to_external_judge(caplog):
     persisted_evidence = persisted_response["webvoyager_judge_evidence"]
     assert persisted_evidence["final_answer"] == "42"
     assert "screenshots" not in persisted_evidence
-    assert len(persisted_evidence["screenshot_sequence"]) == 2
+    assert len(persisted_evidence["screenshot_sequence"]) == 1
     paths = [path for _server, path, _body in calls]
     assert paths.index("/evaluate") < paths.index("/close") < paths.index("/verify")
     messages = "\n".join(record.getMessage() for record in caplog.records)
@@ -670,7 +673,7 @@ async def test_webvoyager_preserves_standard_judge_failure_after_browser_is_clos
         if url_path == "/seed_session":
             return _FakeHttpResponse(_seed("ArXiv--0"))
         if url_path == "/v1/responses":
-            return _FakeHttpResponse(_model_response("Thought: done\nAction: ANSWER; [42]"))
+            return _FakeHttpResponse(_native_model_response("terminate", '{"status":"success","answer":"42"}'))
         if url_path == "/step":
             return _FakeHttpResponse(
                 {
@@ -704,7 +707,7 @@ async def test_webvoyager_preserves_standard_judge_failure_after_browser_is_clos
             task_id="ArXiv--0",
             intent="Find the answer",
             start_urls=["https://example.test"],
-            action_profile="webvoyager_legacy",
+            action_profile=WebActionProfile.COMPUTER_USE,
         ),
     )
 
@@ -738,7 +741,9 @@ async def test_browser_request_timeout_is_retryable_and_cleanup_is_bounded():
         if url_path == "/seed_session":
             return _FakeHttpResponse(_seed())
         if url_path == "/v1/responses":
-            return _FakeHttpResponse(_model_response("Thought: click\nAction: click('a1')"))
+            return _FakeHttpResponse(
+                _native_model_response("computer", '{"actions":[{"action":"wait","duration":0}]}')
+            )
         if url_path == "/step":
             await asyncio.sleep(1.0)
         if url_path == "/close":
@@ -850,7 +855,7 @@ async def test_seed_session_uses_independent_long_poll_timeout():
             await asyncio.sleep(0.05)
             return _FakeHttpResponse(_seed())
         if url_path == "/v1/responses":
-            return _FakeHttpResponse(_model_response("Thought: done\nAction: send_msg_to_user('done')"))
+            return _FakeHttpResponse(_native_model_response("terminate", '{"status":"success","answer":"done"}'))
         if url_path == "/step":
             return _FakeHttpResponse(
                 {
@@ -905,7 +910,7 @@ async def test_seed_session_retries_transient_server_failure():
                 raise error
             return _FakeHttpResponse(_seed())
         if url_path == "/v1/responses":
-            return _FakeHttpResponse(_model_response("Thought: done\nAction: send_msg_to_user('done')"))
+            return _FakeHttpResponse(_native_model_response("terminate", '{"status":"success","answer":"done"}'))
         if url_path == "/step":
             return _FakeHttpResponse(
                 {
@@ -1035,7 +1040,7 @@ async def test_run_classifies_missing_evaluator_as_terminal_configuration_failur
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "native_status,action_error",
+    "runtime_status,action_error",
     [
         (
             CAPTCHA_BUDGET_EXHAUSTED_STATUS,
@@ -1045,7 +1050,7 @@ async def test_run_classifies_missing_evaluator_as_terminal_configuration_failur
 )
 async def test_environment_access_failure_is_masked_instead_of_judged(
     caplog,
-    native_status,
+    runtime_status,
     action_error,
 ):
     """A site the browser cannot reach makes the policy's work unmeasurable."""
@@ -1055,7 +1060,12 @@ async def test_environment_access_failure_is_masked_instead_of_judged(
         agent,
         {
             "/seed_session": [_seed("Allrecipes--0")],
-            "/v1/responses": [_model_response("Thought: keep going\nAction: Click [7]")],
+            "/v1/responses": [
+                _native_model_response(
+                    "computer",
+                    '{"actions":[{"action":"left_click","coordinate":[0.5,0.5]}]}',
+                )
+            ],
             "/step": [
                 {
                     "operation_id": "step-0",
@@ -1064,7 +1074,7 @@ async def test_environment_access_failure_is_masked_instead_of_judged(
                     "terminated": True,
                     "info": {
                         "action_error": action_error,
-                        "native_status": native_status,
+                        "runtime_status": runtime_status,
                     },
                 }
             ],
@@ -1081,7 +1091,7 @@ async def test_environment_access_failure_is_masked_instead_of_judged(
             task_id="Allrecipes--0",
             intent="Find the answer",
             start_urls=["https://example.test"],
-            action_profile="webvoyager_legacy",
+            action_profile=WebActionProfile.COMPUTER_USE,
         ),
     )
 
@@ -1089,7 +1099,7 @@ async def test_environment_access_failure_is_masked_instead_of_judged(
         result = await agent.run(request, body)
 
     assert result.mask_sample is True
-    assert result.failure_kind == native_status
+    assert result.failure_kind == runtime_status
     assert result.reward == 0.0
     assert result.task_success is False
     # Judging a forced stop would score a site-access failure as a policy failure.
@@ -1116,7 +1126,7 @@ async def test_browser_target_closed_after_action_is_judged_as_policy_failure(ca
                     "terminated": True,
                     "info": {
                         "action_error": "BrowserTargetClosedDuringCaptcha: browser target closed",
-                        "native_status": BROWSER_TARGET_CLOSED_STATUS,
+                        "runtime_status": BROWSER_TARGET_CLOSED_STATUS,
                     },
                 }
             ],
@@ -1141,9 +1151,9 @@ async def test_browser_target_closed_after_action_is_judged_as_policy_failure(ca
             task_id="ESPN--10",
             intent="Find the latest championship recap",
             start_urls=["https://www.espn.com/"],
-            runtime_profile="native_visual",
+            runtime_profile="visual_browser",
             observation_profile="screenshot",
-            action_profile="native_toolcall",
+            action_profile="computer_use",
         ),
     )
 

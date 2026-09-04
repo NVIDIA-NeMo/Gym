@@ -4,7 +4,6 @@
 import pytest
 
 from nemo_gym.web.models import (
-    WebActionProfile,
     WebBenchmark,
     WebImage,
     WebObservation,
@@ -14,7 +13,6 @@ from nemo_gym.web.models import (
 from responses_api_agents.web_agent.render import (
     TASK_INPUT_IMAGE_REDACTION_NOTICE,
     compact_som_text,
-    parse_error_message,
     render_observation,
 )
 
@@ -29,14 +27,14 @@ def _block_text(block):
     return block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "")
 
 
-def test_native_render_is_screenshot_first_and_has_no_browsergym_grammar():
+def test_visual_browser_render_is_screenshot_first_and_has_no_text_action_grammar():
     task = WebTask(
         benchmark="webvoyager",
         task_id="Allrecipes--0",
         intent="Find a recipe",
-        runtime_profile="native_visual",
+        runtime_profile="visual_browser",
         observation_profile="screenshot",
-        action_profile="native_toolcall",
+        action_profile="computer_use",
     )
     observation = WebObservation(
         goal=[{"type": "text", "text": "Find a recipe"}],
@@ -50,11 +48,10 @@ def test_native_render_is_screenshot_first_and_has_no_browsergym_grammar():
     text = _block_text(message.content[1])
     assert "# Task Instruction:" in text
     assert "Step 1" in text
-    assert "BrowserGym" not in text
     assert "Action:" not in text
 
 
-def test_a11y_profile_omits_page_screenshot():
+def test_visual_runtime_keeps_screenshot_when_optional_a11y_text_is_present():
     task = WebTask(
         benchmark=WebBenchmark.WEBARENA,
         task_id="0",
@@ -68,8 +65,8 @@ def test_a11y_profile_omits_page_screenshot():
 
     message = render_observation(observation, task, step_index=0)
 
-    assert _block_types(message) == ["input_text"]
-    assert "[a1] button" in _block_text(message.content[0])
+    assert _block_types(message) == ["input_image", "input_text"]
+    assert "[a1] button" in _block_text(message.content[1])
 
 
 def test_som_profile_includes_page_and_goal_images():
@@ -88,10 +85,16 @@ def test_som_profile_includes_page_and_goal_images():
 
     message = render_observation(observation, task, step_index=0)
 
-    assert _block_types(message) == ["input_text", "input_image", "input_image"]
+    assert _block_types(message) == [
+        "input_image",
+        "input_text",
+        "input_text",
+        "input_image",
+        "input_text",
+    ]
 
 
-def test_native_visual_reference_image_is_loaded_from_explicit_root(tmp_path):
+def test_visual_browser_reference_image_is_loaded_from_explicit_root(tmp_path):
     image = tmp_path / "images" / "reference.png"
     image.parent.mkdir()
     image.write_bytes(b"png-payload")
@@ -99,9 +102,9 @@ def test_native_visual_reference_image_is_loaded_from_explicit_root(tmp_path):
         benchmark=WebBenchmark.VISUALWEBARENA,
         task_id="0",
         input_images=["images/reference.png"],
-        runtime_profile="native_visual",
+        runtime_profile="visual_browser",
         observation_profile="screenshot",
-        action_profile="native_toolcall",
+        action_profile="computer_use",
     )
 
     message = render_observation(
@@ -126,15 +129,15 @@ def test_native_visual_reference_image_is_loaded_from_explicit_root(tmp_path):
     assert TASK_INPUT_IMAGE_REDACTION_NOTICE in later.content[0]["text"]
 
 
-def test_native_visual_reference_image_cannot_escape_explicit_root(tmp_path):
+def test_visual_browser_reference_image_cannot_escape_explicit_root(tmp_path):
     outside = tmp_path.parent / "outside.png"
     outside.write_bytes(b"not-readable-through-task-metadata")
     task = WebTask(
         benchmark=WebBenchmark.VISUALWEBARENA,
         task_id="0",
         input_images=["../outside.png"],
-        runtime_profile="native_visual",
-        action_profile="native_toolcall",
+        runtime_profile="visual_browser",
+        action_profile="computer_use",
     )
 
     with pytest.raises(ValueError, match="outside task_image_root"):
@@ -169,7 +172,7 @@ def test_som_only_text_keeps_only_labelled_interactive_elements():
         step_index=0,
         visual_observation_text="som_only",
     )
-    text = _block_text(message.content[0])
+    text = _block_text(message.content[1])
 
     assert "[10] link 'Search', expanded=False" in text
     assert "[12] textbox 'Query'" in text
@@ -185,50 +188,3 @@ def test_compact_som_text_has_a_hard_character_budget():
 
     assert len(compact) < 550
     assert compact.endswith("[Additional labelled elements omitted.]")
-
-
-def test_browsergym_guidance_uses_nemotron_compatible_code_block():
-    task = WebTask(benchmark=WebBenchmark.VISUALWEBARENA, task_id="234")
-    message = render_observation(
-        WebObservation(),
-        task,
-        step_index=0,
-        action_prompt_profile="code_block",
-    )
-    text = _block_text(message.content[0])
-
-    assert "## Action:" in text
-    assert "## Code:" in text
-    assert "```python\nclick('bid')\n```" in text
-    assert "[297] link 'pics'" in text
-    assert "click('297')" in text
-    assert "never pass visible text" in text
-
-    retry = parse_error_message(
-        ValueError("bad action"),
-        action_prompt_profile="code_block",
-    )
-    assert "executable BrowserGym call" in retry.content
-    assert "```python\nclick('bid')\n```" in retry.content
-
-
-def test_browsergym_guidance_defaults_to_standard_action_shape():
-    task = WebTask(benchmark=WebBenchmark.VISUALWEBARENA, task_id="234")
-    message = render_observation(WebObservation(), task, step_index=0)
-    text = _block_text(message.content[0])
-
-    assert "Thought: concise reasoning\nAction: click('bid')" in text
-    assert "## Code:" not in text
-    assert "corrected Thought and Action only" in parse_error_message(ValueError("bad action")).content
-
-
-def test_webvoyager_parse_error_repeats_legacy_grammar_and_stop_boundary():
-    content = parse_error_message(
-        ValueError("bad action"),
-        action_profile=WebActionProfile.WEBVOYAGER_LEGACY,
-    ).content
-
-    assert "Action: Click [bid]" in content
-    assert "ANSWER; [final answer]" in content
-    assert "Type [38]; [SimCSE]" in content
-    assert "stop after its Action line" in content

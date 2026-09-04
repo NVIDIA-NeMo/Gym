@@ -7,32 +7,36 @@ web_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
-        name: browsergym_web
+        name: visual_browser
       environment_server: null
       model_server:
         type: responses_api_models
         name: policy_model
       max_steps: 15
+      policy_protocol: nano_omni_toolcall
       max_parse_retries: 2
       # Shared agent defaults preserve strict parsing and do not alter
       # trajectories. Individual benchmark profiles opt into recovery.
-      native_action_recovery: strict
-      native_tool_alias_recovery: strict
-      native_max_computer_actions: 20
-      native_parse_retry_feedback: false
-      native_parse_retry_temperature: null
-      native_parse_retry_delay_secs: 0.0
+      nano_omni_action_recovery: strict
+      nano_omni_tool_alias_recovery: strict
+      nano_omni_max_computer_actions: 20
+      nano_omni_parse_retry_feedback: false
+      nano_omni_parse_retry_temperature: null
+      nano_omni_parse_retry_delay_secs: 0.0
       repeated_action_warning_threshold: 0
       repeated_action_window: 5
       max_consecutive_execution_failures: 3
       model_turn_max_retries: 0
       model_retry_delay_secs: 1.0
       max_image_history: 3
+      qwen_fold_size: 10
+      qwen_history_n: 100
+      qwen_coordinate_type: relative
+      qwen_thinking: true
       judge_max_screenshots: 3
       visual_observation_text: full_axtree
-      action_prompt_profile: standard
       redact_old_visual_observations: false
-      # Native VisualWebArena profiles override this with the same read-only
+      # VisualWebArena profiles override this with the same read-only
       # task-image directory mounted into the resource server. Local image
       # references are confined below this root before being sent to a model.
       task_image_root: null

@@ -10,12 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from nemo_gym.web.models import (
-    WebActionProfile,
     WebBenchmark,
     WebObservationProfile,
     WebTask,
 )
-from nemo_gym.web.native_visual import adapt_native_webvoyager_record as _adapt_native_webvoyager_record
 
 
 def _start_urls(value: Any) -> list[str]:
@@ -29,11 +27,16 @@ def _start_urls(value: Any) -> list[str]:
 
 
 def gym_row(task: WebTask) -> dict[str, Any]:
-    """Wrap a normalized task in the standard request shape consumed by WebAgent."""
+    """Wrap a model-independent task in the request shape consumed by WebAgent.
+
+    The policy adapter owns instructions, tools, image folding, and output
+    parsing. Keeping those fields out of prepared data lets the exact same
+    immutable 552-task population run with Nano Omni, Qwen, or another policy.
+    """
 
     return {
         "responses_create_params": {
-            "input": [{"role": "user", "content": task.intent}],
+            "input": [],
             "metadata": {
                 "benchmark": task.benchmark.value,
                 "task_id": task.task_id,
@@ -44,24 +47,25 @@ def gym_row(task: WebTask) -> dict[str, Any]:
 
 
 def adapt_webvoyager_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    source_id = record.get("id", record.get("task_id"))
+    if source_id is None:
+        raise ValueError("WebVoyager record requires id or task_id")
+    site_value = record.get("web_name") or record.get("sites") or []
+    sites = [site_value] if isinstance(site_value, str) else [str(site) for site in site_value if site]
+    image_value = record.get("image") or record.get("images") or []
+    input_images = [image_value] if isinstance(image_value, str) else [str(image) for image in image_value if image]
     task = WebTask(
         benchmark=WebBenchmark.WEBVOYAGER,
-        task_id=record.get("id"),
+        task_id=source_id,
         intent=str(record.get("ques") or record.get("intent") or ""),
         start_urls=_start_urls(record.get("web") or record.get("start_url")),
-        sites=[str(record.get("web_name"))] if record.get("web_name") else [],
-        observation_profile=WebObservationProfile.SOM,
-        action_profile=WebActionProfile.WEBVOYAGER_LEGACY,
-        verifier_profile="webvoyager_llm_judge",
+        sites=sites,
+        input_images=input_images,
+        observation_profile=WebObservationProfile.SCREENSHOT,
+        verifier_profile="webvoyager_gemini",
         original_metadata=dict(record),
     )
     return gym_row(task)
-
-
-def adapt_native_webvoyager_record(record: Mapping[str, Any]) -> dict[str, Any]:
-    """Adapt the maintained 552-task population to the native Nano Omni route."""
-
-    return _adapt_native_webvoyager_record(record)
 
 
 def load_json_records(path: str | Path) -> list[dict[str, Any]]:

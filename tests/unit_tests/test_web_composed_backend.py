@@ -99,7 +99,7 @@ def _task() -> WebTask:
     return WebTask(
         benchmark=WebBenchmark.WEBARENA,
         task_id="0",
-        runtime_profile=WebRuntimeProfile.NATIVE_VISUAL,
+        runtime_profile=WebRuntimeProfile.VISUAL_BROWSER,
     )
 
 

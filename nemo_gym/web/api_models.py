@@ -3,7 +3,7 @@
 """Backend-neutral HTTP models for stateful web resource servers.
 
 These models live in the dependency-light web protocol package so agents do
-not import a concrete BrowserGym, Selenium, or native-computer-use backend.
+not import a concrete browser or computer-control backend.
 Resource servers may re-export them for compatibility, but all backends must
 preserve this wire contract.
 """
@@ -78,6 +78,9 @@ class WebSessionStatusResponse(BaseModel):
     created_at: float
     last_access_at: float
     site_lease_id: str
+    browser_lease_id: Optional[str] = None
+    browser_provider: Optional[str] = None
+    browser_transport: Optional[str] = None
 
 
 class WebVerifyRequest(BaseVerifyRequest):

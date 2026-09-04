@@ -49,3 +49,26 @@ def test_web_resources_config_rejects_duplicate_benchmarks() -> None:
 
 def test_web_resources_config_accepts_explicit_single_worker() -> None:
     assert _config(num_workers=1).num_workers == 1
+
+
+def test_web_resources_config_requires_one_browser_provider() -> None:
+    with pytest.raises(ValidationError, match="select exactly one provider"):
+        _config(browser_session_provider={})
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {
+            "browser_lease_ttl_seconds": 60,
+            "browser_heartbeat_interval_seconds": 60,
+        },
+        {
+            "browser_lease_ttl_seconds": 60,
+            "browser_heartbeat_timeout_seconds": 60,
+        },
+    ],
+)
+def test_web_resources_config_heartbeat_must_fit_inside_provider_ttl(updates) -> None:
+    with pytest.raises(ValidationError, match="shorter than the provider lease TTL"):
+        _config(**updates)

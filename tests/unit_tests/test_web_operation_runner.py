@@ -46,3 +46,27 @@ async def test_thread_affine_runner_runs_finalizer_on_its_worker():
 
     with pytest.raises(RuntimeError, match="already stopped"):
         await runner.run(threading.get_ident)
+
+
+@pytest.mark.asyncio
+async def test_thread_affine_runner_shutdown_does_not_block_the_event_loop():
+    runner = ThreadAffineWebOperationRunner()
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
+    def blocking_operation() -> None:
+        worker_started.set()
+        release_worker.wait(timeout=2)
+
+    operation_task = asyncio.create_task(runner.run(blocking_operation))
+    await asyncio.to_thread(worker_started.wait, 1)
+    close_task = asyncio.create_task(runner.close())
+
+    # If executor.shutdown(wait=True) runs on the event-loop thread, this
+    # timeout cannot fire until the worker is released.
+    await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
+    assert not close_task.done()
+
+    release_worker.set()
+    await operation_task
+    await close_task

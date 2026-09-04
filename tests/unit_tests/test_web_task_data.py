@@ -15,8 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 @pytest.mark.parametrize(
     "component",
     [
-        "resources_servers/browsergym_web",
-        "resources_servers/webvoyager_browser",
+        "resources_servers/visual_browser",
         "resources_servers/webvoyager_judge",
     ],
 )
@@ -32,7 +31,7 @@ def test_web_resource_example_rows_match_task_data_schema(component: str) -> Non
 
 
 def test_web_task_schema_rejects_an_unknown_benchmark() -> None:
-    component_dir = REPO_ROOT / "resources_servers/browsergym_web"
+    component_dir = REPO_ROOT / "resources_servers/visual_browser"
     adapter = load_task_data_schema(component_dir)
     row = json.loads((component_dir / "data/example.jsonl").read_text().splitlines()[0])
     row["web_task"]["benchmark"] = "not-a-web-benchmark"

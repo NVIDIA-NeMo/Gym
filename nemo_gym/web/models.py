@@ -10,7 +10,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-# Wire value for ``WebStepResult.info["native_status"]`` when a browser runtime
+# Wire value for ``WebStepResult.info["runtime_status"]`` when a browser runtime
 # has spent its CAPTCHA solving budget. The rollout is then a site-access
 # failure rather than a policy outcome, so agents mask it instead of judging it.
 CAPTCHA_BUDGET_EXHAUSTED_STATUS = "captcha_budget_exhausted"
@@ -27,9 +27,14 @@ class WebBenchmark(StrEnum):
 
 
 class WebRuntimeProfile(StrEnum):
-    BROWSERGYM = "browsergym"
-    NATIVE_VISUAL = "native_visual"
-    SELENIUM = "selenium"
+    """Browser execution protocol exposed by Gym.
+
+    Model-specific prompting is deliberately not represented here. Nano Omni,
+    Qwen, and future policies all drive the same visual browser runtime after
+    their policy adapters normalize actions into ``WebAction``.
+    """
+
+    VISUAL_BROWSER = "visual_browser"
 
 
 class WebObservationProfile(StrEnum):
@@ -39,9 +44,7 @@ class WebObservationProfile(StrEnum):
 
 
 class WebActionProfile(StrEnum):
-    BROWSERGYM_HIGHLEVEL = "browsergym_highlevel"
-    NATIVE_TOOLCALL = "native_toolcall"
-    WEBVOYAGER_LEGACY = "webvoyager_legacy"
+    COMPUTER_USE = "computer_use"
 
 
 class WebArtifactRef(BaseModel):
@@ -84,9 +87,9 @@ class WebTask(BaseModel):
     start_urls: list[str] = Field(default_factory=list)
     sites: list[str] = Field(default_factory=list)
     input_images: list[str] = Field(default_factory=list)
-    runtime_profile: WebRuntimeProfile = WebRuntimeProfile.BROWSERGYM
-    observation_profile: Optional[WebObservationProfile] = None
-    action_profile: WebActionProfile = WebActionProfile.BROWSERGYM_HIGHLEVEL
+    runtime_profile: WebRuntimeProfile = WebRuntimeProfile.VISUAL_BROWSER
+    observation_profile: Optional[WebObservationProfile] = WebObservationProfile.SCREENSHOT
+    action_profile: WebActionProfile = WebActionProfile.COMPUTER_USE
     verifier_profile: Optional[str] = None
     auth_profile: Optional[str] = None
     seed: int = 0
@@ -99,12 +102,6 @@ class WebTask(BaseModel):
         if value is None:
             raise ValueError("task_id is required")
         return str(value)
-
-    @model_validator(mode="after")
-    def validate_runtime(self) -> "WebTask":
-        if self.runtime_profile == WebRuntimeProfile.SELENIUM and self.benchmark != WebBenchmark.WEBVOYAGER:
-            raise ValueError("the selenium runtime is only defined for WebVoyager")
-        return self
 
 
 class WebObservation(BaseModel):
@@ -125,12 +122,7 @@ class WebObservation(BaseModel):
 
 
 class WebAction(BaseModel):
-    """Validated high-level browser action.
-
-    ``script`` is retained for BrowserGym compatibility, but the parsed name
-    and literal arguments allow runtimes to reject unsupported actions without
-    executing arbitrary model-generated Python.
-    """
+    """Model-independent computer-use action accepted by visual browsers."""
 
     name: str
     script: str

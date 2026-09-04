@@ -31,10 +31,10 @@ class DirectWebOperationRunner:
 class ThreadAffineWebOperationRunner:
     """Run every operation on one dedicated thread.
 
-    BrowserGym's synchronous Playwright instance is greenlet- and
-    thread-affine.  Native visual runtimes can reuse this policy when their
-    browser controller has the same constraint, without coupling the common
-    session lifecycle to BrowserGym.
+    Playwright's synchronous API is greenlet- and thread-affine. The dedicated
+    thread keeps those calls off the FastAPI event loop. It is not the browser
+    isolation boundary: headed desktop-control runtimes still scale as one
+    resources-server process or container per DISPLAY.
     """
 
     def __init__(
@@ -60,6 +60,14 @@ class ThreadAffineWebOperationRunner:
             if self._finalizer is not None:
                 await self.run(self._finalizer)
         finally:
-            self._executor.shutdown(wait=True, cancel_futures=True)
+            # ``shutdown(wait=True)`` is synchronous and can otherwise pin the
+            # FastAPI event loop behind a slow Playwright/browser teardown.
+            # Run the join on asyncio's shared worker pool; the browser calls
+            # themselves remain confined to this runner's single worker.
+            await asyncio.to_thread(
+                self._executor.shutdown,
+                wait=True,
+                cancel_futures=True,
+            )
             self._finalizer = None
             self._closed = True

@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nemo_gym.web.api_models import WebResetRequest, WebSeedSessionRequest, WebStepRequest, WebStepResponse
+from nemo_gym.web.browser_session import BrowserSessionError, BrowserSessionHandle, BrowserSessionSpec
 from nemo_gym.web.models import (
     WebAction,
     WebArtifactRef,
@@ -30,8 +31,9 @@ from nemo_gym.web.site_pool import LocalSiteLockPool, SiteLease, UnmanagedSitePo
 
 
 class FakeBackend:
-    def __init__(self, _config, session_id, _artifacts):
+    def __init__(self, _config, session_id, _artifacts, browser_lease):
         self.session_id = session_id
+        self.browser_lease = browser_lease
         self.reset_calls = 0
         self.observe_calls = 0
         self.step_calls = 0
@@ -100,6 +102,128 @@ class FakeSitePool:
         return {"mode": "fake", "active_leases": len(self.acquired) - len(self.released)}
 
 
+class FakeBrowserSessionProvider:
+    name = "fake_browser"
+
+    def __init__(self) -> None:
+        self.acquired: list[BrowserSessionSpec] = []
+        self.released: list[BrowserSessionHandle] = []
+
+    async def acquire(self, spec: BrowserSessionSpec) -> BrowserSessionHandle:
+        self.acquired.append(spec)
+        return BrowserSessionHandle(
+            session_id=f"browser:{spec.metadata['rollout_session_id']}",
+            provider_name=self.name,
+            transport="agentenv",
+            endpoint="https://agentenv.invalid/session",
+        )
+
+    async def release(self, handle: BrowserSessionHandle) -> None:
+        self.released.append(handle)
+
+
+class DelayedBrowserSessionProvider(FakeBrowserSessionProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.finish = asyncio.Event()
+
+    async def acquire(self, spec: BrowserSessionSpec) -> BrowserSessionHandle:
+        self.acquired.append(spec)
+        self.started.set()
+        await self.finish.wait()
+        return BrowserSessionHandle(
+            session_id=f"browser:{spec.metadata['rollout_session_id']}",
+            provider_name=self.name,
+            transport="agentenv",
+            endpoint="https://agentenv.invalid/session",
+        )
+
+
+class FailingHeartbeatBrowserSessionProvider(FakeBrowserSessionProvider):
+    async def heartbeat(self, handle: BrowserSessionHandle) -> None:
+        raise RuntimeError(f"lease {handle.session_id} expired")
+
+
+class HangingHeartbeatBrowserSessionProvider(FakeBrowserSessionProvider):
+    async def heartbeat(self, handle: BrowserSessionHandle) -> None:
+        del handle
+        await asyncio.Event().wait()
+
+
+class LifecycleBrowserSessionProvider(FakeBrowserSessionProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = 0
+        self.closed = 0
+        self.heartbeats = 0
+
+    async def start(self) -> None:
+        self.started += 1
+
+    async def close(self) -> None:
+        self.closed += 1
+
+    async def heartbeat(self, handle: BrowserSessionHandle) -> None:
+        del handle
+        self.heartbeats += 1
+
+
+class FailingReleaseBrowserSessionProvider(FakeBrowserSessionProvider):
+    async def release(self, handle: BrowserSessionHandle) -> None:
+        raise RuntimeError(f"could not release {handle.session_id}")
+
+
+class CancelThenReleaseBrowserSessionProvider(FakeBrowserSessionProvider):
+    def __init__(self, *, fail_second: bool = False) -> None:
+        super().__init__()
+        self.release_started = asyncio.Event()
+        self.release_calls = 0
+        self.fail_second = fail_second
+
+    async def release(self, handle: BrowserSessionHandle) -> None:
+        self.release_calls += 1
+        if self.release_calls == 1:
+            self.release_started.set()
+            await asyncio.Event().wait()
+        if self.fail_second:
+            raise RuntimeError("release retry failed")
+        self.released.append(handle)
+
+
+class BrowserErrorProvider(FakeBrowserSessionProvider):
+    async def acquire(self, spec: BrowserSessionSpec) -> BrowserSessionHandle:
+        del spec
+        raise BrowserSessionError("provider unavailable")
+
+
+class InvalidHandleProvider(FakeBrowserSessionProvider):
+    async def acquire(self, spec: BrowserSessionSpec):
+        del spec
+        return object()
+
+
+class AnonymousHandleProvider(FakeBrowserSessionProvider):
+    async def acquire(self, spec: BrowserSessionSpec) -> BrowserSessionHandle:
+        del spec
+        return BrowserSessionHandle(transport="agentenv")
+
+
+class FailingSitePool(FakeSitePool):
+    async def release(self, lease: SiteLease, *, healthy: bool) -> None:
+        await super().release(lease, healthy=healthy)
+        raise RuntimeError("site release failed")
+
+
+class FailingCloseRunner(DirectWebOperationRunner):
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        raise RuntimeError("runner close failed")
+
+
 def _config(tmp_path, **updates: Any) -> WebResourcesServerConfig:
     values = {
         "name": "web",
@@ -124,7 +248,7 @@ def _step(operation_id: str, *, name: str = "noop", terminal: bool = False) -> W
     )
 
 
-def _manager(tmp_path, *, factory=FakeBackend, site_pool=None, **config_updates):
+def _manager(tmp_path, *, factory=FakeBackend, site_pool=None, browser_session_provider=None, **config_updates):
     backends: list[FakeBackend] = []
 
     def capture_factory(*args):
@@ -137,6 +261,7 @@ def _manager(tmp_path, *, factory=FakeBackend, site_pool=None, **config_updates)
         backend_factory=capture_factory,
         site_pool=site_pool,
         operation_runner=DirectWebOperationRunner(),
+        browser_session_provider=browser_session_provider,
     )
     return manager, backends
 
@@ -158,9 +283,15 @@ async def test_session_lifecycle_caches_operations_and_results(tmp_path) -> None
         "site_lease_id": "fake:session-a",
         "site_isolated": True,
         "site_lease_metadata": {"sites": ["shopping"]},
+        "browser_lease_id": "session-a",
+        "browser_provider": "local_process",
+        "browser_transport": "local_process",
     }
     assert status.status == "ready"
     assert status.site_lease_id == "fake:session-a"
+    assert status.browser_lease_id == "session-a"
+    assert status.browser_provider == "local_process"
+    assert status.browser_transport == "local_process"
     assert observed.url.endswith("/0")
 
     first_step = await manager.step("session-a", _step("operation-1"))
@@ -199,6 +330,397 @@ async def test_session_lifecycle_caches_operations_and_results(tmp_path) -> None
     assert pool.released == [(pool.acquired[0], True)]
     await manager.stop()
     assert manager._reaper_task is None
+
+
+@pytest.mark.asyncio
+async def test_browser_provider_lease_is_bound_to_backend_and_released_exactly_once(tmp_path) -> None:
+    provider = FakeBrowserSessionProvider()
+    manager, backends = _manager(tmp_path, browser_session_provider=provider)
+
+    seed = await manager.seed_session("session-a", WebSeedSessionRequest(task=_task()))
+    assert provider.acquired[0].metadata == {
+        "rollout_session_id": "session-a",
+        "benchmark": "webarena",
+        "task_id": "0",
+    }
+    assert provider.acquired[0].lease_ttl_seconds == 900
+    assert backends[0].browser_lease.session_id == "browser:session-a"
+    assert seed.info["browser_provider"] == "fake_browser"
+    assert seed.info["browser_transport"] == "agentenv"
+
+    assert await manager.close_session("session-a") is True
+    assert await manager.close_session("session-a") is True
+    assert len(provider.released) == 1
+    assert provider.released[0].session_id == "browser:session-a"
+
+
+@pytest.mark.asyncio
+async def test_late_provider_acquire_is_released_after_seed_timeout(tmp_path) -> None:
+    provider = DelayedBrowserSessionProvider()
+    pool = FakeSitePool()
+    manager, _ = _manager(
+        tmp_path,
+        site_pool=pool,
+        browser_session_provider=provider,
+        browser_acquire_timeout_seconds=0.01,
+    )
+
+    with pytest.raises(CapacityUnavailableError, match="did not acquire"):
+        await manager.seed_session("session-a", WebSeedSessionRequest(task=_task()))
+
+    assert manager._creating == set()
+    assert pool.released == [(pool.acquired[0], False)]
+    cleanup_tasks = tuple(manager._late_browser_cleanup_tasks)
+    assert len(cleanup_tasks) == 1
+    provider.finish.set()
+    await asyncio.gather(*cleanup_tasks)
+
+    assert [handle.session_id for handle in provider.released] == ["browser:session-a"]
+    assert (await manager.health())["browser_provider"]["active_leases"] == 0
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_seed_releases_a_provider_handle_that_arrives_late(tmp_path) -> None:
+    provider = DelayedBrowserSessionProvider()
+    pool = FakeSitePool()
+    manager, _ = _manager(tmp_path, site_pool=pool, browser_session_provider=provider)
+
+    seed_task = asyncio.create_task(manager.seed_session("session-a", WebSeedSessionRequest(task=_task())))
+    await provider.started.wait()
+    seed_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await seed_task
+
+    assert manager._creating == set()
+    assert pool.released == [(pool.acquired[0], False)]
+    cleanup_tasks = tuple(manager._late_browser_cleanup_tasks)
+    assert len(cleanup_tasks) == 1
+    provider.finish.set()
+    await asyncio.gather(*cleanup_tasks)
+    assert [handle.session_id for handle in provider.released] == ["browser:session-a"]
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_failure_limit_closes_and_releases_remote_session(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = FailingHeartbeatBrowserSessionProvider()
+    manager, _ = _manager(
+        tmp_path,
+        browser_session_provider=provider,
+        browser_heartbeat_failure_limit=1,
+    )
+    await manager.seed_session("session-a", WebSeedSessionRequest(task=_task()))
+    sleep_calls = 0
+
+    async def one_iteration(_seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", one_iteration)
+    with pytest.raises(asyncio.CancelledError):
+        await manager._browser_heartbeat_loop()
+
+    assert "session-a" not in manager._sessions
+    assert [handle.session_id for handle in provider.released] == ["browser:session-a"]
+
+
+@pytest.mark.asyncio
+async def test_hung_heartbeat_is_bounded_and_releases_remote_session(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = HangingHeartbeatBrowserSessionProvider()
+    manager, _ = _manager(
+        tmp_path,
+        browser_session_provider=provider,
+        browser_heartbeat_timeout_seconds=0.01,
+        browser_heartbeat_failure_limit=1,
+    )
+    await manager.seed_session("session-a", WebSeedSessionRequest(task=_task()))
+    sleep_calls = 0
+
+    async def one_iteration(_seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", one_iteration)
+    with pytest.raises(asyncio.CancelledError):
+        await manager._browser_heartbeat_loop()
+
+    assert "session-a" not in manager._sessions
+    assert [handle.session_id for handle in provider.released] == ["browser:session-a"]
+
+
+@pytest.mark.asyncio
+async def test_provider_lifecycle_is_started_once_and_closed_on_stop(tmp_path) -> None:
+    provider = LifecycleBrowserSessionProvider()
+    manager, _ = _manager(tmp_path, browser_session_provider=provider)
+
+    await manager.start()
+    await manager.start()
+    assert provider.started == 1
+
+    await manager.stop()
+    assert provider.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_successful_heartbeat_clears_consecutive_failure_count(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = LifecycleBrowserSessionProvider()
+    manager, _ = _manager(tmp_path, browser_session_provider=provider)
+    await manager.seed_session("session-a", WebSeedSessionRequest(task=_task()))
+    manager._sessions["session-a"].browser_heartbeat_failures = 2
+    sleep_calls = 0
+
+    async def one_iteration(_seconds):
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", one_iteration)
+    with pytest.raises(asyncio.CancelledError):
+        await manager._browser_heartbeat_loop()
+
+    assert provider.heartbeats == 1
+    assert manager._sessions["session-a"].browser_heartbeat_failures == 0
+    await manager.close_session("session-a")
+
+
+@pytest.mark.asyncio
+async def test_nonrenewable_provider_has_no_heartbeat_loop(tmp_path) -> None:
+    manager, _ = _manager(tmp_path, browser_session_provider=FakeBrowserSessionProvider())
+    assert await manager._browser_heartbeat_loop() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "error_type", "message"),
+    [
+        (BrowserErrorProvider(), CapacityUnavailableError, "provider unavailable"),
+        (InvalidHandleProvider(), TypeError, "invalid handle"),
+    ],
+)
+async def test_provider_acquire_failures_release_site_capacity(
+    tmp_path,
+    provider,
+    error_type,
+    message: str,
+) -> None:
+    pool = FakeSitePool()
+    manager, _ = _manager(
+        tmp_path,
+        site_pool=pool,
+        browser_session_provider=provider,
+    )
+
+    with pytest.raises(error_type, match=message):
+        await manager.seed_session("session-a", WebSeedSessionRequest(task=_task()))
+
+    assert pool.released == [(pool.acquired[0], False)]
+    assert manager._creating == set()
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_provider_fills_missing_handle_identity(tmp_path) -> None:
+    provider = AnonymousHandleProvider()
+    manager, backends = _manager(tmp_path, browser_session_provider=provider)
+
+    response = await manager.seed_session("session-a", WebSeedSessionRequest(task=_task()))
+
+    assert response.info["browser_lease_id"] == "session-a"
+    assert response.info["browser_provider"] == provider.name
+    assert backends[0].browser_lease.session_id == "session-a"
+    await manager.close_session("session-a")
+
+
+@pytest.mark.asyncio
+async def test_close_attempts_all_cleanup_layers_after_independent_failures(tmp_path) -> None:
+    provider = FakeBrowserSessionProvider()
+    pool = FailingSitePool()
+    runner = FailingCloseRunner()
+    manager, backends = _manager(
+        tmp_path,
+        site_pool=pool,
+        browser_session_provider=provider,
+    )
+    manager._shared_operation_runner = None
+    manager._make_operation_runner = lambda _session_id: runner
+    await manager.seed_session("session-a", WebSeedSessionRequest(task=_task()))
+    backends[0].fail_close = True
+
+    assert await manager.close_session("session-a") is True
+    assert backends[0].close_calls == 1
+    assert runner.close_calls == 1
+    assert [handle.session_id for handle in provider.released] == ["browser:session-a"]
+    assert pool.released == [(pool.acquired[0], False)]
+
+
+@pytest.mark.asyncio
+async def test_failed_seed_attempts_all_cleanup_layers_after_independent_failures(tmp_path) -> None:
+    provider = FakeBrowserSessionProvider()
+    pool = FailingSitePool()
+    runner = FailingCloseRunner()
+
+    class FailingResetAndCloseBackend(FakeBackend):
+        def reset(self, task: WebTask):
+            del task
+            raise RuntimeError("reset failed")
+
+        def close(self):
+            super().close()
+            raise RuntimeError("backend close failed")
+
+    manager, backends = _manager(
+        tmp_path,
+        factory=FailingResetAndCloseBackend,
+        site_pool=pool,
+        browser_session_provider=provider,
+    )
+    manager._shared_operation_runner = None
+    manager._make_operation_runner = lambda _session_id: runner
+
+    with pytest.raises(RuntimeError, match="reset failed"):
+        await manager.seed_session("session-a", WebSeedSessionRequest(task=_task()))
+
+    assert backends[0].close_calls == 1
+    assert runner.close_calls == 1
+    assert [handle.session_id for handle in provider.released] == ["browser:session-a"]
+    assert pool.released == [(pool.acquired[0], False)]
+    assert manager._creating == set()
+
+
+@pytest.mark.asyncio
+async def test_browser_release_failure_is_reported_in_health(tmp_path) -> None:
+    provider = FailingReleaseBrowserSessionProvider()
+    manager, _ = _manager(tmp_path, browser_session_provider=provider)
+    await manager.seed_session("session-a", WebSeedSessionRequest(task=_task()))
+
+    await manager.close_session("session-a")
+    browser_health = (await manager.health())["browser_provider"]
+
+    assert browser_health["release_failures"] == 1
+    assert browser_health["active_leases"] == 1
+    assert "could not release" in browser_health["last_error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_second", [False, True])
+async def test_cancelled_browser_release_gets_one_bounded_retry(tmp_path, fail_second: bool) -> None:
+    provider = CancelThenReleaseBrowserSessionProvider(fail_second=fail_second)
+    manager, _ = _manager(tmp_path, browser_session_provider=provider)
+    handle = BrowserSessionHandle(
+        session_id="browser:session-a",
+        provider_name=provider.name,
+        transport="agentenv",
+    )
+    manager._browser_leases_acquired = 1
+    release_task = asyncio.create_task(manager._release_browser_lease(handle))
+    await provider.release_started.wait()
+
+    release_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await release_task
+
+    assert provider.release_calls == 2
+    browser_health = (await manager.health())["browser_provider"]
+    if fail_second:
+        assert browser_health["release_failures"] == 1
+        assert browser_health["released"] == 0
+    else:
+        assert [item.session_id for item in provider.released] == ["browser:session-a"]
+        assert browser_health["released"] == 1
+
+
+@pytest.mark.asyncio
+async def test_repeated_seed_cancellation_keeps_failed_seed_cleanup_alive(tmp_path) -> None:
+    provider = FakeBrowserSessionProvider()
+    pool = FakeSitePool()
+    reset_started = asyncio.Event()
+    close_started = asyncio.Event()
+    finish_close = asyncio.Event()
+
+    class BlockingSeedCleanupRunner(DirectWebOperationRunner):
+        async def run(self, operation, *args):
+            if getattr(operation, "__name__", "") == "reset":
+                reset_started.set()
+                await asyncio.Event().wait()
+            if getattr(operation, "__name__", "") == "close":
+                close_started.set()
+                await finish_close.wait()
+            return operation(*args)
+
+    manager = WebSessionManager(
+        _config(tmp_path),
+        backend_factory=FakeBackend,
+        site_pool=pool,
+        operation_runner=BlockingSeedCleanupRunner(),
+        browser_session_provider=provider,
+    )
+    caller = asyncio.create_task(manager.seed_session("session-a", WebSeedSessionRequest(task=_task())))
+    await reset_started.wait()
+    caller.cancel()
+    await close_started.wait()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    assert provider.released == []
+    assert manager._creating == {"session-a"}
+    finish_close.set()
+    await asyncio.gather(*tuple(manager._failed_seed_cleanup_tasks))
+
+    assert [handle.session_id for handle in provider.released] == ["browser:session-a"]
+    assert pool.released == [(pool.acquired[0], False)]
+    assert manager._creating == set()
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_close_keeps_cleanup_alive_until_leases_are_released(tmp_path) -> None:
+    provider = FakeBrowserSessionProvider()
+    close_started = asyncio.Event()
+    finish_close = asyncio.Event()
+
+    class BlockingCloseRunner(DirectWebOperationRunner):
+        async def run(self, operation, *args):
+            if getattr(operation, "__name__", "") == "close":
+                close_started.set()
+                await finish_close.wait()
+            return operation(*args)
+
+    manager = WebSessionManager(
+        _config(tmp_path),
+        backend_factory=FakeBackend,
+        operation_runner=BlockingCloseRunner(),
+        browser_session_provider=provider,
+    )
+    await manager.seed_session("session-a", WebSeedSessionRequest(task=_task()))
+
+    caller = asyncio.create_task(manager.close_session("session-a"))
+    await close_started.wait()
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    assert "session-a" not in manager._sessions
+    assert provider.released == []
+    finish_close.set()
+    await asyncio.gather(*tuple(manager._session_cleanup_tasks.values()))
+    assert [handle.session_id for handle in provider.released] == ["browser:session-a"]
+    await manager.stop()
 
 
 @pytest.mark.asyncio

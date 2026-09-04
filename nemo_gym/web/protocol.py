@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Runtime protocol implemented by BrowserGym and optional legacy backends."""
+"""Runtime protocol implemented by visual-browser benchmark backends."""
 
 from __future__ import annotations
 

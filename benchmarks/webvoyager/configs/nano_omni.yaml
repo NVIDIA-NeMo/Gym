@@ -1,0 +1,56 @@
+# Nano Omni profile using the same visual browser and 552-task population as Qwen.
+config_paths:
+  - resources_servers/visual_browser/configs/visual_browser.yaml
+  - resources_servers/webvoyager_judge/configs/gemini.yaml
+  - resources_servers/webvoyager_judge/configs/judge_model_gemini.yaml
+  - responses_api_agents/web_agent/configs/web_agent.yaml
+
+webvoyager_environment:
+  _inherit_from: visual_browser
+  resources_servers:
+    visual_browser:
+      terminate_on_action_error: false
+      max_computer_actions: 20
+
+webvoyager_judge:
+  _inherit_from: webvoyager_gemini_judge
+
+nano_omni_webvoyager_agent:
+  _inherit_from: web_agent
+  responses_api_agents:
+    web_agent:
+      resources_server:
+        type: resources_servers
+        name: webvoyager_judge
+      environment_server:
+        type: resources_servers
+        name: webvoyager_environment
+      policy_protocol: nano_omni_toolcall
+      max_steps: 100
+      max_parse_retries: 2
+      nano_omni_action_recovery: repair_single_closing_bracket
+      nano_omni_tool_alias_recovery: webvoyager_v3
+      nano_omni_max_computer_actions: 20
+      nano_omni_parse_retry_feedback: false
+      nano_omni_parse_retry_temperature: null
+      nano_omni_parse_retry_delay_secs: 1.0
+      repeated_action_warning_threshold: 0
+      repeated_action_window: 5
+      max_consecutive_execution_failures: 3
+      model_turn_max_retries: 19
+      model_retry_delay_secs: 5.0
+      max_image_history: 3
+      judge_max_screenshots: 200
+      visual_observation_text: none
+      redact_old_visual_observations: false
+      resources_request_timeout_secs: 420
+      model_request_timeout_secs: 1200
+      judge_request_timeout_secs: 540
+      run_timeout_secs: 14400
+      datasets:
+        - name: webvoyager
+          type: benchmark
+          jsonl_fpath: benchmarks/webvoyager/data/webvoyager.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/webvoyager/prepare.py
+          num_repeats: 1

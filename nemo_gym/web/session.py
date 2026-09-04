@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from nemo_gym.web.api_models import WebStepResponse
+from nemo_gym.web.browser_session import BrowserSessionHandle
 from nemo_gym.web.models import WebObservation, WebTask, WebVerifierResult
 from nemo_gym.web.operation_runner import WebOperationRunner
 from nemo_gym.web.protocol import WebEnvironmentBackend
@@ -42,11 +43,12 @@ class EvaluatorInfrastructureError(RuntimeError):
 
 @dataclass
 class WebSessionState:
-    """Process-local state shared by BrowserGym and native web backends."""
+    """Process-local state for one leased visual-browser rollout."""
 
     session_id: str
     task: WebTask
     backend: WebEnvironmentBackend
+    browser_lease: BrowserSessionHandle
     site_lease: SiteLease
     observation: WebObservation
     seed_info: dict[str, Any]
@@ -57,3 +59,4 @@ class WebSessionState:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     operations: OrderedDict[str, WebStepResponse] = field(default_factory=OrderedDict)
     verifier_result: WebVerifierResult | None = None
+    browser_heartbeat_failures: int = 0

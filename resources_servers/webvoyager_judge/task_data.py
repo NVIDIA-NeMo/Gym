@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import Field
 
-from resources_servers.browsergym_web.task_data import TaskData as WebTaskRow
+from resources_servers.visual_browser.task_data import TaskData as WebTaskRow
 
 
 class TaskData(WebTaskRow):

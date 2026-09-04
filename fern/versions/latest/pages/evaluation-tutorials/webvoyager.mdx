@@ -1,133 +1,40 @@
 ---
 title: "Evaluate WebVoyager"
-description: "Prepare and run the BrowserGym-compatible or native WebVoyager profile end to end."
+description: "Prepare and run the 552-task visual-browser WebVoyager benchmark end to end."
 position: 3
 ---
 
 # Evaluate WebVoyager
 
-WebVoyager evaluates multimodal browser agents on live public websites. NeMo
-Gym provides two explicit profiles because they preserve different observation
-and action protocols from existing WebVoyager implementations.
+WebVoyager evaluates multimodal agents on live public websites. NeMo Gym uses
+one `visual_browser` runtime: headed Chromium under Xvfb, Playwright browser
+lifecycle and navigation, and visible coordinate input through PyAutoGUI.
 
-| Profile | Tasks | Policy interaction | Use |
-|---|---:|---|---|
-| BrowserGym-compatible | 643 | Compact set-of-marks screenshot and high-level BrowserGym actions executed through Playwright | Upstream-compatible baseline and general multimodal models |
-| Native | 552 | Raw screenshots and structured native tools, with Playwright managing Chromium and PyAutoGUI applying coordinate input | Reference-aligned Nano Omni evaluation |
+Nano Omni and Qwen3.5 use different model-output adapters, but they consume the
+same 552 tasks and drive the same browser, proxy/CAPTCHA, action executor, and
+Gemini judge. The earlier BrowserGym-compatible path is not included.
 
-Both profiles share Gym's task and rollout contracts, multimodal agent loop,
-session and artifact handling, and answer-and-screenshot judge. A score from
-one profile is not directly comparable with the other because the task
-population and interaction protocol differ.
+## Install and prepare
 
-## Install Gym
-
-Run from a clean Gym checkout:
+Run from a clean Gym checkout on Linux:
 
 ```bash
 uv lock --check
 uv sync --frozen --extra dev
-./.venv/bin/gym --help >/dev/null
-```
-
-Use Linux for the native profile. It requires Chromium, Xvfb, and `xclip`:
-
-```bash
 command -v Xvfb
 command -v xvfb-run
 command -v xclip
-uv run --project resources_servers/webvoyager_browser playwright install chromium
-```
-
-## Run the BrowserGym-compatible profile
-
-### Prepare the official 643 tasks
-
-The standard Gym command is self-contained:
-
-```bash
+uv run --project resources_servers/visual_browser playwright install chromium
 ./.venv/bin/gym eval prepare --benchmark webvoyager
 ```
 
-It downloads `WebVoyager_data.jsonl` from an immutable revision of the
-official `MinorJerry/WebVoyager` repository into the gitignored
-`benchmarks/webvoyager/data/` directory. The prepare script verifies the
-source SHA-256 and the 643-task population before writing
-`webvoyager_benchmark.jsonl`.
+The prepare command downloads the hash-pinned maintained source, verifies its
+SHA-256 and 552-task denominator, and writes
+`benchmarks/webvoyager/data/webvoyager.jsonl`.
 
-To reuse an existing copy instead of downloading it, set an explicit source:
+## Configure external services
 
-```bash
-export WEBVOYAGER_SOURCE_JSONL="/data/WebVoyager_data.jsonl"
-./.venv/bin/gym eval prepare --benchmark webvoyager
-```
-
-### Configure the policy and judge
-
-The policy and judge must expose OpenAI-compatible endpoints and accept image
-content. Keep credentials in the process environment:
-
-```bash
-export POLICY_BASE_URL="https://policy-host.example/v1"
-export POLICY_MODEL_NAME="served-policy-model"
-read -rsp "Policy API key: " POLICY_API_KEY
-export POLICY_API_KEY
-printf '\n'
-
-export WEBARENA_JUDGE_BASE_URL="https://judge-host.example/v1"
-export WEBARENA_JUDGE_MODEL="served-vision-judge"
-read -rsp "Judge API key: " WEBARENA_JUDGE_API_KEY
-export WEBARENA_JUDGE_API_KEY
-printf '\n'
-```
-
-Generate the private Gym composition:
-
-```bash
-./.venv/bin/python benchmarks/webvoyager/prepare.py \
-  --profile legacy \
-  --force-env
-```
-
-This writes the gitignored `benchmarks/webvoyager/env.yaml` with mode `0600`.
-It contains references to the environment variables, not their secret values.
-
-### Collect rollouts
-
-The one-process form starts all configured Gym servers, runs the 643 tasks,
-and shuts the servers down:
-
-```bash
-cd benchmarks/webvoyager
-../../.venv/bin/gym eval run
-```
-
-For an initial smoke test, add `--limit 1 --concurrency 1`. The BrowserGym
-profile can run multiple sessions concurrently when the host has sufficient
-CPU and memory.
-
-## Run the native 552-task profile
-
-The native profile additionally requires:
-
-- a US HTTP proxy for the configured public-site domains;
-- a funded CapSolver account for challenged pages;
-- a vision-capable judge;
-- an isolated X display and browser profile for every concurrent worker.
-
-### Resolve the pinned task population
-
-No separate repository checkout is required. The prepare command below
-downloads only the root `webvoyager.jsonl` file from the pinned
-`jayl940712/webarena_benchmarks` commit, caches it under the benchmark's
-gitignored `data` directory, and verifies its SHA-256 and 552-task denominator.
-For an existing offline copy, pass `--source /path/to/webvoyager.jsonl` or set
-`WEBVOYAGER_SOURCE_JSONL`; validation remains mandatory.
-
-### Configure external services
-
-Configure the policy endpoint as in the BrowserGym profile. Then configure the
-proxy, CAPTCHA provider, and native judge:
+Keep credentials in environment variables:
 
 ```bash
 export WA_BROWSER_PROXY_SERVER="proxy-host.example:19407"
@@ -143,113 +50,72 @@ export WEBARENA_JUDGE_API_KEY
 printf '\n'
 ```
 
-Verify the proxy exit and CapSolver account before starting a rollout:
+Verify the proxy exits through the intended region and preflight the CapSolver
+account before running browser tasks.
 
-```bash
-curl -fsS -x "http://$WA_BROWSER_PROXY_SERVER" https://ifconfig.me/ip
-mkdir -p results/webvoyager/preflight
-./.venv/bin/python benchmarks/webvoyager/smoke_capsolver_account.py \
-  --output results/webvoyager/preflight/capsolver-account.json
-```
+## Select the policy
 
-When Chromium reaches Squid through a node-local tunnel, set
-`WA_CAPTCHA_PROXY_SERVER` to the public endpoint for that same Squid instance.
-CapSolver cannot connect to a worker-local address.
-
-### Prepare the native composition
+For Qwen3.5-122B-A10B-FP8, Gym launches the checked-in TP8 local-vLLM profile:
 
 ```bash
 ./.venv/bin/python benchmarks/webvoyager/prepare.py \
-  --profile native_v3 \
-  --rollout-output "$PWD/results/webvoyager/full/rollouts.jsonl" \
+  --profile qwen35_122b_a10b \
+  --rollout-output "$PWD/results/webvoyager/qwen/rollouts.jsonl" \
   --force-env
-
-(cd benchmarks/webvoyager && ../../.venv/bin/gym env prefetch)
 ```
 
-The prepare script fails closed unless the source matches both the pinned hash
-and the 552-task denominator.
+For Nano Omni, configure `POLICY_BASE_URL`, `POLICY_API_KEY`, and
+`POLICY_MODEL_NAME`, then use `--profile nano_omni`.
 
 <Note>
 
 Tokenizer, chat template, multimodal processor, reasoning parser, and
-tool-call parser are policy-server assets. The browser and judge do not load
-them. For Nano Omni, use the checked-in model profile at
-`responses_api_models/local_vllm_model/configs/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16-alignment.yaml`.
+tool-call parser are policy-server assets. They are not loaded by the browser
+or judge, and must match the selected model recipe.
 
 </Note>
 
-### Run one smoke task
+## Start and smoke
 
 ```bash
-export RUN_ROOT="$PWD/results/webvoyager/native-smoke-1"
-mkdir -p "$RUN_ROOT/logs/components"
-
 cd benchmarks/webvoyager
+../../.venv/bin/gym env prefetch
 xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
-  ../../.venv/bin/gym eval run -v \
-  --limit 1 \
-  --concurrency 1 \
-  --output "$RUN_ROOT/rollouts.jsonl" \
-  ++nemo_gym_log_dir="$RUN_ROOT/logs/components"
-cd ../..
-```
-
-Inspect the rollout row and component logs. A valid smoke task must reach a
-terminal reward, exercise at least one native tool call, and not be masked as
-an infrastructure failure.
-
-### Run and reconcile all 552 tasks
-
-One native resource server owns one X display, so the portable command is
-sequential:
-
-```bash
-export RUN_ROOT="$PWD/results/webvoyager/native-full-552"
-mkdir -p "$RUN_ROOT/logs/components"
-
-cd benchmarks/webvoyager
-xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
-  ../../.venv/bin/gym eval run -v \
-  --concurrency 1 \
-  --output "$RUN_ROOT/rollouts.jsonl" \
-  ++nemo_gym_log_dir="$RUN_ROOT/logs/components"
-cd ../..
-
-mkdir -p "$RUN_ROOT/aggregate" "$RUN_ROOT/cleanup"
-./.venv/bin/python benchmarks/webvoyager/summarize_native_v3.py \
-  "$RUN_ROOT/rollouts.jsonl" \
-  --dataset benchmarks/webvoyager/data/webvoyager_native_v3.jsonl \
-  --output "$RUN_ROOT/aggregate/summary.json" \
-  --missing-output "$RUN_ROOT/cleanup/retry.jsonl"
-
-jq '{expected, completed_unique, success, strict_sr, missing, duplicate_task_ids, unexpected_task_ids, invalid_or_infrastructure, comparable}' \
-  "$RUN_ROOT/aggregate/summary.json"
-```
-
-A reportable result requires all 552 task IDs exactly once and zero missing,
-duplicate, unexpected, invalid, or unresolved infrastructure rows. Scale out
-with isolated Gym processes; do not increase concurrency against one native
-resource server.
-
-## Reuse foreground servers
-
-For repeated runs, start the selected profile in the foreground:
-
-```bash
-cd benchmarks/webvoyager
-../../.venv/bin/gym env start
+  ../../.venv/bin/gym env start
 ```
 
 From a second terminal in the same directory:
 
 ```bash
-../../.venv/bin/gym eval run --no-serve --concurrency 1
+../../.venv/bin/gym eval run --no-serve -v \
+  --limit 1 \
+  --concurrency 1 \
+  --output ../../results/webvoyager/smoke/rollouts.jsonl
 ```
 
-Stop `gym env start` with Ctrl-C. Gym does not own or stop an external model
-server, proxy, or judge service.
+The smoke is healthy when it resolves a reward, executes a browser action, and
+releases the browser without a masked infrastructure failure.
 
-For pinned Nano Omni serving details, distributed worker isolation, retry
-reconciliation, and failure classification, see the
-[native WebVoyager runbook](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/webvoyager/native-v3-runbook.md).
+## Full population and reconciliation
+
+Run all tasks with `--concurrency 1` for one resource process. For throughput,
+launch isolated processes or containers; every worker needs a distinct
+DISPLAY, HOME, temporary directory, artifact directory, ports, and rollout
+file. Do not place multiple PyAutoGUI sessions on one display.
+
+Reconcile worker outputs against the pinned denominator:
+
+```bash
+./.venv/bin/python benchmarks/webvoyager/summarize.py \
+  results/webvoyager/full/workers \
+  --dataset benchmarks/webvoyager/data/webvoyager.jsonl \
+  --output results/webvoyager/full/summary.json \
+  --missing-output results/webvoyager/full/retry.jsonl
+```
+
+A reportable result has all 552 task IDs exactly once and no unresolved
+missing, duplicate, unexpected, masked, or infrastructure rows.
+
+For policy-specific serving parameters, training failure semantics, AgentEnv
+integration, and complete copyable commands, see the
+[repository runbook](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/webvoyager/runbook.md).

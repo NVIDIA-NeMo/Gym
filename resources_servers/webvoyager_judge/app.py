@@ -23,22 +23,10 @@ from resources_servers.webvoyager_judge.models import (
     WebVoyagerStandardVerifyRequest,
     WebVoyagerStandardVerifyResponse,
 )
-from resources_servers.webvoyager_judge.prompts import NATIVE_WEBVOYAGER_JUDGE_PROMPT
+from resources_servers.webvoyager_judge.prompts import WEBVOYAGER_GEMINI_JUDGE_PROMPT
 
 
 LOG = logging.getLogger("nemo_gym.resources_servers.webvoyager_judge")
-
-
-SYSTEM_PROMPT = """You are evaluating the result of a web-navigation task. You receive:
-1. The original web task instruction.
-2. The final screenshots from the browser trajectory.
-3. The agent's final textual response.
-
-Do not interact with websites. Judge only the supplied evidence. Check every requirement in multi-part tasks. If the
-response contradicts a screenshot, the screenshot takes precedence. If the response contains relevant details that
-are not visible in the screenshots and are not contradicted by them, you may accept those details.
-
-Explain the assessment briefly, then end with exactly one definitive verdict: SUCCESS or NOT SUCCESS."""
 
 
 def _origins(urls: list[str]) -> str:
@@ -65,19 +53,8 @@ def _extract_output_text(response: NeMoGymResponse) -> str:
     return "\n".join(part for part in parts if part).strip()
 
 
-def parse_verdict(text: str) -> bool | None:
-    """Match upstream semantics while treating a missing verdict as judge failure."""
-
-    upper = text.upper()
-    if "NOT SUCCESS" in upper:
-        return False
-    if "SUCCESS" in upper:
-        return True
-    return None
-
-
-def parse_native_verdict(text: str) -> tuple[bool, dict[str, str]] | None:
-    """Parse the JSON verdict contract used by the native v3 recipe."""
+def parse_gemini_verdict(text: str) -> tuple[bool, dict[str, str]] | None:
+    """Parse the maintained WebVoyager JSON verdict contract."""
 
     try:
         payload = json.loads(text)
@@ -103,51 +80,35 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
 
     async def _judge_evidence(self, body: WebVoyagerJudgeRequest) -> WebVoyagerJudgeResponse:
         started = time.monotonic()
-        native = self.config.judge_profile == "native_v3"
         LOG.info(
-            "event=webvoyager_judge_start benchmark=%s task=%s profile=%s screenshots_received=%d "
+            "event=webvoyager_judge_start benchmark=%s task=%s screenshots_received=%d "
             "urls_received=%d origins=%s final_answer_present=%s",
             body.task.benchmark.value,
             body.task.task_id,
-            self.config.judge_profile,
             len(body.screenshots),
             len(body.page_urls),
             _origins(body.page_urls),
             bool(body.final_answer.strip()),
         )
-        if not native and not body.final_answer.strip():
-            LOG.info(
-                "event=webvoyager_judge_short_circuit task=%s reason=agent_no_final_answer elapsed_seconds=%.3f",
-                body.task.task_id,
-                time.monotonic() - started,
-            )
-            return WebVoyagerJudgeResponse(
-                result=WebVerifierResult(
-                    valid_sample=True,
-                    failure_kind="agent_no_final_answer",
-                    verifier_version=self.config.verifier_version,
-                )
-            )
-
         screenshots = body.screenshots[-self.config.max_screenshots :]
         if self.config.require_screenshot and not screenshots:
             LOG.warning(
                 "event=webvoyager_judge_short_circuit task=%s reason=missing_judge_evidence "
                 "valid_sample=%s elapsed_seconds=%.3f",
                 body.task.task_id,
-                native,
+                True,
                 time.monotonic() - started,
             )
             return WebVoyagerJudgeResponse(
                 result=WebVerifierResult(
-                    valid_sample=native,
+                    valid_sample=True,
                     failure_kind="missing_judge_evidence",
                     verifier_version=self.config.verifier_version,
                 )
             )
 
         task_instruction = body.task.intent
-        if native and body.task.start_urls:
+        if body.task.start_urls:
             task_instruction = f"On {body.task.start_urls[0]}: {task_instruction}"
         content = [
             {
@@ -162,11 +123,8 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
         for index, screenshot in enumerate(screenshots, start=1):
             content.append({"type": "input_text", "text": f"Step {index}"})
             content.append({"type": "input_image", "image_url": screenshot, "detail": "high"})
-        if not native:
-            content.append({"type": "input_text", "text": "Your verdict:"})
-
         params = self.config.judge_responses_create_params.model_copy(deep=True)
-        params.instructions = NATIVE_WEBVOYAGER_JUDGE_PROMPT if native else SYSTEM_PROMPT
+        params.instructions = WEBVOYAGER_GEMINI_JUDGE_PROMPT
         params.input = [NeMoGymEasyInputMessage(role="user", content=content)]
         model_started = time.monotonic()
         LOG.info(
@@ -206,13 +164,12 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
             hashlib.sha256(judge_text.encode("utf-8")).hexdigest()[:12],
             time.monotonic() - model_started,
         )
-        native_verdict = parse_native_verdict(judge_text) if native else None
-        verdict = native_verdict[0] if native_verdict is not None else (None if native else parse_verdict(judge_text))
+        parsed_verdict = parse_gemini_verdict(judge_text)
+        verdict = parsed_verdict[0] if parsed_verdict is not None else None
         if verdict is None:
             LOG.warning(
-                "event=webvoyager_judge_unparseable task=%s profile=%s output_chars=%d output_sha256=%s",
+                "event=webvoyager_judge_unparseable task=%s output_chars=%d output_sha256=%s",
                 body.task.task_id,
-                self.config.judge_profile,
                 len(judge_text),
                 hashlib.sha256(judge_text.encode("utf-8")).hexdigest()[:12],
             )
@@ -234,17 +191,16 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
                 verifier_version=self.config.verifier_version,
                 metadata={
                     "judge_text": judge_text,
-                    "judge_profile": self.config.judge_profile,
-                    **({"parsed": native_verdict[1]} if native_verdict is not None else {}),
+                    "judge_profile": "gemini_screenshot_trajectory",
+                    **({"parsed": parsed_verdict[1]} if parsed_verdict is not None else {}),
                     "screenshots_used": len(screenshots),
                     "page_urls": body.page_urls[-self.config.max_screenshots :],
                 },
             )
         LOG.info(
-            "event=webvoyager_judge_complete task=%s profile=%s valid_sample=%s success=%s reward=%s "
+            "event=webvoyager_judge_complete task=%s valid_sample=%s success=%s reward=%s "
             "failure_kind=%s screenshots_used=%d elapsed_seconds=%.3f",
             body.task.task_id,
-            self.config.judge_profile,
             result.valid_sample,
             result.task_success,
             result.reward,

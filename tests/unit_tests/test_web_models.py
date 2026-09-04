@@ -17,23 +17,23 @@ def test_task_id_is_required() -> None:
         WebTask(benchmark=WebBenchmark.WEBARENA, task_id=None)
 
 
-def test_selenium_is_scoped_to_webvoyager() -> None:
-    with pytest.raises(ValidationError, match="only defined for WebVoyager"):
+def test_removed_runtime_profiles_are_rejected_at_the_wire_boundary() -> None:
+    with pytest.raises(ValidationError, match="visual_browser"):
         WebTask(
-            benchmark=WebBenchmark.WEBARENA,
+            benchmark=WebBenchmark.WEBVOYAGER,
             task_id="1",
-            runtime_profile=WebRuntimeProfile.SELENIUM,
+            runtime_profile="browsergym",
         )
 
 
-def test_native_visual_runtime_is_backend_neutral() -> None:
+def test_visual_browser_runtime_is_backend_neutral() -> None:
     task = WebTask(
         benchmark=WebBenchmark.VISUALWEBARENA,
         task_id="17",
-        runtime_profile=WebRuntimeProfile.NATIVE_VISUAL,
+        runtime_profile=WebRuntimeProfile.VISUAL_BROWSER,
     )
 
-    assert task.runtime_profile == WebRuntimeProfile.NATIVE_VISUAL
+    assert task.runtime_profile == WebRuntimeProfile.VISUAL_BROWSER
 
 
 def test_image_requires_inline_or_artifact_transport() -> None:

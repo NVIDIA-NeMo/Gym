@@ -3,6 +3,7 @@
 
 from collections import OrderedDict
 
+from nemo_gym.web.browser_session import BrowserSessionHandle
 from nemo_gym.web.models import WebBenchmark, WebObservation, WebTask
 from nemo_gym.web.operation_runner import DirectWebOperationRunner
 from nemo_gym.web.session import WebSessionState
@@ -32,6 +33,11 @@ def test_common_session_state_owns_idempotency_and_verifier_slots():
         session_id="session-7",
         task=task,
         backend=_Backend(),
+        browser_lease=BrowserSessionHandle(
+            session_id="browser-session-7",
+            endpoint=None,
+            metadata={},
+        ),
         site_lease=SiteLease(lease_id="test:7", isolated=True),
         observation=WebObservation(url="about:blank"),
         seed_info={},

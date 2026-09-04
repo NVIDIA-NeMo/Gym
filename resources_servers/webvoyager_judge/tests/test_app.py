@@ -16,8 +16,7 @@ from nemo_gym.web.judge_evidence import compact_webvoyager_judge_evidence
 from nemo_gym.web.models import WebBenchmark, WebTask
 from resources_servers.webvoyager_judge.app import (
     WebVoyagerJudgeResourcesServer,
-    parse_native_verdict,
-    parse_verdict,
+    parse_gemini_verdict,
 )
 from resources_servers.webvoyager_judge.config import WebVoyagerJudgeConfig
 from resources_servers.webvoyager_judge.models import (
@@ -116,12 +115,6 @@ def _standard_request() -> WebVoyagerStandardVerifyRequest:
     )
 
 
-def test_not_success_is_checked_before_success():
-    assert parse_verdict("The task is NOT SUCCESS") is False
-    assert parse_verdict("The task is a SUCCESS") is True
-    assert parse_verdict("unclear") is None
-
-
 @pytest.mark.asyncio
 async def test_judge_exposes_only_standard_stateless_verify_route():
     server = _server()
@@ -147,16 +140,16 @@ async def test_standard_route_classifies_judge_transport_failure_for_sidecar():
     assert payload["response"] == _standard_request().response.model_dump(mode="json")
 
 
-def test_native_verdict_requires_json_success_or_failure():
-    assert parse_native_verdict('{"thought":"ok","verdict":"SUCCESS"}') == (
+def test_gemini_verdict_requires_json_success_or_failure():
+    assert parse_gemini_verdict('{"thought":"ok","verdict":"SUCCESS"}') == (
         True,
         {"thought": "ok", "verdict": "SUCCESS"},
     )
-    assert parse_native_verdict("SUCCESS") is None
-    assert parse_native_verdict('{"verdict":"NOT SUCCESS"}') is None
+    assert parse_gemini_verdict("SUCCESS") is None
+    assert parse_gemini_verdict('{"verdict":"NOT SUCCESS"}') is None
 
 
-def test_request_contract_accepts_a_full_100_step_native_trajectory():
+def test_request_contract_accepts_a_full_100_step_trajectory():
     request = _request(screenshot_count=101, page_url_count=101)
 
     assert len(request.screenshots) == 101
@@ -228,7 +221,9 @@ async def test_generic_reverify_reconstructs_compact_evidence_without_browser_re
 
     server = _server()
     server.server_client.post = AsyncMock(
-        return_value=_FakeHttpResponse(_model_response("The retained evidence proves completion. SUCCESS"))
+        return_value=_FakeHttpResponse(
+            _model_response('{"thought":"retained evidence proves completion","verdict":"SUCCESS"}')
+        )
     )
     result = await server.verify(request)
 
@@ -245,7 +240,9 @@ async def test_generic_reverify_reconstructs_compact_evidence_without_browser_re
 async def test_standard_verify_response_does_not_echo_top_level_evidence():
     server = _server()
     server.server_client.post = AsyncMock(
-        return_value=_FakeHttpResponse(_model_response("The screenshot proves completion. SUCCESS"))
+        return_value=_FakeHttpResponse(
+            _model_response('{"thought":"screenshot proves completion","verdict":"SUCCESS"}')
+        )
     )
 
     result = await server.verify(_standard_request())
@@ -258,8 +255,8 @@ async def test_standard_verify_response_does_not_echo_top_level_evidence():
 
 
 @pytest.mark.asyncio
-async def test_native_judge_uses_a_full_100_step_trajectory():
-    server = _server(judge_profile="native_v3", max_screenshots=MAX_WEBVOYAGER_JUDGE_EVIDENCE_ITEMS)
+async def test_judge_uses_a_full_100_step_trajectory():
+    server = _server(max_screenshots=MAX_WEBVOYAGER_JUDGE_EVIDENCE_ITEMS)
     server.server_client.post = AsyncMock(
         return_value=_FakeHttpResponse(_model_response('{"thought":"enough evidence","verdict":"SUCCESS"}'))
     )
@@ -273,23 +270,29 @@ async def test_native_judge_uses_a_full_100_step_trajectory():
 
 
 @pytest.mark.asyncio
-async def test_empty_answer_is_valid_policy_failure_without_judge_call():
+async def test_empty_answer_still_uses_visual_trajectory_evidence():
     server = _server()
-    server.server_client.post = AsyncMock()
+    server.server_client.post = AsyncMock(
+        return_value=_FakeHttpResponse(
+            _model_response('{"thought":"screenshots do not prove completion","verdict":"FAILURE"}')
+        )
+    )
 
     response = await server._judge_evidence(_request(answer=""))
 
     assert response.result.valid_sample is True
     assert response.result.reward == 0.0
-    assert response.result.failure_kind == "agent_no_final_answer"
-    server.server_client.post.assert_not_called()
+    assert response.result.failure_kind is None
+    server.server_client.post.assert_awaited_once()
 
 
 @pytest.mark.asyncio
 async def test_judge_success_returns_binary_reward():
     server = _server()
     server.server_client.post = AsyncMock(
-        return_value=_FakeHttpResponse(_model_response("The screenshot proves completion. SUCCESS"))
+        return_value=_FakeHttpResponse(
+            _model_response('{"thought":"screenshot proves completion","verdict":"SUCCESS"}')
+        )
     )
 
     response = await server._judge_evidence(_request())
@@ -315,7 +318,9 @@ async def test_received_unparseable_verdict_is_a_valid_zero_reward():
 async def test_judge_logs_lifecycle_without_screenshot_payload(caplog):
     server = _server()
     server.server_client.post = AsyncMock(
-        return_value=_FakeHttpResponse(_model_response("The screenshot proves completion. SUCCESS"))
+        return_value=_FakeHttpResponse(
+            _model_response('{"thought":"screenshot proves completion","verdict":"SUCCESS"}')
+        )
     )
 
     with caplog.at_level(logging.INFO, logger="nemo_gym.resources_servers.webvoyager_judge"):

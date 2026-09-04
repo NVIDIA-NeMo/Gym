@@ -28,13 +28,14 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from nemo_gym.web.actions import ActionParseError, parse_model_action, parse_native_tool_calls
+from nemo_gym.web.actions import ActionParseError, parse_nano_omni_tool_calls
 from nemo_gym.web.api_models import (
     WebCloseResponse,
     WebEvaluateResponse,
     WebSeedSessionResponse,
     WebStepResponse,
 )
+from nemo_gym.web.computer_use import NANO_OMNI_SYSTEM_PROMPT, nano_omni_tools
 from nemo_gym.web.judge_evidence import compact_webvoyager_judge_evidence
 from nemo_gym.web.models import (
     BROWSER_TARGET_CLOSED_STATUS,
@@ -46,7 +47,14 @@ from nemo_gym.web.models import (
     WebTask,
     WebVerifierResult,
 )
-from responses_api_agents.web_agent.render import parse_error_message, render_observation
+from responses_api_agents.web_agent.qwen_computer_use import (
+    QwenPolicyState,
+    parse_qwen_action,
+)
+from responses_api_agents.web_agent.qwen_computer_use import (
+    response_text as qwen_response_text,
+)
+from responses_api_agents.web_agent.render import render_observation
 
 
 LOG = logging.getLogger("nemo_gym.responses_api_agents.web_agent")
@@ -83,29 +91,33 @@ class WebAgentConfig(BaseResponsesAPIAgentConfig):
     # keeps ``resources_server`` as the canonical verifier used by Gym.
     environment_server: Optional[ResourcesServerRef] = None
     model_server: ModelServerRef
+    policy_protocol: Literal["nano_omni_toolcall", "qwen_xml_computer_use"] = "nano_omni_toolcall"
     max_steps: int = Field(default=15, ge=1, le=200)
     max_parse_retries: int = Field(default=2, ge=0, le=10)
-    native_action_recovery: Literal["strict", "decode_string", "repair_single_closing_bracket"] = "strict"
-    native_tool_alias_recovery: Literal["strict", "webvoyager_v3"] = "strict"
-    native_max_computer_actions: int = Field(default=20, ge=1, le=100)
-    native_parse_retry_feedback: bool = False
-    native_parse_retry_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
-    native_parse_retry_delay_secs: float = Field(default=0.0, ge=0.0, le=60.0)
+    nano_omni_action_recovery: Literal["strict", "decode_string", "repair_single_closing_bracket"] = "strict"
+    nano_omni_tool_alias_recovery: Literal["strict", "webvoyager_v3"] = "strict"
+    nano_omni_max_computer_actions: int = Field(default=20, ge=1, le=100)
+    nano_omni_parse_retry_feedback: bool = False
+    nano_omni_parse_retry_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    nano_omni_parse_retry_delay_secs: float = Field(default=0.0, ge=0.0, le=60.0)
     repeated_action_warning_threshold: int = Field(default=0, ge=0, le=20)
     repeated_action_window: int = Field(default=5, ge=1, le=50)
     max_consecutive_execution_failures: int = Field(default=3, ge=1, le=20)
-    # The reference native runner retries one policy call up to 20 times before
+    # The maintained reference runner retries one policy call up to 20 times before
     # giving up, so the ceiling has to admit that budget.
     model_turn_max_retries: int = Field(default=0, ge=0, le=32)
     model_retry_delay_secs: float = Field(default=1.0, ge=0.0, le=60.0)
     max_image_history: int = Field(default=3, ge=1, le=20)
+    qwen_fold_size: int = Field(default=10, ge=1, le=20)
+    qwen_history_n: int = Field(default=100, ge=1, le=200)
+    qwen_coordinate_type: Literal["relative", "absolute"] = "relative"
+    qwen_thinking: bool = True
     judge_max_screenshots: int = Field(default=3, ge=1, le=200)
     # VisualWebArena JSONL stores relative reference-image paths. The agent
     # resolves them only below this explicitly mounted, read-only directory.
     task_image_root: str | None = None
     max_task_image_bytes: int = Field(default=25 * 1024 * 1024, ge=1, le=100 * 1024 * 1024)
     visual_observation_text: Literal["full_axtree", "som_only", "none"] = "full_axtree"
-    action_prompt_profile: Literal["standard", "code_block"] = "standard"
     redact_old_visual_observations: bool = False
     resources_request_timeout_secs: float = Field(default=180.0, gt=0.0)
     seed_request_timeout_secs: float = Field(default=1800.0, gt=0.0)
@@ -170,18 +182,29 @@ def _parse_response_action(
     response: NeMoGymResponse,
     profile: WebActionProfile,
     *,
-    native_action_recovery: Literal["strict", "decode_string", "repair_single_closing_bracket"] = "strict",
-    native_tool_alias_recovery: Literal["strict", "webvoyager_v3"] = "strict",
-    native_max_computer_actions: int = 20,
+    policy_protocol: Literal["nano_omni_toolcall", "qwen_xml_computer_use"] = "nano_omni_toolcall",
+    qwen_state: QwenPolicyState | None = None,
+    nano_omni_action_recovery: Literal["strict", "decode_string", "repair_single_closing_bracket"] = "strict",
+    nano_omni_tool_alias_recovery: Literal["strict", "webvoyager_v3"] = "strict",
+    nano_omni_max_computer_actions: int = 20,
 ):
-    if profile == WebActionProfile.NATIVE_TOOLCALL:
-        return parse_native_tool_calls(
+    if profile != WebActionProfile.COMPUTER_USE:
+        raise ActionParseError(f"unsupported visual-browser action profile: {profile.value!r}")
+    if policy_protocol == "nano_omni_toolcall":
+        return parse_nano_omni_tool_calls(
             response.output,
-            recovery=native_action_recovery,
-            alias_recovery=native_tool_alias_recovery,
-            max_computer_actions=native_max_computer_actions,
+            recovery=nano_omni_action_recovery,
+            alias_recovery=nano_omni_tool_alias_recovery,
+            max_computer_actions=nano_omni_max_computer_actions,
         )
-    return parse_model_action(_extract_output_text(response), profile)
+    if qwen_state is None:
+        raise ActionParseError("Qwen policy state is required for qwen_xml_computer_use")
+    return parse_qwen_action(
+        qwen_response_text(response),
+        coordinate_type=qwen_state.coordinate_type,
+        original_size=qwen_state.original_size,
+        processed_size=qwen_state.processed_size,
+    )
 
 
 def _incomplete_model_reason(response: NeMoGymResponse) -> str | None:
@@ -197,7 +220,7 @@ def _incomplete_model_reason(response: NeMoGymResponse) -> str | None:
     return str(reason) if reason else "unknown"
 
 
-def _native_parse_retry_messages(response: NeMoGymResponse, error: ActionParseError) -> list[Any]:
+def _nano_omni_parse_retry_messages(response: NeMoGymResponse, error: ActionParseError) -> list[Any]:
     """Return parser feedback without copying the current screenshot."""
 
     invalid_items: list[dict[str, Any]] = []
@@ -366,9 +389,9 @@ def _action_call_names(action: Any) -> str:
     return ",".join(names) or getattr(action, "name", "unknown")
 
 
-def _native_recovery_modes(action: Any) -> str:
+def _nano_omni_recovery_modes(action: Any) -> str:
     metadata = getattr(action, "metadata", {})
-    records = metadata.get("native_parse", {}).get("calls", []) if isinstance(metadata, dict) else []
+    records = metadata.get("nano_omni_parse", {}).get("calls", []) if isinstance(metadata, dict) else []
     modes: list[str] = []
     for record in records:
         if not isinstance(record, dict):
@@ -556,10 +579,18 @@ class WebAgent(SimpleResponsesAPIAgent):
         verifier_result: WebVerifierResult | None = None
         environment_failure_kind: str | None = None
         recent_action_signatures: deque[str] = deque(maxlen=self.config.repeated_action_window)
+        qwen_state: QwenPolicyState | None = None
 
         base_body = body.responses_create_params.model_copy(deep=True)
         if isinstance(base_body.input, str):
             base_body.input = [NeMoGymEasyInputMessage(role="user", content=base_body.input)]
+        if self.config.policy_protocol == "nano_omni_toolcall":
+            if base_body.instructions is None:
+                base_body.instructions = NANO_OMNI_SYSTEM_PROMPT
+            if not base_body.tools:
+                base_body.tools = nano_omni_tools()
+            base_body.tool_choice = "auto"
+            base_body.parallel_tool_calls = True
 
         try:
             seed_started = time.monotonic()
@@ -583,32 +614,54 @@ class WebAgent(SimpleResponsesAPIAgent):
                 time.monotonic() - seed_started,
             )
             self._remember_evidence(observation, screenshot_history, url_history)
-            base_body.input = list(base_body.input) + [
-                render_observation(
-                    observation,
-                    task,
-                    step_index=0,
-                    visual_observation_text=self.config.visual_observation_text,
-                    action_prompt_profile=self.config.action_prompt_profile,
-                    task_image_root=self.config.task_image_root,
-                    max_task_image_bytes=self.config.max_task_image_bytes,
+            if self.config.policy_protocol == "qwen_xml_computer_use":
+                qwen_state = QwenPolicyState(
+                    instruction=task.intent,
+                    max_image_history=self.config.max_image_history,
+                    fold_size=self.config.qwen_fold_size,
+                    history_n=self.config.qwen_history_n,
+                    coordinate_type=self.config.qwen_coordinate_type,
                 )
-            ]
+                qwen_state.append_observation(observation)
+                base_body.input = qwen_state.messages()
+                base_body.instructions = None
+                base_body.tools = []
+                base_body.parallel_tool_calls = False
+                metadata = dict(base_body.metadata or {})
+                metadata["chat_template_kwargs"] = json.dumps(
+                    {"enable_thinking": self.config.qwen_thinking},
+                    separators=(",", ":"),
+                )
+                base_body.metadata = metadata
+            else:
+                base_body.input = list(base_body.input) + [
+                    render_observation(
+                        observation,
+                        task,
+                        step_index=0,
+                        visual_observation_text=self.config.visual_observation_text,
+                        task_image_root=self.config.task_image_root,
+                        max_task_image_bytes=self.config.max_task_image_bytes,
+                    )
+                ]
 
             rollout_finished = False
             for step_index in range(self.config.max_steps):
                 action = None
                 parse_feedback: list[Any] = []
                 for parse_attempt in range(self.config.max_parse_retries + 1):
-                    model_input = _redact_old_images(
-                        list(base_body.input) + trajectory + parse_feedback,
-                        self.config.max_image_history,
-                        redact_observation_text=self.config.redact_old_visual_observations,
-                        append_redaction_notice=task.action_profile != WebActionProfile.NATIVE_TOOLCALL,
-                    )
+                    if qwen_state is not None:
+                        model_input = qwen_state.messages()
+                    else:
+                        model_input = _redact_old_images(
+                            list(base_body.input) + trajectory + parse_feedback,
+                            self.config.max_image_history,
+                            redact_observation_text=self.config.redact_old_visual_observations,
+                            append_redaction_notice=False,
+                        )
                     model_updates: dict[str, Any] = {"input": model_input}
-                    if parse_attempt > 0 and self.config.native_parse_retry_temperature is not None:
-                        model_updates["temperature"] = self.config.native_parse_retry_temperature
+                    if parse_attempt > 0 and self.config.nano_omni_parse_retry_temperature is not None:
+                        model_updates["temperature"] = self.config.nano_omni_parse_retry_temperature
                     model_body = base_body.model_copy(update=model_updates)
                     LOG.info(
                         "event=web_model_turn_start benchmark=%s task=%s step=%d parse_attempt=%d "
@@ -646,7 +699,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                                 time.monotonic() - model_started,
                             )
                             break
-                        except Exception as exc:  # Bounded native API parity retry.
+                        except Exception as exc:  # Bounded reference API parity retry.
                             model_error = exc
                             retry_model_request = (
                                 model_attempt < self.config.model_turn_max_retries
@@ -692,7 +745,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                     if incomplete_reason == "max_output_tokens":
                         # VLLMModel converts both a generated length stop and a
                         # context-budget 400 into a Responses API incomplete
-                        # result. The native reference runner treats either as
+                        # result. The maintained reference runner treats either as
                         # a valid truncated policy outcome and does not retry
                         # the action parser against the same empty response.
                         truncated = True
@@ -705,20 +758,21 @@ class WebAgent(SimpleResponsesAPIAgent):
                             incomplete_reason,
                         )
                         break
-                    if task.action_profile != WebActionProfile.NATIVE_TOOLCALL:
-                        trajectory.extend(model_response.output)
                     try:
                         action = _parse_response_action(
                             model_response,
                             task.action_profile,
-                            native_action_recovery=self.config.native_action_recovery,
-                            native_tool_alias_recovery=self.config.native_tool_alias_recovery,
-                            native_max_computer_actions=self.config.native_max_computer_actions,
+                            policy_protocol=self.config.policy_protocol,
+                            qwen_state=qwen_state,
+                            nano_omni_action_recovery=self.config.nano_omni_action_recovery,
+                            nano_omni_tool_alias_recovery=self.config.nano_omni_tool_alias_recovery,
+                            nano_omni_max_computer_actions=self.config.nano_omni_max_computer_actions,
                         )
-                        if task.action_profile == WebActionProfile.NATIVE_TOOLCALL:
-                            # The reference runner adds only a successfully
-                            # parsed assistant tool-call turn to history.
-                            trajectory.extend(model_response.output)
+                        # Both maintained policy adapters add only a
+                        # successfully parsed assistant turn to trajectory.
+                        trajectory.extend(model_response.output)
+                        if qwen_state is not None:
+                            qwen_state.record_response(qwen_response_text(model_response), action)
                         LOG.info(
                             "event=web_action_parsed benchmark=%s task=%s step=%d parse_attempt=%d "
                             "action=%s calls=%s terminal=%s recovery_modes=%s",
@@ -729,7 +783,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                             action.name,
                             _action_call_names(action),
                             action.terminal,
-                            _native_recovery_modes(action),
+                            _nano_omni_recovery_modes(action),
                         )
                         break
                     except ActionParseError as exc:
@@ -745,26 +799,15 @@ class WebAgent(SimpleResponsesAPIAgent):
                             parse_attempt >= self.config.max_parse_retries,
                         )
                         if parse_attempt >= self.config.max_parse_retries:
-                            if task.action_profile != WebActionProfile.NATIVE_TOOLCALL:
-                                trajectory.append(
-                                    NeMoGymEasyInputMessage(
-                                        role="user",
-                                        content=f"Action parsing failed permanently: {exc}",
-                                    )
-                                )
                             break
-                        if task.action_profile == WebActionProfile.NATIVE_TOOLCALL:
-                            if self.config.native_parse_retry_feedback:
-                                parse_feedback = _native_parse_retry_messages(model_response, exc)
-                            await asyncio.sleep(self.config.native_parse_retry_delay_secs)
+                        if self.config.policy_protocol == "nano_omni_toolcall":
+                            if self.config.nano_omni_parse_retry_feedback:
+                                parse_feedback = _nano_omni_parse_retry_messages(model_response, exc)
+                            await asyncio.sleep(self.config.nano_omni_parse_retry_delay_secs)
                         else:
-                            trajectory.append(
-                                parse_error_message(
-                                    exc,
-                                    action_prompt_profile=self.config.action_prompt_profile,
-                                    action_profile=task.action_profile,
-                                )
-                            )
+                            # The maintained Qwen runner repeats the identical
+                            # request without injecting harness-authored text.
+                            await asyncio.sleep(self.config.nano_omni_parse_retry_delay_secs)
 
                 if truncated:
                     break
@@ -821,16 +864,16 @@ class WebAgent(SimpleResponsesAPIAgent):
                     _url_origin(observation.url),
                     time.monotonic() - environment_started,
                 )
-                native_status = step_data.info.get("native_status")
-                # Native terminate returns the previous observation unchanged;
+                runtime_status = step_data.info.get("runtime_status")
+                # Explicit terminate returns the previous observation unchanged;
                 # unlike a non-terminal action, it does not capture a new
                 # screenshot. Keep valid observations from actions that cause
                 # the environment to terminate, but do not duplicate evidence
                 # for an explicit terminate or append a closed-target result.
-                explicit_native_terminate = task.action_profile == WebActionProfile.NATIVE_TOOLCALL and action.terminal
-                if native_status != BROWSER_TARGET_CLOSED_STATUS and not explicit_native_terminate:
+                explicit_computer_terminate = action.terminal
+                if runtime_status != BROWSER_TARGET_CLOSED_STATUS and not explicit_computer_terminate:
                     self._remember_evidence(observation, screenshot_history, url_history)
-                elif explicit_native_terminate:
+                elif explicit_computer_terminate:
                     LOG.info(
                         "event=web_terminal_evidence_reused benchmark=%s task=%s step=%d screenshots=%d",
                         task.benchmark.value,
@@ -838,10 +881,10 @@ class WebAgent(SimpleResponsesAPIAgent):
                         step_index,
                         len(screenshot_history),
                     )
-                if native_status == CAPTCHA_BUDGET_EXHAUSTED_STATUS:
+                if runtime_status == CAPTCHA_BUDGET_EXHAUSTED_STATUS:
                     # The browser could not reach the site, so nothing the policy
                     # did is measurable. Mask instead of scoring a forced stop.
-                    environment_failure_kind = native_status
+                    environment_failure_kind = runtime_status
                     LOG.warning(
                         "event=web_environment_access_failed benchmark=%s task=%s step=%d failure_kind=%s",
                         task.benchmark.value,
@@ -851,8 +894,8 @@ class WebAgent(SimpleResponsesAPIAgent):
                     )
                     rollout_finished = True
                     break
-                if native_status == BROWSER_TARGET_CLOSED_STATUS:
-                    # A native coordinate action can close the active browser
+                if runtime_status == BROWSER_TARGET_CLOSED_STATUS:
+                    # A coordinate action can close the active browser
                     # target (for example, by clicking browser chrome).  The
                     # reference runner records that as an action/task failure,
                     # not as retryable infrastructure.  Keep the last valid
@@ -880,23 +923,27 @@ class WebAgent(SimpleResponsesAPIAgent):
                     truncated = True
                     rollout_finished = True
                     break
-                trajectory.append(
-                    render_observation(
-                        observation,
-                        task,
-                        step_index=step_index + 1,
-                        visual_observation_text=self.config.visual_observation_text,
-                        action_prompt_profile=self.config.action_prompt_profile,
-                        task_image_root=self.config.task_image_root,
-                        max_task_image_bytes=self.config.max_task_image_bytes,
+                if qwen_state is not None:
+                    qwen_state.append_observation(observation)
+                    trajectory.append(qwen_state.messages()[-1])
+                else:
+                    trajectory.append(
+                        render_observation(
+                            observation,
+                            task,
+                            step_index=step_index + 1,
+                            visual_observation_text=self.config.visual_observation_text,
+                            task_image_root=self.config.task_image_root,
+                            max_task_image_bytes=self.config.max_task_image_bytes,
+                        )
                     )
-                )
                 signature = _repeatable_action_signature(action)
                 if signature is not None:
                     recent_action_signatures.append(signature)
                     occurrences = sum(item == signature for item in recent_action_signatures)
                     if (
-                        self.config.repeated_action_warning_threshold > 0
+                        qwen_state is None
+                        and self.config.repeated_action_warning_threshold > 0
                         and occurrences >= self.config.repeated_action_warning_threshold
                     ):
                         LOG.warning(
@@ -994,8 +1041,8 @@ class WebAgent(SimpleResponsesAPIAgent):
         judge_failure_metadata: dict[str, Any] = {}
         # The WebVoyager judge only consumes retained evidence. Release the
         # browser before the potentially slow VLM call so one judged episode
-        # does not occupy scarce browser/site capacity. WebArena-family native
-        # evaluators still run above while their live page is available.
+        # does not occupy scarce browser/site capacity. Other stateful web
+        # evaluators may still need to run while their live page is available.
         if task.benchmark == WebBenchmark.WEBVOYAGER and environment_failure_kind is None:
             judge_started = time.monotonic()
             LOG.info(

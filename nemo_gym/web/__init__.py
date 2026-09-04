@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Dependency-light contracts shared by NeMo Gym web agents and runtimes."""
 
-from nemo_gym.web.actions import ActionParseError, parse_model_action
+from nemo_gym.web.actions import ActionParseError, parse_nano_omni_tool_calls
 from nemo_gym.web.api_models import (
     WebCloseResponse,
     WebEvaluateRequest,
@@ -17,6 +17,17 @@ from nemo_gym.web.api_models import (
     WebVerifyResponse,
 )
 from nemo_gym.web.artifacts import WebArtifactStore
+from nemo_gym.web.browser_session import (
+    BrowserSessionError,
+    BrowserSessionHandle,
+    BrowserSessionProvider,
+    BrowserSessionSpec,
+    LocalProcessBrowserSessionProvider,
+    RenewableBrowserSessionProvider,
+    create_browser_session_provider,
+    list_browser_session_providers,
+    register_browser_session_provider,
+)
 from nemo_gym.web.composed_backend import ComposedWebBackend, WebBrowserDriver, WebTaskEvaluator
 from nemo_gym.web.models import (
     WebAction,
@@ -52,12 +63,18 @@ from nemo_gym.web.site_pool import LocalSiteLockPool, SiteLease, SitePool, Unman
 __all__ = [
     "ActionParseError",
     "BenchmarkPreconditionError",
+    "BrowserSessionError",
+    "BrowserSessionHandle",
+    "BrowserSessionProvider",
+    "BrowserSessionSpec",
     "CapacityUnavailableError",
     "ComposedWebBackend",
     "DirectWebOperationRunner",
     "EvaluatorConfigurationError",
     "EvaluatorInfrastructureError",
     "LocalSiteLockPool",
+    "LocalProcessBrowserSessionProvider",
+    "RenewableBrowserSessionProvider",
     "SiteLease",
     "SitePool",
     "SessionConflictError",
@@ -92,5 +109,8 @@ __all__ = [
     "WebVerifierResult",
     "WebVerifyRequest",
     "WebVerifyResponse",
-    "parse_model_action",
+    "create_browser_session_provider",
+    "list_browser_session_providers",
+    "parse_nano_omni_tool_calls",
+    "register_browser_session_provider",
 ]

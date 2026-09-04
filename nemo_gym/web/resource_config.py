@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import os
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
@@ -14,7 +14,7 @@ from nemo_gym.web.models import WebBenchmark
 
 
 class WebResourcesServerConfig(BaseResourcesServerConfig):
-    """Configuration shared by BrowserGym and native visual backends."""
+    """Configuration shared by stateful visual-browser backends."""
 
     max_sessions: int = Field(default=1, ge=1)
     artifact_dir: str = "cache/web/artifacts"
@@ -22,8 +22,16 @@ class WebResourcesServerConfig(BaseResourcesServerConfig):
     max_evidence_screenshots: int = Field(default=3, ge=1, le=20)
     session_ttl_seconds: int = Field(default=3600, ge=60)
     reaper_interval_seconds: int = Field(default=60, ge=5)
+    browser_session_provider: dict[str, dict[str, Any]] = Field(default_factory=lambda: {"local_process": {}})
+    browser_session_options: dict[str, Any] = Field(default_factory=dict)
+    browser_lease_ttl_seconds: int = Field(default=900, ge=60)
+    browser_acquire_timeout_seconds: float = Field(default=300.0, gt=0.0)
+    browser_release_timeout_seconds: float = Field(default=60.0, gt=0.0)
+    browser_heartbeat_interval_seconds: float = Field(default=60.0, ge=5.0)
+    browser_heartbeat_timeout_seconds: float = Field(default=30.0, gt=0.0)
+    browser_heartbeat_failure_limit: int = Field(default=3, ge=1, le=20)
     require_auth: bool = False
-    auth_token_env: str = "BROWSERGYM_WEB_RESOURCES_TOKEN"
+    auth_token_env: str = "VISUAL_BROWSER_RESOURCES_TOKEN"
     site_pool_mode: Literal["unmanaged", "local_locks"] = "unmanaged"
     allowed_benchmarks: list[WebBenchmark] = Field(default_factory=lambda: list(WebBenchmark))
 
@@ -33,6 +41,12 @@ class WebResourcesServerConfig(BaseResourcesServerConfig):
             raise ValueError("web sessions are process-local; num_workers must be 1")
         if len(set(self.allowed_benchmarks)) != len(self.allowed_benchmarks):
             raise ValueError("allowed_benchmarks must not contain duplicates")
+        if len(self.browser_session_provider) != 1:
+            raise ValueError("browser_session_provider must select exactly one provider")
+        if self.browser_heartbeat_interval_seconds >= self.browser_lease_ttl_seconds:
+            raise ValueError("browser heartbeat interval must be shorter than the provider lease TTL")
+        if self.browser_heartbeat_timeout_seconds >= self.browser_lease_ttl_seconds:
+            raise ValueError("browser heartbeat timeout must be shorter than the provider lease TTL")
         return self
 
     def resolved_artifact_dir(self) -> str:

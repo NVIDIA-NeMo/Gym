@@ -6,7 +6,6 @@ import json
 import pytest
 
 from nemo_gym.web.datasets import (
-    adapt_native_webvoyager_record,
     adapt_webvoyager_record,
     load_json_records,
     write_jsonl,
@@ -14,7 +13,7 @@ from nemo_gym.web.datasets import (
 from nemo_gym.web.models import WebTask
 
 
-def test_webvoyager_uses_legacy_action_surface_over_browsergym():
+def test_webvoyager_rows_use_the_visual_browser_contract():
     row = adapt_webvoyager_record(
         {
             "web_name": "Allrecipes",
@@ -25,14 +24,12 @@ def test_webvoyager_uses_legacy_action_surface_over_browsergym():
     )
     task = WebTask.model_validate(row["web_task"])
 
-    assert task.runtime_profile.value == "browsergym"
-    assert task.action_profile.value == "webvoyager_legacy"
+    assert task.runtime_profile.value == "visual_browser"
+    assert task.action_profile.value == "computer_use"
+    assert task.observation_profile.value == "screenshot"
     assert task.start_urls == ["https://www.allrecipes.com/"]
-
-
-def test_native_webvoyager_adapter_is_exposed_through_dataset_api():
-    row = adapt_native_webvoyager_record({"id": "Allrecipes--0", "ques": "Find a recipe"})
-    assert row["web_task"]["runtime_profile"] == "native_visual"
+    assert row["responses_create_params"]["input"] == []
+    assert "tools" not in row["responses_create_params"]
 
 
 def test_write_jsonl_is_utf8_and_newline_delimited(tmp_path):

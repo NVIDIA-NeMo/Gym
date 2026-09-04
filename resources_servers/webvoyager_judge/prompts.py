@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pinned prompts for WebVoyager verifier profiles."""
 
-NATIVE_WEBVOYAGER_JUDGE_PROMPT = """You will evaluate whether a web assistant was able to successfully complete a given web task. As an evaluator, you will be presented with three primary components to assist you in your role:
+WEBVOYAGER_GEMINI_JUDGE_PROMPT = """You will evaluate whether a web assistant was able to successfully complete a given web task. As an evaluator, you will be presented with three primary components to assist you in your role:
 
 1. Web Task Instruction: This is a clear and specific directive provided in natural language, detailing the online activity to be carried out. These requirements may include conducting searches, verifying information, comparing prices, checking availability, or any other action relevant to the specified web service (such as Amazon, Apple, ArXiv, BBC News, Booking etc).
 
