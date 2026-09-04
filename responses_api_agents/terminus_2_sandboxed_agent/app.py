@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from fastapi import Request
 from harbor.agents.terminus_2 import Terminus2
-from harbor.llms.base import BaseLLM, LLMResponse
+from harbor.llms.base import BaseLLM, ContextLengthExceededError, LLMResponse
 from harbor.models.agent.context import AgentContext
 from harbor.models.metric.usage_info import UsageInfo
 from harbor.utils.logger import logger as harbor_logger
@@ -232,6 +232,11 @@ class NeMoGymLLM(BaseLLM):
                 cost_usd=0.0,
             )
         content, reasoning_content = self._response_text(response)
+
+        # @bxyu-nvidia: Gym will return an empty model response when context length is exceeded
+        if not content or reasoning_content:
+            raise ContextLengthExceededError
+
         return LLMResponse(
             content=content,
             reasoning_content=reasoning_content,
