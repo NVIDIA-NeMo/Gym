@@ -130,6 +130,25 @@ IMAGE_PULL_POLICY_EXTENSION_KEY = "imagePullPolicy"
 IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY = "opensandbox.extensions.image-pull-policy"
 VALID_IMAGE_PULL_POLICIES = {"Always", "IfNotPresent", "Never"}
 STATUS_CODE_RE = re.compile(r"(?:status code|http)\D+(\d{3})", re.IGNORECASE)
+SERVER_PROXY_API_KEY_HEADER = "OPEN-SANDBOX-API-KEY"  # pragma: allowlist secret
+
+
+def _normalize_domain_protocol(
+    domain: str | None,
+    protocol: str | None,
+    *,
+    use_server_proxy: bool,
+) -> tuple[str | None, str | None]:
+    """Use an explicit management URL scheme for proxied execd routes only."""
+    if domain is None:
+        return None, protocol
+    value = domain.rstrip("/")
+    if use_server_proxy:
+        if value.startswith("http://"):
+            protocol = "http"
+        elif value.startswith("https://"):
+            protocol = "https"
+    return value, protocol
 
 
 def validate_image_pull_policy(image_pull_policy: str) -> str:
@@ -677,14 +696,17 @@ class OpenSandboxProvider:
     ) -> Any:
         _, ConnectionConfig, _, _, _ = _require_opensandbox_sdk()
         kwargs: dict[str, Any] = {}
-        if self._connection.domain is not None:
-            # OpenSandbox SDK 0.1.15 appends ``/v1`` directly. Normalizing here
-            # prevents a configured trailing slash from producing ``//v1``.
-            kwargs["domain"] = self._connection.domain.rstrip("/")
+        domain, protocol = _normalize_domain_protocol(
+            self._connection.domain,
+            self._connection.protocol,
+            use_server_proxy=self._connection.use_server_proxy,
+        )
+        if domain is not None:
+            kwargs["domain"] = domain
         if self._connection.api_key is not None:
             kwargs["api_key"] = self._connection.api_key
-        if self._connection.protocol is not None:
-            kwargs["protocol"] = self._connection.protocol
+        if protocol is not None:
+            kwargs["protocol"] = protocol
         if request_timeout_s is None:
             request_timeout_s = self._connection.request_timeout_s
         if request_timeout_s is not None:
@@ -698,7 +720,7 @@ class OpenSandboxProvider:
             # the key only in proxy mode: a direct sandbox endpoint runs
             # untrusted code and must never see it.
             if self._connection.api_key is not None:
-                kwargs["headers"] = {"OPEN-SANDBOX-API-KEY": self._connection.api_key}
+                kwargs["headers"] = {SERVER_PROXY_API_KEY_HEADER: self._connection.api_key}
         if self._connection.keepalive_expiry_s is not None or self._connection.disable_connection_pooling:
             kwargs["transport"] = self._get_transport()
         return ConnectionConfig(**kwargs)
@@ -1489,7 +1511,12 @@ class OpenSandboxProvider:
         headers = dict(endpoint.headers)
         if self._connection.api_key:
             headers["OPEN-SANDBOX-API-KEY"] = self._connection.api_key
-        return f"{self._connection.protocol}://{endpoint.endpoint}", headers, request_timeout_s
+        _, protocol = _normalize_domain_protocol(
+            self._connection.domain,
+            self._connection.protocol,
+            use_server_proxy=self._connection.use_server_proxy,
+        )
+        return f"{protocol or 'http'}://{endpoint.endpoint}", headers, request_timeout_s
 
     async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> SandboxPtySession:
         """Open an interactive execd PTY session inside a sandbox."""

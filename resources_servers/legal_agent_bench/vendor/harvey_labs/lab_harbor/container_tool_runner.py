@@ -4,8 +4,9 @@
 """Container-side implementation for non-bash Harbor agent tools.
 
 LegalAgentBenchHarborAgent invokes this script inside the Harbor environment
-with a tool name and a JSON argument payload. It returns one JSON object on
-stdout:
+with a tool name and a JSON argument payload. The native Gym agent passes the
+payload over stdin so large document writes do not exceed the operating
+system's argument-size limit. It returns one JSON object on stdout:
 
     {"result": "...", "metrics": {...}}
 
@@ -36,13 +37,17 @@ MAX_READ_LINES = 200
 
 
 def main() -> None:
-    if len(sys.argv) != 3:
+    if len(sys.argv) == 3:
+        raw_arguments = sys.argv[2]
+    elif len(sys.argv) == 2:
+        raw_arguments = sys.stdin.read()
+    else:
         _emit("Error: expected tool name and JSON arguments", {})
         return
 
     tool_name = sys.argv[1]
     try:
-        arguments = json.loads(sys.argv[2])
+        arguments = json.loads(raw_arguments)
     except json.JSONDecodeError as exc:
         _emit(f"Error: invalid JSON arguments: {exc}", {})
         return

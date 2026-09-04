@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import threading
 import time
 from asyncio import Semaphore
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,8 +20,11 @@ from omegaconf import OmegaConf
 from resources_servers.legal_agent_bench.harbor_bridge import REPO_ROOT, LegalAgentBenchHarborBridge
 from resources_servers.legal_agent_bench.legal_harbor_agent import (
     LegalAgentBenchHarborAgent,
+    LegalAgentBenchHarnessError,
+    ModelResponse,
     OpenAICompatibleAdapter,
     _chat_with_timeout,
+    _run_agent_async,
 )
 from resources_servers.legal_agent_bench.prepare import (
     EXPECTED_TASK_COUNT,
@@ -28,8 +33,11 @@ from resources_servers.legal_agent_bench.prepare import (
     _marker,
     flatten_task_id,
 )
+from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor import container_tool_runner
+from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor import judge as lab_judge
 from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor import scoring as lab_scoring
 from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor.judge import (
+    OpenAICompatibleJudge,
     _extract_judge_message_text,
 )
 from resources_servers.legal_agent_bench.verifier import (
@@ -42,6 +50,24 @@ from responses_api_agents.harbor_agent.app import HarborAgentConfig
 
 
 BENCH_DIR = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("use_stdin", [False, True])
+def test_container_tool_runner_accepts_legacy_argv_and_stdin(monkeypatch, capsys, use_stdin: bool) -> None:
+    arguments = {"file_path": "memo.txt"}
+    raw_arguments = json.dumps(arguments)
+    argv = ["container_tool_runner.py", "preflight"]
+    if not use_stdin:
+        argv.append(raw_arguments)
+    monkeypatch.setattr(container_tool_runner.sys, "argv", argv)
+    monkeypatch.setattr(container_tool_runner.sys, "stdin", io.StringIO(raw_arguments if use_stdin else ""))
+    preflight = MagicMock(return_value="ready")
+    monkeypatch.setattr(container_tool_runner, "_preflight", preflight)
+
+    container_tool_runner.main()
+
+    assert json.loads(capsys.readouterr().out) == {"result": "ready", "metrics": {}}
+    preflight.assert_called_once_with()
 
 
 def _write_skills(skills_dir: Path) -> None:
@@ -80,6 +106,7 @@ def test_folder_config_is_public_docker_only() -> None:
     assert resource["auto_prepare_assets"] is True
     assert agent["harbor_environment_type"] == "docker"
     assert agent["harbor_environment_import_path"] is None
+    assert agent["harbor_skip_verification_on_agent_failure"] is True
     assert "docker_image" not in json.dumps(agent)
 
 
@@ -272,6 +299,262 @@ async def test_policy_adapter_timeout(monkeypatch) -> None:
         await _chat_with_timeout(adapter, [], [])
 
 
+@pytest.mark.asyncio
+async def test_harbor_agent_preserves_partial_trajectory_then_propagates_failure(monkeypatch, tmp_path) -> None:
+    task_dir = tmp_path / "task"
+    (task_dir / "documents").mkdir(parents=True)
+    (task_dir / "environment").mkdir()
+    (task_dir / "task.toml").write_text('version = "1.0"\n', encoding="utf-8")
+    (task_dir / "task.json").write_text(
+        json.dumps(
+            {
+                "title": "Test task",
+                "instructions": "Write the deliverable.",
+                "criteria": [{"id": "C-1", "title": "Done", "match_criteria": "Pass."}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    logs_dir = tmp_path / "logs" / "agent"
+    agent = LegalAgentBenchHarborAgent(
+        logs_dir=logs_dir,
+        model_name="policy-model",
+        api_base="http://policy/v1",
+        skills_dir=tmp_path / "skills",
+    )
+    monkeypatch.setattr(agent, "_skill_names", lambda: [])
+
+    async def hydrate(_environment, _docs_dir):
+        return None
+
+    monkeypatch.setattr(agent, "_hydrate_environment", hydrate)
+    monkeypatch.setattr(agent, "_create_adapter", MagicMock())
+    monkeypatch.setattr(
+        "resources_servers.legal_agent_bench.legal_harbor_agent.get_all_tool_definitions",
+        lambda: [],
+    )
+
+    class ToolExecutor:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def preflight(self):
+            return None
+
+    monkeypatch.setattr(
+        "resources_servers.legal_agent_bench.legal_harbor_agent.HarborToolExecutor",
+        ToolExecutor,
+    )
+
+    async def partial_failure(*, transcript_path, **_kwargs):
+        transcript_path.write_text(
+            json.dumps(
+                {
+                    "turn": 1,
+                    "role": "assistant",
+                    "message": {"role": "assistant", "content": "Partial work"},
+                    "text": "Partial work",
+                    "tool_calls": None,
+                    "input_tokens": 11,
+                    "output_tokens": 3,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "messages": [],
+            "turn_count": 1,
+            "input_tokens": 11,
+            "output_tokens": 3,
+            "wall_clock_seconds": 0.1,
+            "finished_cleanly": False,
+            "context_overflow": False,
+            "model_error": "adapter failed after partial output",
+            "model_error_type": "ConnectionError",
+            "model_connection_failed": True,
+            "agent_timed_out": False,
+            "tool_metrics": {},
+        }
+
+    monkeypatch.setattr(
+        "resources_servers.legal_agent_bench.legal_harbor_agent._run_agent_async",
+        partial_failure,
+    )
+
+    class Environment:
+        environment_dir = task_dir / "environment"
+
+        async def download_dir(self, _source, target):
+            Path(target).mkdir(parents=True, exist_ok=True)
+
+    context = SimpleNamespace()
+    with pytest.raises(LegalAgentBenchHarnessError, match="adapter failed after partial output"):
+        await agent.run("<!-- lab_task_id:test/task -->", Environment(), context)
+
+    trajectory = json.loads((logs_dir / "trajectory.json").read_text(encoding="utf-8"))
+    assert trajectory["steps"][-1]["message"] == "Partial work"
+    assert context.metadata["agent_failed"] is True
+    assert context.metadata["model_connection_failed"] is True
+    assert context.metadata["agent_timed_out"] is False
+    assert context.metadata["model_error"] == "adapter failed after partial output"
+
+
+@pytest.mark.asyncio
+async def test_harbor_loop_classifies_timeout_after_partial_output(tmp_path) -> None:
+    class Adapter:
+        timeout_seconds = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def make_system_message(self, content):
+            return {"role": "system", "content": content}
+
+        def make_user_message(self, content):
+            return {"role": "user", "content": content}
+
+        def make_tool_result_messages(self, results):
+            return [{"role": "tool", "content": result} for _call_id, result in results]
+
+        async def chat(self, _messages, _tools):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(
+                    message={"role": "assistant", "content": "Working"},
+                    tool_calls=[SimpleNamespace(id="call-1", name="read", arguments='{"path":"input.docx"}')],
+                    text="Working",
+                    input_tokens=10,
+                    output_tokens=2,
+                )
+            raise TimeoutError("model request timed out")
+
+    class ToolExecutor:
+        async def execute(self, _name, _arguments):
+            return "document text"
+
+        def get_metrics(self):
+            return {}
+
+    transcript = tmp_path / "transcript.jsonl"
+    result = await _run_agent_async(
+        adapter=Adapter(),
+        system_prompt="system",
+        tool_executor=ToolExecutor(),
+        tools=[],
+        max_turns=3,
+        transcript_path=transcript,
+    )
+
+    entries = [json.loads(line) for line in transcript.read_text(encoding="utf-8").splitlines()]
+    assert any(entry.get("role") == "assistant" for entry in entries)
+    assert any(entry.get("role") == "model_error" for entry in entries)
+    assert result["model_error"] == "model request timed out"
+    assert result["agent_timed_out"] is True
+    assert result["model_connection_failed"] is False
+
+
+@pytest.mark.asyncio
+async def test_harbor_loop_preserves_context_limit_as_scoreable_incomplete_output(tmp_path) -> None:
+    class Adapter:
+        timeout_seconds = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def make_system_message(self, content):
+            return {"role": "system", "content": content}
+
+        def make_user_message(self, content):
+            return {"role": "user", "content": content}
+
+        def make_tool_result_messages(self, results):
+            return [{"role": "tool", "content": result} for _call_id, result in results]
+
+        async def chat(self, _messages, _tools):
+            self.calls += 1
+            if self.calls == 1:
+                return ModelResponse(
+                    message={"role": "assistant", "content": "Partial work"},
+                    tool_calls=[SimpleNamespace(id="call-1", name="read", arguments='{"path":"input.docx"}')],
+                    text="Partial work",
+                    input_tokens=10,
+                    output_tokens=2,
+                )
+            raise RuntimeError("maximum context length exceeded")
+
+    class ToolExecutor:
+        async def execute(self, _name, _arguments):
+            return "document text"
+
+        def get_metrics(self):
+            return {}
+
+    result = await _run_agent_async(
+        adapter=Adapter(),
+        system_prompt="system",
+        tool_executor=ToolExecutor(),
+        tools=[],
+        max_turns=3,
+        transcript_path=tmp_path / "transcript.jsonl",
+    )
+
+    assert result["context_overflow"] is True
+    assert result["finished_cleanly"] is False
+    assert result["model_error"] is None
+    assert result["model_connection_failed"] is False
+    assert result["agent_timed_out"] is False
+    assert result["output_tokens"] == 2
+
+
+@pytest.mark.asyncio
+async def test_harbor_loop_preserves_max_turns_as_scoreable_incomplete_output(tmp_path) -> None:
+    class Adapter:
+        timeout_seconds = None
+
+        def make_system_message(self, content):
+            return {"role": "system", "content": content}
+
+        def make_user_message(self, content):
+            return {"role": "user", "content": content}
+
+        def make_tool_result_messages(self, results):
+            return [{"role": "tool", "content": result} for _call_id, result in results]
+
+        async def chat(self, _messages, _tools):
+            return ModelResponse(
+                message={"role": "assistant", "content": "Partial work"},
+                tool_calls=[SimpleNamespace(id="call-1", name="read", arguments='{"path":"input.docx"}')],
+                text="Partial work",
+                input_tokens=10,
+                output_tokens=2,
+            )
+
+    class ToolExecutor:
+        async def execute(self, _name, _arguments):
+            return "document text"
+
+        def get_metrics(self):
+            return {}
+
+    result = await _run_agent_async(
+        adapter=Adapter(),
+        system_prompt="system",
+        tool_executor=ToolExecutor(),
+        tools=[],
+        max_turns=1,
+        transcript_path=tmp_path / "transcript.jsonl",
+    )
+
+    assert result["turn_count"] == 1
+    assert result["finished_cleanly"] is False
+    assert result["context_overflow"] is False
+    assert result["model_error"] is None
+    assert result["model_connection_failed"] is False
+    assert result["agent_timed_out"] is False
+    assert result["output_tokens"] == 2
+
+
 @pytest.mark.parametrize(
     "message, expected",
     [
@@ -287,6 +570,48 @@ def test_judge_response_text_sources(message, expected) -> None:
 def test_empty_judge_message_fails_clearly() -> None:
     with pytest.raises(ValueError, match="contained no text"):
         _extract_judge_message_text({"content": "", "reasoning_content": None})
+
+
+def test_judge_sends_configured_reasoning_effort(monkeypatch) -> None:
+    observed = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": '{"verdict":"pass","reasoning":"ok"}'}}]}).encode()
+
+    def urlopen(request, *, timeout):
+        observed["payload"] = json.loads(request.data)
+        observed["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(lab_judge.urllib.request, "urlopen", urlopen)
+    judge = OpenAICompatibleJudge(
+        model="openai-compatible/provider/judge",
+        base_url="https://judge.example/v1",
+        api_key="test-key",  # pragma: allowlist secret
+        temperature=None,
+        timeout_seconds=30,
+        reasoning_effort="medium",
+    )
+
+    result = judge.evaluate(
+        {
+            "task_description": "task",
+            "agent_output": "output",
+            "criterion_title": "criterion",
+            "match_criteria": "match",
+        }
+    )
+
+    assert result == {"verdict": "pass", "reasoning": "ok"}
+    assert observed["payload"]["reasoning_effort"] == "medium"
+    assert observed["timeout"] == 30
 
 
 def test_reward_mode_validation() -> None:
@@ -387,6 +712,21 @@ def test_deliverable_matching_ignores_thread_export() -> None:
         {"contract": "revised-contract.docx"},
         ["output.docx", "final-contract.docx"],
     ) == {"contract": "final-contract.docx"}
+
+
+def test_full_output_ignores_raw_ooxml_working_files(monkeypatch, tmp_path) -> None:
+    output_dir = tmp_path / "output"
+    (output_dir / "workdir" / "word" / "_rels").mkdir(parents=True)
+    (output_dir / "response.docx").write_bytes(b"placeholder")
+    (output_dir / "workdir" / "word" / "document.xml").write_text("raw document xml")
+    (output_dir / "workdir" / "word" / "_rels" / "document.xml.rels").write_text("raw relationships")
+    monkeypatch.setattr(lab_scoring, "_read_file_as_text", lambda path: f"content:{path.name}")
+
+    content = lab_scoring._load_all_output(output_dir)
+
+    assert "content:response.docx" in content
+    assert "document.xml" not in content
+    assert "document.xml.rels" not in content
 
 
 def test_parallel_judging_uses_isolated_judges_and_preserves_order(tmp_path) -> None:

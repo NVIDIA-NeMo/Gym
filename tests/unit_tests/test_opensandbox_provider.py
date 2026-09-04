@@ -562,6 +562,62 @@ def test_connection_config_and_image_policy(fake_opensandbox_sdk: None) -> None:
     assert "headers" not in direct._connection_config().kwargs
 
 
+def test_connection_domain_url_normalization_and_proxy_secret_boundary(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "domain": "http://sandbox.example:8080/",
+            "api_key": "key",  # pragma: allowlist secret
+            "protocol": "http",
+            "use_server_proxy": True,
+        }
+    )
+    config = provider._connection_config()
+    assert config.kwargs["domain"] == "http://sandbox.example:8080"
+    assert config.kwargs["protocol"] == "http"
+    assert config.kwargs["headers"] == {
+        "OPEN-SANDBOX-API-KEY": "key",  # pragma: allowlist secret
+    }
+
+    direct = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "domain": "sandbox.example",
+            "api_key": "key",  # pragma: allowlist secret
+            "use_server_proxy": False,
+        }
+    )._connection_config()
+    assert "headers" not in direct.kwargs
+
+    url_scheme_wins = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "https://sandbox.example", "protocol": "http", "use_server_proxy": True}
+    )._connection_config()
+    assert url_scheme_wins.kwargs["domain"] == "https://sandbox.example"
+    assert url_scheme_wins.kwargs["protocol"] == "https"
+
+    direct_protocol_wins = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "https://sandbox.example", "protocol": "http", "use_server_proxy": False}
+    )._connection_config()
+    assert direct_protocol_wins.kwargs["domain"] == "https://sandbox.example"
+    assert direct_protocol_wins.kwargs["protocol"] == "http"
+
+    base_path = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "https://sandbox.example/prefix", "protocol": "http", "use_server_proxy": True}
+    )._connection_config()
+    assert base_path.kwargs["domain"] == "https://sandbox.example/prefix"
+    assert base_path.kwargs["protocol"] == "https"
+
+    bare_base_path = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "sandbox.example/prefix", "protocol": "http"}
+    )._connection_config()
+    assert bare_base_path.kwargs["domain"] == "sandbox.example/prefix"
+    assert bare_base_path.kwargs["protocol"] == "http"
+
+    empty_domain = opensandbox_provider.OpenSandboxProvider(
+        connection={"domain": "", "protocol": "http"}
+    )._connection_config()
+    assert empty_domain.kwargs["domain"] == ""
+    assert empty_domain.kwargs["protocol"] == "http"
+
+
 def test_connection_transport_backends(fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch) -> None:
     # Default backend is httpx, with the configured keepalive expiry on the pool.
     provider = opensandbox_provider.OpenSandboxProvider()
