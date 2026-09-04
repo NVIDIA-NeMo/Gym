@@ -74,7 +74,11 @@ async def stage_and_run_eval(
             local.write_text(content)
             await provider.exec(handle, f"mkdir -p {Path(target).parent}", timeout_s=30)
             await provider.upload_file(handle, local, target)
-        await provider.exec(handle, eval_command, timeout_s=timeout_s)
+        result = await provider.exec(handle, eval_command, timeout_s=timeout_s)
+        if result.return_code != 0:
+            raise RuntimeError(
+                f"eval command failed ({result.return_code}): {(result.stderr or result.stdout or '')[:300]}"
+            )
         local = Path(td) / "reward"
         await provider.download_file(handle, reward_file, local)
         return float(local.read_text().strip() or 0.0)
@@ -244,18 +248,14 @@ class SandboxAgent(SimpleResponsesAPIAgent):
             return BaseVerifyResponse.model_validate(await get_response_json(verify_resp))
 
     async def _grade_in_box(self, handle, grade_spec: dict) -> float:
-        try:
-            return await stage_and_run_eval(
-                self._provider,
-                handle,
-                eval_files=grade_spec.get("eval_files") or {},
-                eval_command=grade_spec.get("eval_command") or "bash /tests/test.sh",
-                reward_file=grade_spec.get("eval_reward_file") or "/logs/verifier/reward.txt",
-                timeout_s=self.config.eval_timeout,
-            )
-        except Exception:
-            LOG.warning("in-box grading failed, reward=0", exc_info=True)
-            return 0.0
+        return await stage_and_run_eval(
+            self._provider,
+            handle,
+            eval_files=grade_spec.get("eval_files") or {},
+            eval_command=grade_spec.get("eval_command") or "bash /tests/test.sh",
+            reward_file=grade_spec.get("eval_reward_file") or "/logs/verifier/reward.txt",
+            timeout_s=self.config.eval_timeout,
+        )
 
     async def _provision_box(self, image: str, files: dict[str, str], model_url: str):
         spec = SandboxSpec(image=image, **dict(self.config.sandbox_spec))
