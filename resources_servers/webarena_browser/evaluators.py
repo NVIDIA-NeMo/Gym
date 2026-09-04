@@ -13,6 +13,7 @@ from typing import Protocol
 from nemo_gym.web.evaluation_collision import build_collision_plan, has_collision_mitigation
 from nemo_gym.web.models import WebBenchmark, WebObservation, WebTask, WebVerifierResult
 from nemo_gym.web.session import EvaluatorConfigurationError
+from nemo_gym.web.task_images import resolve_local_task_image_path
 from nemo_gym.web.visual_browser import VisualBrowserEvaluationContext
 from resources_servers.webarena_browser.config import WebArenaBrowserResourcesServerConfig
 from resources_servers.webarena_browser.site_auth import configured_site_urls, resolve_site_templates
@@ -47,7 +48,37 @@ class WebArenaFamilyEvaluator(Protocol):
 def _task_needs_judge(task_config: dict) -> bool:
     eval_config = task_config.get("eval") or {}
     reference_answers = eval_config.get("reference_answers") or {}
-    return bool(set(reference_answers).intersection({"exact_match", "must_include", "fuzzy_match"}))
+    if set(reference_answers).intersection({"exact_match", "must_include", "fuzzy_match"}):
+        return True
+    return any(query.get("eval_vqa") for query in eval_config.get("page_image_query") or [])
+
+
+def _materialize_evaluator_image_paths(
+    task_config: dict,
+    *,
+    image_root: str | None,
+    max_bytes: int,
+) -> None:
+    """Resolve local fuzzy-image references without changing remote/media URLs."""
+
+    eval_config = task_config.get("eval") or {}
+    for query in eval_config.get("page_image_query") or []:
+        expression = query.get("eval_fuzzy_image_match")
+        if not isinstance(expression, str):
+            continue
+        resolved: list[str] = []
+        for raw_reference in expression.split(" |OR| "):
+            reference = raw_reference.strip()
+            if reference.startswith(("http://", "https://", "media/")):
+                resolved.append(reference)
+                continue
+            path, _mime_type = resolve_local_task_image_path(
+                reference,
+                image_root=image_root,
+                max_bytes=max_bytes,
+            )
+            resolved.append(str(path))
+        query["eval_fuzzy_image_match"] = " |OR| ".join(resolved)
 
 
 def _reference_task_config(
@@ -65,9 +96,14 @@ def _reference_task_config(
     task_config["start_url"] = list(task.start_urls)
     task_config = resolve_site_templates(task_config, site_urls)
     if not isinstance(task_config.get("eval"), dict):
-        raise EvaluatorConfigurationError("WebArena task requires an eval object")
+        raise EvaluatorConfigurationError("WebArena-family task requires an eval object")
     if not isinstance(task_config["eval"].get("eval_types"), list):
-        raise EvaluatorConfigurationError("WebArena task requires eval.eval_types")
+        raise EvaluatorConfigurationError("WebArena-family task requires eval.eval_types")
+    _materialize_evaluator_image_paths(
+        task_config,
+        image_root=config.task_image_root,
+        max_bytes=config.max_task_image_bytes,
+    )
 
     source_plan = task.task_kwargs.get("collision_plan")
     collision_plan = copy.deepcopy(source_plan) if isinstance(source_plan, dict) else build_collision_plan(task_config)
@@ -75,13 +111,17 @@ def _reference_task_config(
     return task_config, collision_plan
 
 
-class WebArenaClassicEvaluator:
+class WebArenaFamilyReferenceEvaluator:
     """Run the pinned local evaluator while its Playwright page is still live."""
 
     def __init__(
         self,
+        benchmark: WebBenchmark,
         config: WebArenaBrowserResourcesServerConfig,
     ) -> None:
+        if benchmark not in {WebBenchmark.WEBARENA, WebBenchmark.VISUALWEBARENA}:
+            raise ValueError(f"unsupported WebArena-family benchmark: {benchmark.value}")
+        self.benchmark = benchmark
         self.config = config
         self._task_key: tuple[WebBenchmark, str] | None = None
         self._task_config: dict | None = None
@@ -96,11 +136,24 @@ class WebArenaClassicEvaluator:
         browser_context: VisualBrowserEvaluationContext,
     ) -> None:
         del observation
-        if task.benchmark != WebBenchmark.WEBARENA:
-            raise EvaluatorConfigurationError(f"WebArena evaluator received benchmark {task.benchmark.value!r}")
+        if task.benchmark != self.benchmark:
+            raise EvaluatorConfigurationError(
+                f"{self.benchmark.value} evaluator received benchmark {task.benchmark.value!r}"
+            )
         task_config, collision_plan = _reference_task_config(task, self.config)
         if _task_needs_judge(task_config) and not os.environ.get("WEBARENA_JUDGE_API_KEY", "").strip():
-            raise EvaluatorConfigurationError("WEBARENA_JUDGE_API_KEY is required by this WebArena task")
+            raise EvaluatorConfigurationError("WEBARENA_JUDGE_API_KEY is required by this WebArena-family task")
+        if any(
+            query.get("eval_fuzzy_image_match")
+            for query in (task_config.get("eval") or {}).get("page_image_query") or []
+        ):
+            try:
+                import numpy  # noqa: F401
+                import skimage  # noqa: F401
+            except ImportError as exc:
+                raise EvaluatorConfigurationError(
+                    "numpy and scikit-image are required for VisualWebArena fuzzy-image evaluation"
+                ) from exc
 
         from resources_servers.webarena_browser.reference_evaluation import (
             collect_browser_snapshots_sync,
@@ -134,15 +187,16 @@ class WebArenaClassicEvaluator:
     ) -> WebVerifierResult:
         del observation
         if self._task_key != (task.benchmark, task.task_id):
-            raise RuntimeError("WebArena evaluator is not prepared for this task")
+            raise RuntimeError("WebArena-family evaluator is not prepared for this task")
         if self._task_config is None or self._collision_plan is None or self._before is None:
-            raise RuntimeError("WebArena evaluator state is incomplete")
+            raise RuntimeError("WebArena-family evaluator state is incomplete")
 
         from resources_servers.webarena_browser.reference_evaluation import (
             build_snapshot_context,
             collect_browser_snapshots_sync,
             collect_snapshots,
             evaluate_classic_task_sync,
+            evaluate_visualwebarena_task_sync,
             merge_snapshots,
         )
 
@@ -157,14 +211,24 @@ class WebArenaClassicEvaluator:
             else None
         )
         agent_result = {"answer": final_answer or ""}
-        score, message = evaluate_classic_task_sync(
-            self._task_config,
-            agent_result,
-            browser_context.page,
-            judge_log_path=judge_log_path,
-            eval_context=eval_context,
-        )
-        verifier_version = "webarena-reference-3b775dc"
+        if task.benchmark == WebBenchmark.WEBARENA:
+            score, message = evaluate_classic_task_sync(
+                self._task_config,
+                agent_result,
+                browser_context.page,
+                judge_log_path=judge_log_path,
+                eval_context=eval_context,
+            )
+            verifier_version = "webarena-reference-3b775dc"
+        else:
+            score, message = evaluate_visualwebarena_task_sync(
+                self._task_config,
+                agent_result,
+                browser_context.page,
+                judge_log_path=judge_log_path,
+                eval_context=eval_context,
+            )
+            verifier_version = "visualwebarena-reference-3b775dc"
         score = max(0.0, min(1.0, float(score)))
         LOG.info(
             "event=webarena_evaluator_complete benchmark=%s task=%s score=%.3f message=%r",
@@ -215,8 +279,9 @@ class WebArenaTaskEvaluator:
         if evaluators is None:
             resolved_evaluators: dict[WebBenchmark, WebArenaFamilyEvaluator] = {}
             if config is not None:
-                if WebBenchmark.WEBARENA in config.allowed_benchmarks:
-                    resolved_evaluators[WebBenchmark.WEBARENA] = WebArenaClassicEvaluator(config)
+                for benchmark in (WebBenchmark.WEBARENA, WebBenchmark.VISUALWEBARENA):
+                    if benchmark in config.allowed_benchmarks:
+                        resolved_evaluators[benchmark] = WebArenaFamilyReferenceEvaluator(benchmark, config)
             self._evaluators = resolved_evaluators
         else:
             self._evaluators = dict(evaluators)
