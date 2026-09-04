@@ -34,7 +34,7 @@ OUTPUT_FPATH = DATA_DIR / "apex25_benchmark.jsonl"
 
 HF_REPO_ID = "MathArena/apex_2025"
 # Pin to a specific revision for reproducibility (see README).
-HF_REVISION = "ac8a641db12cc87be39e61ea89f2e04c80c5f2e7"
+HF_REVISION = "ac8a641db12cc87be39e61ea89f2e04c80c5f2e7"  # pragma: allowlist secret
 
 
 def prepare() -> Path:
