@@ -3,11 +3,56 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from nemo_gym.judge import JudgeError
 from resources_servers.job_bench import app
+
+
+@pytest.mark.parametrize(
+    "response",
+    ['```json\n{"rubric_passed": true}\n```', 'prefix {"rubric_passed": true} suffix'],
+)
+def test_parse_judge_json_fallbacks(response: str) -> None:
+    parsed, _ = app.judge.parse_judge_json(response)
+
+    assert parsed["rubric_passed"] is True
+
+
+def test_parse_judge_json_rejects_garbage() -> None:
+    with pytest.raises(ValueError):
+        app.judge.parse_judge_json("not json")
+
+
+@pytest.mark.parametrize(("passed", "expected_score"), [(True, 3), (False, 0)])
+def test_judge_rubric_scores_model_verdict(monkeypatch, passed: bool, expected_score: int) -> None:
+    content = json.dumps(
+        {
+            "criteria_results": [{"passed": passed, "reasoning": "reason", "evidence": "evidence"}],
+            "rubric_passed": passed,
+            "overall_reasoning": "reason",
+        }
+    )
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+    completions = SimpleNamespace(create=lambda **_kwargs: response)
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    monkeypatch.setattr(app.judge, "get_openai_client", lambda *_args: client)
+
+    result, debug = app.judge.judge_rubric(
+        0,
+        {"rubric": "required", "weight": 3, "criterion": ["first", "second"]},
+        "answer",
+        "judge-model",
+        "https://judge.example",
+        "test",
+        max_retries=1,
+    )
+
+    assert result["result"]["score"] == expected_score
+    assert result["result"]["criteria_results"][1]["passed"] is False
+    assert debug["api_exit_code"] == 0
 
 
 def test_judge_uses_official_weighted_score(monkeypatch, tmp_path: Path) -> None:
