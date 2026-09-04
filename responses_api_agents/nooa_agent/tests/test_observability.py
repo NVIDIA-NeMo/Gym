@@ -27,9 +27,13 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
+from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ToolCallObservation
 from responses_api_agents.nooa_agent.gym_llm import GymModelCall, RolloutLLMState
-from responses_api_agents.nooa_agent.observability import GymTraceHooks
+from responses_api_agents.nooa_agent.observability import (
+    GymTraceHooks,
+    adapt_response_for_verify,
+    finalize_observations,
+)
 
 
 def response(
@@ -154,3 +158,35 @@ def test_episode_usage_sums_only_complete_usage(missing_usage: bool) -> None:
     else:
         assert episode.response.usage is not None
         assert episode.response.usage.total_tokens == 24
+
+
+def test_adapt_response_for_verify_adds_fallback_without_mutating_episode() -> None:
+    response = NeMoGymResponse(
+        id="nooa-test",
+        created_at=0,
+        model="nooa",
+        object="response",
+        output=[],
+        parallel_tool_calls=False,
+        tool_choice="none",
+        tools=[],
+    )
+
+    adapted, gaps = adapt_response_for_verify(response, "fallback answer")
+
+    assert adapted.output[0].content[0].text == "fallback answer"
+    assert [gap.code for gap in gaps] == ["non_trainable_fallback_output"]
+    assert response.output == []
+
+
+def test_finalize_observations_appends_termination_gap() -> None:
+    bundle = AgentObservationBundle(source="nooa", records=[], gaps=[])
+
+    finalized = finalize_observations(
+        bundle,
+        termination_reason="policy_budget_exceeded",
+        termination_error="budget exhausted",
+    )
+
+    assert finalized.gaps[0].code == "policy_budget_exceeded"
+    assert finalized.gaps[0].detail == "budget exhausted"
