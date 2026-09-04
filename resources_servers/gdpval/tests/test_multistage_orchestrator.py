@@ -19,7 +19,7 @@ import json
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pytest
 
@@ -37,9 +37,13 @@ from nemo_gym.rollout_collection import (
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
 )
+from resources_servers.gdpval.multistage_elo import PartialStagePolicy
 from resources_servers.gdpval.multistage_orchestrator import (
     MultiStageRunConfig,
     StageResume,
+    _cached_partial_snapshot_is_valid,
+    _is_in_process_retryable,
+    _partial_stage_outcome,
     _prepare_resume,
     aggregate_metrics_path_for,
     append_journal_record,
@@ -3315,3 +3319,377 @@ class TestReferenceMissingIsTerminal:
             NG_FAILURE_CLASS_KEY: REFERENCE_MISSING_FAILURE_CLASS,
         }
         assert _is_success_row(row) is False
+
+
+# ---------------------------------------------------------------------------
+# In-process retry gate + tolerant partial gate
+# ---------------------------------------------------------------------------
+
+
+class TestInProcessRetryGate:
+    """``_is_in_process_retryable`` must apply the gate its caller claims."""
+
+    def test_accepts_persisted_retryable_classes(self) -> None:
+        assert _is_in_process_retryable({NG_FAILURE_CLASS_KEY: "timeout_exceeded"}) is True
+        assert _is_in_process_retryable({NG_FAILURE_CLASS_KEY: "transient"}) is True
+
+    def test_rejects_success_and_drained_rows(self) -> None:
+        assert _is_in_process_retryable({}) is False
+        assert _is_in_process_retryable({"per_reference": {}, "reward": 1.0}) is False
+        assert _is_in_process_retryable({NG_FAILURE_CLASS_KEY: "transient", NG_NO_PERSIST_KEY: True}) is False
+
+    def test_rejects_terminal_rows(self) -> None:
+        # A resume gates a terminal row; an in-process retry must gate it too.
+        assert _is_in_process_retryable({NG_FAILURE_CLASS_KEY: "transient", NG_TERMINAL_KEY: True}) is False
+        # A timeout is never terminal, even when an old build stamped the flag.
+        assert _is_in_process_retryable({NG_FAILURE_CLASS_KEY: "timeout_exceeded", NG_TERMINAL_KEY: True}) is True
+
+    @pytest.mark.parametrize(
+        "failure_class",
+        [
+            "reference_missing",
+            "eval_missing",
+            "transport_ineligible",
+            "skipped",
+            "incomplete",
+            "judge_invalid",
+            "legitimate",
+        ],
+    )
+    def test_rejects_classes_nothing_repairs_mid_process(self, failure_class: str) -> None:
+        assert _is_in_process_retryable({NG_FAILURE_CLASS_KEY: failure_class}) is False
+
+
+class TestTolerateUnresolved:
+    """``tolerate_unresolved`` widens the class test and nothing else."""
+
+    REF = "r1"
+
+    def _stage_rows(self) -> List[Dict[str, Any]]:
+        return [{TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0, "reference_ids": [self.REF]} for i in range(4)]
+
+    def _successful(self, stage_rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for row in stage_rows[:3]:
+            success = dict(row)
+            success["per_reference"] = {self.REF: {"wins": 4, "losses": 3, "ties": 1}}
+            rows.append(success)
+        return rows
+
+    def _outcome(self, result: Optional[Dict[str, Any]], *, tolerate: bool) -> Optional[Dict[str, Any]]:
+        stage_rows = self._stage_rows()
+        policy = PartialStagePolicy(
+            min_success_fraction=0.7,
+            min_per_reference_success_fraction=0.7,
+            min_successful_rows_per_reference=1,
+            waivable_failure_classes=("timeout_exceeded",),
+            tolerate_unresolved=tolerate,
+        )
+        new_results: List[Dict[str, Any]] = []
+        if result is not None:
+            new_results.append(dict(result, **{TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 0}))
+        return _partial_stage_outcome(
+            policy,
+            stage_rows,
+            self._successful(stage_rows),
+            new_results,
+            {(3, 0)},
+            [self.REF],
+            1200.0,
+            1,
+        )
+
+    def test_waivable_class_is_accepted_either_way(self) -> None:
+        result = {NG_FAILURE_CLASS_KEY: "timeout_exceeded"}
+        assert self._outcome(result, tolerate=False) is not None
+        assert self._outcome(result, tolerate=True) is not None
+
+    def test_non_waivable_class_is_accepted_only_when_tolerating(self) -> None:
+        result = {NG_FAILURE_CLASS_KEY: "agent_run_error"}
+        assert self._outcome(result, tolerate=False) is None
+        accepted = self._outcome(result, tolerate=True)
+        assert accepted is not None
+        assert accepted["accepted_unresolved_keys"] == [[3, 0]]
+
+    def test_missing_failure_class_is_never_waived(self) -> None:
+        # The docstring promises "any persisted failure class"; a row carrying
+        # no class at all is not one.
+        assert self._outcome({"reward": 0.0}, tolerate=False) is None
+        assert self._outcome({"reward": 0.0}, tolerate=True) is None
+
+    def test_drained_and_missing_rows_still_hold_the_stage_open(self) -> None:
+        drained = {NG_FAILURE_CLASS_KEY: "timeout_exceeded", NG_NO_PERSIST_KEY: True}
+        assert self._outcome(drained, tolerate=True) is None
+        assert self._outcome(None, tolerate=True) is None
+
+
+class TestCachedPartialSnapshotPolicyRecord:
+    """A frozen snapshot survives legacy records and a ``tolerate_unresolved`` flip."""
+
+    REF = "r1"
+    REF_ELOS = {"r1": 1200.0}
+
+    def _fixture(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], PartialStagePolicy, Dict[str, Any]]:
+        stage_rows = [
+            {TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0, "reference_ids": [self.REF]} for i in range(20)
+        ]
+        persisted: List[Dict[str, Any]] = []
+        for row in stage_rows[:19]:
+            success = dict(row)
+            success["per_reference"] = {self.REF: {"wins": 4, "losses": 3, "ties": 1}}
+            persisted.append(success)
+        policy = PartialStagePolicy(
+            min_success_fraction=0.9,
+            min_per_reference_success_fraction=0.5,
+            min_successful_rows_per_reference=1,
+        )
+        outcome = _partial_stage_outcome(policy, stage_rows, persisted, [], set(), [self.REF], 1200.0, 1)
+        assert outcome is not None
+        return stage_rows, persisted, policy, outcome
+
+    def _is_valid(self, outcome: Mapping[str, Any], policy: PartialStagePolicy) -> bool:
+        stage_rows, persisted, _, _ = self._fixture()
+        return _cached_partial_snapshot_is_valid(outcome, policy, stage_rows, persisted, [self.REF], self.REF_ELOS)
+
+    def test_round_trips_its_own_record(self) -> None:
+        _, _, policy, outcome = self._fixture()
+        assert self._is_valid(outcome, policy) is True
+
+    def test_legacy_four_key_policy_record_is_accepted(self) -> None:
+        _, _, policy, outcome = self._fixture()
+        legacy = dict(outcome)
+        legacy["policy"] = {k: v for k, v in outcome["policy"].items() if k != "tolerate_unresolved"}
+        assert "tolerate_unresolved" not in legacy["policy"]
+        assert self._is_valid(legacy, policy) is True
+
+    def test_tolerate_unresolved_flip_does_not_invalidate(self) -> None:
+        # Flipping the flag mid-run is its intended use (breaking a hang); it
+        # changes no evidence, so an already-frozen snapshot stays valid.
+        _, _, policy, outcome = self._fixture()
+        flipped = PartialStagePolicy(
+            min_success_fraction=policy.min_success_fraction,
+            min_per_reference_success_fraction=policy.min_per_reference_success_fraction,
+            min_successful_rows_per_reference=policy.min_successful_rows_per_reference,
+            waivable_failure_classes=policy.waivable_failure_classes,
+            tolerate_unresolved=True,
+        )
+        assert self._is_valid(outcome, flipped) is True
+        recorded_on = dict(outcome, policy=dict(outcome["policy"], tolerate_unresolved=True))
+        assert self._is_valid(recorded_on, policy) is True
+
+    def test_material_policy_change_still_invalidates(self) -> None:
+        _, _, _, outcome = self._fixture()
+        stricter = PartialStagePolicy(
+            min_success_fraction=0.95,
+            min_per_reference_success_fraction=0.5,
+            min_successful_rows_per_reference=1,
+        )
+        assert self._is_valid(outcome, stricter) is False
+
+
+class TestRetryInProcess:
+    """The opt-in retry loop must terminate and must not void persisted evidence."""
+
+    @staticmethod
+    def _tolerant_cfg(*, retry_inprocess: bool) -> MultiStageRunConfig:
+        return parse_multistage_config(
+            {
+                "enabled": True,
+                "stages": [
+                    {
+                        "num_tasks": 10,
+                        "partial_completion": {
+                            "min_success_fraction": 0.7,
+                            "min_per_reference_success_fraction": 0.7,
+                            "min_successful_rows_per_reference": 1,
+                            # Deliberately excludes the class the rows come back
+                            # with, so only `tolerate_unresolved` can accept them.
+                            "waivable_failure_classes": ["transient"],
+                            "tolerate_unresolved": True,
+                        },
+                    },
+                    {"num_tasks": 10, "num_models": 1},
+                ],
+                "seed": 0,
+                "retry_inprocess": retry_inprocess,
+            }
+        )
+
+    @staticmethod
+    def _drained_retry_runner(failed_indices: set[int], dispatched_stages: List[int]):
+        """Stage-0 rows fail persisted once, then every retry comes back drained."""
+        successful_run = _fake_run_rollouts_factory(target_elo=1100.0)
+
+        async def run(rows_in: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+            dispatched_stages.extend(row["stage_index"] for row in rows_in)
+            pairs = await successful_run(rows_in)
+            if not rows_in or rows_in[0]["stage_index"] != 0:
+                return pairs
+            rewritten: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+            for row, result in pairs:
+                if row[TASK_INDEX_KEY_NAME] not in failed_indices:
+                    rewritten.append((row, result))
+                elif row.get(ATTEMPT_INDEX_KEY_NAME):
+                    rewritten.append(
+                        (row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded", NG_NO_PERSIST_KEY: True}),
+                    )
+                else:
+                    rewritten.append((row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded"}))
+            return rewritten
+
+        return run
+
+    async def test_tolerated_stage_advances_with_retry_off(self) -> None:
+        task_ids = [f"t{i}" for i in range(10)]
+        resume = TestPartialStageCompletion._balanced_resume(task_ids)
+        dispatched_stages: List[int] = []
+
+        _, summaries = await run_multistage_stages(
+            self._tolerant_cfg(retry_inprocess=False),
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            self._drained_retry_runner({0, 1}, dispatched_stages),
+            resume=resume,
+        )
+
+        assert set(dispatched_stages) == {0, 1}
+        assert len(summaries) == 2
+
+    async def test_drained_retry_does_not_stop_a_tolerated_stage(self, monkeypatch) -> None:
+        # Enabling the retry flag must not turn a completable stage into a
+        # stopped one once the dispatch budget is spent.
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+        task_ids = [f"t{i}" for i in range(10)]
+        resume = TestPartialStageCompletion._balanced_resume(task_ids)
+        dispatched_stages: List[int] = []
+
+        _, summaries = await run_multistage_stages(
+            self._tolerant_cfg(retry_inprocess=True),
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            self._drained_retry_runner({0, 1}, dispatched_stages),
+            resume=resume,
+        )
+
+        assert set(dispatched_stages) == {0, 1}
+        assert len(summaries) == 2
+
+    async def test_drained_retry_journals_no_tombstone(self, monkeypatch) -> None:
+        # A durable no-persist disposition over a key whose sidecar already holds
+        # a real failure would disable the pre-dispatch shortcut forever.
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+        task_ids = [f"t{i}" for i in range(10)]
+        resume = TestPartialStageCompletion._balanced_resume(task_ids)
+
+        await run_multistage_stages(
+            self._tolerant_cfg(retry_inprocess=True),
+            {"a": 1000.0, "b": 1200.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            self._drained_retry_runner({0, 1}, []),
+            resume=resume,
+        )
+
+        assert resume.appended[0]
+        assert all(not row.get(NG_NO_PERSIST_KEY) for row in resume.appended[0])
+
+    @staticmethod
+    def _single_stage_cfg() -> MultiStageRunConfig:
+        return parse_multistage_config(
+            {"enabled": True, "stages": [{"num_tasks": 1}], "seed": 0, "retry_inprocess": True}
+        )
+
+    async def test_always_failing_row_makes_exactly_max_attempts_dispatches(self, monkeypatch) -> None:
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+        task_ids = ["t0"]
+        resume = RecordingResume()
+        dispatched: List[Dict[str, Any]] = []
+
+        async def run(rows_in: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+            dispatched.extend(dict(row) for row in rows_in)
+            return [(row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded"}) for row in rows_in]
+
+        await run_multistage_stages(
+            self._single_stage_cfg(),
+            {"a": 1000.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            run,
+            resume=resume,
+        )
+
+        # One initial dispatch plus max_attempts - 1 retries, then the loop stops.
+        assert len(dispatched) == 3
+        assert [row.get(ATTEMPT_INDEX_KEY_NAME) for row in dispatched] == [None, 1, 2]
+
+    async def test_reuse_cached_deliverable_is_sticky_across_retries(self, monkeypatch) -> None:
+        # Attempt 0 reports a reusable deliverable; attempt 1 comes back stamped
+        # on the rollout path without the flag. Attempt 2 must still reuse it
+        # rather than re-running the whole policy rollout.
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+        task_ids = ["t0"]
+        resume = RecordingResume()
+        dispatched: List[Dict[str, Any]] = []
+
+        async def run(rows_in: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+            pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+            for row in rows_in:
+                dispatched.append(dict(row))
+                if row.get(ATTEMPT_INDEX_KEY_NAME):
+                    pairs.append((row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded"}))
+                else:
+                    pairs.append(
+                        (row, {NG_FAILURE_CLASS_KEY: "transient", "reuse_cached_deliverable": True}),
+                    )
+            return pairs
+
+        await run_multistage_stages(
+            self._single_stage_cfg(),
+            {"a": 1000.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            run,
+            resume=resume,
+        )
+
+        assert len(dispatched) == 3
+        assert dispatched[0].get("reuse_cached_deliverable") is None
+        assert dispatched[1].get("reuse_cached_deliverable") is True
+        assert dispatched[2].get("reuse_cached_deliverable") is True
+
+    async def test_all_drained_retry_still_emits_explicit_counts(self, monkeypatch) -> None:
+        # Suppressing the event when nothing was dispatched leaves an operator
+        # with no evidence that the loop ran and consumed selections.
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+        task_ids = ["t0"]
+        resume = RecordingResume()
+        events: List[Tuple[str, dict]] = []
+
+        async def run(rows_in: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+            pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+            for row in rows_in:
+                if row.get(ATTEMPT_INDEX_KEY_NAME):
+                    pairs.append((row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded", NG_NO_PERSIST_KEY: True}))
+                else:
+                    pairs.append((row, {NG_FAILURE_CLASS_KEY: "timeout_exceeded"}))
+            return pairs
+
+        await run_multistage_stages(
+            self._single_stage_cfg(),
+            {"a": 1000.0},
+            _distribution(task_ids),
+            _materialized_rows(task_ids),
+            run,
+            resume=resume,
+            on_event=lambda name, data: events.append((name, data)),
+        )
+
+        retries = [data for name, data in events if name == "stage_retry"]
+        assert len(retries) == 2
+        for data in retries:
+            assert data["num_selected"] == 1
+            assert data["num_dispatched"] == 0
+            assert data["num_drained"] == 1
+            assert data["num_recovered"] == 0

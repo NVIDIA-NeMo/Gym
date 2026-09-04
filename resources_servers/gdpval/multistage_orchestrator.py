@@ -183,6 +183,7 @@ def _is_in_process_retryable(row: Mapping[str, Any]) -> bool:
     return (
         not _is_success_row(row)
         and not row.get(NG_NO_PERSIST_KEY)
+        and not _is_terminal_failure(row)
         and row.get(NG_FAILURE_CLASS_KEY) in _IN_PROCESS_RETRYABLE_CLASSES
     )
 
@@ -332,7 +333,13 @@ def _partial_stage_outcome(
         # sample re-dispatchable intact. `tolerate_unresolved` never waives those.
         if result is None or result.get(NG_NO_PERSIST_KEY):
             return None
-        if not policy.tolerate_unresolved and result.get(NG_FAILURE_CLASS_KEY) not in policy.waivable_failure_classes:
+        # A persisted failure class is required either way: `tolerate_unresolved`
+        # widens *which* classes are waivable, it never waives a row carrying no
+        # class at all.
+        failure_class = result.get(NG_FAILURE_CLASS_KEY)
+        if failure_class is None:
+            return None
+        if not policy.tolerate_unresolved and failure_class not in policy.waivable_failure_classes:
             return None
 
     per_reference = {
@@ -391,9 +398,14 @@ def _cached_partial_snapshot_is_valid(
     # with a default: a legacy record round-trips as the off value instead of
     # invalidating every resume of a run that already froze a partial outcome.
     recorded_tolerate_unresolved = policy_record.get("tolerate_unresolved", False)
+    # It is also non-material to validity and so excluded from the comparison:
+    # the snapshot is revalidated by re-deriving the outcome from its recorded
+    # evidence, and this flag does not change that evidence -- only whether a
+    # stage would be accepted. Flipping it mid-run (its intended use, to break a
+    # hang) must therefore not invalidate an already-frozen snapshot.
+    expected_policy_record = _partial_policy_record(expected_policy)
     recorded_policy_fields = {field: policy_record[field] for field in required_policy_fields}
-    recorded_policy_fields["tolerate_unresolved"] = recorded_tolerate_unresolved
-    if recorded_policy_fields != _partial_policy_record(expected_policy):
+    if recorded_policy_fields != {field: expected_policy_record[field] for field in required_policy_fields}:
         return False
     # The durable record spells the waiver set `newly_waivable_failure_classes`;
     # the config field is `waivable_failure_classes`. Map it back before parsing.
@@ -1163,7 +1175,10 @@ async def run_multistage_stages(
         inprocess_attempts: Dict[Tuple[Any, Any], int] = {}
         if retry_inprocess and pairs and resume is not None:
             startup_attempts = resume.attempts_by_stage.get(index, {})
-            reuse_cached_keys_for_stage = resume.reuse_cached_keys.get(index, frozenset())
+            # Sticky for the whole stage: once a key is known to have a reusable
+            # deliverable on disk it stays reusable, even if a later attempt comes
+            # back stamped on the rollout path without the flag.
+            reuse_cached_keys_for_stage = set(resume.reuse_cached_keys.get(index, frozenset()))
             pending_by_key = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]): r for r in pending_rows}
             while True:
                 retry_rows = []
@@ -1185,7 +1200,9 @@ async def run_multistage_stages(
                     # rather than rerunning the agent, exactly as resume does. The
                     # flag may have been set on this very row moments ago, so honour
                     # both it and the startup snapshot.
-                    if key in reuse_cached_keys_for_stage or row.get("reuse_cached_deliverable"):
+                    if row.get("reuse_cached_deliverable"):
+                        reuse_cached_keys_for_stage.add(key)
+                    if key in reuse_cached_keys_for_stage:
                         retry_row["reuse_cached_deliverable"] = True
                     retry_rows.append(retry_row)
                     inprocess_attempts[key] = inprocess_attempts.get(key, 0) + 1
@@ -1198,23 +1215,34 @@ async def run_multistage_stages(
                     expected_final_stage_index=total_stages - 1,
                     expected_stage_row_count=expected_stage_row_count,
                 )
-                resume.on_rows(index, retried)
                 # Once the dispatch budget is gone every row comes back drained
-                # without a POST; reporting those as re-dispatched is misleading.
-                num_dispatched = sum(1 for r in retried if not r.get(NG_NO_PERSIST_KEY))
-                if num_dispatched:
-                    _emit(
-                        "stage_retry",
-                        index=index,
-                        total_stages=total_stages,
-                        num_retried=num_dispatched,
-                        num_recovered=sum(1 for r in retried if _is_success_row(r)),
-                    )
-                # Later attempt wins for a key; earlier attempts stay in the sidecar.
-                superseded = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in retried}
+                # without a POST. A drained row means "we never got to try", not
+                # "the earlier persisted attempt is void": it must neither become
+                # the row of record nor journal a no-persist disposition over a
+                # key whose sidecar already holds a real failure -- that tombstone
+                # is durable and would permanently disable the pre-dispatch
+                # partial-outcome shortcut for that key.
+                dispatched = [r for r in retried if not r.get(NG_NO_PERSIST_KEY)]
+                num_drained = len(retried) - len(dispatched)
+                if dispatched:
+                    resume.on_rows(index, dispatched)
+                _emit(
+                    "stage_retry",
+                    index=index,
+                    total_stages=total_stages,
+                    num_selected=len(retry_rows),
+                    num_dispatched=len(dispatched),
+                    num_drained=num_drained,
+                    num_recovered=sum(1 for r in dispatched if _is_success_row(r)),
+                )
+                # Later *dispatched* attempt wins for a key; earlier attempts stay
+                # in the sidecar. Drained rows are discarded, leaving the persisted
+                # attempt as the row of record; the attempt counter still advanced
+                # above, so the loop cannot spin on them.
+                superseded = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in dispatched}
                 new_tagged = [
                     r for r in new_tagged if (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) not in superseded
-                ] + retried
+                ] + dispatched
         # A verify-side failure can still carry a complete, reusable policy
         # artifact. Make it available immediately to later stages in this same
         # process; startup-only sidecar loading covers only resumed runs.
@@ -2337,7 +2365,9 @@ def _log_event(name: str, data: dict) -> None:  # pragma: no cover
     elif name == "stage_retry":
         print(
             f"[multistage-elo] stage {data['index'] + 1}/{data['total_stages']} in-process retry: "
-            f"re-dispatched {data.get('num_retried')} rollout(s), recovered {data.get('num_recovered')}",
+            f"{data.get('num_selected')} rollout(s) selected, {data.get('num_dispatched')} re-dispatched, "
+            f"{data.get('num_drained')} drained without dispatch, "
+            f"{data.get('num_recovered')} recovered",
             file=sys.stderr,
             flush=True,
         )
