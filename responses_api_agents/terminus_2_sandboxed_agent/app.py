@@ -265,9 +265,6 @@ class NeMoGymTerminus2(Terminus2):
     def _init_llm(self, *args: Any, **kwargs: Any) -> BaseLLM:
         return self._nemo_gym_llm
 
-    def _count_total_tokens(self, chat: Any) -> int:
-        return sum(len(str(message.get("content", ""))) // 4 for message in chat.messages)
-
     def _dump_trajectory_with_continuation_index(self, continuation_index: int) -> None:
         if self._dump_trajectory_enabled:
             super()._dump_trajectory_with_continuation_index(continuation_index)
