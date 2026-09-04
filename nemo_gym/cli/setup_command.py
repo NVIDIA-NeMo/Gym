@@ -14,6 +14,7 @@
 # limitations under the License.
 import importlib.metadata
 import os
+import shlex
 from os import environ
 from pathlib import Path
 from subprocess import Popen
@@ -174,7 +175,22 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
 
         prefix_cmd = f" > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
-        env_setup_cmd = f"{uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && {install_cmd}{prefix_cmd}"
+        # `uv venv --seed` writes bin/python and bin/activate before the dependency install runs,
+        # and those two files are exactly what `should_skip_venv_setup` above tests for. A build
+        # that dies during the install therefore leaves behind a venv that later runs cannot tell
+        # apart from a complete one, so they skip it and the server dies at startup instead. Delete
+        # it here, the one place where the incompleteness is actually known, so the next run starts
+        # clean. Only the venv this command is building is removed, which keeps the cleanup as
+        # narrow as possible when several jobs share a checkout.
+        quoted_venv_path = shlex.quote(str(venv_path))
+        cleanup_cmd = (
+            f"{{ echo 'Removing incomplete venv:' {quoted_venv_path} >&2; "
+            f"rm -rf {quoted_venv_path}; exit 1; }}{prefix_cmd}"
+        )
+        env_setup_cmd = (
+            f"{{ {uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && "
+            f"{install_cmd}{prefix_cmd} || {cleanup_cmd}; }}"
+        )
 
     return f"cd {dir_path} && {env_setup_cmd}"
 
