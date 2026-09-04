@@ -32,6 +32,8 @@ from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
 from nemo_gym.server_utils import (
+    NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME,
+    NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME,
     BaseServer,
     BaseServerConfig,
     ConnectionError,
@@ -268,6 +270,37 @@ class TestServerUtils:
             url_path="blah blah",
         )
         assert "my mock response" == actual_response
+
+    async def test_ServerClient_preserves_external_capture_url(self, monkeypatch: MonkeyPatch) -> None:
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="head", port=12345),
+            global_config_dict=DictConfig(
+                {"policy_model": {"responses_api_models": {"vllm_model": {"host": "plain-host", "port": 54321}}}}
+            ),
+        )
+        monkeypatch.setenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME, "policy_model")
+        monkeypatch.setenv(
+            NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME,
+            "http://model/ng-rollout/rollout-1/training-token-capture",
+        )
+
+        request_mock = AsyncMock(return_value="response")
+        client_mock = MagicMock()
+        client_mock.return_value.request = request_mock
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", client_mock)
+
+        response = await server_client.post(
+            server_name="policy_model",
+            url_path="/v1/chat/completions",
+            headers={"x-existing": "value"},
+        )
+
+        assert response == "response"
+        request_mock.assert_awaited_once_with(
+            method="POST",
+            url="http://model/ng-rollout/rollout-1/training-token-capture/v1/chat/completions",
+            headers={"x-existing": "value"},
+        )
 
     def test_BaseServer_load_config_from_global_config(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
