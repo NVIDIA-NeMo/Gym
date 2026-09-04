@@ -829,6 +829,15 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in summary.items() if v is not None}
 
 
+def _processor_server_name(agent_name: str, global_config_dict: DictConfig) -> str:
+    """Return the episode server paired with an agent, if one was normalized."""
+    processor_name = f"{agent_name}__processor"
+    processor = global_config_dict.get(processor_name)
+    if isinstance(processor, DictConfig) and "processors" in processor:
+        return processor_name
+    return agent_name
+
+
 # Request failures that are data, not bugs. Anything else still propagates.
 _RUN_FAILURE_ERRORS = (ClientError, orjson.JSONDecodeError, TimeoutError)
 # Statuses something in front of the agent answers with; the agent itself returns 500.
@@ -1695,7 +1704,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
             agg_request = AggregateMetricsRequest(verify_responses=stripped)
             agg_response = await server_client.post(
-                server_name=agent_name,
+                server_name=_processor_server_name(agent_name, server_client.global_config_dict),
                 url_path="/aggregate_metrics",
                 json=agg_request,
             )
@@ -1917,7 +1926,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 started_at = time()
                 res = None
                 try:
-                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                    agent_name = row[AGENT_REF_KEY_NAME]["name"]
+                    res = await server_client.post(
+                        server_name=_processor_server_name(agent_name, server_client.global_config_dict),
+                        url_path="/run",
+                        json=row,
+                    )
                     await raise_for_status(res)
                     result = await get_response_json(res)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
