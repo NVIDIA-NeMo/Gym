@@ -236,6 +236,27 @@ class TestEngine:
         assert world["transferred"] is True
         assert all(c["error"] for c in world["calls"][:2])
 
+    def test_errored_write_leaves_no_db_trace(self, configured_engine) -> None:
+        # Reviewer: set_card_controls could apply a valid atm update, then fail on a
+        # malformed online payload, retaining the mutation. Writes are transactional now.
+        world = engine.seed_world(CUSTOMER)
+        import copy
+
+        before = copy.deepcopy(world["db"])
+        result = engine.apply_tool(
+            world,
+            "set_card_controls",
+            {"card_id": "CARD00001", "atm": {"domestic": {"enabled": False}}, "online": "malformed"},
+        )
+        assert world["calls"][-1]["error"], result
+        assert world["db"] == before, "errored write must roll the episode DB back"
+        # A clean write still lands.
+        engine.apply_tool(
+            world, "set_card_controls", {"card_id": "CARD00001", "atm": {"domestic": {"enabled": False}}}
+        )
+        assert not world["calls"][-1]["error"]
+        assert world["db"] != before
+
     def test_tool_schemas_cover_every_tool(self) -> None:
         names = {s["name"] for s in TOOL_SCHEMAS}
         assert names == set(engine.MCP_TOOL_NAMES) | {engine.TRANSFER_TOOL}
@@ -434,11 +455,13 @@ class TestReviewFixes:
     def test_errored_call_does_not_satisfy_action_check(self, configured_engine) -> None:
         gold = [{"name": "create_fd", "arguments": {"principal": 50000}}]
         calls = [{"name": "create_fd", "arguments": {"principal": 50000}, "error": True}]
-        a = reward_mod._action_reward(calls, gold, gold_errors=[False])
+        a = reward_mod._action_reward(calls, gold)
         assert a["strict"] == 0.0 and a["action_frac"] == 0.0
-        a = reward_mod._action_reward(calls, gold, gold_errors=[True])
+        # Only an explicit expect_error marking legitimises an errored call.
+        gold_marked = [{"name": "create_fd", "arguments": {"principal": 50000}, "expect_error": True}]
+        a = reward_mod._action_reward(calls, gold_marked)
         assert a["strict"] == 1.0
-        a = reward_mod._action_reward(calls, [{"name": "show_mandates", "arguments": {}}], gold_errors=[False])
+        a = reward_mod._action_reward(calls, [{"name": "show_mandates", "arguments": {}}])
         assert a["bad_writes"] == 0
 
     async def test_init_actions_do_not_pollute_calls(self, configured_engine) -> None:
@@ -497,3 +520,115 @@ class TestReviewFixes:
         assert len(judge._cache) == judge._CACHE_MAX
         assert judge.cache_get("m:0") is None and judge.cache_get(f"m:{judge._CACHE_MAX + 9}") == 1.0
         judge._cache.clear()
+
+
+class TestDeterministicFloors:
+    """Review round 2: deterministic requirements that a do-nothing agent fails."""
+
+    def _store(self, configured_engine, ec: dict, nl_history: list[dict], transferred: bool = False, calls=None):
+        world = engine.seed_world(CUSTOMER)
+        if calls:
+            world["calls"].extend(calls)
+        if transferred:
+            world["transferred"] = True
+        return {
+            reward_mod.TASK_KEY: {
+                "task_id": "floor_test",
+                "customer": CUSTOMER,
+                "evaluation_criteria": ec,
+                "user_scenario": {},
+            },
+            reward_mod.WORLD_KEY: world,
+            "nl_history": nl_history,
+        }
+
+    def test_mute_agent_never_passes_strict(self, configured_engine) -> None:
+        ec = {"actions": [], "reward_basis": ["DB", "NL_ASSERTION"]}
+        mute = self._store(configured_engine, ec, [{"role": "user", "content": "hi"}])
+        assert reward_mod.score_trajectory(mute)["strict"] == 0.0
+        spoke = self._store(
+            configured_engine,
+            ec,
+            [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "I cannot do that."}],
+        )
+        assert reward_mod.score_trajectory(spoke)["strict"] == 1.0
+
+    def test_max_tool_calls_gates_strict(self, configured_engine) -> None:
+        ec = {"actions": [], "reward_basis": ["DB", "NL_ASSERTION"], "max_tool_calls": 0}
+        hist = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "Hello! Have a nice day."}]
+        clean = self._store(configured_engine, ec, hist)
+        assert reward_mod.score_trajectory(clean)["strict"] == 1.0
+        chatty = self._store(
+            configured_engine,
+            ec,
+            hist,
+            calls=[{"name": "show_mandates", "arguments": {}, "result": "{}", "error": False}],
+        )
+        assert reward_mod.score_trajectory(chatty)["strict"] == 0.0
+
+    def test_require_transfer_gates_strict(self, configured_engine) -> None:
+        ec = {
+            "actions": [{"name": engine.TRANSFER_TOOL, "arguments": {}}],
+            "reward_basis": ["ACTION", "DB", "NL_ASSERTION"],
+            "require_transfer": True,
+        }
+        hist = [
+            {"role": "user", "content": "unlock my login"},
+            {"role": "assistant", "content": "Transferring you now."},
+        ]
+        no_transfer = self._store(configured_engine, ec, hist)
+        assert reward_mod.score_trajectory(no_transfer)["strict"] == 0.0
+        transferred = self._store(
+            configured_engine,
+            ec,
+            hist,
+            transferred=True,
+            calls=[{"name": engine.TRANSFER_TOOL, "arguments": {}, "result": "Transfer successful", "error": False}],
+        )
+        assert reward_mod.score_trajectory(transferred)["strict"] == 1.0
+
+
+class TestShippedDataIntegrity:
+    """Contract checks over the in-tree dataset (no model calls, engine only)."""
+
+    def test_gold_replay_and_expect_error_marking(self) -> None:
+        data_dir = Path(__file__).resolve().parents[1] / "data"
+        engine.configure()  # point at the shipped data/
+        try:
+            rows = []
+            for split in ("train", "validation"):
+                with open(data_dir / f"{split}.jsonl", encoding="utf-8") as f:
+                    rows.extend(json.loads(line) for line in f if line.strip())
+            assert len(rows) == 300
+            for row in rows:
+                world = engine.seed_world(row["customer"])
+                for action in row["evaluation_criteria"]["actions"]:
+                    args = dict(action.get("arguments") or {})
+                    engine.apply_tool(world, action["name"], args)
+                    errored = bool(world["calls"][-1].get("error"))
+                    expected = bool(action.get("expect_error"))
+                    assert errored == expected, (
+                        f"{row['task_id']}: gold {action['name']} errored={errored} "
+                        f"but expect_error={expected} - expected errors must be marked "
+                        f"explicitly, and marked actions must actually error"
+                    )
+                store = {
+                    reward_mod.TASK_KEY: {
+                        "task_id": row["task_id"],
+                        "customer": row["customer"],
+                        "evaluation_criteria": row["evaluation_criteria"],
+                        "user_scenario": row["user_scenario"],
+                    },
+                    reward_mod.WORLD_KEY: world,
+                    "nl_history": [
+                        {"role": "user", "content": row["opening_message"] or "hi"},
+                        {
+                            "role": "assistant",
+                            "content": " ".join(row["evaluation_criteria"].get("communicate_info") or []) or "Done.",
+                        },
+                    ],
+                }
+                score = reward_mod.score_trajectory(store)
+                assert score["strict"] == 1.0, f"{row['task_id']}: gold replay strict={score['strict']}"
+        finally:
+            engine.configure()

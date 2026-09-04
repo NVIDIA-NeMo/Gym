@@ -47,6 +47,10 @@ Each task's `evaluation_criteria` specifies `actions` (gold tool calls, optional
 | COMMUNICATE | Was every `communicate_info` item said to the customer, with no internal identifiers or tool names leaked? | Customer-facing assistant messages | strict and dense |
 | NL_ASSERTION | Are the `nl_assertions` satisfied? | Customer-facing transcript only, graded by the judge model | dense only |
 
+An errored tool call never satisfies a gold action unless that gold action carries an explicit `expect_error: true` (tasks that deliberately exercise an error path, e.g. querying a nonexistent service request). A gold action that errors on replay without the marking is a data bug, and `tests/test_app.py::TestShippedDataIntegrity` fails on it.
+
+Three further deterministic floors gate `strict`: an episode with no non-empty customer-facing assistant message never passes (a mute agent cannot outscore a correct refusal-with-explanation); a task may declare `max_tool_calls` (e.g. `0` for a purely conversational task, failing any tool use) or `require_transfer: true` (the episode must end in `transfer_to_human_agents`, read from the engine's transfer flag). All three are code checks, independent of the judge.
+
 `strict` is the product of the binary ACTION, DB, and COMMUNICATE checks that appear in the task's `reward_basis`: 1.0 or 0.0, no partial credit. `dense` is a weighted blend of the same components plus the judge score (weights ACTION 0.40, DB 0.25, COMMUNICATE 0.15, NL_ASSERTION 0.20, renormalised over the active basis). The reported `reward` is:
 
 - `strict == 1`: `1.0 - efficiency_cost`, where the cost (capped at 0.15) grades redundant calls, out-of-order gold calls, and low judge scores on an otherwise passing trajectory, so that a batch of passing rollouts still has reward variance.

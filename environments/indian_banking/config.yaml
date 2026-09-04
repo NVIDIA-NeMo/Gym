@@ -65,12 +65,14 @@ indian_banking_agent:
 # repoint judge_model_server if you want separate models).
 # Supplied from env.yaml (repo root, gitignored) like the policy_* keys:
 #   user_sim_base_url / user_sim_api_key / user_sim_model_name
+# (wrapped in oc.select here so manifest-backed static validation, which loads no
+# env.yaml, resolves offline; at runtime env.yaml values are found by the select)
 # The user simulator (and judge) must be a different model from the policy.
 user_simulator_model:
   responses_api_models:
     openai_model:
       entrypoint: app.py
-      openai_base_url: ${user_sim_base_url}
-      openai_api_key: ${user_sim_api_key}
-      openai_model: ${user_sim_model_name}
+      openai_base_url: ${oc.select:user_sim_base_url,''}
+      openai_api_key: ${oc.select:user_sim_api_key,''}
+      openai_model: ${oc.select:user_sim_model_name,''}
       openai_default_headers: {}

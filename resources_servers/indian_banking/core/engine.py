@@ -195,6 +195,10 @@ def apply_tool(world: dict[str, Any], name: str, arguments: dict[str, Any]) -> s
             return hit
 
     tokens = banking_tools.bind_db(world["db"], world["customer"])
+    # Writes are transactional: a call that reports an error must leave no trace in
+    # the episode database (e.g. set_card_controls must not retain a valid atm
+    # update after failing on a malformed online payload). Reads skip the snapshot.
+    db_snapshot = pickle.dumps(world["db"]) if name in WRITE_TOOLS or name in SOFT_WRITE_TOOLS else None
     try:
         try:
             result = str(fn(**arguments))
@@ -207,6 +211,8 @@ def apply_tool(world: dict[str, Any], name: str, arguments: dict[str, Any]) -> s
             error = True
     finally:
         banking_tools.reset_db(*tokens)
+    if error and db_snapshot is not None:
+        world["db"] = pickle.loads(db_snapshot)
 
     # Never cache a not-configured result.
     if cache_key is not None and not error and "not configured" not in result:

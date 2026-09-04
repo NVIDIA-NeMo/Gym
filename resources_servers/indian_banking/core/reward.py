@@ -94,7 +94,8 @@ def _dict_hash(obj: Any) -> str:
 def _replay_gold(customer, gold_actions: list[dict]) -> tuple[dict, list[bool]]:
     """Replay gold actions on a fresh seed; returns (gold_world, per-action error flags).
 
-    Both the DB hash comparison and errored-call matching read this one replay."""
+    The DB hash comparison reads the replayed world; the error flags exist for data
+    integrity checks (every flagged action must carry an explicit ``expect_error``)."""
     gold_world = engine.seed_world(customer)
     errors = []
     for a in gold_actions:
@@ -103,7 +104,7 @@ def _replay_gold(customer, gold_actions: list[dict]) -> tuple[dict, list[bool]]:
     return gold_world, errors
 
 
-def _action_reward(calls: list[dict], gold_actions: list[dict], gold_errors: list[bool] | None = None) -> dict:
+def _action_reward(calls: list[dict], gold_actions: list[dict]) -> dict:
     """Score ACTION. Returns strict, action_frac, name_frac, seq_frac, purity_ok, bad_writes, n_writes."""
     if not gold_actions:
         return {
@@ -116,15 +117,13 @@ def _action_reward(calls: list[dict], gold_actions: list[dict], gold_errors: lis
             "n_writes": 0,
         }
 
-    errs = gold_errors if gold_errors and len(gold_errors) == len(gold_actions) else [False] * len(gold_actions)
-    gidx = {id(g): i for i, g in enumerate(gold_actions)}
-
     def matches(gold: dict, call: dict) -> bool:
         if gold["name"] != call["name"]:
             return False
-        # An errored call satisfies a gold action only if that gold action also
-        # errors on its own replay (some tasks deliberately exercise error paths).
-        if call.get("error") and not errs[gidx[id(gold)]]:
+        # An errored call satisfies a gold action only if the task explicitly marks
+        # that action with ``expect_error: true`` (tasks that deliberately exercise
+        # an error path). Never inferred from the gold replay.
+        if call.get("error") and not gold.get("expect_error"):
             return False
         return args_match(
             gold.get("arguments") or {},
@@ -362,11 +361,11 @@ def score_trajectory(store: dict, judge_score: float | None = None) -> dict:
     seq_frac = 1.0
     purity_ok = True
     bad_writes = n_writes = 0
-    gold_world = gold_errors = None
+    gold_world = None
     if gold_actions and ("ACTION" in basis or "DB" in basis):
-        gold_world, gold_errors = _replay_gold(customer, gold_actions)
+        gold_world, _ = _replay_gold(customer, gold_actions)
     if "ACTION" in basis:
-        a = _action_reward(calls, gold_actions, gold_errors)
+        a = _action_reward(calls, gold_actions)
         action_frac, name_frac = a["action_frac"], a["name_frac"]
         seq_frac = a["seq_frac"]
         purity_ok, bad_writes, n_writes = a["purity_ok"], a["bad_writes"], a["n_writes"]
@@ -398,6 +397,22 @@ def score_trajectory(store: dict, judge_score: float | None = None) -> dict:
         strict *= v
     if not components:  # NL-only basis (no shipped task uses one) -> neutral
         strict = 1.0
+
+    # ---- deterministic floors (never inferred, always checkable offline) ----
+    # A silent episode never passes: strict requires at least one non-empty
+    # customer-facing assistant message, whatever the reward basis. This is what
+    # separates a correct refusal-with-explanation from a mute agent on tasks
+    # whose DB check passes trivially.
+    if not any((m.get("content") or "").strip() for m in nl_history if m.get("role") == "assistant"):
+        strict = 0.0
+    # Optional per-task criteria in evaluation_criteria:
+    #   max_tool_calls: N  -> more than N tool calls fails strict (0 = conversational-only task)
+    #   require_transfer: true -> the episode must end in transfer_to_human_agents
+    max_tool_calls = ec.get("max_tool_calls")
+    if max_tool_calls is not None and len(calls) > int(max_tool_calls):
+        strict = 0.0
+    if ec.get("require_transfer") and not world.get("transferred"):
+        strict = 0.0
 
     # Any partial credit stays below a true pass; purity only discounts the task block.
     purity_scale = 1.0 - PURITY_PEN * (bad_writes / n_writes) if n_writes else 1.0
