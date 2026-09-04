@@ -56,7 +56,7 @@ class SWEIFWrapperConfig(swe.SWEBenchWrapperConfig):
 
 class SWEIFVerifyResponse(swe.SWEBenchVerifyResponse):
     # One record per constraint: {id, trigger, match, no_answer, instruction, n_steps, n_pass, n_silent, step_avg,
-    # all_pass, graded_turns, continuation_only, steps: [{turn, reward, detail}]}. None when the row has no
+    # all_pass, graded_turns, continuation_only, steps: [{turn, reward, detail, items}]}. None when the row has no
     # constraints.
     if_constraints: Optional[List[Dict[str, Any]]] = None
 

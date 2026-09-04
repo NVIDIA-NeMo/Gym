@@ -57,8 +57,9 @@ _LEGACY_DATA_TYPE = {1: "fresh", 2: "last_step", 3: "interject"}
 # ------------------------------------------------------------------ Responses-API output -> verifier turns
 def segment(items: List[dict], finish: str = "finish") -> List[dict]:
     """Assistant turns from Responses-API items: message/function_call items accumulate until a function_call_output.
-    Returns a list of dicts {texts, calls:[(name,args)], call_ids}."""
-    turns, cur = [], {"texts": [], "calls": [], "call_ids": []}
+    Returns a list of dicts {texts, calls:[(name,args)], call_ids, ids}; `ids` are the output-item ids (message `id`,
+    function_call `id` or `call_id`) that form the turn, so a step record can be located in `response.output` directly."""
+    turns, cur = [], {"texts": [], "calls": [], "call_ids": [], "ids": []}
     for o in items:
         t = o.get("type")
         if t == "reasoning":
@@ -66,9 +67,11 @@ def segment(items: List[dict], finish: str = "finish") -> List[dict]:
         if t == "function_call_output":
             if cur["texts"] or cur["calls"]:
                 turns.append(cur)
-            cur = {"texts": [], "calls": [], "call_ids": []}
+            cur = {"texts": [], "calls": [], "call_ids": [], "ids": []}
         elif t == "message":
             if o.get("role") == "assistant":
+                if o.get("id"):
+                    cur["ids"].append(o["id"])
                 c = o.get("content")
                 if isinstance(c, str):
                     cur["texts"].append(c)
@@ -83,6 +86,8 @@ def segment(items: List[dict], finish: str = "finish") -> List[dict]:
                 a = {}
             cur["calls"].append((o.get("name") or "", a if isinstance(a, dict) else {}))
             cur["call_ids"].append(o.get("call_id"))
+            if o.get("id") or o.get("call_id"):
+                cur["ids"].append(o.get("id") or o.get("call_id"))
     if cur["texts"] or cur["calls"]:
         turns.append(cur)
     return turns
@@ -186,6 +191,7 @@ def _grade(
     if _item_type(sdg_item) in PREFIX_TYPES and input_items is not None:
         skip, _note, continuation_only = prefix_turn_count(input_items, output_items or [])
     graded = [t for t in turns if t.index >= skip]
+    graded_segs = segs[skip:]  # same order as `graded`: graded_segs[j]["ids"] are the output items of graded turn j
     # re-index so the verifier's first_turn/final semantics apply to the continuation
     for j, t in enumerate(graded):
         t.index = j
@@ -217,7 +223,10 @@ def _grade(
                 "all_pass": bool(n and p == n),
                 "graded_turns": len(graded),
                 "continuation_only": continuation_only,
-                "steps": [{"turn": s.turn, "reward": s.reward, "detail": s.detail} for s in steps],
+                "steps": [
+                    {"turn": s.turn, "reward": s.reward, "detail": s.detail, "items": list(graded_segs[s.turn]["ids"])}
+                    for s in steps
+                ],
                 **({"error": err} if err else {}),
             }
         )
@@ -236,7 +245,10 @@ def grade_row(
 
     One record per constraint:
       {id, trigger, match, no_answer, instruction, n_steps, n_pass, n_silent, step_avg, all_pass, graded_turns, continuation_only,
-       steps: [{turn, reward, detail}]}
+       steps: [{turn, reward, detail, items}]}
+    `turn` is the index of the graded model turn (0-based; a turn is what the model emitted between two tool results;
+    prefix items count from the cut), `items` the ids of the output items that form that turn (message `id`, tool-call
+    `id`), so the step can be found in `response.output` without counting turns.
     `n_steps` is the number of gradable steps (turns where the trigger fired), `n_pass` the number with reward 1,
     `step_avg` = n_pass / n_steps (None when the trigger never fired), `all_pass` = n_steps > 0 and n_pass == n_steps,
     `graded_turns` the number of assistant turns graded, `continuation_only` True when the row is a prefix item whose

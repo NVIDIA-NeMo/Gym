@@ -39,7 +39,7 @@ re-indexes a continuation from zero, and grades every constraint. Each record:
 
 ```
 {id, trigger, match, no_answer, instruction, n_steps, n_pass, n_silent, step_avg, all_pass, graded_turns, continuation_only,
- steps: [{turn, reward, detail}]}
+ steps: [{turn, reward, detail, items}]}  — `items` = the ids of the output items (message id, tool-call id) that form the graded turn, so a step can be found in `response.output` without counting turns
 ```
 
 Every matcher declares how a silent in-scope turn (a bare tool call with no text) is treated (`no_answer`): a required shape
