@@ -14,7 +14,7 @@ All environments can be used for training. A benchmark is the evaluation-configu
 
 ## How Benchmarks Relate to Environments
 
-The same resources server powers both. For example, `math_with_judge` is used for RL training via the `code_gen` environment **and** as the verifier for benchmarks like `aime24`, `aime25`, and `gsm8k`. The benchmark config chains to the resources server via `config_paths` and adds a `type: benchmark` dataset with its own `prepare_script` and `num_repeats`.
+The same resources server powers both. For example, `resources_servers/math_with_judge/configs/math_with_judge.yaml` provides the OpenMathReasoning training dataset **and** uses `math_with_judge` as the verifier for benchmarks like `aime24`, `aime25`, and `gsm8k`. The benchmark config chains to the resources server via `config_paths` and adds a `type: benchmark` dataset with its own `prepare_script` and `num_repeats`.
 
 ```yaml
 # benchmarks/aime24/config.yaml
