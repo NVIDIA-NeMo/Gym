@@ -46,9 +46,9 @@ Every matcher declares how a silent in-scope turn (a bare tool call with no text
 (`fail`: prefix, exact, fence, JSON, regex, script, minimum bound) fails it, and an episode with no final message fails its
 final-message rules once; a no-answer-compliant rule (`ungradable`: ban, maximum bound, sentinel) is simply not graded on it.
 `n_silent` counts those turns so a report can show the no-answer rate next to the score. A retired or unknown matcher yields a
-not-applicable record with an `error` field; the row is never lost. Aggregation is done downstream by the recipe: the headline
-CR and SCR per trace with the matched no-op (`sdg/trace_metrics.py`), the constraint-pooled CR / SCR and step pass rate with
-the per-kind no-answer rates (`sdg/score_if.py`).
+not-applicable record with an `error` field; the row is never lost. Aggregation is done downstream by the recipe: CR and SCR
+as means over traces — the headline with the matched no-op (`sdg/trace_metrics.py`) and the breakdowns by group and by
+no-answer kind (`sdg/score_if.py`).
 
 ## Requirements
 
