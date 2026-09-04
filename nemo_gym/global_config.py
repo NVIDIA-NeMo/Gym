@@ -37,6 +37,7 @@ from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from ray import __version__ as ray_version
 
 from nemo_gym import CACHE_DIR, RESULTS_DIR, WORKING_DIR, _resolve_under_cwd_or_install, component_search_roots
+from nemo_gym._config_aliases import LEGACY_AGENT_ALIASES, legacy_config_path_alias
 from nemo_gym.config_types import (
     AgentCompositionError,
     AlmostServerError,
@@ -65,6 +66,8 @@ from nemo_gym.telemetry.setup import (
     telemetry_config_from_global_config,
 )
 
+
+logger = logging.getLogger(__name__)
 
 _GLOBAL_CONFIG_DICT = None
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
@@ -429,6 +432,12 @@ class GlobalConfigDictParser(BaseModel):
             else:
                 searched_locations = [root / config_path for root in component_search_roots()]
             config_path = _resolve_under_cwd_or_install(original_entry)
+            if not config_path.exists() and (canonical_entry := legacy_config_path_alias(original_entry)):
+                canonical_path = _resolve_under_cwd_or_install(canonical_entry)
+                if canonical_path.exists():
+                    logger.warning(f"Config path `{original_entry}` is deprecated; use `{canonical_entry}`.")
+                    config_paths[index] = canonical_entry
+                    config_path = canonical_path
 
             try:
                 extra_config = _load_config_yaml(config_path)
@@ -851,6 +860,46 @@ Use the name the composed config reports."""
             routes.update({str(key): value for key, value in declared.items()})
         global_config_dict["agent_map"] = routes
 
+    @staticmethod
+    def apply_legacy_agent_aliases(global_config_dict: DictConfig) -> None:
+        """Route legacy reasoning-gym agent names to their canonical instances."""
+        declared = global_config_dict.get("agent_map")
+        routes = dict(declared) if isinstance(declared, DictConfig) else {}
+        active_aliases = {}
+        for legacy, canonical in LEGACY_AGENT_ALIASES.items():
+            destination = routes.get(canonical, canonical)
+            if legacy not in global_config_dict and destination in global_config_dict:
+                active_aliases[legacy] = destination
+        if not active_aliases:
+            return
+
+        deprecated_uses = set()
+        selected = global_config_dict.get("agent_name")
+        if selected in active_aliases:
+            deprecated_uses.add(str(selected))
+            global_config_dict["agent_name"] = active_aliases[selected]
+
+        for key, destination in list(routes.items()):
+            if destination in active_aliases:
+                deprecated_uses.add(str(destination))
+                routes[key] = active_aliases[destination]
+        for legacy, destination in active_aliases.items():
+            routes.setdefault(legacy, destination)
+        global_config_dict["agent_map"] = routes
+
+        fan_out = global_config_dict.get("fan_out")
+        if isinstance(fan_out, DictConfig):
+            for key, destinations in fan_out.items():
+                if not isinstance(destinations, (list, ListConfig)):
+                    continue
+                replacements = [active_aliases.get(destination, destination) for destination in destinations]
+                deprecated_uses.update(destination for destination in destinations if destination in active_aliases)
+                fan_out[key] = replacements
+
+        if deprecated_uses:
+            replacements = ", ".join(f"`{legacy}` -> `{active_aliases[legacy]}`" for legacy in sorted(deprecated_uses))
+            logger.warning(f"Legacy agent names are deprecated; use {replacements}.")
+
     def _raise_on_unsupported_pairing(
         self, global_config_dict: DictConfig, source: _AgentInstance, targets: List[_AgentInstance]
     ) -> None:
@@ -1161,6 +1210,7 @@ Pass each config with --config (it builds the list for you), e.g.:
         # Must run after the swap above (inherited bindings must exist to carry over) and before the
         # missing-value check below (it removes the unbound agent instance that still carries '???').
         self.compose_unbound_agent(global_config_dict, held_agent_overrides)
+        self.apply_legacy_agent_aliases(global_config_dict)
 
         # Fail fast with one actionable error if any required value is still '???'. Runs *after*
         # _recursively_swap_keys so that _delete_key/_inherit_from/_copy have been applied first —

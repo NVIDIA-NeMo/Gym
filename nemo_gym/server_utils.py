@@ -44,6 +44,7 @@ from aiohttp import (
     TCPConnector,
 )
 from aiohttp.client import _RequestOptions
+from anyio import create_task_group
 from fastapi import FastAPI, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
@@ -53,6 +54,7 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import (
@@ -730,6 +732,62 @@ def _telemetry_server_type(server_cls: Type) -> Optional[str]:
     return None
 
 
+class ClientDisconnectCancellationMiddleware:
+    """Cancel an in-flight HTTP request when its client disconnects."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+        self.num_cancelled = 0
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        received_messages: asyncio.Queue[Message] = asyncio.Queue()
+        client_disconnected = asyncio.Event()
+
+        async def receive_message() -> Message:
+            return await received_messages.get()
+
+        async def send_message(message: Message) -> None:
+            if not client_disconnected.is_set():
+                await send(message)
+
+        # The listener is the sole reader of the original ASGI receive channel.
+        # Forwarding request messages keeps the body available to the app while
+        # also allowing disconnects to cancel handlers that no longer call receive.
+        async with create_task_group() as task_group:
+
+            async def run_app() -> None:
+                try:
+                    await self.app(scope, receive_message, send_message)
+                finally:
+                    task_group.cancel_scope.cancel()
+
+            async def listen_for_disconnect() -> None:
+                while True:
+                    message = await receive()
+                    await received_messages.put(message)
+                    if message["type"] != "http.disconnect":
+                        continue
+
+                    client_disconnected.set()
+                    self.num_cancelled += 1
+                    if is_global_aiohttp_client_request_debug_enabled() or self.num_cancelled % 100 == 0:
+                        client = scope.get("client")
+                        client_address = f"{client[0]}:{client[1]}" if client else "-:-"
+                        print(
+                            f'{client_address} - "{scope["method"]} {scope["path"]}" '
+                            f"499 CLIENT DISCONNECTED ({self.num_cancelled} total for this server worker)"
+                        )
+                    task_group.cancel_scope.cancel()
+                    return
+
+            task_group.start_soon(run_app)
+            task_group.start_soon(listen_for_disconnect)
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
@@ -817,7 +875,7 @@ class SimpleServer(BaseServer):
 
                 return JSONResponse(content=response_content, status_code=500)
             except CancelledError:
-                return JSONResponse(content="An unknown error occurred", status_code=500)
+                return JSONResponse(content="Request was cancelled", status_code=500)
             except Exception as e:
                 print(
                     f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
@@ -831,6 +889,9 @@ repr(e): {repr(e)}"""
                     f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
                 )
                 return JSONResponse(content="An unknown error occurred", status_code=500)
+
+    def setup_cancellation_middleware(self, app: FastAPI) -> None:
+        app.add_middleware(ClientDisconnectCancellationMiddleware)
 
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
         base_profile_dir = WORKING_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
@@ -944,6 +1005,8 @@ repr(e): {repr(e)}"""
         server.set_ulimit()
         server.prefix_server_logs()
         server.setup_exception_middleware(app)
+        # Register last so cancellation wraps the complete request stack.
+        server.setup_cancellation_middleware(app)
         # Must precede uvicorn.run: Starlette refuses add_middleware once the app has
         # started. This is the ingress half of cross-process propagation — the instrumentor
         # extracts an inbound `traceparent` and parents this server's SERVER span to the

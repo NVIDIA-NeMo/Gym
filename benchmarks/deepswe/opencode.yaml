@@ -5,7 +5,7 @@ config_paths:
   - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
   - resources_servers/deepswe/configs/deepswe.yaml
 
-opencode_deepswe_resources_server:
+deepswe_opencode_resources_server:
   _inherit_from: deepswe_resources_server
   resources_servers:
     deepswe:
@@ -13,7 +13,7 @@ opencode_deepswe_resources_server:
         type: responses_api_models
         name: policy_model
 
-opencode_sandboxed_agent_deepswe:
+deepswe_opencode_sandboxed_agent:
   _inherit_from: opencode_sandboxed_agent
   responses_api_agents:
     opencode_sandboxed_agent:
@@ -21,7 +21,7 @@ opencode_sandboxed_agent_deepswe:
 
       resources_server:
         type: resources_servers
-        name: opencode_deepswe_resources_server
+        name: deepswe_opencode_resources_server
       datasets:
         - name: deepswe_v1_1
           type: benchmark

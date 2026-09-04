@@ -3,16 +3,16 @@ config_paths:
 - resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1.yaml
 
 
-terminus_2_sandboxed_terminal_bench_2_1_resources_server:
+terminal_bench_2_1_terminus_2_sandboxed_resources_server:
   _inherit_from: terminal_bench_2_1_resources_server
 
-terminus_2_sandboxed_agent_terminal_bench_2_1:
+terminal_bench_2_1_terminus_2_sandboxed_agent:
   _inherit_from: terminus_2_sandboxed_agent
   responses_api_agents:
     terminus_2_sandboxed_agent:
       resources_server:
         type: resources_servers
-        name: terminus_2_sandboxed_terminal_bench_2_1_resources_server
+        name: terminal_bench_2_1_terminus_2_sandboxed_resources_server
       datasets:
         - name: terminal_bench_2_1
           type: benchmark

@@ -20,7 +20,11 @@ harness install) are bypassed by calling staticmethods/properties directly rathe
 constructing the agent.
 """
 
+import hashlib
 import json
+import os
+import shutil
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, PropertyMock, patch
@@ -32,6 +36,7 @@ from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
 from nemo_gym.sandbox.providers.docker import DockerProvider
+from responses_api_agents.anyterminal_agent import app
 from responses_api_agents.anyterminal_agent.app import (
     _RUNNER_TEMPLATE,
     AnyTerminalAgent,
@@ -40,6 +45,7 @@ from responses_api_agents.anyterminal_agent.app import (
     GymAgentHarnessProcessor,
     RunTerminalAgent,
     _build_provider,
+    _file_lock,
     _format_container,
     _instruction_from_input,
     _read_task_meta,
@@ -505,6 +511,78 @@ class TestHarnessProcessorSetup:
             proc.setup()
             proc.setup()
         assert "already at" in capsys.readouterr().out
+
+    def test_rechecks_sentinel_after_acquiring_lock(self, tmp_path: Path) -> None:
+        proc = self._proc_no_script()
+        deps_dir = tmp_path / "deps" / "anyterminal_no_such_agent_deps"
+        lock_path = deps_dir.parent / f".{deps_dir.name}.lockdir"
+        lock_path.mkdir(parents=True)
+
+        def finish_other_install(_seconds: float) -> None:
+            deps_dir.mkdir()
+            (deps_dir / ".installed").write_text(hashlib.sha256(b"no-script").hexdigest())
+            shutil.rmtree(lock_path)
+
+        with (
+            patch.object(type(proc), "_parent", new_callable=PropertyMock, return_value=tmp_path),
+            patch("responses_api_agents.anyterminal_agent.app.time.sleep", side_effect=finish_other_install),
+        ):
+            assert proc.setup() == deps_dir
+
+        assert not lock_path.exists()
+
+    def test_file_lock_retries_when_lock_disappears_before_stat(self, tmp_path: Path) -> None:
+        setup_dir = tmp_path / "target"
+        lock_path = setup_dir.parent / f".{setup_dir.name}.lockdir"
+        lock_path.mkdir()
+        original_stat = Path.stat
+        removed = False
+
+        def stat(path: Path, *args, **kwargs):
+            nonlocal removed
+            if path == lock_path and not removed:
+                removed = True
+                shutil.rmtree(lock_path)
+                raise FileNotFoundError
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(Path, "stat", stat):
+            with _file_lock(setup_dir, "test", max_wait=0, poll_interval=0):
+                assert lock_path.exists()
+
+    def test_file_lock_timeout_does_not_remove_existing_lock(self, tmp_path: Path) -> None:
+        setup_dir = tmp_path / "target"
+        lock_path = setup_dir.parent / f".{setup_dir.name}.lockdir"
+        lock_path.mkdir()
+
+        with pytest.raises(TimeoutError):
+            with _file_lock(setup_dir, "test", max_wait=0, poll_interval=0):
+                pass
+
+        assert lock_path.exists()
+
+    def test_stale_lock_is_reclaimed(self, tmp_path: Path) -> None:
+        setup_dir = tmp_path / "target"
+        lock_path = setup_dir.parent / f".{setup_dir.name}.lockdir"
+        lock_path.mkdir(parents=True)
+        old = time.time() - app._AGENT_DEPS_LOCK_STALE_AFTER_SECONDS - 1
+        os.utime(lock_path, (old, old))
+
+        with _file_lock(setup_dir, "test", max_wait=1, poll_interval=0):
+            assert lock_path.exists()  # reacquired fresh by us, not the stale one
+
+        assert not lock_path.exists()
+
+    def test_fresh_lock_is_not_reclaimed(self, tmp_path: Path) -> None:
+        setup_dir = tmp_path / "target"
+        lock_path = setup_dir.parent / f".{setup_dir.name}.lockdir"
+        lock_path.mkdir(parents=True)
+
+        with pytest.raises(TimeoutError):
+            with _file_lock(setup_dir, "test", max_wait=0, poll_interval=0):
+                pass
+
+        assert lock_path.exists()
 
 
 # ── GymAgentHarnessProcessor.get_run_command ─────────────────────────────────────

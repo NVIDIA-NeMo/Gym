@@ -17,7 +17,7 @@ import nemo_gym.health.checks as health_checks
 import nemo_gym.rollout_collection as rollout_collection
 import nemo_gym.rollout_health as health
 from nemo_gym.base_responses_api_model import build_model_call_record
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from nemo_gym.rollout_health import CHECK_REGISTRY, run_health_checks
 from nemo_gym.rollout_observability import TrajectoryRecord
 
@@ -244,14 +244,14 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
     }
 
     class GoldenHelper(RolloutCollectionHelper):
-        def run_examples(self, examples, *args, **kwargs):
+        def _run_examples_with_metadata(self, examples, *args, **kwargs):
             futures = []
             for example in examples:
                 future = Future()
                 future.set_result(
-                    (
-                        example,
-                        {
+                    _CompletedRollout(
+                        row=example,
+                        result={
                             "response": {
                                 "output": [
                                     {
@@ -264,6 +264,7 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
                             },
                             "reward": 1.0,
                         },
+                        rollout_latency_ms=None,
                     )
                 )
                 futures.append(future)

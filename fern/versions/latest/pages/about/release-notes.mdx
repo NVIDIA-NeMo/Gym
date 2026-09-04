@@ -5,7 +5,146 @@ position: 4
 ---
 
 <AccordionGroup>
-<Accordion title="v0.5.0" defaultOpen>
+<Accordion title="v0.6.0" defaultOpen>
+
+### Release Summary
+
+NeMo Gym v0.6.0 lets you use external agent harnesses during RL training and adds Switchyard for evaluating model-routing strategies.
+
+Highlights:
+
+- Use supported external agent harnesses during RL training; NeMo Gym preserves each model call's token IDs and reconstructs the multi-step run as one training response
+- Run routing-aware evaluations with Switchyard by comparing fixed and routed conditions on the same benchmark
+- Trust and debug rollouts with automatic health checks, end-to-end traces, and per-agent token, turn, tool-call, and latency diagnostics
+- Evaluate and compare multiple agents and datasets in one run, with task-level routing to the appropriate harness
+- Submit eval jobs to a Slurm cluster directly from NeMo Gym, scaling vLLM across GPUs or nodes for higher rollout concurrency
+
+### First-Time Contributors
+
+We welcomed **19 new contributors** to NeMo Gym with this release:
+
+- **@giuliolovisotto** added automatic rollout health checks and documented how to diagnose rollout quality
+- **@mlazuka** added per-rollout and per-run aggregate observability metrics
+- **@imxj** added the LiteLLM model server
+- **@max-sudolabs** added the E2B sandbox provider
+- **@aroshanghias-nvd** added a simple agent with configurable context-compaction policies
+- **@ehosseiniasl** added video input support to the vLLM model server
+- **@adv-andrew** added the synthetic OpenAir 5G congestion-control environment
+- **@knayaka** added the Citation IF instruction-following benchmark
+- **@nickson-quak** added a social-bias evaluation environment that separately scores answer correctness and whether explanations rely on stereotypes
+- **@gnalbandyan** added the multimodal HLE vision benchmark
+- **@michal2409** improved OpenHands reliability and generation-limit handling for SWE agents
+
+Thank you to all **64 NeMo Gym contributors** this cycle, including 19 first-time contributors!
+
+### Configure Tasks and Data
+
+- Resources servers can declare their datasets, and `gym dataset collate` records each row's `task_source` so NeMo Gym can select the correct agent at run time
+- Use `agent_map` to reroute selected tasks or fan-out to run the same tasks with multiple agents; invalid agent mappings fail before execution
+- Each resources server defines a typed `task_data` schema. Collation validates rows before a run, and `gym env schema --resources-server <name>` shows the expected data shape
+
+### Configure Agent Harnesses
+
+- Use `--agent-type` to swap a benchmark or environment's configured harness, with compatibility checks for unsupported pairings
+- **OpenCode Sandboxed Agent** runs OpenCode inside task-specific NeMo Gym sandboxes, with configurations for SWE-Bench Verified and Multilingual, DeepSWE, and Terminal-Bench 2.1
+- **Cline Agent** runs the Cline CLI headlessly and converts its tool-use trace into a NeMo Gym trajectory; this initial integration is evaluation-only
+- **Conversational Tool Use workflow** adds three agents that generate customer-service domains, policies, tools, and scenarios, plus a policy-loop agent and resources server that simulate and score multi-turn customer and tool interactions
+- **OSWorld Agent** runs OSWorld desktop tasks end to end, executes model-generated GUI actions, and returns NeMo Gym trajectories with OSWorld rewards
+- **Prime Agent** runs Prime Intellect's agent headlessly through NeMo Gym, with included math and Reasoning Gym environments
+- **Simple Strands Agent** wraps the Simple Strands Resolver agent with configurable local tools; included environments cover math and Reasoning Gym
+- **Terminus-2 Agent** runs Harbor's terminal-command agent through NeMo Gym, with AnyTerminal integration and support for other terminal-compatible resources servers
+- **Simple Agent with Compaction** applies configurable history policies before each model call, including policies that omit older image observations or reasoning blocks
+- **Image Tools Agent** lets models iteratively transform and inspect images, scores their image-tool calls, and delegates final-answer verification to the mapped environment
+- **Verified Code QA (VCQA) Agent** gives models read-only repository snapshots or Git histories to investigate with file, search, and shell tools, then scores answers against a rubric with an LLM judge
+- **OpenClaw with AnyTerminal** runs the evaluation-only OpenClaw harness inside Terminal Bench task containers and scores each run with the task's tests
+
+### Configure Models
+
+- **LiteLLM Model** connects NeMo Gym to providers supported by LiteLLM
+- **Switchyard Model** compares model-routing strategies on the same benchmark and records the route and configuration used for reproducible results
+- The vLLM model server now supports video inputs
+- Use `sampling_overrides` to enforce generation settings when external agent harnesses omit them, preserving on-policy training behavior
+- Use `endpoint_file` to update a vLLM backend address without restarting NeMo Gym, with bounded connection retries during endpoint rotation
+
+### Rollout Observability and Export
+
+- Export configs, metrics, and rollouts through a shared exporter framework. MLflow is new; W&B uses the same path
+- Automatic rollout health checks flag missing turns, inconsistent model calls, token-count mismatches, and runaway generation, with structured reports from evaluation and aggregation
+- NeMo Lens telemetry traces each rollout across NeMo Gym's agent, model, and resources servers, making latency and failures easier to diagnose
+- Rollout diagnostics report token usage, turns, tool calls, and latency, with agent-level traces for OpenClaw, Hermes, Pi, OpenCode, and SWE agents
+- Repeated-rollout metrics now include variability and 95% confidence intervals
+
+### Evaluation and Training
+
+- Compatible external agent harnesses can produce on-policy training data: NeMo Gym preserves exact token IDs across model calls and rebuilds each multi-step episode as one training response
+- Opt in to `route_failures_to_sidecar` to keep an evaluation running when agent calls fail; coverage reporting identifies excluded rollouts, and selected failure classes can instead count as zero
+- Trust eval artifacts: automatic health checks catch missing turns, broken model calls, and runaway generation; rollouts record tokens, turns, tool calls, and latency
+- Verifiers can return a human-readable `failure_reason` to explain unsuccessful rollouts
+
+### Sandboxing and Orchestration
+
+- **E2B** joins the built-in sandbox providers with template building, command execution, file operations, and lifecycle management
+- The OpenSandbox provider adds asynchronous interactive PTY sessions and detached PTY execution for long-running commands
+- OpenSandbox adds configurable network policy, run-scoped cleanup, bounded background-status polling, and an OpenSandbox backend for OSWorld
+- The Apptainer provider accepts a custom binary path
+- Experimental `gym eval submit` runs one or more vLLM instances on a Slurm node or distributes whole replicas across nodes, with configurable environment variables, container mounts, and outputs
+
+### Environments and Benchmarks
+
+- **Software engineering and agentic workflows:** Sandboxed OpenCode configurations for SWE-Bench Verified and Multilingual repository repair, DeepSWE software-engineering tasks, and Terminal-Bench 2.1 terminal tasks; Verified Code QA for repository investigation; OSWorld for desktop automation; and synthetic conversational tool use
+- **Finance:** Vals Finance Agent v2 for multi-step financial analysis and local full-text search over SEC filings
+- **Long context, knowledge, and reasoning:** LongMemEval for conversational memory, RULER v2 for long-context reasoning, SpartQA for spatial reasoning, and new math and Reasoning Gym pairings across agent harnesses
+- **Safety and instruction following:** AgentIF for agentic instruction-following scenarios, Citation IF for citation compliance, and synthetic social-bias questions that separately score answer correctness and whether explanations rely on stereotypes
+- **Science and multimodal:** Expanded Litmus ADME drug-discovery profiles, HLE vision for multimodal expert-level questions, image-tool PivotRL verification, and a synthetic OpenAir 5G congestion-control environment
+- **Aviary environments:** Standalone entries for scientific data analysis with BixBench-Hypothesis and BixBench, grade-school math with GSM8K, and multi-hop question answering with HotpotQA
+
+See the [Available Environments](https://github.com/NVIDIA-NeMo/Gym#-available-environments) table for the full list.
+
+### Deprecation Notices
+
+- `upload_rollouts_to_wandb` has been renamed to `upload_rollouts` because it now controls rollout uploads to every configured exporter. The old name still works but emits a deprecation warning
+- NeMo Gym now requires `openai==2.44.0` instead of `openai<=2.7.2`. A parent environment that forces another version fails configuration by default. Set `allow_openai_version_skew: true` only when intentionally allowing the parent and server environments to use different SDK versions
+- `+agent_name=<name>` now sends every row to that agent. Previously, it only applied to rows that did not specify an agent. Use `+agent_map=...` to reroute only selected rows
+- Datasets collated before v0.6.0 may contain `agent_ref` without `task_source`. They still run, but this routing format is deprecated; run `gym dataset collate` again or set `agent_map` explicitly
+- Because collation now validates task data, malformed or mismatched rows that were previously accepted may fail during preparation. Use `gym env schema --resources-server <name>` to see the expected shape
+- Agentic math environments now use harness-first names. Previous environment names, config paths, preparation scripts, and agent references remain supported as deprecated aliases and emit migration warnings:
+  - `reasoning_gym_claude_code` → `claude_code_reasoning_gym`
+  - `reasoning_gym_hermes` → `hermes_reasoning_gym`
+  - `reasoning_gym_orchestrator` → `langgraph_orchestrator_reasoning_gym`
+  - `reasoning_gym_parallel_thinking` → `langgraph_parallel_thinking_reasoning_gym`
+  - `reasoning_gym_reflection` → `langgraph_reflection_reasoning_gym`
+  - `reasoning_gym_rewoo` → `langgraph_rewoo_reasoning_gym`
+- The following agent config files were renamed. Previous config paths and `--agent-type` flavors remain supported as deprecated aliases and emit migration warnings:
+  - `stirrup_gdpval.yaml` → `stirrup_agent.yaml`
+  - `tau2_agent.yaml` → `tau2.yaml`
+  - `acereason-math.yaml` → `verifiers_agent.yaml`
+
+### Bug Fixes
+
+- Converting between Responses and Chat Completions now preserves structured tool outputs and reasoning metadata and supports audio, file, custom-tool, and parallel tool-call inputs
+- Fixed recursive `config_paths` overrides so nested configurations apply in the intended order
+- `gym eval run --split` now fails immediately when no declared dataset matches the requested split
+- Dry runs now fail when server environment setup fails and report unresolved configuration values and catalog lookups clearly
+- Improved OpenSandbox reliability around authentication, startup races, unavailable backends, out-of-memory failures, and cleanup
+- Added support for running Docker sandboxes as a non-root user
+- Preserved exact vLLM token metadata instead of re-tokenizing prompts
+- Improved SWE agent reliability across OpenHands, OpenCode, and SWE-Bench
+- Fresh runs now clear outdated failure reports when reusing an output path
+- Fixed AnyTerminal secret redaction so unrelated configuration values are not modified
+- OpenClaw now preserves partial execution traces when a run times out
+
+### Documentation
+
+- Added reproducible Nemotron 3.5 Lightning evaluation recipe across agentic, knowledge, reasoning, and science benchmarks
+- Added a guide for diagnosing rollout quality with `gym eval health-check`
+- Added a tutorial for using external agent harnesses to generate on-policy training rollouts.
+- Added a setup guide for the E2B sandbox provider
+- Added a guide for running routing-aware evaluations with Switchyard and comparing results across routing conditions
+- Added practical guidance for verifying equivalent answers
+
+</Accordion>
+
+<Accordion title="v0.5.0">
 
 ### Release Summary
 

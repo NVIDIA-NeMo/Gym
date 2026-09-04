@@ -33,7 +33,8 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from typing import Any
 
-from nemo_gym.token_id_capture.lineage import assistant_fingerprint, stamp_continuation
+from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
+from nemo_gym.token_id_capture.lineage import stamp_continuation
 from nemo_gym.token_id_capture.protocols import LineageResolution, LineageStore, TokenSink
 from nemo_gym.token_id_capture.records import (
     ParentResolutionStatus,
