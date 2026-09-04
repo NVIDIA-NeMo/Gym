@@ -8,10 +8,11 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import Request
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import (
@@ -73,6 +74,23 @@ class WorkspaceBenchResourcesServer(SimpleResourcesServer):
         self._upstream_dir = ensure_upstream()
         self._semaphore = asyncio.Semaphore(self.config.num_processes)
 
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            try:
+                async with parent_lifespan(app) as state:
+                    yield state
+            finally:
+                sandboxes = list(self._sandboxes.values())
+                self._sandboxes.clear()
+                await asyncio.gather(*(sandbox.stop() for sandbox in sandboxes), return_exceptions=True)
+
+        app.router.lifespan_context = lifespan
+        return app
+
     async def seed_session(self, request: Request, body: WorkspaceBenchRequest) -> WorkspaceBenchSeedResponse:
         task_dir = Path(body.task_dir)
         metadata = json.loads((task_dir / "metadata.json").read_text(encoding="utf-8"))
@@ -94,8 +112,8 @@ class WorkspaceBenchResourcesServer(SimpleResourcesServer):
             resources=SandboxResources.from_mapping(sandbox_config.get("resources", {})),
             provider_options=sandbox_config.get("provider_options", {}),
         )
-        await sandbox.start(spec)
         try:
+            await sandbox.start(spec)
             with tempfile.TemporaryDirectory() as temporary_dir:
                 archive = Path(temporary_dir) / "input.tar.gz"
                 manifest = metadata.get("data_manifest") or []
@@ -134,29 +152,35 @@ class WorkspaceBenchResourcesServer(SimpleResourcesServer):
             ),
             encoding="utf-8",
         )
-        subprocess.run(
-            [
-                sys.executable,
-                str(evaluation_dir / "src" / "agent_as_a_judge.py"),
-                "--task-dir",
-                str(case_dir),
-                "--eval-yaml",
-                str(config_path),
-                "--overwrite",
-            ],
-            cwd=evaluation_dir,
-            check=True,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=self.config.judge_timeout_s,
-        )
+        try:
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(evaluation_dir / "src" / "agent_as_a_judge.py"),
+                    "--task-dir",
+                    str(case_dir),
+                    "--eval-yaml",
+                    str(config_path),
+                    "--overwrite",
+                ],
+                cwd=evaluation_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=self.config.judge_timeout_s,
+            )
+        except subprocess.SubprocessError as exc:
+            detail = getattr(exc, "stderr", None) or getattr(exc, "stdout", None) or str(exc)
+            raise RuntimeError(f"Workspace-Bench judge failed: {detail}") from exc
         judged = json.loads((case_dir / "rubrics_judge--gym-judge.json").read_text(encoding="utf-8"))
         graph = json.loads((case_dir / "dependency_graph--gym-judge.json").read_text(encoding="utf-8"))
         return judged["rubrics"], graph
 
     async def verify(self, request: Request, body: WorkspaceBenchVerifyRequest) -> WorkspaceBenchVerifyResponse:
-        sandbox = self._sandboxes.pop(str(request.session[SESSION_ID_KEY]))
+        sandbox = self._sandboxes.pop(str(request.session[SESSION_ID_KEY]), None)
+        if sandbox is None:
+            raise HTTPException(status_code=400, detail="Workspace-Bench session is not active")
         try:
             with tempfile.TemporaryDirectory() as temporary_dir:
                 local_dir = Path(temporary_dir)

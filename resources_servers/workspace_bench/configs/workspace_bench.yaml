@@ -8,6 +8,8 @@ workspace_bench_resources_server:
       judge_base_url: ${oc.env:WORKSPACE_BENCH_JUDGE_BASE_URL,''}
       judge_api_key: ${oc.env:WORKSPACE_BENCH_JUDGE_API_KEY,''}
       judge_model: ${oc.env:WORKSPACE_BENCH_JUDGE_MODEL,''}
+      judge_timeout_s: 600
+      num_processes: 10
       sandbox_provider: sandbox
       sandbox_config:
         image: ${oc.env:WORKSPACE_BENCH_IMAGE,node:24-bookworm-slim}
