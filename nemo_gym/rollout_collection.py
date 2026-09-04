@@ -14,9 +14,11 @@
 # limitations under the License.
 import asyncio
 import glob as glob_module
+import hashlib
 import json
 import logging
 import os
+import traceback
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
@@ -25,7 +27,7 @@ from copy import deepcopy
 from datetime import timedelta
 from itertools import repeat
 from pathlib import Path
-from time import time
+from time import monotonic, time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
 import orjson
@@ -520,6 +522,146 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
         "dataset_uuid": metadata.get("uuid") if isinstance(metadata, dict) else None,
     }
     return {k: v for k, v in summary.items() if v is not None}
+
+
+_ROLLOUT_TRACE_TEXT_LIMIT = 131_072
+_ROLLOUT_TRACE_EXCEPTION_CHAIN_LIMIT = 8
+
+
+def _bounded_rollout_trace_text(value: Any) -> str:
+    try:
+        text = str(value)
+    except BaseException as error:  # pragma: no cover - defensive diagnostics
+        text = f"<str failed: {type(error).__name__}: {error!r}>"
+    if len(text) <= _ROLLOUT_TRACE_TEXT_LIMIT:
+        return text
+    half = _ROLLOUT_TRACE_TEXT_LIMIT // 2
+    omitted = len(text) - (2 * half)
+    return f"{text[:half]}...<truncated {omitted} chars>...{text[-half:]}"
+
+
+def _rollout_exception_debug_summary(error: BaseException) -> Dict[str, Any]:
+    chain = []
+    current: Optional[BaseException] = error
+    seen = set()
+    while current is not None and len(chain) < _ROLLOUT_TRACE_EXCEPTION_CHAIN_LIMIT:
+        if id(current) in seen:
+            chain.append({"error_type": "<cycle>", "error": "exception chain cycle"})
+            break
+        seen.add(id(current))
+        chain.append(
+            {
+                "error_type": f"{type(current).__module__}.{type(current).__qualname__}",
+                "error": _bounded_rollout_trace_text(repr(current)),
+                "message": _bounded_rollout_trace_text(current),
+            }
+        )
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif not current.__suppress_context__:
+            current = current.__context__
+        else:
+            current = None
+    try:
+        formatted_traceback = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    except BaseException as formatting_error:  # pragma: no cover - defensive
+        formatted_traceback = f"<traceback formatting failed: {type(formatting_error).__name__}: {formatting_error!r}>"
+    summary = {
+        "error_type": f"{type(error).__module__}.{type(error).__qualname__}",
+        "error": _bounded_rollout_trace_text(repr(error)),
+        "message": _bounded_rollout_trace_text(error),
+        "exception_chain": chain,
+        "traceback": _bounded_rollout_trace_text(formatted_traceback),
+    }
+    response_content = getattr(error, "response_content", None)
+    if response_content is not None:
+        summary["response_content"] = _rollout_body_debug_summary(response_content)
+    return summary
+
+
+def _rollout_body_debug_summary(body: Any) -> Dict[str, Any]:
+    """Summarize a cached error/parse body without issuing another network read."""
+    try:
+        if isinstance(body, bytes):
+            raw_body = body
+        elif isinstance(body, bytearray):
+            raw_body = bytes(body)
+        else:
+            raw_body = str(body).encode("utf-8", errors="replace")
+        preview_limit = 4096
+        preview = raw_body.decode("utf-8", errors="replace")
+        if len(preview) > preview_limit:
+            half = preview_limit // 2
+            omitted = len(preview) - (2 * half)
+            preview = f"{preview[:half]}...<truncated {omitted} chars>...{preview[-half:]}"
+        return {
+            "bytes": len(raw_body),
+            "sha256": hashlib.sha256(raw_body).hexdigest(),
+            "preview": preview,
+        }
+    except BaseException as error:  # pragma: no cover - defensive diagnostics
+        return {"diagnostic_error": _bounded_rollout_trace_text(repr(error))}
+
+
+def _rollout_response_debug_summary(response: Any) -> Dict[str, Any]:
+    """Capture response metadata and any already-cached body without consuming it."""
+    if response is None:
+        return {}
+    try:
+        headers = getattr(response, "headers", None)
+        selected_headers = {}
+        if headers is not None:
+            for name in (
+                "content-length",
+                "content-type",
+                "server",
+                "traceparent",
+                "x-correlation-id",
+                "x-request-id",
+            ):
+                value = headers.get(name)
+                if value is not None:
+                    selected_headers[name] = value
+        summary = {
+            "status": getattr(response, "status", None),
+            "method": getattr(response, "method", None),
+            "url": getattr(response, "url", None),
+            "headers": selected_headers,
+        }
+        cached_body = getattr(response, "_body", None)
+        if cached_body is not None:
+            summary["cached_body"] = _rollout_body_debug_summary(cached_body)
+        return summary
+    except BaseException as error:  # pragma: no cover - defensive diagnostics
+        return {"diagnostic_error": _bounded_rollout_trace_text(repr(error))}
+
+
+def _emit_rollout_trace(event: str, **fields: Any) -> None:
+    """Emit an always-on, bounded trace without affecting rollout behavior."""
+    try:
+        print(
+            "[nemo_gym_trace] "
+            + json.dumps(
+                {
+                    "component": "gym.rollout_collection",
+                    "event": event,
+                    "hostname": os.uname().nodename,
+                    "pid": os.getpid(),
+                    "timestamp": time(),
+                    **fields,
+                },
+                default=repr,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+    except BaseException as error:  # pragma: no cover - defensive diagnostics
+        print(
+            f"[nemo_gym_trace] diagnostic serialization failed event={event!r} error={error!r}",
+            flush=True,
+        )
 
 
 class RolloutCollectionHelper(BaseModel):
@@ -1038,19 +1180,69 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
         semaphore = semaphore or nullcontext()
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
-            async with semaphore:
-                res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                try:
-                    await raise_for_status(res)
-                except Exception:
-                    print(
-                        "[rollout_collection] /run failed "
-                        f"status={getattr(res, 'status', None)} "
-                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                        flush=True,
+            started_at = monotonic()
+            request_started_at: Optional[float] = None
+            phase = "wait_for_semaphore"
+            res = None
+            row_summary = _rollout_request_debug_summary(row)
+            server_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
+            try:
+                async with semaphore:
+                    phase = "post_run"
+                    request_started_at = monotonic()
+                    _emit_rollout_trace(
+                        "gym_request_started",
+                        phase=phase,
+                        server_name=server_name,
+                        row=row_summary,
+                        semaphore_wait_seconds=request_started_at - started_at,
                     )
-                    raise
-                return row, await get_response_json(res)
+                    res = await server_client.post(
+                        server_name=row["agent_ref"]["name"],
+                        url_path="/run",
+                        json=row,
+                    )
+                    phase = "raise_for_status"
+                    try:
+                        await raise_for_status(res)
+                    except Exception:
+                        print(
+                            "[rollout_collection] /run failed "
+                            f"status={getattr(res, 'status', None)} "
+                            f"row={json.dumps(row_summary, sort_keys=True)}",
+                            flush=True,
+                        )
+                        raise
+                    phase = "decode_response"
+                    result = await get_response_json(res)
+                    _emit_rollout_trace(
+                        "gym_request_completed",
+                        server_name=server_name,
+                        row=row_summary,
+                        status=getattr(res, "status", None),
+                        elapsed_seconds=monotonic() - started_at,
+                        request_elapsed_seconds=(
+                            monotonic() - request_started_at if request_started_at is not None else None
+                        ),
+                    )
+                    return row, result
+            except BaseException as error:
+                _emit_rollout_trace(
+                    "gym_request_exception",
+                    phase=phase,
+                    server_name=server_name,
+                    row=row_summary,
+                    status=getattr(res, "status", None),
+                    response_method=getattr(res, "method", None),
+                    response_url=getattr(res, "url", None),
+                    response=_rollout_response_debug_summary(res),
+                    elapsed_seconds=monotonic() - started_at,
+                    request_elapsed_seconds=(
+                        monotonic() - request_started_at if request_started_at is not None else None
+                    ),
+                    exception=_rollout_exception_debug_summary(error),
+                )
+                raise
 
         return tqdm.as_completed(
             map(_post_subroutine, examples),

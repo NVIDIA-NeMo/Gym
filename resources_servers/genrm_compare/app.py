@@ -30,7 +30,11 @@ Output:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import time
+import traceback
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -65,6 +69,127 @@ logger = logging.getLogger(__name__)
 _cohort_lock: asyncio.Lock = asyncio.Lock()
 _cohort_buffers: Dict[str, List[Tuple[Any, asyncio.Future]]] = defaultdict(list)
 _cohort_jit_buffers: Dict[str, Tuple[List[float, float, float], List[int, int, int]]] = defaultdict(lambda: ([], []))
+
+_GENRM_TRACE_TEXT_LIMIT = 131_072
+_GENRM_TRACE_EXCEPTION_CHAIN_LIMIT = 8
+
+
+def _bounded_genrm_trace_text(value: Any) -> str:
+    try:
+        text = str(value)
+    except BaseException as error:  # pragma: no cover - defensive diagnostics
+        text = f"<str failed: {type(error).__name__}: {error!r}>"
+    if len(text) <= _GENRM_TRACE_TEXT_LIMIT:
+        return text
+    half = _GENRM_TRACE_TEXT_LIMIT // 2
+    omitted = len(text) - (2 * half)
+    return f"{text[:half]}...<truncated {omitted} chars>...{text[-half:]}"
+
+
+def _format_genrm_exception(error: BaseException) -> Dict[str, Any]:
+    chain = []
+    current: Optional[BaseException] = error
+    seen = set()
+    while current is not None and len(chain) < _GENRM_TRACE_EXCEPTION_CHAIN_LIMIT:
+        if id(current) in seen:
+            chain.append({"error_type": "<cycle>", "error": "exception chain cycle"})
+            break
+        seen.add(id(current))
+        chain.append(
+            {
+                "error_type": f"{type(current).__module__}.{type(current).__qualname__}",
+                "error": _bounded_genrm_trace_text(repr(current)),
+                "message": _bounded_genrm_trace_text(current),
+            }
+        )
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif not current.__suppress_context__:
+            current = current.__context__
+        else:
+            current = None
+    try:
+        formatted_traceback = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+    except BaseException as formatting_error:  # pragma: no cover - defensive
+        formatted_traceback = f"<traceback formatting failed: {type(formatting_error).__name__}: {formatting_error!r}>"
+    return {
+        "error_type": f"{type(error).__module__}.{type(error).__qualname__}",
+        "error": _bounded_genrm_trace_text(repr(error)),
+        "message": _bounded_genrm_trace_text(error),
+        "exception_chain": chain,
+        "traceback": _bounded_genrm_trace_text(formatted_traceback),
+    }
+
+
+def _genrm_request_identity(body: Any) -> Dict[str, Any]:
+    try:
+        identity = {
+            "task_index": getattr(body, "task_index", None),
+            "rollout_index": getattr(body, "rollout_index", None),
+            "attempt_index": getattr(body, "attempt_index", None),
+            "prompt_id": getattr(body, "prompt_id", None),
+        }
+        response = getattr(body, "response", None)
+        response_id = response.get("id") if isinstance(response, dict) else getattr(response, "id", None)
+        if response_id is not None:
+            identity["response_id"] = response_id
+        return {key: value for key, value in identity.items() if value is not None}
+    except BaseException as error:  # pragma: no cover - defensive diagnostics
+        return {"diagnostic_error": _bounded_genrm_trace_text(repr(error))}
+
+
+def _genrm_store_summary(prompt_key: Optional[str] = None) -> Dict[str, Any]:
+    try:
+        summary: Dict[str, Any] = {
+            "active_cohorts": len(_cohort_buffers),
+            "pending_members": sum(len(buffer) for buffer in _cohort_buffers.values()),
+            "active_jit_cohorts": len(_cohort_jit_buffers),
+        }
+        if prompt_key is not None:
+            cohort = _cohort_buffers.get(prompt_key, [])
+            jit_results, jit_metadata = _cohort_jit_buffers.get(prompt_key, ([], []))
+            summary.update(
+                {
+                    "cohort_members": len(cohort),
+                    "cohort_member_identities": [_genrm_request_identity(member) for member, _ in cohort],
+                    "jit_result_count": len(jit_results),
+                    "jit_metadata_count": len(jit_metadata),
+                }
+            )
+        return summary
+    except BaseException as error:  # pragma: no cover - defensive diagnostics
+        return {
+            "diagnostic_error": _bounded_genrm_trace_text(repr(error)),
+            "prompt_key": prompt_key,
+        }
+
+
+def _emit_genrm_trace(event: str, **fields: Any) -> None:
+    """Emit always-on cohort diagnostics without changing request semantics."""
+    try:
+        print(
+            "[nemo_gym_trace] "
+            + json.dumps(
+                {
+                    "component": "gym.genrm_compare",
+                    "event": event,
+                    "hostname": os.uname().nodename,
+                    "pid": os.getpid(),
+                    "timestamp": time.time(),
+                    **fields,
+                },
+                default=repr,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+    except BaseException as error:  # pragma: no cover - defensive diagnostics
+        print(
+            f"[nemo_gym_trace] diagnostic serialization failed event={event!r} error={error!r}",
+            flush=True,
+        )
 
 
 class GenRMCompareConfig(BaseResourcesServerConfig):
@@ -209,78 +334,187 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         """Verify a single rollout. When num_rollouts_per_prompt > 1, buffers by prompt and runs comparison when cohort is full."""
         cfg = self.config
         principle = body.principle
+        verify_started_at = time.perf_counter()
+        request_identity = _genrm_request_identity(body)
         if cfg.num_rollouts_per_prompt <= 1:
+            _emit_genrm_trace(
+                "genrm_verify_bypassed",
+                request=request_identity,
+                reason="num_rollouts_per_prompt_le_one",
+                num_rollouts_per_prompt=cfg.num_rollouts_per_prompt,
+                default_score=cfg.default_score,
+            )
             return BaseVerifyResponse(
                 responses_create_params=body.responses_create_params,
                 response=body.response,
                 reward=cfg.default_score,
             )
 
-        input_messages = getattr(body.responses_create_params, "input", None) or []
-        prompt_key = self._activate_verify_cohort_attempt(
-            body,
-            input_messages if isinstance(input_messages, list) else list(input_messages),
-            principle,
-        )
-        future: asyncio.Future[float] = asyncio.get_running_loop().create_future()
+        prompt_key: Optional[str] = None
+        future: Optional[asyncio.Future[float]] = None
+        phase = "prepare_input"
+        try:
+            input_messages = getattr(body.responses_create_params, "input", None) or []
+            phase = "activate_cohort_attempt"
+            prompt_key = self._activate_verify_cohort_attempt(
+                body,
+                input_messages if isinstance(input_messages, list) else list(input_messages),
+                principle,
+            )
+            future = asyncio.get_running_loop().create_future()
 
-        _cohort_buffers[prompt_key].append((body, future))
+            phase = "append_cohort_member"
+            cohort_size_before = len(_cohort_buffers.get(prompt_key, []))
+            _cohort_buffers[prompt_key].append((body, future))
+            _emit_genrm_trace(
+                "genrm_cohort_member_buffered",
+                prompt_key=prompt_key,
+                request=request_identity,
+                cohort_size_before=cohort_size_before,
+                cohort_size_after=cohort_size_before + 1,
+                expected_cohort_size=cfg.num_rollouts_per_prompt,
+                elapsed_seconds=time.perf_counter() - verify_started_at,
+                store=_genrm_store_summary(prompt_key),
+            )
 
-        conversation_history = _input_to_conversation_history(getattr(body.responses_create_params, "input", []) or [])
-        buf = _cohort_buffers[prompt_key]
-        response_objs = [
-            (b.response.model_dump() if hasattr(b.response, "model_dump") else b.response) for b, _ in buf
-        ]
-        principle_val = getattr(body, "principle", None) or principle
-
-        existing_results, existing_metadata = _cohort_jit_buffers[prompt_key]
-        new_results, new_metadata = await self._run_jit_compare_using_most_recent_response_obj(
-            conversation_history, response_objs, existing_metadata, principle_val
-        )
-        existing_results.extend(new_results)
-        existing_metadata.extend(new_metadata)
-
-        cohort_ready = False
-        if len(response_objs) >= cfg.num_rollouts_per_prompt:
-            assert len(response_objs) == cfg.num_rollouts_per_prompt
-            cohort_ready = True
-
-        # Only run for the final response
-        if cohort_ready:
-            existing_results, existing_metadata = _cohort_jit_buffers.pop(prompt_key)
-
-            # Sort to match the ordering of the original `_run_compare` logic
-            existing_results, existing_metadata = zip(
-                *sorted(
-                    zip(existing_results, existing_metadata), key=lambda pair: (pair[1][2], pair[1][0], pair[1][1])
+            phase = "prepare_jit_compare"
+            conversation_history = _input_to_conversation_history(
+                getattr(body.responses_create_params, "input", []) or []
+            )
+            buf = _cohort_buffers[prompt_key]
+            response_objs = [
+                (
+                    buffered_body.response.model_dump()
+                    if hasattr(buffered_body.response, "model_dump")
+                    else buffered_body.response
                 )
+                for buffered_body, _ in buf
+            ]
+            principle_val = getattr(body, "principle", None) or principle
+
+            existing_results, existing_metadata = _cohort_jit_buffers[prompt_key]
+            jit_started_at = time.perf_counter()
+            phase = "run_jit_compare"
+            new_results, new_metadata = await self._run_jit_compare_using_most_recent_response_obj(
+                conversation_history,
+                response_objs,
+                existing_metadata,
+                principle_val,
+            )
+            existing_results.extend(new_results)
+            existing_metadata.extend(new_metadata)
+            _emit_genrm_trace(
+                "genrm_jit_compare_completed",
+                prompt_key=prompt_key,
+                request=request_identity,
+                cohort_size=len(response_objs),
+                expected_cohort_size=cfg.num_rollouts_per_prompt,
+                new_result_count=len(new_results),
+                new_metadata_count=len(new_metadata),
+                total_result_count=len(existing_results),
+                total_metadata_count=len(existing_metadata),
+                jit_elapsed_seconds=time.perf_counter() - jit_started_at,
+                elapsed_seconds=time.perf_counter() - verify_started_at,
             )
 
-            rewards, _, _, _ = aggregate_scores(
-                comparison_results=existing_results,
-                comparison_metadata=existing_metadata,
-                response_objs=response_objs,
-                aggregator_method=cfg.aggregator_method,
-                default_score=cfg.default_score,
-                reasoning_bonus=cfg.reasoning_bonus,
-                answer_bonus=cfg.answer_bonus,
-                top_percentile=cfg.top_percentile,
-                group_reasoning_length_penalty_coeff=cfg.group_reasoning_length_penalty_coeff,
-                group_answer_length_penalty_coeff=cfg.group_answer_length_penalty_coeff,
-                group_style_penalty_coeff=cfg.group_style_penalty_coeff,
+            cohort_ready = False
+            if len(response_objs) >= cfg.num_rollouts_per_prompt:
+                assert len(response_objs) == cfg.num_rollouts_per_prompt
+                cohort_ready = True
+
+            # Only run for the final response
+            if cohort_ready:
+                _emit_genrm_trace(
+                    "genrm_cohort_ready",
+                    prompt_key=prompt_key,
+                    triggering_request=request_identity,
+                    expected_cohort_size=cfg.num_rollouts_per_prompt,
+                    elapsed_seconds=time.perf_counter() - verify_started_at,
+                    store=_genrm_store_summary(prompt_key),
+                )
+                phase = "pop_jit_cohort"
+                existing_results, existing_metadata = _cohort_jit_buffers.pop(prompt_key)
+
+                # Sort to match the ordering of the original `_run_compare` logic
+                phase = "sort_comparison_results"
+                existing_results, existing_metadata = zip(
+                    *sorted(
+                        zip(existing_results, existing_metadata),
+                        key=lambda pair: (
+                            pair[1][2],
+                            pair[1][0],
+                            pair[1][1],
+                        ),
+                    )
+                )
+
+                phase = "aggregate_scores"
+                rewards, _, _, _ = aggregate_scores(
+                    comparison_results=existing_results,
+                    comparison_metadata=existing_metadata,
+                    response_objs=response_objs,
+                    aggregator_method=cfg.aggregator_method,
+                    default_score=cfg.default_score,
+                    reasoning_bonus=cfg.reasoning_bonus,
+                    answer_bonus=cfg.answer_bonus,
+                    top_percentile=cfg.top_percentile,
+                    group_reasoning_length_penalty_coeff=cfg.group_reasoning_length_penalty_coeff,
+                    group_answer_length_penalty_coeff=cfg.group_answer_length_penalty_coeff,
+                    group_style_penalty_coeff=cfg.group_style_penalty_coeff,
+                )
+
+                phase = "resolve_cohort_futures"
+                cohort_buf = _cohort_buffers.pop(prompt_key)
+                cohort_identities = [_genrm_request_identity(member) for member, _ in cohort_buf]
+                resolved_futures = 0
+                already_done_futures = 0
+                for index, (_, cohort_future) in enumerate(cohort_buf):
+                    if not cohort_future.done():
+                        cohort_future.set_result(rewards[index])
+                        resolved_futures += 1
+                    else:
+                        already_done_futures += 1
+                _emit_genrm_trace(
+                    "genrm_cohort_resolved",
+                    prompt_key=prompt_key,
+                    triggering_request=request_identity,
+                    cohort_members=cohort_identities,
+                    rewards=list(rewards),
+                    resolved_futures=resolved_futures,
+                    already_done_futures=already_done_futures,
+                    elapsed_seconds=time.perf_counter() - verify_started_at,
+                    store=_genrm_store_summary(),
+                )
+
+            phase = "await_cohort_reward"
+            reward = await future
+            _emit_genrm_trace(
+                "genrm_verify_completed",
+                prompt_key=prompt_key,
+                request=request_identity,
+                reward=reward,
+                elapsed_seconds=time.perf_counter() - verify_started_at,
+                store=_genrm_store_summary(prompt_key),
             )
-
-            cohort_buf = _cohort_buffers.pop(prompt_key)
-            for i, (_, f) in enumerate(cohort_buf):
-                if not f.done():
-                    f.set_result(rewards[i])
-
-        reward = await future
-        return BaseVerifyResponse(
-            responses_create_params=body.responses_create_params,
-            response=body.response,
-            reward=reward,
-        )
+            return BaseVerifyResponse(
+                responses_create_params=body.responses_create_params,
+                response=body.response,
+                reward=reward,
+            )
+        except BaseException as error:
+            _emit_genrm_trace(
+                "genrm_verify_exception",
+                phase=phase,
+                prompt_key=prompt_key,
+                request=request_identity,
+                future_created=future is not None,
+                future_done=future.done() if future is not None else None,
+                future_cancelled=future.cancelled() if future is not None else None,
+                elapsed_seconds=time.perf_counter() - verify_started_at,
+                store=_genrm_store_summary(prompt_key),
+                exception=_format_genrm_exception(error),
+            )
+            raise
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -324,7 +558,21 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             prior_attempt = attempt - 1
             stale_key = f"{base_key}::attempt::{prior_attempt}"
             stale_buffer = _cohort_buffers.pop(stale_key, [])
-            _cohort_jit_buffers.pop(stale_key, None)
+            stale_jit_results, stale_jit_metadata = _cohort_jit_buffers.pop(stale_key, ([], []))
+            _emit_genrm_trace(
+                "genrm_cohort_attempt_superseded",
+                base_key=base_key,
+                stale_prompt_key=stale_key,
+                active_prompt_key=f"{base_key}::attempt::{attempt}",
+                prior_attempt=prior_attempt,
+                active_attempt=attempt,
+                triggering_request=_genrm_request_identity(body),
+                stale_member_count=len(stale_buffer),
+                stale_members=[_genrm_request_identity(member) for member, _ in stale_buffer],
+                stale_jit_result_count=len(stale_jit_results),
+                stale_jit_metadata_count=len(stale_jit_metadata),
+                store=_genrm_store_summary(),
+            )
             if stale_buffer:
                 logger.warning(
                     "Superseding GenRM cohort attempt %s with attempt %s (%s pending responses)",

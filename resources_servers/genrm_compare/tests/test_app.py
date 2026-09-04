@@ -191,7 +191,7 @@ class TestGenRMCompareResourcesServer:
             f"prompt_id::prompt-123::{prompt_hash}::attempt::0"
         )
 
-    async def test_new_attempt_discards_prior_cohort_state(self, config):
+    async def test_new_attempt_discards_prior_cohort_state(self, config, capsys):
         """A retry cannot append regenerated responses to its prior cohort."""
         server = GenRMCompareResourcesServer.model_construct(config=config, server_client=MagicMock())
         input_messages = [NeMoGymEasyInputMessage(role="user", content="retry me", type="message")]
@@ -225,6 +225,14 @@ class TestGenRMCompareResourcesServer:
         assert attempt_zero_key not in resources_servers.genrm_compare.app._cohort_buffers
         assert attempt_zero_key not in resources_servers.genrm_compare.app._cohort_jit_buffers
         assert isinstance(pending.exception(), RuntimeError)
+        trace = capsys.readouterr().out
+        assert '"event":"genrm_cohort_attempt_superseded"' in trace
+        assert '"prior_attempt":0' in trace
+        assert '"active_attempt":1' in trace
+        assert '"task_index":77' in trace
+        assert '"rollout_index":0' in trace
+        assert '"stale_member_count":1' in trace
+        assert '"stale_jit_result_count":1' in trace
 
     async def test_run_jit_compare_using_most_recent_response_obj(self, monkeypatch: MonkeyPatch) -> None:
         config = GenRMCompareConfig(

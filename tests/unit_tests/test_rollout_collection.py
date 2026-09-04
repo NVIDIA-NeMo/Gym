@@ -25,7 +25,12 @@ import yaml
 import nemo_gym.rollout_collection
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
-from nemo_gym.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.global_config import (
+    AGENT_REF_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
@@ -331,6 +336,10 @@ class TestRolloutCollection:
 
         captured = capsys.readouterr()
         assert "[rollout_collection] /run failed status=500" in captured.out
+        assert '"event":"gym_request_started"' in captured.out
+        assert '"event":"gym_request_exception"' in captured.out
+        assert '"phase":"raise_for_status"' in captured.out
+        assert "RuntimeError('boom')" in captured.out
         assert '"rollout_id": "7-0"' in captured.out
         assert '"_ng_task_index": 7' in captured.out
         assert '"_ng_rollout_index": 0' in captured.out
@@ -342,6 +351,65 @@ class TestRolloutCollection:
         assert "do not log this either" not in captured.out
         assert "responses_create_params" not in captured.out
         assert "do not log this" not in captured.out
+
+    async def test_run_examples_logs_connection_and_decode_failures(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        row = {
+            AGENT_REF_KEY_NAME: {"name": "my_agent"},
+            TASK_INDEX_KEY_NAME: 11,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+            ATTEMPT_INDEX_KEY_NAME: 1,
+            "metadata": {"uuid": "safe-uuid", "secret": "do not log"},
+            "responses_create_params": {"input": "private prompt"},
+        }
+
+        connection_client = MagicMock()
+        connection_client.post = AsyncMock(side_effect=ConnectionError("agent server unavailable"))
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: connection_client,
+        )
+        with pytest.raises(ConnectionError, match="agent server unavailable"):
+            await next(RolloutCollectionHelper().run_examples([row]))
+
+        connection_trace = capsys.readouterr().out
+        assert '"event":"gym_request_exception"' in connection_trace
+        assert '"phase":"post_run"' in connection_trace
+        assert '"rollout_id":"11-3-a1"' in connection_trace
+        assert "agent server unavailable" in connection_trace
+        assert "private prompt" not in connection_trace
+        assert "do not log" not in connection_trace
+
+        response = MagicMock()
+        response.status = 200
+        decode_client = MagicMock()
+        decode_client.post = AsyncMock(return_value=response)
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: decode_client,
+        )
+
+        async def successful_status(_response):
+            return None
+
+        async def fail_decode(_response):
+            raise ValueError("malformed response body")
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", successful_status)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", fail_decode)
+        with pytest.raises(ValueError, match="malformed response body"):
+            await next(RolloutCollectionHelper().run_examples([row]))
+
+        decode_trace = capsys.readouterr().out
+        assert '"event":"gym_request_exception"' in decode_trace
+        assert '"phase":"decode_response"' in decode_trace
+        assert '"status":200' in decode_trace
+        assert "malformed response body" in decode_trace
 
     def test_preprocess_rows_with_prompt_config(self, tmp_path: Path) -> None:
         """prompt_config builds responses_create_params.input from template."""
