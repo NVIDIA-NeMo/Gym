@@ -20,7 +20,7 @@ terminus_2_sandboxed_agent:
       debug: false
       model_context_limit: 262144
       model_output_limit: null
-      llm_request_timeout: 600  # 10 mins
+      llm_request_timeout: 600  # 10 mins, Litellm default
 
       sandbox_provider: sandbox
       sandbox_timeout: 10800  # 3 hrs
