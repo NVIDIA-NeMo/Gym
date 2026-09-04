@@ -383,7 +383,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             except TimeoutError:
                 terminus2_completed = False
                 error = format_exc()
-            except:
+            except Exception:
                 terminus2_completed = False
                 error = format_exc()
                 print(f"Hit exception while running Terminus2: {format_exc()}", file=sys.stderr)
@@ -468,7 +468,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         self._session_sandboxes.pop(session_key)
         try:
             await sandbox.stop()
-        except:
+        except Exception:
             print("Failed to stop sandbox", format_exc(), file=sys.stderr)
 
         result = await get_response_json(verification)
