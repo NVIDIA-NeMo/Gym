@@ -35,6 +35,7 @@ from uuid import uuid4
 import orjson
 import pytest
 from fastapi import Body, Request
+from fastapi.responses import RedirectResponse, Response
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ValidationError
 
@@ -440,6 +441,42 @@ def test_config_keeps_settings_when_capture_is_off(tmp_path):
     assert cfg.build_sink() is None
 
 
+def test_model_config_accepts_exact_non_generating_requests():
+    cfg = BaseResponsesAPIModelConfig(
+        host="0.0.0.0",
+        port=8099,
+        entrypoint="app.py",
+        name="custom_model",
+        token_id_capture_non_generating_requests=[{"method": "get", "path": "/custom/metadata"}],
+    )
+
+    assert [(request.method, request.path) for request in cfg.token_id_capture_non_generating_requests] == [
+        ("GET", "/custom/metadata")
+    ]
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        {"method": "*", "path": "/v1/models"},
+        {"method": 123, "path": "/v1/models"},
+        {"method": True, "path": "/v1/models"},
+        {"method": "GET", "path": "v1/models"},
+        {"method": "GET", "path": "/v1/*"},
+        {"method": "GET", "path": "/v1/models?all=true"},
+    ],
+)
+def test_model_config_rejects_invalid_non_generating_requests(declaration):
+    with pytest.raises(ValidationError):
+        BaseResponsesAPIModelConfig(
+            host="0.0.0.0",
+            port=8099,
+            entrypoint="app.py",
+            name="custom_model",
+            token_id_capture_non_generating_requests=[declaration],
+        )
+
+
 def test_mask_fraction_limit_defaults_off_and_parses():
     default = TokenIdCaptureConfig.model_validate(_block(dir="/tmp/token-capture"))
     configured = TokenIdCaptureConfig.model_validate(_block(dir="/tmp/token-capture", max_mask_fraction=0.5))
@@ -708,6 +745,167 @@ def test_uncorrelated_call_captures_nothing(tmp_path):
     assert resp.status_code == 200
     # No rollout prefix -> nothing recorded, no file created.
     assert list(tmp_path.glob("*.tokens.jsonl")) == []
+
+
+def test_unimplemented_model_discovery_does_not_mark_capture_incomplete(tmp_path):
+    client = TestClient(_server(_both_enabled(tmp_path)).setup_webserver())
+    response = client.get("/ng-rollout/models-roll0/training-token-capture/v1/models")
+
+    assert response.status_code == 404
+    assert TokenCaptureStore(tmp_path).freeze_now("models-roll0").incomplete is False
+
+
+def test_unimplemented_method_does_not_mark_capture_incomplete(tmp_path):
+    app = _server(_both_enabled(tmp_path)).setup_webserver()
+
+    @app.get("/metadata")
+    async def metadata():
+        return {"kind": "metadata"}
+
+    client = TestClient(app)
+    response = client.post("/ng-rollout/probe-roll0/training-token-capture/metadata")
+
+    assert response.status_code == 405
+    assert TokenCaptureStore(tmp_path).freeze_now("probe-roll0").incomplete is False
+
+
+def test_successful_unknown_capture_path_fails_closed(tmp_path):
+    app = _server(_both_enabled(tmp_path)).setup_webserver()
+
+    @app.post("/v1/unsupported-generation")
+    async def unsupported_generation():
+        return {"output": "generated"}
+
+    client = TestClient(app)
+    response = client.post(
+        "/ng-rollout/unknown-roll0/training-token-capture/v1/unsupported-generation",
+        json={"input": "hi"},
+    )
+
+    assert response.status_code == 200
+    assert TokenCaptureStore(tmp_path).freeze_now("unknown-roll0").incomplete is True
+
+
+def test_unknown_head_request_fails_closed(tmp_path):
+    app = _server(_both_enabled(tmp_path)).setup_webserver()
+
+    @app.head("/metadata")
+    async def metadata():
+        return Response(status_code=200)
+
+    client = TestClient(app)
+    response = client.head("/ng-rollout/head-roll0/training-token-capture/metadata")
+
+    assert response.status_code == 200
+    assert TokenCaptureStore(tmp_path).freeze_now("head-roll0").incomplete is True
+
+
+def test_unknown_redirect_fails_closed(tmp_path):
+    app = _server(_both_enabled(tmp_path)).setup_webserver()
+
+    @app.get("/redirect")
+    async def redirect():
+        return RedirectResponse("/v1/responses", status_code=307)
+
+    client = TestClient(app, follow_redirects=False)
+    response = client.get("/ng-rollout/redirect-roll0/training-token-capture/redirect")
+
+    assert response.status_code == 307
+    assert response.headers["location"] == "/ng-rollout/redirect-roll0/training-token-capture/v1/responses"
+    assert TokenCaptureStore(tmp_path).freeze_now("redirect-roll0").incomplete is True
+
+
+def test_router_redirect_preserves_capture_prefix(tmp_path):
+    app = _server(_both_enabled(tmp_path)).setup_webserver()
+
+    @app.get("/metadata/")
+    async def metadata():
+        return {"kind": "metadata"}
+
+    client = TestClient(app, follow_redirects=False)
+    response = client.get("/ng-rollout/router-redirect-roll0/training-token-capture/metadata")
+
+    assert response.status_code == 307
+    assert (
+        response.headers["location"]
+        == "http://testserver/ng-rollout/router-redirect-roll0/training-token-capture/metadata/"
+    )
+    assert TokenCaptureStore(tmp_path).freeze_now("router-redirect-roll0").incomplete is True
+
+
+@pytest.mark.parametrize("status", [204, 400, 500])
+def test_unknown_status_other_than_not_found_or_method_not_allowed_fails_closed(tmp_path, status):
+    app = _server(_both_enabled(tmp_path)).setup_webserver()
+
+    @app.get("/status")
+    async def status_response():
+        return Response(status_code=status)
+
+    client = TestClient(app)
+    response = client.get("/ng-rollout/status-roll0/training-token-capture/status")
+
+    assert response.status_code == status
+    assert TokenCaptureStore(tmp_path).freeze_now("status-roll0").incomplete is True
+
+
+def test_unknown_exception_before_response_fails_closed(tmp_path):
+    app = _server(_both_enabled(tmp_path)).setup_webserver()
+
+    @app.get("/crash")
+    async def crash():
+        raise RuntimeError("boom")
+
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.get("/ng-rollout/crash-roll0/training-token-capture/crash")
+
+    assert response.status_code == 500
+    assert TokenCaptureStore(tmp_path).freeze_now("crash-roll0").incomplete is True
+
+
+def test_unknown_request_without_response_start_fails_closed(tmp_path):
+    app = _server(_both_enabled(tmp_path)).setup_webserver()
+
+    async def silent_app(scope, receive, send):
+        return
+
+    app.mount("/silent", silent_app)
+    client = TestClient(app)
+
+    with pytest.raises(RuntimeError, match="No response returned"):
+        client.get("/ng-rollout/silent-roll0/training-token-capture/silent/")
+
+    assert TokenCaptureStore(tmp_path).freeze_now("silent-roll0").incomplete is True
+
+
+def test_model_server_can_declare_successful_non_generating_route(tmp_path):
+    config = _both_enabled(tmp_path)
+
+    server = _CapturingModel(
+        config=BaseResponsesAPIModelConfig(
+            host="0.0.0.0",
+            port=8099,
+            entrypoint="",
+            name="srv",
+            token_id_capture_non_generating_requests=[
+                {"method": "POST", "path": "/v1/custom-metadata"},
+            ],
+        ),
+        server_client=MagicMock(spec=ServerClient, global_config_dict=config),
+    )
+    app = server.setup_webserver()
+
+    @app.post("/v1/custom-metadata")
+    async def custom_metadata():
+        return {"capabilities": ["tools"]}
+
+    client = TestClient(app)
+    response = client.post(
+        "/ng-rollout/declared-roll0/training-token-capture/v1/custom-metadata",
+        json={},
+    )
+
+    assert response.status_code == 200
+    assert TokenCaptureStore(tmp_path).freeze_now("declared-roll0").incomplete is False
 
 
 def test_package_is_dependency_free_leaf():

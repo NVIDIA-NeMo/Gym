@@ -25,6 +25,13 @@ env:
       lineage_store: my_pkg.sinks:MyResolver  # Required with a custom sink (same backend namespace).
       delta_records: true                  # Store RESOLVED continuations as parent-relative suffixes.
       max_mask_fraction: 0.5               # Abort a run that is mostly producing masked rollouts.
+
+my_model:
+  responses_api_models:
+    custom_model:
+      token_id_capture_non_generating_requests:
+        - method: GET
+          path: /custom/metadata
 ```
 
 Evaluation capture uses ``/ng-rollout/<id>/...``.
@@ -72,7 +79,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from nemo_gym.token_id_capture.protocols import (
     LineageStore,
@@ -85,6 +92,34 @@ from nemo_gym.token_id_capture.protocols import (
 logger = logging.getLogger(__name__)
 
 TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
+
+
+class NonGeneratingRequest(BaseModel):
+    """Declare one exact model request that cannot return policy-generated content."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    method: str
+    path: str
+
+    @field_validator("method", mode="before")
+    @classmethod
+    def _normalize_method(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("method must be a string")
+        method = value.upper()
+        if not method or not method.isascii() or not method.isalpha():
+            raise ValueError("method must be an HTTP method without wildcards")
+        return method
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, path: str) -> str:
+        if not path.startswith("/"):
+            raise ValueError("path must start with '/'")
+        if any(character in path for character in "?#*{}"):
+            raise ValueError("path must be exact and cannot contain query strings, fragments, or wildcards")
+        return path
 
 
 class TokenIdCaptureSettings(BaseModel):
