@@ -489,7 +489,10 @@ async def _run_stirrup_agent(
     top_p: float = 0.95,
     enable_thinking: bool = True,
     max_completion_tokens_cap: int = 64000,
+    min_completion_tokens: int = 1024,
+    prompt_estimator_truncate_history_thinking: Optional[bool] = None,
     truncation_recovery: bool = True,
+    min_compaction_summary_words: int = 1,
     tavily_api_key: Optional[Union[str, List[str]]] = None,
     tavily_max_sweeps: int = 1,
 ) -> Dict[str, Any]:
@@ -557,6 +560,8 @@ async def _run_stirrup_agent(
         top_p=top_p,
         enable_thinking=enable_thinking,
         max_completion_tokens_cap=max_completion_tokens_cap,
+        min_completion_tokens=min_completion_tokens,
+        prompt_estimator_truncate_history_thinking=prompt_estimator_truncate_history_thinking,
         truncation_recovery=truncation_recovery,
     )
 
@@ -609,6 +614,7 @@ async def _run_stirrup_agent(
         "tools": tools,
         "tool_response_as_user": True,
         "skip_input_file_listing": is_gdpval,
+        "min_compaction_summary_words": min_compaction_summary_words,
     }
     if system_prompt:
         agent_kwargs["system_prompt"] = system_prompt
@@ -969,8 +975,8 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         default=None,
         description="HuggingFace model ID (or local checkpoint path) used to load a tokenizer "
         "for dynamic max_completion_tokens sizing. E.g. 'Qwen/Qwen3-Coder-30B-A3B-Instruct'. "
-        "When None, a character-count fallback is used (conservative, but slightly over-allocates "
-        "input tokens). See ``nemo_client.DynamicMaxTokensChatCompletionsClient``.",
+        "When None, an approximate character-count fallback is used; it can substantially "
+        "overcount retained reasoning. See ``nemo_client.DynamicMaxTokensChatCompletionsClient``.",
     )
     completion_token_buffer: int = Field(
         default=1000,
@@ -990,9 +996,24 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
     )
     max_completion_tokens_cap: int = Field(
         default=64000,
+        ge=1,
         description="Hard ceiling on per-call ``max_completion_tokens``. Dynamic sizing computes "
         "context_window - input_tokens - completion_token_buffer, then caps to this value. "
         "Set to match the training-side response-length budget for RL.",
+    )
+    min_completion_tokens: int = Field(
+        default=1024,
+        ge=1,
+        description="Target minimum per-call ``max_completion_tokens``. The hard cap always applies; "
+        "estimated remaining context is also a strict bound when the loaded tokenizer successfully "
+        "renders the complete prompt. The "
+        "approximate fallback preserves this floor even when its estimate exceeds context. "
+        "Long-horizon benchmarks can opt into a larger usable floor.",
+    )
+    prompt_estimator_truncate_history_thinking: Optional[bool] = Field(
+        default=None,
+        description="Optional prompt-estimator setting for checkpoints whose template omits historical "
+        "reasoning before the last user turn. This is never forwarded to the model request.",
     )
     truncation_recovery: bool = Field(
         default=True,
@@ -1003,6 +1024,13 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "budget is deliberately NOT reduced, because recovery turns are usually large single-shot "
         "deliverable writes (median 34.6k tokens). The instruction is sent to the server but not "
         "recorded in the trajectory; set False for RL rollouts that require an unsteered policy.",
+    )
+    min_compaction_summary_words: int = Field(
+        default=1,
+        ge=1,
+        description="Minimum whitespace-delimited word count accepted from context compaction. "
+        "The generic default rejects only empty output; long-horizon benchmarks can require a "
+        "more complete summary.",
     )
     tavily_api_key: Optional[Union[str, List[str]]] = Field(
         default=None,
@@ -1197,7 +1225,10 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             "top_p": getattr(body, "top_p", None) or self.config.top_p,
             "enable_thinking": self.config.enable_thinking,
             "max_completion_tokens_cap": self.config.max_completion_tokens_cap,
+            "min_completion_tokens": self.config.min_completion_tokens,
+            "prompt_estimator_truncate_history_thinking": (self.config.prompt_estimator_truncate_history_thinking),
             "truncation_recovery": self.config.truncation_recovery,
+            "min_compaction_summary_words": self.config.min_compaction_summary_words,
             "tavily_api_key": self.config.tavily_api_key,
             "tavily_max_sweeps": self.config.tavily_max_sweeps,
         }

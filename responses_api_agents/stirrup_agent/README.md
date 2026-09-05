@@ -131,6 +131,9 @@ The agent reads its Hydra config at `configs/stirrup_agent.yaml`. Notable keys:
 | `rerun_incomplete` | `false` | If true, skip the rollout for tasks that already **finished** (a finish marker is cached) and only re-run the ones that didn't (see [Task Re-run Mode](#task-re-run-mode)). Composes with `execute_only` and `judge_only`. |
 | `model_id` | `null` | HF model id or local path used to load a tokenizer for dynamic output sizing. |
 | `completion_token_buffer` | `1000` | Safety margin (in tokens) reserved when sizing `max_completion_tokens` per call. |
+| `min_completion_tokens` | `1024` | Target useful per-call completion floor. The hard cap always applies; estimated remaining context is also a strict bound when the tokenizer successfully renders the complete prompt. Approximate fallbacks preserve this floor even when their estimate exceeds context. GDPVal raises it to `8192`. |
+| `prompt_estimator_truncate_history_thinking` | `null` | Optional estimator-only switch for templates that omit completed historical reasoning. It is never sent to the provider. |
+| `min_compaction_summary_words` | `1` | Minimum summary length accepted during context compaction. GDPVal uses `50`; invalid summaries retry up to three times and never replace the live history. |
 
 Env vars honored: `TAVILY_API_KEY`, `HF_TOKEN`, `OPENAI_API_KEY`.
 
@@ -155,12 +158,27 @@ The wrapper ships a `DynamicMaxTokensChatCompletionsClient`
 
 Set `model_id` to the same checkpoint (or HF id) you are serving via
 vLLM and the tokeniser match is exact.  Leave it unset and the client
-falls back to a conservative character-count estimate — slower to
-allocate completion budget but always safe.  `completion_token_buffer`
+falls back to a character-count estimate. When
+`prompt_estimator_truncate_history_thinking=true`, that fallback mirrors
+Nemotron's prior-assistant transformation without changing the retained
+trajectory or provider request. `completion_token_buffer`
 absorbs the residual gap between our estimate and the exact prompt the
 server renders (chat-template wrappers, tool-schema injection).  The
 default `1000` works in practice; raise it (e.g. 2000–5000) if you see
 sporadic HTTP 400 responses at the vLLM proxy.
+
+When the loaded tokenizer successfully renders the complete prompt, estimated
+remaining context is a strict output bound and a prompt with no remaining room
+fails before dispatch. If full rendering is unsupported, JSON and character
+estimates can substantially overcount retained reasoning, so the client still
+dispatches the configured completion floor; the hard completion cap applies in
+both modes.
+
+GDPVal uses an `8192`-token minimum because a 1024-token truncation cannot
+reliably produce a complete script or tool call. Generic Stirrup agents keep
+the historical 1024-token default. Launchers serving a local checkpoint should
+still pass that checkpoint as `model_id`; the fallback is a resilience path,
+not a replacement for template-exact tokenization.
 
 ## Advanced Features
 

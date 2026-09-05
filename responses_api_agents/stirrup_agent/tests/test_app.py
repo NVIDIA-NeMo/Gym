@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from omegaconf import OmegaConf
 from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -128,6 +129,22 @@ class TestApp:
             ),
         )
         StirrupAgentWrapper(config=config, server_client=MagicMock(spec=ServerClient))
+
+        # Generic Stirrup users retain the historical behavior. GDPVal opts in
+        # to its larger floor and matching template semantics in its benchmark
+        # config below.
+        assert config.min_completion_tokens == 1024
+        assert config.prompt_estimator_truncate_history_thinking is None
+        assert config.min_compaction_summary_words == 1
+
+    def test_gdpval_config_opts_into_safe_context_budget(self) -> None:
+        repo_root = STIRRUP_AGENT_DIR.parents[1]
+        config = OmegaConf.load(repo_root / "benchmarks" / "gdpval" / "config.yaml")
+        agent = config.gdpval_stirrup_agent.responses_api_agents.stirrup_agent
+
+        assert agent.min_completion_tokens == 8192
+        assert "prompt_estimator_truncate_history_thinking" not in agent
+        assert agent.min_compaction_summary_words == 50
 
     def test_output_history_preserves_nemo_user_tool_results(self) -> None:
         """Run-history export should keep NeMo user-role tool results as tool outputs."""
