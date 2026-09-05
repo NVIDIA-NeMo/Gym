@@ -6,6 +6,11 @@ position: 1
 
 The `opensandbox` provider creates sandboxes through the OpenSandbox SDK and server API. It is the Kubernetes-backed provider used by agentic software engineering environments such as `mini_swe_agent_2`.
 
+<Tip>
+Running at scale? Read [OpenSandbox Best Practices](/infrastructure/sandbox/opensandbox-best-practices)
+for resource requests vs limits, timeout and retry guidance, and the failure signatures that are not bugs.
+</Tip>
+
 ## Setup
 
 Install the sandbox extra in the runtime image or virtual environment that creates sandboxes:
@@ -78,7 +83,7 @@ The provider constructor accepts four optional config sections:
 | `connection` | OpenSandbox SDK connection settings: domain, API key, protocol, request timeout, and server proxy mode. |
 | `create` | Sandbox create timeout, retry, image pull policy, and health-check behavior. |
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
-| `operations` | Retry and timeout behavior for SDK operations after create, including command retries and close timeout. |
+| `operations` | Retry and timeout behavior for SDK operations after create, including command retries, close timeout, background command polling, and the dedicated `status_poll_timeout_s` budget for background status polls. |
 
 ## SandboxSpec Provider Options
 
@@ -238,3 +243,5 @@ Command failures return `SandboxExecResult` with the command's exit code. If Ope
 The provider's `create.image_pull_policy` defaults to `IfNotPresent`. Valid values are `Always`, `IfNotPresent`, and `Never`. The resolved policy is written into OpenSandbox create extensions as both `imagePullPolicy` and `opensandbox.extensions.image-pull-policy` unless those keys are already present in `provider_options.extensions`.
 
 Create retries handle transient allocation, connection, image pull, and server-side errors. Command retries are controlled separately by `operations.command_retries`.
+
+execd, the exec daemon inside each sandbox, holds every command response open for `EXECD_API_GRACE_SHUTDOWN` (default 1s) after the command's last event, which is fixed latency on each command and on the readiness probe. Set it in the sandbox spec's `env` to shorten it; the shipped SWE-bench and OpenCode configs use `50ms`, and the provider's `operations.background_poll_initial_s` (0.5) is sized to that.

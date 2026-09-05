@@ -43,7 +43,8 @@ apt-get install -y --no-install-recommends \
     git \
     wget \
     less \
-    vim
+    vim \
+    gnupg
 
 apt-get purge -y \
     ffmpeg \
@@ -67,6 +68,25 @@ curl -fSsL -o /tmp/enroot.deb \
     "https://github.com/NVIDIA/enroot/releases/download/v${ENROOT_VERSION}/enroot_${ENROOT_VERSION}-1_${arch}.deb"
 apt-get install -y /tmp/enroot.deb
 rm /tmp/enroot.deb
+
+# Drop the --ldconfig arg from enroot's NVIDIA hook so nvidia-container-cli
+# reuses the sandbox's existing ld.so.cache instead of regenerating it.
+sed -i 's/cli_args=("--no-cgroups" "--ldconfig=@$(command -v ldconfig.real || command -v ldconfig)")/cli_args=("--no-cgroups")/' \
+    /etc/enroot/hooks.d/98-nvidia.sh
+grep -q '^cli_args=("--no-cgroups")$' /etc/enroot/hooks.d/98-nvidia.sh
+
+# Install nvidia-container-toolkit so enroot's NVIDIA hook
+# (/etc/enroot/hooks.d/98-nvidia.sh) can find nvidia-container-cli to inject
+# GPUs into enroot sandboxes. Without this, enroot sandboxes that request a
+# GPU fail at the hook step even though the outer container has GPU access.
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+    | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+    | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+    > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+apt-get update
+apt-get install -y nvidia-container-toolkit
+rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
@@ -140,8 +160,12 @@ COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} pyproject.toml uv.loc
 COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
     nemo_gym/__init__.py nemo_gym/package_info.py ./nemo_gym/
 
+# The telemetry extra is included even though telemetry is off by default. It is a few MB
+# of pure-Python packages, and without it in the image nobody can switch tracing on with
+# an environment variable — they would have to rebuild. Off remains the default: the code
+# is inert until NEMO_LENS_ENABLED=1.
 RUN uv venv --seed && \
-    uv sync --link-mode symlink --locked --extra vllm --no-install-project
+    uv sync --link-mode symlink --locked --extra vllm --extra telemetry --no-install-project
 
 ENV PATH="/opt/nemo_gym_venv/bin:$PATH"
 
@@ -173,11 +197,11 @@ LABEL com.nvidia.build.ref="${NVIDIA_BUILD_REF}"
 COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
     --exclude=pyproject.toml --exclude=uv.lock . /opt/nemo-gym
 
-# Install the nemo-gym project itself along with the vllm extra. The worktree
-# was created for the runtime UID in the base stage, so restore build ownership
+# Install the nemo-gym project itself along with the vllm and telemetry extras. The
+# worktree was created for the runtime UID in the base stage, so restore build ownership
 # before setuptools invokes Git.
 RUN chown root:root /opt/nemo-gym && \
-    UV_LINK_MODE=symlink uv sync --locked --extra vllm
+    UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry
 
 # Keep runtime uv and XDG caches separate from the root-owned build cache that
 # backs the symlinked project environment.

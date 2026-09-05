@@ -2,6 +2,7 @@
 swebench_resources_server:          # instance name — how agents/CLI refer to this server
   resources_servers:                              # server type: resources_servers | responses_api_agents | responses_api_models
     swebench:                        # implementation directory under resources_servers/
+      allowed_agents: [opencode_sandboxed_agent]
       entrypoint: app.py                        # server entry module
       domain: other                             # task domain; one of: math, coding, agent, knowledge,
                                                 #   instruction_following, long_context, safety, games, translation,
@@ -18,6 +19,11 @@ swebench_resources_server:          # instance name — how agents/CLI refer to 
       sandbox_config:
         ttl_s: 18000
         ready_timeout_s: 1200
+        derive_cpu_env: true
+        env:
+          # execd holds each finished command's response open for this long (default 1s);
+          # a short grace keeps every command and the readiness probe from paying that tail.
+          EXECD_API_GRACE_SHUTDOWN: "50ms"
         resources:
           cpu: 2
           memory_mib: 16384
@@ -32,4 +38,3 @@ swebench_resources_server:          # instance name — how agents/CLI refer to 
             disk_gib: 30
         metadata:
           benchmark: swebench-verified
-          harness: mini-swe-agent

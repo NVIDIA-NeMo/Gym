@@ -17,7 +17,7 @@ import json
 import multiprocessing as mp
 from copy import deepcopy
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from math_verify.errors import TimeoutException
 from pytest import approx, fixture, raises, skip
@@ -39,6 +39,7 @@ from resources_servers.math_with_judge.app import (
     LibraryJudgeMathResourcesServer,
     LibraryJudgeMathResourcesServerConfig,
     LibraryJudgeMathVerifyRequest,
+    _extract_last_boxed_answer,
     _run_math_verify,
 )
 
@@ -159,17 +160,17 @@ class TestApp:
             type="message",
         )
 
+    def test_extract_last_boxed_answer(self) -> None:
+        assert _extract_last_boxed_answer("No boxed answer") is None
+        assert _extract_last_boxed_answer(r"First \boxed{wrong}, then \boxed{right}") == "right"
+        assert _extract_last_boxed_answer(r"\boxed{\frac{1}{2}}") == r"\frac{1}{2}"
+        assert _extract_last_boxed_answer(r"\boxed{ exact text }") == " exact text "
+        assert _extract_last_boxed_answer(r"\boxed{unclosed") is None
+
     async def test_verify(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
         resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
-        response_mock = AsyncMock()
-        post_mock = MagicMock()
-        post_mock.read = response_mock
-        server_mock.post = AsyncMock(return_value=post_mock)
-        not_equal_item = self._create_response_output_message(
-            f"{LibraryJudgeMathResourcesServer.JUDGE_NOT_EQUAL_LABEL} done"
-        )
-        response_mock.return_value = json.dumps(self._create_response("verify_not_equal_id", not_equal_item))
+        server_mock.post = AsyncMock()
 
         question = "Simplify the expression x + 7 - 6"
         expected_answer = "x + 1"
@@ -195,22 +196,14 @@ class TestApp:
         assert not_equal_verify_response.response == first_model_response
         assert not_equal_verify_response.reward == approx(0.0)
         assert not_equal_verify_response.expected_answer == expected_answer
-        assert not_equal_verify_response.extracted_answer == "1"
+        assert not_equal_verify_response.extracted_answer is None
         assert not_equal_verify_response.library_reward == approx(0.0)
-        judge_evaluations = not_equal_verify_response.judge_evaluations
-        assert len(judge_evaluations) == 1
-        self._check_judge_evaluation(
-            judge_evaluations[0],
-            question,
-            expected_answer,
-            not_equal_verify_response.extracted_answer,
-            {},
-            "verify_not_equal_id",
-            not_equal_item,
-        )
+        assert not_equal_verify_response.judge_evaluations is None
+        server_mock.post.assert_not_awaited()
         assert sorted(list(not_equal_verify_response.model_dump())) == [
             "expected_answer",
             "extracted_answer",
+            "failure_reason",
             "judge_evaluations",
             "library_reward",
             "response",
@@ -221,7 +214,7 @@ class TestApp:
         second_model_response = first_model_response.model_copy(deep=True)
         second_model_response.output = second_model_response.output + [
             NeMoGymResponseReasoningItem(id="extra_reasoning", summary=[], type="reasoning"),
-            self._create_response_output_message(" + x$"),
+            self._create_response_output_message(" + x = \\boxed{x + 1}$"),
             NeMoGymResponseOutputMessage(
                 id="refusal_finish",
                 content=[
@@ -249,6 +242,7 @@ class TestApp:
         assert sorted(list(equal_verify_response.model_dump())) == [
             "expected_answer",
             "extracted_answer",
+            "failure_reason",
             "judge_evaluations",
             "library_reward",
             "response",
@@ -282,29 +276,27 @@ class TestApp:
         not_equal_question = "What is 1 + 1?"
         not_equal_expected_answer = "2"
         not_equal_generated_answer = "3"
-        (
-            not_equal_reward,
-            not_equal_extracted_answer,
-            not_equal_library_reward,
-            not_equal_judge_evaluations,
-        ) = await resources_server._verify_answer(
-            not_equal_question,
-            not_equal_expected_answer,
-            not_equal_generated_answer,
-        )
+        with patch.object(
+            resources_server,
+            "_verify_answer_with_library_async",
+            new_callable=AsyncMock,
+        ) as library_verifier:
+            (
+                not_equal_reward,
+                not_equal_extracted_answer,
+                not_equal_library_reward,
+                not_equal_judge_evaluations,
+            ) = await resources_server._verify_answer(
+                not_equal_question,
+                not_equal_expected_answer,
+                not_equal_generated_answer,
+            )
+            library_verifier.assert_not_awaited()
         assert not_equal_reward == approx(0.0)
-        assert not_equal_extracted_answer == "3"
+        assert not_equal_extracted_answer is None
         assert not_equal_library_reward == approx(0.0)
-        assert len(not_equal_judge_evaluations) == 1
-        self._check_judge_evaluation(
-            not_equal_judge_evaluations[0],
-            not_equal_question,
-            not_equal_expected_answer,
-            not_equal_generated_answer,
-            {},
-            "verify_answer_not_equal_id",
-            not_equal_item,
-        )
+        assert not_equal_judge_evaluations is None
+        server_mock.post.assert_not_awaited()
 
         first_judge_equal_item = self._create_response_output_message(
             f"I say {LibraryJudgeMathResourcesServer.JUDGE_EQUAL_LABEL} as the verdict"
@@ -318,26 +310,36 @@ class TestApp:
         ]
         judge_equal_question = "What is 14 divided by 10?"
         judge_equal_expected_answer = "1.4"
-        judge_equal_generated_answer = "Final answer: {7 / 5}"
-        (
-            judge_equal_reward,
-            judge_equal_extracted_answer,
-            judge_equal_library_reward,
-            judge_equal_judge_evaluations,
-        ) = await resources_server._verify_answer(
-            judge_equal_question,
-            judge_equal_expected_answer,
-            judge_equal_generated_answer,
-        )
+        judge_equal_generated_answer = r"Reasoning before \boxed{ exact {nested} answer } trailing text"
+        exact_boxed_answer = " exact {nested} answer "
+        with patch.object(
+            resources_server,
+            "_verify_answer_with_library_async",
+            new=AsyncMock(return_value=(0.0, "math-verify extraction")),
+        ) as library_verifier:
+            (
+                judge_equal_reward,
+                judge_equal_extracted_answer,
+                judge_equal_library_reward,
+                judge_equal_judge_evaluations,
+            ) = await resources_server._verify_answer(
+                judge_equal_question,
+                judge_equal_expected_answer,
+                judge_equal_generated_answer,
+            )
+            library_verifier.assert_awaited_once_with(
+                judge_equal_expected_answer,
+                judge_equal_generated_answer,
+            )
         assert judge_equal_reward == approx(1.0)
-        assert judge_equal_extracted_answer == "5"
+        assert judge_equal_extracted_answer == "math-verify extraction"
         assert judge_equal_library_reward == approx(0.0)
         assert len(judge_equal_judge_evaluations) == 2
         self._check_judge_evaluation(
             judge_equal_judge_evaluations[0],
             judge_equal_question,
             judge_equal_expected_answer,
-            judge_equal_extracted_answer,
+            exact_boxed_answer,
             {},
             "verify_answer_first_judge_equal_id",
             first_judge_equal_item,
@@ -345,7 +347,7 @@ class TestApp:
         self._check_judge_evaluation(
             judge_equal_judge_evaluations[1],
             judge_equal_question,
-            judge_equal_extracted_answer,
+            exact_boxed_answer,
             judge_equal_expected_answer,
             {},
             "verify_answer_second_judge_equal_id",

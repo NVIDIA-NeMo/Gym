@@ -12,11 +12,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from copy import deepcopy
 from types import UnionType
-from typing import Annotated, Any, Dict, List, Literal, NotRequired, Required, Union, get_args, get_origin
+from typing import (
+    Annotated,
+    Any,
+    Dict,
+    List,
+    Literal,
+    NotRequired,
+    Required,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 import openai
 import pytest
+from openai.types.chat.completion_create_params import CompletionCreateParamsNonStreaming
 from openai.types.responses import (
     EasyInputMessage,
     ResponseCodeInterpreterToolCall,
@@ -28,6 +42,13 @@ from openai.types.responses import (
     ResponseOutputItem,
     ResponseOutputMessage,
     ResponseReasoningItem,
+)
+from openai.types.responses.response_create_params import ResponseCreateParamsBase
+from openai.types.responses.response_input_item import (
+    AdditionalTools as InputAdditionalTools,
+)
+from openai.types.responses.response_input_item import (
+    ComputerCallOutput as InputComputerCallOutput,
 )
 from openai.types.responses.response_input_item import (
     FunctionCallOutput as InputFunctionCallOutput,
@@ -58,7 +79,9 @@ from nemo_gym.openai_utils import (
     NeMoGymLocalShellCall,
     NeMoGymMessage,
     NeMoGymResponse,
+    NeMoGymResponseAdditionalTools,
     NeMoGymResponseCodeInterpreterToolCall,
+    NeMoGymResponseComputerCallOutput,
     NeMoGymResponseComputerToolCall,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseCustomToolCall,
@@ -117,6 +140,49 @@ class TestNeMoGymResponseCreateParamsNonStreaming:
     def test_unknown_field_still_forbidden(self) -> None:
         with pytest.raises(ValidationError):
             NeMoGymResponseCreateParamsNonStreaming(input="hello", not_a_real_field=1)
+
+    @pytest.mark.parametrize(
+        "role",
+        ["unknown", "user", "assistant", "system", "critic", "discriminator", "developer", "tool"],
+    )
+    def test_additional_tools_output_preserved_then_normalized_for_replay(self, role: str) -> None:
+        payload = {"type": "additional_tools", "id": "at_1", "role": role, "tools": []}
+
+        response = NeMoGymResponse.model_validate(_response_with_output([payload]))
+        assert isinstance(response.output[0], NeMoGymResponseAdditionalTools)
+        assert response.output[0].role == role
+        output_dump = response.model_dump(mode="json")["output"][0]
+        assert output_dump["role"] == role
+
+        replay = NeMoGymResponseCreateParamsNonStreaming(input=[output_dump])
+        replay_dump = replay.model_dump(mode="json", exclude_unset=True)["input"][0]
+        assert replay_dump["role"] == "developer"
+        assert (
+            InputAdditionalTools.model_validate(replay_dump).model_dump(mode="json", exclude_unset=True) == replay_dump
+        )
+
+    def test_failed_computer_output_preserved_then_status_removed_for_replay(self) -> None:
+        payload = {
+            "type": "computer_call_output",
+            "id": "cco_1",
+            "call_id": "call_1",
+            "output": {"type": "computer_screenshot", "image_url": "data:image/png;base64,x"},
+            "status": "failed",
+        }
+
+        response = NeMoGymResponse.model_validate(_response_with_output([payload]))
+        assert isinstance(response.output[0], NeMoGymResponseComputerCallOutput)
+        assert response.output[0].status == "failed"
+        output_dump = response.model_dump(mode="json")["output"][0]
+        assert output_dump["status"] == "failed"
+
+        replay = NeMoGymResponseCreateParamsNonStreaming(input=[output_dump])
+        replay_dump = replay.model_dump(mode="json", exclude_unset=True)["input"][0]
+        assert "status" not in replay_dump
+        assert (
+            InputComputerCallOutput.model_validate(replay_dump).model_dump(mode="json", exclude_unset=True)
+            == replay_dump
+        )
 
 
 class TestTokenMetadataValidation:
@@ -222,6 +288,122 @@ class TestNeMoGymChatCompletionSchemas:
         assert params.tools[0]["type"] == "custom"
         assert params.messages[0]["tool_calls"][0]["type"] == "custom"
         assert params.messages[0]["generation_token_ids"] == [2]
+
+    def test_tool_call_strips_only_the_outer_name_without_mutating_input(self) -> None:
+        payload = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "name": "KB_search",
+                            "function": {
+                                "name": "KB_search",
+                                "arguments": '{"query": "hello"}',
+                            },
+                            "type": "function",
+                        }
+                    ],
+                }
+            ],
+            "model": "gpt-test",
+        }
+        original = deepcopy(payload)
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+
+        tool_call = params.messages[0]["tool_calls"][0]
+        assert tool_call["type"] == "function"
+        assert tool_call["function"] == {"name": "KB_search", "arguments": '{"query": "hello"}'}
+        assert "name" not in tool_call
+        dumped = params.model_dump()["messages"][0]["tool_calls"][0]
+        assert "name" not in dumped
+        assert dumped["function"]["name"] == "KB_search"
+        assert payload == original
+
+    def test_custom_tool_call_strips_only_the_outer_name_without_mutating_input(self) -> None:
+        payload = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "custom",
+                            "custom": {"name": "shell", "input": "echo hello"},
+                            "name": "shell",
+                        }
+                    ],
+                }
+            ],
+            "model": "gpt-test",
+        }
+        original = deepcopy(payload)
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+
+        tool_call = params.messages[0]["tool_calls"][0]
+        assert tool_call["type"] == "custom"
+        assert tool_call["custom"] == {"name": "shell", "input": "echo hello"}
+        assert "name" not in tool_call
+        assert tool_call["custom"]["name"] == "shell"
+        assert payload == original
+
+    @pytest.mark.parametrize(
+        "tool_call",
+        [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "f", "arguments": "{}"},
+                "not_a_real_field": 1,
+            },
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "f", "arguments": "{}", "not_a_real_field": 1},
+            },
+            {
+                "id": "call-1",
+                "type": "custom",
+                "custom": {"name": "shell", "input": "echo hello"},
+                "not_a_real_field": 1,
+            },
+            {
+                "id": "call-1",
+                "type": "custom",
+                "custom": {"name": "shell", "input": "echo hello", "not_a_real_field": 1},
+            },
+        ],
+    )
+    def test_tool_calls_still_reject_other_unknown_fields(self, tool_call: dict[str, Any]) -> None:
+        payload = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [tool_call],
+                }
+            ],
+            "model": "gpt-test",
+        }
+
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+
+    def test_unknown_top_level_request_key_is_still_rejected(self) -> None:
+        """Normalizing the tool-call name must not loosen the request model."""
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+                {
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "model": "gpt-test",
+                    "not_a_real_request_field": True,
+                }
+            )
 
     def test_custom_response_tool_call_round_trip(self) -> None:
         payload = {
@@ -367,6 +549,13 @@ class TestNeMoGymResponseToolCallItems:
         assert isinstance(call, NeMoGymResponseFunctionWebSearch)
         assert call.type == "web_search_call"
         assert call.status == "completed"
+
+    def test_local_prompt_message_in_response_output_validates(self) -> None:
+        response = NeMoGymResponse.model_validate(
+            _response_with_output([{"type": "message", "role": "user", "content": "environment observation"}])
+        )
+
+        assert isinstance(response.output[0], NeMoGymEasyInputMessage)
 
     def test_remaining_output_call_items_validate(self) -> None:
         response = NeMoGymResponse.model_validate(
@@ -963,6 +1152,15 @@ def test_sdk_output_types_are_a_subset_of_input_types() -> None:
     )
 
 
+def test_gym_output_union_represents_every_sdk_output_type() -> None:
+    missing = sorted(set(SDK_OUTPUT_TAGS) - set(GYM_OUTPUT_TAG_OWNERS))
+    unexpected = sorted(set(GYM_OUTPUT_TAG_OWNERS) - set(SDK_OUTPUT_TAGS))
+    assert not (missing or unexpected), (
+        f"NeMoGymResponseOutputItem differs from openai {openai.__version__} ResponseOutputItem: "
+        f"missing={missing} unexpected={unexpected}"
+    )
+
+
 @pytest.mark.parametrize("tag", sorted(SDK_INPUT_TAGS))
 def test_gym_union_represents_every_sdk_item_type(tag: str) -> None:
     """Require a Gym union member or explicit exclusion for each SDK input type.
@@ -1163,4 +1361,88 @@ def test_duplicate_type_tags_are_documented() -> None:
     assert duplicates == {"message", "function_call", "reasoning"}, (
         f"duplicate type tags changed: {sorted(duplicates)}. Each duplicate widens the error "
         f"report for an unrecognised item; update this test if the change is intended."
+    )
+
+
+def test_request_model_carries_every_sdk_request_field() -> None:
+    """Keep the strict request model aligned with the SDK request schema.
+
+    Missing fields cause non-streaming validation errors.
+    The streaming sanitizer would otherwise remove them.
+    """
+    sdk_fields = set(get_type_hints(ResponseCreateParamsBase, include_extras=True))
+    missing = sorted(sdk_fields - set(NeMoGymResponseCreateParamsNonStreaming.model_fields))
+    assert not missing, (
+        f"openai {openai.__version__} accepts {missing} on a Responses request and "
+        f"NeMoGymResponseCreateParamsNonStreaming does not, so those are rejected when sent "
+        f"plainly and dropped when streaming.\n"
+        f"Fix: mirror each field with the SDK's type."
+    )
+
+
+def test_chat_request_field_set_matches_sdk_without_deprecated_fields() -> None:
+    """Keep the strict Chat request model aligned with the supported SDK fields.
+
+    Deprecated fields remain disabled.
+    """
+    sdk_fields = set(get_type_hints(CompletionCreateParamsNonStreaming, include_extras=True))
+    expected = sdk_fields - {"function_call", "functions"}
+    actual = set(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields)
+    assert actual == expected, (
+        f"openai {openai.__version__} Chat request fields changed: "
+        f"missing={sorted(expected - actual)} extra={sorted(actual - expected)}"
+    )
+
+    with pytest.raises(ValidationError):
+        NeMoGymChatCompletionCreateParamsNonStreaming(messages=[], not_a_real_field=True)
+
+
+def test_response_field_set_is_pinned() -> None:
+    """Detect changes to the SDK ``Response`` fields.
+
+    ``NeMoGymResponse`` inherits the SDK ``Response`` model.
+    New SDK fields therefore appear in Gym model dumps.
+    Update the expected set after deciding how Gym handles each changed field.
+    """
+    expected = {
+        "background",
+        "completed_at",
+        "conversation",
+        "created_at",
+        "error",
+        "id",
+        "incomplete_details",
+        "instructions",
+        "max_output_tokens",
+        "max_tool_calls",
+        "metadata",
+        "model",
+        "moderation",
+        "object",
+        "output",
+        "parallel_tool_calls",
+        "previous_response_id",
+        "prompt",
+        "prompt_cache_key",
+        "prompt_cache_retention",
+        "reasoning",
+        "safety_identifier",
+        "service_tier",
+        "status",
+        "temperature",
+        "text",
+        "tool_choice",
+        "tools",
+        "top_logprobs",
+        "top_p",
+        "truncation",
+        "usage",
+        "user",
+    }
+    actual = set(NeMoGymResponse.model_fields)
+    added = sorted(actual - expected)
+    removed = sorted(expected - actual)
+    assert not (added or removed), (
+        f"openai {openai.__version__} changed Response's field set: added={added} removed={removed}.\n"
+        f"Decide what Gym does with each, then update this list."
     )

@@ -26,8 +26,10 @@ from responses_api_agents.anyswe_agent.agent_runner import _extract_patch, _snap
 from responses_api_agents.anyswe_agent.app import (
     AnySweAgent,
     AnySweAgentConfig,
+    AnySweRunRequest,
     _classify_agent_error,
     _dataset_family,
+    _model_url_for_rollout,
     _r2e_resolved,
     _safe_config_json,
     _should_mask_sample,
@@ -102,6 +104,21 @@ class TestAgentRunner:
 
 
 class TestSandboxAPI:
+    def test_run_request_preserves_rollout_indices(self) -> None:
+        request = AnySweRunRequest.model_validate(
+            {
+                "responses_create_params": {"input": [], "model": "model"},
+                "_ng_task_index": 3,
+                "_ng_rollout_index": 1,
+            }
+        )
+        assert getattr(request, "_ng_task_index") == 3
+        assert getattr(request, "_ng_rollout_index") == 1
+
+    def test_model_url_carries_rollout_correlation(self) -> None:
+        assert _model_url_for_rollout("http://model-host:8000", "3-1") == "http://model-host:8000/ng-rollout/3-1"
+        assert _model_url_for_rollout("http://model-host:8000", None) == "http://model-host:8000"
+
     def test_default_provider_is_named_sandbox(self) -> None:
         config = AnySweAgentConfig(
             host="0.0.0.0",
@@ -203,10 +220,17 @@ class TestSandboxAPI:
         class Params:
             def model_dump_json(self) -> str:
                 return json.dumps(
-                    {"sandbox_provider": {"opensandbox": {"api_key": "secret"}}}  # pragma: allowlist secret
+                    {
+                        "sandbox_provider": {"opensandbox": {"api_key": "secret"}},  # pragma: allowlist secret
+                        "agent_runtime_source": "https://example.test/runtime?token=secret",
+                        "agent_deps_url": "https://example.test/runtime?token=secret",
+                    }
                 )
 
-        assert json.loads(_safe_config_json(Params()))["sandbox_provider"]["opensandbox"]["api_key"] == "***"
+        result = json.loads(_safe_config_json(Params()))
+        assert result["sandbox_provider"]["opensandbox"]["api_key"] == "***"
+        assert "agent_runtime_source" not in result
+        assert "agent_deps_url" not in result
 
 
 class TestSetupScriptsExist:
