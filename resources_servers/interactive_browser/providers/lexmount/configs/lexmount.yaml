@@ -1,0 +1,44 @@
+# The same environment, driving remote browsers from a hosted service. It lives
+# with the provider it configures rather than in the environment's own configs/,
+# so everything vendor-specific is one directory. Load it by path:
+#
+#   gym env start --config resources_servers/interactive_browser/providers/lexmount/configs/lexmount.yaml ...
+#
+# Worked example of `backend: remote_cdp` + a session provider. Credentials come
+# from the environment, never from this file:
+#   LEXMOUNT_API_KEY / LEXMOUNT_PROJECT_ID / LEXMOUNT_BASE_URL
+# and the SDK is installed by the operator (`pip install lexmount`) — it is not
+# a dependency of this environment. See providers/lexmount/README.md.
+interactive_browser:
+  resources_servers:
+    interactive_browser:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Interactive browser environment on remote browsers (CDP) supplied by the Lexmount session provider.
+      backend:
+        remote_cdp:
+          connect_timeout_s: 60
+          session_provider:
+            lexmount:
+              browser_mode: normal
+              create_timeout_s: 150
+      max_elements: 50
+
+interactive_browser_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 12
+      resources_server:
+        type: resources_servers
+        name: interactive_browser
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      # A remote browser cannot open this repo's offline `site/` tasks (they are
+      # local file:// URIs), so the remote flavor ships live-web tasks instead.
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/interactive_browser/data/example_remote.jsonl
