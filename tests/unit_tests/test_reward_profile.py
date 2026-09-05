@@ -59,6 +59,15 @@ class TestRewardProfile:
                 }:
                     row.pop(key)
 
+    def test_profile_accepts_processor_ref(self) -> None:
+        row = _row(0, 0)
+        row["processor_ref"] = {"name": "turn_processor"}
+        row.pop("agent_ref")
+
+        _, rollout_metrics, _ = RewardProfiler().profile_from_data([row], [_result(0, 0)])
+
+        assert rollout_metrics[0]["agent_ref"]["name"] == "turn_processor"
+
     def test_profile_from_data(self) -> None:
         rows = [
             {

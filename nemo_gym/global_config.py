@@ -189,6 +189,7 @@ ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
+PROCESSOR_REF_KEY_NAME = "processor_ref"
 # The config instance that declares the row's dataset (a resources server normally; the agent
 # itself for self-contained environments). Stamped into derived artifacts at collate/load time;
 # resolved to an agent at dispatch time. See the dataset-decoupling RFC.

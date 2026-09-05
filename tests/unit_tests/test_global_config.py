@@ -34,11 +34,13 @@ from nemo_gym.config_types import (
     ConfigPathNotFoundError,
     MalformedConfigPathsError,
     NoServerInstancesError,
+    ProcessorServerInstanceConfig,
     ServerRefNotFoundError,
     UnsupportedAgentOverrideError,
     UnsupportedAgentPairingError,
     UnsupportedModelPairingError,
     WANDBConfig,
+    maybe_get_server_instance_config,
 )
 from nemo_gym.global_config import (
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
@@ -60,6 +62,24 @@ from nemo_gym.server_utils import (
 
 
 class TestGlobalConfig:
+    def test_processor_is_a_server_instance(self) -> None:
+        server, error = maybe_get_server_instance_config(
+            "turn_processor",
+            OmegaConf.create(
+                {
+                    "processors": {
+                        "alternating_turn": {
+                            "entrypoint": "app.py",
+                        }
+                    }
+                }
+            ),
+        )
+
+        assert error is None
+        assert isinstance(server, ProcessorServerInstanceConfig)
+        assert server.SERVER_TYPE == "processors"
+
     def _mock_versions_for_testing(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr(nemo_gym.global_config, "openai_version", "test openai version")
         monkeypatch.setattr(nemo_gym.global_config, "ray_version", "test ray version")
