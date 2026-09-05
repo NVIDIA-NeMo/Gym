@@ -16,6 +16,7 @@ import json
 import shlex
 import sys
 import tomllib
+from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
 from subprocess import TimeoutExpired
@@ -572,6 +573,12 @@ class TestOnboardingCommandAdapters:
                 ),
             ),
             datasets=(SimpleNamespace(name="example", rows=1, type="example"),),
+            rollout_smoke={
+                "dataset": "example",
+                "rollout_limit": 1,
+                "timeout_seconds": 60,
+                "requirements": ["sandbox"],
+            },
             synchronized_fields=("datasets",),
             warnings=("check this",),
         )
@@ -582,6 +589,7 @@ class TestOnboardingCommandAdapters:
         assert "Manifest: alpha 1.0.0" in captured.out
         assert "alpha_agent -> simple_agent" in captured.out
         assert "example: 1 rows" in captured.out
+        assert "Rollout smoke: dataset=example limit=1 timeout=60s requirements=sandbox" in captured.out
         assert "Synchronized: datasets" in captured.out
         assert "check this" in captured.err
 
@@ -821,6 +829,23 @@ class TestListEnvironments:
                 "lifecycle": "active",
             }
         ]
+
+    def test_json_output_includes_rollout_smoke_contract(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        smoke = {
+            "dataset": "example",
+            "rollout_limit": 1,
+            "timeout_seconds": 60,
+            "requirements": ["sandbox"],
+        }
+        self._mock_catalog(
+            monkeypatch,
+            overrides={"json": True},
+            entries=(replace(self._ALPHA, rollout_smoke=smoke),),
+        )
+
+        list_environments()
+
+        assert json.loads(capsys.readouterr().out)[0]["rollout_smoke"] == smoke
 
     def test_query_filters_environments(self, monkeypatch: MonkeyPatch, capsys) -> None:
         self._mock_catalog(monkeypatch, overrides={"query": "alpha"})

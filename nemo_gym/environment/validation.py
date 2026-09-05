@@ -75,6 +75,7 @@ class EnvironmentValidationReport:
     datasets: tuple[DatasetValidation, ...]
     rollout_driver: str | None = None
     grading_mode: str | None = None
+    rollout_smoke: dict[str, Any] | None = None
     synchronized_fields: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
 
@@ -554,6 +555,23 @@ def _validate_benchmark_prompt_contract(manifest: EnvironmentManifest) -> None:
         )
 
 
+def _validate_rollout_smoke(
+    manifest: EnvironmentManifest,
+    dataset_reports: tuple[DatasetValidation, ...],
+) -> dict[str, Any] | None:
+    if manifest.rollout_smoke is None:
+        return None
+
+    smoke = manifest.rollout_smoke
+    dataset = next(report for report in dataset_reports if report.name == smoke.dataset)
+    if smoke.rollout_limit > dataset.rows:
+        raise EnvironmentValidationError(
+            f"rollout_smoke.rollout_limit is {smoke.rollout_limit}, but dataset {smoke.dataset!r} "
+            f"contains only {dataset.rows} rows."
+        )
+    return smoke.model_dump(mode="json")
+
+
 def _write_manifest_atomically(path: Path, manifest: EnvironmentManifest) -> None:
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     temporary = Path(temporary_name)
@@ -643,6 +661,7 @@ def validate_environment(
             _validate_dataset(dataset, standard_prompt_config=manifest.standard_prompt_config)
             for dataset in manifest.datasets
         )
+        rollout_smoke = _validate_rollout_smoke(manifest, dataset_reports)
     if synchronized:
         _write_manifest_atomically(resolved_manifest_path, manifest)
     return EnvironmentValidationReport(
@@ -658,6 +677,7 @@ def validate_environment(
         datasets=dataset_reports,
         rollout_driver=composition.rollout_driver,
         grading_mode=composition.grading_mode,
+        rollout_smoke=rollout_smoke,
         synchronized_fields=synchronized,
         warnings=_profile_warnings(
             manifest.integration_profile.value,

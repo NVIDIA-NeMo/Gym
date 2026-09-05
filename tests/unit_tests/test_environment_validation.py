@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.environment.manifest import EnvironmentManifest, dump_manifest, load_manifest
+from nemo_gym.environment.manifest import EnvironmentManifest, RolloutSmoke, dump_manifest, load_manifest
 from nemo_gym.environment.validation import (
     EnvironmentValidationError,
     ResolvedComponent,
@@ -186,6 +186,41 @@ def test_reports_resolved_composition_and_declared_profile(tmp_path: Path) -> No
         ("model_server", "runtime-selected"),
     ]
     assert report.components[0].entrypoint == "app.py"
+
+
+def test_reports_validated_rollout_smoke_contract(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path)
+    manifest = load_manifest(manifest_path).model_copy(
+        update={
+            "rollout_smoke": RolloutSmoke(
+                dataset="example",
+                rollout_limit=1,
+                timeout_seconds=60,
+                requirements=["sandbox"],
+            )
+        }
+    )
+    manifest_path.write_text(dump_manifest(manifest), encoding="utf-8")
+
+    report = validate_environment(manifest_path)
+
+    assert report.rollout_smoke == {
+        "dataset": "example",
+        "rollout_limit": 1,
+        "timeout_seconds": 60,
+        "requirements": ["sandbox"],
+    }
+
+
+def test_rollout_smoke_limit_cannot_exceed_dataset_rows(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path)
+    manifest = load_manifest(manifest_path).model_copy(
+        update={"rollout_smoke": RolloutSmoke(dataset="example", rollout_limit=2)}
+    )
+    manifest_path.write_text(dump_manifest(manifest), encoding="utf-8")
+
+    with pytest.raises(EnvironmentValidationError, match="contains only 1 rows"):
+        validate_environment(manifest_path)
 
 
 @pytest.mark.parametrize(

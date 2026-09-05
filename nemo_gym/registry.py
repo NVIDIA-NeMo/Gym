@@ -63,6 +63,7 @@ class EnvironmentCatalogEntry:
     licensing: Optional[str] = None
     lifecycle: Optional[str] = None
     resources_server_selector: Optional[str] = None
+    rollout_smoke: Optional[Dict[str, object]] = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,7 @@ def _manifest_entry(
         "modality": manifest.modality,
         "licensing": manifest.licensing,
         "lifecycle": _enum_value(manifest.lifecycle),
+        "rollout_smoke": manifest.rollout_smoke.model_dump(mode="json") if manifest.rollout_smoke else None,
     }
     if expected_kind == "environment":
         return EnvironmentEntry(**values)
