@@ -59,7 +59,7 @@ _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
-    max_steps: int = None
+    max_steps: int = 1
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
