@@ -1,5 +1,5 @@
 config_paths:
-  - responses_api_agents/aviary_agent/configs/aviary_agent.yaml
+  - harnesses/aviary_agent/configs/aviary_agent.yaml
 
 # NOTE: AviaryResourcesServer is an abstract base server and cannot be instantiated directly,
 # so here we run the GSM8k server for tests/examples. Users should use the other configurations

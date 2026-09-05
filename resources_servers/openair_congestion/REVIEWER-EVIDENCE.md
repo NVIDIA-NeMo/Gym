@@ -38,7 +38,7 @@ These files are review scope, not evidence of upstream acceptance.
 | Model input | KPI messages omit evaluator-only difficulty, regime, and scenario labels. | `tests/test_render.py`, `tests/test_example_artifacts.py` |
 | Recorded-data boundary | Nested KPI-snapshot JSONL inputs fail closed on malformed topology, identifiers, action metadata, or step order; optional recorded actions are returned only as diagnostics, stored scalar rewards are ignored, and the current action cannot alter a prerecorded next state; metadata reports `training_usable: false`. | `dataset_backend.py`, `tests/test_dataset_ingestion.py` |
 | Transition completeness | Every successful scored step, including terminal and truncated steps, retains its after-observation. | `app.py`, `generate_example_rollouts.py`, `tests/test_app.py`, `tests/test_example_artifacts.py` |
-| OpenAir lifecycle integration | The server advertises explicit close; the agent preserves caller routing/auth cookies, merges resource-issued session cookies, closes opted-in sessions, and preserves completed rollouts with a `cleanup_warning` if cleanup fails. | `tests/test_app.py`, `responses_api_agents/gymnasium_agent/tests/test_app.py` |
+| OpenAir lifecycle integration | The server advertises explicit close; the agent preserves caller routing/auth cookies, merges resource-issued session cookies, closes opted-in sessions, and preserves completed rollouts with a `cleanup_warning` if cleanup fails. | `tests/test_app.py`, `harnesses/gymnasium_agent/tests/test_app.py` |
 
 ## Checked-in evidence and generators
 
@@ -81,7 +81,7 @@ PYTHONPATH=.:resources_servers/openair_congestion \
 
 .venv/bin/pytest \
   resources_servers/openair_congestion/tests \
-  responses_api_agents/gymnasium_agent/tests/test_app.py -q
+  harnesses/gymnasium_agent/tests/test_app.py -q
 
 .venv/bin/gym env test --resources-server openair_congestion
 ```

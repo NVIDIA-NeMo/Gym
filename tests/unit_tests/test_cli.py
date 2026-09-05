@@ -105,7 +105,7 @@ class TestServerJunitReports:
         assert run.call_args.args[0] == "setup && pytest"
 
     def test_uses_unique_module_path_and_prefix(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
-        test_config = MagicMock(entrypoint="responses_api_agents/example")
+        test_config = MagicMock(entrypoint="harnesses/example")
         test_config.resolved_dir_path = Path("/tmp/example")
         run = MagicMock()
         monkeypatch.setenv("GYM_CI_JUNIT_DIR", str(tmp_path / "reports"))
@@ -115,8 +115,8 @@ class TestServerJunitReports:
         _test_single(test_config, OmegaConf.create({}))
 
         command = run.call_args.args[0]
-        assert f"--junitxml={tmp_path}/reports/responses_api_agents__example.xml" in command
-        assert "--junit-prefix=responses_api_agents.example" in command
+        assert f"--junitxml={tmp_path}/reports/harnesses__example.xml" in command
+        assert "--junit-prefix=harnesses.example" in command
         assert (tmp_path / "reports").is_dir()
 
 

@@ -431,13 +431,26 @@ class GlobalConfigDictParser(BaseModel):
                 searched_locations = [config_path]
             else:
                 searched_locations = [root / config_path for root in component_search_roots()]
-            config_path = _resolve_under_cwd_or_install(original_entry)
-            if not config_path.exists() and (canonical_entry := legacy_config_path_alias(original_entry)):
+            canonical_entry = legacy_config_path_alias(original_entry)
+            is_legacy_harness_path = (
+                not config_path.is_absolute() and config_path.parts and config_path.parts[0] == "responses_api_agents"
+            )
+            if canonical_entry and is_legacy_harness_path:
                 canonical_path = _resolve_under_cwd_or_install(canonical_entry)
                 if canonical_path.exists():
                     logger.warning(f"Config path `{original_entry}` is deprecated; use `{canonical_entry}`.")
                     config_paths[index] = canonical_entry
                     config_path = canonical_path
+                else:
+                    config_path = _resolve_under_cwd_or_install(original_entry)
+            else:
+                config_path = _resolve_under_cwd_or_install(original_entry)
+                if not config_path.exists() and canonical_entry:
+                    canonical_path = _resolve_under_cwd_or_install(canonical_entry)
+                    if canonical_path.exists():
+                        logger.warning(f"Config path `{original_entry}` is deprecated; use `{canonical_entry}`.")
+                        config_paths[index] = canonical_entry
+                        config_path = canonical_path
 
             try:
                 extra_config = _load_config_yaml(config_path)

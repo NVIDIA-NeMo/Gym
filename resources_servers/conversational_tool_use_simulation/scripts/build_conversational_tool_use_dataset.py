@@ -26,6 +26,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from harnesses.conversational_tool_use.simulation.prompt import (
+    agent_system_message,
+    responses_api_tools,
+)
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.conversational_tool_use_simulation.app import (
     ConversationalToolUseSeedSessionRequest,
@@ -36,10 +40,6 @@ from resources_servers.conversational_tool_use_simulation.scripts.quality import
     ArtifactValidationError,
     detect_leak,
     validate_tool_schema,
-)
-from responses_api_agents.conversational_tool_use.simulation.prompt import (
-    agent_system_message,
-    responses_api_tools,
 )
 
 

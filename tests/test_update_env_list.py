@@ -20,13 +20,13 @@ import scripts.update_env_list as update_env_list
 
 def test_training_server_info_includes_benchmark_configs(tmp_path: Path, monkeypatch) -> None:
     resources_servers = tmp_path / "resources_servers"
-    responses_api_agents = tmp_path / "responses_api_agents"
+    harnesses = tmp_path / "harnesses"
     benchmarks = tmp_path / "benchmarks"
     resources_servers.mkdir()
-    responses_api_agents.mkdir()
+    harnesses.mkdir()
     benchmark_dir = benchmarks / "desktop_bench"
     benchmark_dir.mkdir(parents=True)
-    agent_dir = responses_api_agents / "desktop_agent" / "configs"
+    agent_dir = harnesses / "desktop_agent" / "configs"
     agent_dir.mkdir(parents=True)
     agent_config = agent_dir / "desktop_agent.yaml"
     agent_config.write_text(
@@ -59,7 +59,7 @@ desktop_agent:
     )
 
     monkeypatch.setattr(update_env_list, "RESOURCES_SERVERS_FOLDER", resources_servers)
-    monkeypatch.setattr(update_env_list, "RESPONSES_API_AGENTS_FOLDER", responses_api_agents)
+    monkeypatch.setattr(update_env_list, "HARNESSES_FOLDER", harnesses)
     monkeypatch.setattr(update_env_list, "BENCHMARKS_FOLDER", benchmarks)
 
     servers = update_env_list.get_training_server_info()

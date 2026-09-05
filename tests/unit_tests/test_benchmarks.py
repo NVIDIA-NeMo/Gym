@@ -31,7 +31,7 @@ def _mock_global_config(config: dict = None):
 def test_pinchbench_tavily_key_is_derived_from_environment() -> None:
     repo_root = Path(__file__).parents[2]
     benchmark = safe_load((repo_root / "benchmarks/pinchbench/config.yaml").read_text())
-    agent = safe_load((repo_root / "responses_api_agents/pinchbench/configs/pinchbench.yaml").read_text())
+    agent = safe_load((repo_root / "harnesses/pinchbench/configs/pinchbench.yaml").read_text())
 
     assert benchmark["tavily_api_key"] == "${oc.env:PINCHBENCH_TAVILY_API_KEY,null}"
     assert agent["pinchbench_agent"]["responses_api_agents"]["pinchbench"]["tavily_api_key"] == ("${tavily_api_key}")

@@ -19,7 +19,7 @@ pin an upstream ref, don't copy task files). This clones it at the SAME ref the 
 image bakes in — `Dockerfile.benchmark`'s `PINCHBENCH_SKILL_REF` — so the prompts written
 here describe the tasks `benchmark.py` actually loads inside the sandbox.
 
-Row shape mirrors `responses_api_agents/pinchbench/dataset_preprocess.py` (which generates
+Row shape mirrors `harnesses/pinchbench/dataset_preprocess.py` (which generates
 the committed 5-task `data/example.jsonl`): the task's human-readable `## Prompt` section in
 `input`, plus `verifier_metadata.task_id`. `task_id` is the authoritative selector — at run
 time `run_task.sh` passes it to `benchmark.py --suite`, which loads the full task (prompt +
@@ -56,7 +56,7 @@ EXAMPLE_JSONL_FPATH = AGENT_DIR / "data" / "example.jsonl"
 
 SKILL_REPO_URL = "https://github.com/pinchbench/skill"
 # Keep in lockstep with `PINCHBENCH_SKILL_REF` in
-# responses_api_agents/pinchbench/Dockerfile.benchmark.
+# harnesses/pinchbench/Dockerfile.benchmark.
 SKILL_REF = "v2.0.0"
 # The v2.0.0 manifest's task count; upstream drift surfaces here rather than as a
 # silently shorter run.
@@ -105,7 +105,7 @@ def _assert_matches_example_jsonl(skill_dir: Path) -> None:
             raise ValueError(
                 f"Regenerated row for '{task_id}' does not match {EXAMPLE_JSONL_FPATH} line {line_number}. "
                 f"The skill checkout is not at {SKILL_REF}, or the row format has diverged from "
-                "responses_api_agents/pinchbench/dataset_preprocess.py."
+                "harnesses/pinchbench/dataset_preprocess.py."
             )
 
 

@@ -1,5 +1,5 @@
 config_paths:
-  - responses_api_agents/finance_agent/configs/finance_agent.yaml
+  - harnesses/finance_agent/configs/finance_agent.yaml
 
 # Finance SEC search: SEC filing search with optional web search (via tavily_api_key in env.yaml)
 finance_sec_search_resources_server:

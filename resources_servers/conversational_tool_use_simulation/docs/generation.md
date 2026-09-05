@@ -31,9 +31,9 @@ Start the model, generation agents, conversation agent, and simulation resource 
 
 ```bash
 gym env start \
-  --config responses_api_agents/conversational_tool_use/domain_generation/configs/conversational_tool_use_domain_generation.yaml \
-  --config responses_api_agents/conversational_tool_use/policy_tool_generation/configs/conversational_tool_use_policy_tool_generation.yaml \
-  --config responses_api_agents/conversational_tool_use/scenario_generation/configs/conversational_tool_use_scenario_generation.yaml \
+  --config harnesses/conversational_tool_use/domain_generation/configs/conversational_tool_use_domain_generation.yaml \
+  --config harnesses/conversational_tool_use/policy_tool_generation/configs/conversational_tool_use_policy_tool_generation.yaml \
+  --config harnesses/conversational_tool_use/scenario_generation/configs/conversational_tool_use_scenario_generation.yaml \
   --config resources_servers/conversational_tool_use_simulation/configs/conversational_tool_use_simulation.yaml \
   --model-type openai_model \
   --model-url "$MODEL_BASE_URL" \
@@ -86,7 +86,7 @@ Each generation agent README lists every supported agent setting and its checked
 ```bash
 gym eval run --no-serve \
   --agent conversational_tool_use_domain_generation \
-  --input responses_api_agents/conversational_tool_use/domain_generation/data/example.jsonl \
+  --input harnesses/conversational_tool_use/domain_generation/data/example.jsonl \
   --output /tmp/conversational_tool_use/domain_rollouts.jsonl \
   --limit 1 \
   --num-repeats 1 \
@@ -98,7 +98,7 @@ gym eval run --no-serve \
 Choose exactly one profile:
 
 ```bash
-python -m responses_api_agents.conversational_tool_use.domain_generation.materialize \
+python -m harnesses.conversational_tool_use.domain_generation.materialize \
   --input-file /tmp/conversational_tool_use/domain_rollouts.jsonl \
   --output-file /tmp/conversational_tool_use/policy_tool_inputs.jsonl \
   --profile general
@@ -122,7 +122,7 @@ gym eval run --no-serve \
 ## 4. Materialize Scenario Inputs
 
 ```bash
-python -m responses_api_agents.conversational_tool_use.policy_tool_generation.materialize \
+python -m harnesses.conversational_tool_use.policy_tool_generation.materialize \
   --input-path /tmp/conversational_tool_use/policy_tool_rollouts.jsonl \
   --output-path /tmp/conversational_tool_use/scenario_generation_inputs.jsonl
 ```
@@ -145,7 +145,7 @@ gym eval run --no-serve \
 ## 6. Materialize Conversation Inputs
 
 ```bash
-python -m responses_api_agents.conversational_tool_use.scenario_generation.materialize \
+python -m harnesses.conversational_tool_use.scenario_generation.materialize \
   --input /tmp/conversational_tool_use/scenario_generation_rollouts.jsonl \
   --output /tmp/conversational_tool_use/conversation_inputs.jsonl
 ```

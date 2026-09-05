@@ -1,5 +1,5 @@
 config_paths:
-  - responses_api_agents/toolsandbox_agent/configs/toolsandbox_agent.yaml
+  - harnesses/toolsandbox_agent/configs/toolsandbox_agent.yaml
 
 # Standalone gym config for the ToolSandbox benchmark.
 #

@@ -7,7 +7,7 @@
 # Every shipped provider config binds the same name `sandbox`, so swapping providers is
 # swapping this config path in `+config_paths` (no agent edit):
 #
-#   AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
+#   AGENT=harnesses/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
 #   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
 #   ng_run "+config_paths=[$AGENT, nemo_gym/sandbox/providers/openshell/configs/openshell.yaml, $MODEL]"
 #

@@ -208,7 +208,7 @@ image rather than building directly:
 
 ```bash
 export PINCHBENCH_SIF=/abs/path/pinchbench.sif
-bash responses_api_agents/pinchbench/setup_scripts/build_image.sh --apptainer
+bash harnesses/pinchbench/setup_scripts/build_image.sh --apptainer
 ```
 
 The build script writes to `PINCHBENCH_SIF` when it is set, so exporting it first points

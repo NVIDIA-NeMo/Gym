@@ -47,7 +47,7 @@ openair_congestion:
 openair_congestion_gymnasium_agent:
   responses_api_agents:
     # Inner key 'gymnasium_agent' must match the shared
-    # responses_api_agents/gymnasium_agent dir name. Its run() loop: POST
+    # harnesses/gymnasium_agent dir name. Its run() loop: POST
     # /reset, then per turn POST /v1/responses -> POST /step, appending
     # tool_outputs + observation, until terminated/truncated or max_steps.
     gymnasium_agent:

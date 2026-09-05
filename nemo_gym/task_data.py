@@ -6,7 +6,7 @@ A resources server ships a ``task_data.py`` module next to its ``app.py`` export
 symbol ``TaskData``: either a Pydantic ``BaseModel`` subclass or a type (e.g. an
 ``Annotated[Union[...], Field(discriminator=...)]`` alias) accepted by ``pydantic.TypeAdapter``.
 A self-contained agent (one that declares datasets but no ``resources_server`` reference) ships
-the same module under ``responses_api_agents/<implementation>/`` and owns its rows' schema; an
+the same module under ``harnesses/<implementation>/`` and owns its rows' schema; an
 agent WITH a reference uses that resources server's schema instead.
 It describes the task-owned fields of that server's dataset rows, written FLAT in the planned
 end-state shape: the fields as they will appear inside the unified ``task_data`` row key after
@@ -78,7 +78,7 @@ def find_server_dir(server_name: str, base_folder: str = "resources_servers") ->
     Resolves against ``_resolve_under_cwd_or_install`` (extra plugin roots first, then cwd, then
     the Gym install root), without the CLI's venv-marker requirement (a schema can exist for a
     server whose venv was never set up). Self-contained agents (which verify in-process) keep
-    their schemas under ``responses_api_agents/<name>/``.
+    their schemas under ``harnesses/<name>/``.
     """
     from nemo_gym import _resolve_under_cwd_or_install
 

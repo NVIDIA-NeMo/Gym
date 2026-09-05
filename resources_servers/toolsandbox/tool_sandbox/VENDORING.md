@@ -97,4 +97,4 @@ copyright-header and import-style changes.
 
 The gym integration proper (resources server, agent harness, schemas, configs)
 lives **outside** this vendored tree, under
-`resources_servers/toolsandbox/` and `responses_api_agents/toolsandbox_agent/`.
+`resources_servers/toolsandbox/` and `harnesses/toolsandbox_agent/`.

@@ -10,7 +10,7 @@ Likewise the gold test data (test_data.h5) comes from server config, not the row
 
 Wire required-ness here covers the whole rollout path, not just the resources server:
 ``ScicodeRunRequest`` omits ``required_dependencies``, but the wired agent's
-``ScicodeAgentRunRequest`` (responses_api_agents/scicode_agent/app.py) declares it ``str`` with no
+``ScicodeAgentRunRequest`` (harnesses/scicode_agent/app.py) declares it ``str`` with no
 default and reads it unconditionally, and scicode's config wires that agent — so a row missing the
 field would pass a resources-server-only schema yet 422 at the agent /run before any rollout.
 It is therefore required below.

@@ -291,9 +291,9 @@ class TestApp:
             patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
             patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
             # Avoid pulling in real file-reader conversion for the .mp3 stub.
-            patch("responses_api_agents.stirrup_agent.file_reader.read_deliverable_files", return_value=""),
+            patch("harnesses.stirrup_agent.file_reader.read_deliverable_files", return_value=""),
             patch(
-                "responses_api_agents.stirrup_agent.file_reader.convert_deliverables_to_content_blocks",
+                "harnesses.stirrup_agent.file_reader.convert_deliverables_to_content_blocks",
                 return_value=[],
             ),
         ):

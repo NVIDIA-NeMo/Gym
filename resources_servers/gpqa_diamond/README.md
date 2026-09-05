@@ -16,7 +16,7 @@ GPQA-specific verifier built on top of `resources_servers/mcqa`.
 
 Use GPQA-Diamond with:
 
-- `responses_api_agents/simple_agent`
+- `harnesses/simple_agent`
 - `responses_api_models/*` (typically `policy_model`)
 - `resources_servers/gpqa_diamond`
 
@@ -78,7 +78,7 @@ Using a local Nemotron 3 model with `local_vllm_model`:
 
 ```bash
 gym env start \
-    --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
+    --config harnesses/simple_agent/configs/simple_agent.yaml \
     --model-type local_vllm_model/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
     --resources-server gpqa_diamond \
     '++policy_model=${inherit_from:NVIDIA-Nemotron-3-Nano-30B-A3B-BF16}' \
@@ -91,7 +91,7 @@ Generic example with `openai_model`:
 
 ```bash
 gym env start \
-    --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
+    --config harnesses/simple_agent/configs/simple_agent.yaml \
     --model-type openai_model \
     --resources-server gpqa_diamond \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=gpqa_diamond

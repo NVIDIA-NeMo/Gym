@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
+
 import logging
 import os
 import sys
@@ -25,7 +27,7 @@ from typing import Callable, List, Optional, Union
 # |- results (RESULTS_DIR)
 # |- nemo_gym (ROOT_DIR)
 # |- responses_api_models
-# |- responses_api_agents
+# |- harnesses
 # ...
 ROOT_DIR = Path(__file__).absolute().parent
 PARENT_DIR = ROOT_DIR.parent
@@ -44,12 +46,17 @@ RESULTS_DIR = WORKING_DIR / "results"
 # Read at call time so it reflects the current environment (incl. spawned server subprocesses).
 NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME = "NEMO_GYM_EXTRA_ROOTS"
 
+# ``responses_api_agents`` remains the on-the-wire/config server type. Filesystem discovery uses the
+# public ``harnesses`` taxonomy first while accepting the old tree for external plugins and paths.
+_LEGACY_COMPONENT_DIR_ALIASES = {"responses_api_agents": "harnesses"}
+_CANONICAL_COMPONENT_DIR_FALLBACKS = {canonical: legacy for legacy, canonical in _LEGACY_COMPONENT_DIR_ALIASES.items()}
+
 
 def _extra_roots() -> List[Path]:
     return [Path(d) for d in os.environ.get(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, "").split(os.pathsep) if d]
 
 
-def component_search_roots(*, sys_path: List[Path] | None = None) -> List[Path]:
+def component_search_roots(*, sys_path: Optional[List[Path]] = None) -> List[Path]:
     """Ordered, de-duplicated roots to look for a Gym component/artifact under: the ``NEMO_GYM_EXTRA_ROOTS``
     roots first, then cwd and the install root (``PARENT_DIR``, the built-ins) last.
 
@@ -101,11 +108,17 @@ def _resolve_under_cwd_or_install(
         return p
     is_valid = validator if validator is not None else Path.exists
     roots = component_search_roots()
+    relative_candidates = [p]
+    if p.parts and (canonical_head := _LEGACY_COMPONENT_DIR_ALIASES.get(p.parts[0])):
+        relative_candidates = [Path(canonical_head, *p.parts[1:]), p]
+    elif p.parts and (legacy_head := _CANONICAL_COMPONENT_DIR_FALLBACKS.get(p.parts[0])):
+        relative_candidates.append(Path(legacy_head, *p.parts[1:]))
     for root in roots:
-        candidate = root / p
-        if is_valid(candidate):
-            return candidate
-    return roots[0] / p
+        for relative_candidate in relative_candidates:
+            candidate = root / relative_candidate
+            if is_valid(candidate):
+                return candidate
+    return roots[0] / relative_candidates[0]
 
 
 def _augment_sys_path() -> None:

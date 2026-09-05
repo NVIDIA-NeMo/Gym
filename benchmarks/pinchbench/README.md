@@ -6,7 +6,7 @@ of an [OpenClaw](https://github.com/openclaw/openclaw) agent.
 
 This benchmark config is a thin narrowing of the `pinchbench` agent server, which owns the whole
 integration (one sandbox per task, in-sandbox OpenClaw gateway, PinchBench's own grading harness).
-Read [`responses_api_agents/pinchbench/README.md`](../../responses_api_agents/pinchbench/README.md)
+Read [`harnesses/pinchbench/README.md`](../../harnesses/pinchbench/README.md)
 first — architecture, the per-task image build, config knobs, and the parity validation against
 vanilla standalone PinchBench all live there.
 
@@ -27,7 +27,7 @@ gym eval prepare --benchmark pinchbench
 ```
 
 The PinchBench skill is not vendored. `prepare.py` clones it at `v2.0.0` — the same ref
-`responses_api_agents/pinchbench/Dockerfile.benchmark` bakes into the per-task image — and writes
+`harnesses/pinchbench/Dockerfile.benchmark` bakes into the per-task image — and writes
 `data/pinchbench_benchmark.jsonl`, one row per manifest task:
 
 ```json
@@ -42,7 +42,7 @@ config change needed.
 
 Set `PINCHBENCH_SKILL_DIR` to an existing `v2.0.0` checkout to skip the clone. Preparation fails
 loudly if the manifest is not 147 tasks or if the regenerated rows do not byte-match the committed
-`responses_api_agents/pinchbench/data/example.jsonl`, so upstream drift can't slip through.
+`harnesses/pinchbench/data/example.jsonl`, so upstream drift can't slip through.
 
 ## Quickstart
 

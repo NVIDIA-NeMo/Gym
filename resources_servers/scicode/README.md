@@ -17,7 +17,7 @@ ground-truth targets in `test_data.h5` and returns the reward.
 
 SciCode uses a **custom multi-step agent** — `simple_agent` will not work:
 
-- `responses_api_agents/scicode_agent` (generates code sub-step by sub-step, accumulating prior code)
+- `harnesses/scicode_agent` (generates code sub-step by sub-step, accumulating prior code)
 - `responses_api_models/*` (typically `policy_model`)
 - `resources_servers/scicode` (this server)
 

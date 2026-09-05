@@ -21,7 +21,7 @@ answer. Binary reward (1.0 = equivalent, 0.0 = not equivalent).
 
 Use LABBench2 VLM with:
 
-- `responses_api_agents/labbench2_vlm_agent` — custom agent (see below)
+- `harnesses/labbench2_vlm_agent` — custom agent (see below)
 - `responses_api_models/*` — policy model (e.g. `openai_model`)
 - `resources_servers/labbench2_vlm` — this resource server
 - A separate judge model instance (configured via `judge_model_server`)
@@ -43,7 +43,7 @@ want protocol rows as extracted text (including mixed splits); `run.sh` passes
 this for the dedicated protocolqa2 rollout loop.
 
 `pymupdf` (for PDF rendering and text extraction) is only required in the agent's venv
-(`responses_api_agents/labbench2_vlm_agent/requirements.txt`), not in the
+(`harnesses/labbench2_vlm_agent/requirements.txt`), not in the
 resource server or core `nemo_gym`.
 
 ## Dataset Format

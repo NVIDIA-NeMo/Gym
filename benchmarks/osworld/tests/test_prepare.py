@@ -228,7 +228,7 @@ def test_main_writes_complete_nano_omni_profile(monkeypatch, tmp_path: Path, cap
     assert agent["vm_path"] == str(vm_path.resolve())
 
     output = capsys.readouterr().out
-    managed_venv = tmp_path / "server-venvs/responses_api_agents/osworld_agent/.venv"
+    managed_venv = tmp_path / "server-venvs/harnesses/osworld_agent/.venv"
     assert "the OSWorld runtime package install is an explicit opt-in" in output
     assert "gym env prefetch" in output
     assert "install_optional_runtime_deps.sh" in output

@@ -1,5 +1,5 @@
 config_paths:
-  - responses_api_agents/critpt_agent/configs/critpt_agent.yaml
+  - harnesses/critpt_agent/configs/critpt_agent.yaml
 
 critpt_resources_server:
   resources_servers:

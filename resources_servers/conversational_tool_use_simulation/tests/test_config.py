@@ -58,16 +58,16 @@ def test_simulation_roles_use_the_canonical_shared_model_and_sampling() -> None:
 def test_generation_role_models_copy_the_standard_policy_model() -> None:
     config_paths = {
         "domain_generation_model": (
-            "responses_api_agents/conversational_tool_use/domain_generation/configs/conversational_tool_use_domain_generation.yaml"
+            "harnesses/conversational_tool_use/domain_generation/configs/conversational_tool_use_domain_generation.yaml"
         ),
         "policy_generation_model": (
-            "responses_api_agents/conversational_tool_use/policy_tool_generation/configs/conversational_tool_use_policy_tool_generation.yaml"
+            "harnesses/conversational_tool_use/policy_tool_generation/configs/conversational_tool_use_policy_tool_generation.yaml"
         ),
         "policy_tool_judge_model": (
-            "responses_api_agents/conversational_tool_use/policy_tool_generation/configs/conversational_tool_use_policy_tool_generation.yaml"
+            "harnesses/conversational_tool_use/policy_tool_generation/configs/conversational_tool_use_policy_tool_generation.yaml"
         ),
         "scenario_generation_model": (
-            "responses_api_agents/conversational_tool_use/scenario_generation/configs/conversational_tool_use_scenario_generation.yaml"
+            "harnesses/conversational_tool_use/scenario_generation/configs/conversational_tool_use_scenario_generation.yaml"
         ),
     }
 

@@ -269,7 +269,7 @@ horizon, decoding settings, and repeat count fixed when comparing policies.
 
 ```bash
 pytest resources_servers/openair_congestion/tests -q
-pytest responses_api_agents/gymnasium_agent/tests/test_app.py -q
+pytest harnesses/gymnasium_agent/tests/test_app.py -q
 ```
 
 The suite covers configuration and schemas, representative deterministic

@@ -246,7 +246,7 @@ class TestEnsureDistribution:
         dataset.write_text("")  # contents irrelevant; build is monkeypatched
         built = _dist({"occupation=x": ["t0", "t1"]})
 
-        import responses_api_agents.stirrup_agent.task_distribution as td
+        import harnesses.stirrup_agent.task_distribution as td
 
         monkeypatch.setattr(td, "build_distribution_from_dataset", lambda path, cols: built)
 
@@ -259,7 +259,7 @@ class TestEnsureDistribution:
         assert json.loads(out.read_text()) == built
 
     def test_raises_when_no_distribution_and_no_dataset(self, monkeypatch) -> None:
-        import responses_api_agents.stirrup_agent.task_distribution as td
+        import harnesses.stirrup_agent.task_distribution as td
 
         monkeypatch.setattr(td, "resolve_default_dataset", lambda: None)
         with pytest.raises(FileNotFoundError):

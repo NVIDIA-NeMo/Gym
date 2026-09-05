@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 from omegaconf import OmegaConf
 
+from harnesses.harbor_agent.app import HarborAgentConfig
 from resources_servers.legal_agent_bench.harbor_bridge import REPO_ROOT, LegalAgentBenchHarborBridge
 from resources_servers.legal_agent_bench.legal_harbor_agent import (
     LegalAgentBenchHarborAgent,
@@ -38,7 +39,6 @@ from resources_servers.legal_agent_bench.verifier import (
     _write_report,
     score_rubric,
 )
-from responses_api_agents.harbor_agent.app import HarborAgentConfig
 
 
 BENCH_DIR = Path(__file__).resolve().parents[1]

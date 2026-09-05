@@ -195,7 +195,7 @@ def run_command(
     work_dir = f"{working_dir_path.absolute()}"
     custom_env = environ.copy()
     # The server dir on PYTHONPATH lets `import app` work. When a caller passes `project_root` (the
-    # dir containing resources_servers/, responses_api_agents/, ...), it's added so generated
+    # dir containing resources_servers/, harnesses/, ...), it's added so generated
     # `resources_servers.<name>.app`-style imports resolve from outside a repo checkout — opt-in, so
     # this generic helper doesn't bake a layout assumption in for its other callers.
     py_path_entries = [work_dir]

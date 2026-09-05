@@ -795,14 +795,14 @@ This could be due to a change in how metrics are calculated, leading to outdated
         if impl_key is None:
             # No resources server owns this data. A self-contained agent (one that declares no
             # resources_server reference at all) may own a schema itself, under
-            # responses_api_agents/<implementation>/task_data.py. An agent whose reference is
+            # harnesses/<implementation>/task_data.py. An agent whose reference is
             # dangling is skipped: its schema home is the (missing) resources server.
             if c.SERVER_TYPE != "responses_api_agents":
                 return None
             if getattr(c.get_inner_run_server_config(), "resources_server", None) is not None:
                 return None
             impl_key = next(iter(c.responses_api_agents))
-            base_folder = "responses_api_agents"
+            base_folder = "harnesses"
         server_dir = find_server_dir(impl_key, base_folder=base_folder)
         if server_dir is None:
             return None

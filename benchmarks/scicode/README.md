@@ -11,7 +11,7 @@ sub-steps. Generated code is executed against the problem's test cases.
   total sub-steps passed divided by total sub-steps across all rollouts — and `problem_accuracy`
   (= `mean/reward`, the whole problem passing)
 
-A custom multi-step agent (`responses_api_agents/scicode_agent`) drives the per-sub-step
+A custom multi-step agent (`harnesses/scicode_agent`) drives the per-sub-step
 generation loop; the resources server (`resources_servers/scicode`) executes each sub-step's
 accumulated code and runs its test cases.
 

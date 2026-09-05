@@ -51,9 +51,16 @@ Point Gym at one or more extra roots so your own benchmarks, environments, resou
 ├── benchmarks/<name>/
 ├── environments/<name>/
 ├── resources_servers/<name>/
-├── responses_api_agents/<name>/
+├── harnesses/<name>/
 └── responses_api_models/<name>/
 ```
+
+<Note>
+`harnesses/` is the canonical filesystem and Python package location. The YAML server-type key
+remains `responses_api_agents` because it is part of the existing configuration and runtime
+protocol. Legacy `responses_api_agents/<name>/...` paths and Python imports continue to work, but
+new integrations should use `harnesses/<name>/...` and `harnesses.<name>`.
+</Note>
 
 Set it as an `os.pathsep`-separated list (`:` on Linux/macOS):
 
@@ -138,7 +145,7 @@ Agent servers must include both a `resources_server` and `model_server` block to
 ```yaml
 my_agent:                                     # Server ID (your choice — used in API requests)
   responses_api_agents:                       # Server type (must be "responses_api_agents" for agent servers)
-    simple_agent:                             # Implementation (must match a directory in responses_api_agents/)
+    simple_agent:                             # Implementation (must match a directory in harnesses/)
       entrypoint: app.py                      # Python file to run
       resources_server:                       # Specifies which resources server to use
         type: resources_servers               # Always "resources_servers"

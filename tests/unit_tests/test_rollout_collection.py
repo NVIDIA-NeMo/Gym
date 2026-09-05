@@ -553,7 +553,7 @@ class TestRolloutCollection:
 
     def test_ng_perf_matches_model_calls_by_response_id_pair_like_simple_agent(self) -> None:
         # Integration test: simple_agent sets result["ng_trajectory"] directly (see
-        # responses_api_agents/simple_agent/app.py), bypassing join_model_call_observations
+        # harnesses/simple_agent/app.py), bypassing join_model_call_observations
         # entirely -- so its ModelCallRef is never canonicalized with a model_call_id and only
         # ever carries (model_ref, response_id). Token fields must still populate.
         row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}

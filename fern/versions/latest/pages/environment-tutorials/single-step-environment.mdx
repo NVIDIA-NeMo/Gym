@@ -140,7 +140,7 @@ This section covers the key aspects of building the environment itself: building
 
 ### 3.1 Agent Server
 
-While this tutorial is about a single-step environment, it still can use the built-in `simple_agent`, which handles even multi-step tool calling out of the box. No custom agent code is needed. Here is simplified pseudocode showing the core flow ([actual implementation](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent)):
+While this tutorial is about a single-step environment, it still can use the built-in `simple_agent`, which handles even multi-step tool calling out of the box. No custom agent code is needed. Here is simplified pseudocode showing the core flow ([actual implementation](https://github.com/NVIDIA-NeMo/Gym/tree/main/harnesses/simple_agent)):
 
 ```python
 # run() — episode lifecycle
@@ -165,7 +165,7 @@ async def responses(self, body):
     return model_response
 ```
 
-This tutorial uses `simple_agent`. For other patterns (multi-turn correction, custom orchestration), see the other agents in [`responses_api_agents/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents), or build your own by extending `SimpleResponsesAPIAgent`.
+This tutorial uses `simple_agent`. For other patterns (multi-turn correction, custom orchestration), see the other agents in [`harnesses/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/harnesses), or build your own by extending `SimpleResponsesAPIAgent`.
 
 ### 3.2 Resources Server
 
@@ -476,10 +476,10 @@ If you don't want to use the OpenAI API, you can try using a local vLLM server (
 
 ### Test with Client (Optional)
 
-You can do a quick spot-check by pointing the built-in client at your agent. Inside `responses_api_agents/simple_agent/client.py`, change the server name to `my_weather_tool_simple_agent`, then run:
+You can do a quick spot-check by pointing the built-in client at your agent. Inside `harnesses/simple_agent/client.py`, change the server name to `my_weather_tool_simple_agent`, then run:
 
 ```bash
-python responses_api_agents/simple_agent/client.py
+python harnesses/simple_agent/client.py
 ```
 
 <Note>

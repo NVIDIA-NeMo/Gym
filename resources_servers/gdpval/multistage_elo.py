@@ -17,7 +17,7 @@ Instead of comparing the evaluated model against every reference model on all
 tasks, multi-stage ELO runs a sequence of *stages*. Each stage:
 
 1. Samples ``T`` tasks from a task-distribution JSON file (see
-   ``responses_api_agents.stirrup_agent.task_distribution``); ``T`` is
+   ``harnesses.stirrup_agent.task_distribution``); ``T`` is
    configurable per stage and **defaults to the full task set**,
 2. Includes a set of ``M`` reference models and assigns **each task a single
    reference** drawn uniformly (equal weight) from that set — so a task is
@@ -193,7 +193,7 @@ def plan_stage_task_ids(
     exactly proportional per stage, with nesting guaranteed. A single shared RNG
     is used (per-stage ``seed`` only applies to independent sampling).
     """
-    from responses_api_agents.stirrup_agent.task_distribution import sample_task_ids
+    from harnesses.stirrup_agent.task_distribution import sample_task_ids
 
     base_rng = rng or random.Random()
     total = len(all_task_ids(distribution))
@@ -322,7 +322,7 @@ def ensure_distribution(
     if distribution_path is not None and Path(distribution_path).is_file():
         return load_distribution(distribution_path), Path(distribution_path)
 
-    from responses_api_agents.stirrup_agent.task_distribution import (
+    from harnesses.stirrup_agent.task_distribution import (
         build_distribution_from_dataset,
         resolve_default_dataset,
     )

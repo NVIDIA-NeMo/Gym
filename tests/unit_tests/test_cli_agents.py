@@ -29,7 +29,7 @@ def _mock_global_config(config: dict = None):
 
 
 def _entry(name: str, self_contained: bool, variants=(), description=None) -> AgentEntry:
-    path = Path("responses_api_agents") / name
+    path = Path("harnesses") / name
     config_paths = tuple(path / "configs" / f"{v}.yaml" for v in variants)
     return AgentEntry(
         name=name,
@@ -138,9 +138,10 @@ class TestListAgents:
         out = capsys.readouterr().out
         assert "Unknown agent 'swe_agent'" in out and "swe_agents" in out
 
-    def test_inspect_shows_absolute_path(self, tmp_path: Path, capsys, monkeypatch) -> None:
+    @pytest.mark.parametrize("tree", ["harnesses", "responses_api_agents"])
+    def test_inspect_shows_absolute_path(self, tmp_path: Path, capsys, monkeypatch, tree: str) -> None:
         # Real discovery (via an extra root): the path line must be the agent dir's absolute path.
-        agent_dir = tmp_path / "responses_api_agents" / "my_agent"
+        agent_dir = tmp_path / tree / "my_agent"
         agent_dir.mkdir(parents=True)
         (agent_dir / "app.py").write_text("")
         monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))

@@ -5,7 +5,7 @@ Single-box Sokoban puzzle environment. The environment is implemented under `res
 ## Why it exists
 - **Domain**: Deterministic Sokoban puzzles.
 - **Interaction style**: The environment returns a board observation and expects exactly one move per turn.
-- **Evaluation**: Reward is accumulated directly through `/step`, so this server should be used with `responses_api_agents/gymnasium_agent`.
+- **Evaluation**: Reward is accumulated directly through `/step`, so this server should be used with `harnesses/gymnasium_agent`.
 
 ## Running
 Spin up the server alongside a compatible agent:
@@ -13,7 +13,7 @@ Spin up the server alongside a compatible agent:
 ```bash
 gym env start \
     --model-type openai_model \
-    --config responses_api_agents/gymnasium_agent/configs/gymnasium_agent.yaml \
+    --config harnesses/gymnasium_agent/configs/gymnasium_agent.yaml \
     --resources-server grl_sokoban
 ```
 

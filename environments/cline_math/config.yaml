@@ -1,5 +1,5 @@
 config_paths:
-  - responses_api_agents/cline_agent/configs/cline_agent.yaml
+  - harnesses/cline_agent/configs/cline_agent.yaml
 
 math_with_judge:
   resources_servers:

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from responses_api_agents.harbor_agent.app import HarborAgent
+from harnesses.harbor_agent.app import HarborAgent
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

@@ -12,8 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib
 from pathlib import Path
 
+from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _resolve_under_cwd_or_install
 from nemo_gym.agent_registry import (
     AgentEntry,
     _discover_agents_in_dir,
@@ -123,6 +125,19 @@ class TestDiscoverAgents:
     def test_missing_directory_yields_no_agents(self, tmp_path: Path) -> None:
         assert _discover_agents_in_dir(tmp_path / "nope") == {}
 
+    def test_canonical_tree_wins_over_legacy_tree_in_same_root(self, tmp_path: Path, monkeypatch) -> None:
+        canonical = _make_agent(tmp_path / "harnesses", "same")
+        _make_agent(tmp_path / "responses_api_agents", "same")
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
+
+        assert discover_agents()["same"].path == canonical
+
+    def test_higher_priority_legacy_plugin_shadows_builtin(self, tmp_path: Path, monkeypatch) -> None:
+        legacy = _make_agent(tmp_path / "responses_api_agents", "simple_agent")
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
+
+        assert discover_agents()["simple_agent"].path == legacy
+
 
 class TestRealAgents:
     def test_discovers_real_simple_agent_as_composable(self) -> None:
@@ -135,3 +150,14 @@ class TestRealAgents:
         entry = AgentEntry(name="a", path=Path("a"), config_paths=(Path("a/configs/a.yaml"),), self_contained=True)
         assert {entry: 1}[entry] == 1
         assert entry.variants == {"a": Path("a/configs/a.yaml")}
+
+    def test_legacy_import_namespace_points_at_canonical_implementation(self) -> None:
+        canonical = importlib.import_module("harnesses.codex_agent.setup_codex")
+        legacy = importlib.import_module("responses_api_agents.codex_agent.setup_codex")
+
+        assert Path(canonical.__file__).resolve() == Path(legacy.__file__).resolve()
+
+    def test_legacy_filesystem_path_resolves_to_canonical_tree(self) -> None:
+        resolved = _resolve_under_cwd_or_install("responses_api_agents/simple_agent")
+
+        assert resolved == Path(__file__).resolve().parents[2] / "harnesses" / "simple_agent"

@@ -497,7 +497,7 @@ exclude-dependencies = [
 nemo-lens = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "b85578fc2b736a1804705e537001b5f45e9c715d" }
 
 [tool.setuptools.package-data]
-# The built-in asset trees (resources_servers, responses_api_agents, responses_api_models,
+# The built-in asset trees (resources_servers, harnesses, responses_api_models,
 # benchmarks, environments — all under [tool.setuptools.packages.find]) ship their configs, READMEs,
 # and example data into the wheel via the setuptools-scm VCS file-finder, which includes git-tracked
 # files. (Adding `environments` to packages.find above is what makes that tree ship at all.) Bulk
@@ -615,8 +615,9 @@ include = [
     "benchmarks.*",
     "resources_servers",
     "resources_servers.*",
+    "harnesses",
+    "harnesses.*",
     "responses_api_agents",
-    "responses_api_agents.*",
     "responses_api_models",
     "responses_api_models.*",
     "environments",
@@ -627,20 +628,20 @@ include = [
 # SWE harnesses create mutable runtime trees inside their package directory.
 # Package discovery must never race or ship those caches and rollout outputs.
 exclude = [
-    "responses_api_agents.swe_agents.results",
-    "responses_api_agents.swe_agents.results.*",
-    "responses_api_agents.swe_agents.swe_openhands_setup",
-    "responses_api_agents.swe_agents.swe_openhands_setup.*",
-    "responses_api_agents.swe_agents.swe_opencode_setup",
-    "responses_api_agents.swe_agents.swe_opencode_setup.*",
-    "responses_api_agents.swe_agents.swe_r2e_gym_setup",
-    "responses_api_agents.swe_agents.swe_r2e_gym_setup.*",
-    "responses_api_agents.swe_agents.swe_rebench_setup",
-    "responses_api_agents.swe_agents.swe_rebench_setup.*",
-    "responses_api_agents.swe_agents.swe_swebench_multilingual_setup",
-    "responses_api_agents.swe_agents.swe_swebench_multilingual_setup.*",
-    "responses_api_agents.swe_agents.swe_swebench_setup",
-    "responses_api_agents.swe_agents.swe_swebench_setup.*",
+    "harnesses.swe_agents.results",
+    "harnesses.swe_agents.results.*",
+    "harnesses.swe_agents.swe_openhands_setup",
+    "harnesses.swe_agents.swe_openhands_setup.*",
+    "harnesses.swe_agents.swe_opencode_setup",
+    "harnesses.swe_agents.swe_opencode_setup.*",
+    "harnesses.swe_agents.swe_r2e_gym_setup",
+    "harnesses.swe_agents.swe_r2e_gym_setup.*",
+    "harnesses.swe_agents.swe_rebench_setup",
+    "harnesses.swe_agents.swe_rebench_setup.*",
+    "harnesses.swe_agents.swe_swebench_multilingual_setup",
+    "harnesses.swe_agents.swe_swebench_multilingual_setup.*",
+    "harnesses.swe_agents.swe_swebench_setup",
+    "harnesses.swe_agents.swe_swebench_setup.*",
 ]
 
 ################################################

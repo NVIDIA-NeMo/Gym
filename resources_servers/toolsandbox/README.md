@@ -27,7 +27,7 @@ done`, `/close` (computes + caches the reward), `/verify` (returns it).
 - `app.py` — `ToolSandboxResourcesServer`
 - `schemas.py` — request/response + config schemas
 - `tool_sandbox/` — vendored apple/ToolSandbox (self-contained; no `benchmarks/` deps)
-- `../../responses_api_agents/toolsandbox_agent/` — the driving agent harness
+- `../../harnesses/toolsandbox_agent/` — the driving agent harness
 
 ## Scoring caveat: Responses API vs Chat Completions (read before comparing numbers)
 

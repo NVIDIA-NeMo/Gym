@@ -94,7 +94,7 @@ Commands that need a model (`gym env start`, `gym eval run`) configure it throug
 ### Swapping the agent
 
 `--agent-type NAME` runs an environment or benchmark with a different agent harness, without editing any
-config. It resolves to `responses_api_agents/NAME/configs/NAME.yaml`; use `NAME/FLAVOR` to pick a
+config. It resolves to `harnesses/NAME/configs/NAME.yaml`; use `NAME/FLAVOR` to pick a
 non-default config in that directory.
 
 ```bash
@@ -254,7 +254,7 @@ gym list environments --json | jq '.[].name'
 
 ### `gym list agents`
 
-List the agent harnesses under `responses_api_agents/`, with each one's composition pattern — **composable** (Pattern A: references a separate resources server, so it can be wired into a matching environment) vs **self-contained** (Pattern B: ships its own framework/environment) — plus its config variants.
+List the agent harnesses under `harnesses/`, with each one's composition pattern — **composable** (Pattern A: references a separate resources server, so it can be wired into a matching environment) vs **self-contained** (Pattern B: ships its own framework/environment) — plus its config variants.
 
 | Option | Description |
 | --- | --- |

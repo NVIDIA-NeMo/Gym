@@ -3,7 +3,7 @@ title: "Integrate external libraries"
 description: ""
 position: 8
 ---
-Fundamentally, a training environment in NeMo Gym is some Python logic that performs a sequence or graph of model calls and tool calls. For native NeMo Gym environments, all of the model and tool calls are present within an agent server like [`simple_agent`](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/simple_agent/app.py). For environments that we consider "external", the orchestration of model and tool calls is offloaded to a third-party library rather than implemented within NeMo Gym itself.
+Fundamentally, a training environment in NeMo Gym is some Python logic that performs a sequence or graph of model calls and tool calls. For native NeMo Gym environments, all of the model and tool calls are present within an agent server like [`simple_agent`](https://github.com/NVIDIA-NeMo/Gym/blob/main/harnesses/simple_agent/app.py). For environments that we consider "external", the orchestration of model and tool calls is offloaded to a third-party library rather than implemented within NeMo Gym itself.
 
 Integrating external training environments, benchmarks, or agents into a NeMo Gym environment requires additional considerations beyond native NeMo Gym environments. We provide a rough template of integration form factor below and best practices for ensuring that the integration is correct.
 
@@ -26,7 +26,7 @@ Integrating external training environments, benchmarks, or agents into a NeMo Gy
    2. Use the [NeMo Gym custom OpenAI client](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/openai_utils.py) rather than other popular LLM clients including OpenAI, Anthropic, and LiteLLM.  
       1. The NeMo Gym OpenAI client has been meticulously designed to scale.
       2. Other LLM clients (such as LiteLLM) often preprocess or postprocess the inputs and outputs, making it difficult to understand and control the flow of information.  
-      3. Propagate cookies from the incoming request through all downstream calls (see [`simple_agent`](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/simple_agent/app.py) for the pattern).  
+      3. Propagate cookies from the incoming request through all downstream calls (see [`simple_agent`](https://github.com/NVIDIA-NeMo/Gym/blob/main/harnesses/simple_agent/app.py) for the pattern).
    3. Use Pydantic models for checking the data format wherever necessary.  
 2. Rollout creation  
    1. During training, NeMo Gym models return additional fields on response messages or output items: [`prompt_token_ids`, `generation_token_ids`, and `generation_log_probs`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/openai_utils.py).  

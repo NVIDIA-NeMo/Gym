@@ -1,5 +1,5 @@
 config_paths:
-  - responses_api_agents/scicode_agent/configs/scicode_agent.yaml
+  - harnesses/scicode_agent/configs/scicode_agent.yaml
 
 scicode:
   resources_servers:

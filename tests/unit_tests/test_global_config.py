@@ -1887,6 +1887,18 @@ class TestConfigLoadErrors:
         assert len(configs) == 1
         assert f"Config path `{legacy}` is deprecated; use `{canonical}`." in caplog.text
 
+    def test_load_extra_config_paths_resolves_legacy_harness_tree(self, caplog: LogCaptureFixture) -> None:
+        parser = GlobalConfigDictParser()
+        legacy = "responses_api_agents/simple_agent/configs/simple_agent.yaml"
+        canonical = "harnesses/simple_agent/configs/simple_agent.yaml"
+
+        with caplog.at_level("WARNING"):
+            config_paths, configs = parser.load_extra_config_paths([legacy])
+
+        assert config_paths == [canonical]
+        assert len(configs) == 1
+        assert f"Config path `{legacy}` is deprecated; use `{canonical}`." in caplog.text
+
     def test_existing_legacy_config_path_takes_precedence(
         self, monkeypatch: MonkeyPatch, tmp_path: Path, caplog: LogCaptureFixture
     ) -> None:
@@ -1991,7 +2003,7 @@ class TestConfigLoadErrors:
         # second `datasets:` block can land unnoticed and only surface at runtime. Sweep every real
         # config in the repo so this fails fast in CI instead.
         repo_root = Path(__file__).resolve().parents[2]
-        config_dirs = ("responses_api_agents", "resources_servers", "nemo_gym/sandbox/providers")
+        config_dirs = ("harnesses", "resources_servers", "nemo_gym/sandbox/providers")
         config_paths = [p for d in config_dirs for p in (repo_root / d).rglob("*.yaml")]
         assert config_paths, "no config files discovered -- sweep dirs may have moved"
 
@@ -2645,7 +2657,7 @@ class TestComposeUnboundAgent:
     def test_real_benchmark_composes_onto_real_harness(self) -> None:
         resolved = self._parse_config_paths(
             "benchmarks/gpqa/config.yaml",
-            "responses_api_agents/hermes_agent/configs/hermes_agent.yaml",
+            "harnesses/hermes_agent/configs/hermes_agent.yaml",
         )
 
         block = resolved[self._composed_name("gpqa_mcqa_simple_agent")]["responses_api_agents"]["hermes_agent"]

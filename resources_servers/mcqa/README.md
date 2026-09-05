@@ -116,7 +116,7 @@ For datasets with custom prompt formats, you can optionally use `template_metada
 **Standard format (with `grading_mode`):**
 ```bash
 gym env start \
-    --config responses_api_agents/simple_agent/configs/simple_agent.yaml \
+    --config harnesses/simple_agent/configs/simple_agent.yaml \
     --model-type openai_model \
     --resources-server mcqa \
     +simple_agent.responses_api_agents.simple_agent.resources_server.name=mcqa

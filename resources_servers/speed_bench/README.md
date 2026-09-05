@@ -110,7 +110,7 @@ For an EAGLE3 / MTP setup with a paired draft model, see
 gym env start \
     --model-type local_vllm_model/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec \
     --resources-server speed_bench \
-    --config responses_api_agents/speed_bench_agent/configs/speed_bench_agent.yaml \
+    --config harnesses/speed_bench_agent/configs/speed_bench_agent.yaml \
     +policy_model=Qwen3-30B-A3B-Instruct-2507-ngram-specdec
 
 # Collecting rollouts (5-example smoke test)

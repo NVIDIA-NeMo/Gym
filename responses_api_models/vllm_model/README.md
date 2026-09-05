@@ -107,5 +107,5 @@ tail -f temp.log
 
 Once you see that server instances are up, call the server. If you see a model response here, then everything is working as intended.
 ```bash
-python responses_api_agents/simple_agent/client.py
+python harnesses/simple_agent/client.py
 ```

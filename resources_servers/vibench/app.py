@@ -21,7 +21,7 @@ such as Docker cannot support it at all.
 
   * ``seed_session`` returns the PRD text and asset directory for the task. It creates no
     sandbox and hands out no handle. The agent never sees the test plans.
-  * ``responses_api_agents/vibench_agent`` owns the build sandbox, runs a coding harness in
+  * ``harnesses/vibench_agent`` owns the build sandbox, runs a coding harness in
     it, tars the finished app, and writes it to ``artifact_dir``.
   * ``verify`` unpacks that tarball and grades it with ViBench's ``run-seed.py`` then
     ``run-evaluate-post-seeding.py``, once per test plan. Each run stands up the app +

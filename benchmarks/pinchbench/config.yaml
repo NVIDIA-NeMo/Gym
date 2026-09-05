@@ -3,7 +3,7 @@
 
 # Chain to existing agent config
 config_paths:
-  - responses_api_agents/pinchbench/configs/pinchbench.yaml
+  - harnesses/pinchbench/configs/pinchbench.yaml
 
 # Run-time knobs the agent config interpolates. Declared here so `gym list` and
 # `gym eval prepare` resolve without them; a null reaching the agent fails fast in

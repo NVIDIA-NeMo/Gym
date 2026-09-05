@@ -194,7 +194,7 @@ Beyond signatures, startup also refuses: **non-Gym middleware** installed on the
 
 ## Wiring the agent (Claude Code)
 
-The [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent) reads the `mcp` metadata from `/seed_session`, writes a per-rollout `gym_mcp_config.json`, and launches Claude Code with `--mcp-config`. The generated config — shown here for `workplace_assistant`, the worked example below — looks like:
+The [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/harnesses/claude_code_agent) reads the `mcp` metadata from `/seed_session`, writes a per-rollout `gym_mcp_config.json`, and launches Claude Code with `--mcp-config`. The generated config — shown here for `workplace_assistant`, the worked example below — looks like:
 
 ```json
 {

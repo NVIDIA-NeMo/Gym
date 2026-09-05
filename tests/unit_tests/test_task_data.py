@@ -507,7 +507,7 @@ class TestRepoDataMatchesSchemas:
         configs = [
             c
             for c in subprocess.run(["git", "ls-files", "*.yaml"], capture_output=True, text=True).stdout.split()
-            if c.split("/")[0] in ("resources_servers", "responses_api_agents", "benchmarks", "environments")
+            if c.split("/")[0] in ("resources_servers", "harnesses", "benchmarks", "environments")
         ]
         tracked = set(subprocess.run(["git", "ls-files", "*.jsonl"], capture_output=True, text=True).stdout.split())
 
@@ -538,7 +538,7 @@ class TestRepoDataMatchesSchemas:
                             elif "resources_server" not in body:
                                 # Self-contained agent: its schema lives next to the agent
                                 # implementation, mirroring collate's fallback.
-                                owner = ("responses_api_agents", impl_key)
+                                owner = ("harnesses", impl_key)
                             else:
                                 ref = body.get("resources_server") or {}
                                 name = ref.get("name") if isinstance(ref, dict) else None
@@ -559,7 +559,7 @@ class TestRepoDataMatchesSchemas:
                                 server_files.setdefault(owner, set()).add(str(d["jsonl_fpath"]))
 
         assert len(server_files) > 50, "mapping looks broken: too few servers with committed data"
-        agent_owned = [o for o in server_files if o[0] == "responses_api_agents"]
+        agent_owned = [o for o in server_files if o[0] == "harnesses"]
         assert len(agent_owned) >= 5, "mapping looks broken: self-contained agent datasets not found"
         failures = []
         rows_checked = 0
