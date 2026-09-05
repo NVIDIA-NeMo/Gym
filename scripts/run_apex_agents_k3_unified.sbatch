@@ -552,8 +552,15 @@ run_main() {
         (( alive > 0 )) || die "all ${POLICY_LABEL} serving processes exited before readiness"
         sleep 10
     done
-    (( ${#policy_urls[@]} == N_REPLICAS )) ||
-        die "${POLICY_LABEL} readiness timed out (${#policy_urls[@]}/${N_REPLICAS} replicas ready)"
+    if (( ${#policy_urls[@]} == 0 )); then
+        die "${POLICY_LABEL} readiness timed out (0/${N_REPLICAS} replicas ready)"
+    elif (( ${#policy_urls[@]} < N_REPLICAS )); then
+        # A replica that never initializes (NCCL init timeout on one node group, a
+        # stale listener on a reused node) used to kill the whole rotation after the
+        # full wait. The balancer only routes to the ready backends, so continue on
+        # that subset and let the requeue path pick up the rest.
+        log "WARNING: ${POLICY_LABEL} readiness timed out with ${#policy_urls[@]}/${N_REPLICAS} replicas ready; continuing on the ready subset."
+    fi
 
     local url served
     for url in "${policy_urls[@]}"; do
