@@ -1278,7 +1278,7 @@ class TestArenaResourcesServer:
         assert metrics["win_rate"] == approx(0.5, abs=0.05)
         assert metrics["verbosity_acceptance_rate"] == approx(0.5)
 
-    def test_compute_metrics_v3_max_token_response_scores_zero(self, config: ArenaResourcesServerConfig):
+    def test_compute_metrics_v3_unjudged_model_outputs_score_zero(self, config: ArenaResourcesServerConfig):
         config.style_control_method = "reference_length"
         config.style_length_ratio_range = (0.5, 1.75)
         config.style_short_reference_max_tokens = 100
@@ -1306,16 +1306,22 @@ class TestArenaResourcesServer:
         context_exceeded = truncated | {
             "response": {"incomplete_details": {"reason": "max_output_tokens"}, "usage": None}
         }
+        reasoning_only = truncated | {
+            "response": {"status": "completed"},
+            "policy_answer": None,
+            "policy_reasoning": "Reasoning without a final answer",
+        }
 
-        metrics = reference_server.compute_metrics([[win], [truncated], [context_exceeded]])
+        metrics = reference_server.compute_metrics([[win], [truncated], [context_exceeded], [reasoning_only]])
 
-        assert metrics["max_token_reached_rate"] == approx(1 / 3)
-        assert metrics["context_window_exceeded_rate"] == approx(1 / 3)
+        assert metrics["max_token_reached_rate"] == approx(1 / 4)
+        assert metrics["context_window_exceeded_rate"] == approx(1 / 4)
         assert metrics["rollout_failure_rate"] == approx(0.0)
+        assert metrics["reasoning_only_response_rate"] == approx(1 / 4)
         assert metrics["missing_judgment_rate"] == approx(0.0)
-        assert metrics["win_rate_no_SC"] == approx(1 / 3, abs=0.05)
-        assert metrics["win_rate"] == approx(1 / 3, abs=0.05)
-        assert metrics["verbosity_acceptance_rate"] == approx(1 / 3)
+        assert metrics["win_rate_no_SC"] == approx(1 / 4, abs=0.05)
+        assert metrics["win_rate"] == approx(1 / 4, abs=0.05)
+        assert metrics["verbosity_acceptance_rate"] == approx(1 / 4)
 
     def test_compute_metrics_v2_max_token_response_remains_failure(self, server: ArenaResourcesServer):
         server.config.max_rollout_failure_rate = 1.0
