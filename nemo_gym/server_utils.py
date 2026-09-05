@@ -159,7 +159,8 @@ def _make_keepalive_socket_factory(
 
 def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSession:  # pragma: no cover
     assert not is_global_aiohttp_client_setup(), (
-        "There is already a global aiohttp client setup. Please refactor your code or call `global_aiohttp_client_exit` if you want to explicitly re-make the client!"
+        "There is already a global aiohttp client setup. Please refactor your code or await "
+        "`close_global_aiohttp_client` if you want to explicitly re-make the client!"
     )
 
     num_workers = get_nemo_gym_fastapi_num_workers()
@@ -195,14 +196,46 @@ def is_global_aiohttp_client_request_debug_enabled() -> bool:
     return _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
 
 
-def global_aiohttp_client_exit():  # pragma: no cover
-    if not is_global_aiohttp_client_setup():
+async def close_global_aiohttp_client() -> None:
+    """Idempotently close the global session on its owning event loop."""
+    global _GLOBAL_AIOHTTP_CLIENT
+    client = _GLOBAL_AIOHTTP_CLIENT
+    if client is None:
+        return
+    if client.closed:
+        _GLOBAL_AIOHTTP_CLIENT = None
+        return
+    if asyncio.get_running_loop() is not client._loop:
+        raise RuntimeError("the global aiohttp client must be closed on its owning event loop")
+    try:
+        await client.close()
+    finally:
+        if _GLOBAL_AIOHTTP_CLIENT is client and client.closed:
+            _GLOBAL_AIOHTTP_CLIENT = None
+
+
+def global_aiohttp_client_exit() -> None:  # pragma: no cover
+    global _GLOBAL_AIOHTTP_CLIENT
+    client = _GLOBAL_AIOHTTP_CLIENT
+    if client is None:
         return
 
-    global _GLOBAL_AIOHTTP_CLIENT
-    asyncio.run(_GLOBAL_AIOHTTP_CLIENT.close())
+    owner_loop = client._loop
+    if client.closed or owner_loop.is_closed():
+        _GLOBAL_AIOHTTP_CLIENT = None
+        return
 
-    _GLOBAL_AIOHTTP_CLIENT = None
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    if running_loop is owner_loop:
+        return
+    if owner_loop.is_running():
+        asyncio.run_coroutine_threadsafe(close_global_aiohttp_client(), owner_loop).result()
+    else:
+        owner_loop.run_until_complete(close_global_aiohttp_client())
 
 
 atexit.register(global_aiohttp_client_exit)
@@ -1013,6 +1046,11 @@ repr(e): {repr(e)}"""
 
             maybe_auto_expose(server, app)
         server.setup_liveness(app)
+
+        @app.on_event("shutdown")
+        async def close_http_client() -> None:
+            await close_global_aiohttp_client()
+
         server.set_ulimit()
         server.prefix_server_logs()
         server.setup_exception_middleware(app)
