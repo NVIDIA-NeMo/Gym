@@ -30,10 +30,10 @@ with open(args.fpath, "rb") as f, open(f_out_path, "wb") if args.group_to_write_
             if output_item.get("role") == "user":
                 content = output_item["content"]
                 count += "No valid JSON found in response" in content
-                technical_difficulties_count += "Technical difficulties" in content
             elif output_item.get("type") == "reasoning":
                 content = output_item["summary"][0]["text"]
                 stuck_count += "stuck" in content or "unresponsive" in content
+                technical_difficulties_count += "Technical difficulties" in content
 
         is_errored = bool(row["error"])
         is_timeout = is_errored and "raise TimeoutError from exc_val" in row["error"]
