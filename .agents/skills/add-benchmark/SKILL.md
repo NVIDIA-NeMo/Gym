@@ -21,6 +21,10 @@ Before editing, read these pages and follow their links only as needed:
 
 Treat the current CLI, Pydantic schemas, and generated scaffold as authoritative when they disagree with prose.
 
+Read [references/patterns.md](references/patterns.md) when implementation needs a concrete current example of
+manifest/config ownership, raw-row and `TaskData` design, a verifier fixture, scorer reuse, or a non-default integration
+profile. The reference illustrates relationships; regenerate the scaffold and inspect the cited code before copying it.
+
 ## Preserve the upstream contract
 
 Record the upstream revision, license, canonical splits, task identifiers, prompt templates, scoring behavior, reward
