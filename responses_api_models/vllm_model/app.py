@@ -697,6 +697,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 # No user message found — create one with just the audio blocks.
                 body_dict.setdefault("messages", []).append({"role": "user", "content": list(audio_blocks)})
 
+        if self.config.return_token_id_information:
+            self._derive_required_prefix_token_ids(body_dict)
         self._apply_sampling_overrides(body_dict)
         self._validate_single_choice_token_request(body_dict)
         if self._external_capture_enabled:
@@ -1250,6 +1252,23 @@ class VLLMModel(SimpleResponsesAPIModel):
             cls._require_token_id_list(prompt_value, "prompt_token_ids"),
             cls._require_token_id_list(generation_value, "choice.token_ids"),
         )
+
+    @classmethod
+    def _derive_required_prefix_token_ids(cls, body_dict: Dict[str, Any]) -> None:
+        if body_dict.get("required_prefix_token_ids") is not None:
+            return
+
+        for message in reversed(body_dict.get("messages", [])):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            token_bundle = cls._extract_message_token_bundle(message)
+            if token_bundle is None:
+                continue
+            body_dict["required_prefix_token_ids"] = [
+                *token_bundle["prompt_token_ids"],
+                *token_bundle["generation_token_ids"],
+            ]
+            return
 
     def _extract_choice_logprobs(self, choice_dict: Dict[str, Any]) -> tuple[List[int], List[float]]:
         logprobs_block = choice_dict.get("logprobs")
