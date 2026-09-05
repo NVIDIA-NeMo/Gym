@@ -185,6 +185,40 @@ async def test_setup_failure_closes_sandbox():
     agent._provider.close.assert_awaited_once_with(handle)
 
 
+async def test_nested_runner_exit_fails_without_waiting_for_timeout():
+    agent = _make_agent(mode="gym_runner", rollout_timeout=2400)
+    handle = MagicMock()
+    agent._provision_box = AsyncMock(return_value=handle)
+    agent._provider.exec = AsyncMock(
+        side_effect=[
+            SandboxExecResult("", "", 0),
+            SandboxExecResult("EXITED\n", "", 0),
+            SandboxExecResult("killed", "", 0),
+        ]
+    )
+    agent._provider.close = AsyncMock()
+    body = MagicMock()
+    body.model_dump.return_value = {"responses_create_params": {"metadata": {}}}
+
+    with (
+        patch.object(SandboxAgent, "_sandbox_model_url", return_value="https://model.example"),
+        patch("responses_api_agents.sandbox_agent.app.asyncio.sleep", new=AsyncMock()) as sleep,
+        pytest.raises(RuntimeError, match="runner exited.*killed"),
+    ):
+        await agent._run_nested(MagicMock(), body)
+    sleep.assert_awaited_once_with(20)
+    assert "runner.pid" in agent._provider.exec.await_args_list[0].args[1]
+    agent._provider.close.assert_awaited_once_with(handle)
+
+
+async def test_download_json_requires_exactly_one_row():
+    agent = _make_agent()
+    agent._provider.download_file = AsyncMock(side_effect=lambda _, __, path: path.write_text("{}\n{}\n"))
+
+    with pytest.raises(RuntimeError, match="expected one JSON row.*got 2"):
+        await agent._download_json(MagicMock(), "/work/rollouts.jsonl")
+
+
 def test_gym_tar_built_on_init():
     with (
         patch("responses_api_agents.sandbox_agent.app.create_provider", return_value=MagicMock()),
