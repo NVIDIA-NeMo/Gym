@@ -213,22 +213,25 @@ def project_nooa_episode(
     )
 
 
-def _has_completed_assistant_message(response: NeMoGymResponse) -> bool:
-    return any(
-        isinstance(item, NeMoGymResponseOutputMessage) and item.status == "completed" for item in response.output
-    )
+def _ends_with_completed_assistant_message(response: NeMoGymResponse) -> bool:
+    if not response.output:
+        return False
+    last = response.output[-1]
+    return isinstance(last, NeMoGymResponseOutputMessage) and last.status == "completed"
 
 
-def adapt_response_for_verify(
+def ensure_verifier_final_message(
     response: NeMoGymResponse,
     return_value: Any,
 ) -> tuple[NeMoGymResponse, list[ObservationGap]]:
     """Add a verifier-facing fallback message without mutating the ATIF episode."""
 
     gaps: list[ObservationGap] = []
-    if _has_completed_assistant_message(response) or return_value is None:
+    if _ends_with_completed_assistant_message(response) or return_value is None:
         return response, gaps
 
+    # Verifiers commonly grade the last assistant message, so preserve the full ATIF trace and append the
+    # entrypoint return only when that trace does not already end with a completed assistant message.
     output = list(response.output)
     output.append(
         NeMoGymResponseOutputMessage(
