@@ -19,6 +19,7 @@ import pytest
 from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_routing import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -27,9 +28,6 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.stirrup_agent.app import (
-    NG_FAILURE_CLASS_KEY,
-    NG_NO_PERSIST_KEY,
-    NG_TERMINAL_KEY,
     StirrupAgentWrapper,
     StirrupAgentWrapperConfig,
     StirrupRunRequest,
@@ -439,6 +437,7 @@ class TestRerunIncompleteMode:
         assert result["error_class"] == "incomplete"
         assert result["reward"] == 0.0
         assert result["skipped"] is False
+        assert result["response"] == NeMoGymResponse.model_validate(result["response"]).model_dump(mode="json")
         assert NG_TERMINAL_KEY not in result
         assert NG_NO_PERSIST_KEY not in result
 
