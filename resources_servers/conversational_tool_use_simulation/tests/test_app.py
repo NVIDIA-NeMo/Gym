@@ -60,7 +60,9 @@ class JsonResponseStub:
 
 
 def make_server(
-    enable_llm_judge: bool = False, enforce_transfer_ground_truth: bool = False
+    enable_llm_judge: bool = False,
+    enforce_transfer_ground_truth: bool = False,
+    fallback_first_user_message: bool = True,
 ) -> ConversationalToolUseSimulationServer:
     config = ConversationalToolUseSimulationConfig(
         host="0.0.0.0",
@@ -70,6 +72,7 @@ def make_server(
         domain="agent",
         enable_llm_judge=enable_llm_judge,
         enforce_transfer_ground_truth=enforce_transfer_ground_truth,
+        fallback_first_user_message=fallback_first_user_message,
         judge_model_server={"type": "responses_api_models", "name": "judge_model"} if enable_llm_judge else None,
     )
     return ConversationalToolUseSimulationServer(config=config, server_client=MagicMock(spec=ServerClient))
@@ -541,8 +544,40 @@ async def test_user_stop_completes_and_agent_stop_does_not(monkeypatch) -> None:
     assert "session_1" not in server.session_id_to_state
 
 
-async def test_first_user_stop_is_invalid(monkeypatch) -> None:
+async def test_first_user_stop_falls_back_to_reason_for_contact(monkeypatch) -> None:
     server = make_server()
+    request = RequestStub()
+
+    await server.seed_session(
+        request,
+        ConversationalToolUseSeedSessionRequest(
+            domain_name="subscription support",
+            profile="general",
+            policy="policy",
+            customer_scenario={"reason_for_contact": "I need help."},
+        ),
+    )
+
+    async def stop_user_message(state):
+        return "###STOP###", None
+
+    monkeypatch.setattr(server, "_generate_user_message", stop_user_message)
+    user_message = await server.next_user_message(request)
+    assert user_message.should_continue is True
+    assert user_message.terminal_state is None
+    assert user_message.message == "I need help."
+
+    state = server.session_id_to_state["session_1"]
+    assert [message.content for message in state.messages] == ["I need help."]
+    assert state.invalid_reasons == []
+    assert state.terminal_state is None
+    fallbacks = state.source_artifacts["first_user_message_fallbacks"]
+    assert len(fallbacks) == 1
+    assert fallbacks[0].startswith("invalid_user_message: ")
+
+
+async def test_first_user_stop_is_invalid_when_fallback_disabled(monkeypatch) -> None:
+    server = make_server(fallback_first_user_message=False)
     request = RequestStub()
 
     await server.seed_session(
@@ -746,8 +781,95 @@ async def test_tool_argument_enum_is_validated_by_jsonschema() -> None:
     assert verified.result.trajectory.messages[-1].tool_name == "update_subscription"
 
 
-async def test_user_generation_error_records_invalid_reason(monkeypatch) -> None:
+async def test_first_user_generation_error_falls_back_to_reason_for_contact(monkeypatch) -> None:
     server = make_server()
+    request = RequestStub()
+
+    await server.seed_session(
+        request,
+        ConversationalToolUseSeedSessionRequest(
+            domain_name="subscription support",
+            profile="general",
+            policy="policy",
+            customer_scenario={"reason_for_contact": "I need help."},
+        ),
+    )
+
+    async def raise_generation_error(state):
+        raise RuntimeError("model server returned no text")
+
+    monkeypatch.setattr(server, "_generate_user_message", raise_generation_error)
+
+    user_message = await server.next_user_message(request)
+
+    assert user_message.should_continue is True
+    assert user_message.terminal_state is None
+    assert user_message.message == "I need help."
+    state = server.session_id_to_state["session_1"]
+    assert [message.content for message in state.messages] == ["I need help."]
+    assert state.generation_invalid_reason is None
+    assert state.terminal_error is None
+    assert state.source_artifacts["first_user_message_fallbacks"] == [
+        "message_generation_error: model server returned no text"
+    ]
+
+
+async def test_first_user_fallback_uses_default_when_reason_for_contact_is_unusable(monkeypatch) -> None:
+    for reason_for_contact in ("", "   ", "Cancel it. ###STOP###"):
+        server = make_server()
+        request = RequestStub()
+        await server.seed_session(
+            request,
+            ConversationalToolUseSeedSessionRequest(
+                domain_name="subscription support",
+                profile="general",
+                policy="policy",
+                customer_scenario={"reason_for_contact": reason_for_contact},
+            ),
+        )
+
+        async def raise_generation_error(state):
+            raise RuntimeError("model server returned no text")
+
+        monkeypatch.setattr(server, "_generate_user_message", raise_generation_error)
+        user_message = await server.next_user_message(request)
+        assert user_message.should_continue is True
+        assert user_message.message == "I need help with my account."
+
+
+async def test_later_user_generation_error_still_records_invalid_reason(monkeypatch) -> None:
+    server = make_server()
+    request = RequestStub()
+
+    await server.seed_session(
+        request,
+        ConversationalToolUseSeedSessionRequest(
+            domain_name="subscription support",
+            profile="general",
+            policy="policy",
+            customer_scenario={"reason_for_contact": "I need help."},
+        ),
+    )
+
+    first = await server.next_user_message(request)
+    assert first.should_continue is True
+    await server.record_agent_message(request, RecordAgentMessageRequest(content="Sure, what is the issue?"))
+
+    async def raise_generation_error(state):
+        raise RuntimeError("model server returned no text")
+
+    monkeypatch.setattr(server, "_generate_user_message", raise_generation_error)
+    user_message = await server.next_user_message(request)
+
+    assert user_message.should_continue is False
+    assert user_message.terminal_state == "incomplete"
+    state = server.session_id_to_state["session_1"]
+    assert state.generation_invalid_reason == "message_generation_error"
+    assert "first_user_message_fallbacks" not in state.source_artifacts
+
+
+async def test_user_generation_error_records_invalid_reason_when_fallback_disabled(monkeypatch) -> None:
+    server = make_server(fallback_first_user_message=False)
     request = RequestStub()
 
     await server.seed_session(
