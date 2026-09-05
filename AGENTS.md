@@ -70,8 +70,8 @@ For guidance on how to build environments, see `fern/versions/latest/pages/envir
 
 ## Communication & Async Patterns
 
-All async HTTP ultimately uses NeMo Gym's singleton aiohttp client, which provides connection pooling, retries, and
-trace propagation.
+New or modified async HTTP must ultimately use NeMo Gym's singleton aiohttp client, which provides connection pooling,
+retries, and trace propagation. Treat existing direct-httpx integrations as legacy code to migrate when touched.
 
 - **Configured Gym server-to-server calls:** use `self.server_client.get()` / `.post()` so the configured server name,
   rollout route, and shared transport are preserved.

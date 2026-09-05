@@ -36,13 +36,18 @@ navigation only when the title or placement changes.
 
 ### Move, rename, or remove a page
 
-Update `main.yml`, repository references, and `fern/docs.yml` redirects when a published URL changes. Use an explicit
-redirect target; do not leave duplicate pages to preserve old routes.
+Update any explicit `main.yml` entry if present, update repository references, and add a `fern/docs.yml` redirect when
+a published URL changes. Use an explicit redirect target; do not leave duplicate pages to preserve old routes.
 
-### Cut or backport a release
+### Cut a release
 
 Only do this when explicitly requested. Follow the exact release procedure in `fern/README.md`; do not infer a version
 number, retarget a nonexistent `latest.yml`, publish, or create a tag without authorization.
+
+### Backport to a frozen release
+
+Edit only the requested files in the specified `fern/versions/v<release>/` tree and its matching YAML or redirects when
+needed. Never resnapshot a frozen release from `latest/` during a targeted backport.
 
 ## Authoring contracts
 

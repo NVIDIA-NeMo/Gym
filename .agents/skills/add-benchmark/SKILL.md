@@ -24,15 +24,18 @@ Treat the current CLI, Pydantic schemas, and generated scaffold as authoritative
 ## Preserve the upstream contract
 
 Record the upstream revision, license, canonical splits, task identifiers, prompt templates, scoring behavior, reward
-range, and published reference metrics before choosing the integration. Reproduce upstream task-level results where
-practical; aggregate parity alone can hide conversion and scoring errors.
+range, and published reference metrics before choosing the integration. For a port, reproduce the published metrics in
+the original repository before integration, then reproduce them in Gym with the same models. Inspect task-level
+discrepancies; aggregate parity alone can hide conversion and scoring errors.
 
 Choose the narrowest integration profile that preserves the workload:
 
 - `custom-gym-verifier`: Gym owns rollout orchestration and implements or reuses the scorer.
 - `custom-gym-agent-loop`: the benchmark needs a custom Gym-hosted interaction loop.
-- `external-agent-loop`: an external harness owns the loop but Gym owns model and resource services.
-- `external-rollout-driver`: the external system owns the complete rollout lifecycle.
+- `external-agent-loop`: an external framework owns one episode behind the agent's `run()` adapter; a Gym model server
+  is optional.
+- `external-rollout-driver`: a configured rollout driver coordinates collection across tasks or rollouts above the
+  agent.
 
 Do not create a custom agent merely to duplicate a built-in harness. If the request is for a training-only workload or
 an independently reusable resources server, use that workload's contract instead of presenting it as a benchmark.
@@ -47,17 +50,24 @@ gym search benchmarks "<task domain>"
 
 gym env init --benchmark <name> --profile custom-gym-verifier \
   --reuse-verifier <scorer> --reward-range <low> <high> --higher-is-better
+
+# New scorer with the scaffold's default [0, 1], higher-is-better reward contract.
+gym env init --benchmark <name> --profile custom-gym-verifier
 ```
 
-Omit `--reuse-verifier` when adding a new scorer. Select another `--profile` when the upstream benchmark owns more of
-the rollout loop. Inspect `gym env init --help` rather than guessing flags.
+The reward flags are accepted only with `--reuse-verifier`. For a new scorer with a different reward contract, update
+the generated manifest and verifier fixture/tests together. Select another `--profile` when the upstream benchmark owns
+more of the rollout loop. Inspect `gym env init --help` rather than guessing flags.
 
 ## Implement the authored and runtime contracts
 
 - The manifest owns catalog metadata, integration profile, reward semantics, provenance, and publish-readiness fields.
 - Hydra config remains authoritative for runtime composition: datasets, agents, models, resources servers, and wiring.
-- Keep stable task IDs. Put private answers and scorer inputs in `verifier_metadata`, not prompts.
-- Declare `canonical_split`, `standard_prompt_config`, and `prepare_script` when the benchmark contract requires them.
+- Keep stable task IDs and keep private answer keys and scorer inputs out of `responses_create_params.input`. Follow the
+  resources server's `TaskData` schema and request model for field placement: current rows commonly use flat task
+  fields; use legacy `verifier_metadata` only when the wire contract declares it.
+- Every benchmark declares `canonical_split` and `standard_prompt_config`, and at least one benchmark dataset declares
+  `prepare_script`. A dataset's `prompt_config`, when present, must match the standard prompt contract.
 - Provide a deterministic `VERIFIER_FIXTURE` for a custom verifier and test both accepted and rejected behavior.
 - Do not assume rewards are binary. Implement the declared range and optimization direction.
 - Preserve Responses API items, session cookies, and trace context across multi-turn or external integrations.
@@ -79,8 +89,9 @@ Add focused tests for conversion, scoring boundaries, malformed model output, fa
 Coverage must remain at least 96%, and tests must assert observable behavior.
 
 For behavior-changing environment or agent code, run representative real smoke rollouts and inspect both agent and
-verifier behavior. A full evaluation, reward profile, or training run is stronger evidence but is not a universal merge
-compute gate. Compare a sample of Gym tasks and rewards with upstream fixtures or outputs before claiming parity.
+verifier behavior. Benchmarks additionally require the reward profiling, rollout inspection, upstream reproduction,
+same-model Gym comparison, and variance characterization in the benchmark guide. These are fidelity checks, not a
+requirement to run training.
 
 Before handoff, run scoped pre-commit checks, then the repository checks required by `AGENTS.md`. New source files need
 the NVIDIA SPDX header, and commits need DCO sign-off.

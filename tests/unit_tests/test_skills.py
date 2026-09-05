@@ -17,6 +17,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.skills import (
@@ -48,10 +49,53 @@ def _canonical_skill_dirs():
     return sorted(path for path in CANONICAL_SKILLS_DIR.iterdir() if path.is_dir())
 
 
+def _skill_frontmatter(skill_md):
+    content = skill_md.read_text()
+    match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
+    assert match, f"Invalid frontmatter delimiters in {skill_md}"
+    frontmatter = yaml.safe_load(match.group(1))
+    assert isinstance(frontmatter, dict), f"Frontmatter must be a mapping in {skill_md}"
+    return content, frontmatter, match.end()
+
+
+def _unfinished_todo_outside_fences(body):
+    fence_marker = None
+    fence_length = 0
+    for line in body.splitlines():
+        fence = re.match(r"^[ \t]*(?:(?:[-+*]|\d+[.)])[ \t]+)?(`{3,}|~{3,})(.*)$", line)
+        if fence:
+            marker = fence.group(1)
+            if fence_marker is None:
+                fence_marker = marker[0]
+                fence_length = len(marker)
+            elif marker[0] == fence_marker and len(marker) >= fence_length and not fence.group(2).strip():
+                fence_marker = None
+                fence_length = 0
+            continue
+        if fence_marker is None and re.fullmatch(r"[ ]{0,3}\[TODO:[^\n]*\][ \t]*", line):
+            return True
+    return False
+
+
 class TestRepositorySkills:
-    def test_directory_names_match_skill_names(self):
+    def test_canonical_skills_follow_discovery_contract(self):
+        allowed_frontmatter = {"name", "description", "license", "allowed-tools", "metadata"}
         for skill_dir in _canonical_skill_dirs():
-            assert parse_skill_md(skill_dir / "SKILL.md").name == skill_dir.name
+            skill_md = skill_dir / "SKILL.md"
+            content, frontmatter, body_start = _skill_frontmatter(skill_md)
+            assert set(frontmatter) <= allowed_frontmatter
+
+            name = frontmatter.get("name")
+            assert isinstance(name, str) and re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name)
+            assert len(name) <= 64
+            assert name == skill_dir.name
+
+            description = frontmatter.get("description")
+            assert isinstance(description, str) and description.strip()
+            assert len(description.strip()) <= 1024
+            assert "<" not in description and ">" not in description
+            assert not description.lstrip().startswith("[TODO:")
+            assert not _unfinished_todo_outside_fences(content[body_start:])
 
     @pytest.mark.parametrize("native_dir", [".claude/skills", ".codex/skills"])
     def test_native_discovery_links_cover_canonical_skills(self, native_dir):
@@ -64,19 +108,20 @@ class TestRepositorySkills:
             assert native_path.resolve() == (CANONICAL_SKILLS_DIR / name).resolve()
 
     def test_documented_inventory_covers_canonical_skills(self):
-        documented_names = set(re.findall(r"\.agents/skills/([a-z0-9-]+)", AGENT_SKILLS_DOC.read_text()))
+        available_skills = AGENT_SKILLS_DOC.read_text().split("## Available Skills", 1)[1].split("\n## ", 1)[0]
+        documented_names = set(re.findall(r"\.agents/skills/([a-z0-9-]+)", available_skills))
         expected_names = {path.name for path in _canonical_skill_dirs()}
         assert documented_names == expected_names
 
     def test_relative_markdown_links_resolve(self):
         markdown_link_pattern = re.compile(r"\]\(([^)]+)\)")
         for skill_dir in _canonical_skill_dirs():
-            skill_md = skill_dir / "SKILL.md"
-            for target in markdown_link_pattern.findall(skill_md.read_text()):
-                target = target.split("#", 1)[0]
-                if not target or target.startswith(("http://", "https://", "mailto:")):
-                    continue
-                assert (skill_dir / target).exists(), f"Broken link in {skill_md}: {target}"
+            for markdown_file in skill_dir.rglob("*.md"):
+                for target in markdown_link_pattern.findall(markdown_file.read_text()):
+                    target = target.split("#", 1)[0].split("?", 1)[0]
+                    if not target or target.startswith(("/", "http://", "https://", "mailto:")):
+                        continue
+                    assert (markdown_file.parent / target).exists(), f"Broken link in {markdown_file}: {target}"
 
 
 class TestParseSkillMd:
