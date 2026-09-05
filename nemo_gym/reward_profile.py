@@ -546,6 +546,10 @@ def compute_pass_majority_metrics(
         - ``pass@{k}/no_answer``, ``majority@{k}/no_answer``: fraction with no extracted answer
         - ``pass@1[avg-of-{k}]/{name}/std_dev_across_runs``, ``…/std_err_across_runs``: variance stats
 
+        When ``answer_key`` is set, a rollout whose extracted answer is None counts as a
+        failure (score 0) in ``pass@{k}``, ``pass@1[avg-of-{k}]``, and ``majority@{k}`` for
+        every score except ``no_answer``, so all three aggregations share one denominator.
+
         All accuracy values are percentages (0-100).
     """
 
@@ -581,11 +585,28 @@ def compute_pass_majority_metrics(
     # Collect score names
     score_names = sorted({name for task_scores in all_score_dicts for s in task_scores for name in s})
 
+    # majority@k already scores a rollout with no extractable answer as wrong.
+    # Letting pass@k and pass@1[avg-of-k] score the same rollout by its reward
+    # lets the aggregations report contradictory numbers for identical data
+    # (#2574), so the failure is mirrored here. no_answer keeps its raw value
+    # because it exists to count exactly these rollouts. The raw scores in
+    # all_score_dicts stay untouched for callers and per-rollout diagnostics.
+    if answer_key is not None:
+        pass_score_dicts = [
+            [
+                {name: (0 if a is None and name != "no_answer" else v) for name, v in s.items()}
+                for a, s in zip(task_answers, task_scores)
+            ]
+            for task_scores, task_answers in zip(all_score_dicts, all_answers)
+        ]
+    else:
+        pass_score_dicts = all_score_dicts
+
     for k in range(1, max_k + 1):
         for name in score_names:
             # --- pass@k ---
             pass_values = []
-            for task_scores in all_score_dicts:
+            for task_scores in pass_score_dicts:
                 vals = [s.get(name) for s in task_scores if name in s]
                 if not vals or k > len(vals):
                     continue
@@ -605,7 +626,7 @@ def compute_pass_majority_metrics(
 
             # --- pass@1[avg-of-k] ---
             avg_values = []
-            for task_scores in all_score_dicts:
+            for task_scores in pass_score_dicts:
                 vals = [s.get(name) for s in task_scores[:k] if name in s]
                 if vals:
                     avg_values.append(sum(vals) / len(vals))
