@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -63,8 +64,14 @@ def make_server() -> MultiChallengeServer:
         port=8080,
         entrypoint="app.py",
         name="multichallenge",
-        judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
-        judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], temperature=0.0),
+        judge_model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+            input=[], max_output_tokens=8192, temperature=0.7, top_p=0.8
+        ),
+        judge_system_message=(
+            "You are a precise evaluator. Assess responses objectively based on the given criteria. "
+            "Analyze the response carefully against the evaluation question."
+        ),
         aggregation_mode=AggregationMode.MEAN,
     )
     return MultiChallengeServer(config=config, server_client=MagicMock(spec=ServerClient))
@@ -183,6 +190,7 @@ async def test_verify_scores_each_rubric_and_returns_mean_reward(monkeypatch: py
 
     judge = AsyncMock(side_effect=fake_call_judge)
     monkeypatch.setattr("resources_servers.multichallenge.app.call_judge", judge)
+    server = make_server()
     request = MultiChallengeVerifyRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
             input=[{"role": "user", "content": "Please suggest dinner."}]
@@ -197,7 +205,7 @@ async def test_verify_scores_each_rubric_and_returns_mean_reward(monkeypatch: py
         },
     )
 
-    result = await make_server().verify(request)
+    result = await server.verify(request)
 
     assert result.reward == pytest.approx(0.5)
     assert result.generated_response == "Try a nut-free pasta."
@@ -207,6 +215,15 @@ async def test_verify_scores_each_rubric_and_returns_mean_reward(monkeypatch: py
     assert result.num_passed == 1
     assert result.num_total == 2
     assert judge.await_count == 2
+    for call in judge.await_args_list:
+        assert call.kwargs["server_name"] == "policy_model"
+        assert call.kwargs["url_path"] == "/v1/responses"
+        assert call.kwargs["response_model"] is NeMoGymResponse
+        judge_params = call.kwargs["json"]
+        assert judge_params.max_output_tokens == 8192
+        assert judge_params.temperature == pytest.approx(0.7)
+        assert judge_params.top_p == pytest.approx(0.8)
+        assert [message.role for message in judge_params.input] == ["system", "user"]
 
 
 async def test_verify_empty_rubric_is_zero_without_judge_call(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -239,3 +256,17 @@ async def test_verify_negative_pass_criteria_rewards_no_verdict(monkeypatch: pyt
     assert result.reward == 1.0
     assert result.num_passed == 1
     assert result.rubric_evaluations[0].verdict == "NO"
+
+
+async def test_verify_propagates_judge_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    judge = AsyncMock(side_effect=JudgeError("RuntimeError: judge unavailable"))
+    monkeypatch.setattr("resources_servers.multichallenge.app.call_judge", judge)
+    request = MultiChallengeVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        response=make_response("A response to judge."),
+        context="Earlier conversation",
+        rubric=[{"question": "Did it answer?", "pass_criteria": "YES"}],
+    )
+
+    with pytest.raises(JudgeError, match="RuntimeError: judge unavailable"):
+        await make_server().verify(request)
