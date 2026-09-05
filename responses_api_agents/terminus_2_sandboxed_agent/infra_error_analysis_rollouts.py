@@ -34,6 +34,7 @@ with open(args.fpath, "rb") as f, open(f_out_path, "wb") if args.group_to_write_
                 content = output_item["summary"][0]["text"]
                 stuck_count += "stuck" in content or "unresponsive" in content
             elif output_item.get("type") == "message":
+                content = output_item["content"][0]["text"]
                 technical_difficulties_count += "Technical difficulties" in content
 
         is_errored = bool(row["error"])
