@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 from pytest import fixture
 
 from nemo_gym.config_types import ModelServerRef
@@ -667,12 +668,21 @@ class TestShippedDataIntegrity:
     def test_gold_replay_and_expect_error_marking(self) -> None:
         data_dir = Path(__file__).resolve().parents[1] / "data"
         engine.configure()  # point at the shipped data/
+        if not (data_dir / "db.json").exists():
+            pytest.skip("db.json not present; fetch it from the dataset repo to run the replay check")
         try:
             rows = []
-            for split in ("train", "validation"):
-                with open(data_dir / f"{split}.jsonl", encoding="utf-8") as f:
-                    rows.extend(json.loads(line) for line in f if line.strip())
-            assert len(rows) == 300
+            expected = {"example": 5, "train": 250, "validation": 50}
+            for split in ("example", "train", "validation"):
+                fpath = data_dir / f"{split}.jsonl"
+                if split != "example" and not fpath.exists():
+                    continue  # hosted split not downloaded; example alone still guards the contract
+                with open(fpath, encoding="utf-8") as f:
+                    split_rows = [json.loads(line) for line in f if line.strip()]
+                assert len(split_rows) == expected[split], f"{split}: {len(split_rows)} rows"
+                rows.extend(split_rows)
+            seen = {r["task_id"] for r in rows}
+            assert len(seen) >= 5
             for row in rows:
                 world = engine.seed_world(row["customer"])
                 for action in row["evaluation_criteria"]["actions"]:

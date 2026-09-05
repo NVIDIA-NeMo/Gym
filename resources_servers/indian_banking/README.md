@@ -49,7 +49,7 @@ Each task's `evaluation_criteria` specifies `actions` (gold tool calls, optional
 
 `reward_basis` is the authoritative selector: a task may carry `nl_assertions` or `communicate_info` even when the corresponding check is not in its basis - those fields then document the expected outcome (and remain available to custom evaluations) but do not enter `strict` or `dense`. The judge runs only when `NL_ASSERTION` is in the basis and assertions are present.
 
-An errored tool call never satisfies a gold action unless that gold action carries an explicit `expect_error: true` (tasks that deliberately exercise an error path, e.g. querying a nonexistent service request). A gold action that errors on replay without the marking is a data bug, and `tests/test_app.py::TestShippedDataIntegrity` fails on it.
+An errored tool call never satisfies a gold action unless that gold action carries an explicit `expect_error: true` (tasks that deliberately exercise an error path, e.g. querying a nonexistent service request). A gold action that errors on replay without the marking is a data bug, and `tests/test_app.py::TestShippedDataIntegrity` fails on it (the committed `example.jsonl` is always checked; the train/validation splits are included whenever they are present locally).
 
 Three further deterministic floors gate `strict`: an episode with no non-empty customer-facing assistant message never passes (a mute agent cannot outscore a correct refusal-with-explanation); a task may declare `max_tool_calls` (e.g. `0` for a purely conversational task, failing any tool use) or `require_transfer: true` (the episode must end in `transfer_to_human_agents`, read from the engine's transfer flag). All three are code checks, independent of the judge.
 
@@ -79,7 +79,14 @@ Every row is one task, and every task seeds one conversation.
 
 All customer, account, transaction, and merchant data is synthetic, and every bank, brand, and merchant name in the data is fictional; any resemblance to real entities is coincidental.
 
-All data ships in-tree under `data/`: `train.jsonl` (250), `validation.jsonl` (50), `example.jsonl` (5 rows drawn from the validation split), `db.json` (customer database), `kb.json` (knowledge base), `agent_instruction.txt`, and `policy.md`. Nothing needs to be downloaded before serving.
+`example.jsonl` (5 rows drawn from the validation split), `agent_instruction.txt`, `policy.md` and the dataset metrics ship in-tree under `data/`. The remaining artifacts are hosted on the Hugging Face dataset repo [`NPCI/nemo-gym-indian-banking`](https://huggingface.co/datasets/NPCI/nemo-gym-indian-banking) (Apache 2.0): `train.jsonl` (250 rows), `validation.jsonl` (50 rows), `db.json` (the 197-customer database) and `kb.json` (the 59-article knowledge base). `gym dataset collate --download` fetches the train/validation splits to their configured paths; fetch the database and knowledge base once with
+
+```bash
+hf download NPCI/nemo-gym-indian-banking db.json kb.json \
+    --repo-type dataset --local-dir resources_servers/indian_banking/data/
+```
+
+(set `HF_TOKEN` if the dataset repo requires authentication). The server refuses to start without them and names this location in its error message.
 
 A row looks like this (long fields elided):
 
@@ -154,14 +161,14 @@ gym env start \
     --resources-server indian_banking
 ```
 
-Produce the collated dataset used for training (all splits ship in-tree; nothing to download):
+Download the train/validation splits and produce the collated dataset used for training:
 
 ```bash
 gym dataset collate \
     --config resources_servers/indian_banking/configs/indian_banking.yaml \
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \
     --output-dir data/indian_banking_trajectory_collection \
-    --mode train_preparation \
+    --mode train_preparation --download \
 ```
 
 Collect rollouts on the example rows (this is also how `data/example_rollouts.jsonl` is produced):

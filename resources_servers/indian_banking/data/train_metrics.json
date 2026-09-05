@@ -3,9 +3,16 @@
     "type": "train",
     "jsonl_fpath": "resources_servers/indian_banking/data/train.jsonl",
     "num_repeats": 1,
-    "source": null,
+    "source": {
+        "type": "huggingface",
+        "repo_id": "NPCI/nemo-gym-indian-banking",
+        "artifact_fpath": "train.jsonl"
+    },
     "gitlab_identifier": null,
-    "huggingface_identifier": null,
+    "huggingface_identifier": {
+        "repo_id": "NPCI/nemo-gym-indian-banking",
+        "artifact_fpath": "train.jsonl"
+    },
     "license": "Apache 2.0",
     "Number of examples": 250,
     "Number of tools": {

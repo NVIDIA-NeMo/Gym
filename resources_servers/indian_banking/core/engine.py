@@ -137,9 +137,9 @@ def get_base_db() -> dict[str, Any]:
     if _BASE_DB is None:
         if not os.path.exists(_DB_PATH):
             raise FileNotFoundError(
-                f"{_DB_PATH} not found. db.json (and kb.json) ship in-tree under "
-                "resources_servers/indian_banking/data/ alongside "
-                "train.jsonl/validation.jsonl; restore them from the repository."
+                f"{_DB_PATH} not found. db.json (and kb.json) live in the Hugging Face "
+                "dataset repo NPCI/nemo-gym-indian-banking; download them into "
+                "resources_servers/indian_banking/data/ before serving (see README)."
             )
         with open(_DB_PATH, encoding="utf-8") as f:
             _BASE_DB = json.load(f)
