@@ -1,0 +1,129 @@
+--- a/resources_servers/gdpval/app.py
++++ b/resources_servers/gdpval/app.py
+@@ -712,6 +712,7 @@
+         from resources_servers.gdpval.comparison import (
+             JUDGE_REQUEST_TIMEOUT_SECONDS,
+             Judge,
++            JudgeContextWindowError,
+             apply_judge_image_byte_cap,
+             apply_native_pdf_overflow,
+             build_file_section,
+@@ -992,6 +993,7 @@
+                         sections_by_judge: Dict[str, Dict[str, List[dict]]] = {}
+                         transport_receipts: Dict[str, Dict[str, Any]] = {}
+                         failed_names: Set[str] = set()
++                        trial_rng_state = rng.getstate()
+                         # Sampling is replayed from the untouched RNG after any
+                         # pre-dispatch exclusion. Only modes that can actually be
+                         # sampled are materialized, avoiding needless raster work.
+@@ -1100,20 +1102,40 @@
+                                     )
+                             if not new_failure:
+                                 matchup_judges = active
++                                try:
++                                    result = await asyncio.to_thread(
++                                        run_trials,
++                                        judges=matchup_judges,
++                                        task_prompt=body.prompt or "",
++                                        refs=native["refs"],
++                                        submission_a=native["submission_a"],
++                                        submission_b=native["submission_b"],
++                                        sections_by_judge=sections_by_judge,
++                                        num_trials=self.config.num_comparison_trials,
++                                        return_raw_responses=self.config.persist_raw_judge_responses,
++                                        rng=rng,
++                                    )
++                                except JudgeContextWindowError as error:
++                                    if error.judge_name in failed_names:
++                                        raise
++                                    failed_names.add(error.judge_name)
++                                    sections_by_judge.pop(error.judge_name, None)
++                                    transport_receipts.pop(error.judge_name, None)
++                                    media_exclusions.append(
++                                        {
++                                            "mode": "provider_context_window",
++                                            "judges": [error.judge_name],
++                                            "reason": "provider_context_window",
++                                            "error": repr(error.original)[:1000],
++                                        }
++                                    )
++                                    # Discard the partial matchup and replay its
++                                    # canonical seeded schedule without the
++                                    # incapable provider.
++                                    rng.setstate(trial_rng_state)
++                                    continue
+                                 break
+
+-                        result = await asyncio.to_thread(
+-                            run_trials,
+-                            judges=matchup_judges,
+-                            task_prompt=body.prompt or "",
+-                            refs=native["refs"],
+-                            submission_a=native["submission_a"],
+-                            submission_b=native["submission_b"],
+-                            sections_by_judge=sections_by_judge,
+-                            num_trials=self.config.num_comparison_trials,
+-                            return_raw_responses=self.config.persist_raw_judge_responses,
+-                            rng=rng,
+-                        )
+                         result["transport_by_judge"] = transport_receipts
+                         if media_exclusions:
+                             result["media_routing_exclusions"] = media_exclusions
+--- a/resources_servers/gdpval/comparison.py
++++ b/resources_servers/gdpval/comparison.py
+@@ -1368,8 +1368,37 @@
+         return False
+     error_text = str(error).lower()
+     return any(marker in error_text for marker in RETRYABLE_ERROR_MARKERS)
++
++
++_CONTEXT_WINDOW_ERROR_MARKERS = (
++    "contextwindowexceeded",
++    "context window error",
++    "input is too long for requested model",
++)
++
++
++def is_context_window_error(error: BaseException) -> bool:
++    """Recognize only provider rejections that explicitly report context size."""
++    parts: list[str] = []
++    seen: set[int] = set()
++    current: Optional[BaseException] = error
++    while current is not None and id(current) not in seen:
++        seen.add(id(current))
++        parts.append(f"{type(current).__name__}: {current!r}".lower())
++        current = current.__cause__ or current.__context__
++    message = "\n".join(parts)
++    return any(marker in message for marker in _CONTEXT_WINDOW_ERROR_MARKERS)
++
+
++class JudgeContextWindowError(RuntimeError):
++    """A named judge rejected an otherwise preflight-valid request as too large."""
+
++    def __init__(self, judge_name: str, original: BaseException) -> None:
++        self.judge_name = judge_name
++        self.original = original
++        super().__init__(f"judge {judge_name!r} exceeded its provider context window: {original}")
++
++
+ def send_judge_request(
+     client: Any,
+     model: str,
+@@ -2030,9 +2059,14 @@
+             submission_a=current_a,
+             submission_b=current_b,
+         )
+-        response_text = send_judge_request(
+-            judge.client, judge.model, messages, max_output_tokens, judge.create_overrides
+-        )
++        try:
++            response_text = send_judge_request(
++                judge.client, judge.model, messages, max_output_tokens, judge.create_overrides
++            )
++        except Exception as error:
++            if is_context_window_error(error):
++                raise JudgeContextWindowError(judge.name, error) from error
++            raise
+         if return_raw_responses:
+             raw_responses.append(response_text)
+         judgement = parse_judgement(response_text)
