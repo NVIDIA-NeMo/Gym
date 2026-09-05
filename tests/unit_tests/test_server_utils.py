@@ -36,6 +36,7 @@ from nemo_gym.server_utils import (
     NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME,
     BaseServer,
     BaseServerConfig,
+    ClientDisconnectCancellationMiddleware,
     ConnectionError,
     DictConfig,
     GlobalAIOHTTPAsyncClientConfig,
@@ -660,6 +661,69 @@ class TestServerUtils:
 
         assert handler_cancelled.is_set()
         assert sent_messages == []
+
+    async def test_cancellation_middleware_ignores_disconnect_after_response_completion(self) -> None:
+        response_sent = asyncio.Event()
+        finish_cleanup = asyncio.Event()
+        cleanup_completed = asyncio.Event()
+        handler_cancelled = asyncio.Event()
+
+        async def inner_app(scope, receive, send) -> None:
+            assert await receive() == {"type": "http.request", "body": b"", "more_body": False}
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok", "more_body": False})
+            try:
+                await finish_cleanup.wait()
+            except asyncio.CancelledError:
+                handler_cancelled.set()
+                raise
+            cleanup_completed.set()
+
+        middleware = ClientDisconnectCancellationMiddleware(inner_app)
+        request_delivered = False
+
+        async def receive():
+            nonlocal request_delivered
+            if not request_delivered:
+                request_delivered = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            await response_sent.wait()
+            return {"type": "http.disconnect"}
+
+        sent_messages = []
+
+        async def send(message):
+            sent_messages.append(message)
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                response_sent.set()
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/work",
+            "raw_path": b"/work",
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+            "server": ("testserver", 80),
+        }
+        app_task = asyncio.create_task(middleware(scope, receive, send))
+        await asyncio.wait_for(response_sent.wait(), timeout=1)
+        await asyncio.sleep(0)
+        finish_cleanup.set()
+        await asyncio.wait_for(app_task, timeout=1)
+
+        assert cleanup_completed.is_set()
+        assert not handler_cancelled.is_set()
+        assert middleware.num_cancelled == 0
+        assert sent_messages == [
+            {"type": "http.response.start", "status": 200, "headers": []},
+            {"type": "http.response.body", "body": b"ok", "more_body": False},
+        ]
 
     def test_upstream_error_log_has_bounded_body_and_redacted_url(self) -> None:
         request_info = RequestInfo(

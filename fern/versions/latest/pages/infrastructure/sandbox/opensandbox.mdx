@@ -80,7 +80,7 @@ The provider constructor accepts four optional config sections:
 
 | Section | Purpose |
 | --- | --- |
-| `connection` | OpenSandbox SDK connection settings: domain, API key, protocol, request timeout, and server proxy mode. |
+| `connection` | OpenSandbox SDK connection settings: domain, API key, protocol, request timeout, server proxy mode, and `tls_verify`. |
 | `create` | Sandbox create timeout, retry, image pull policy, and health-check behavior. |
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
 | `operations` | Retry and timeout behavior for SDK operations after create, including command retries, close timeout, background command polling, and the dedicated `status_poll_timeout_s` budget for background status polls. |
@@ -245,3 +245,5 @@ The provider's `create.image_pull_policy` defaults to `IfNotPresent`. Valid valu
 Create retries handle transient allocation, connection, image pull, and server-side errors. Command retries are controlled separately by `operations.command_retries`.
 
 execd, the exec daemon inside each sandbox, holds every command response open for `EXECD_API_GRACE_SHUTDOWN` (default 1s) after the command's last event, which is fixed latency on each command and on the readiness probe. Set it in the sandbox spec's `env` to shorten it; the shipped SWE-bench and OpenCode configs use `50ms`, and the provider's `operations.background_poll_initial_s` (0.5) is sized to that.
+
+`connection.tls_verify` (default `false`) controls certificate verification on every connection the provider opens, both the SDK transport and PTY WebSockets. The default skips verification so that `https://` endpoints with a certificate the client cannot verify, such as a validation cluster behind a self-signed load balancer, work without extra setup; set `tls_verify: true` for endpoints with a verifiable certificate. Pair `https` endpoints with `connection.protocol: https`. The `cleanup_sandboxes.py` helper mirrors the setting with `--tls-verify` and reads `tls_verify` from `--connection-config`.
