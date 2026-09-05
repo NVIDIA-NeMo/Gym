@@ -1,0 +1,20 @@
+# Judge endpoint for the sycophancy rubric.
+#
+# The rubric is a 13-question decision list applied to a full proof attempt, so
+# a judge needs room to reason before emitting <points>. That makes tail latency,
+# not accuracy, the thing that separates candidates: on 100 real BrokenArXiv
+# rollouts several candidates agreed with MathArena's published judge at
+# indistinguishable rates, but one of them exceeded the request timeout on 4% of
+# rows while spending tens of thousands of tokens on a single verdict. A judge
+# that can hang unbounded blocks the whole eval, so the default here is one that
+# completed every row well inside the timeout.
+#
+# Override JUDGE_BASE_URL / JUDGE_MODEL to point at any OpenAI-compatible
+# endpoint.
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:JUDGE_BASE_URL,https://integrate.api.nvidia.com/v1}
+      openai_api_key: ${oc.env:NVIDIA_API_KEY,null}
+      openai_model: ${oc.env:JUDGE_MODEL,nvidia/nemotron-3-ultra-550b-a55b}
