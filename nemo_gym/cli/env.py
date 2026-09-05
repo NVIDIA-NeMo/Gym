@@ -979,6 +979,34 @@ class TestAllConfig(BaseNeMoGymCLIConfig):
     )
 
 
+_SERVER_TYPE_DIRS = ("resources_servers", "responses_api_agents", "responses_api_models")
+
+
+def _discover_server_dirs() -> Tuple[List[str], List[Path]]:
+    """Return all component directories and the subset opted into server tests.
+
+    A component opts into ``gym env test --all`` by including a README. Earlier search roots
+    shadow same-named components from later roots, matching normal component resolution.
+    """
+    seen_rel_paths: set[str] = set()
+    candidate_dir_paths: List[str] = []
+    for root in component_search_roots():
+        for server_type_dir in _SERVER_TYPE_DIRS:
+            for module_path in sorted((root / server_type_dir).glob("*")):
+                if "pycache" in module_path.name or not module_path.is_dir():
+                    continue
+                rel_path = f"{server_type_dir}/{module_path.name}"
+                if rel_path in seen_rel_paths:
+                    continue
+                seen_rel_paths.add(rel_path)
+                candidate_dir_paths.append(rel_path)
+
+    testable_dir_paths = [
+        Path(path) for path in candidate_dir_paths if (_resolve_server_dir(Path(path)) / "README.md").exists()
+    ]
+    return candidate_dir_paths, testable_dir_paths
+
+
 def _select_shard(dir_paths: List[Path], shard_index: int, num_shards: int) -> List[Path]:
     """Deterministically select this shard's subset of modules.
 
@@ -1007,22 +1035,8 @@ def test_all():  # pragma: no cover
     # (a user's project), and the Gym install root (built-ins, under PARENT_DIR in editable and wheel
     # installs). Entrypoints are kept relative; earlier roots shadow later ones for same-named modules. This
     # lets `gym env test` discover and run built-in and plugin servers from any cwd, not only a repo checkout.
-    server_type_dirs = ("resources_servers", "responses_api_agents", "responses_api_models")
-    seen_rel_paths: set[str] = set()
-    candidate_dir_paths: List[str] = []
-    for root in component_search_roots():
-        for server_type_dir in server_type_dirs:
-            for module_path in sorted((root / server_type_dir).glob("*")):
-                if "pycache" in module_path.name or not module_path.is_dir():
-                    continue
-                rel_path = f"{server_type_dir}/{module_path.name}"
-                if rel_path in seen_rel_paths:
-                    continue
-                seen_rel_paths.add(rel_path)
-                candidate_dir_paths.append(rel_path)
+    candidate_dir_paths, dir_paths = _discover_server_dirs()
     print(f"Found {len(candidate_dir_paths)} total modules:{_display_list_of_paths(candidate_dir_paths)}\n")
-    dir_paths: List[Path] = list(map(Path, candidate_dir_paths))
-    dir_paths = [p for p in dir_paths if (_resolve_server_dir(p) / "README.md").exists()]
     print(f"Found {len(dir_paths)} modules to test:{_display_list_of_paths(dir_paths)}\n")
 
     # Keep the full list for the total-vs-tested mismatch check below, then narrow to this shard.
