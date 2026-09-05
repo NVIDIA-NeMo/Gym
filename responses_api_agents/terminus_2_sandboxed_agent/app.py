@@ -292,7 +292,7 @@ class NeMoGymTerminus2(Terminus2):
         return res
 
     def _count_total_tokens(self, *args, **kwargs):
-        if self._is_check_proactive_summarization:
+        if self._is_check_proactive_summarization and self._nemo_gym_llm.usages:
             return self._nemo_gym_llm.usages[-1].total_tokens
         return super()._count_total_tokens(*args, **kwargs)
 
