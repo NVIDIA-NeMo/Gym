@@ -364,12 +364,20 @@ def test_bootstrap_submit_line_contains_only_paths_and_authorization() -> None:
     assert "AUTHORIZE_PROVIDER_CALLS" in export_line
     assert "ACTIVE_PACKAGE" in export_line
     assert "CHECKPOINT_E2E_MODEL_NAME" in export_line
+    assert "CHECKPOINT_E2E_REFERENCE_OVERLAY" in export_line
+    assert "CHECKPOINT_E2E_ENV_FILE" in export_line
+    assert "EXPECTED_REFERENCE_OVERLAY_SHA256" in export_line
     assert '--export="$export_spec"' in launcher
     assert "CHECKPOINT_E2E_GYM_ROOT" in launcher
     assert "CHECKPOINT_E2E_EXPECTED_GYM_REVISION" in launcher
     assert 'run_existing_judge.sh" prepare' in bootstrap
     assert 'run_existing_judge.sh" submit' in bootstrap
     assert ': "${CHECKPOINT_E2E_MODEL_NAME:?set CHECKPOINT_E2E_MODEL_NAME}"' in bootstrap
+    assert ': "${CHECKPOINT_E2E_REFERENCE_OVERLAY:?set CHECKPOINT_E2E_REFERENCE_OVERLAY}"' in bootstrap
+    assert ': "${CHECKPOINT_E2E_ENV_FILE:?set CHECKPOINT_E2E_ENV_FILE}"' in bootstrap
+    assert 'CHECKPOINT_E2E_REFERENCE_OVERLAY="$CHECKPOINT_E2E_REFERENCE_OVERLAY"' in bootstrap
+    assert 'CHECKPOINT_E2E_ENV_FILE="$CHECKPOINT_E2E_ENV_FILE"' in bootstrap
+    assert "prepare did not preserve the bootstrap reference/environment inputs" in bootstrap
     assert "EXPECTED_IMPORT_ID" in export_line
     assert "EXPECTED_PACKAGE_SOURCE_SHA256" in export_line
     assert "EXPECTED_RUN_ID" in export_line

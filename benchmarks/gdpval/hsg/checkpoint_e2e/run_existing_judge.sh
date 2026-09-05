@@ -17,6 +17,8 @@ PYTHON_BIN=${CHECKPOINT_E2E_PYTHON:-python3}
 OWNER_ROOT=${CHECKPOINT_E2E_OWNER_ROOT:-/lustre/fsw/portfolios/llmservice/users/spanev}
 AAV2_ROOT=${CHECKPOINT_E2E_AAV2_ROOT:-$OWNER_ROOT/gdpval_colo/aav2}
 DATASET=${CHECKPOINT_E2E_DATASET:-$AAV2_ROOT/gdpval_benchmark.local.jsonl}
+REFERENCE_OVERLAY=${CHECKPOINT_E2E_REFERENCE_OVERLAY:-$AAV2_ROOT/aa_v2_reference_paths.mirrored.yaml}
+ENV_FILE=${CHECKPOINT_E2E_ENV_FILE:-$AAV2_ROOT/aav2.env}
 VERSION=$(<"$SCRIPT_DIR/VERSION")
 EXISTING_ROOT=${CHECKPOINT_E2E_EXISTING_ROOT:-$AAV2_ROOT/checkpoint_e2e_existing_v${VERSION//./_}_runs}
 
@@ -50,6 +52,11 @@ EOF
 resolve_directory() {
     "$PYTHON_BIN" -c 'from pathlib import Path; import sys; p=Path(sys.argv[1]); assert p.is_absolute(); r=p.resolve(strict=True); assert p==r and r.is_dir() and not p.is_symlink(); print(r)' "$1" \
         || fail "path must be an absolute resolved real directory: $1"
+}
+
+resolve_regular_file() {
+    "$PYTHON_BIN" -c 'from pathlib import Path; import sys; p=Path(sys.argv[1]); assert p.is_absolute(); r=p.resolve(strict=True); assert p==r and r.is_file() and not p.is_symlink(); print(r)' "$1" \
+        || fail "path must be an absolute resolved real file: $1"
 }
 
 publish_env() {
@@ -102,8 +109,11 @@ load_run() {
 prepare_run() {
     [[ $# == 2 ]] || { usage >&2; exit 64; }
     local checkpoint source identity import_id campaign_root location settings run_dir runtime gemini_concurrency
+    local reference_overlay env_file
     checkpoint=$(resolve_directory "$1")
     source=$(resolve_directory "$2")
+    reference_overlay=$(resolve_regular_file "$REFERENCE_OVERLAY")
+    env_file=$(resolve_regular_file "$ENV_FILE")
     gemini_concurrency=${GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS:-2}
     [[ $gemini_concurrency =~ ^[1-4]$ ]] \
         || fail "GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS must be an integer from 1 through 4"
@@ -119,7 +129,10 @@ prepare_run() {
     [[ $campaign_root == "$EXISTING_ROOT"/* && ! -L $campaign_root ]] \
         || fail "unsafe import campaign root"
 
-    CHECKPOINT_E2E_ROOT="$campaign_root" "$BASE_LAUNCHER" prepare "$checkpoint"
+    CHECKPOINT_E2E_ROOT="$campaign_root" \
+    CHECKPOINT_E2E_REFERENCE_OVERLAY="$reference_overlay" \
+    CHECKPOINT_E2E_ENV_FILE="$env_file" \
+        "$BASE_LAUNCHER" prepare "$checkpoint"
     location=$("$PYTHON_BIN" "$CAMPAIGN_PY" locate \
         --checkpoint "$checkpoint" --campaign-root "$campaign_root")
     run_dir=$(printf '%s\n' "$location" | sed -n 's/^RUN_DIR=//p')
@@ -134,6 +147,8 @@ prepare_run() {
 
     # shellcheck disable=SC1090
     source "$settings"
+    [[ $REFERENCE_OVERLAY == "$reference_overlay" && $ENV_FILE == "$env_file" ]] \
+        || fail "prepared reference/environment override drift"
     [[ $ACCOUNT == nemotron_n3_post ]] || fail "campaign account is not nemotron_n3_post: $ACCOUNT"
     [[ $CPU_PARTITION == cpu && $CPU_QOS == cpu-normal ]] \
         || fail "unexpected CPU routing: $CPU_PARTITION/$CPU_QOS"
@@ -165,10 +180,16 @@ launch_bootstrap() {
     [[ $# == 2 ]] || { usage >&2; exit 64; }
     local checkpoint source authorize account cpu_partition cpu_qos model_name state_id state_dir gemini_concurrency persistent_session
     local gym_root_override expected_gym_revision export_spec old_run_dir receipt job_name job
+    local reference_overlay reference_overlay_sha env_file
     local identity package_identity checkpoint_identity expected_run_id import_id package_sha
     local submissions path name number latest=0 latest_job attempt prepared_run
     checkpoint=$(resolve_directory "$1")
     source=$(resolve_directory "$2")
+    reference_overlay=$(resolve_regular_file "$REFERENCE_OVERLAY")
+    env_file=$(resolve_regular_file "$ENV_FILE")
+    reference_overlay_sha=$(sha256sum "$reference_overlay" | awk '{print $1}')
+    [[ $reference_overlay_sha =~ ^[0-9a-f]{64}$ ]] \
+        || fail "reference overlay identity is invalid"
     authorize=${CHECKPOINT_E2E_AUTHORIZE_PROVIDER_CALLS:-false}
     [[ $authorize == true || $authorize == false ]] \
         || fail "CHECKPOINT_E2E_AUTHORIZE_PROVIDER_CALLS must be true or false"
@@ -187,7 +208,7 @@ launch_bootstrap() {
     [[ $account == nemotron_n3_post && $cpu_partition == cpu && $cpu_qos == cpu-normal ]] \
         || fail "bootstrap must use nemotron_n3_post and cpu/cpu-normal"
     for value in "$checkpoint" "$source" "$SCRIPT_DIR" "$OWNER_ROOT" "$AAV2_ROOT" \
-        "$DATASET" "$EXISTING_ROOT"; do
+        "$DATASET" "$EXISTING_ROOT" "$reference_overlay" "$env_file"; do
         [[ $value == /* && $value != *,* && $value != *$'\n'* && $value != *$'\r'* ]] \
             || fail "unsafe bootstrap path: $value"
     done
@@ -217,10 +238,11 @@ launch_bootstrap() {
     expected_run_id=$(printf '%s\n' "$checkpoint_identity" | sed -n 's/^RUN_ID=//p')
     [[ $expected_run_id =~ ^[A-Za-z0-9._-]+-[0-9a-f]{16}$ ]] \
         || fail "checkpoint identity is invalid"
-    state_id=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+    state_id=$(printf '%s\n' \
         "$checkpoint_identity" "$identity" "$package_identity" "$model_name" "$authorize" \
         "$gemini_concurrency" "$persistent_session" \
         "${gym_root_override:-default}" "${expected_gym_revision:-default}" \
+        "$reference_overlay" "$reference_overlay_sha" "$env_file" \
         | sha256sum | awk '{print substr($1,1,24)}')
     state_dir="$EXISTING_ROOT/bootstrap/$state_id"
     submissions=$state_dir/submissions
@@ -283,7 +305,7 @@ launch_bootstrap() {
     (( attempt <= 4 )) || fail "bootstrap submission bound reached: $latest/4"
     receipt=$submissions/attempt_${attempt}.jobid
     job_name="gdp-existing-boot-${state_id:0:10}"
-    export_spec="CHECKPOINT=$checkpoint,EXTERNAL_SOURCE=$source,ACTIVE_PACKAGE=$SCRIPT_DIR,BOOTSTRAP_STATE_DIR=$state_dir,AUTHORIZE_PROVIDER_CALLS=$authorize,EXPECTED_IMPORT_ID=$import_id,EXPECTED_PACKAGE_SOURCE_SHA256=$package_sha,EXPECTED_RUN_ID=$expected_run_id,CHECKPOINT_E2E_OWNER_ROOT=$OWNER_ROOT,CHECKPOINT_E2E_AAV2_ROOT=$AAV2_ROOT,CHECKPOINT_E2E_DATASET=$DATASET,CHECKPOINT_E2E_EXISTING_ROOT=$EXISTING_ROOT,CHECKPOINT_E2E_MODEL_NAME=$model_name,GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS=$gemini_concurrency,CHECKPOINT_E2E_PERSISTENT_JUDGE_SESSION=$persistent_session"
+    export_spec="CHECKPOINT=$checkpoint,EXTERNAL_SOURCE=$source,ACTIVE_PACKAGE=$SCRIPT_DIR,BOOTSTRAP_STATE_DIR=$state_dir,AUTHORIZE_PROVIDER_CALLS=$authorize,EXPECTED_IMPORT_ID=$import_id,EXPECTED_PACKAGE_SOURCE_SHA256=$package_sha,EXPECTED_RUN_ID=$expected_run_id,EXPECTED_REFERENCE_OVERLAY_SHA256=$reference_overlay_sha,CHECKPOINT_E2E_OWNER_ROOT=$OWNER_ROOT,CHECKPOINT_E2E_AAV2_ROOT=$AAV2_ROOT,CHECKPOINT_E2E_DATASET=$DATASET,CHECKPOINT_E2E_REFERENCE_OVERLAY=$reference_overlay,CHECKPOINT_E2E_ENV_FILE=$env_file,CHECKPOINT_E2E_EXISTING_ROOT=$EXISTING_ROOT,CHECKPOINT_E2E_MODEL_NAME=$model_name,GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS=$gemini_concurrency,CHECKPOINT_E2E_PERSISTENT_JUDGE_SESSION=$persistent_session"
     if [[ -n $gym_root_override ]]; then
         export_spec+=",CHECKPOINT_E2E_GYM_ROOT=$gym_root_override,CHECKPOINT_E2E_EXPECTED_GYM_REVISION=$expected_gym_revision"
     fi

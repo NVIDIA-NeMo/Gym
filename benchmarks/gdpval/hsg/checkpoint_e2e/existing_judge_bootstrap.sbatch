@@ -24,9 +24,12 @@ export PATH=/cm/local/apps/slurm/current/bin:/usr/local/sbin:/usr/local/bin:/usr
 : "${EXPECTED_IMPORT_ID:?set EXPECTED_IMPORT_ID}"
 : "${EXPECTED_PACKAGE_SOURCE_SHA256:?set EXPECTED_PACKAGE_SOURCE_SHA256}"
 : "${EXPECTED_RUN_ID:?set EXPECTED_RUN_ID}"
+: "${EXPECTED_REFERENCE_OVERLAY_SHA256:?set EXPECTED_REFERENCE_OVERLAY_SHA256}"
 : "${CHECKPOINT_E2E_OWNER_ROOT:?set CHECKPOINT_E2E_OWNER_ROOT}"
 : "${CHECKPOINT_E2E_AAV2_ROOT:?set CHECKPOINT_E2E_AAV2_ROOT}"
 : "${CHECKPOINT_E2E_DATASET:?set CHECKPOINT_E2E_DATASET}"
+: "${CHECKPOINT_E2E_REFERENCE_OVERLAY:?set CHECKPOINT_E2E_REFERENCE_OVERLAY}"
+: "${CHECKPOINT_E2E_ENV_FILE:?set CHECKPOINT_E2E_ENV_FILE}"
 : "${CHECKPOINT_E2E_EXISTING_ROOT:?set CHECKPOINT_E2E_EXISTING_ROOT}"
 : "${CHECKPOINT_E2E_MODEL_NAME:?set CHECKPOINT_E2E_MODEL_NAME}"
 : "${GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS:?set GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS}"
@@ -44,8 +47,18 @@ fail() { echo "EXISTING_BOOTSTRAP_FAIL: $*" >&2; exit 64; }
     || fail "persistent judge session must be true or false"
 [[ $EXPECTED_IMPORT_ID =~ ^import-[0-9a-f]{24}$ \
     && $EXPECTED_PACKAGE_SOURCE_SHA256 =~ ^[0-9a-f]{64}$ \
-    && $EXPECTED_RUN_ID =~ ^[A-Za-z0-9._-]+-[0-9a-f]{16}$ ]] \
+    && $EXPECTED_RUN_ID =~ ^[A-Za-z0-9._-]+-[0-9a-f]{16}$ \
+    && $EXPECTED_REFERENCE_OVERLAY_SHA256 =~ ^[0-9a-f]{64}$ ]] \
     || fail "bootstrap content identity is invalid"
+for path in "$CHECKPOINT_E2E_REFERENCE_OVERLAY" "$CHECKPOINT_E2E_ENV_FILE"; do
+    [[ $path == /* && $path != *,* && $path != *$'\n'* && $path != *$'\r'* \
+        && -f $path && ! -L $path \
+        && $(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve(strict=True))' "$path") == "$path" ]] \
+        || fail "bootstrap file path is unsafe: $path"
+done
+[[ $(sha256sum "$CHECKPOINT_E2E_REFERENCE_OVERLAY" | awk '{print $1}') \
+    == "$EXPECTED_REFERENCE_OVERLAY_SHA256" ]] \
+    || fail "reference overlay changed after bootstrap submission"
 gym_override_count=0
 [[ -z ${CHECKPOINT_E2E_GYM_ROOT:-} ]] || gym_override_count=$((gym_override_count + 1))
 [[ -z ${CHECKPOINT_E2E_EXPECTED_GYM_REVISION:-} ]] || gym_override_count=$((gym_override_count + 1))
@@ -61,6 +74,8 @@ CHECKPOINT_E2E_AUTHORIZE_PROVIDER_CALLS="$AUTHORIZE_PROVIDER_CALLS" \
 CHECKPOINT_E2E_OWNER_ROOT="$CHECKPOINT_E2E_OWNER_ROOT" \
 CHECKPOINT_E2E_AAV2_ROOT="$CHECKPOINT_E2E_AAV2_ROOT" \
 CHECKPOINT_E2E_DATASET="$CHECKPOINT_E2E_DATASET" \
+CHECKPOINT_E2E_REFERENCE_OVERLAY="$CHECKPOINT_E2E_REFERENCE_OVERLAY" \
+CHECKPOINT_E2E_ENV_FILE="$CHECKPOINT_E2E_ENV_FILE" \
 CHECKPOINT_E2E_EXISTING_ROOT="$CHECKPOINT_E2E_EXISTING_ROOT" \
 CHECKPOINT_E2E_MODEL_NAME="$CHECKPOINT_E2E_MODEL_NAME" \
 GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS="$GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS" \
@@ -83,6 +98,14 @@ prepared_package_sha=$(python3 -c \
     || fail "prepared package identity receipt is unreadable"
 [[ $prepared_package_sha == "$EXPECTED_PACKAGE_SOURCE_SHA256" ]] \
     || fail "active package changed between bootstrap validation and snapshot"
+(
+    # Generated owner-only settings containing validated absolute paths.
+    # shellcheck disable=SC1090
+    source "$prepared_run/settings.env"
+    [[ $REFERENCE_OVERLAY == "$CHECKPOINT_E2E_REFERENCE_OVERLAY" \
+        && $REFERENCE_OVERLAY_SHA256 == "$EXPECTED_REFERENCE_OVERLAY_SHA256" \
+        && $ENV_FILE == "$CHECKPOINT_E2E_ENV_FILE" ]]
+) || fail "prepare did not preserve the bootstrap reference/environment inputs"
 
 run_receipt=$BOOTSTRAP_STATE_DIR/PREPARED_RUN_DIR
 temporary=$run_receipt.tmp.$$
