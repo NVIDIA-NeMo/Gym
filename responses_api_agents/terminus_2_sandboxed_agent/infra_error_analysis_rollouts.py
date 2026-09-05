@@ -25,10 +25,12 @@ with open(args.fpath, "rb") as f, open(f_out_path, "wb") if args.group_to_write_
 
         count = 0
         stuck_count = 0
+        technical_difficulties_count = 0
         for output_item in row["response"]["output"]:
             if output_item.get("role") == "user":
                 content = output_item["content"]
                 count += "No valid JSON found in response" in content
+                technical_difficulties_count += "Technical difficulties" in content
             elif output_item.get("type") == "reasoning":
                 content = output_item["summary"][0]["text"]
                 stuck_count += "stuck" in content or "unresponsive" in content
@@ -40,6 +42,7 @@ with open(args.fpath, "rb") as f, open(f_out_path, "wb") if args.group_to_write_
             "Long model calls": row["model_calls_gt_10min"] >= 6,
             "Model claims to be stuck": stuck_count > 10,
             "No valid JSON found in response": count > 10,
+            "Technical difficulties": technical_difficulties_count > 0,
             "Errored (excluding timeout)": is_errored - is_timeout,
             "Timed out": is_timeout,
             "Total samples with reward=0": 1,
