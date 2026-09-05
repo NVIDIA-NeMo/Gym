@@ -16,9 +16,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
 from typing import Any
-from uuid import uuid4
 
 import aiohttp
 from fastapi import Body, HTTPException, Request, Response
@@ -33,7 +31,6 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
@@ -113,13 +110,10 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         model_url_path: str,
         model_cookies: dict[str, str],
         resource_cookies: dict[str, str],
-        rollout_id: str | None = None,
     ) -> NOOARunResult:
-        rollout_id = rollout_id or maybe_rollout_id_from_run_body(body) or uuid4().hex
         return await self.runner.run(
             NOOARunRequest(
                 row=body,
-                rollout_id=rollout_id,
                 model_url_path=model_url_path,
                 model_cookies=model_cookies,
                 resource_cookies=resource_cookies,
@@ -144,8 +138,6 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         run_body = NOOAAgentRunRequest(responses_create_params=body)
         cookies = dict(request.cookies)
-        path_params = getattr(request, "path_params", None)
-        rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         try:
             async with self.sem, asyncio.timeout(self.config.run_timeout_secs):
                 run_result = await self._execute_nooa_episode(
@@ -153,7 +145,6 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                     model_url_path=self.url_path_for_request("/v1/responses", request),
                     model_cookies=dict(cookies),
                     resource_cookies=dict(cookies),
-                    rollout_id=rollout_id if isinstance(rollout_id, str) else None,
                 )
         except ValueError as error:
             raise HTTPException(
