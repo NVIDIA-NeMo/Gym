@@ -144,6 +144,16 @@ See the [Available Environments](https://github.com/NVIDIA-NeMo/Gym#-available-e
 
 </Accordion>
 
+<Accordion title="v0.5.1">
+
+Patch release focused on security, container reliability, and legal/attribution updates — no breaking changes from v0.5.0.
+
+- **Security**: removed bundled royalty-bearing codec binaries and dependencies flagged in legal review; bumped `orjson`, `msgpack`, and `python-multipart` for CVE remediation
+- **Docker**: installed `enroot` and declared a `bash` entrypoint in the Gym container; installed `nvidia-container-toolkit` so enroot's NVIDIA GPU hook works inside the container; documented the pre-built image's `docker run` usage
+- **Legal**: expanded `ATTRIBUTIONS.md` to a full 167-package inventory; added the PinchBench modified-component notice and NVIDIA disclaimer
+- **Documentation**: fixed stale Python version references (3.12 → 3.13.14) across install and setup guides; cherry-picked the model-call capture guide and tutorial path redirects from v0.5.0
+
+</Accordion>
 <Accordion title="v0.5.0">
 
 ### Release Summary
