@@ -383,6 +383,26 @@ class TestEnvironmentCatalog:
         )
         assert set(deduplicated) == {("benchmark", "resources_servers/mcqa/science")}
 
+    def test_discovers_resource_workload_with_processor_dataset(self, tmp_path: Path, monkeypatch) -> None:
+        configs = tmp_path / "resources_servers" / "game" / "configs"
+        configs.mkdir(parents=True)
+        configs.joinpath("game.yaml").write_text(
+            "resource:\n"
+            "  resources_servers:\n"
+            "    game: {entrypoint: app.py, domain: games}\n"
+            "coordinator:\n"
+            "  processors:\n"
+            "    turns:\n"
+            "      datasets:\n"
+            "      - {name: example, type: example, jsonl_fpath: example.jsonl}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        entries = {(entry.kind, entry.name): entry for entry in discover_environment_catalog()}
+
+        assert ("environment", "resources_servers/game") in entries
+
 
 class TestReadEnvironmentDetails:
     def test_extracts_resources_servers_agent_datasets_and_value(self, tmp_path: Path) -> None:
@@ -402,6 +422,9 @@ class TestReadEnvironmentDetails:
             "      datasets:\n"
             "      - {name: train, type: train}\n"
             "      - {name: example, type: example}\n"
+            "env_processor:\n"
+            "  processors:\n"
+            "    alternating_turn: {}\n"
         )
 
         details = read_environment_details(cfg)
@@ -410,4 +433,5 @@ class TestReadEnvironmentDetails:
         assert details["value"] == "The value"
         assert details["resources_servers"] == ["my_rs"]
         assert details["agent"] == "simple_agent"
+        assert details["processor"] == "alternating_turn"
         assert details["datasets"] == ["train", "example"]

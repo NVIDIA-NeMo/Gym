@@ -14,10 +14,11 @@
 # limitations under the License.
 import importlib.metadata
 import os
+import shlex
 from os import environ
 from pathlib import Path
 from subprocess import Popen
-from sys import stderr, stdout
+from sys import executable, stderr, stdout
 from typing import IO, Any
 
 from omegaconf import DictConfig
@@ -130,9 +131,13 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     verbose_flag = "-v " if global_config_dict.get(PIP_INSTALL_VERBOSE_KEY_NAME) else ""
 
     is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
+    lock_path = venv_path.with_name(f"{venv_path.name}.lock")
+    lock_command = f"{shlex.quote(executable)} -m nemo_gym.cli.venv_lock {shlex.quote(str(lock_path))}"
 
     if should_skip_venv_setup:
-        env_setup_cmd = f"source {venv_activate_fpath}"
+        # Even a no-op setup must take the lock: another process may have created
+        # bin/python and bin/activate but still be installing dependencies.
+        env_setup_cmd = f"{lock_command} true && source {venv_activate_fpath}"
     else:
         has_pyproject_toml = (dir_path / "pyproject.toml").exists()
         has_requirements_txt = (dir_path / "requirements.txt").exists()
@@ -174,7 +179,8 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
             )
 
         prefix_cmd = f" > >(sed 's/^/({prefix}) /') 2> >(sed 's/^/({prefix}) /' >&2)"
-        env_setup_cmd = f"{uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && {install_cmd}{prefix_cmd}"
+        setup_cmd = f"{uv_venv_cmd}{prefix_cmd} && source {venv_activate_fpath} && {install_cmd}{prefix_cmd}"
+        env_setup_cmd = f"{lock_command} {shlex.quote(setup_cmd)} && source {venv_activate_fpath}"
 
     return f"cd {dir_path} && {env_setup_cmd}"
 

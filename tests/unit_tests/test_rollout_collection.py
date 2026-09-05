@@ -34,10 +34,11 @@ from pydantic import ValidationError
 import nemo_gym.rollout_collection
 import nemo_gym.token_id_capture.delivery
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
+from nemo_gym.config_types import AggregateMetricScope, ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    PROCESSOR_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
@@ -228,8 +229,8 @@ class TestRolloutCollection:
             }
         )
 
-        assert _processor_server_name("simple", config) == "simple__processor"
-        assert _processor_server_name("other", config) == "other"
+        assert _processor_server_name("simple", AGENT_REF_KEY_NAME, config) == "simple__processor"
+        assert _processor_server_name("other", AGENT_REF_KEY_NAME, config) == "other"
 
     def test_rollout_request_debug_summary_compact(self) -> None:
         row = {
@@ -799,6 +800,31 @@ class TestRolloutCollection:
         assert "responses_create_params" not in captured.out
         assert "do not log this" not in captured.out
         assert "[rollout_collection] /run failed" in captured.out
+
+    async def test_run_examples_prefers_processor_ref(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        row = {
+            PROCESSOR_REF_KEY_NAME: {"name": "turn_processor"},
+            AGENT_REF_KEY_NAME: {"name": "legacy_agent"},
+        }
+        response = MagicMock()
+        response.read = AsyncMock(return_value=orjson.dumps({"reward": 1.0}))
+        mock_server_client = MagicMock()
+        mock_server_client.post = AsyncMock(return_value=response)
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {"turn_processor": {"processors": {"alternating_turn": {}}}}
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
+        )
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", AsyncMock())
+
+        returned_row, result = await next(RolloutCollectionHelper().run_examples([row]))
+
+        assert returned_row is row
+        assert result == {"reward": 1.0}
+        assert mock_server_client.post.await_args.kwargs["server_name"] == "turn_processor"
 
     async def test_run_examples_records_agent_http_failure_as_a_failure_row(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1663,6 +1689,27 @@ class TestRolloutCollection:
         # Seeds should track rollout index within each task (0, 1, 2 per task).
         assert seeds_seen == [0, 1, 2, 0, 1, 2]
 
+    def test_preprocess_rows_accepts_processor_without_agent_ref(self, tmp_path: Path) -> None:
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text(
+            json.dumps(
+                {
+                    "responses_create_params": {"input": []},
+                    PROCESSOR_REF_KEY_NAME: {"name": "turn_processor"},
+                }
+            )
+            + "\n"
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        assert rows[0][PROCESSOR_REF_KEY_NAME]["name"] == "turn_processor"
+        assert AGENT_REF_KEY_NAME not in rows[0]
+
     def test_preprocess_rows_num_repeats_dict_form(self, tmp_path: Path) -> None:
         """Dict-form num_repeats applies the per-agent value to each row."""
         fpath = tmp_path / "input.jsonl"
@@ -2076,6 +2123,7 @@ class TestRolloutCollection:
                 "group_level_metrics": actual_aggregate_metrics[0]["group_level_metrics"],
                 "perf_summary": None,
                 "repeat_level_metrics": [],
+                "per_agent_metrics": {},
             }
         ]
         assert expected_aggregate_metrics == actual_aggregate_metrics
@@ -2689,13 +2737,28 @@ class TestRolloutCollection:
 
         assert expected_results == actual_returned_results
 
-    async def test_call_aggregate_metrics(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def test_call_aggregate_metrics(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
         """Test _call_aggregate_metrics with a mocked server client."""
 
         agg = AggregateMetrics(
             agent_metrics={"mean/reward": 0.5},
             key_metrics={"mean/reward": 0.5},
             group_level_metrics=[{"mean/reward": 1.0}, {"mean/reward": 0.0}],
+            per_agent_metrics={
+                "player0": AggregateMetricScope(
+                    metrics={"mean/reward": -0.5},
+                    key_metrics={"mean/reward": -0.5},
+                ),
+                "player1": AggregateMetricScope(
+                    metrics={"mean/reward": 0.5},
+                    key_metrics={"mean/reward": 0.5},
+                ),
+            },
         )
 
         mock_response = AsyncMock()
@@ -2747,6 +2810,11 @@ class TestRolloutCollection:
         assert written[0]["agent_metrics"]["mean/reward"] == 0.5
         assert written[0]["key_metrics"]["mean/reward"] == 0.5
         assert len(written[0]["group_level_metrics"]) == 2
+        assert written[0]["per_agent_metrics"]["player0"]["key_metrics"]["mean/reward"] == -0.5
+        assert written[0]["per_agent_metrics"]["player1"]["key_metrics"]["mean/reward"] == 0.5
+        output = capsys.readouterr().out
+        assert "Key metrics for my_agent/player0" in output
+        assert "Key metrics for my_agent/player1" in output
 
         # Verify server_client.post was called with stripped data (usage preserved)
         call_kwargs = mock_server_client.post.call_args
