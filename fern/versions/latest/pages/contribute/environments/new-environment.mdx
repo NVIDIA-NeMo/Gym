@@ -100,7 +100,7 @@ Fixture execution runs directly in the resources server's dependency environment
 
 ## Guiding Principles
 
-Adding a training environment has the same local correctness requirements as [Adding A Benchmark](/main/contribute/environments/adding-a-benchmark): its manifest must validate and its verifier fixture must pass. Behavior-changing environment or agent code must also run representative real smoke rollouts as required by `AGENTS.md`. A full evaluation, reward profile, or training run can provide stronger evidence about measurement quality and training utility, but it is optional and is not a publication or merge compute gate.
+Adding a training environment has the same local correctness requirements as [Adding A Benchmark](/main/contribute/environments/adding-a-benchmark): its manifest must validate and its verifier fixture must pass. Behavior-changing environment or agent work must also run representative real smoke rollouts as required by `AGENTS.md`. A full evaluation, reward profile, or training run can provide stronger evidence about measurement quality and training utility, but it is optional and is not a publication or merge compute gate.
 
 When compute is available, a useful training experiment isolates the environment's effect on the targeted capability. GRPO with NeMo RL, 64 prompts per step, and 16 rollouts per prompt is one starting point; adjust it to the environment and available compute.
 
@@ -130,8 +130,8 @@ Contributing a resources server follows this sequence:
 | 1 | Curate Tasks | Collect or generate training tasks and create example data |
 | 2 | Implementation | Build resources server with verification logic |
 | 3 | Testing | Write and run unit tests |
-| 4 | Example Rollouts | Optionally capture runtime evidence |
-| 5 | Reward Profiling | Optionally inspect reward distribution |
+| 4 | Smoke Rollouts | For behavior changes, run a representative model rollout and inspect agent and verifier behavior |
+| 5 | Reward Profiling | Optionally inspect reward distribution for training environments; benchmarks require profiling |
 | 6 | Training Validation | Optionally test training utility |
 | 7 | Submit PR | Submit pull request with all required information |
 | 8 | Review | Address feedback on the required local checks and contribution metadata |
@@ -162,16 +162,23 @@ Write and run tests for your resources server:
 - At least one test per server is required for PR approval
 - You are responsible for ensuring your tests adequately cover your server's functionality
 
-### 4. Generate Example Rollouts (Optional)
+### 4. Generate Example Rollouts (Required for Behavior Changes)
 
-When a policy endpoint and compute are available, generate example rollouts as additional runtime evidence:
+When environment or agent work changes runtime behavior, generate representative model rollouts and inspect the agent
+and verifier results:
 
 - Document the command used to start your server, for example, `gym env start --resources-server my_server`
 - If useful for review, save representative outputs to `data/example_rollouts.jsonl`
 
-This evidence is not required to publish or merge the environment.
+This evidence is required for behavior-changing environment or agent contributions. Metadata-only catalog or manifest
+changes and docs-only changes do not require model compute. Saving the rollout artifact in the repository remains
+optional.
 
-### 5. Reward Profiling (Optional)
+### 5. Reward Profiling (Optional for Training Environments)
+
+Fixed evaluation benchmarks must follow the reward-profiling requirements in
+[Adding A Benchmark](/main/contribute/environments/adding-a-benchmark). For training environments, profiling remains
+optional:
 
 Run inference to inspect reward distribution:
 
@@ -206,7 +213,9 @@ After submitting your PR:
 2. Address any feedback from reviewers
 3. After approval, maintainers merge the contribution
 
-Reviewers may inspect optional rollout or training evidence when provided, but do not need to reproduce a compute-heavy run for the contribution to merge.
+Reviewers inspect the required smoke-rollout evidence for behavior-changing work and may inspect optional full
+evaluation or training evidence when provided. They do not need to reproduce a compute-heavy run for the contribution
+to merge.
 
 ## Recommended Technical Design
 

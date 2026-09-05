@@ -11,9 +11,9 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - Prefer focused changes. Do not make unrelated "drive-by" edits. If a drive-by fix is worth keeping, open a separate issue or PR.
 - Intentional synthetic scaling of environments is fine when scoped via an issue or focused PR; do not dump unreviewed bulk diffs.
 - You (the human author) own every line submitted. Treat model output as untrusted until reviewed.
-- For behavior-changing environment or agent code: run representative real smoke rollouts with a model and inspect
-  agent and verifier behavior. Green unit tests alone are not enough. Catalog, manifest, and docs-only changes do not
-  require model compute.
+- For behavior-changing environment or agent work: run representative real smoke rollouts with a model and inspect
+  agent and verifier behavior. Green unit tests alone are not enough. Metadata-only catalog or manifest changes and
+  docs-only changes do not require model compute.
 - Before opening a PR, run the local checks that mirror CI: tests (skip or N/A for docs-only), `pre-commit run --all-files`, and DCO sign-off (`git commit -s`). Cryptographic `-S` signing is optional and not required.
 - AI-generated tests must assert real behavior; avoid vacuous pass-through tests.
 - Prefer the vetted skills under `.agents/skills/` (see [Agent Skills](https://docs.nvidia.com/nemo/gym/latest/contribute/agent-skills)).

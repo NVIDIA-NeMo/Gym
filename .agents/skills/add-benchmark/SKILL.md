@@ -14,10 +14,12 @@ description: >
 
 Before editing, read these pages and follow their links only as needed:
 
-- `fern/versions/latest/pages/contribute/environments/new-environment.mdx` for manifests, integration profiles,
-  validation layers, and publish readiness.
-- `fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx` for benchmark-specific requirements.
-- The data-preparation and prompt-configuration pages linked from the benchmark guide.
+- [New Environment](../../../fern/versions/latest/pages/contribute/environments/new-environment.mdx) for manifests,
+  integration profiles, validation layers, and publish readiness.
+- [Add a benchmark](../../../fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx) for
+  benchmark-specific requirements.
+- [Prepare and Validate](../../../fern/versions/latest/pages/data/prepare-validate.mdx) and
+  [Prompt Config](../../../fern/versions/latest/pages/data/prompt-config.mdx) for data and prompt contracts.
 
 Treat the current CLI, Pydantic schemas, and generated scaffold as authoritative when they disagree with prose.
 
@@ -92,7 +94,7 @@ gym env test <name> --kind benchmark
 Add focused tests for conversion, scoring boundaries, malformed model output, failure handling, and state isolation.
 Coverage must remain at least 96%, and tests must assert observable behavior.
 
-For behavior-changing environment or agent code, run representative real smoke rollouts and inspect both agent and
+For behavior-changing environment or agent work, run representative real smoke rollouts and inspect both agent and
 verifier behavior. All benchmarks additionally require the reward profiling, rollout inspection, and variance
 characterization in the benchmark guide. Ports of existing benchmarks also require upstream reproduction followed by
 a same-model Gym comparison. These are fidelity checks, not a requirement to run training.
