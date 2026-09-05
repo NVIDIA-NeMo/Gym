@@ -135,7 +135,7 @@ diff --git a/resources_servers/gdpval/comparison.py b/resources_servers/gdpval/c
      prefix = "data:application/pdf;base64,"
      output: dict[str, list[dict]] = {}
      for section_name, blocks in sections.items():
-@@ -1691,21 +1737,49 @@ def apply_native_pdf_overflow(
+@@ -1691,20 +1737,48 @@ def apply_native_pdf_overflow(
              payload = base64.b64decode(url[len(prefix) :], validate=True)
              if hashlib.sha256(payload).hexdigest() != item["sha256"]:
                  raise ValueError(f"overflow plan hash drift: {section_name}/{block_index}")

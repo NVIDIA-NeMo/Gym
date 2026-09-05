@@ -137,18 +137,14 @@ def _run_pass(head_url: str, concurrency: int) -> None:
 
     e2e_config = E2ERolloutCollectionConfig.model_validate(global_config)
     if e2e_config.rollout_collection_driver != EXPECTED_DRIVER:
-        raise JudgeSessionError(
-            f"unexpected rollout_collection_driver: {e2e_config.rollout_collection_driver!r}"
-        )
+        raise JudgeSessionError(f"unexpected rollout_collection_driver: {e2e_config.rollout_collection_driver!r}")
 
     output_path = Path(e2e_config.output_jsonl_fpath)
     data_output_dir = output_path.parent / "preprocessed_datasets"
     input_path = data_output_dir / f"{e2e_config.split}.jsonl"
     journal_path = output_path.with_name(f"{output_path.stem}_multistage_state.jsonl")
 
-    reuse_prepared = e2e_config.reuse_existing_data_preparation or (
-        output_path.is_file() and journal_path.is_file()
-    )
+    reuse_prepared = e2e_config.reuse_existing_data_preparation or (output_path.is_file() and journal_path.is_file())
     if input_path.exists():
         if input_path.is_symlink() or not input_path.is_file():
             raise JudgeSessionError(f"prepared input is not a regular non-symlink file: {input_path}")

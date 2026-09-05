@@ -164,8 +164,7 @@ def compute(args: argparse.Namespace) -> dict[str, Any]:
     distribution_path = _regular(distribution_path, "occupation distribution")
     if distribution_path != args.distribution_path:
         raise ValueError(
-            "resolved occupation distribution path drift: "
-            f"{distribution_path} != {args.distribution_path}"
+            f"resolved occupation distribution path drift: {distribution_path} != {args.distribution_path}"
         )
     fingerprint = compute_fingerprint(
         multistage_config,
@@ -216,9 +215,7 @@ def main() -> None:
     args.preprocessed_input = _regular(args.preprocessed_input, "preprocessed input")
     if args.distribution_path.is_symlink():
         raise ValueError("occupation distribution must not be a symlink")
-    distribution_parent = _directory(
-        args.distribution_path.parent, "occupation distribution parent"
-    )
+    distribution_parent = _directory(args.distribution_path.parent, "occupation distribution parent")
     args.distribution_path = distribution_parent / args.distribution_path.name
     expected_distribution = args.preprocessed_input.parent.parent / "occupation_distribution.json"
     if args.distribution_path != expected_distribution:
@@ -227,9 +224,7 @@ def main() -> None:
             f"{args.distribution_path} != {expected_distribution}"
         )
     if args.distribution_path.exists() and not args.distribution_path.is_file():
-        raise ValueError(
-            f"occupation distribution must be a regular file: {args.distribution_path}"
-        )
+        raise ValueError(f"occupation distribution must be a regular file: {args.distribution_path}")
     args.config = [_regular(path, "config") for path in args.config]
     if len(args.config) != 6:
         raise ValueError(f"expected the production six-config stack, found {len(args.config)}")

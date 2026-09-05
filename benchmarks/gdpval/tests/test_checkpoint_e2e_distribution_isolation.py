@@ -33,7 +33,7 @@ def test_prepare_and_live_judge_share_frozen_distribution_contract() -> None:
     judge = (PACKAGE / "judge.sbatch").read_text()
     assert 'DISTRIBUTION_PATH="$JUDGE_DIR/occupation_distribution.json"' in judge
     assert '++multistage.distribution_path="$DISTRIBUTION_PATH"' in judge
-    assert '$(stat -c \'%a\' "$DISTRIBUTION_PATH") == 400' in judge
+    assert "$(stat -c '%a' \"$DISTRIBUTION_PATH\") == 400" in judge
     assert 'd["distribution_path"]' in judge
     assert 'd["distribution_sha256"]' in judge
     assert judge.index("provider-free fingerprint input/distribution path/hash drift") < judge.index(

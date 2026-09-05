@@ -167,7 +167,7 @@ def test_rollout_wrapper_uses_safe_exit_and_exact_shard_postcondition() -> None:
 
     assert '"${ROLLOUT_PACKAGE_DIR:?' in script
     assert 'SCRIPT_DIR="$(cd -P -- "$ROLLOUT_PACKAGE_DIR"' in script
-    assert '${BASH_SOURCE[0]}' not in script
+    assert "${BASH_SOURCE[0]}" not in script
     assert 'source "$ROLLOUT_LIFECYCLE_SH"' in script
     assert "trap gdpval_rollout_on_exit EXIT" in script
     assert "gdpval_rollout_cleanup" in script

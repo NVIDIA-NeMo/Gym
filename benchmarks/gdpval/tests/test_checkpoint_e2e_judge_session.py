@@ -40,9 +40,7 @@ def test_service_gate_requires_the_exact_expected_live_set(monkeypatch) -> None:
     monkeypatch.setattr(helper.urllib.request, "urlopen", lambda *_args, **_kwargs: Response())
     assert helper.services_ready("http://127.0.0.1:12000", expected) == (True, "all 2 services ready")
 
-    ready, detail = helper.services_ready(
-        "http://127.0.0.1:12000", [*expected, "gdpval_stirrup_agent"]
-    )
+    ready, detail = helper.services_ready("http://127.0.0.1:12000", [*expected, "gdpval_stirrup_agent"])
     assert not ready
     assert "gdpval_stirrup_agent" in detail
 
@@ -52,15 +50,15 @@ def test_persistent_command_contract_is_opt_in_bounded_strict_and_reaped() -> No
     controller = (PACKAGE / "existing_judge_controller.sbatch").read_text(encoding="utf-8")
 
     assert "PERSISTENT_JUDGE_SESSION=${CHECKPOINT_E2E_PERSISTENT_JUDGE_SESSION:-false}" in judge
-    legacy = judge.split('if [[ $PERSISTENT_JUDGE_SESSION == false ]]; then', 1)[1].split("\nfi", 1)[0]
+    legacy = judge.split("if [[ $PERSISTENT_JUDGE_SESSION == false ]]; then", 1)[1].split("\nfi", 1)[0]
     persistent = judge.split("# Opt-in persistent path:", 1)[1]
     assert '"$GYM_PYTHON" "$GYM_ENTRYPOINT" eval run' in legacy
     assert '"$GYM_PYTHON" "$GYM_ENTRYPOINT" env start' in persistent
     assert '"$SESSION_PY" run-pass' in persistent
-    assert 'CONCURRENCY_LADDER=${CONCURRENCY_LADDER:-16,8,4,1}' in judge
-    assert '[[ $CONCURRENCY_LADDER == 16,8,4,1 ]]' in judge
-    assert 'strict_result && exit 0' in persistent
-    assert persistent.index('strict_result && exit 0') < persistent.index("exit 76")
+    assert "CONCURRENCY_LADDER=${CONCURRENCY_LADDER:-16,8,4,1}" in judge
+    assert "[[ $CONCURRENCY_LADDER == 16,8,4,1 ]]" in judge
+    assert "strict_result && exit 0" in persistent
+    assert persistent.index("strict_result && exit 0") < persistent.index("exit 76")
 
     # EXIT runs for both strict success and ladder exhaustion, and the process-
     # group helper both signals and reaps the env/service owner.

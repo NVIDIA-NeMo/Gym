@@ -149,8 +149,7 @@ def _controller_fixture(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, str
         tmp_path / "reference.yaml",
         "gdpval:\n  reference_models:\n"
         + "".join(
-            f"    model_{index}:\n      deliverables_dir: {root}\n"
-            for index, root in enumerate(reference_roots)
+            f"    model_{index}:\n      deliverables_dir: {root}\n" for index, root in enumerate(reference_roots)
         ),
     )
     transport_root = run_dir / "judge_transport_views"
@@ -402,9 +401,7 @@ def test_compute_preflight_receipts_post_rollout_vllm_drift_only(tmp_path: Path)
     assert "VLLM_CONTAINER_POST_ROLLOUT_DRIFT" in after_coverage.stdout
     assert (run_dir / "settings.env").read_bytes() == settings_before
     drift_receipt = run_dir / "VLLM_CONTAINER_DRIFT_AFTER_ROLLOUTS"
-    fields = dict(
-        line.split("=", 1) for line in drift_receipt.read_text(encoding="utf-8").splitlines()
-    )
+    fields = dict(line.split("=", 1) for line in drift_receipt.read_text(encoding="utf-8").splitlines())
     assert fields["schema"] == "gdpval.vllm-container-post-rollout-drift.v1"
     assert fields["path"] == str(container)
     assert fields["expected_signature"] != fields["observed_signature"]
@@ -464,7 +461,7 @@ def test_launch_contract_keeps_fast_shards_exact_recovery_and_strict_judging() -
     assert "JUDGE_PORT_SLOT_COUNT=1000" in judge
     assert "flock -n 9" in judge
     assert "candidate_offset < JUDGE_PORT_SLOT_WIDTH" in judge
-    assert '/dev/tcp/127.0.0.1/$candidate_port' in judge
+    assert "/dev/tcp/127.0.0.1/$candidate_port" in judge
     assert "++head_server.host=127.0.0.1" in judge
     assert '++head_server.port="$JUDGE_HEAD_PORT"' in judge
     assert '++port_range_low="$JUDGE_PORT_RANGE_LOW"' in judge
@@ -1047,8 +1044,7 @@ def test_controller_judge_attempt_budget_is_global_across_restarts(tmp_path: Pat
         tmp_path / "reference.yaml",
         "gdpval:\n  reference_models:\n"
         + "".join(
-            f"    model_{index}:\n      deliverables_dir: {root}\n"
-            for index, root in enumerate(reference_roots)
+            f"    model_{index}:\n      deliverables_dir: {root}\n" for index, root in enumerate(reference_roots)
         ),
     )
     transport_root = run_dir / "judge_transport_views"

@@ -37,9 +37,7 @@ class TransitionError(RuntimeError):
 
 
 def _canonical_bytes(value: Any) -> bytes:
-    return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode(
-        "utf-8"
-    )
+    return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -141,9 +139,7 @@ def _scan_package(root: Path) -> tuple[list[dict[str, Any]], int, int]:
             raise TransitionError(f"package inventory contains a symlink: {path}")
         relative = path.relative_to(root).as_posix()
         if stat.S_ISDIR(metadata.st_mode):
-            entries.append(
-                {"path": relative, "type": "directory", "mode": f"{stat.S_IMODE(metadata.st_mode):04o}"}
-            )
+            entries.append({"path": relative, "type": "directory", "mode": f"{stat.S_IMODE(metadata.st_mode):04o}"})
         elif stat.S_ISREG(metadata.st_mode):
             size = metadata.st_size
             entries.append(
@@ -235,9 +231,7 @@ def _validate_seed(path: Path, *, fingerprint: str) -> tuple[dict[str, Any], str
     imported = document.get("imported_stage1_rows")
     if type(before) is not int or type(imported) is not int or before < 0 or imported < 0 or before + imported != 217:
         raise TransitionError("seed receipt Stage-1 row accounting is inconsistent")
-    pre_tail_sha = _require_sha256(
-        document.get("target_output_sha256_after"), label="seed target_output_sha256_after"
-    )
+    pre_tail_sha = _require_sha256(document.get("target_output_sha256_after"), label="seed target_output_sha256_after")
     _require_sha256(document.get("target_output_sha256_before"), label="seed target_output_sha256_before")
     return document, pre_tail_sha
 
@@ -425,7 +419,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (TransitionError, OSError) as exc:
         print(f"TRANSITION_RECEIPT_FAIL: {exc}", file=sys.stderr)
         return 64
-    print(json.dumps({"status": "PASS", "receipt": str(args.output.expanduser().absolute()), "sha256": _sha256_bytes(payload)}, sort_keys=True))
+    print(
+        json.dumps(
+            {"status": "PASS", "receipt": str(args.output.expanduser().absolute()), "sha256": _sha256_bytes(payload)},
+            sort_keys=True,
+        )
+    )
     return 0
 
 

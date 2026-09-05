@@ -189,7 +189,7 @@ index a6bca78e8..cc4f19351 100644
      "bad gateway",
      "gateway timeout",
      "gateway time-out",
-@@ -1367,6 +1369,10 @@ def _is_retryable(error: Exception) -> bool:
+@@ -1367,4 +1369,8 @@ def _is_retryable(error: Exception) -> bool:
      if is_permanent_judge_error(error):
          return False
      error_text = str(error).lower()

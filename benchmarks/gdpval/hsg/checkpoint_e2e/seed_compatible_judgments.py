@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Seed exact task/reference judgment rows from a compatible completed campaign.
 
 The target campaign keeps its own calibration rows and frozen Stage-1 plan. Only

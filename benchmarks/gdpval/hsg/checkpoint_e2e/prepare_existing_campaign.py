@@ -114,9 +114,7 @@ def _sha256_bytes(payload: bytes) -> str:
 
 
 def _canonical_bytes(document: Any) -> bytes:
-    return (json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode(
-        "utf-8"
-    )
+    return (json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode("utf-8")
 
 
 def _fsync_dir_once(path: Path) -> None:
@@ -468,7 +466,9 @@ def _publish_immutable(path: Path, payload: bytes, *, executable: bool = False) 
     _fsync_dir(path.parent)
 
 
-def _identity_document(source: Path, dataset: DatasetIdentity, source_entries: Sequence[dict[str, Any]]) -> dict[str, Any]:
+def _identity_document(
+    source: Path, dataset: DatasetIdentity, source_entries: Sequence[dict[str, Any]]
+) -> dict[str, Any]:
     source_sha = _inventory_sha256(source_entries)
     identity = {
         "schema": SCHEMA,
@@ -660,15 +660,11 @@ def verify(run_dir: Path, *, strict_snapshot: bool = False) -> dict[str, Any]:
     package_inventory = _load_json(package_inventory_path, schema=PACKAGE_INVENTORY_SCHEMA)
     if _sha256_bytes(_read_bytes(source_inventory_path)) != receipt.get("source_inventory_file_sha256"):
         _fail("source inventory receipt hash mismatch")
-    if _sha256_bytes(_read_bytes(package_inventory_path)) != receipt.get(
-        "judge_package_inventory_file_sha256"
-    ):
+    if _sha256_bytes(_read_bytes(package_inventory_path)) != receipt.get("judge_package_inventory_file_sha256"):
         _fail("judge package inventory receipt hash mismatch")
     if _inventory_sha256(source_inventory.get("entries", [])) != receipt.get("source_inventory_sha256"):
         _fail("source inventory identity mismatch")
-    if _inventory_sha256(package_inventory.get("entries", [])) != receipt.get(
-        "judge_package_inventory_sha256"
-    ):
+    if _inventory_sha256(package_inventory.get("entries", [])) != receipt.get("judge_package_inventory_sha256"):
         _fail("judge package inventory identity mismatch")
 
     dataset_record = receipt.get("dataset")

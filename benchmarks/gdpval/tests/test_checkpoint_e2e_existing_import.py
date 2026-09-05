@@ -86,7 +86,11 @@ def test_import_snapshots_external_tree_and_is_idempotent(tmp_path: Path) -> Non
 
     assert first == second
     assert first["completed"] == 3
-    assert (source_marker.read_bytes(), source_marker.stat().st_mode, source_marker.stat().st_mtime_ns) == source_before
+    assert (
+        source_marker.read_bytes(),
+        source_marker.stat().st_mode,
+        source_marker.stat().st_mtime_ns,
+    ) == source_before
     snapshot_marker = run_dir / "deliverables" / "task_task-0" / "repeat_0" / "finish_params.json"
     assert snapshot_marker.read_bytes() == source_marker.read_bytes()
     assert stat.S_IMODE(snapshot_marker.stat().st_mode) == 0o400
@@ -160,14 +164,10 @@ def test_transient_io_retries_dataset_marker_and_copy_without_identity_drift(
     assert prepared["status"] == "PASS"
     assert remaining_reads == {dataset: 0, marker: 0}
     assert copy_failures == 0
-    assert verify(run_dir, strict_snapshot=True)["source_inventory_sha256"] == identity[
-        "source_inventory_sha256"
-    ]
+    assert verify(run_dir, strict_snapshot=True)["source_inventory_sha256"] == identity["source_inventory_sha256"]
 
 
-def test_persistent_eio_exhausts_the_bound_and_fails_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_persistent_eio_exhausts_the_bound_and_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     dataset, source, _, _ = _fixture(tmp_path)
     marker = source / "task_task-0" / "repeat_0" / "finish_params.json"
     real_read_bytes = Path.read_bytes
@@ -304,8 +304,8 @@ def test_import_only_shell_entrypoints_parse_and_never_submit_rollouts_or_gpus()
     assert "bootstrap) launch_bootstrap" in launcher
     assert "existing_judge_bootstrap.sbatch" in launcher
     assert 'CHECKPOINT_E2E_AUTHORIZE_PROVIDER_CALLS="$authorize"' in launcher
-    assert '[[ $ACCOUNT == nemotron_n3_post ]]' in launcher
-    assert '[[ $CPU_PARTITION == cpu && $CPU_QOS == cpu-normal ]]' in launcher
+    assert "[[ $ACCOUNT == nemotron_n3_post ]]" in launcher
+    assert "[[ $CPU_PARTITION == cpu && $CPU_QOS == cpu-normal ]]" in launcher
     assert "gdpval_rollout.sbatch" not in launcher + controller
     assert "GPU_PARTITION" not in launcher + controller
     assert "--gres" not in launcher + controller
@@ -324,9 +324,7 @@ def test_import_only_shell_entrypoints_parse_and_never_submit_rollouts_or_gpus()
     assert 'PATH="$SAFE_PATH"' in launcher
     assert controller.count('PATH="$SAFE_PATH"') >= 3
     preconvert = (package / "preconvert_closure.sbatch").read_text()
-    assert preconvert.index("REQUESTED_ACTIVE_PACKAGE=") < preconvert.index(
-        'source "$MARS_JOB_ROOT/settings.env"'
-    )
+    assert preconvert.index("REQUESTED_ACTIVE_PACKAGE=") < preconvert.index('source "$MARS_JOB_ROOT/settings.env"')
     assert ': "${CHECKPOINT_E2E_EXECUTION_PACKAGE:?set CHECKPOINT_E2E_EXECUTION_PACKAGE}"' in preconvert
     assert 'REQUESTED_ACTIVE_PACKAGE != "$CAMPAIGN_E2E_DIR"' in preconvert
     assert 'CHECKPOINT_E2E_ACTIVE_PACKAGE="$DURABLE_ACTIVE_PACKAGE"' in controller
@@ -336,7 +334,7 @@ def test_import_controller_gates_every_scientific_phase_and_preserves_null_marke
     package = Path(__file__).parents[1] / "hsg" / "checkpoint_e2e"
     controller = (package / "existing_judge_controller.sbatch").read_text()
     fingerprint = (package / "prepare_existing_fingerprint.sh").read_text()
-    assert "prepare_existing_campaign.py\" verify" in controller
+    assert 'prepare_existing_campaign.py" verify' in controller
     assert "PRECONVERT_PASS_EXISTING" in controller
     assert "TRANSPORT_PREBUILD_PASS_$JUDGE_DIR_SUFFIX" in controller
     assert "prepare_existing_fingerprint.sh" in controller

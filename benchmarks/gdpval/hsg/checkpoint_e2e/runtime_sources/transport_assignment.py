@@ -186,9 +186,7 @@ def _footprint(directory: Path, *, include_reference_files: bool = True) -> Foot
             continue
         if suffix not in _BINARY_EXTENSIONS:
             continue
-        artifacts.append(
-            _BinaryArtifact(path=path, member=None, suffix=suffix, size=path.stat().st_size)
-        )
+        artifacts.append(_BinaryArtifact(path=path, member=None, suffix=suffix, size=path.stat().st_size))
 
     # A common deliverable layout includes both loose stems and a convenience
     # ZIP containing those exact stems. The judge renderer retains the bytes
@@ -381,8 +379,7 @@ def make_assignment_repair(
             if require_completed_reference and not _has_valid_finish_marker(directories):
                 return []
             footprint_cache[key] = [
-                _footprint(directory, include_reference_files=include_reference_files)
-                for directory in directories
+                _footprint(directory, include_reference_files=include_reference_files) for directory in directories
             ]
         return footprint_cache[key]
 
