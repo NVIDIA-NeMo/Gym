@@ -106,7 +106,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         )
         super().model_post_init(context)
 
-    async def _run_episode(
+    async def _execute_nooa_episode(
         self,
         body: NOOAAgentRunRequest,
         *,
@@ -148,7 +148,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         try:
             async with self.sem, asyncio.timeout(self.config.run_timeout_secs):
-                run_result = await self._run_episode(
+                run_result = await self._execute_nooa_episode(
                     run_body,
                     model_url_path=self.url_path_for_request("/v1/responses", request),
                     model_cookies=dict(cookies),
@@ -173,7 +173,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         record = body.model_dump()
         try:
             async with self.sem:
-                result = await self._run_once(request, body, record)
+                result = await self._execute_rollout_with_error_classification(request, body, record)
         except _TransientInfrastructureError as error:
             cause = error.__cause__ or error
             result = self._failure_response(
@@ -199,14 +199,14 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             response.set_cookie(name, value)
         return result
 
-    async def _run_once(
+    async def _execute_rollout_with_error_classification(
         self,
         request: Request,
         body: NOOAAgentRunRequest,
         record: dict[str, Any],
     ) -> NOOAAgentVerifyResponse:
         try:
-            return await self._run_once_unclassified(request, body, record)
+            return await self._execute_rollout_without_error_classification(request, body, record)
         except _EpisodeTimeoutExceeded:
             raise
         except Exception as error:
@@ -214,7 +214,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 raise _TransientInfrastructureError(str(error)) from error
             raise
 
-    async def _run_once_unclassified(
+    async def _execute_rollout_without_error_classification(
         self,
         request: Request,
         body: NOOAAgentRunRequest,
@@ -232,7 +232,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
 
         try:
             async with asyncio.timeout(self.config.run_timeout_secs) as episode_timeout:
-                run_result = await self._run_episode(
+                run_result = await self._execute_nooa_episode(
                     body,
                     model_url_path=self.url_path_for_run("/v1/responses", body),
                     model_cookies=dict(request.cookies),
