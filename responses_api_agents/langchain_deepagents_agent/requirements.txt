@@ -1,0 +1,11 @@
+-e nemo-gym[dev] @ ../../
+# deepagents>=0.7.0 unconditionally pulls in langchain-anthropic, whose anthropic floor (>=0.120.0)
+# conflicts with nemo_gym's own anthropic<=0.109.2 pin (pyproject.toml) — nemo_gym only imports one type
+# from anthropic and deliberately avoids the real client (httpx), so its pin is a routine periodic bump,
+# not a hard ceiling, but changing it repo-wide is out of scope for this one agent. Capped here instead;
+# 0.6.12 is the newest version that resolves. examples/langchain_deepagent (a fully separate dependency
+# tree, no nemo-gym[dev]) still uses >=0.7.6 — a real, documented version delta between the two, not an
+# oversight.
+deepagents<0.7.0
+langchain-core
+langchain-tavily>=0.2.18

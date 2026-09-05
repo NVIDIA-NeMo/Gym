@@ -1,0 +1,4 @@
+interface:
+  display_name: "Add Agent Server"
+  short_description: "Add or review a NeMo Gym agent server without the silent-failure bugs"
+  default_prompt: "Use $add-agent-server to add, wrap, or review a NeMo Gym agent server."
