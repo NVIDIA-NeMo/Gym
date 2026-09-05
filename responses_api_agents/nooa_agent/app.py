@@ -20,6 +20,7 @@ from collections.abc import Mapping
 from typing import Any
 from uuid import uuid4
 
+import aiohttp
 from fastapi import Body, HTTPException, Request, Response
 from pydantic import ConfigDict, Field
 
@@ -55,20 +56,17 @@ class _EpisodeTimeoutExceeded(TimeoutError):
 def _is_transient_infrastructure_error(error: BaseException) -> bool:
     """Apply Stirrup's retry policy to downstream HTTP and connection failures."""
 
-    try:
-        import aiohttp
-
-        if isinstance(error, aiohttp.ClientResponseError):
-            return 500 <= error.status < 600
-        if isinstance(error, aiohttp.ClientConnectionError):
-            return True
-    except ImportError:  # pragma: no cover - aiohttp is a core dependency
-        pass
+    if isinstance(error, aiohttp.ClientResponseError):
+        return 500 <= error.status < 600
+    if isinstance(error, aiohttp.ClientConnectionError):
+        return True
     if isinstance(error, (TimeoutError, ConnectionError)):
         return True
-    if error.__cause__ is not None and _is_transient_infrastructure_error(error.__cause__):
-        return True
-    return error.__context__ is not None and _is_transient_infrastructure_error(error.__context__)
+    return any(
+        _is_transient_infrastructure_error(nested)
+        for nested in (error.__cause__, error.__context__)
+        if nested is not None
+    )
 
 
 class NOOAAgentRunRequest(BaseRunRequest):
