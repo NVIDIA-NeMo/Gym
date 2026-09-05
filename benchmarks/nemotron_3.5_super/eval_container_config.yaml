@@ -11,7 +11,7 @@ config_paths:
 - benchmarks/deepswe/opencode.yaml
 - benchmarks/terminal_bench_2_1/terminus_2.yaml
 - benchmarks/swebench/pro/opencode.yaml
-- model_backends/vllm_model/configs/vllm_model.yaml
+- responses_api_models/vllm_model/configs/vllm_model.yaml
 - benchmarks/nemotron_3.5_super/sandbox_utils.yaml
 
 ########################################

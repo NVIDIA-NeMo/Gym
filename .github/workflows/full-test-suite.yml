@@ -225,7 +225,7 @@ jobs:
           cd /tmp/myproject
           source .venv/bin/activate
           ng_help
-          ng_dump_config "+config_paths=[resources_servers/arc_agi/configs/arc_agi.yaml,model_backends/vllm_model/configs/vllm_model.yaml]"
+          ng_dump_config "+config_paths=[resources_servers/arc_agi/configs/arc_agi.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
 
       - name: Test ng_init_resources_server
         run: |
@@ -244,7 +244,7 @@ jobs:
         run: |
           cd /tmp/myproject
           source .venv/bin/activate
-          ng_run "+config_paths=[resources_servers/arc_agi/configs/arc_agi.yaml,model_backends/vllm_model/configs/vllm_model.yaml]" &
+          ng_run "+config_paths=[resources_servers/arc_agi/configs/arc_agi.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" &
           NG_RUN_PID=$!
           $GITHUB_WORKSPACE/scripts/wait_for_servers.sh $NG_RUN_PID
 
@@ -260,7 +260,7 @@ jobs:
         run: |
           cd /tmp/myproject
           source .venv/bin/activate
-          ng_run "+config_paths=[resources_servers/hello_world/configs/hello_world.yaml,model_backends/vllm_model/configs/vllm_model.yaml]" &
+          ng_run "+config_paths=[resources_servers/hello_world/configs/hello_world.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" &
           NG_RUN_PID=$!
           $GITHUB_WORKSPACE/scripts/wait_for_servers.sh $NG_RUN_PID
 

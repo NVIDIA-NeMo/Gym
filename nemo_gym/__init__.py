@@ -24,7 +24,7 @@ from typing import Callable, List, Optional, Union
 # |- cache (CACHE_DIR)
 # |- results (RESULTS_DIR)
 # |- nemo_gym (ROOT_DIR)
-# |- model_backends
+# |- responses_api_models
 # |- responses_api_agents
 # ...
 ROOT_DIR = Path(__file__).absolute().parent

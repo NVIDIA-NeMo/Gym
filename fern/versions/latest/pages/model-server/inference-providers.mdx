@@ -18,7 +18,7 @@ For **training** workloads that require token IDs and log probabilities, use [vL
 
 ## Supported Providers
 
-All provider configs live in [`model_backends/inference_provider/configs/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/model_backends/inference_provider/configs).
+All provider configs live in [`responses_api_models/inference_provider/configs/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_models/inference_provider/configs).
 
 | Provider | Config | Base URL |
 |----------|--------|----------|
@@ -72,10 +72,10 @@ In this example, we use Together.ai:
 
 ```bash
 environment_config="resources_servers/mcqa/configs/mcqa.yaml"
-model_config="model_backends/inference_provider/configs/together.yaml"
+model_config="responses_api_models/inference_provider/configs/together.yaml"
 ```
 
-For unlisted providers, use the generic config: `model_backends/inference_provider/configs/inference_provider.yaml`
+For unlisted providers, use the generic config: `responses_api_models/inference_provider/configs/inference_provider.yaml`
 
 ### 2. Start servers
 

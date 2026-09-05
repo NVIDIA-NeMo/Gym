@@ -38,7 +38,6 @@ from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR, _resolve_under_cwd_or_install, component_search_roots
-from nemo_gym._config_aliases import LEGACY_MODEL_BACKENDS_SUBDIR, MODEL_BACKENDS_SUBDIR
 from nemo_gym.cli.setup_command import get_venv_path, run_command, setup_env_command
 from nemo_gym.cli.utils import (
     exit_cleanly_on_config_error,
@@ -304,18 +303,9 @@ def _resolve_server_dir(rel_path: Path) -> Path:
     directory counts as a server only if it ships an install marker for one of our two venv setups. This
     lets ``gym env test`` find and run built-in (and plugin) servers from any cwd, not just a repo checkout.
     """
-    resolved = _resolve_under_cwd_or_install(
+    return _resolve_under_cwd_or_install(
         rel_path, validator=lambda d: (d / "requirements.txt").exists() or (d / "pyproject.toml").exists()
     )
-    if (resolved / "requirements.txt").exists() or (resolved / "pyproject.toml").exists():
-        return resolved
-    if rel_path.parts and rel_path.parts[0] == LEGACY_MODEL_BACKENDS_SUBDIR:
-        canonical_path = Path(MODEL_BACKENDS_SUBDIR, *rel_path.parts[1:])
-        return _resolve_under_cwd_or_install(
-            canonical_path,
-            validator=lambda d: (d / "requirements.txt").exists() or (d / "pyproject.toml").exists(),
-        )
-    return resolved
 
 
 class RunConfig(BaseNeMoGymCLIConfig):
@@ -326,7 +316,7 @@ class RunConfig(BaseNeMoGymCLIConfig):
 
     ```bash
     config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\\
-    model_backends/openai_model/configs/openai_model.yaml"
+    responses_api_models/openai_model/configs/openai_model.yaml"
     gym env start "+config_paths=[${config_paths}]"
     ```
     """
@@ -748,7 +738,7 @@ def prefetch(
 
     ```bash
     # Pre-warm venvs for a specific config
-    config_paths="model_backends/local_vllm_model/configs/local_vllm_model.yaml,\\
+    config_paths="responses_api_models/local_vllm_model/configs/local_vllm_model.yaml,\\
     resources_servers/math/configs/math.yaml"
     gym env prefetch "+config_paths=[${config_paths}]"
     ```
@@ -813,7 +803,7 @@ def run(
     ```bash
     # Start servers with specific configs
     config_paths="resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,\\
-    model_backends/openai_model/configs/openai_model.yaml"
+    responses_api_models/openai_model/configs/openai_model.yaml"
     gym env start "+config_paths=[${config_paths}]"
     ```
     """
@@ -885,7 +875,7 @@ See `resources_servers/example_multi_step/configs/example_multi_step.yaml` for a
 Your commands should look something like:
 ```bash
 # Server spinup
-example_multi_step_config_paths="model_backends/openai_model/configs/openai_model.yaml,\
+example_multi_step_config_paths="responses_api_models/openai_model/configs/openai_model.yaml,\
 resources_servers/example_multi_step/configs/example_multi_step.yaml"
 gym env start "+config_paths=[${{example_multi_step_config_paths}}]"
 
@@ -1017,12 +1007,7 @@ def test_all():  # pragma: no cover
     # (a user's project), and the Gym install root (built-ins, under PARENT_DIR in editable and wheel
     # installs). Entrypoints are kept relative; earlier roots shadow later ones for same-named modules. This
     # lets `gym env test` discover and run built-in and plugin servers from any cwd, not only a repo checkout.
-    server_type_dirs = (
-        "resources_servers",
-        "responses_api_agents",
-        MODEL_BACKENDS_SUBDIR,
-        LEGACY_MODEL_BACKENDS_SUBDIR,
-    )
+    server_type_dirs = ("resources_servers", "responses_api_agents", "responses_api_models")
     seen_rel_paths: set[str] = set()
     candidate_dir_paths: List[str] = []
     for root in component_search_roots():
@@ -1031,13 +1016,9 @@ def test_all():  # pragma: no cover
                 if "pycache" in module_path.name or not module_path.is_dir():
                     continue
                 rel_path = f"{server_type_dir}/{module_path.name}"
-                identity_dir = (
-                    MODEL_BACKENDS_SUBDIR if server_type_dir == LEGACY_MODEL_BACKENDS_SUBDIR else server_type_dir
-                )
-                identity = f"{identity_dir}/{module_path.name}"
-                if identity in seen_rel_paths:
+                if rel_path in seen_rel_paths:
                     continue
-                seen_rel_paths.add(identity)
+                seen_rel_paths.add(rel_path)
                 candidate_dir_paths.append(rel_path)
     print(f"Found {len(candidate_dir_paths)} total modules:{_display_list_of_paths(candidate_dir_paths)}\n")
     dir_paths: List[Path] = list(map(Path, candidate_dir_paths))

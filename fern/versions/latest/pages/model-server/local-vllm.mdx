@@ -4,7 +4,7 @@ description: "Gym-managed vLLM server deployment"
 position: 6
 ---
 
-NeMo Gym can launch and manage the vLLM server for you using LocalVLLMModel (in `model_backends/local_vllm_model`).
+NeMo Gym can launch and manage the vLLM server for you using LocalVLLMModel (in `responses_api_models/local_vllm_model`).
 LocalVLLMModel is a subclass of VLLMModel that spawns the vLLM engine and auto-configures the model server to use it.
 The Chat Completions to Responses API conversion is inherited from VLLMModel. See [VLLMModel](/model-server/vllm) for details.
 
@@ -17,9 +17,9 @@ If you want to connect NeMo Gym to a vLLM server you start and manage yourself, 
 
 ## Use LocalVLLMModel
 
-Unlike VLLMModel, LocalVLLMModel does not require a separate vLLM install or a manual model download. vLLM is a transitive dependency of `model_backends/local_vllm_model`, and model weights are fetched from the Hugging Face Hub on first run (using `HF_TOKEN` from your environment if present). A single `gym env start` brings up both vLLM and NeMo Gym.
+Unlike VLLMModel, LocalVLLMModel does not require a separate vLLM install or a manual model download. vLLM is a transitive dependency of `responses_api_models/local_vllm_model`, and model weights are fetched from the Hugging Face Hub on first run (using `HF_TOKEN` from your environment if present). A single `gym env start` brings up both vLLM and NeMo Gym.
 
-Several model configs ship with the server under `model_backends/local_vllm_model/configs/` — see the `Qwen/`, `openai/`, and `nvidia/` subdirectories for ready-to-use examples. To launch a single-node 8-GPU run with `Qwen3-30B-A3B-Instruct-2507`:
+Several model configs ship with the server under `responses_api_models/local_vllm_model/configs/` — see the `Qwen/`, `openai/`, and `nvidia/` subdirectories for ready-to-use examples. To launch a single-node 8-GPU run with `Qwen3-30B-A3B-Instruct-2507`:
 
 ```bash
 gym env start \
@@ -135,8 +135,8 @@ gym env start \
 
 ```bash
 gym env start \
-    --config model_backends/local_vllm_model/configs/openai/gpt-oss-20b-reasoning-high.yaml \
-    --config model_backends/local_vllm_model/configs/openai/gpt-oss-120b-reasoning-high.yaml \
+    --config responses_api_models/local_vllm_model/configs/openai/gpt-oss-20b-reasoning-high.yaml \
+    --config responses_api_models/local_vllm_model/configs/openai/gpt-oss-120b-reasoning-high.yaml \
     ++gpt-oss-20b-reasoning-high.responses_api_models.local_vllm_model.vllm_serve_kwargs.tensor_parallel_size=4 \
     ++gpt-oss-120b-reasoning-high.responses_api_models.local_vllm_model.vllm_serve_kwargs.tensor_parallel_size=4
 ```
@@ -145,8 +145,8 @@ gym env start \
 
 ```bash
 gym env start \
-    --config model_backends/local_vllm_model/configs/openai/gpt-oss-20b-reasoning-high.yaml \
-    --config model_backends/local_vllm_model/configs/openai/gpt-oss-120b-reasoning-high.yaml
+    --config responses_api_models/local_vllm_model/configs/openai/gpt-oss-20b-reasoning-high.yaml \
+    --config responses_api_models/local_vllm_model/configs/openai/gpt-oss-120b-reasoning-high.yaml
 ```
 
 ## Inherited features

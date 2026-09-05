@@ -58,7 +58,7 @@ if [ "${PIN_GYM:-1}" != 0 ]; then
 fi
 
 gym eval prepare --benchmark browsecomp \
-  --config model_backends/vllm_model/configs/vllm_model.yaml
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml
 
 gym eval run \
   --benchmark browsecomp \

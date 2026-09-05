@@ -1,5 +1,5 @@
 config_paths:
-- model_backends/vllm_model/configs/vllm_model.yaml
+- responses_api_models/vllm_model/configs/vllm_model.yaml
 
 # We bump up the connector per host limit since this is a larger benchmark suite
 global_aiohttp_connector_limit_per_host: 16384

@@ -1,6 +1,6 @@
 config_paths:
   - resources_servers/ruler/configs/ruler.yaml
-  - model_backends/local_vllm_model/configs/pretrain_text_completion.yaml
+  - responses_api_models/local_vllm_model/configs/pretrain_text_completion.yaml
 
 ruler_pretrain_resources_server:
   _inherit_from: ruler_resources_server

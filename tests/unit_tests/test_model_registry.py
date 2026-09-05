@@ -15,7 +15,7 @@
 from pathlib import Path
 
 from nemo_gym.discovery import merge_by_name
-from nemo_gym.model_registry import _discover_models_in_dir, discover_models
+from nemo_gym.model_registry import _discover_models_in_dir
 
 
 def _make_model(models_dir: Path, name: str, *, app: bool = True, flavors=()) -> Path:
@@ -70,26 +70,3 @@ class TestDiscoverModels:
 
     def test_missing_directory_yields_no_models(self, tmp_path: Path) -> None:
         assert _discover_models_in_dir(tmp_path / "nope") == {}
-
-    def test_canonical_and_legacy_directories_are_discovered(self, tmp_path: Path, monkeypatch) -> None:
-        canonical = tmp_path / "model_backends"
-        legacy = tmp_path / "responses_api_models"
-        _make_model(canonical, "canonical_model", flavors=("canonical_model",))
-        _make_model(legacy, "legacy_model", flavors=("legacy_model",))
-        monkeypatch.setattr("nemo_gym.model_registry.component_search_roots", lambda: [tmp_path])
-
-        models = discover_models()
-
-        assert models["canonical_model"].config_path.is_relative_to(canonical)
-        assert models["legacy_model"].config_path.is_relative_to(legacy)
-
-    def test_canonical_directory_shadows_legacy_in_the_same_root(self, tmp_path: Path, monkeypatch) -> None:
-        canonical = tmp_path / "model_backends"
-        legacy = tmp_path / "responses_api_models"
-        _make_model(canonical, "shared", flavors=("shared",))
-        _make_model(legacy, "shared", flavors=("shared",))
-        monkeypatch.setattr("nemo_gym.model_registry.component_search_roots", lambda: [tmp_path])
-
-        models = discover_models()
-
-        assert models["shared"].config_path.is_relative_to(canonical)

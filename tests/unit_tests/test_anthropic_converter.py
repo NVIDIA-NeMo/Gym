@@ -15,7 +15,7 @@
 """Tests for the ingress (inverse) direction of the shared AnthropicConverter.
 
 The egress direction (Responses -> Anthropic request, Anthropic response -> Responses) is
-covered by model_backends/anthropic_model/tests/test_app.py. These tests cover the new
+covered by responses_api_models/anthropic_model/tests/test_app.py. These tests cover the new
 inverse direction used by an Anthropic Messages ingress proxy, plus round-trips that guard the
 two directions against drift.
 """

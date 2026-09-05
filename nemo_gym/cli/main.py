@@ -25,11 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
-from nemo_gym._config_aliases import (
-    LEGACY_ENVIRONMENT_ALIASES,
-    legacy_config_path_alias,
-    legacy_model_backend_path,
-)
+from nemo_gym._config_aliases import LEGACY_ENVIRONMENT_ALIASES, legacy_config_path_alias
 from nemo_gym.cli.utils import did_you_mean
 
 
@@ -345,7 +341,7 @@ _ASSETS = {
     "benchmark": ("benchmarks", "", "config"),
     "environment": ("environments", "", "config"),
     "resources-server": ("resources_servers", "configs", None),
-    "model-type": ("model_backends", "configs", None),
+    "model-type": ("responses_api_models", "configs", None),
     "agent-type": ("responses_api_agents", "configs", None),
 }
 
@@ -368,7 +364,6 @@ def _asset_config_path(flag: str, value: str) -> str:
 
     roots = component_search_roots()
     matches: list[Path] = []
-    selected_legacy_path: Path | None = None
 
     if "/" in value and flag in {"benchmark", "environment"}:
         nested_matches: list[Path] = []
@@ -386,17 +381,12 @@ def _asset_config_path(flag: str, value: str) -> str:
                 )
             return str(nested_matches[0])
 
-    legacy_path = legacy_model_backend_path(path)
     for root in roots:
-        candidates = (root / path, root / legacy_path) if legacy_path else (root / path,)
-        for candidate in candidates:
-            if candidate.exists():
-                resolved = candidate.resolve()
-                if resolved not in matches:
-                    matches.append(resolved)
-                    if legacy_path and candidate == root / legacy_path and len(matches) == 1:
-                        selected_legacy_path = legacy_path
-                break
+        candidate = root / path
+        if candidate.exists():
+            resolved = candidate.resolve()
+            if resolved not in matches:
+                matches.append(resolved)
 
     if len(matches) > 1:
         shadowed = ", ".join(f"`{m}`" for m in matches[1:])
@@ -405,8 +395,6 @@ def _asset_config_path(flag: str, value: str) -> str:
             f"and ignoring {shadowed}. Pass `--config <path>` to select a different one."
         )
     if matches:
-        if selected_legacy_path:
-            logger.warning(f"Model backend path `{selected_legacy_path}` is deprecated; move it to `{path}`.")
         return str(matches[0])
 
     if flag == "environment" and value in LEGACY_ENVIRONMENT_ALIASES:

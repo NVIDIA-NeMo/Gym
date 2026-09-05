@@ -150,7 +150,7 @@ ns nemo_gym_rollouts \
     --server_nodes 2 \
     --server_args "--tensor-parallel-size 8 --data-parallel-size 1 --data-parallel-size-local 1 --data-parallel-backend ray --distributed-executor-backend ray --api-server-count 1 --reasoning-parser deepseek_r1 --trust-remote-code --dtype auto --enforce-eager" \
     --model "$MODEL" \
-    --config_paths "benchmarks/wmt24pp/config.yaml,model_backends/vllm_model/configs/vllm_model.yaml" \
+    --config_paths "benchmarks/wmt24pp/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml" \
     --input_file benchmarks/wmt24pp/data/wmt24pp_benchmark.jsonl \
     --output_dir /workspace/wmt24pp_smoke \
     --expname wmt24pp_smoke \

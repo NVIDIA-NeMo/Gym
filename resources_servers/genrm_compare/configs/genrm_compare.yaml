@@ -5,7 +5,7 @@
 # and optionally 'principle' (see use_principle and default_principle below).
 #
 # The GenRM model server is defined by the top-level "genrm_model" block below (same
-# structure as model_backends/genrm_model/configs/genrm_model.yaml). Override
+# structure as responses_api_models/genrm_model/configs/genrm_model.yaml). Override
 # genrm_model_server.name to use a different model server (e.g. from another config).
 #
 # Expected GenRM output format (JSON):
@@ -81,7 +81,7 @@ genrm_compare_resources_server:
       description: GenRM pairwise comparison for RLHF training
       value: Compare multiple candidate responses using GenRM model
 
-# GenRM model server (local vLLM). Same structure as model_backends/genrm_model/configs/genrm_model.yaml.
+# GenRM model server (local vLLM). Same structure as responses_api_models/genrm_model/configs/genrm_model.yaml.
 # Uses ${genrm_model_name} from env. Load this block when running genrm_compare, or load that file instead.
 genrm_model:
   responses_api_models:

@@ -33,7 +33,7 @@ Environments decompose into four concepts:
 | Dataset | JSONL: one row per task |
 | Agent Harness | FastAPI Agent Server (`responses_api_agents/`) |
 | Verifier + State | FastAPI Resources Server (`resources_servers/`) |
-| Model | FastAPI Model Server (`model_backends/`) or your own |
+| Model | FastAPI Model Server (`responses_api_models/`) or your own |
 
 Base class hierarchy:
 ```

@@ -86,7 +86,7 @@ records `spec_decode_unavailable: true` on every row and
 
 A ready-to-use demo config that bakes ngram speculative decoding into a
 `local_vllm_model` lives at
-[`model_backends/local_vllm_model/configs/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec.yaml`](../../model_backends/local_vllm_model/configs/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec.yaml).
+[`responses_api_models/local_vllm_model/configs/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec.yaml`](../../responses_api_models/local_vllm_model/configs/Qwen/Qwen3-30B-A3B-Instruct-2507-ngram-specdec.yaml).
 The relevant block to copy into your own model config is:
 
 ```yaml

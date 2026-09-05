@@ -42,7 +42,7 @@ The default setup writes capture records to a node-local directory and lets Gym 
 
 ### 1. Configure the model server for training
 
-Use `model_backends/vllm_model/configs/vllm_model_for_training.yaml` as the model-server config. It enables token information in model responses.
+Use `responses_api_models/vllm_model/configs/vllm_model_for_training.yaml` as the model-server config. It enables token information in model responses.
 
 External harnesses often omit sampling parameters or send serving-oriented defaults. Pin the parameters used by training with `sampling_overrides` so every request uses the policy's intended sampling configuration:
 
@@ -138,7 +138,7 @@ Some harnesses reshape an assistant turn before sending the next request. A chat
 Prefix supply asks a compatible inference backend to begin the next prompt with the verified parent's exact tokens. Enable the Gym model-server side with this config overlay:
 
 ```text
-model_backends/vllm_model/configs/vllm_model_supply_prefix.yaml
+responses_api_models/vllm_model/configs/vllm_model_supply_prefix.yaml
 ```
 
 The backend must support Gym's required-prefix request and return the prompt token ids actually used for generation. Gym verifies that evidence before accepting prefix supply. A missing or mismatched proof fails the model call instead of silently producing an off-policy capture.

@@ -17,7 +17,7 @@ GPQA-specific verifier built on top of `resources_servers/mcqa`.
 Use GPQA-Diamond with:
 
 - `responses_api_agents/simple_agent`
-- `model_backends/*` (typically `policy_model`)
+- `responses_api_models/*` (typically `policy_model`)
 - `resources_servers/gpqa_diamond`
 
 The server verifies the model response and returns reward `1.0` for exact

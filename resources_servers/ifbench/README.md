@@ -13,7 +13,7 @@ This resources server evaluates instruction following using AllenAI's [IFBench](
 Use IFBench with:
 
 - `responses_api_agents/simple_agent`
-- `model_backends/*` (typically `policy_model`)
+- `responses_api_models/*` (typically `policy_model`)
 - `resources_servers/ifbench`
 
 The server evaluates each instruction in `instruction_id_list` against the model response and returns a reward between 0.0 and 1.0.

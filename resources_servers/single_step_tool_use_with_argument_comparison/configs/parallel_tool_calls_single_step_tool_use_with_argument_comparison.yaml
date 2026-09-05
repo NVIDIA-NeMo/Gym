@@ -95,7 +95,7 @@ parallel_tool_calls_single_step_tool_use_with_argument_comparison_agent:
         type: resources_servers
         name: parallel_tool_calls_single_step_tool_use_with_argument_comparison_resources_server
       # `policy_model` is the name NeMo-RL supplies for its vLLM policy via
-      # model_backends/vllm_model/configs/vllm_model_for_training.yaml, so this environment
+      # responses_api_models/vllm_model/configs/vllm_model_for_training.yaml, so this environment
       # can be trained against from NeMo-RL without any adapter.
       model_server:
         type: responses_api_models

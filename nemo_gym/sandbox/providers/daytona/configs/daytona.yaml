@@ -8,7 +8,7 @@
 # providers is swapping this config path in `+config_paths` (no agent edit):
 #
 #   AGENT=responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml
-#   MODEL=model_backends/vllm_model/configs/vllm_model.yaml
+#   MODEL=responses_api_models/vllm_model/configs/vllm_model.yaml
 #   gym env start \
 #       --config $AGENT \
 #       --config nemo_gym/sandbox/providers/daytona/configs/daytona.yaml \

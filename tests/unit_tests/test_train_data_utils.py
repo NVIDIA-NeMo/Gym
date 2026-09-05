@@ -42,7 +42,7 @@ def load_example_multi_step_test_global_config_dict() -> DictConfig:
             {
                 "config_paths": [
                     "resources_servers/example_multi_step/configs/example_multi_step.yaml",
-                    "model_backends/openai_model/configs/openai_model.yaml",
+                    "responses_api_models/openai_model/configs/openai_model.yaml",
                 ],
                 # For policy_model
                 "policy_base_url": "",

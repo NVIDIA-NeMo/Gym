@@ -26,7 +26,7 @@ Add the provider config beside the agent and model configs:
 gym env start \
   --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
   --config nemo_gym/sandbox/providers/e2b/configs/e2b.yaml \
-  --config model_backends/vllm_model/configs/vllm_model.yaml
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml
 ```
 
 ## Templates

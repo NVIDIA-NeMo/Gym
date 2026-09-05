@@ -19,7 +19,7 @@ the agent.
 The benchmark chains in `resources_servers/labbench2_vlm/configs/judge_model_openai.yaml`,
 which targets an OpenAI-compatible hosted endpoint. To use a different judge
 (e.g. a local vLLM), drop that chain and supply your own `responses_api_models`
-instance named `judge_model` — see `model_backends/vllm_model/configs/vllm_model.yaml`
+instance named `judge_model` — see `responses_api_models/vllm_model/configs/vllm_model.yaml`
 for the vLLM form.
 
 Credentials go in `env.yaml` at the **repository root** (the parser loads
@@ -85,7 +85,7 @@ After changing `example.jsonl`, regenerate its static validation metrics:
 .venv/bin/gym dataset collate \
   --resources-server labbench2_vlm \
   --config resources_servers/labbench2_vlm/configs/judge_model_openai.yaml \
-  --config model_backends/openai_model/configs/openai_model.yaml \
+  --config responses_api_models/openai_model/configs/openai_model.yaml \
   --mode example_validation \
   --output-dir /tmp/labbench2_vlm_example_validation \
   +overwrite_metrics_conflicts=true

@@ -269,7 +269,7 @@ gym list agents --json | jq '.[] | {name, self_contained}'
 
 ### `gym list models`
 
-List the model servers under `model_backends/`.
+List the model servers under `responses_api_models/`.
 The value in the **Model** column corresponds to a config flavor and can be passed as the `--model-type` flag to other commands.
 
 | Option | Description |
@@ -500,7 +500,7 @@ Unlike `gym env validate`, `resolve` substitutes no dummy model, so a model conf
 # Merge a resources-server config with a model config, apply an override, and print the result
 gym env resolve \
     --config resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml \
-    --config model_backends/openai_model/configs/openai_model.yaml \
+    --config responses_api_models/openai_model/configs/openai_model.yaml \
     ++responses_create_params.temperature=0.6 \
     ++policy_base_url=https://api.openai.com/v1 \
     ++policy_api_key=sk-example \
@@ -796,7 +796,7 @@ Merge sharded rollout results into a single rollouts file with aggregate metrics
 ```bash
 gym eval aggregate \
     --config benchmarks/aime24/config.yaml \
-    --config model_backends/vllm_model/configs/vllm_model.yaml \
+    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
     --input-glob 'results/rollouts-rs*-chunk*.jsonl' \
     --output results/rollouts.jsonl
 ```
@@ -1037,7 +1037,7 @@ The most common Hydra overrides now have dedicated flags:
 ```bash
 # Start servers
 # Before:
-ng_run "+config_paths=[resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,model_backends/openai_model/configs/openai_model.yaml]"
+ng_run "+config_paths=[resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml,responses_api_models/openai_model/configs/openai_model.yaml]"
 # After:
 gym env start \
     --resources-server example_single_tool_call \
@@ -1045,7 +1045,7 @@ gym env start \
 
 # End-to-end rollout collection
 # Before:
-config_paths="model_backends/openai_model/configs/openai_model.yaml,resources_servers/math_with_judge/configs/math_with_judge.yaml"
+config_paths="responses_api_models/openai_model/configs/openai_model.yaml,resources_servers/math_with_judge/configs/math_with_judge.yaml"
 ng_e2e_collect_rollouts "+config_paths=[${config_paths}]" \
     ++output_jsonl_fpath=results/aime24.jsonl \
     ++split=validation

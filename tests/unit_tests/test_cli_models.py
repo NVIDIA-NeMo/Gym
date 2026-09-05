@@ -162,16 +162,3 @@ class TestListModels:
             list_models()
         expected_config = (model_dir / "configs" / "my_model.yaml").resolve()
         assert f"config: {expected_config}" in capsys.readouterr().out
-
-    def test_inspect_discovers_legacy_plugin_path(self, tmp_path: Path, capsys, monkeypatch) -> None:
-        model_dir = tmp_path / "responses_api_models" / "legacy_model"
-        (model_dir / "configs").mkdir(parents=True)
-        (model_dir / "configs" / "legacy_model.yaml").write_text("legacy_model: {}\n")
-        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
-        with patch(
-            "nemo_gym.cli.models.get_global_config_dict",
-            return_value=_mock_global_config({"component_name": "legacy_model"}),
-        ):
-            list_models()
-
-        assert f"config: {(model_dir / 'configs' / 'legacy_model.yaml').resolve()}" in capsys.readouterr().out

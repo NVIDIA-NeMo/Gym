@@ -53,7 +53,7 @@ message.
 The server config references a `judge_model` that callers must
 provide.  The bundled `benchmarks/ugphysics/judge_gptoss20b.yaml`
 (`openai/gpt-oss-20b` via NVIDIA's public NIM) is a runnable default;
-swap it for any other `model_backends/*` config that exposes a
+swap it for any other `responses_api_models/*` config that exposes a
 `judge_model` server name to use a different judge.
 
 ```bash

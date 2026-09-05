@@ -555,7 +555,7 @@ Start the server with `verify_golden_patch=true`:
 ```bash
 # SWE-bench Verified
 ng_run "+config_paths=[responses_api_agents/swe_agents/configs/swebench_openhands.yaml,\
-model_backends/vllm_model/configs/vllm_model.yaml]" \
+responses_api_models/vllm_model/configs/vllm_model.yaml]" \
     +swe_agents.responses_api_agents.swe_agents.verify_golden_patch=true \
     +swe_agents.responses_api_agents.swe_agents.container_formatter=/lustre/xxx/images/swe-bench/swebench_sweb.eval.x86_64.\{instance_id\}.sif \
     +swe_agents.responses_api_agents.swe_agents.model_server.name=vllm_model

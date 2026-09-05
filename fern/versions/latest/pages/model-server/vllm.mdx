@@ -7,7 +7,7 @@ position: 5
 
 Most open-source models use Chat Completions format, while NeMo Gym uses the Responses API natively. VLLMModel bridges this gap by converting between the two formats automatically. For background on why NeMo Gym chose the Responses API and how the two schemas differ, see [responses-api-evolution](/infrastructure/engineering-notes/responses-api-evolution).
 
-VLLMModel provides a Responses API to Chat Completions mapping middleware layer via `model_backends/vllm_model`. It assumes you are pointing to a vLLM instance since it relies on vLLM-specific endpoints like `/tokenize` and vLLM-specific arguments like `return_tokens_as_token_ids`.
+VLLMModel provides a Responses API to Chat Completions mapping middleware layer via `responses_api_models/vllm_model`. It assumes you are pointing to a vLLM instance since it relies on vLLM-specific endpoints like `/tokenize` and vLLM-specific arguments like `return_tokens_as_token_ids`.
 
 ## Two upstream backends
 
@@ -18,7 +18,7 @@ VLLMModel can drive either of vLLM's OpenAI-compatible endpoints, selected by th
 | `false` (default)             | `POST /v1/chat/completions`  | Instruct models. vLLM applies the chat template, runs reasoning- and tool-call parsers server-side. The default rollout config (`vllm_model.yaml`) and training config (`vllm_model_for_training.yaml`) both target this backend. |
 | `true`                        | `POST /v1/completions`       | Base (non-instruct) models, or cases where the caller has already rendered the full prompt string upstream and wants the bytes forwarded verbatim. See [The /v1/completions backend](#the-v1completions-backend) below. |
 
-**To use VLLMModel, just change the `model_backends/openai_model/configs/openai_model.yaml` in your config paths to `model_backends/vllm_model/configs/vllm_model.yaml`!**
+**To use VLLMModel, just change the `responses_api_models/openai_model/configs/openai_model.yaml` in your config paths to `responses_api_models/vllm_model/configs/vllm_model.yaml`!**
 ```bash
 gym env start \
     --resources-server example_multi_step \
@@ -31,7 +31,7 @@ VLLMModel connects NeMo Gym to a vLLM server that you start and manage yourself.
 
 ## Use VLLMModel
 Below is an e2e example of how to spin up a NeMo Gym compatible vLLM Chat Completions OpenAI server and run rollout collection with it.
-This section walks through starting a vLLM server manually and connecting NeMo Gym to it through `model_backends/vllm_model`.
+This section walks through starting a vLLM server manually and connecting NeMo Gym to it through `responses_api_models/vllm_model`.
 If you want NeMo Gym to manage the vLLM server lifecycle for you instead, see [LocalVLLMModel](/model-server/local-vllm).
 
 ### Install vLLM
@@ -154,7 +154,7 @@ gym eval run --no-serve \
 
 ## The /v1/completions backend
 
-Set `use_completions_api: true` to drive vLLM's text-completions endpoint instead of chat completions. A ready-to-use config ships at `model_backends/vllm_model/configs/vllm_model_completions.yaml`:
+Set `use_completions_api: true` to drive vLLM's text-completions endpoint instead of chat completions. A ready-to-use config ships at `responses_api_models/vllm_model/configs/vllm_model_completions.yaml`:
 
 ```yaml
 policy_model:
@@ -219,7 +219,7 @@ The end-to-end flow is identical to the [Use VLLMModel](#use-vllmmodel) walkthro
 ```bash
 gym env start \
     --config resources_servers/example_multi_step/configs/example_multi_step.yaml \
-    --config model_backends/vllm_model/configs/vllm_model_completions.yaml \
+    --config responses_api_models/vllm_model/configs/vllm_model_completions.yaml \
     --model-url http://0.0.0.0:10240/v1 \
     --model <your-model> \
     --model-api-key dummy_key

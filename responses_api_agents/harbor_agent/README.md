@@ -313,7 +313,7 @@ export DAYTONA_API_KEY=<your-daytona-api-key>
 ```
 
 Then add the policy model server settings to repo-root `env.yaml`, using the
-same keys consumed by `model_backends/vllm_model/configs/vllm_model.yaml`:
+same keys consumed by `responses_api_models/vllm_model/configs/vllm_model.yaml`:
 
 ```yaml
 policy_base_url: <openai-compatible-base-url>
@@ -409,7 +409,7 @@ without involving NeMo Gym's model-server routing.
 
 Pass `chat_template_kwargs` to the tokenize endpoint.
 
-**`Gym/model_backends/vllm_model/app.py`** — the `/tokenize` endpoint must
+**`Gym/responses_api_models/vllm_model/app.py`** — the `/tokenize` endpoint must
 receive `chat_template_kwargs` (e.g., `truncate_history_thinking: false`) to match
 the tokenization used during chat completion. Without this, the tokenize call uses
 the template's default `truncate_history_thinking=True`, which strips reasoning from

@@ -184,7 +184,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=(
             "resources_servers/terminus_judge/configs/terminus_judge_simple.yaml,"
-            "model_backends/openai_model/configs/openai_model.yaml"
+            "responses_api_models/openai_model/configs/openai_model.yaml"
         ),
         help="Comma-separated config path list used by ng_run in Hydra list syntax.",
     )

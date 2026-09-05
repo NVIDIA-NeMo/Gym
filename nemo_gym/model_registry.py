@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Registry of model backends under ``model_backends/<name>/``.
+"""Registry of model servers under ``responses_api_models/<name>/``.
 
 Maps each model dir to the config flavors it ships (``configs/<flavor>.yaml``), so they can be
 enumerated by the token passed to ``--model-type`` (see :attr:`ModelEntry.model_types`). Reads the
@@ -23,12 +23,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict
 
-from nemo_gym import PARENT_DIR, component_search_roots
-from nemo_gym._config_aliases import LEGACY_MODEL_BACKENDS_SUBDIR, MODEL_BACKENDS_SUBDIR
-from nemo_gym.discovery import merge_by_name
+from nemo_gym import PARENT_DIR
+from nemo_gym.discovery import discover_components
 
 
-MODELS_SUBDIR = MODEL_BACKENDS_SUBDIR
+MODELS_SUBDIR = "responses_api_models"
 MODELS_DIR = PARENT_DIR / MODELS_SUBDIR
 MODEL_CONFIGS_SUBDIR = "configs"
 
@@ -43,7 +42,7 @@ class ModelEntry:
 
 
 def _discover_models_in_dir(models_dir: Path) -> Dict[str, ModelEntry]:
-    """Map model name -> :class:`ModelEntry` for every config flavor under one ``model_backends/`` dir.
+    """Map model name -> :class:`ModelEntry` for every config flavor under one ``responses_api_models/`` dir.
 
     One entry per ``configs/<flavor>.yaml``: ``<dir>`` for the flavor named after the model, ``<dir>/<flavor>``
     for the rest. A config-less dir contributes nothing. Returns an empty dict if the directory is missing.
@@ -67,19 +66,7 @@ def _discover_models_in_dir(models_dir: Path) -> Dict[str, ModelEntry]:
 def discover_models() -> Dict[str, ModelEntry]:
     """Map model name -> :class:`ModelEntry` for every discoverable model server.
 
-    Scans the canonical ``model_backends/`` subdir of every :func:`~nemo_gym.component_search_roots`
-    root (``NEMO_GYM_EXTRA_ROOTS`` + cwd + built-ins). For a transition period it also discovers
-    third-party backends in the legacy ``responses_api_models/`` subdir. Root precedence is preserved,
-    and a canonical backend shadows a legacy backend in the same root.
+    Scans the ``responses_api_models/`` subdir of every :func:`~nemo_gym.discovery.component_search_roots`
+    root (``NEMO_GYM_EXTRA_ROOTS`` + cwd + built-ins), merged so user models shadow same-named built-ins.
     """
-    per_root = []
-    for root in component_search_roots():
-        per_root.append(
-            merge_by_name(
-                [
-                    _discover_models_in_dir(root / MODELS_SUBDIR),
-                    _discover_models_in_dir(root / LEGACY_MODEL_BACKENDS_SUBDIR),
-                ]
-            )
-        )
-    return merge_by_name(per_root)
+    return discover_components(MODELS_SUBDIR, _discover_models_in_dir)

@@ -38,7 +38,7 @@ source .venv/bin/activate
 
 gym dataset collate \
     --resources-server workplace_assistant \
-    --config model_backends/vllm_model/configs/vllm_model_for_training.yaml \
+    --config responses_api_models/vllm_model/configs/vllm_model_for_training.yaml \
     --output-dir data/workplace_assistant \
     --mode train_preparation \
     --download \
@@ -76,7 +76,7 @@ nemo_gym:
   nemo_gym_root: $NEMO_GYM_ROOT
   uses_reasoning_parser: false         # set true for reasoning models
   config_paths:
-    - $NEMO_GYM_ROOT/model_backends/vllm_model/configs/vllm_model_for_training.yaml
+    - $NEMO_GYM_ROOT/responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
     - $NEMO_GYM_ROOT/resources_servers/workplace_assistant/configs/workplace_assistant.yaml
 ```
 
@@ -110,7 +110,7 @@ To train on multiple environments simultaneously, create a mixed dataset where e
 nemo_gym:
   nemo_gym_root: $NEMO_GYM_ROOT
   config_paths:
-    - $NEMO_GYM_ROOT/model_backends/vllm_model/configs/vllm_model_for_training.yaml
+    - $NEMO_GYM_ROOT/responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
     - $NEMO_GYM_ROOT/resources_servers/math_with_judge/configs/math_with_judge.yaml
     - $NEMO_GYM_ROOT/resources_servers/workplace_assistant/configs/workplace_assistant.yaml
 ```
