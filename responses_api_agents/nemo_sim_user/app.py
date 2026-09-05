@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import Body, Request, Response
 from pydantic import Field
 
-from nemo_gym.agents.responses_api_agent import StandardResponsesAPIAgent, StandardResponsesAPIAgentConfig
+from nemo_gym.agents.responses_api_agent import ResponsesAPIAgent, ResponsesAPIAgentConfig
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -18,7 +18,7 @@ from nemo_gym.openai_utils import (
 )
 
 
-class NeMoSimUserAgentConfig(StandardResponsesAPIAgentConfig):
+class NeMoSimUserAgentConfig(ResponsesAPIAgentConfig):
     locale: str = "en_US"
     incremental_disclosure_ratio: float = Field(0.6, ge=0.0, le=1.0)
 
@@ -52,7 +52,7 @@ def _nemo_sim_api() -> dict[str, Any]:
     }
 
 
-class NeMoSimUserAgent(StandardResponsesAPIAgent):
+class NeMoSimUserAgent(ResponsesAPIAgent):
     """Derive a private user prompt from Responses metadata, then run the standard policy loop."""
 
     config: NeMoSimUserAgentConfig

@@ -3,8 +3,8 @@
 
 """Discoverable entrypoint for the core policy-only Responses API agent."""
 
-from nemo_gym.agents.responses_api_agent import StandardResponsesAPIAgent
+from nemo_gym.agents.responses_api_agent import ResponsesAPIAgent
 
 
 if __name__ == "__main__":
-    StandardResponsesAPIAgent.run_webserver()
+    ResponsesAPIAgent.run_webserver()
