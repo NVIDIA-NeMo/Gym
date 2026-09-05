@@ -56,6 +56,7 @@ from nemo_gym.cli.env import (
 )
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config_types import ConfigError, NoServerInstancesError, ResourcesServerInstanceConfig
+from nemo_gym.environment.manifest import RolloutSmoke
 from nemo_gym.environment.scaffold import ScaffoldError
 from nemo_gym.registry import EnvironmentCatalogEntry
 
@@ -573,12 +574,12 @@ class TestOnboardingCommandAdapters:
                 ),
             ),
             datasets=(SimpleNamespace(name="example", rows=1, type="example"),),
-            rollout_smoke={
-                "dataset": "example",
-                "rollout_limit": 1,
-                "timeout_seconds": 60,
-                "requirements": ["sandbox"],
-            },
+            rollout_smoke=RolloutSmoke(
+                dataset="example",
+                input_row_count=1,
+                per_rollout_timeout_seconds=60,
+                environment_requirements=["sandbox"],
+            ),
             synchronized_fields=("datasets",),
             warnings=("check this",),
         )
@@ -589,7 +590,10 @@ class TestOnboardingCommandAdapters:
         assert "Manifest: alpha 1.0.0" in captured.out
         assert "alpha_agent -> simple_agent" in captured.out
         assert "example: 1 rows" in captured.out
-        assert "Rollout smoke: dataset=example limit=1 timeout=60s requirements=sandbox" in captured.out
+        assert (
+            "Rollout smoke: dataset=example input_rows=1 per_rollout_timeout=60s "
+            "environment_requirements=sandbox" in " ".join(captured.out.split())
+        )
         assert "Synchronized: datasets" in captured.out
         assert "check this" in captured.err
 
@@ -833,14 +837,14 @@ class TestListEnvironments:
     def test_json_output_includes_rollout_smoke_contract(self, monkeypatch: MonkeyPatch, capsys) -> None:
         smoke = {
             "dataset": "example",
-            "rollout_limit": 1,
-            "timeout_seconds": 60,
-            "requirements": ["sandbox"],
+            "input_row_count": 1,
+            "per_rollout_timeout_seconds": 60,
+            "environment_requirements": ["sandbox"],
         }
         self._mock_catalog(
             monkeypatch,
             overrides={"json": True},
-            entries=(replace(self._ALPHA, rollout_smoke=smoke),),
+            entries=(replace(self._ALPHA, rollout_smoke=RolloutSmoke.model_validate(smoke)),),
         )
 
         list_environments()
@@ -892,11 +896,17 @@ class TestListEnvironments:
 
         assert "1 catalog entry has no modality metadata" in capsys.readouterr().err
 
-    def _mock_inspect_alpha(self, monkeypatch: MonkeyPatch, *, json_output: bool = False) -> None:
+    def _mock_inspect_alpha(
+        self,
+        monkeypatch: MonkeyPatch,
+        *,
+        json_output: bool = False,
+        rollout_smoke: RolloutSmoke | None = None,
+    ) -> None:
         self._mock_catalog(
             monkeypatch,
             overrides={"component_name": "alpha", "json": json_output},
-            entries=(self._ALPHA,),
+            entries=(replace(self._ALPHA, rollout_smoke=rollout_smoke),),
         )
         monkeypatch.setattr(
             nemo_gym.cli.env,
@@ -933,6 +943,30 @@ class TestListEnvironments:
         payload = json.loads(capsys.readouterr().out)
         assert payload["description"] == "Alpha env\nValue: Some value"
         assert "value" not in payload and "value" not in payload["details"]
+
+    @pytest.mark.parametrize("json_output", [False, True])
+    def test_inspect_renders_rollout_smoke_for_output_mode(
+        self, monkeypatch: MonkeyPatch, capsys, json_output: bool
+    ) -> None:
+        smoke = RolloutSmoke(
+            dataset="example",
+            input_row_count=1,
+            per_rollout_timeout_seconds=60,
+            environment_requirements=["sandbox"],
+        )
+        self._mock_inspect_alpha(monkeypatch, json_output=json_output, rollout_smoke=smoke)
+
+        list_environments()
+
+        output = capsys.readouterr().out
+        if json_output:
+            assert json.loads(output)["details"]["rollout_smoke"] == smoke.model_dump(mode="json")
+        else:
+            assert (
+                "rollout smoke: dataset=example input_rows=1 per_rollout_timeout=60s "
+                "environment_requirements=sandbox" in output
+            )
+            assert "{'dataset':" not in output
 
     def test_inspect_json_output(self, monkeypatch: MonkeyPatch, capsys) -> None:
         self._mock_inspect_alpha(monkeypatch, json_output=True)

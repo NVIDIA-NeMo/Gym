@@ -16,7 +16,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Literal, Optional
+from typing import Dict, Iterable, List, Literal, Optional, TypedDict
 
 import yaml
 from omegaconf import DictConfig, OmegaConf
@@ -25,7 +25,7 @@ from nemo_gym import PARENT_DIR, component_search_roots
 from nemo_gym.benchmarks import _benchmark_config_name, _benchmark_config_paths
 from nemo_gym.config_types import ConfigError
 from nemo_gym.discovery import iter_server_configs, read_config_metadata
-from nemo_gym.environment.manifest import EnvironmentManifest, ManifestError, load_manifest
+from nemo_gym.environment.manifest import EnvironmentManifest, ManifestError, RolloutSmoke, load_manifest
 
 
 ENVIRONMENTS_SUBDIR = "environments"
@@ -38,6 +38,15 @@ MANIFEST_FILENAME = "manifest.yaml"
 
 CatalogKind = Literal["environment", "benchmark"]
 CatalogStatus = Literal["experimental", "no-manifest"]
+
+
+class EnvironmentDetails(TypedDict):
+    domain: Optional[str]
+    description: Optional[str]
+    value: Optional[str]
+    resources_servers: List[str]
+    agent: Optional[str]
+    datasets: List[str]
 
 
 class RegistryError(ConfigError):
@@ -63,7 +72,7 @@ class EnvironmentCatalogEntry:
     licensing: Optional[str] = None
     lifecycle: Optional[str] = None
     resources_server_selector: Optional[str] = None
-    rollout_smoke: Optional[Dict[str, object]] = None
+    rollout_smoke: Optional[RolloutSmoke] = None
 
 
 @dataclass(frozen=True)
@@ -122,7 +131,7 @@ def _manifest_entry(
         "modality": manifest.modality,
         "licensing": manifest.licensing,
         "lifecycle": _enum_value(manifest.lifecycle),
-        "rollout_smoke": manifest.rollout_smoke.model_dump(mode="json") if manifest.rollout_smoke else None,
+        "rollout_smoke": manifest.rollout_smoke,
     }
     if expected_kind == "environment":
         return EnvironmentEntry(**values)
@@ -325,7 +334,7 @@ def resolve_catalog_entry(
     return matches[0]
 
 
-def read_environment_details(config_path: Path) -> Dict[str, object]:
+def read_environment_details(config_path: Path) -> EnvironmentDetails:
     """Deep-parse an environment config for the ``gym list environments <name>`` inspect view.
 
     Returns ``domain``, ``description`` (via :func:`~nemo_gym.discovery.read_config_metadata`), plus

@@ -9,6 +9,7 @@ import pytest
 
 from nemo_gym.environment.manifest import EnvironmentManifest, RolloutSmoke, dump_manifest, load_manifest
 from nemo_gym.environment.validation import (
+    DatasetValidation,
     EnvironmentValidationError,
     ResolvedComponent,
     ResolvedComposition,
@@ -16,6 +17,7 @@ from nemo_gym.environment.validation import (
     _infer_profile,
     _only_delegates_to_super,
     _only_raises_not_implemented,
+    _validate_rollout_smoke,
     _with_component_root,
     validate_environment,
 )
@@ -177,6 +179,7 @@ def test_reports_resolved_composition_and_declared_profile(tmp_path: Path) -> No
     assert report.profile_evidence == "selected agent implementation is simple_agent"
     assert report.warnings == ()
     assert "integration_profile" not in report.to_dict()
+    assert "rollout_smoke" not in report.to_dict()
     assert report.datasets[0].rows == 1
     assert report.grading_mode == "exact"
     assert report.rollout_driver is None
@@ -194,9 +197,9 @@ def test_reports_validated_rollout_smoke_contract(tmp_path: Path) -> None:
         update={
             "rollout_smoke": RolloutSmoke(
                 dataset="example",
-                rollout_limit=1,
-                timeout_seconds=60,
-                requirements=["sandbox"],
+                input_row_count=1,
+                per_rollout_timeout_seconds=60,
+                environment_requirements=["sandbox"],
             )
         }
     )
@@ -204,23 +207,60 @@ def test_reports_validated_rollout_smoke_contract(tmp_path: Path) -> None:
 
     report = validate_environment(manifest_path)
 
-    assert report.rollout_smoke == {
+    assert report.rollout_smoke is not None
+    assert report.rollout_smoke.model_dump(mode="json") == {
         "dataset": "example",
-        "rollout_limit": 1,
-        "timeout_seconds": 60,
-        "requirements": ["sandbox"],
+        "input_row_count": 1,
+        "per_rollout_timeout_seconds": 60,
+        "environment_requirements": ["sandbox"],
     }
+    assert report.to_dict()["rollout_smoke"] == report.rollout_smoke.model_dump(mode="json")
 
 
-def test_rollout_smoke_limit_cannot_exceed_dataset_rows(tmp_path: Path) -> None:
+def test_rollout_smoke_input_row_count_honors_dataset_boundary(tmp_path: Path) -> None:
     manifest_path = _asset(tmp_path)
+    dataset_path = manifest_path.parent / "data/example.jsonl"
+    dataset_path.write_text(dataset_path.read_text(encoding="utf-8") * 2, encoding="utf-8")
     manifest = load_manifest(manifest_path).model_copy(
-        update={"rollout_smoke": RolloutSmoke(dataset="example", rollout_limit=2)}
+        update={"rollout_smoke": RolloutSmoke(dataset="example", input_row_count=2)}
     )
     manifest_path.write_text(dump_manifest(manifest), encoding="utf-8")
 
-    with pytest.raises(EnvironmentValidationError, match="contains only 1 rows"):
+    report = validate_environment(manifest_path)
+
+    assert report.datasets[0].rows == 2
+
+    manifest = manifest.model_copy(update={"rollout_smoke": RolloutSmoke(dataset="example", input_row_count=3)})
+    manifest_path.write_text(dump_manifest(manifest), encoding="utf-8")
+
+    with pytest.raises(EnvironmentValidationError, match="contains only 2 rows"):
         validate_environment(manifest_path)
+
+
+def test_rollout_smoke_row_count_uses_referenced_dataset() -> None:
+    raw = _manifest()
+    raw["datasets"].append(
+        {
+            "name": "smoke",
+            "type": "example",
+            "jsonl_fpath": "environments/demo/data/smoke.jsonl",
+        }
+    )
+    raw["rollout_smoke"] = {"dataset": "smoke", "input_row_count": 2}
+    manifest = EnvironmentManifest.model_validate(raw)
+    reports = (
+        DatasetValidation(name="example", type="example", path="example.jsonl", rows=100),
+        DatasetValidation(name="smoke", type="example", path="smoke.jsonl", rows=2),
+    )
+
+    with pytest.raises(EnvironmentValidationError, match="references unknown dataset 'smoke'"):
+        _validate_rollout_smoke(manifest, reports[:1])
+
+    assert _validate_rollout_smoke(manifest, reports) == manifest.rollout_smoke
+
+    manifest = manifest.model_copy(update={"rollout_smoke": RolloutSmoke(dataset="smoke", input_row_count=3)})
+    with pytest.raises(EnvironmentValidationError, match="contains only 2 rows"):
+        _validate_rollout_smoke(manifest, reports)
 
 
 @pytest.mark.parametrize(

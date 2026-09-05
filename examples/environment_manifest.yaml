@@ -18,10 +18,13 @@ resources_server: example_resources_server
 agent_server: simple_agent
 model_server: policy_model
 datasets:
+  - name: validation
+    type: validation
+    jsonl_fpath: data/validation.jsonl
   - name: smoke
     type: example
     jsonl_fpath: data/smoke.jsonl
 rollout_smoke:
   dataset: smoke
-  rollout_limit: 1
-  timeout_seconds: 60
+  input_row_count: 1
+  per_rollout_timeout_seconds: 60

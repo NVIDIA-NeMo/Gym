@@ -15,7 +15,7 @@
 import difflib
 import json
 import sys
-from typing import Dict, Iterable, Optional
+from typing import Iterable, Mapping, Optional
 
 
 def did_you_mean(value: str, candidates: Iterable[str]) -> str:
@@ -39,7 +39,7 @@ def render_component_inspection(
     type_noun: str,
     domain: Optional[str] = None,
     description: Optional[str] = None,
-    details: Dict[str, str],
+    details: Mapping[str, object],
     usage: Optional[str] = None,
 ) -> None:
     """Render the uniform ``gym list <type> <name>`` inspect view (or its ``--json`` payload).
