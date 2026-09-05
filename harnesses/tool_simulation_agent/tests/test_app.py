@@ -149,7 +149,8 @@ class TestApp:
             "tool_choice": "auto",
             "tools": [],
         }
-        self._set_server_client_post_responses(server_client_post_mock, chat_response_object)
+        post_responses = self._set_server_client_post_responses(server_client_post_mock, chat_response_object)
+        post_responses[0].cookies = {"model_session": "model-cookie"}
         chat_response = test_client.post(
             "/v1/responses",
             json={
@@ -160,8 +161,11 @@ class TestApp:
                     }
                 ]
             },
+            cookies={"incoming_session": "response-cookie"},
         )
         assert chat_response.status_code == 200
+        assert chat_response.cookies["incoming_session"] == "response-cookie"
+        assert chat_response.cookies["model_session"] == "model-cookie"
         expected_chat_response_json = {
             "id": "chat_response_id",
             "created_at": 1,
@@ -221,7 +225,7 @@ class TestApp:
                     )
                 ],
             ),
-            cookies={},
+            cookies={"incoming_session": "response-cookie"},
         )
 
     async def test_run(self, agent_config: ToolSimulationAgentConfig) -> None:
@@ -401,7 +405,7 @@ class TestApp:
                     },
                     "response": full_tool_call_response,
                 },
-                cookies={"model_session": "verify-cookie"},
+                cookies={"incoming_session": "run-cookie", "model_session": "verify-cookie"},
             ),
         ]
         assert _calls_without_nulls(server_client_post_mock.call_args_list) == _calls_without_nulls(

@@ -31,7 +31,7 @@ from typing import Any, Dict, Optional
 import ray
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import PARENT_DIR, _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef
@@ -281,7 +281,7 @@ class GymAgentHarnessProcessor(BaseModel):
 
     def setup(self) -> Path:
         """Install agent deps into a portable prefix (idempotent, hash-keyed)."""
-        agent_dir = PARENT_DIR / "responses_api_agents" / self._agent_key
+        agent_dir = _resolve_under_cwd_or_install(Path("harnesses", self._agent_key))
         deps_dir = self._parent / "deps" / f"anyterminal_{self._agent_key}_deps"
         sentinel = deps_dir / ".installed"
         script = agent_dir / "scripts" / f"{self._agent_key}_deps.sh"

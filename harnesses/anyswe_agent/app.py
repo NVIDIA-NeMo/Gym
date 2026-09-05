@@ -29,7 +29,7 @@ from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym import PARENT_DIR
+from nemo_gym import PARENT_DIR, _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef
@@ -198,11 +198,12 @@ class GymAgentHarnessProcessor(BaseModel):
         sentinel = deps_dir / ".installed"
         scripts = Path(__file__).parent / "setup_scripts"
         script = scripts / f"{self._agent_key}_deps.sh"
+        agent_dir = _resolve_under_cwd_or_install(Path("harnesses", self._agent_key))
         sources = (
             script,
             scripts / "_portable_python.sh",
-            PARENT_DIR / "responses_api_agents" / self._agent_key / "requirements.txt",
-            *sorted((PARENT_DIR / "responses_api_agents" / self._agent_key).glob("*.py")),
+            agent_dir / "requirements.txt",
+            *sorted(agent_dir.glob("*.py")),
         )
         recipe = hashlib.sha256(b"".join(path.read_bytes() for path in sources if path.exists())).hexdigest()
         if sentinel.exists() and sentinel.read_text().strip() == recipe:

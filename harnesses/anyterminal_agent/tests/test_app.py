@@ -49,7 +49,7 @@ from harnesses.anyterminal_agent.app import (
     _safe_config_json,
     update_metrics,
 )
-from nemo_gym import PARENT_DIR
+from nemo_gym import PARENT_DIR, _resolve_under_cwd_or_install
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
@@ -138,7 +138,8 @@ class TestFormatContainer:
 
 class TestSetupScriptsExist:
     def test_supported_agents_have_deps_scripts(self) -> None:
-        assert (PARENT_DIR / "responses_api_agents" / "hermes_agent" / "scripts" / "hermes_agent_deps.sh").exists()
+        agent_dir = _resolve_under_cwd_or_install("harnesses/hermes_agent")
+        assert (agent_dir / "scripts" / "hermes_agent_deps.sh").exists()
         assert (Path(__file__).parent.parent / "setup_scripts" / "_portable_python.sh").exists()
 
 
