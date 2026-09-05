@@ -1504,6 +1504,24 @@ def _apply_verbosity(global_config_dict: DictConfig) -> None:
         logging.getLogger().setLevel(logging.DEBUG)
 
 
+def translate_interpolation_error(e: InterpolationResolutionError) -> ConfigInterpolationError:
+    """Same class of user error as an unset '???' (see raise_on_missing_values), reported the same way
+    instead of letting omegaconf's traceback reach the top level. Covers both a missing `${key}`
+    (InterpolationKeyError) and a failing resolver such as `${oc.env:VAR}`, which carries its own
+    message and so is passed through as-is."""
+    match = re.search(r"Interpolation key '([^']+)' not found", str(e))
+    if not match:
+        return ConfigInterpolationError(str(e))
+    key = match.group(1)
+    return ConfigInterpolationError(
+        f"""Config value '{e.full_key}' references '{key}', which is not set after merging.
+
+Provide it via a CLI override, in env.yaml, or in a config you pass via config_paths.
+For example, on the command line:
+  ++{key}=<value>"""
+    )
+
+
 def set_global_config_dict(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
     global_config_dict_parser_cls: Type[GlobalConfigDictParser] = GlobalConfigDictParser,
@@ -1512,21 +1530,7 @@ def set_global_config_dict(
     try:
         global_config_dict = global_config_dict_parser_cls().parse(global_config_dict_parser_config)
     except InterpolationResolutionError as e:
-        # Same class of user error as an unset '???' (see raise_on_missing_values), so report it the same
-        # way instead of letting omegaconf's traceback reach the top level. Covers both a missing `${key}`
-        # (InterpolationKeyError) and a failing resolver such as `${oc.env:VAR}`, which carries its own
-        # message and so is passed through as-is.
-        match = re.search(r"Interpolation key '([^']+)' not found", str(e))
-        if not match:
-            raise ConfigInterpolationError(str(e)) from e
-        key = match.group(1)
-        raise ConfigInterpolationError(
-            f"""Config value '{e.full_key}' references '{key}', which is not set after merging.
-
-Provide it via a CLI override, in env.yaml, or in a config you pass via config_paths.
-For example, on the command line:
-  ++{key}=<value>"""
-        ) from e
+        raise translate_interpolation_error(e) from e
 
     _GLOBAL_CONFIG_DICT = global_config_dict
 

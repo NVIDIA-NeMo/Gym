@@ -16,6 +16,7 @@ from typing import Any
 
 import orjson
 from omegaconf import DictConfig, OmegaConf
+from omegaconf.errors import InterpolationResolutionError
 from pydantic import BaseModel, ValidationError
 from yaml import YAMLError
 
@@ -35,6 +36,7 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     dataset_agent_pins,
     resolve_dataset_agent,
+    translate_interpolation_error,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 
@@ -171,14 +173,17 @@ def _resolve_manifest_composition(config_path: Path) -> ResolvedComposition:
     )
     parser = GlobalConfigDictParser()
     with _with_component_root(config_path):
-        resolved = parser.parse(
-            GlobalConfigDictParserConfig(
-                initial_global_config_dict=initial,
-                skip_load_from_cli=True,
-                skip_load_from_dotenv=True,
-                offline=True,
+        try:
+            resolved = parser.parse(
+                GlobalConfigDictParserConfig(
+                    initial_global_config_dict=initial,
+                    skip_load_from_cli=True,
+                    skip_load_from_dotenv=True,
+                    offline=True,
+                )
             )
-        )
+        except InterpolationResolutionError as e:
+            raise translate_interpolation_error(e) from e
     servers = parser.filter_for_server_instance_configs(resolved)
     by_instance = {server.name: server for server in servers}
     agents = [server for server in servers if server.SERVER_TYPE == "responses_api_agents"]
