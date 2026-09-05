@@ -211,3 +211,60 @@ def project_nooa_episode(
         response=response,
         observations=AgentObservationBundle(source="nooa", records=[*invocations, *tools], gaps=gaps),
     )
+
+
+def _ends_with_completed_assistant_message(response: NeMoGymResponse) -> bool:
+    if not response.output:
+        return False
+    last = response.output[-1]
+    return isinstance(last, NeMoGymResponseOutputMessage) and last.status == "completed"
+
+
+def ensure_verifier_final_message(
+    response: NeMoGymResponse,
+    return_value: Any,
+) -> tuple[NeMoGymResponse, list[ObservationGap]]:
+    """Add a verifier-facing fallback message without mutating the ATIF episode."""
+
+    gaps: list[ObservationGap] = []
+    if _ends_with_completed_assistant_message(response) or return_value is None:
+        return response, gaps
+
+    # Verifiers commonly grade the last assistant message, so preserve the full ATIF trace and append the
+    # entrypoint return only when that trace does not already end with a completed assistant message.
+    output = list(response.output)
+    output.append(
+        NeMoGymResponseOutputMessage(
+            id="nooa_fallback",
+            content=[NeMoGymResponseOutputText(annotations=[], text=_json_output(return_value))],
+        )
+    )
+    gaps.append(
+        ObservationGap(
+            code="non_trainable_fallback_output",
+            detail="NOOA returned a value without a final model-authored message.",
+        )
+    )
+    return response.model_copy(update={"output": output}), gaps
+
+
+def finalize_observations(
+    observations: AgentObservationBundle,
+    *,
+    extra_gaps: list[ObservationGap] | None = None,
+    termination_reason: str | None = None,
+    termination_error: str | None = None,
+) -> AgentObservationBundle:
+    """Merge lifecycle-only observation gaps onto the ATIF projection."""
+
+    gaps = [*observations.gaps, *(extra_gaps or [])]
+    if termination_reason is not None:
+        gaps.append(
+            ObservationGap(
+                code=termination_reason,
+                detail=termination_error or f"NOOA execution terminated with {termination_reason}.",
+            )
+        )
+    if not gaps:
+        return observations
+    return observations.model_copy(update={"gaps": gaps})

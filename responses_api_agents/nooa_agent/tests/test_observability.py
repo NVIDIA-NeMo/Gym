@@ -16,9 +16,19 @@
 from nooa.atif import AgentSchema, ObservationResultSchema, ObservationSchema, StepObject, ToolCallSchema, Trajectory
 
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentInvocation, ModelCallRef, ToolCallObservation
-from responses_api_agents.nooa_agent.observability import project_nooa_episode
+from nemo_gym.openai_utils import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+)
+from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ModelCallRef, ToolCallObservation
+from responses_api_agents.nooa_agent.observability import (
+    ensure_verifier_final_message,
+    finalize_observations,
+    project_nooa_episode,
+)
 
 
 def test_projects_atif_semantics_and_model_references() -> None:
@@ -152,3 +162,88 @@ def test_reports_ambiguous_model_ownership_for_nested_trajectories() -> None:
     assert invocations[1].parent_invocation_id == "root"
     assert all(not invocation.model_calls for invocation in invocations)
     assert [gap.code for gap in episode.observations.gaps] == ["model_call_ownership_unavailable"]
+
+
+def test_ensure_verifier_final_message_adds_fallback_without_mutating_episode() -> None:
+    response = NeMoGymResponse(
+        id="nooa-test",
+        created_at=0,
+        model="nooa",
+        object="response",
+        output=[],
+        parallel_tool_calls=False,
+        tool_choice="none",
+        tools=[],
+    )
+
+    adapted, gaps = ensure_verifier_final_message(response, "fallback answer")
+
+    assert adapted.output[0].content[0].text == "fallback answer"
+    assert [gap.code for gap in gaps] == ["non_trainable_fallback_output"]
+    assert response.output == []
+
+
+def test_ensure_verifier_final_message_appends_after_intermediate_message_and_tool_call() -> None:
+    response = NeMoGymResponse(
+        id="nooa-test",
+        created_at=0,
+        model="nooa",
+        object="response",
+        output=[
+            NeMoGymResponseOutputMessage(
+                id="intermediate",
+                content=[NeMoGymResponseOutputText(annotations=[], text="I will check.")],
+            ),
+            NeMoGymResponseFunctionToolCall(
+                id="return-1",
+                call_id="return-1",
+                name="return_result",
+                arguments='{"result":"cold"}',
+            ),
+        ],
+        parallel_tool_calls=False,
+        tool_choice="none",
+        tools=[],
+    )
+
+    adapted, gaps = ensure_verifier_final_message(response, "It is cold.")
+
+    assert [item.type for item in adapted.output] == ["message", "function_call", "message"]
+    assert adapted.output[-1].content[0].text == "It is cold."
+    assert [gap.code for gap in gaps] == ["non_trainable_fallback_output"]
+
+
+def test_ensure_verifier_final_message_preserves_terminal_message() -> None:
+    response = NeMoGymResponse(
+        id="nooa-test",
+        created_at=0,
+        model="nooa",
+        object="response",
+        output=[
+            NeMoGymResponseOutputMessage(
+                id="final",
+                content=[NeMoGymResponseOutputText(annotations=[], text="It is cold.")],
+            )
+        ],
+        parallel_tool_calls=False,
+        tool_choice="none",
+        tools=[],
+    )
+
+    adapted, gaps = ensure_verifier_final_message(response, "It is cold.")
+
+    assert adapted is response
+    assert gaps == []
+
+
+def test_finalize_observations_appends_termination_gap() -> None:
+    bundle = AgentObservationBundle(source="nooa", records=[], gaps=[])
+
+    finalized = finalize_observations(
+        bundle,
+        termination_reason="policy_budget_exceeded",
+        termination_error="budget exhausted",
+    )
+
+    assert finalized.gaps[0].code == "policy_budget_exceeded"
+    assert finalized.gaps[0].detail == "budget exhausted"
