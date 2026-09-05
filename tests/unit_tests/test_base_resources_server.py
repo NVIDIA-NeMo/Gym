@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 from nemo_gym.base_resources_server import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
+    BaseSeedSessionResponse,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
@@ -70,3 +71,29 @@ class TestBaseResourcesServer:
 
     def test_reverify_mode(self) -> None:
         assert asyncio.run(_resources_server().get_reverify_mode()) == ReverifyMode.UNKNOWN
+
+
+class TestEnvironmentSessionId:
+    """`env_session_id` gives a rollout record and an environment log a join key."""
+
+    def _params(self) -> NeMoGymResponseCreateParamsNonStreaming:
+        return NeMoGymResponseCreateParamsNonStreaming(input="hi")
+
+    def _response(self) -> NeMoGymResponse:
+        return NeMoGymResponse.model_construct(id="resp-1", output=[])
+
+    def test_absent_by_default_on_both_ends(self) -> None:
+        assert BaseSeedSessionResponse().env_session_id is None
+        verify = BaseVerifyResponse(responses_create_params=self._params(), response=self._response(), reward=1.0)
+        assert verify.env_session_id is None
+
+    def test_survives_the_seed_to_verify_round_trip(self) -> None:
+        seeded = BaseSeedSessionResponse(env_session_id="browser-ctx-9c41")
+        verify = BaseVerifyResponse(
+            responses_create_params=self._params(),
+            response=self._response(),
+            reward=0.0,
+            env_session_id=seeded.env_session_id,
+        )
+        assert seeded.model_dump()["env_session_id"] == "browser-ctx-9c41"
+        assert verify.model_dump()["env_session_id"] == "browser-ctx-9c41"

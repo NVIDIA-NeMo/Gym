@@ -108,6 +108,10 @@ class BaseVerifyResponse(BaseVerifyRequest):
     # Machine-readable handling belongs to `mask_sample`/`failure_kind`.
     failure_reason: Optional[str] = None
 
+    # The same environment-side handle reported by ``/seed_session``, returned with the
+    # score so a rollout record and an environment log line share a join key.
+    env_session_id: Optional[str] = None
+
 
 class BaseMultiRewardVerifyResponse(BaseVerifyResponse):
     """Base verify response for environments with multiple reward objectives.
@@ -130,7 +134,11 @@ class BaseSeedSessionRequest(BaseModel):
 
 
 class BaseSeedSessionResponse(BaseModel):
-    pass
+    # The environment-side handle for this session: a container id, a browser context id,
+    # a provider session id. Opaque to Gym, and optional - an environment that does not
+    # report one is unaffected. Returning it lets the training side join its own rollout
+    # records against environment- and provider-side logs without timestamp guessing.
+    env_session_id: Optional[str] = None
 
 
 class MCPServerMetadata(BaseModel):
