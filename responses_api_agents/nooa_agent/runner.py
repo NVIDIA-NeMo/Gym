@@ -39,7 +39,6 @@ from responses_api_agents.nooa_agent.resource_tools import (
 class NOOARunRequest:
     row: Any
     rollout_id: str
-    task_id: str
     model_url_path: str
     model_cookies: dict[str, str] = field(default_factory=dict)
     resource_cookies: dict[str, str] = field(default_factory=dict)

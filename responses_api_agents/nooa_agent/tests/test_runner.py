@@ -132,7 +132,6 @@ async def test_embedded_runner_maps_full_row_and_attaches_resource_methods() -> 
         NOOARunRequest(
             row=row("Paris"),
             rollout_id="rollout-1",
-            task_id="task-1",
             model_url_path="/ng-rollout/rollout-1/v1/responses",
             resource_cookies={"session": "one"},
         )
@@ -154,7 +153,6 @@ async def test_constructs_a_fresh_agent_for_every_rollout() -> None:
         NOOARunRequest(
             row=row("Paris"),
             rollout_id="one",
-            task_id="task",
             model_url_path="/one/v1/responses",
         )
     )
@@ -162,7 +160,6 @@ async def test_constructs_a_fresh_agent_for_every_rollout() -> None:
         NOOARunRequest(
             row=row("Berlin"),
             rollout_id="two",
-            task_id="task",
             model_url_path="/two/v1/responses",
         )
     )
