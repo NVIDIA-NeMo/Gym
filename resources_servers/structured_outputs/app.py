@@ -293,34 +293,111 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
                 parsed = None
         return parsed
 
-    def strictify_schema(self, schema: Dict[str, Any]):
-        """Make a schema strict as per OpenAPI guidelines"""
-        if isinstance(schema, Dict):
+    def strictify_schema(self, schema: Any):
+        """Make a schema strict as per OpenAPI guidelines.
+
+        Recurses into dict values and list items so object schemas nested
+        inside ``oneOf`` / ``anyOf`` branches are strictified at the level
+        they appear. For ``allOf``, branches are recursed into so that
+        nested composites (e.g. a ``oneOf`` inside an ``allOf`` branch) are
+        strictified, but ``additionalProperties`` is stripped from each
+        branch to prevent cross-branch rejection — one branch's
+        ``additionalProperties: False`` would otherwise reject fields
+        contributed by its siblings.
+        """
+        if isinstance(schema, list):
+            for item in schema:
+                self.strictify_schema(item)
+        elif isinstance(schema, dict):
             if "properties" in schema:
                 schema["required"] = list(schema["properties"])
                 schema["additionalProperties"] = False
             for k, v in schema.items():
+                if k == "allOf":
+                    for branch in v if isinstance(v, list) else []:
+                        self.strictify_schema(branch)
+                        if isinstance(branch, dict):
+                            branch.pop("additionalProperties", None)
+                    continue
                 self.strictify_schema(v)
 
-    def coerce_xml_types(self, data: Any, schema: Dict[str, Any]) -> Any:
+    def coerce_xml_types(
+        self,
+        data: Any,
+        schema: Dict[str, Any],
+        root_schema: Dict[str, Any],
+    ) -> Any:
         """Recursively coerce xmltodict string values to match the JSON schema types.
 
         xmltodict.parse() returns all leaf values as strings. This method walks the
         parsed data alongside the schema and converts values where possible.
         On conversion failure the original value is returned so that schema
         validation can report the error.
+
+        ``root_schema`` is the top-level schema and is threaded through the
+        recursion so that internal ``$ref`` pointers of the form
+        ``#/$defs/<name>`` can be resolved. External refs (e.g. URLs) are
+        not supported.
+
+        Nullable union types of the form ``[<T>, "null"]`` are supported:
+        empty XML tags coerce to ``None``, otherwise the first non-null
+        member is used. Other multi-type unions are best-effort (we coerce
+        against the first non-null member).
         """
-        if not isinstance(schema, dict) or "type" not in schema:
+        if not isinstance(schema, dict):
+            return data
+
+        # Resolve $ref pointers so coercion works with $defs-based schemas.
+        if "$ref" in schema:
+            ref_path = schema["$ref"].removeprefix("#/")
+            resolved: Any = root_schema
+            for part in ref_path.split("/"):
+                resolved = resolved[part]
+            return self.coerce_xml_types(data, resolved, root_schema)
+
+        # Handle oneOf/anyOf: try coercing against each branch and pick the
+        # first one where coercion + validation succeeds.
+        for keyword in ("oneOf", "anyOf"):
+            if keyword in schema:
+                best = data
+                for branch in schema[keyword]:
+                    try:
+                        coerced = self.coerce_xml_types(data, branch, root_schema)
+                        branch_strict = json.loads(json.dumps(branch))
+                        self.strictify_schema(branch_strict)
+                        validate_against_schema_openapi(coerced, branch_strict)
+                        return coerced
+                    except Exception:
+                        best = coerced
+                        continue
+                return best
+
+        # Handle allOf: coerce through each branch cumulatively.
+        if "allOf" in schema:
+            result = data
+            for branch in schema["allOf"]:
+                result = self.coerce_xml_types(result, branch, root_schema)
+            return result
+
+        if "type" not in schema:
             return data
 
         schema_type = schema["type"]
+
+        # Nullable union types like ["integer", "null"]: empty data → null,
+        # otherwise coerce against the first non-null member. Parity with
+        # the CSV path's _coerce_csv_scalar.
+        if isinstance(schema_type, list):
+            if data is None or data == "":
+                return None if "null" in schema_type else data
+            schema_type = next((t for t in schema_type if t != "null"), schema_type[0])
 
         if schema_type == "object" and isinstance(data, dict):
             properties = schema.get("properties", {})
             coerced = {}
             for key, value in data.items():
                 if key in properties:
-                    coerced[key] = self.coerce_xml_types(value, properties[key])
+                    coerced[key] = self.coerce_xml_types(value, properties[key], root_schema)
                 else:
                     coerced[key] = value
             return coerced
@@ -337,7 +414,7 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
                 data = next(iter(data.values()))
             if not isinstance(data, list):
                 data = [data] if data is not None else []
-            return [self.coerce_xml_types(item, items_schema) for item in data]
+            return [self.coerce_xml_types(item, items_schema, root_schema) for item in data]
 
         # xmltodict returns None for empty tags like <field/> or <field></field>.
         # Coerce to "" only for string types (parity with JSON/YAML where "" is valid).
@@ -452,7 +529,7 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
 
         try:
             if schema_type == SchemaType.XML and self.config.xml_coerce_types:
-                response_obj = self.coerce_xml_types(response_obj, schema)
+                response_obj = self.coerce_xml_types(response_obj, schema, root_schema=schema)
             if schema_type == SchemaType.CSV:
                 response_obj = self.coerce_csv_types(response_obj, schema)
             validate_against_schema_openapi(response_obj, schema)
