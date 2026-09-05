@@ -317,6 +317,11 @@ def verify_target_match(
         # Check editor sub-command first (view vs str_replace vs create)
         r_cmd = extract_editor_command(rollout_args)
         e_cmd = extract_editor_command(expected_args)
+        if bool(r_cmd) != bool(e_cmd):
+            # One side has an editor command and the other lost it (e.g. the
+            # tool parser dropped a '<parametercommand>' header): not the same
+            # action. See the bash branch below.
+            return False
         if r_cmd and e_cmd and r_cmd != e_cmd:
             return False
         # Check target file (last 2 path components to avoid basename collisions)
@@ -343,6 +348,12 @@ def verify_target_match(
     if rollout_cat == "bash" and expected_cat == "bash":
         r_cmd = extract_command(rollout_args)
         e_cmd = extract_command(expected_args)
+        # A bash call whose command argument is missing cannot be the same
+        # action as one that has a command. vLLM's tool parser silently drops
+        # a parameter whose header lost its '=' ('<parametercommand>'), which
+        # used to fall through every check below and score full credit.
+        if bool(r_cmd) != bool(e_cmd):
+            return False
         # Check command verb matches (grep vs pytest vs cd)
         r_verb = extract_command_verb(r_cmd)
         e_verb = extract_command_verb(e_cmd)
@@ -431,7 +442,9 @@ def compute_argument_similarity(
         e_cmd = extract_command(expected_args)
         if r_cmd and e_cmd:
             return _capped_similarity(r_cmd, e_cmd)
-        return 1.0
+        # Both empty: nothing to compare. One empty: the rollout dropped (or
+        # invented) the command, which must not score as a perfect match.
+        return 1.0 if not r_cmd and not e_cmd else 0.0
 
     return 1.0  # non-edit/bash, similarity not applicable
 
