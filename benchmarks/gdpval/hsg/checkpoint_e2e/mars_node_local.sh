@@ -20,6 +20,13 @@ mars_validate_source_dir() {
         && -d $path && ! -L $path ]]
 }
 
+mars_marker_matches() {
+    local marker=$1 expected=$2 actual
+    [[ -f $marker && ! -L $marker ]] || return 1
+    actual=$(<"$marker") || return 1
+    [[ $actual == "$expected" ]]
+}
+
 mars_assert_node_local() {
     local path=$1 filesystem
     [[ $path == /raid/scratch/* && $path != *:* && $path != *$'\n'* \
@@ -81,7 +88,7 @@ mars_stage_package() {
     lock=$MARS_BASE/locks/package-$id.lock
     exec {mars_package_lock_fd}>"$lock"
     flock -x "$mars_package_lock_fd" || mars_fail "could not lock package stage" || return
-    if [[ ! -f $marker || -L $marker || $(<"$marker" 2>/dev/null) != "$MARS_PACKAGE_ID_EXPECTED" ]]; then
+    if ! mars_marker_matches "$marker" "$MARS_PACKAGE_ID_EXPECTED"; then
         temporary=$MARS_BASE/assets/.package-$id.${SLURM_JOB_ID}.$$
         rm -rf -- "$temporary"
         install -d -m 0700 "$temporary"
@@ -114,7 +121,7 @@ mars_stage_gym() {
     lock=$MARS_BASE/locks/gym-${revision:0:12}.lock
     exec {mars_gym_lock_fd}>"$lock"
     flock -x "$mars_gym_lock_fd" || mars_fail "could not lock Gym stage" || return
-    if [[ ! -f $marker || -L $marker || $(<"$marker" 2>/dev/null) != "$revision" ]]; then
+    if ! mars_marker_matches "$marker" "$revision"; then
         temporary=$MARS_BASE/assets/.gym-${revision:0:12}.${SLURM_JOB_ID}.$$
         rm -rf -- "$temporary"
         install -d -m 0700 "$temporary"
@@ -173,8 +180,7 @@ mars_stage_runtime() {
     lock=$MARS_BASE/locks/runtime-${MARS_GYM_REVISION_EXPECTED:0:12}-${runtime_id}.lock
     exec {mars_runtime_lock_fd}>"$lock"
     flock -x "$mars_runtime_lock_fd" || mars_fail "could not lock runtime stage" || return
-    if [[ ! -f $marker || -L $marker \
-        || $(<"$marker" 2>/dev/null) != "$MARS_PACKAGE_ID_EXPECTED" ]]; then
+    if ! mars_marker_matches "$marker" "$MARS_PACKAGE_ID_EXPECTED"; then
         rm -rf -- "$destination"
         PYTHONPATH="$MARS_GYM" "$MARS_PYTHON" "$MARS_PACKAGE/transport_runtime.py" materialize \
             --gym-root "$MARS_GYM" --runtime-root "$destination" --package-root "$MARS_PACKAGE"

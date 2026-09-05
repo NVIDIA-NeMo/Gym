@@ -365,7 +365,7 @@ launch_controller() {
         -t 12:00:00 --cpus-per-task=2 --mem=8G \
         -o "$RUN_DIR/logs/%j_existing_controller.out" \
         -e "$RUN_DIR/logs/%j_existing_controller.err" \
-        --export=RUN_DIR="$RUN_DIR",CHECKPOINT_E2E_AUTHORIZE_PROVIDER_CALLS="$authorize",CHECKPOINT_E2E_PERSISTENT_JUDGE_SESSION="$persistent_session",GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS="$GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS",PATH="$SAFE_PATH" \
+        --export=RUN_DIR="$RUN_DIR",CHECKPOINT_E2E_EXECUTION_PACKAGE="$ACTIVE_PACKAGE",CHECKPOINT_E2E_AUTHORIZE_PROVIDER_CALLS="$authorize",CHECKPOINT_E2E_PERSISTENT_JUDGE_SESSION="$persistent_session",GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS="$GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS",PATH="$SAFE_PATH" \
         "$ACTIVE_PACKAGE/existing_judge_controller.sbatch") \
         || fail "could not submit or adopt import-only controller"
     slurm_publish_job_receipt "$RUN_DIR/EXISTING_CONTROLLER.jobid" "$job" true >/dev/null \
