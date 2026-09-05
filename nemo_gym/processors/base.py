@@ -19,6 +19,7 @@ from abc import abstractmethod
 from collections.abc import Mapping
 from functools import wraps
 from typing import Any, Optional
+from warnings import warn
 
 from fastapi import Body, FastAPI
 
@@ -45,7 +46,10 @@ class BaseProcessor(AggregateMetricsMixin, SimpleServer):
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
         self.setup_session_middleware(app)
+        return self.register_processor_routes(app)
 
+    def register_processor_routes(self, app: FastAPI) -> FastAPI:
+        """Register rollout-processing routes on an existing FastAPI app."""
         attributes = {"nemo.gym.server.name": self.config.name}
         run = traced_rollout_endpoint(self.run, attributes)
 
@@ -92,6 +96,15 @@ class BaseProcessor(AggregateMetricsMixin, SimpleServer):
         pass
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        if self.config.skip_verification:
+            warn(
+                "Skipping aggregate metrics because skip_verification=True; "
+                "use disable_aggregation=True to avoid writing aggregate metric files.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return AggregateMetrics()
+
         return compute_aggregate_metrics(
             body.verify_responses,
             compute_metrics_fn=self.compute_metrics,

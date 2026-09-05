@@ -3,15 +3,19 @@
 
 """Reusable agent harnesses provided by NeMo Gym."""
 
-from nemo_gym.agents.base import BaseStandardResponsesAPIAgent
+from nemo_gym.agents.base import (
+    BaseResponsesAPIAgent,
+    BaseResponsesAPIAgentConfig,
+)
 from nemo_gym.agents.responses_api_agent import (
-    StandardResponsesAPIAgent,
-    StandardResponsesAPIAgentConfig,
+    ResponsesAPIAgent,
+    ResponsesAPIAgentConfig,
 )
 
 
 __all__ = [
-    "BaseStandardResponsesAPIAgent",
-    "StandardResponsesAPIAgent",
-    "StandardResponsesAPIAgentConfig",
+    "BaseResponsesAPIAgent",
+    "BaseResponsesAPIAgentConfig",
+    "ResponsesAPIAgent",
+    "ResponsesAPIAgentConfig",
 ]

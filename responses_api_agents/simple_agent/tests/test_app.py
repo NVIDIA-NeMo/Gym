@@ -21,7 +21,7 @@ from fastapi import Response
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.agents.responses_api_agent import StandardResponsesAPIAgent
+from nemo_gym.agents.responses_api_agent import ResponsesAPIAgent, ResponsesAPIAgentConfig
 from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
@@ -57,9 +57,9 @@ def _drop_nulls(value):
 
 
 def _make_agent(
-    observability_enabled: bool, agent_type: type[StandardResponsesAPIAgent] = StandardResponsesAPIAgent
-) -> tuple[StandardResponsesAPIAgent, MagicMock]:
-    config = SimpleAgentConfig(
+    observability_enabled: bool, agent_type: type[ResponsesAPIAgent] = ResponsesAPIAgent
+) -> tuple[ResponsesAPIAgent, MagicMock]:
+    config = ResponsesAPIAgentConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
@@ -94,7 +94,7 @@ def _mock_response(payload=None, *, status=200, content="") -> MagicMock:
 
 class TestApp:
     def test_sanity(self) -> None:
-        config = SimpleAgentConfig(
+        config = ResponsesAPIAgentConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
@@ -108,7 +108,7 @@ class TestApp:
                 name="",
             ),
         )
-        server = StandardResponsesAPIAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server = ResponsesAPIAgent(config=config, server_client=MagicMock(spec=ServerClient))
         paths = {route.path for route in server.setup_webserver().routes}
         assert "/v1/responses" in paths
         assert "/run" not in paths
@@ -373,17 +373,13 @@ class TestApp:
 
     @pytest.mark.parametrize(("capture_enabled", "override_responses"), ((False, False), (True, False), (True, True)))
     async def test_run_preserves_self_dispatch(self, capture_enabled: bool, override_responses: bool) -> None:
-        agent_type = StandardResponsesAPIAgent
+        agent_type = ResponsesAPIAgent
         if override_responses:
 
             async def overridden_responses(*args, **kwargs):
                 raise AssertionError("run must preserve self-dispatch for responses overrides")
 
-            agent_type = type(
-                "OverriddenStandardResponsesAPIAgent",
-                (StandardResponsesAPIAgent,),
-                {"responses": overridden_responses},
-            )
+            agent_type = type("OverriddenResponsesAPIAgent", (ResponsesAPIAgent,), {"responses": overridden_responses})
         server, server_client = _make_agent(capture_enabled, agent_type)
         processor = _make_processor(capture_enabled, server_client)
 

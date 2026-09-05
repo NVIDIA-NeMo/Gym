@@ -21,7 +21,6 @@ from typing import Any, Optional
 
 from fastapi import Body, FastAPI, Request
 
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgent, BaseResponsesAPIAgentConfig
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
 from nemo_gym.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
@@ -30,12 +29,23 @@ from nemo_gym.global_config import (
 )
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.server_utils import SimpleServer, apply_rollout_prefix, rollout_path_prefix
+from nemo_gym.server_utils import (
+    BaseRunServerInstanceConfig,
+    SimpleServer,
+    apply_rollout_prefix,
+    rollout_path_prefix,
+)
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
-class BaseStandardResponsesAPIAgent(BaseResponsesAPIAgent, SimpleServer):
+class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
+    skip_verification: bool = False
+    skip_verification_reward: float = 0.0
+    token_id_capture: bool = False
+
+
+class BaseResponsesAPIAgent(SimpleServer):
     """Responses API agent harness with no episode-level rollout endpoint."""
 
     config: BaseResponsesAPIAgentConfig
