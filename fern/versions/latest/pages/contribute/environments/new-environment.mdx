@@ -100,7 +100,7 @@ Fixture execution runs directly in the resources server's dependency environment
 
 ## Guiding Principles
 
-Adding a training environment has the same local correctness requirements as [Adding A Benchmark](/contribute/environments/adding-a-benchmark): its manifest must validate and its verifier fixture must pass. A full evaluation, reward profile, or training run can provide stronger evidence about measurement quality and training utility, but it is optional and is not a publication or merge compute gate.
+Adding a training environment has the same local correctness requirements as [Adding A Benchmark](/contribute/environments/adding-a-benchmark): its manifest must validate and its verifier fixture must pass. Behavior-changing environment or agent code must also run representative real smoke rollouts as required by `AGENTS.md`. A full evaluation, reward profile, or training run can provide stronger evidence about measurement quality and training utility, but it is optional and is not a publication or merge compute gate.
 
 When compute is available, a useful training experiment isolates the environment's effect on the targeted capability. GRPO with NeMo RL, 64 prompts per step, and 16 rollouts per prompt is one starting point; adjust it to the environment and available compute.
 

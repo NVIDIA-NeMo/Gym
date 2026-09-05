@@ -11,7 +11,9 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - Prefer focused changes. Do not make unrelated "drive-by" edits. If a drive-by fix is worth keeping, open a separate issue or PR.
 - Intentional synthetic scaling of environments is fine when scoped via an issue or focused PR; do not dump unreviewed bulk diffs.
 - You (the human author) own every line submitted. Treat model output as untrusted until reviewed.
-- For environment or agent changes: run real rollouts with a model and inspect agent and verifier behavior. Green unit tests alone are not enough.
+- For behavior-changing environment or agent code: run representative real smoke rollouts with a model and inspect
+  agent and verifier behavior. Green unit tests alone are not enough. Catalog, manifest, and docs-only changes do not
+  require model compute.
 - Before opening a PR, run the local checks that mirror CI: tests (skip or N/A for docs-only), `pre-commit run --all-files`, and DCO sign-off (`git commit -s`). Cryptographic `-S` signing is optional and not required.
 - AI-generated tests must assert real behavior; avoid vacuous pass-through tests.
 - Prefer the vetted skills under `.agents/skills/` (see [Agent Skills](https://docs.nvidia.com/nemo/gym/latest/contribute/agent-skills)).
@@ -68,10 +70,20 @@ For guidance on how to build environments, see `fern/versions/latest/pages/envir
 
 ## Communication & Async Patterns
 
-Servers communicate via `ServerClient`, which wraps aiohttp with retry logic (3 tries, exponential backoff) and connection pooling via a singleton aiohttp client.
+All async HTTP ultimately uses NeMo Gym's singleton aiohttp client, which provides connection pooling, retries, and
+trace propagation.
 
-- **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through NeMo Gym's global aiohttp client (`nemo_gym.server_utils.request()`). Do not use `httpx.AsyncClient` — httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency (16k+ requests). When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter. See `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the adapter pattern.
-- **Propagate session cookies** through all downstream calls (`cookies=request.cookies`) for stateful environments.
+- **Configured Gym server-to-server calls:** use `self.server_client.get()` / `.post()` so the configured server name,
+  rollout route, and shared transport are preserved.
+- **Lower-level or external async HTTP:** use `nemo_gym.server_utils.request()`. For OpenAI-compatible semantics, use
+  `NeMoGymAsyncOpenAI`, which uses the same Gym transport. Do not create `httpx.AsyncClient` instances —
+  httpx/httpcore connection pooling hangs at high concurrency (16k+ requests). When an external library requires an
+  httpx-shaped client, replace its transport with an aiohttp adapter; see `TavilySearchAIOHTTPClient` in
+  `resources_servers/tavily_search/app.py`.
+- **Propagate session cookies:** pass the relevant cookie jar on every downstream call and replace or merge it from the
+  response as required by that service's protocol. Agent loops must keep model-server and resources-server cookie jars
+  separate, seed them from the appropriate inbound or session-start response, and mirror required final cookies onto
+  the outbound FastAPI response.
 - Use `asyncio.Semaphore` to bound concurrent subprocess/external calls
 - For Ray remote tasks in async code: `result = await future` (Ray futures are directly awaitable). Never call `ray.get()` directly in async context.
 - Decode all subprocess output with `errors="replace"` to handle non-UTF8

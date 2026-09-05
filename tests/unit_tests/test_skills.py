@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
+from pathlib import Path
+
 import pytest
 
 from nemo_gym import PARENT_DIR
@@ -34,6 +37,46 @@ def _write_skill(skills_dir, name, description="A skill.", version=None, body="#
         frontmatter += f"metadata:\n  version: {version}\n"
     (skill_dir / "SKILL.md").write_text(f"---\n{frontmatter}---\n{body}")
     return skill_dir
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CANONICAL_SKILLS_DIR = REPO_ROOT / ".agents/skills"
+AGENT_SKILLS_DOC = REPO_ROOT / "fern/versions/latest/pages/contribute/agent-skills.mdx"
+
+
+def _canonical_skill_dirs():
+    return sorted(path for path in CANONICAL_SKILLS_DIR.iterdir() if path.is_dir())
+
+
+class TestRepositorySkills:
+    def test_directory_names_match_skill_names(self):
+        for skill_dir in _canonical_skill_dirs():
+            assert parse_skill_md(skill_dir / "SKILL.md").name == skill_dir.name
+
+    @pytest.mark.parametrize("native_dir", [".claude/skills", ".codex/skills"])
+    def test_native_discovery_links_cover_canonical_skills(self, native_dir):
+        expected_names = {path.name for path in _canonical_skill_dirs()}
+        discovered_names = {path.name for path in (REPO_ROOT / native_dir).iterdir() if path.is_symlink()}
+        assert discovered_names == expected_names
+
+        for name in expected_names:
+            native_path = REPO_ROOT / native_dir / name
+            assert native_path.resolve() == (CANONICAL_SKILLS_DIR / name).resolve()
+
+    def test_documented_inventory_covers_canonical_skills(self):
+        documented_names = set(re.findall(r"\.agents/skills/([a-z0-9-]+)", AGENT_SKILLS_DOC.read_text()))
+        expected_names = {path.name for path in _canonical_skill_dirs()}
+        assert documented_names == expected_names
+
+    def test_relative_markdown_links_resolve(self):
+        markdown_link_pattern = re.compile(r"\]\(([^)]+)\)")
+        for skill_dir in _canonical_skill_dirs():
+            skill_md = skill_dir / "SKILL.md"
+            for target in markdown_link_pattern.findall(skill_md.read_text()):
+                target = target.split("#", 1)[0]
+                if not target or target.startswith(("http://", "https://", "mailto:")):
+                    continue
+                assert (skill_dir / target).exists(), f"Broken link in {skill_md}: {target}"
 
 
 class TestParseSkillMd:
