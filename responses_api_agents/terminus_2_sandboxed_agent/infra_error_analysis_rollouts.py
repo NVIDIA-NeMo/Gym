@@ -22,8 +22,6 @@ success_counts = Counter()
 with open(args.fpath, "rb") as f, open(f_out_path, "wb") if args.group_to_write_out else nullcontext() as f_out:
     for i, line in tqdm(enumerate(f)):
         row = orjson.loads(line)
-        if "Technical difficulties" in line.decode():
-            print(True)
 
         count = 0
         stuck_count = 0
