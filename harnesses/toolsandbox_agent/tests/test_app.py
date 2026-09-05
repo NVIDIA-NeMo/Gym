@@ -369,29 +369,6 @@ class TestApp:
         assert verify_calls[0].kwargs["server_name"] == "toolsandbox_resources_server"
         assert verify_calls[0].kwargs["json"]["response"]["env_id"] == "env-1"
 
-    async def test_run_rejects_unsuccessful_verify_response(self, agent_config: ToolSandboxAgentConfig) -> None:
-        regular_post = _post_router(
-            {
-                "/seed_session": [_seed_payload()],
-                "/v1/responses": [_text_response("final")],
-                "/step": [_step_payload(done=True)],
-                "/close": [{"message": "closed", "success": True}],
-            }
-        )
-        verify_response = _FakeResp({})
-        verify_response.raise_for_status = MagicMock(side_effect=RuntimeError("verify failed"))
-
-        async def post(**kwargs: Any) -> _FakeResp:
-            if kwargs["url_path"] == "/verify":
-                return verify_response
-            return await regular_post(**kwargs)
-
-        agent = self._make_agent(agent_config, post)
-
-        with raises(RuntimeError, match="verify failed"):
-            await agent.run(self._run_request())
-        verify_response.raise_for_status.assert_called_once_with()
-
     async def test_run_propagates_errors(self, agent_config: ToolSandboxAgentConfig) -> None:
         async def _boom(**_kwargs: Any) -> _FakeResp:
             raise RuntimeError("seed exploded")

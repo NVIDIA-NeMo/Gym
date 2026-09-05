@@ -8,10 +8,7 @@ namespace keeps historical Python imports working without duplicating the
 implementations in the wheel.
 """
 
-import importlib
-import sys
+from pathlib import Path
 
 
-# Importing the old package first still returns the canonical package object. ``harnesses`` also
-# installs a small alias finder so every nested legacy import shares canonical module identity.
-sys.modules[__name__] = importlib.import_module("harnesses")
+__path__ = [str(Path(__file__).resolve().parent.parent / "harnesses")]

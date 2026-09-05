@@ -14,7 +14,7 @@
 # limitations under the License.
 import json
 
-from fastapi import Body, Request, Response
+from fastapi import Body, Request
 from pydantic import ConfigDict, ValidationError
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
@@ -45,10 +45,7 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
     config: ToolSimulationAgentConfig
 
     async def responses(
-        self,
-        request: Request,
-        response: Response,
-        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
         model_response = await self.server_client.post(
             server_name=self.config.model_server.name,
@@ -62,16 +59,11 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
         model_response_json = await model_response.json()
 
         try:
-            parsed_response = NeMoGymResponse.model_validate(model_response_json)
+            return NeMoGymResponse.model_validate(model_response_json)
         except ValidationError as e:
             raise RuntimeError(
                 f"Received an invalid response from the model server: {json.dumps(model_response_json)}"
             ) from e
-
-        # Preserve both the caller's session and any model-server cookie for a subsequent /verify call.
-        for key, value in (*request.cookies.items(), *model_response.cookies.items()):
-            response.set_cookie(key, value)
-        return parsed_response
 
     async def run(
         self, request: Request, body: ToolSimulationAgentRunRequest = Body()
@@ -85,7 +77,7 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
             cookies=cookies,
         )
         await raise_for_status(response)
-        cookies = request.cookies | response.cookies
+        cookies = response.cookies
 
         response_json = await response.json()
         if config.skip_verification:

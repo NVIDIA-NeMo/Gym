@@ -13,10 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import importlib
-import json
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _resolve_under_cwd_or_install
@@ -38,12 +34,6 @@ def _make_agent(agents_dir: Path, name: str, *, app: bool = True, configs: dict 
         for variant, body in configs.items():
             (configs_dir / f"{variant}.yaml").write_text(body)
     return agent_dir
-
-
-def _write_importable_agent(root: Path, layout: str, name: str, value: str) -> None:
-    agent_dir = root / layout / name
-    agent_dir.mkdir(parents=True)
-    (agent_dir / "__init__.py").write_text(f"VALUE = {value!r}\n")
 
 
 def _pattern_a(agent_type: str = "simple_agent") -> str:
@@ -165,64 +155,9 @@ class TestRealAgents:
         canonical = importlib.import_module("harnesses.codex_agent.setup_codex")
         legacy = importlib.import_module("responses_api_agents.codex_agent.setup_codex")
 
-        assert canonical is legacy
         assert Path(canonical.__file__).resolve() == Path(legacy.__file__).resolve()
 
     def test_legacy_filesystem_path_resolves_to_canonical_tree(self) -> None:
         resolved = _resolve_under_cwd_or_install("responses_api_agents/simple_agent")
 
         assert resolved == Path(__file__).resolve().parents[2] / "harnesses" / "simple_agent"
-
-
-def test_third_party_imports_match_discovery_precedence(tmp_path: Path) -> None:
-    high_priority = tmp_path / "high"
-    low_priority = tmp_path / "low"
-
-    _write_importable_agent(high_priority, "harnesses", "canonical_only", "canonical")
-    _write_importable_agent(high_priority, "responses_api_agents", "legacy_only", "legacy")
-    _write_importable_agent(high_priority, "harnesses", "same_root", "canonical")
-    _write_importable_agent(high_priority, "responses_api_agents", "same_root", "legacy")
-    _write_importable_agent(high_priority, "responses_api_agents", "cross_root", "high-legacy")
-    _write_importable_agent(low_priority, "harnesses", "cross_root", "low-canonical")
-
-    script = """
-import importlib
-import json
-import nemo_gym
-
-legacy_package = importlib.import_module("responses_api_agents")
-canonical_package = importlib.import_module("harnesses")
-legacy_first = importlib.import_module("responses_api_agents.same_root")
-canonical_after = importlib.import_module("harnesses.same_root")
-names = (
-    "harnesses.canonical_only",
-    "harnesses.legacy_only",
-    "responses_api_agents.legacy_only",
-    "responses_api_agents.same_root",
-    "responses_api_agents.cross_root",
-)
-result = {name: importlib.import_module(name).VALUE for name in names}
-result["package_identity"] = legacy_package is canonical_package
-result["nested_identity"] = legacy_first is canonical_after
-print(json.dumps(result, sort_keys=True))
-"""
-    env = os.environ.copy()
-    env[NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME] = os.pathsep.join((str(high_priority), str(low_priority)))
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=Path(__file__).parents[2],
-        env=env,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    assert json.loads(completed.stdout) == {
-        "harnesses.canonical_only": "canonical",
-        "harnesses.legacy_only": "legacy",
-        "nested_identity": True,
-        "package_identity": True,
-        "responses_api_agents.cross_root": "high-legacy",
-        "responses_api_agents.legacy_only": "legacy",
-        "responses_api_agents.same_root": "canonical",
-    }
