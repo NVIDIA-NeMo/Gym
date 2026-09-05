@@ -48,7 +48,7 @@ from anyio import create_task_group
 from fastapi import FastAPI, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, ORJSONResponse
 from multidict import CIMultiDict
 from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
@@ -1097,7 +1097,7 @@ class HeadServer(BaseServer):
     _cached_yaml: Optional[str] = None
 
     def setup_webserver(self) -> FastAPI:
-        app = FastAPI()
+        app = FastAPI(default_response_class=ORJSONResponse)
 
         self.setup_liveness(app)
         app.get("/global_config_dict_yaml")(self.global_config_dict_yaml)
