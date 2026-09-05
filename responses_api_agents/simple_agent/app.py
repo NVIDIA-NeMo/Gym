@@ -13,40 +13,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Discoverable server entrypoint for the core StandardResponsesAPIAgent."""
+"""Discoverable server entrypoint for the core ResponsesAPIAgent."""
 
 from fastapi import Request
 
 from nemo_gym.agents.base import Body
 from nemo_gym.agents.responses_api_agent import (
     INTERNAL_TRAJECTORY_KEY,
-    StandardResponsesAPIAgent,
-    StandardResponsesAPIAgentConfig,
+    ResponsesAPIAgent,
+)
+from nemo_gym.agents.responses_api_agent import (
+    ResponsesAPIAgentConfig as SimpleAgentConfig,
 )
 from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.config_types import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
+)
 from nemo_gym.processors.single_agent_turn import (
-    SingleAgentTurnRunRequest,
-    SingleAgentTurnVerifyRequest,
-    SingleAgentTurnVerifyResponse,
+    SingleAgentTurnRunRequest as SimpleAgentRunRequest,
+)
+from nemo_gym.processors.single_agent_turn import (
+    SingleAgentTurnVerifyRequest as SimpleAgentVerifyRequest,
+)
+from nemo_gym.processors.single_agent_turn import (
+    SingleAgentTurnVerifyResponse as SimpleAgentVerifyResponse,
 )
 from nemo_gym.rollout_observability import ObservationGap, TrajectoryRecord
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
-__all__ = ["SimpleAgent", "SimpleAgentConfig", "StandardResponsesAPIAgent"]
-
-
-class SimpleAgentConfig(StandardResponsesAPIAgentConfig):
-    pass
-
-
-SimpleAgentRunRequest = SingleAgentTurnRunRequest
-SimpleAgentVerifyRequest = SingleAgentTurnVerifyRequest
-SimpleAgentVerifyResponse = SingleAgentTurnVerifyResponse
-
-
-class SimpleAgent(StandardResponsesAPIAgent, SimpleResponsesAPIAgent):
+class SimpleAgent(ResponsesAPIAgent, SimpleResponsesAPIAgent):
     """Deprecated combined agent retained for backward compatibility."""
 
     config: SimpleAgentConfig
@@ -136,5 +133,15 @@ class SimpleAgent(StandardResponsesAPIAgent, SimpleResponsesAPIAgent):
         return AggregateMetrics.model_validate(await get_response_json(response))
 
 
+__all__ = [
+    "ResponsesAPIAgent",
+    "SimpleAgent",
+    "SimpleAgentConfig",
+    "SimpleAgentRunRequest",
+    "SimpleAgentVerifyRequest",
+    "SimpleAgentVerifyResponse",
+]
+
+
 if __name__ == "__main__":
-    StandardResponsesAPIAgent.run_webserver()
+    ResponsesAPIAgent.run_webserver()

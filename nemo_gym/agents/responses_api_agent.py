@@ -12,8 +12,8 @@ from fastapi import Request, Response
 from pydantic import ValidationError
 
 from nemo_gym.agents.base import (
+    BaseResponsesAPIAgent,
     BaseResponsesAPIAgentConfig,
-    BaseStandardResponsesAPIAgent,
     Body,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -40,16 +40,16 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 
 
-class StandardResponsesAPIAgentConfig(BaseResponsesAPIAgentConfig):
+class ResponsesAPIAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = None
 
 
-class StandardResponsesAPIAgent(BaseStandardResponsesAPIAgent):
+class ResponsesAPIAgent(BaseResponsesAPIAgent):
     """A reusable model/tool-loop harness with no rollout endpoint."""
 
-    config: StandardResponsesAPIAgentConfig
+    config: ResponsesAPIAgentConfig
 
     async def _run_turn(
         self,
