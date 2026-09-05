@@ -6,7 +6,19 @@ New integrations should import from ``model_backends``. The internal configurati
 ``responses_api_models`` and is intentionally unaffected by this filesystem compatibility package.
 """
 
-from model_backends import __path__ as _canonical_backend_paths
+import sys
+from pathlib import Path
+
+from nemo_gym import component_search_roots
+from nemo_gym._config_aliases import LEGACY_MODEL_BACKENDS_SUBDIR, MODEL_BACKENDS_SUBDIR
 
 
-__path__ = list(_canonical_backend_paths)
+# Match discovery precedence for legacy imports: earlier roots win, and canonical wins over
+# legacy within one root. This also keeps pre-MB-1553 third-party backends importable rather
+# than limiting the shim to Gym's built-in canonical tree.
+__path__ = [
+    str(backend_dir)
+    for root in component_search_roots(sys_path=[Path(entry) for entry in sys.path if entry])
+    for subdir in (MODEL_BACKENDS_SUBDIR, LEGACY_MODEL_BACKENDS_SUBDIR)
+    if (backend_dir := root / subdir).is_dir()
+]

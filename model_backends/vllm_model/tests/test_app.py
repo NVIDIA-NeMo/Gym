@@ -15,9 +15,11 @@
 import asyncio
 import json
 import logging
+import os
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
+from aiohttp.client_exceptions import ClientResponseError
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch, mark, raises
 
@@ -782,6 +784,32 @@ class TestApp:
 
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._setup_server(monkeypatch)
+
+    @mark.parametrize("use_completions_api", [False, True])
+    async def test_non_utf8_context_error_is_decoded_with_replacement(
+        self, monkeypatch: MonkeyPatch, use_completions_api: bool
+    ) -> None:
+        server = self._setup_server(monkeypatch)
+        server.config.use_completions_api = use_completions_api
+        error = ClientResponseError(MagicMock(), (), status=400, message="bad request")
+        error.response_content = b"\xffcontext length exceeded"
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        if use_completions_api:
+            mock_client.create_completion = AsyncMock(side_effect=error)
+        else:
+            mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        server._clients = [mock_client]
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "session"}
+
+        response = await server.chat_completions(
+            request,
+            NeMoGymChatCompletionCreateParamsNonStreaming(
+                messages=[{"role": "user", "content": "hello"}],
+            ),
+        )
+
+        assert response.choices[0].finish_reason == "length"
 
     def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
         workers = [self._setup_server(monkeypatch) for _ in range(2)]
@@ -5200,6 +5228,23 @@ class TestEndpointFile:
         assert server.config.base_url == ["http://newer-host:8712/v1"]
         # Static base_url clients keep today's retry-forever behavior.
         assert self._make_server(tmp_path, endpoint_file=None)._clients[0].max_connection_retries is None
+
+    def test_same_mtime_empty_to_populated_publish_is_detected(self, tmp_path) -> None:
+        endpoint_file = tmp_path / "endpoint.txt"
+        fixed_ns = 1_700_000_000_000_000_000
+        endpoint_file.write_text("")
+        os.utime(endpoint_file, ns=(fixed_ns, fixed_ns))
+        server = self._make_server(tmp_path, endpoint_check_interval_s=0.0)
+
+        server._maybe_rebind_endpoint()
+        assert server._endpoint_missing_since is not None
+
+        endpoint_file.write_text("http://new-host:8712/v1\n")
+        os.utime(endpoint_file, ns=(fixed_ns, fixed_ns))
+        server._maybe_rebind_endpoint()
+
+        assert server.config.base_url == ["http://new-host:8712/v1"]
+        assert server._endpoint_missing_since is None
 
     def test_unpublished_endpoint_grace_lifecycle(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         endpoint_file = tmp_path / "endpoint.txt"

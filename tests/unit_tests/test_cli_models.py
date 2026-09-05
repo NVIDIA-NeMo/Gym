@@ -29,7 +29,7 @@ def _mock_global_config(config: dict = None):
 
 
 def _entry(name: str, group: str) -> ModelEntry:
-    config_path = Path("responses_api_models") / group / "configs" / f"{name.split('/')[-1]}.yaml"
+    config_path = Path("model_backends") / group / "configs" / f"{name.split('/')[-1]}.yaml"
     return ModelEntry(name=name, model_group=group, config_path=config_path)
 
 
@@ -151,7 +151,7 @@ class TestListModels:
 
     def test_inspect_shows_absolute_config_path(self, tmp_path: Path, capsys, monkeypatch) -> None:
         # Real discovery (via an extra root): the config line must be the config's absolute path.
-        model_dir = tmp_path / "responses_api_models" / "my_model"
+        model_dir = tmp_path / "model_backends" / "my_model"
         (model_dir / "configs").mkdir(parents=True)
         (model_dir / "configs" / "my_model.yaml").write_text("my_model: {}\n")
         monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(tmp_path))
