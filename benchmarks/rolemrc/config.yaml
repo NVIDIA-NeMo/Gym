@@ -1,0 +1,23 @@
+config_paths:
+  - resources_servers/rolemrc/configs/rolemrc.yaml
+
+# Gym-native RoleMRC benchmark, reference-metric mode: ROUGE/BLEU/METEOR/
+# BERTScore against the gold reply, ROUGE-L is the reward. No model server is
+# needed for scoring. Inherits the resources server + model wiring from
+# rolemrc_simple_agent (see resources_servers/rolemrc/configs/rolemrc.yaml).
+# The LLM-as-judge variant lives in config_judge.yaml.
+rolemrc_benchmark_simple_agent:
+  _inherit_from: rolemrc_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: rolemrc
+        type: benchmark
+        jsonl_fpath: benchmarks/rolemrc/data/rolemrc_benchmark.jsonl
+        prepare_script: benchmarks/rolemrc/prepare.py
+        # Rows already carry a fully-built responses_create_params.input (the
+        # full multi-turn RoleMRC conversation), so no prompt template is
+        # applied. The key is required by BenchmarkDatasetConfig even when null.
+        prompt_config: null
+        num_repeats: 1
+        license: Creative Commons Attribution 4.0 International

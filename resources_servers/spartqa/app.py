@@ -237,12 +237,12 @@ class SpartqaRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
     # ``target`` is the single gold CO label; ``options`` are the two story
-    # objects offered by the question. ``target`` (a scalar) survives the
-    # nemo-evaluator ``gym://...protocol=native`` driver, which forwards a row's
-    # top-level scalar fields onto ``/verify`` but DROPS list/dict fields
-    # (``options`` never arrives that way). The options therefore also ride in
-    # ``verifier_metadata``, which the driver forwards intact; verify() falls
-    # back to it so the full candidate set is always available.
+    # objects offered by the question. ``target`` (a scalar) survives an
+    # external runner that forwards a row's top-level scalar fields onto
+    # ``/verify`` but DROPS list/dict fields (``options`` never arrives that
+    # way). The options therefore also ride in ``verifier_metadata``, which is
+    # forwarded intact; verify() falls back to it so the full candidate set is
+    # always available.
     target: str = ""
     options: List[str] = Field(default_factory=list)
     verifier_metadata: Optional[Dict[str, Any]] = None
