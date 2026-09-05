@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Registry of agent harnesses under ``harnesses/<name>/``.
+"""Registry of agent harnesses under ``responses_api_agents/<name>/``.
 
 An agent harness is one *component* of an environment (an environment = dataset + agent harness +
 resources server [verifier and state] + model). This module maps an agent's short ``<name>`` (the
@@ -43,18 +43,12 @@ from typing import Dict, Optional, Tuple
 
 from omegaconf import OmegaConf
 
-from nemo_gym import PARENT_DIR, component_search_roots
-from nemo_gym.discovery import merge_by_name
+from nemo_gym import PARENT_DIR
+from nemo_gym.discovery import discover_components
 
 
-HARNESSES_SUBDIR = "harnesses"
-HARNESSES_DIR = PARENT_DIR / HARNESSES_SUBDIR
-LEGACY_AGENTS_SUBDIR = "responses_api_agents"
-
-# Backward-compatible aliases for callers which imported these constants. Their values now identify
-# the canonical public filesystem taxonomy; the legacy directory name remains a config/server wire key.
-AGENTS_SUBDIR = HARNESSES_SUBDIR
-AGENTS_DIR = HARNESSES_DIR
+AGENTS_SUBDIR = "responses_api_agents"
+AGENTS_DIR = PARENT_DIR / AGENTS_SUBDIR
 AGENT_CONFIGS_SUBDIR = "configs"
 
 
@@ -138,7 +132,7 @@ def _classify(config_paths: Tuple[Path, ...]) -> Tuple[bool, Optional[str]]:
 
 
 def _discover_agents_in_dir(agents_dir: Path) -> Dict[str, AgentEntry]:
-    """Map agent name -> :class:`AgentEntry` for every agent dir under one harness tree.
+    """Map agent name -> :class:`AgentEntry` for every agent dir under one ``responses_api_agents/`` dir.
 
     The name is the directory name. A directory is an agent if it has an ``app.py`` or at least one
     agent config. Returns an empty dict if the directory is missing.
@@ -171,18 +165,7 @@ def _discover_agents_in_dir(agents_dir: Path) -> Dict[str, AgentEntry]:
 def discover_agents() -> Dict[str, AgentEntry]:
     """Map agent name -> :class:`AgentEntry` for every discoverable agent dir.
 
-    Scans the canonical ``harnesses/`` subdir and then the legacy ``responses_api_agents/`` subdir
-    of every :func:`~nemo_gym.component_search_roots` root. Within a root, canonical harnesses win;
-    across roots, user components shadow same-named built-ins. Supporting the legacy tree keeps
-    existing plugins discoverable without making the transport-oriented name public taxonomy.
+    Scans the ``responses_api_agents/`` subdir of every :func:`~nemo_gym.discovery.component_search_roots`
+    root (``NEMO_GYM_EXTRA_ROOTS`` + cwd + built-ins), merged so user agents shadow same-named built-ins.
     """
-    per_root = (
-        merge_by_name(
-            (
-                _discover_agents_in_dir(root / HARNESSES_SUBDIR),
-                _discover_agents_in_dir(root / LEGACY_AGENTS_SUBDIR),
-            )
-        )
-        for root in component_search_roots()
-    )
-    return merge_by_name(per_root)
+    return discover_components(AGENTS_SUBDIR, _discover_agents_in_dir)

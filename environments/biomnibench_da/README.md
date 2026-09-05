@@ -1,7 +1,7 @@
 # BiomniBench-DA environment
 
 [BiomniBench-DA](https://huggingface.co/datasets/phylobio/BiomniBench-DA) data-analysis
-tasks, run through the [Harbor Agent](../../harnesses/harbor_agent) bridge
+tasks, run through the [Harbor Agent](../../responses_api_agents/harbor_agent) bridge
 (Harbor manages the sandboxed environment + verifier; the Harbor agent bridges that to
 NeMo Gym). Materialized task trees live under `data/` (gitignored — see `prepare.py`).
 
@@ -164,7 +164,7 @@ nothing is lost. This was a real gap (now fixed) where `harbor_agent`'s
 checkout, pass `+disable_aggregation=true` to `ng_collect_rollouts`/`gym eval run`
 as a workaround, then run `gym eval aggregate` once all shards finish.
 
-See the [Harbor Agent README](../../harnesses/harbor_agent/README.md) for
+See the [Harbor Agent README](../../responses_api_agents/harbor_agent/README.md) for
 details on the underlying Harbor bridge (custom agents/environments, NeMo RL
 training notes, and rollout storage layout), which applies to any Harbor-backed
 environment, not just BiomniBench-DA.

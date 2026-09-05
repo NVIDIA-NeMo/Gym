@@ -17,7 +17,7 @@ shape `swebench` uses cannot run on Docker, Apptainer or enroot. See
 | --- | --- |
 | Task rows (`app`, `artifact`, PRD paths, test-plan paths) | `prepare.py` → `data/*.jsonl` |
 | PRD text + asset paths | `seed_session` in `app.py` (no sandbox, no handle) |
-| Build sandbox, PRD staging, writing the app, harvesting it | `harnesses/vibench_agent` |
+| Build sandbox, PRD staging, writing the app, harvesting it | `responses_api_agents/vibench_agent` |
 | Seed → evaluate → score | `verify` in `app.py`, shelling into a ViBench checkout |
 
 The agent writes a tarball of the built app into `artifact_dir` and passes the path to
@@ -109,7 +109,7 @@ set `sandbox_model_base_url` on the agent instead.
 ```bash
 gym env start \
     --config resources_servers/vibench/configs/vibench.yaml \
-    --config harnesses/vibench_agent/configs/docker.yaml \
+    --config responses_api_agents/vibench_agent/configs/docker.yaml \
     --model-type openai_model
 
 gym eval run --no-serve \

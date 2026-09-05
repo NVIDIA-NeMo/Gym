@@ -38,8 +38,8 @@ from finance_agent.get_agent import Parameters as UpstreamParameters
 from finance_agent.tools import VALID_TOOLS, SubmitFinalResult
 from omegaconf import OmegaConf
 
-from harnesses.finance_agent.app import FinanceAgentConfig
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from responses_api_agents.finance_agent.app import FinanceAgentConfig
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]

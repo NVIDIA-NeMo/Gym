@@ -5,7 +5,7 @@ GRL Tetris environment in Gymnasium style. The model emits one or more `<action>
 ## Why it exists
 - **Domain**: Classic falling-block Tetris on a configurable grid.
 - **Interaction style**: Gymnasium API (`reset` + `step` returning `(obs, reward, terminated, truncated, info)`). Multiple actions can be batched into a single model turn.
-- **Evaluation**: Reward accumulates per game step; `terminated=True` when the game ends. Pair with `harnesses/gymnasium_agent`.
+- **Evaluation**: Reward accumulates per game step; `terminated=True` when the game ends. Pair with `responses_api_agents/gymnasium_agent`.
 - **Independence**: No runtime dependency on the GRL repository. The environment is vendored and self-contained.
 
 ## Running
@@ -14,7 +14,7 @@ Start NeMo Gym servers
 ```bash
 gym env start \
     --model-type openai_model \
-    --config harnesses/gymnasium_agent/configs/gymnasium_agent.yaml \
+    --config responses_api_agents/gymnasium_agent/configs/gymnasium_agent.yaml \
     --resources-server grl_tetris
 ```
 

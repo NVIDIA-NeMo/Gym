@@ -1,5 +1,5 @@
 config_paths:
-  - harnesses/kilocode_agent/configs/kilocode_agent.yaml
+  - responses_api_agents/kilocode_agent/configs/kilocode_agent.yaml
 
 math_with_judge:
   resources_servers:

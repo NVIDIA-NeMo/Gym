@@ -322,7 +322,7 @@ class RunConfig(BaseNeMoGymCLIConfig):
     """
 
     entrypoint: str = Field(
-        description="Entrypoint for this command. This must be a relative path with 2 parts. Should look something like `harnesses/simple_agent`."
+        description="Entrypoint for this command. This must be a relative path with 2 parts. Should look something like `responses_api_agents/simple_agent`."
     )
 
 
@@ -1007,24 +1007,18 @@ def test_all():  # pragma: no cover
     # (a user's project), and the Gym install root (built-ins, under PARENT_DIR in editable and wheel
     # installs). Entrypoints are kept relative; earlier roots shadow later ones for same-named modules. This
     # lets `gym env test` discover and run built-in and plugin servers from any cwd, not only a repo checkout.
-    server_type_dirs = (
-        ("resources_servers", "resources_servers"),
-        ("harnesses", "harnesses"),
-        ("responses_api_agents", "harnesses"),
-        ("responses_api_models", "responses_api_models"),
-    )
+    server_type_dirs = ("resources_servers", "responses_api_agents", "responses_api_models")
     seen_rel_paths: set[str] = set()
     candidate_dir_paths: List[str] = []
     for root in component_search_roots():
-        for server_type_dir, identity_dir in server_type_dirs:
+        for server_type_dir in server_type_dirs:
             for module_path in sorted((root / server_type_dir).glob("*")):
                 if "pycache" in module_path.name or not module_path.is_dir():
                     continue
                 rel_path = f"{server_type_dir}/{module_path.name}"
-                identity_path = f"{identity_dir}/{module_path.name}"
-                if identity_path in seen_rel_paths:
+                if rel_path in seen_rel_paths:
                     continue
-                seen_rel_paths.add(identity_path)
+                seen_rel_paths.add(rel_path)
                 candidate_dir_paths.append(rel_path)
     print(f"Found {len(candidate_dir_paths)} total modules:{_display_list_of_paths(candidate_dir_paths)}\n")
     dir_paths: List[Path] = list(map(Path, candidate_dir_paths))

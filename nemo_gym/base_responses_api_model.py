@@ -1673,7 +1673,7 @@ def merge_model_call_capture_into_record(
             bundle = AgentObservationBundle.model_validate(observations)
             if bundle.source == "claude_code":
                 try:
-                    from harnesses.claude_code_agent.observability import (
+                    from responses_api_agents.claude_code_agent.observability import (
                         associate_claude_code_compaction_calls,
                     )
 

@@ -464,7 +464,7 @@ def test_shared_change_classifier_matches_gym_docs_and_server_paths() -> None:
 
     for path in ("**.md", "fern/**", "LICENSE", "benchmarks/**"):
         assert path in action
-    for path in ("resources_servers/**", "harnesses/**", "responses_api_models/**"):
+    for path in ("resources_servers/**", "responses_api_agents/**", "responses_api_models/**"):
         assert path in action
 
     assert "uses: ./.github/actions/classify-changes" in unit_workflow

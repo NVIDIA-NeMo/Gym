@@ -12,7 +12,7 @@ harbor_agent:
           workdir: "/app"
 
       harbor_agent_name: null
-      harbor_agent_import_path: "harnesses.harbor_agent.custom_agents.terminus_2_nemo_gym:Terminus2NemoGym"
+      harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym:Terminus2NemoGym"
       harbor_agent_kwargs:
         max_turns: 20
         interleaved_thinking: true
@@ -27,9 +27,9 @@ harbor_agent:
           output_cost_per_token: 0.0
 
       harbor_environment_type: null
-      harbor_environment_import_path: "harnesses.harbor_agent.custom_envs.singularity.singularity:SingularityEnvironment"
+      harbor_environment_import_path: "responses_api_agents.harbor_agent.custom_envs.singularity.singularity:SingularityEnvironment"
       harbor_environment_kwargs:
-        singularity_image_cache_dir: "harnesses/harbor_agent/singularity_cache"
+        singularity_image_cache_dir: "responses_api_agents/harbor_agent/singularity_cache"
       harbor_no_delete: true
 
       model_server:
@@ -41,4 +41,4 @@ harbor_agent:
       harbor_verifier_override_timeout: null
       harbor_verifier_max_timeout: null
       harbor_timeout_multiplier: null
-      harbor_jobs_dir: "harnesses/harbor_agent/jobs"
+      harbor_jobs_dir: "responses_api_agents/harbor_agent/jobs"

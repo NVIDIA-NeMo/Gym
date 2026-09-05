@@ -55,7 +55,7 @@ runs:
           fern/**
           LICENSE
           resources_servers/**
-          harnesses/**
+          responses_api_agents/**
           responses_api_models/**
           benchmarks/**
         files_yaml: |
@@ -66,7 +66,7 @@ runs:
             - benchmarks/**
           server:
             - resources_servers/**
-            - harnesses/**
+            - responses_api_agents/**
             - responses_api_models/**
 
     - name: Classify changes

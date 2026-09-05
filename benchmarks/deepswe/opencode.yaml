@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 config_paths:
-  - harnesses/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
   - resources_servers/deepswe/configs/deepswe.yaml
 
 deepswe_opencode_resources_server:

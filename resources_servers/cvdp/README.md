@@ -49,16 +49,16 @@ eda_sim_image: cvdp-cadence-verif:latest
 
 ## Agents
 
-Both flavors are the **same agent class — `CVDPAgent`** (`harnesses/cvdp_agent/app.py`); you pick the flavor with the **`simple_agent`** config flag. They differ only in **how the candidate RTL is produced and graded**:
+Both flavors are the **same agent class — `CVDPAgent`** (`responses_api_agents/cvdp_agent/app.py`); you pick the flavor with the **`simple_agent`** config flag. They differ only in **how the candidate RTL is produced and graded**:
 
 - **`simple_agent: true` — direct generation** (`cvdp_agent`, config `configs/cvdp_agent.yaml`): the model emits the RTL inline in its response; the server parses it out (`_parse_model_response`) and runs the harness. A single completion — no tools, no file editing.
-- **`simple_agent: false` — sandboxed harness** (`cvdp_agent_generic_*`, configs `configs/cvdp_agent_generic_*.yaml`): a coding **harness** runs **inside** the EDA sim container, editing files on disk and self-testing with the in-container EDA tools; the server grades the files it wrote back (`rtl_files`). The harness is a config-selected unit — `agent_server_module`/`class`/`config_class` name any Gym `responses()` agent. Claude Code is the default; Hermes ships as a second example (`configs/cvdp_agent_generic_hermes.yaml`), and any other harness drops in via config + a deps script. See [`harnesses/cvdp_agent/`](../../harnesses/cvdp_agent/).
+- **`simple_agent: false` — sandboxed harness** (`cvdp_agent_generic_*`, configs `configs/cvdp_agent_generic_*.yaml`): a coding **harness** runs **inside** the EDA sim container, editing files on disk and self-testing with the in-container EDA tools; the server grades the files it wrote back (`rtl_files`). The harness is a config-selected unit — `agent_server_module`/`class`/`config_class` name any Gym `responses()` agent. Claude Code is the default; Hermes ships as a second example (`configs/cvdp_agent_generic_hermes.yaml`), and any other harness drops in via config + a deps script. See [`responses_api_agents/cvdp_agent/`](../../responses_api_agents/cvdp_agent/).
 
 ### Sandboxed harness settings (`configs/cvdp_agent_generic_claude.yaml`)
 
 | Field                 | Default                                       | Description                                                                                          |
 | --------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `agent_server_module` | `harnesses.claude_code_agent.app`  | Python module of the Gym harness agent booted inside the sandbox                                     |
+| `agent_server_module` | `responses_api_agents.claude_code_agent.app`  | Python module of the Gym harness agent booted inside the sandbox                                     |
 | `agent_server_class`  | `ClaudeCodeAgent`                             | Harness agent class                                                                                  |
 | `agent_config_class`  | `ClaudeCodeAgentConfig`                       | Harness agent config class                                                                           |
 | `agent_kwargs`        | `{}`                                          | Passed straight into the harness config class; keys must be valid fields on it (Claude: `model`, `anthropic_base_url`, `anthropic_api_key`, `max_turns`) |
@@ -90,7 +90,7 @@ cvdp_sim_image: ghcr.io/hdl/sim/osvb
 
 ```bash
 gym env start \
-    --config harnesses/cvdp_agent/configs/cvdp_agent_generic_claude.yaml \
+    --config responses_api_agents/cvdp_agent/configs/cvdp_agent_generic_claude.yaml \
     --resources-server cvdp \
     --model-type vllm_model
 ```
@@ -100,7 +100,7 @@ gym env start \
 ```bash
 gym eval run --no-serve \
     --agent cvdp_agent_generic_claude \
-    --config harnesses/cvdp_agent/configs/cvdp_agent_generic_claude.yaml \
+    --config responses_api_agents/cvdp_agent/configs/cvdp_agent_generic_claude.yaml \
     --input resources_servers/cvdp/data/<dataset>.jsonl \
     --output results/rollouts.jsonl \
     --num-repeats 5 \

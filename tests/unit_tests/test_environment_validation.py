@@ -162,7 +162,7 @@ def _custom_agent_asset(tmp_path: Path, *, profile: str, source: str) -> Path:
         config_path.read_text(encoding="utf-8").replace("    simple_agent:\n", "    custom_agent:\n"),
         encoding="utf-8",
     )
-    agent_dir = tmp_path / "harnesses/custom_agent"
+    agent_dir = tmp_path / "responses_api_agents/custom_agent"
     agent_dir.mkdir(parents=True)
     (agent_dir / "app.py").write_text(source, encoding="utf-8")
     return manifest_path
@@ -244,7 +244,7 @@ def test_infers_representative_builtin_agent_profiles(implementation: str, profi
         name=implementation,
         implementation=implementation,
         boundary="responses_api_agents",
-        entrypoint=str(Path(__file__).parents[2] / "harnesses" / implementation / "app.py"),
+        entrypoint=str(Path(__file__).parents[2] / "responses_api_agents" / implementation / "app.py"),
     )
     composition = ResolvedComposition(
         resources_server=None,

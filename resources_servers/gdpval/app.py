@@ -393,7 +393,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
         deliverable_content_blocks: Optional[List[Dict[str, Any]]] = None
 
         if body.deliverables_dir and Path(body.deliverables_dir).is_dir():
-            from harnesses.stirrup_agent.file_reader import (
+            from responses_api_agents.stirrup_agent.file_reader import (
                 convert_deliverables_to_content_blocks,
                 read_deliverable_files,
             )

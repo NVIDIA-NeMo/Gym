@@ -31,7 +31,7 @@ from nemo_gym.server_metadata import ServerMetadata, visit_agent_server, visit_r
 README_PATH = Path("README.md")
 
 RESOURCES_SERVERS_FOLDER = Path("resources_servers")
-HARNESSES_FOLDER = Path("harnesses")
+RESPONSES_API_AGENTS_FOLDER = Path("responses_api_agents")
 BENCHMARKS_FOLDER = Path("benchmarks")
 
 
@@ -244,7 +244,7 @@ def extract_benchmark_metadata(yaml_path: Path) -> tuple[ConfigMetadata, str]:  
 
     for config_path in data.get("config_paths", []):
         referenced_path = Path(config_path)
-        if not referenced_path.is_file() or not ({"harnesses", "responses_api_agents"} & set(referenced_path.parts)):
+        if not referenced_path.is_file() or "responses_api_agents" not in referenced_path.parts:
             continue
         with referenced_path.open() as f:
             referenced_data = yaml.safe_load(f) or {}
@@ -257,8 +257,7 @@ def extract_benchmark_metadata(yaml_path: Path) -> tuple[ConfigMetadata, str]:  
             )
         ):
             resource_data = referenced_resource
-            parent = "harnesses" if "harnesses" in referenced_path.parts else "responses_api_agents"
-            agent_index = referenced_path.parts.index(parent) + 1
+            agent_index = referenced_path.parts.index("responses_api_agents") + 1
             display_name = referenced_path.parts[agent_index].replace("_", " ").title()
             break
 
@@ -269,8 +268,8 @@ def get_training_server_info() -> list[ServerInfo]:  # pragma: no cover
     """Collect training-ready server metadata (skips example_* servers)."""
     training_servers = []
 
-    for base_folder in (RESOURCES_SERVERS_FOLDER, HARNESSES_FOLDER):
-        from_agent = base_folder == HARNESSES_FOLDER
+    for base_folder in (RESOURCES_SERVERS_FOLDER, RESPONSES_API_AGENTS_FOLDER):
+        from_agent = base_folder == RESPONSES_API_AGENTS_FOLDER
         for subdir in base_folder.iterdir():
             if not subdir.is_dir():
                 continue

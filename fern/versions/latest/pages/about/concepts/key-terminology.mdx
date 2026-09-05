@@ -31,7 +31,7 @@ The **model** (also called the **policy**) is what you call for generation — l
 | Concept | In NeMo Gym |
 | --- | --- |
 | Dataset | JSONL rows with `responses_create_params` + `verifier_metadata` — [Prepare Data](/data) |
-| Agent harness | Implemented by the **Agent server** (`harnesses/`) — [Agent Server](/agent-server) |
+| Agent harness | Implemented by the **Agent server** (`responses_api_agents/`) — [Agent Server](/agent-server) |
 | Verifier, per-attempt state, env tools | Implemented by the **Resources server** (`resources_servers/`): `seed_session()` initializes state; tools mutate it; `verify()` scores the attempt — [Build Verifiers](/build-verifiers) |
 | Model | Served by the **Model server** (`responses_api_models/`) — wraps local or remote endpoints — [Model Server](/model-server) |
 | Protocol | **Responses API** (Chat Completions converted via middleware when needed) |

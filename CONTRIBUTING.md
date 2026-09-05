@@ -152,7 +152,7 @@ Hooks that auto-modify files (`ruff`, `ruff-format`, `add-verified-flag`, `updat
 | Changed files | Test scope |
 |---------------|------------|
 | Only `**.md`, `docs/**`, `fern/**`, `LICENSE`, `benchmarks/**` | **Skip** — no tests run |
-| Only `resources_servers/**`, `harnesses/**`, `responses_api_models/**` | **Server-only** — tests run for the changed servers only |
+| Only `resources_servers/**`, `responses_api_agents/**`, `responses_api_models/**` | **Server-only** — tests run for the changed servers only |
 | Anything else (core library, CI, scripts, and so on) | **Full suite** — all tests run |
 
 Priority is `other > server > doc`: a PR touching both a server file and a core file triggers the full suite. When the full suite runs, the server tests are split across **8 parallel shards** with `fail_on_total_and_test_mismatch=true` — this means **every resources server must have at least one test**, or its shard fails.

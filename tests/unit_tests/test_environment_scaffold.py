@@ -54,9 +54,9 @@ def test_scaffolds_and_validates_every_kind_and_profile(
         IntegrationProfile.CUSTOM_GYM_AGENT_LOOP,
         IntegrationProfile.EXTERNAL_AGENT_LOOP,
     }
-    assert (tmp_path / "harnesses/sample_agent").is_dir() is generated_agent
+    assert (tmp_path / "responses_api_agents/sample_agent").is_dir() is generated_agent
     if generated_agent:
-        agent_source = tmp_path.joinpath("harnesses/sample_agent/app.py").read_text(encoding="utf-8")
+        agent_source = tmp_path.joinpath("responses_api_agents/sample_agent/app.py").read_text(encoding="utf-8")
         extensions = ("responses", "run") if profile == IntegrationProfile.EXTERNAL_AGENT_LOOP else ("responses",)
         assert all(f"async def {extension}(" in agent_source for extension in extensions)
         assert all(f"super().{extension}(" in agent_source for extension in extensions)
@@ -70,7 +70,7 @@ def test_completed_external_agent_retains_its_profile(tmp_path: Path) -> None:
         name="external",
         profile="external-agent-loop",
     ).asset_dir
-    app_path = tmp_path / "harnesses/external_agent/app.py"
+    app_path = tmp_path / "responses_api_agents/external_agent/app.py"
     source = app_path.read_text(encoding="utf-8")
     source = source.replace(
         "return await super().responses(request, response, body)",

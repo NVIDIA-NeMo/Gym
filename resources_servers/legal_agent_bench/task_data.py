@@ -8,7 +8,7 @@ this server under ``config.harbor_tasks_cache_dir``/``config.harbor_tasks_dir``,
 ``responses_create_params.input`` is an empty list. The server's own verify() is a stub (bare
 ``BaseVerifyRequest``, always reward=0.0) — Harbor executes the task-local verifier and the agent
 bridge returns its reward. ``instance_id`` is required by the shared harbor agent's wire model
-(``HarborRunRequest`` at harnesses/harbor_agent/app.py, ``instance_id: str``), which
+(``HarborRunRequest`` at responses_api_agents/harbor_agent/app.py, ``instance_id: str``), which
 parses it as '<dataset_alias>::<task_name>' to select the Harbor task.
 """
 

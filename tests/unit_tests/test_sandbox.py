@@ -24,7 +24,6 @@ from uuid import uuid4
 import pytest
 
 import nemo_gym.sandbox.providers.registry as provider_registry
-from harnesses.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
 from nemo_gym.sandbox import (
     AsyncSandbox,
     Sandbox,
@@ -45,6 +44,7 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.sandbox.api import _AsyncLoopRunner
 from nemo_gym.sandbox.utils import rewrite_image
+from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
 
 
 pytestmark = pytest.mark.sandbox

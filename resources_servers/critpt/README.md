@@ -15,7 +15,7 @@ generated code to the [Artificial Analysis API](https://artificialanalysis.ai/do
 
 CritPt uses a **custom two-turn agent** — `simple_agent` will not work:
 
-- `harnesses/critpt_agent` (Turn 1: solve; Turn 2: populate the code template)
+- `responses_api_agents/critpt_agent` (Turn 1: solve; Turn 2: populate the code template)
 - `responses_api_models/*` (typically `policy_model`)
 - `resources_servers/critpt` (this server)
 

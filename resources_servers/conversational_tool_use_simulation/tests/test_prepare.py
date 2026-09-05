@@ -17,10 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from harnesses.conversational_tool_use.domain_generation import assets as domain_assets
-from harnesses.conversational_tool_use.policy_tool_generation import assets as policy_tool_assets
-from harnesses.conversational_tool_use.scenario_generation import assets as scenario_assets
 from resources_servers.conversational_tool_use_simulation import prepare as prepare_module
+from responses_api_agents.conversational_tool_use.domain_generation import assets as domain_assets
+from responses_api_agents.conversational_tool_use.policy_tool_generation import assets as policy_tool_assets
+from responses_api_agents.conversational_tool_use.scenario_generation import assets as scenario_assets
 
 
 def _write_flat_directory(directory: Path, files: dict[str, str]) -> None:

@@ -330,7 +330,7 @@ def patch_swebench_multilingual_golden_patch_pass(eval_sh: str, instance_id: str
 
 async def patch_swebench_multilingual_sandbox(repo: str, instance_id: str, sandbox: AsyncSandbox) -> None:
     if MAP_REPO_TO_EXT.get(repo) == "java":
-        base_path = PARENT_DIR / "harnesses/swe_agents/maven_mirror"
+        base_path = PARENT_DIR / "responses_api_agents/swe_agents/maven_mirror"
         settings_xml_path = base_path / "settings.xml"
         init_gradle_path = base_path / "init.gradle"
 

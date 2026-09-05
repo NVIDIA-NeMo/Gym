@@ -1,5 +1,5 @@
 config_paths:
-- harnesses/terminus_2_sandboxed_agent/configs/terminus_2_sandboxed_agent.yaml
+- responses_api_agents/terminus_2_sandboxed_agent/configs/terminus_2_sandboxed_agent.yaml
 - resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1.yaml
 
 

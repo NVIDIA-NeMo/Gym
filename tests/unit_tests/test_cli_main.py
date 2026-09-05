@@ -1282,7 +1282,7 @@ class TestAssetSelectors:
             resolved = cli_main._asset_config_path("agent-type", legacy)
 
         server, flavor = canonical.split("/")
-        expected = WORKING_DIR / "harnesses" / server / "configs" / f"{flavor}.yaml"
+        expected = WORKING_DIR / "responses_api_agents" / server / "configs" / f"{flavor}.yaml"
         assert resolved == str(expected)
         assert "deprecated" in caplog.text
 
@@ -1370,7 +1370,7 @@ class TestAssetSelectors:
 class TestAgentSelector:
     """`--agent-type NAME[/FLAVOR]` resolves a named harness to its config and adds it to `+config_paths`."""
 
-    HERMES = "harnesses/hermes_agent/configs/hermes_agent.yaml"
+    HERMES = "responses_api_agents/hermes_agent/configs/hermes_agent.yaml"
 
     @pytest.mark.parametrize(
         "command",
@@ -1395,24 +1395,8 @@ class TestAgentSelector:
         _, overrides = _dispatch_for(
             monkeypatch, ["env", "start", "--agent-type", "cvdp_agent/cvdp_agent_generic_hermes"]
         )
-        expected = WORKING_DIR / "harnesses/cvdp_agent/configs/cvdp_agent_generic_hermes.yaml"
+        expected = WORKING_DIR / "responses_api_agents/cvdp_agent/configs/cvdp_agent_generic_hermes.yaml"
         assert overrides == [f"+config_paths=[{expected}]"]
-
-    def test_legacy_plugin_tree_remains_selectable(
-        self, monkeypatch: MonkeyPatch, tmp_path: Path, caplog: LogCaptureFixture
-    ) -> None:
-        config = tmp_path / "responses_api_agents" / "plugin_agent" / "configs" / "plugin_agent.yaml"
-        config.parent.mkdir(parents=True)
-        config.write_text("plugin: true\n", encoding="utf-8")
-
-        with caplog.at_level(logging.WARNING):
-            _, overrides = _dispatch_for(
-                monkeypatch,
-                ["env", "start", "--search-dir", str(tmp_path), "--agent-type", "plugin_agent"],
-            )
-
-        assert overrides == [f"+config_paths=[{config.resolve()}]"]
-        assert "deprecated" in caplog.text
 
     def test_composes_with_benchmark_into_one_config_paths_token(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(

@@ -33,15 +33,14 @@ LEGACY_CONFIG_PATH_ALIASES = {
         f"environments/{legacy}/config.yaml": f"environments/{canonical}/config.yaml"
         for legacy, canonical in LEGACY_ENVIRONMENT_ALIASES.items()
     },
-    "harnesses/stirrup_agent/configs/stirrup_gdpval.yaml": ("harnesses/stirrup_agent/configs/stirrup_agent.yaml"),
-    "harnesses/tau2/configs/tau2_agent.yaml": "harnesses/tau2/configs/tau2.yaml",
-    "harnesses/verifiers_agent/configs/acereason-math.yaml": (
-        "harnesses/verifiers_agent/configs/verifiers_agent.yaml"
+    "responses_api_agents/stirrup_agent/configs/stirrup_gdpval.yaml": (
+        "responses_api_agents/stirrup_agent/configs/stirrup_agent.yaml"
+    ),
+    "responses_api_agents/tau2/configs/tau2_agent.yaml": "responses_api_agents/tau2/configs/tau2.yaml",
+    "responses_api_agents/verifiers_agent/configs/acereason-math.yaml": (
+        "responses_api_agents/verifiers_agent/configs/verifiers_agent.yaml"
     ),
 }
-
-LEGACY_HARNESSES_PATH_PREFIX = "responses_api_agents/"
-HARNESSES_PATH_PREFIX = "harnesses/"
 
 
 def legacy_config_path_alias(path: str) -> str | None:
@@ -49,8 +48,4 @@ def legacy_config_path_alias(path: str) -> str | None:
     parsed = Path(path)
     if parsed.is_absolute():
         return None
-    normalized = parsed.as_posix()
-    if normalized.startswith(LEGACY_HARNESSES_PATH_PREFIX):
-        normalized = HARNESSES_PATH_PREFIX + normalized.removeprefix(LEGACY_HARNESSES_PATH_PREFIX)
-    canonical = LEGACY_CONFIG_PATH_ALIASES.get(normalized, normalized)
-    return canonical if canonical != parsed.as_posix() else None
+    return LEGACY_CONFIG_PATH_ALIASES.get(parsed.as_posix())

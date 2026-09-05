@@ -12,7 +12,7 @@ This resources server evaluates instruction following using AllenAI's [IFBench](
 
 Use IFBench with:
 
-- `harnesses/simple_agent`
+- `responses_api_agents/simple_agent`
 - `responses_api_models/*` (typically `policy_model`)
 - `resources_servers/ifbench`
 

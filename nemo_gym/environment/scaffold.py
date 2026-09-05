@@ -355,7 +355,7 @@ def _render_manifest_composition(root: Path, composition: _Composition) -> dict[
         IntegrationProfile.CUSTOM_GYM_AGENT_LOOP,
         IntegrationProfile.EXTERNAL_AGENT_LOOP,
     }:
-        agent_dir = root / "harnesses" / composition.agent_implementation
+        agent_dir = root / "responses_api_agents" / composition.agent_implementation
         files.update(_agent_files(root, agent_dir, composition))
     if composition.rollout_driver:
         files[asset / "rollout_driver.py"] = _rollout_driver()
@@ -708,9 +708,9 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
         body = f"""\
         from fastapi import Request, Response
 
-        from harnesses.simple_agent.app import SimpleAgent
         from nemo_gym.base_responses_api_agent import Body
         from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+        from responses_api_agents.simple_agent.app import SimpleAgent
 
 
         class {class_name}Agent(SimpleAgent):
@@ -727,13 +727,13 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
         body = f"""\
         from fastapi import Request, Response
 
-        from harnesses.simple_agent.app import (
+        from nemo_gym.base_responses_api_agent import Body
+        from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+        from responses_api_agents.simple_agent.app import (
             SimpleAgent,
             SimpleAgentRunRequest,
             SimpleAgentVerifyResponse,
         )
-        from nemo_gym.base_responses_api_agent import Body
-        from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 
 
         class {class_name}Agent(SimpleAgent):

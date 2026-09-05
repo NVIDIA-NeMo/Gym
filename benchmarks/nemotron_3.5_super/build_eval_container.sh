@@ -78,7 +78,7 @@ gdown --folder "https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvU
 if [[ -n "$TAU_2_MOUNT_BASE_GYM_DIR" ]]; then
     echo "Copying Tau2 and Tau3 data from mounted Gym dir: $TAU_2_MOUNT_BASE_GYM_DIR"
     cp -r "$TAU_2_MOUNT_BASE_GYM_DIR/benchmarks/tau2/nemo_gym_data" benchmarks/tau2/nemo_gym_data
-    cp -r "$TAU_2_MOUNT_BASE_GYM_DIR/harnesses/tau2/tau2_data" harnesses/tau2/tau2_data
+    cp -r "$TAU_2_MOUNT_BASE_GYM_DIR/responses_api_agents/tau2/tau2_data" responses_api_agents/tau2/tau2_data
 fi
 
 ########################################

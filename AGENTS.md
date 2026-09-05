@@ -31,7 +31,7 @@ Environments decompose into four concepts:
 | Concept | NeMo Gym Component |
 |---------|-------------------|
 | Dataset | JSONL: one row per task |
-| Agent Harness | FastAPI Agent Server (`harnesses/`) |
+| Agent Harness | FastAPI Agent Server (`responses_api_agents/`) |
 | Verifier + State | FastAPI Resources Server (`resources_servers/`) |
 | Model | FastAPI Model Server (`responses_api_models/`) or your own |
 

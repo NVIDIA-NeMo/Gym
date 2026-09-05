@@ -15,12 +15,12 @@ START_CONTROL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/start_control.sh"
 RUN_EVAL_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/run_eval.sh"
 CLEANUP_RUN_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/cleanup_run.sh"
 OPENSANDBOX_CLEANUP_SCRIPT = REPO_ROOT / "benchmarks/osworld/tools/cleanup_opensandbox_run.py"
-OSWORLD_AGENT_CONFIG = REPO_ROOT / "harnesses/osworld_agent/configs/osworld_agent.yaml"
-OSWORLD_AGENT_APP = REPO_ROOT / "harnesses/osworld_agent/app.py"
-OSWORLD_AGENT_REQUIREMENTS = REPO_ROOT / "harnesses/osworld_agent/requirements.txt"
-OSWORLD_AGENT_OVERRIDES = REPO_ROOT / "harnesses/osworld_agent/overrides.txt"
-OSWORLD_RUNTIME_DEPS_SCRIPT = REPO_ROOT / "harnesses/osworld_agent/install_optional_runtime_deps.sh"
-OSWORLD_RUNTIME_DEPS_CHECKER = REPO_ROOT / "harnesses/osworld_agent/runtime_dependencies.py"
+OSWORLD_AGENT_CONFIG = REPO_ROOT / "responses_api_agents/osworld_agent/configs/osworld_agent.yaml"
+OSWORLD_AGENT_APP = REPO_ROOT / "responses_api_agents/osworld_agent/app.py"
+OSWORLD_AGENT_REQUIREMENTS = REPO_ROOT / "responses_api_agents/osworld_agent/requirements.txt"
+OSWORLD_AGENT_OVERRIDES = REPO_ROOT / "responses_api_agents/osworld_agent/overrides.txt"
+OSWORLD_RUNTIME_DEPS_SCRIPT = REPO_ROOT / "responses_api_agents/osworld_agent/install_optional_runtime_deps.sh"
+OSWORLD_RUNTIME_DEPS_CHECKER = REPO_ROOT / "responses_api_agents/osworld_agent/runtime_dependencies.py"
 
 
 @pytest.mark.parametrize(

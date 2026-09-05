@@ -14,7 +14,7 @@ The examples in `data/example.jsonl` are synthetic. They are not redistributed b
 
 Use BunsenBench Chemistry MCQ with:
 
-- `harnesses/simple_agent` via `bunsenbench_chemistry_mcq_simple_agent`
+- `responses_api_agents/simple_agent` via `bunsenbench_chemistry_mcq_simple_agent`
 - `responses_api_models/*` (typically `policy_model` or `openai_model`)
 - `resources_servers/bunsenbench_chemistry_mcq` (config key: `bunsenbench_chemistry_mcq`)
 
@@ -104,7 +104,7 @@ Beyond accuracy, each rollout is classified into exactly one mutually exclusive 
 ## Example Usage
 
 ```bash
-config_paths="harnesses/simple_agent/configs/simple_agent.yaml,\
+config_paths="responses_api_agents/simple_agent/configs/simple_agent.yaml,\
 responses_api_models/openai_model/configs/openai_model.yaml,\
 resources_servers/bunsenbench_chemistry_mcq/configs/bunsenbench_chemistry_mcq.yaml"
 

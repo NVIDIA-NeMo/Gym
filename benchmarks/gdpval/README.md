@@ -2,7 +2,7 @@
 
 [GDPVal](https://huggingface.co/datasets/openai/gdpval) — 220 professional
 knowledge-work tasks scored by an LLM judge against per-task rubrics. This
-benchmark wires the Stirrup-based agent (`harnesses/stirrup_agent`)
+benchmark wires the Stirrup-based agent (`responses_api_agents/stirrup_agent`)
 to the GDPVal resources server (`resources_servers/gdpval`).
 
 ## Prepare data
@@ -200,7 +200,7 @@ journal (and re-derived deterministically from the stage seed when a recorded
 plan predates them), so they replay identically on resume; use the same
 `multistage.seed` so a fresh re-plan of any not-yet-started stage draws the same
 tasks and assignment. See
-[Task Re-run Mode](../../harnesses/stirrup_agent/README.md#task-re-run-mode)
+[Task Re-run Mode](../../responses_api_agents/stirrup_agent/README.md#task-re-run-mode)
 for the full semantics.
 
 ## Multi-judge panel

@@ -24,7 +24,7 @@ You do not configure a separate "Claude model" server. Point Claude Code at any 
 
 ## Wire Claude Code to a Gym model server
 
-The built-in [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/harnesses/claude_code_agent) runs `claude -p` as a subprocess. Set its `model_server` ref to the Gym model server you want to use. That ref takes precedence over `anthropic_base_url`: the agent resolves `ANTHROPIC_BASE_URL` to the model server, and the CLI appends `/v1/messages`.
+The built-in [`claude_code_agent`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent) runs `claude -p` as a subprocess. Set its `model_server` ref to the Gym model server you want to use. That ref takes precedence over `anthropic_base_url`: the agent resolves `ANTHROPIC_BASE_URL` to the model server, and the CLI appends `/v1/messages`.
 
 The showcase config [`reasoning_gym_claude_code_agent_model_server.yaml`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/reasoning_gym/configs/reasoning_gym_claude_code_agent_model_server.yaml) already wires `model_server` to `policy_model`. Compose it with any model server:
 
@@ -131,7 +131,7 @@ ANTHROPIC_BASE_URL=$URL ANTHROPIC_AUTH_TOKEN=local \
 
 ## Related
 
-- Agent runtime options (`bare`, MCP, skills, thinking): [`claude_code_agent` README](https://github.com/NVIDIA-NeMo/Gym/tree/main/harnesses/claude_code_agent)
+- Agent runtime options (`bare`, MCP, skills, thinking): [`claude_code_agent` README](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/claude_code_agent)
 - Skills evaluation pattern: [Agent Skills](/agent-server/agent-skills)
 - MCP tools from a Resources Server: [MCP Resources Server](/environment-tutorials/mcp-resources-server)
 - Capture model HTTP evidence: [Model-call capture](/model-server/model-call-capture)

@@ -54,7 +54,7 @@ The example below uses Qwen3-27B-FP8 — swap `--model` and the
 
 ```bash
 gym env start \
-    --config harnesses/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
+    --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
     --config nemo_gym/sandbox/providers/enroot/configs/enroot.yaml \
     +skip_venv_if_present=true \
     --model-type local_vllm_model \
@@ -75,7 +75,7 @@ gym env start \
 ```bash
 gym eval run --no-serve \
     --agent mini_swe_agent_2 \
-    --input harnesses/mini_swe_agent_2/data/example.jsonl \
+    --input responses_api_agents/mini_swe_agent_2/data/example.jsonl \
     --output results/mini_swe_agent_2_v2.jsonl \
     --limit 5 \
     --num-repeats 1 \

@@ -1,7 +1,7 @@
 # Complete Nemotron 3 Nano Omni OSWorld profile: the upstream agent scaffold,
 # the external vLLM transport, and Gym Docker Sandbox execution.
 config_paths:
-  - harnesses/osworld_agent/configs/osworld_agent.yaml
+  - responses_api_agents/osworld_agent/configs/osworld_agent.yaml
 
 policy_base_url: ${oc.env:NANO_OMNI_VLLM_BASE_URL,http://127.0.0.1:8000/v1}
 policy_api_key: ${oc.env:NANO_OMNI_VLLM_API_KEY,local-vllm}  # pragma: allowlist secret

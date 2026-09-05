@@ -47,14 +47,14 @@ def _runtime_bundles(repo_root: Path) -> tuple[AssetBundle, ...]:
     return (
         AssetBundle(
             remote_dir=Path("conversational_tool_use_domain_generation/prompts"),
-            local_dir=repo_root / "harnesses/conversational_tool_use/domain_generation/prompts",
+            local_dir=repo_root / "responses_api_agents/conversational_tool_use/domain_generation/prompts",
             filenames=("domain_generation.txt",),
             file_count=1,
             tree_sha256="0fcdff8392e4f531042322087d8a8038ff9c8dc17a6854c712c7c1ad6e4cb346",  # pragma: allowlist secret
         ),
         AssetBundle(
             remote_dir=Path("conversational_tool_use_policy_tool_generation/prompts"),
-            local_dir=repo_root / "harnesses/conversational_tool_use/policy_tool_generation/prompts",
+            local_dir=repo_root / "responses_api_agents/conversational_tool_use/policy_tool_generation/prompts",
             filenames=(
                 "cohesion_judge.txt",
                 "general_policy.txt",
@@ -72,7 +72,7 @@ def _runtime_bundles(repo_root: Path) -> tuple[AssetBundle, ...]:
         AssetBundle(
             remote_dir=Path("conversational_tool_use_policy_tool_generation/references/golden_policies"),
             local_dir=repo_root
-            / "harnesses/conversational_tool_use/policy_tool_generation/references/golden_policies",
+            / "responses_api_agents/conversational_tool_use/policy_tool_generation/references/golden_policies",
             filenames=tuple(
                 filename for index in range(1, 9) for filename in (f"policy-{index}.md", f"tools_{index}.jsonl")
             ),
@@ -81,7 +81,7 @@ def _runtime_bundles(repo_root: Path) -> tuple[AssetBundle, ...]:
         ),
         AssetBundle(
             remote_dir=Path("conversational_tool_use_scenario_generation/prompts"),
-            local_dir=repo_root / "harnesses/conversational_tool_use/scenario_generation/prompts",
+            local_dir=repo_root / "responses_api_agents/conversational_tool_use/scenario_generation/prompts",
             filenames=("scenario_system.txt", "scenario_user.txt"),
             file_count=2,
             tree_sha256="684e433926cee22beb71f34412578c26ff8e1589bd903ddae82021e613af03fb",  # pragma: allowlist secret
@@ -93,13 +93,14 @@ def _history_bundles(repo_root: Path) -> tuple[AssetBundle, ...]:
     return (
         AssetBundle(
             remote_dir=Path("conversational_tool_use_domain_generation/prompt_history"),
-            local_dir=repo_root / "harnesses/conversational_tool_use/domain_generation/prompts/archive",
+            local_dir=repo_root / "responses_api_agents/conversational_tool_use/domain_generation/prompts/archive",
             file_count=2,
             tree_sha256="27e7dab1d6a3a9766929766fe192e35ead23876eab419692d11822f27bfba770",  # pragma: allowlist secret
         ),
         AssetBundle(
             remote_dir=Path("conversational_tool_use_policy_tool_generation/prompt_history"),
-            local_dir=repo_root / "harnesses/conversational_tool_use/policy_tool_generation/prompts/archive",
+            local_dir=repo_root
+            / "responses_api_agents/conversational_tool_use/policy_tool_generation/prompts/archive",
             file_count=42,
             tree_sha256="fd4d674dea96fee4d258daef1defa55b4aa42dfe6bc7720ac2b0e44aa41c5d90",  # pragma: allowlist secret
         ),

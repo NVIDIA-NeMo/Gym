@@ -35,7 +35,7 @@ export NEMO_GYM_TAU2_BENCH_DATA_REF="${NEMO_GYM_TAU2_BENCH_DATA_REF:-bxyu/nemo_g
 
 BENCH=tau2/configs/banking_bm25_grep_artificial_analysis
 GYM_ROOT="${GYM_ROOT:-$PWD}"
-TAU2_VENV="${TAU2_VENV:-$GYM_ROOT/harnesses/tau2/.venv}"
+TAU2_VENV="${TAU2_VENV:-$GYM_ROOT/responses_api_agents/tau2/.venv}"
 
 # Gym builds the tau2 agent venv on first use, so pre-build it here to give the
 # pin below somewhere to install.

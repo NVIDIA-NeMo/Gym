@@ -9,8 +9,8 @@ CONTROL_HOST=${NEMO_GYM_CONTROL_HOST:-127.0.0.1}
 GYM_BIN=${GYM_BIN:-${GYM_ROOT}/.venv/bin/gym}
 GYM_PYTHON=${GYM_PYTHON:-$(dirname "${GYM_BIN}")/python}
 ENV_FILE=${GYM_ROOT}/benchmarks/osworld/env.yaml
-RUNTIME_DEPS_CHECKER=${GYM_ROOT}/harnesses/osworld_agent/runtime_dependencies.py
-RUNTIME_DEPS_INSTALLER=${GYM_ROOT}/harnesses/osworld_agent/install_optional_runtime_deps.sh
+RUNTIME_DEPS_CHECKER=${GYM_ROOT}/responses_api_agents/osworld_agent/runtime_dependencies.py
+RUNTIME_DEPS_INSTALLER=${GYM_ROOT}/responses_api_agents/osworld_agent/install_optional_runtime_deps.sh
 STATE_DIR=${RUN_ROOT}/run/osworld/${RUN_ID}
 PID_FILE=${STATE_DIR}/control.pid
 

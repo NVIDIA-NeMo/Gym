@@ -342,10 +342,8 @@ _ASSETS = {
     "environment": ("environments", "", "config"),
     "resources-server": ("resources_servers", "configs", None),
     "model-type": ("responses_api_models", "configs", None),
-    "agent-type": ("harnesses", "configs", None),
+    "agent-type": ("responses_api_agents", "configs", None),
 }
-
-_ASSET_LEGACY_PARENTS = {"agent-type": ("responses_api_agents",)}
 
 
 def _asset_config_path(flag: str, value: str) -> str:
@@ -383,16 +381,12 @@ def _asset_config_path(flag: str, value: str) -> str:
                 )
             return str(nested_matches[0])
 
-    selected_paths: list[tuple[Path, str]] = []
-    search_parents = (parent, *_ASSET_LEGACY_PARENTS.get(flag, ()))
     for root in roots:
-        for search_parent in search_parents:
-            candidate = root / search_parent / server_name / subdir / f"{config_flavor}.yaml"
-            if candidate.exists():
-                resolved = candidate.resolve()
-                if resolved not in matches:
-                    matches.append(resolved)
-                    selected_paths.append((resolved, search_parent))
+        candidate = root / path
+        if candidate.exists():
+            resolved = candidate.resolve()
+            if resolved not in matches:
+                matches.append(resolved)
 
     if len(matches) > 1:
         shadowed = ", ".join(f"`{m}`" for m in matches[1:])
@@ -401,8 +395,6 @@ def _asset_config_path(flag: str, value: str) -> str:
             f"and ignoring {shadowed}. Pass `--config <path>` to select a different one."
         )
     if matches:
-        if selected_paths[0][1] != parent:
-            logger.warning(f"Agent config directory `{selected_paths[0][1]}` is deprecated; move it to `{parent}`.")
         return str(matches[0])
 
     if flag == "environment" and value in LEGACY_ENVIRONMENT_ALIASES:
@@ -439,37 +431,19 @@ def _asset_config_path(flag: str, value: str) -> str:
         # Suggest the closest real name across all roots: a config flavor when the server exists, else a server
         # name, reporting the full paths that were searched in each case.
         available = ", ".join(
-            {
-                f"`{(root / search_parent / server_name / subdir).resolve()}`"
-                for root in roots
-                for search_parent in search_parents
-                if (root / search_parent / server_name / subdir).is_dir()
-            }
+            set(f"`{(root / config_dir).resolve()}`" for root in roots if (root / config_dir).is_dir())
         )
         typo = config_flavor
-        candidates = [
-            p.stem
-            for root in roots
-            for search_parent in search_parents
-            for p in (root / search_parent / server_name / subdir).glob("*.yaml")
-        ]
+        candidates = [p.stem for root in roots for p in (root / config_dir).glob("*.yaml")]
 
         if len(candidates) == 0:
-            available = ", ".join(
-                {
-                    f"`{(root / search_parent).resolve()}`"
-                    for root in roots
-                    for search_parent in search_parents
-                    if (root / search_parent).is_dir()
-                }
-            )
+            available = ", ".join(set(f"`{(root / parent).resolve()}`" for root in roots if (root / parent).is_dir()))
             typo = server_name
             candidates = [
                 child.name
                 for root in roots
-                for search_parent in search_parents
-                if (root / search_parent).is_dir()
-                for child in (root / search_parent).iterdir()
+                if (root / parent).is_dir()
+                for child in (root / parent).iterdir()
                 if child.is_dir()
             ]
 

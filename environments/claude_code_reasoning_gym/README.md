@@ -24,7 +24,7 @@ anthropic_base_url: http://localhost:8000
 
 `anthropic_base_url` should not include `/v1`. Claude Code appends `/v1/messages` itself.
 
-See [`harnesses/claude_code_agent`](../../harnesses/claude_code_agent/README.md) for the full set of agent options (`thinking`, `max_thinking_tokens`, `allowed_tools`, `disallowed_tools`, `max_turns`, `timeout`, etc.).
+See [`responses_api_agents/claude_code_agent`](../../responses_api_agents/claude_code_agent/README.md) for the full set of agent options (`thinking`, `max_thinking_tokens`, `allowed_tools`, `disallowed_tools`, `max_turns`, `timeout`, etc.).
 
 ## Start
 

@@ -1,0 +1,48 @@
+harbor_agent:
+  responses_api_agents:
+    harbor_agent:
+      # Python module entrypoint loaded by NeMo Gym.
+      entrypoint: app.py
+      domain: agent
+      description: Harbor integration for agent harnesses and environments.
+      value: Improve models in popular agentic environments supported by Harbor such as Terminus2.
+      concurrency: 10
+
+      harbor_datasets:
+        scientific:
+          local_dataset_path: "responses_api_agents/harbor_agent/data/nemotron_terminal_synthetic_tasks/skill_based/mixed/scientific_computing"
+          workdir: "/app"
+        terminal_bench:
+          dataset_name: "terminal-bench"
+          dataset_version: "2.0"
+
+      harbor_agent_name: null
+      harbor_agent_import_path: "responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym:Terminus2NemoGym"
+      harbor_agent_kwargs:
+        max_turns: 20
+        interleaved_thinking: true
+        enable_summarize: false
+        collect_rollout_details: true
+        trajectory_config:
+          raw_content: true
+        model_info:
+          max_input_tokens: 49152
+          max_output_tokens: 49152
+          input_cost_per_token: 0.0
+          output_cost_per_token: 0.0
+
+      harbor_environment_type: "daytona"
+      harbor_environment_import_path: null
+      harbor_environment_kwargs:
+        network_block_all: false
+
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      harbor_agent_override_timeout: null
+      harbor_agent_max_timeout: null
+      harbor_verifier_override_timeout: null
+      harbor_verifier_max_timeout: null
+      harbor_timeout_multiplier: null
+      harbor_jobs_dir: "responses_api_agents/harbor_agent/jobs"
