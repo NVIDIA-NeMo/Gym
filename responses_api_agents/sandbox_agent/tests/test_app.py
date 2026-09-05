@@ -20,7 +20,7 @@ import pytest
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.sandbox_agent.app import SandboxAgent, SandboxAgentConfig
+from responses_api_agents.sandbox_agent.app import SandboxAgent, SandboxAgentConfig, stage_and_run_eval
 
 
 def _config(**kwargs) -> SandboxAgentConfig:
@@ -160,6 +160,29 @@ async def test_grading_command_failure_is_not_reward_zero():
     with pytest.raises(RuntimeError, match="eval command failed.*grader crashed"):
         await agent._grade_in_box(MagicMock(), {"eval_command": "false"})
     agent._provider.download_file.assert_not_awaited()
+
+
+async def test_empty_reward_file_is_not_reward_zero():
+    provider = MagicMock()
+    provider.exec = AsyncMock(return_value=SandboxExecResult("", "", 0))
+    provider.download_file = AsyncMock(side_effect=lambda _, __, path: path.write_text(""))
+
+    with pytest.raises(RuntimeError, match="reward file.*is empty"):
+        await stage_and_run_eval(provider, MagicMock(), {}, "true", "/reward", 30)
+
+
+async def test_setup_failure_closes_sandbox():
+    agent = _make_agent(setup_commands=["install deps"])
+    handle = MagicMock()
+    agent._provider.create = AsyncMock(return_value=handle)
+    agent._provider.exec = AsyncMock(
+        side_effect=[SandboxExecResult("", "", 0), SandboxExecResult("", "install failed", 2)]
+    )
+    agent._provider.close = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="setup failed.*install failed"):
+        await agent._provision_box("image", {}, "https://model.example")
+    agent._provider.close.assert_awaited_once_with(handle)
 
 
 def test_gym_tar_built_on_init():
