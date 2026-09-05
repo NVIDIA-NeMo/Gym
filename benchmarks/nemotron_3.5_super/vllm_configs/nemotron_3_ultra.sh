@@ -23,12 +23,16 @@ ULTRA_MAX_NUM_SEQS="${ULTRA_MAX_NUM_SEQS:-64}"
 ULTRA_ENABLE_PREFIX_CACHING="${ULTRA_ENABLE_PREFIX_CACHING:-0}"
 ULTRA_PREFILL_CUDAGRAPH_COPY_INPUTS="${ULTRA_PREFILL_CUDAGRAPH_COPY_INPUTS:-0}"
 ULTRA_PREFILL_ENFORCE_EAGER="${ULTRA_PREFILL_ENFORCE_EAGER:-1}"
+ULTRA_PREFILL_ENABLE_ASYNC_SCHEDULING="${ULTRA_PREFILL_ENABLE_ASYNC_SCHEDULING:-0}"
 ULTRA_DECODE_CUDAGRAPH_MODE="${ULTRA_DECODE_CUDAGRAPH_MODE:-NONE}"
 ULTRA_DECODE_CUDAGRAPH_COPY_INPUTS="${ULTRA_DECODE_CUDAGRAPH_COPY_INPUTS:-0}"
 ULTRA_DECODE_CUDAGRAPH_CAPTURE_SIZES="${ULTRA_DECODE_CUDAGRAPH_CAPTURE_SIZES:-}"
 ULTRA_DISABLE_DECODE_CUSTOM_ALL_REDUCE="${ULTRA_DISABLE_DECODE_CUSTOM_ALL_REDUCE:-0}"
 ULTRA_DECODE_ALL2ALL_BACKEND="${ULTRA_DECODE_ALL2ALL_BACKEND:-}"
+ULTRA_DECODE_ENABLE_EPLB="${ULTRA_DECODE_ENABLE_EPLB:-0}"
+ULTRA_DECODE_EPLB_CONFIG="${ULTRA_DECODE_EPLB_CONFIG:-}"
 ULTRA_DECODE_ENFORCE_EAGER="${ULTRA_DECODE_ENFORCE_EAGER:-1}"
+ULTRA_DECODE_ENABLE_ASYNC_SCHEDULING="${ULTRA_DECODE_ENABLE_ASYNC_SCHEDULING:-0}"
 ULTRA_NUM_SPECULATIVE_TOKENS="${ULTRA_NUM_SPECULATIVE_TOKENS:-5}"
 export SAFETENSORS_FAST_GPU=1
 
@@ -57,6 +61,14 @@ case "$ULTRA_PREFILL_ENFORCE_EAGER" in
     0 | 1) ;;
     *)
         echo "ERROR: ULTRA_PREFILL_ENFORCE_EAGER must be 0 or 1; got '$ULTRA_PREFILL_ENFORCE_EAGER'." >&2
+        exit 2
+        ;;
+esac
+
+case "$ULTRA_PREFILL_ENABLE_ASYNC_SCHEDULING" in
+    0 | 1) ;;
+    *)
+        echo "ERROR: ULTRA_PREFILL_ENABLE_ASYNC_SCHEDULING must be 0 or 1; got '$ULTRA_PREFILL_ENABLE_ASYNC_SCHEDULING'." >&2
         exit 2
         ;;
 esac
@@ -99,10 +111,26 @@ case "$ULTRA_DECODE_ALL2ALL_BACKEND" in
         ;;
 esac
 
+case "$ULTRA_DECODE_ENABLE_EPLB" in
+    0 | 1) ;;
+    *)
+        echo "ERROR: ULTRA_DECODE_ENABLE_EPLB must be 0 or 1; got '$ULTRA_DECODE_ENABLE_EPLB'." >&2
+        exit 2
+        ;;
+esac
+
 case "$ULTRA_DECODE_ENFORCE_EAGER" in
     0 | 1) ;;
     *)
         echo "ERROR: ULTRA_DECODE_ENFORCE_EAGER must be 0 or 1; got '$ULTRA_DECODE_ENFORCE_EAGER'." >&2
+        exit 2
+        ;;
+esac
+
+case "$ULTRA_DECODE_ENABLE_ASYNC_SCHEDULING" in
+    0 | 1) ;;
+    *)
+        echo "ERROR: ULTRA_DECODE_ENABLE_ASYNC_SCHEDULING must be 0 or 1; got '$ULTRA_DECODE_ENABLE_ASYNC_SCHEDULING'." >&2
         exit 2
         ;;
 esac
@@ -125,7 +153,6 @@ VLLM_COMMON_ARGS=(
     --enable-chunked-prefill
     --kv-cache-dtype fp8
     --no-disable-hybrid-kv-cache-manager
-    --no-async-scheduling
     --block-size 128
     --mamba-cache-mode align
     --mamba-ssm-cache-dtype float16
@@ -156,6 +183,12 @@ VLLM_PREFILL_ARGS=(
     --tensor-parallel-size 4
 )
 
+if [[ "$ULTRA_PREFILL_ENABLE_ASYNC_SCHEDULING" == "1" ]]; then
+    VLLM_PREFILL_ARGS+=(--async-scheduling)
+else
+    VLLM_PREFILL_ARGS+=(--no-async-scheduling)
+fi
+
 if [[ "$ULTRA_PREFILL_ENFORCE_EAGER" == "1" ]]; then
     # Bypass torch.compile as well as CUDA graphs on the prefill tier.
     VLLM_PREFILL_ARGS+=(--enforce-eager)
@@ -171,6 +204,13 @@ VLLM_DECODE_ARGS=(
     --tensor-parallel-size 4
 )
 
+if [[ "$ULTRA_DECODE_ENABLE_ASYNC_SCHEDULING" == "1" ]]; then
+    # Overlap CPU scheduling for the next decode step with current GPU work.
+    VLLM_DECODE_ARGS+=(--async-scheduling)
+else
+    VLLM_DECODE_ARGS+=(--no-async-scheduling)
+fi
+
 if [[ "$ULTRA_DISABLE_DECODE_CUSTOM_ALL_REDUCE" == "1" ]]; then
     # Isolate custom all-reduce from the graph-enabled distributed decode path.
     # vLLM falls back to its standard NCCL-backed tensor-parallel reductions.
@@ -181,6 +221,15 @@ if [[ -n "$ULTRA_DECODE_ALL2ALL_BACKEND" ]]; then
     # Select the collective used to dispatch tokens to the expert-parallel
     # decode ranks and combine the expert outputs. Prefill stays on the default.
     VLLM_DECODE_ARGS+=(--all2all-backend "$ULTRA_DECODE_ALL2ALL_BACKEND")
+fi
+
+if [[ "$ULTRA_DECODE_ENABLE_EPLB" == "1" ]]; then
+    # Rebalance the existing decode experts from observed routing load. Keep
+    # the stable default all-to-all backend unless it is explicitly overridden.
+    VLLM_DECODE_ARGS+=(--enable-eplb)
+    if [[ -n "$ULTRA_DECODE_EPLB_CONFIG" ]]; then
+        VLLM_DECODE_ARGS+=(--eplb-config "$ULTRA_DECODE_EPLB_CONFIG")
+    fi
 fi
 
 if [[ "$ULTRA_DECODE_ENFORCE_EAGER" == "1" ]]; then
