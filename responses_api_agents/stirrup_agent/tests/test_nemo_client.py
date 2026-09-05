@@ -518,6 +518,27 @@ async def test_no_estimated_context_remaining_raises_before_dispatch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_output_cap_smaller_than_prompt_does_not_shrink_context_window() -> None:
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=262_144,
+        base_url="http://test",
+        api_key="k",
+        min_completion_tokens=8192,
+        max_completion_tokens_cap=8192,
+    )
+    client._count_input_tokens_with_confidence = MagicMock(return_value=(10_000, True))
+    client._tokenizer = object()
+    fake_create = AsyncMock(return_value=_make_response())
+    client._client = MagicMock()
+    client._client.chat.completions.create = fake_create
+
+    await client.generate([UserMessage(content="hi")], tools={})
+
+    assert fake_create.await_args.kwargs["max_completion_tokens"] == 8192
+
+
+@pytest.mark.asyncio
 async def test_fallback_overestimate_still_dispatches_configured_floor() -> None:
     client = DynamicMaxTokensChatCompletionsClient(
         model="m",

@@ -475,7 +475,7 @@ async def _run_stirrup_agent(
     api_key: str = "dummy",
     max_turns: int = 250,
     temperature: float = 0.6,
-    max_tokens: int = 262144,
+    context_window_tokens: int = 262144,
     reference_files: Optional[list] = None,
     reference_file_urls: Optional[list] = None,
     exec_provider_class: Optional[str] = None,
@@ -505,6 +505,9 @@ async def _run_stirrup_agent(
     a tokenizer that sizes ``max_completion_tokens`` dynamically per call
     (see ``DynamicMaxTokensChatCompletionsClient``).  When unset, a
     character-count fallback is used.
+
+    *context_window_tokens* describes model capacity. It is deliberately
+    separate from the outer Responses API request's ``max_output_tokens``.
     """
     from stirrup.tools import DEFAULT_TOOLS
     from stirrup.tools.code_backends.base import SHELL_TIMEOUT, CodeExecToolProvider, CommandResult
@@ -553,7 +556,7 @@ async def _run_stirrup_agent(
         model=model_name,
         base_url=model_base_url,
         api_key=api_key,
-        max_tokens=max_tokens,
+        max_tokens=context_window_tokens,
         model_id=model_id,
         completion_token_buffer=completion_token_buffer,
         temperature=temperature,
@@ -985,6 +988,13 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "(messages + tool-schema JSON) and the exact prompt the server sees after chat-template "
         "rendering. See ``nemo_client.DynamicMaxTokensChatCompletionsClient``.",
     )
+    context_window_tokens: int = Field(
+        default=262144,
+        ge=1,
+        description="Model context-window size used for dynamic per-call completion budgeting. "
+        "This is independent of the Responses API request's max_output_tokens, which limits "
+        "output rather than describing model capacity.",
+    )
     top_p: float = Field(
         default=0.95,
         description="Top-p sampling cutoff for the policy model. Forwarded to the LLM client.",
@@ -1191,7 +1201,10 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
         model_name = getattr(body, "model", None) or "default"
         temperature = getattr(body, "temperature", None) or self.config.temperature
-        max_tokens = getattr(body, "max_output_tokens", 262144) or 262144
+        requested_output_tokens = getattr(body, "max_output_tokens", None)
+        max_completion_tokens_cap = self.config.max_completion_tokens_cap
+        if requested_output_tokens is not None:
+            max_completion_tokens_cap = min(max_completion_tokens_cap, requested_output_tokens)
 
         exec_provider = self.task_strategy.get_exec_provider(task_info, self.config)
         exec_provider_class = None
@@ -1211,7 +1224,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             "api_key": "dummy",  # pragma: allowlist secret
             "max_turns": self.config.agent_max_turns,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "context_window_tokens": self.config.context_window_tokens,
             "reference_files": task_info.get("reference_files") if self.config.task == "gdpval" else None,
             "reference_file_urls": task_info.get("reference_file_urls") if self.config.task == "gdpval" else None,
             "exec_provider_class": exec_provider_class,
@@ -1224,7 +1237,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             "completion_token_buffer": self.config.completion_token_buffer,
             "top_p": getattr(body, "top_p", None) or self.config.top_p,
             "enable_thinking": self.config.enable_thinking,
-            "max_completion_tokens_cap": self.config.max_completion_tokens_cap,
+            "max_completion_tokens_cap": max_completion_tokens_cap,
             "min_completion_tokens": self.config.min_completion_tokens,
             "prompt_estimator_truncate_history_thinking": (self.config.prompt_estimator_truncate_history_thinking),
             "truncation_recovery": self.config.truncation_recovery,

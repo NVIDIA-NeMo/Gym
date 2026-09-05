@@ -131,6 +131,7 @@ The agent reads its Hydra config at `configs/stirrup_agent.yaml`. Notable keys:
 | `rerun_incomplete` | `false` | If true, skip the rollout for tasks that already **finished** (a finish marker is cached) and only re-run the ones that didn't (see [Task Re-run Mode](#task-re-run-mode)). Composes with `execute_only` and `judge_only`. |
 | `model_id` | `null` | HF model id or local path used to load a tokenizer for dynamic output sizing. |
 | `completion_token_buffer` | `1000` | Safety margin (in tokens) reserved when sizing `max_completion_tokens` per call. |
+| `context_window_tokens` | `262144` | Model context-window size used for dynamic completion budgeting. Independent of a request's `max_output_tokens`. |
 | `min_completion_tokens` | `1024` | Target useful per-call completion floor. The hard cap always applies; estimated remaining context is also a strict bound when the tokenizer successfully renders the complete prompt. Approximate fallbacks preserve this floor even when their estimate exceeds context. GDPVal raises it to `8192`. |
 | `prompt_estimator_truncate_history_thinking` | `null` | Optional estimator-only switch for templates that omit completed historical reasoning. It is never sent to the provider. |
 | `min_compaction_summary_words` | `1` | Minimum summary length accepted during context compaction. GDPVal uses `50`; invalid summaries retry up to three times and never replace the live history. |
