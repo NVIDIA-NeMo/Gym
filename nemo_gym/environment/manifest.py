@@ -78,15 +78,6 @@ class DatasetKind(StrEnum):
     BENCHMARK = "benchmark"
 
 
-class RolloutSmokeRequirement(StrEnum):
-    """Environment-side services needed by an external rollout smoke test."""
-
-    AUXILIARY_MODEL = "auxiliary-model"
-    GPU = "gpu"
-    NETWORK = "network"
-    SANDBOX = "sandbox"
-
-
 _PROFILE_REQUIRED_FIELDS = {
     IntegrationProfile.CUSTOM_GYM_VERIFIER: ("model_server",),
     IntegrationProfile.CUSTOM_GYM_AGENT_LOOP: ("model_server",),
@@ -141,28 +132,6 @@ class ManifestDataset(_ManifestModel):
             if self.prepare_script is None:
                 raise ValueError("a benchmark dataset requires: prepare_script")
         return self
-
-
-class RolloutSmoke(_ManifestModel):
-    """A small dataset contract for external rollout consumers."""
-
-    dataset: NonEmptyString
-    rollout_limit: int = Field(default=1, ge=1)
-    timeout_seconds: int = Field(default=300, ge=1)
-    requirements: list[RolloutSmokeRequirement] = Field(
-        default_factory=list,
-        json_schema_extra={"uniqueItems": True},
-    )
-
-    @field_validator("requirements")
-    @classmethod
-    def validate_unique_requirements(
-        cls,
-        value: list[RolloutSmokeRequirement],
-    ) -> list[RolloutSmokeRequirement]:
-        if len(value) != len(set(value)):
-            raise ValueError("rollout_smoke.requirements must be unique")
-        return value
 
 
 class AdoptedFrom(_ManifestModel):
@@ -255,7 +224,6 @@ class EnvironmentManifest(_ManifestModel):
     standard_prompt_config: NonEmptyString | None = None
     adopted_from: AdoptedFrom | None = None
     lifecycle: Lifecycle = Lifecycle.ACTIVE
-    rollout_smoke: RolloutSmoke | None = None
 
     @field_validator("authors")
     @classmethod
@@ -294,15 +262,6 @@ class EnvironmentManifest(_ManifestModel):
             dataset.type == DatasetKind.BENCHMARK for dataset in self.datasets
         ):
             raise ValueError("a benchmark manifest requires a benchmark dataset")
-        if self.rollout_smoke is not None:
-            smoke_dataset = next(
-                (dataset for dataset in self.datasets if dataset.name == self.rollout_smoke.dataset),
-                None,
-            )
-            if smoke_dataset is None:
-                raise ValueError(f"rollout_smoke.dataset references unknown dataset {self.rollout_smoke.dataset!r}")
-            if smoke_dataset.type != DatasetKind.EXAMPLE:
-                raise ValueError("rollout_smoke.dataset must reference an example dataset")
         return self
 
 

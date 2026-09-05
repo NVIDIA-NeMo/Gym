@@ -1245,15 +1245,6 @@ def _print_validation_report(report: EnvironmentValidationReport, *, json_output
     rich.print("[green]✓[/green] Datasets:")
     for dataset in report.datasets:
         rich.print(f"    {dataset.name}: {dataset.rows} rows ({dataset.type})")
-    if report.rollout_smoke:
-        requirements = ", ".join(report.rollout_smoke["requirements"]) or "none"
-        rich.print(
-            "[green]✓[/green] Rollout smoke: "
-            f"dataset={report.rollout_smoke['dataset']} "
-            f"limit={report.rollout_smoke['rollout_limit']} "
-            f"timeout={report.rollout_smoke['timeout_seconds']}s "
-            f"requirements={requirements}"
-        )
     if report.synchronized_fields:
         rich.print(f"[green]✓[/green] Synchronized: {', '.join(report.synchronized_fields)}")
     for warning in report.warnings:
@@ -1441,8 +1432,6 @@ def _inspect_environment(
     details = {"config": str(entry.config_path.resolve()), "status": entry.status}
     if entry.manifest_path is not None:
         details["manifest"] = str(entry.manifest_path.resolve())
-    if entry.rollout_smoke is not None:
-        details["rollout smoke"] = entry.rollout_smoke
     for label, value in (
         ("version", entry.version),
         ("profile", entry.integration_profile),
@@ -1479,7 +1468,7 @@ def _inspect_environment(
 
 
 def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
-    payload = {
+    return {
         "name": entry.name,
         "kind": entry.kind,
         "status": entry.status,
@@ -1491,9 +1480,6 @@ def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
         "licensing": entry.licensing,
         "lifecycle": entry.lifecycle,
     }
-    if entry.rollout_smoke is not None:
-        payload["rollout_smoke"] = entry.rollout_smoke
-    return payload
 
 
 @exit_cleanly_on_config_error

@@ -12,7 +12,6 @@ from nemo_gym.environment.manifest import (
     EnvironmentManifest,
     IntegrationProfile,
     ManifestError,
-    RolloutSmokeRequirement,
     dump_manifest,
     load_manifest,
     manifest_json_schema,
@@ -224,57 +223,6 @@ def test_manifest_rejects_duplicate_dataset_names() -> None:
         EnvironmentManifest.model_validate(raw)
 
 
-def test_rollout_smoke_selects_an_example_dataset_and_uses_bounded_defaults() -> None:
-    raw = _manifest()
-    raw["datasets"].append(
-        {
-            "name": "smoke",
-            "type": "example",
-            "jsonl_fpath": "data/smoke.jsonl",
-        }
-    )
-    raw["rollout_smoke"] = {
-        "dataset": "smoke",
-        "requirements": ["sandbox", "auxiliary-model"],
-    }
-
-    smoke = EnvironmentManifest.model_validate(raw).rollout_smoke
-
-    assert smoke is not None
-    assert smoke.rollout_limit == 1
-    assert smoke.timeout_seconds == 300
-    assert smoke.requirements == [
-        RolloutSmokeRequirement.SANDBOX,
-        RolloutSmokeRequirement.AUXILIARY_MODEL,
-    ]
-
-
-@pytest.mark.parametrize(
-    ("smoke", "message"),
-    [
-        ({"dataset": "missing"}, "references unknown dataset"),
-        ({"dataset": "validation"}, "must reference an example dataset"),
-        ({"dataset": "smoke", "rollout_limit": 0}, "greater than or equal to 1"),
-        ({"dataset": "smoke", "timeout_seconds": 0}, "greater than or equal to 1"),
-        ({"dataset": "smoke", "requirements": ["cluster"]}, "Input should be"),
-        ({"dataset": "smoke", "requirements": ["sandbox", "sandbox"]}, "must be unique"),
-    ],
-)
-def test_rollout_smoke_rejects_invalid_contracts(smoke: dict, message: str) -> None:
-    raw = _manifest()
-    raw["datasets"].append(
-        {
-            "name": "smoke",
-            "type": "example",
-            "jsonl_fpath": "data/smoke.jsonl",
-        }
-    )
-    raw["rollout_smoke"] = smoke
-
-    with pytest.raises(ValidationError, match=message):
-        EnvironmentManifest.model_validate(raw)
-
-
 def test_adopted_from_validates_source_format() -> None:
     raw = _manifest()
     raw["adopted_from"] = {
@@ -317,9 +265,6 @@ def test_generated_schema_is_machine_readable() -> None:
     schema = manifest_json_schema()
 
     assert schema["$defs"]["Domain"]["enum"] == [domain.value for domain in Domain]
-    assert schema["$defs"]["RolloutSmokeRequirement"]["enum"] == [
-        requirement.value for requirement in RolloutSmokeRequirement
-    ]
     Draft202012Validator.check_schema(schema)
     validator = Draft202012Validator(schema)
     assert not list(validator.iter_errors(_manifest()))
@@ -356,5 +301,3 @@ def test_neutral_example_matches_manifest_contract() -> None:
 
     assert manifest.name == "example_environment"
     assert manifest.integration_profile == IntegrationProfile.CUSTOM_GYM_VERIFIER
-    assert manifest.rollout_smoke is not None
-    assert manifest.rollout_smoke.dataset == "smoke"
