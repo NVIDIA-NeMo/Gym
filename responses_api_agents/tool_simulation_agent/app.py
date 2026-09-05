@@ -14,7 +14,7 @@
 # limitations under the License.
 import json
 
-from fastapi import Body, Request
+from fastapi import Body, Request, Response
 from pydantic import ConfigDict, ValidationError
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
@@ -45,12 +45,16 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
     config: ToolSimulationAgentConfig
 
     async def responses(
-        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
+        self,
+        request: Request,
+        response: Response,
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
         model_response = await self.server_client.post(
             server_name=self.config.model_server.name,
             url_path=self.url_path_for_request("/v1/responses", request),
             json=body,
+            cookies=request.cookies,
         )
 
         # Model calls are expected to always succeed.
@@ -58,20 +62,30 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
         model_response_json = await model_response.json()
 
         try:
-            return NeMoGymResponse.model_validate(model_response_json)
+            parsed_response = NeMoGymResponse.model_validate(model_response_json)
         except ValidationError as e:
             raise RuntimeError(
                 f"Received an invalid response from the model server: {json.dumps(model_response_json)}"
             ) from e
 
-    async def run(self, body: ToolSimulationAgentRunRequest = Body()) -> ToolSimulationAgentVerifyResponse:
+        # Preserve both the caller's session and any model-server cookie for a subsequent /verify call.
+        for key, value in (*request.cookies.items(), *model_response.cookies.items()):
+            response.set_cookie(key, value)
+        return parsed_response
+
+    async def run(
+        self, request: Request, body: ToolSimulationAgentRunRequest = Body()
+    ) -> ToolSimulationAgentVerifyResponse:
         config = self.config
+        cookies = request.cookies
         response = await self.server_client.post(
             server_name=config.name,
             url_path=self.url_path_for_run("/v1/responses", body),
             json=body.responses_create_params,
+            cookies=cookies,
         )
         await raise_for_status(response)
+        cookies = request.cookies | response.cookies
 
         response_json = await response.json()
         if config.skip_verification:
@@ -88,6 +102,7 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
                 server_name=config.resources_server.name,
                 url_path="/verify",
                 json=verify_request.model_dump(),
+                cookies=cookies,
             )
             await raise_for_status(verify_response)
             result = await verify_response.json()
