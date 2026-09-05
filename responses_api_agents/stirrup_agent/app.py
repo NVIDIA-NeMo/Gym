@@ -475,7 +475,7 @@ async def _run_stirrup_agent(
     api_key: str = "dummy",
     max_turns: int = 250,
     temperature: float = 0.6,
-    max_tokens: int = 262144,
+    context_window_tokens: int = 262144,
     reference_files: Optional[list] = None,
     reference_file_urls: Optional[list] = None,
     exec_provider_class: Optional[str] = None,
@@ -489,7 +489,10 @@ async def _run_stirrup_agent(
     top_p: float = 0.95,
     enable_thinking: bool = True,
     max_completion_tokens_cap: int = 64000,
+    min_completion_tokens: int = 1024,
+    prompt_estimator_truncate_history_thinking: Optional[bool] = None,
     truncation_recovery: bool = True,
+    min_compaction_summary_words: int = 1,
     tavily_api_key: Optional[Union[str, List[str]]] = None,
     tavily_max_sweeps: int = 1,
 ) -> Dict[str, Any]:
@@ -502,6 +505,9 @@ async def _run_stirrup_agent(
     a tokenizer that sizes ``max_completion_tokens`` dynamically per call
     (see ``DynamicMaxTokensChatCompletionsClient``).  When unset, a
     character-count fallback is used.
+
+    *context_window_tokens* describes model capacity. It is deliberately
+    separate from the outer Responses API request's ``max_output_tokens``.
     """
     from stirrup.tools import DEFAULT_TOOLS
     from stirrup.tools.code_backends.base import SHELL_TIMEOUT, CodeExecToolProvider, CommandResult
@@ -550,13 +556,15 @@ async def _run_stirrup_agent(
         model=model_name,
         base_url=model_base_url,
         api_key=api_key,
-        max_tokens=max_tokens,
+        max_tokens=context_window_tokens,
         model_id=model_id,
         completion_token_buffer=completion_token_buffer,
         temperature=temperature,
         top_p=top_p,
         enable_thinking=enable_thinking,
         max_completion_tokens_cap=max_completion_tokens_cap,
+        min_completion_tokens=min_completion_tokens,
+        prompt_estimator_truncate_history_thinking=prompt_estimator_truncate_history_thinking,
         truncation_recovery=truncation_recovery,
     )
 
@@ -609,6 +617,7 @@ async def _run_stirrup_agent(
         "tools": tools,
         "tool_response_as_user": True,
         "skip_input_file_listing": is_gdpval,
+        "min_compaction_summary_words": min_compaction_summary_words,
     }
     if system_prompt:
         agent_kwargs["system_prompt"] = system_prompt
@@ -969,8 +978,8 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         default=None,
         description="HuggingFace model ID (or local checkpoint path) used to load a tokenizer "
         "for dynamic max_completion_tokens sizing. E.g. 'Qwen/Qwen3-Coder-30B-A3B-Instruct'. "
-        "When None, a character-count fallback is used (conservative, but slightly over-allocates "
-        "input tokens). See ``nemo_client.DynamicMaxTokensChatCompletionsClient``.",
+        "When None, an approximate character-count fallback is used; it can substantially "
+        "overcount retained reasoning. See ``nemo_client.DynamicMaxTokensChatCompletionsClient``.",
     )
     completion_token_buffer: int = Field(
         default=1000,
@@ -978,6 +987,13 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "max_completion_tokens. Absorbs the residual gap between our tokenizer estimate "
         "(messages + tool-schema JSON) and the exact prompt the server sees after chat-template "
         "rendering. See ``nemo_client.DynamicMaxTokensChatCompletionsClient``.",
+    )
+    context_window_tokens: int = Field(
+        default=262144,
+        ge=1,
+        description="Model context-window size used for dynamic per-call completion budgeting. "
+        "This is independent of the Responses API request's max_output_tokens, which limits "
+        "output rather than describing model capacity.",
     )
     top_p: float = Field(
         default=0.95,
@@ -990,9 +1006,24 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
     )
     max_completion_tokens_cap: int = Field(
         default=64000,
+        ge=1,
         description="Hard ceiling on per-call ``max_completion_tokens``. Dynamic sizing computes "
         "context_window - input_tokens - completion_token_buffer, then caps to this value. "
         "Set to match the training-side response-length budget for RL.",
+    )
+    min_completion_tokens: int = Field(
+        default=1024,
+        ge=1,
+        description="Target minimum per-call ``max_completion_tokens``. The hard cap always applies; "
+        "estimated remaining context is also a strict bound when the loaded tokenizer successfully "
+        "renders the complete prompt. The "
+        "approximate fallback preserves this floor even when its estimate exceeds context. "
+        "Long-horizon benchmarks can opt into a larger usable floor.",
+    )
+    prompt_estimator_truncate_history_thinking: Optional[bool] = Field(
+        default=None,
+        description="Optional prompt-estimator setting for checkpoints whose template omits historical "
+        "reasoning before the last user turn. This is never forwarded to the model request.",
     )
     truncation_recovery: bool = Field(
         default=True,
@@ -1003,6 +1034,13 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "budget is deliberately NOT reduced, because recovery turns are usually large single-shot "
         "deliverable writes (median 34.6k tokens). The instruction is sent to the server but not "
         "recorded in the trajectory; set False for RL rollouts that require an unsteered policy.",
+    )
+    min_compaction_summary_words: int = Field(
+        default=1,
+        ge=1,
+        description="Minimum whitespace-delimited word count accepted from context compaction. "
+        "The generic default rejects only empty output; long-horizon benchmarks can require a "
+        "more complete summary.",
     )
     tavily_api_key: Optional[Union[str, List[str]]] = Field(
         default=None,
@@ -1163,7 +1201,10 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
         model_name = getattr(body, "model", None) or "default"
         temperature = getattr(body, "temperature", None) or self.config.temperature
-        max_tokens = getattr(body, "max_output_tokens", 262144) or 262144
+        requested_output_tokens = getattr(body, "max_output_tokens", None)
+        max_completion_tokens_cap = self.config.max_completion_tokens_cap
+        if requested_output_tokens is not None:
+            max_completion_tokens_cap = min(max_completion_tokens_cap, requested_output_tokens)
 
         exec_provider = self.task_strategy.get_exec_provider(task_info, self.config)
         exec_provider_class = None
@@ -1183,7 +1224,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             "api_key": "dummy",  # pragma: allowlist secret
             "max_turns": self.config.agent_max_turns,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "context_window_tokens": self.config.context_window_tokens,
             "reference_files": task_info.get("reference_files") if self.config.task == "gdpval" else None,
             "reference_file_urls": task_info.get("reference_file_urls") if self.config.task == "gdpval" else None,
             "exec_provider_class": exec_provider_class,
@@ -1196,8 +1237,11 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             "completion_token_buffer": self.config.completion_token_buffer,
             "top_p": getattr(body, "top_p", None) or self.config.top_p,
             "enable_thinking": self.config.enable_thinking,
-            "max_completion_tokens_cap": self.config.max_completion_tokens_cap,
+            "max_completion_tokens_cap": max_completion_tokens_cap,
+            "min_completion_tokens": self.config.min_completion_tokens,
+            "prompt_estimator_truncate_history_thinking": (self.config.prompt_estimator_truncate_history_thinking),
             "truncation_recovery": self.config.truncation_recovery,
+            "min_compaction_summary_words": self.config.min_compaction_summary_words,
             "tavily_api_key": self.config.tavily_api_key,
             "tavily_max_sweeps": self.config.tavily_max_sweeps,
         }

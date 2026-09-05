@@ -103,6 +103,15 @@ gdpval_stirrup_agent:
       agent_max_turns: 250
       concurrency: 32
       temperature: 1.0
+      # GDPVal tasks routinely need multi-thousand-token scripts. A 1,024-token
+      # completion cannot form a useful tool call and can create a sticky
+      # code_exec({}) loop after long reasoning turns.
+      context_window_tokens: 262144
+      min_completion_tokens: 8192
+      # Reject the observed near-empty compaction outputs that erase progress
+      # on long GDPVal sessions. Generic Stirrup agents accept any non-empty
+      # summary for backward compatibility.
+      min_compaction_summary_words: 50
       system_prompt_template: ${oc.env:SYSTEM_PROMPT_TEMPLATE,null}
       user_prompt_template: ${oc.env:USER_PROMPT_TEMPLATE,null}
       gdpval_container_path: ${oc.env:GDPVAL_CONTAINER_PATH,null}
