@@ -13,9 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import yaml
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.judge import JudgeError
@@ -59,20 +61,12 @@ def make_response(text: str) -> NeMoGymResponse:
 
 
 def make_server() -> MultiChallengeServer:
-    config = MultiChallengeConfig(
-        host="127.0.0.1",
-        port=8080,
-        entrypoint="app.py",
-        name="multichallenge",
-        judge_model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
-        judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
-            input=[], max_output_tokens=8192, temperature=0.7, top_p=0.8
-        ),
-        judge_system_message=(
-            "You are a precise evaluator. Assess responses objectively based on the given criteria. "
-            "Analyze the response carefully against the evaluation question."
-        ),
-        aggregation_mode=AggregationMode.MEAN,
+    config_path = Path(__file__).resolve().parents[1] / "configs/multichallenge.yaml"
+    raw_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))["multichallenge"]["resources_servers"][
+        "multichallenge"
+    ]
+    config = MultiChallengeConfig.model_validate(
+        {"host": "127.0.0.1", "port": 8080, "name": "multichallenge", **raw_config}
     )
     return MultiChallengeServer(config=config, server_client=MagicMock(spec=ServerClient))
 

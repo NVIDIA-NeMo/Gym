@@ -136,6 +136,7 @@ async def test_standard_verifier_reward_golden_values(
     [
         ("<think>helpful answer</think>\nRefusal: no", 1.0, False),
         ("<think>declined request</think>\nRefusal: yes", 0.0, True),
+        ("<think>Initial: Refusal: yes</think>\nFinal: Refusal: no", 1.0, False),
         ("Unable to classify", 0.5, None),
     ],
 )
