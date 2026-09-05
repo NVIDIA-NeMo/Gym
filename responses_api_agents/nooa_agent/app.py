@@ -87,18 +87,6 @@ def _merge_cookies(current: dict[str, str], response: Any) -> dict[str, str]:
     return current
 
 
-def _task_id(body: NOOAAgentRunRequest) -> str:
-    values = body.model_dump()
-    return next(
-        (
-            str(values[key])
-            for key in ("task_id", "problem_id", "instance_id", "_ng_task_index")
-            if values.get(key) is not None
-        ),
-        "unknown",
-    )
-
-
 class NOOAAgent(SimpleResponsesAPIAgent):
     """Embedded NOOA adapter that keeps Gym authoritative for every external interaction."""
 
@@ -132,7 +120,6 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             NOOARunRequest(
                 row=body,
                 rollout_id=rollout_id,
-                task_id=_task_id(body),
                 model_url_path=model_url_path,
                 model_cookies=model_cookies,
                 resource_cookies=resource_cookies,
