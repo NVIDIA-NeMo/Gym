@@ -1,0 +1,200 @@
+diff --git a/responses_api_models/openai_model/app.py b/responses_api_models/openai_model/app.py
+index f72ac9eb5..c1021b43a 100644
+--- a/responses_api_models/openai_model/app.py
++++ b/responses_api_models/openai_model/app.py
+@@ -13,7 +13,12 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ import asyncio
++import random
++import time
++from asyncio import sleep
+ from contextlib import nullcontext
++from datetime import timezone
++from email.utils import parsedate_to_datetime
+ from typing import Any, Dict, Optional
+
+ from pydantic import Field
+@@ -24,12 +29,122 @@ from nemo_gym.base_responses_api_model import (
+     SimpleResponsesAPIModel,
+ )
+ from nemo_gym.openai_utils import (
++    RATE_LIMIT_ERROR_CODES,
++    RETRY_ERROR_CODES,
+     NeMoGymAsyncOpenAI,
+     NeMoGymChatCompletion,
+     NeMoGymChatCompletionCreateParamsNonStreaming,
+     NeMoGymResponse,
+     NeMoGymResponseCreateParamsNonStreaming,
+ )
++from nemo_gym.server_utils import MAX_NUM_TRIES, ClientResponse, raise_for_status, request
++
++
++RATE_LIMIT_MAX_ATTEMPTS = 6
++RATE_LIMIT_INITIAL_BACKOFF_SECONDS = 1.0
++RATE_LIMIT_MAX_BACKOFF_SECONDS = 30.0
++RATE_LIMIT_MAX_TOTAL_BACKOFF_SECONDS = 90.0
++RATE_LIMIT_JITTER_FRACTION = 0.25
++
++
++def _parse_retry_after_seconds(value: Optional[str]) -> Optional[float]:
++    if not value:
++        return None
++    try:
++        return max(0.0, float(value))
++    except ValueError:
++        pass
++    try:
++        retry_at = parsedate_to_datetime(value)
++    except (TypeError, ValueError, OverflowError):
++        return None
++    if retry_at.tzinfo is None:
++        retry_at = retry_at.replace(tzinfo=timezone.utc)
++    return max(0.0, retry_at.timestamp() - time.time())
++
++
++def _rate_limit_retry_delay(response: ClientResponse, attempt: int, remaining_budget: float) -> Optional[float]:
++    retry_after = _parse_retry_after_seconds(response.headers.get("Retry-After"))
++    if retry_after is not None and retry_after > remaining_budget:
++        return None
++    exponential = min(
++        RATE_LIMIT_INITIAL_BACKOFF_SECONDS * (2 ** (attempt - 1)),
++        RATE_LIMIT_MAX_BACKOFF_SECONDS,
++    )
++    jitter = random.uniform(0.0, exponential * RATE_LIMIT_JITTER_FRACTION)
++    jittered_exponential = min(exponential + jitter, RATE_LIMIT_MAX_BACKOFF_SECONDS)
++    delay = max(jittered_exponential, retry_after or 0.0)
++    return delay if delay <= remaining_budget else None
++
++
++class BoundedRateLimitOpenAI(NeMoGymAsyncOpenAI):
++    """Provider client with one bounded, Retry-After-aware 429 retry loop."""
++
++    async def _request_with_retry(self, **request_kwargs: Dict) -> ClientResponse:
++        max_num_tries = MAX_NUM_TRIES
++        tries = 0
++        rate_limit_attempts = 0
++        rate_limit_backoff_seconds = 0.0
++        while tries < max_num_tries:
++            tries += 1
++            response = await request(**request_kwargs)
++
++            if response.status == 429:
++                rate_limit_attempts += 1
++                content = (await response.content.read()).decode()
++                if rate_limit_attempts >= RATE_LIMIT_MAX_ATTEMPTS:
++                    print(
++                        f"[model_retry url={request_kwargs.get('url')} status=429 kind=rate_limit "
++                        f"try={rate_limit_attempts} max_tries={RATE_LIMIT_MAX_ATTEMPTS} exhausted=true "
++                        f"error_msg={content[:200]}]",
++                        flush=True,
++                    )
++                    break
++                remaining_budget = RATE_LIMIT_MAX_TOTAL_BACKOFF_SECONDS - rate_limit_backoff_seconds
++                if remaining_budget <= 0:
++                    print(
++                        f"[model_retry url={request_kwargs.get('url')} status=429 kind=rate_limit "
++                        f"try={rate_limit_attempts} max_tries={RATE_LIMIT_MAX_ATTEMPTS} exhausted=true "
++                        f"error_msg={content[:200]}]",
++                        flush=True,
++                    )
++                    break
++                delay = _rate_limit_retry_delay(response, rate_limit_attempts, remaining_budget)
++                if delay is None:
++                    print(
++                        f"[model_retry url={request_kwargs.get('url')} status=429 kind=rate_limit "
++                        f"try={rate_limit_attempts} max_tries={RATE_LIMIT_MAX_ATTEMPTS} exhausted=true "
++                        f"reason=retry_after_exceeds_budget error_msg={content[:200]}]",
++                        flush=True,
++                    )
++                    break
++                print(
++                    f"[model_retry url={request_kwargs.get('url')} status=429 kind=rate_limit "
++                    f"try={rate_limit_attempts} max_tries={RATE_LIMIT_MAX_ATTEMPTS} retry_in_s={delay:.3f} "
++                    f"error_msg={content[:200]}]",
++                    flush=True,
++                )
++                max_num_tries += 1
++                rate_limit_backoff_seconds += delay
++                await sleep(delay)
++                continue
++
++            if response.status in RETRY_ERROR_CODES:
++                # Preserve the pinned client's behavior for every non-429 code.
++                if response.status in RATE_LIMIT_ERROR_CODES:
++                    max_num_tries += 1
++                content = (await response.content.read()).decode()
++                kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "server_error"
++                print(
++                    f"[model_retry url={request_kwargs.get('url')} status={response.status} "
++                    f"kind={kind} try={tries} max_tries={max_num_tries} error_msg={content[:200]}]",
++                    flush=True,
++                )
++                await sleep(0.5)
++                continue
++            return response
++
++        await raise_for_status(response)
+
+
+ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
+@@ -64,7 +179,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
+     config: SimpleModelServerConfig
+
+     def model_post_init(self, context):
+-        self._client = NeMoGymAsyncOpenAI(
++        self._client = BoundedRateLimitOpenAI(
+             base_url=self.config.openai_base_url,
+             api_key=self.config.openai_api_key,
+             default_headers=self.config.openai_default_headers,
+diff --git a/resources_servers/gdpval/app.py b/resources_servers/gdpval/app.py
+index 05665c426..eb7bd1d40 100644
+--- a/resources_servers/gdpval/app.py
++++ b/resources_servers/gdpval/app.py
+@@ -783,8 +783,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
+                     base_url=judge.base_url,
+                     api_key=judge.api_key,
+                     timeout=JUDGE_REQUEST_TIMEOUT_SECONDS,
+-                    # comparison.send_judge_request owns the retry policy; the
+-                    # SDK default would multiply every explicit attempt by 3.
++                    # The provider-facing model adapter owns 429 retries; the
++                    # SDK default would replay each exhausted adapter request.
+                     max_retries=0,
+                 )
+             return client_cache[key]
+diff --git a/resources_servers/gdpval/comparison.py b/resources_servers/gdpval/comparison.py
+index a6bca78e8..cc4f19351 100644
+--- a/resources_servers/gdpval/comparison.py
++++ b/resources_servers/gdpval/comparison.py
+@@ -156,16 +156,18 @@ MAX_ZIP_MEMBERS_FOR_JUDGE = 1_000
+ MAX_ZIP_MEMBER_BYTES_FOR_JUDGE = MAX_SECTION_RAW_ATTACHMENT_BYTES_FOR_JUDGE
+ MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES_FOR_JUDGE = MAX_SECTION_RAW_ATTACHMENT_BYTES_FOR_JUDGE
+ ZIP_COPY_CHUNK_BYTES = 1024 * 1024
+-RETRYABLE_ERROR_MARKERS = (
++RATE_LIMIT_ERROR_MARKERS = (
+     "429",
+-    "502",
+-    "503",
+-    "504",
+     "rate limit",
+     "ratelimit",
+     "resource_exhausted",
+     "resource has been exhausted",
+     "throttling",
++)
++RETRYABLE_ERROR_MARKERS = (
++    "502",
++    "503",
++    "504",
+     "bad gateway",
+     "gateway timeout",
+     "gateway time-out",
+@@ -1367,4 +1369,8 @@ def _is_retryable(error: Exception) -> bool:
+     if is_permanent_judge_error(error):
+         return False
+     error_text = str(error).lower()
++    # The provider-facing model adapter owns bounded 429 handling. Repeating
++    # the same rate limit here would multiply calls across two backoff loops.
++    if any(marker in error_text for marker in RATE_LIMIT_ERROR_MARKERS):
++        return False
+     return any(marker in error_text for marker in RETRYABLE_ERROR_MARKERS)

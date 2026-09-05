@@ -1,0 +1,10 @@
+{
+  "all_paths_nested": true,
+  "projection_sha256": "77904a9b323e909bb58e6738ebe90edf6d091591448a654fc4e9b1e896df7c26",
+  "reference_occurrences": 261,
+  "schema": "gdpval.reference-asset-scope.v1",
+  "source_dataset_sha256": "85f4b36317292f417c79dcad97af41c49704e6d0553b5f79f8b54349d0641774",
+  "source_rows": 220,
+  "tasks_with_references": 125,
+  "tasks_without_references": 95
+}

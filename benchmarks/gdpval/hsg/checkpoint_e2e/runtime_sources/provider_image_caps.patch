@@ -1,0 +1,452 @@
+--- a/resources_servers/gdpval/app.py
++++ b/resources_servers/gdpval/app.py
+@@ -179,6 +179,9 @@
+     max_native_pdf_pages: Optional[int] = None
+     max_native_pdf_documents: Optional[int] = None
+     max_native_pdf_bytes: Optional[int] = None
++    # Provider limit for one image's base64 source. Oversize static PNG/JPEG
++    # images are losslessly tiled with explicit reconstruction coordinates.
++    max_image_base64_bytes: Optional[int] = None
+     # Tried in order for images_and_text. The first lossless projection below
+     # max_serialized_request_bytes wins; otherwise this member is excluded.
+     raster_dpi_tiers: Tuple[int, ...] = ()
+@@ -450,6 +453,7 @@
+                     max_native_pdf_pages=member.max_native_pdf_pages,
+                     max_native_pdf_documents=member.max_native_pdf_documents,
+                     max_native_pdf_bytes=member.max_native_pdf_bytes,
++                    max_image_base64_bytes=member.max_image_base64_bytes,
+                     raster_dpi_tiers=tuple(member.raster_dpi_tiers),
+                     max_serialized_request_bytes=member.max_serialized_request_bytes,
+                 )
+@@ -669,6 +673,7 @@
+         from resources_servers.gdpval.comparison import (
+             JUDGE_REQUEST_TIMEOUT_SECONDS,
+             Judge,
++            apply_judge_image_byte_cap,
+             apply_native_pdf_overflow,
+             build_file_section,
+             clean_up_paths,
+@@ -757,6 +762,7 @@
+                 max_native_pdf_pages=rj.max_native_pdf_pages,
+                 max_native_pdf_documents=rj.max_native_pdf_documents,
+                 max_native_pdf_bytes=rj.max_native_pdf_bytes,
++                max_image_base64_bytes=rj.max_image_base64_bytes,
+                 raster_dpi_tiers=rj.raster_dpi_tiers,
+                 max_serialized_request_bytes=rj.max_serialized_request_bytes,
+             )
+@@ -845,6 +851,33 @@
+                     pages += pdf_page_count(payload)
+             return {"pages": pages, "documents": documents, "bytes": byte_count}
+
++        async def _preflight_candidate(
++            judge: Judge,
++            candidate_sections: Dict[str, List[dict]],
++        ) -> Tuple[Dict[str, List[dict]], Dict[str, Any]]:
++            prepared, image_receipt = await asyncio.to_thread(
++                apply_judge_image_byte_cap,
++                judge,
++                candidate_sections,
++                max_images=self.config.judge_max_images_per_request,
++            )
++            if not image_receipt["eligible"]:
++                return prepared, {
++                    "eligible": False,
++                    "judge": judge.name,
++                    "media_mode": judge.media_mode,
++                    "image_byte_cap": image_receipt,
++                    "reasons": list(image_receipt["reasons"]),
++                }
++            receipt = await asyncio.to_thread(
++                preflight_judge_transport,
++                judge,
++                body.prompt or "",
++                prepared,
++            )
++            receipt["image_byte_cap"] = image_receipt
++            return prepared, receipt
++
+         try:
+             # Judge the eval submission against every reference model, and within
+             # each model against every available reference repeat. Raw vote
+@@ -962,16 +995,14 @@
+                                                 eval_task_dir, "images_and_text", dpi
+                                             ),
+                                         }
+-                                        receipt = await asyncio.to_thread(
+-                                            preflight_judge_transport,
++                                        prepared_sections, receipt = await _preflight_candidate(
+                                             judge,
+-                                            body.prompt or "",
+                                             candidate_sections,
+                                         )
+                                         receipt["render_dpi"] = dpi
+                                         attempted_preflights.append(receipt)
+                                         if receipt["eligible"]:
+-                                            sections_by_judge[judge_name] = candidate_sections
++                                            sections_by_judge[judge_name] = prepared_sections
+                                             transport_receipts[judge_name] = receipt
+                                             break
+                                         # Do not retain rejected raster payloads;
+@@ -995,16 +1026,14 @@
+                                 if judge_name in sections_by_judge:
+                                     continue
+                                 for dpi, candidate_sections in candidates:
+-                                    receipt = await asyncio.to_thread(
+-                                        preflight_judge_transport,
++                                    prepared_sections, receipt = await _preflight_candidate(
+                                         judge,
+-                                        body.prompt or "",
+                                         candidate_sections,
+                                     )
+                                     receipt["render_dpi"] = dpi
+                                     attempted_preflights.append(receipt)
+                                     if receipt["eligible"]:
+-                                        sections_by_judge[judge_name] = candidate_sections
++                                        sections_by_judge[judge_name] = prepared_sections
+                                         transport_receipts[judge_name] = receipt
+                                         break
+                                 if judge_name not in sections_by_judge:
+--- a/resources_servers/gdpval/comparison.py
++++ b/resources_servers/gdpval/comparison.py
+@@ -1457,6 +1457,7 @@
+     max_native_pdf_pages: Optional[int] = None
+     max_native_pdf_documents: Optional[int] = None
+     max_native_pdf_bytes: Optional[int] = None
++    max_image_base64_bytes: Optional[int] = None
+     raster_dpi_tiers: tuple[int, ...] = ()
+     max_serialized_request_bytes: Optional[int] = None
+
+@@ -1630,8 +1631,215 @@
+             converted.extend(rendered)
+         output[section_name] = converted
+     return output
+
+
++_LOSSLESS_TILE_MIME_TYPES = frozenset({"image/png", "image/jpeg"})
++
++
++def _image_data_url(block: dict) -> tuple[str, str] | None:
++    """Return ``(mime_type, base64_payload)`` for an inline image block."""
++
++    if block.get("type") != "image_url":
++        return None
++    image_url = block.get("image_url") or {}
++    url = image_url.get("url", "") if isinstance(image_url, dict) else ""
++    if not isinstance(url, str) or not url.startswith("data:image/"):
++        return None
++    header, separator, payload = url.partition(",")
++    if not separator or not header.endswith(";base64"):
++        return None
++    return header[5:-7].lower(), payload
++
++
++def _lossless_png_tiles(
++    payload: bytes,
++    *,
++    max_base64_bytes: int,
++    max_tiles: int,
++) -> tuple[list[bytes], list[tuple[int, int, int, int]], tuple[int, int]]:
++    """Split a static image into complete, non-overlapping lossless PNG tiles."""
++
++    if max_base64_bytes <= 0 or max_tiles <= 0:
++        raise ValueError("image tile limits must be positive")
++    try:
++        import fitz  # PyMuPDF
++    except ImportError as exc:
++        raise RuntimeError("PyMuPDF is required for provider image-cap tiling") from exc
++
++    try:
++        source = fitz.Pixmap(payload)
++    except Exception as exc:
++        raise ValueError(f"cannot decode static image for lossless tiling: {exc!r}") from exc
++    if source.colorspace is None or source.width <= 0 or source.height <= 0:
++        raise ValueError("static image has no tileable pixel colorspace")
++    if source.width * source.height > MAX_RASTER_PAGE_PIXELS_FOR_JUDGE:
++        raise ValueError(
++            "static image exceeds the bounded lossless tiling pixel limit: "
++            f"{source.width}x{source.height}"
++        )
++
++    def _encode(rect: tuple[int, int, int, int]) -> bytes:
++        box = fitz.IRect(*rect)
++        tile = fitz.Pixmap(source.colorspace, box, source.alpha)
++        tile.copy(source, box)
++        tile.set_origin(0, 0)
++        return tile.tobytes("png")
++
++    accepted: list[tuple[tuple[int, int, int, int], bytes]] = []
++    pending: list[tuple[int, int, int, int]] = [(0, 0, source.width, source.height)]
++    while pending:
++        rect = pending.pop()
++        encoded = _encode(rect)
++        encoded_chars = 4 * ((len(encoded) + 2) // 3)
++        if encoded_chars <= max_base64_bytes:
++            accepted.append((rect, encoded))
++            continue
++        x0, y0, x1, y1 = rect
++        width = x1 - x0
++        height = y1 - y0
++        if width <= 1 and height <= 1:
++            raise ValueError("one lossless image pixel exceeds the provider image cap")
++        if len(accepted) + len(pending) + 2 > max_tiles:
++            raise ValueError(f"lossless image tiling requires more than {max_tiles} tiles")
++        if width >= height and width > 1:
++            midpoint = x0 + width // 2
++            first = (x0, y0, midpoint, y1)
++            second = (midpoint, y0, x1, y1)
++        else:
++            midpoint = y0 + height // 2
++            first = (x0, y0, x1, midpoint)
++            second = (x0, midpoint, x1, y1)
++        # Stack order preserves the source's top/left-first visual reading order.
++        pending.extend((second, first))
++
++    return (
++        [encoded for _rect, encoded in accepted],
++        [rect for rect, _encoded in accepted],
++        (source.width, source.height),
++    )
++
++
++def apply_judge_image_byte_cap(
++    judge: Judge,
++    sections: dict[str, list[dict]],
++    *,
++    max_images: int,
++) -> tuple[dict[str, list[dict]], dict[str, Any]]:
++    """Apply a provider's individual-image cap without dropping image pixels.
++
++    Static PNG/JPEG inputs that exceed the configured base64-source limit are
++    decoded once and emitted as lossless PNG tiles. Each tile carries explicit
++    source hash, dimensions, and crop coordinates, so the judge can reconstruct
++    the original layout. Unsupported/invalid inputs fail closed before dispatch.
++    """
++
++    cap = judge.max_image_base64_bytes
++    original = {name: list(blocks) for name, blocks in sections.items()}
++    image_count = sum(
++        _image_data_url(block) is not None for blocks in sections.values() for block in blocks
++    )
++    receipt: dict[str, Any] = {
++        "enabled": cap is not None,
++        "eligible": True,
++        "max_image_base64_bytes": cap,
++        "original_image_count": image_count,
++        "output_image_count": image_count,
++        "transformations": [],
++        "reasons": [],
++    }
++    if cap is None:
++        return original, receipt
++    if cap <= 0 or max_images <= 0:
++        receipt["eligible"] = False
++        receipt["reasons"].append("invalid_image_cap_config")
++        return original, receipt
++    if image_count > max_images:
++        receipt["eligible"] = False
++        receipt["reasons"].append("provider_image_count_cap")
++        return original, receipt
++
++    available_extra_tiles = max_images - image_count
++    transformed: dict[str, list[dict]] = {}
++    try:
++        for section_name, blocks in sections.items():
++            output: list[dict] = []
++            for block_index, block in enumerate(blocks):
++                parsed = _image_data_url(block)
++                if parsed is None or len(parsed[1].encode("ascii")) <= cap:
++                    output.append(block)
++                    continue
++                mime_type, encoded_payload = parsed
++                if mime_type not in _LOSSLESS_TILE_MIME_TYPES:
++                    raise ValueError(f"oversize image MIME cannot be tiled losslessly: {mime_type}")
++                raw = base64.b64decode(encoded_payload, validate=True)
++                max_tiles = available_extra_tiles + 1
++                tiles, rectangles, dimensions = _lossless_png_tiles(
++                    raw,
++                    max_base64_bytes=cap,
++                    max_tiles=max_tiles,
++                )
++                available_extra_tiles -= len(tiles) - 1
++                source_sha256 = hashlib.sha256(raw).hexdigest()
++                tile_receipts: list[dict[str, Any]] = []
++                for tile_index, (tile, rect) in enumerate(zip(tiles, rectangles), start=1):
++                    tile_payload = base64.b64encode(tile).decode("ascii")
++                    if len(tile_payload.encode("ascii")) > cap:
++                        raise RuntimeError("lossless image tile violated its provider cap")
++                    x0, y0, x1, y1 = rect
++                    output.append(
++                        {
++                            "type": "text",
++                            "text": (
++                                f"[lossless image tile {tile_index}/{len(tiles)}; "
++                                f"source_sha256={source_sha256}; original={dimensions[0]}x{dimensions[1]}px; "
++                                f"crop=({x0},{y0})-({x1},{y1}); complete source coverage, no resizing]"
++                            ),
++                        }
++                    )
++                    output.append(
++                        {
++                            "type": "image_url",
++                            "image_url": {"url": f"data:image/png;base64,{tile_payload}"},
++                        }
++                    )
++                    tile_receipts.append(
++                        {
++                            "crop": [x0, y0, x1, y1],
++                            "raw_bytes": len(tile),
++                            "base64_bytes": len(tile_payload),
++                            "sha256": hashlib.sha256(tile).hexdigest(),
++                        }
++                    )
++                receipt["transformations"].append(
++                    {
++                        "section": section_name,
++                        "block_index": block_index,
++                        "source_mime_type": mime_type,
++                        "source_sha256": source_sha256,
++                        "source_raw_bytes": len(raw),
++                        "source_base64_bytes": len(encoded_payload),
++                        "source_dimensions": list(dimensions),
++                        "tiles": tile_receipts,
++                    }
++                )
++            transformed[section_name] = output
++    except Exception as exc:
++        receipt["eligible"] = False
++        receipt["reasons"].append("provider_image_cap_transform_failed")
++        receipt["error"] = repr(exc)
++        return original, receipt
++
++    output_count = sum(
++        _image_data_url(block) is not None for blocks in transformed.values() for block in blocks
++    )
++    receipt["output_image_count"] = output_count
++    if output_count > max_images:
++        receipt["eligible"] = False
++        receipt["reasons"].append("provider_image_count_cap")
++        return original, receipt
++    return transformed, receipt
++
++
+ _LOSSY_TRANSPORT_PREFIXES = (
+     "[attachment omitted",
+     "[oversize:",
+@@ -1652,11 +1860,15 @@
+         submission_b=sections["submission_b"],
+     )
+     markers: list[str] = []
++    image_base64_sizes: list[int] = []
+     for message in messages:
+         for block in message.get("content") or []:
+             text = str(block.get("text", ""))
+             if text.startswith(_LOSSY_TRANSPORT_PREFIXES):
+                 markers.append(text.splitlines()[0][:240])
++            parsed_image = _image_data_url(block)
++            if parsed_image is not None:
++                image_base64_sizes.append(len(parsed_image[1].encode("ascii")))
+     create_kwargs = merge_create_kwargs(
+         {
+             "model": judge.model,
+@@ -1675,12 +1887,19 @@
+         reasons.append("lossy_attachment_omission")
+     if cap is not None and serialized_bytes >= cap:
+         reasons.append("provider_wire_cap")
++    image_cap = judge.max_image_base64_bytes
++    oversized_images = [size for size in image_base64_sizes if image_cap is not None and size > image_cap]
++    if oversized_images:
++        reasons.append("provider_image_byte_cap")
+     return {
+         "eligible": not reasons,
+         "judge": judge.name,
+         "media_mode": judge.media_mode,
+         "serialized_request_bytes": serialized_bytes,
+         "max_serialized_request_bytes": cap,
++        "largest_image_base64_bytes": max(image_base64_sizes, default=0),
++        "max_image_base64_bytes": image_cap,
++        "oversize_image_count": len(oversized_images),
+         "loss_markers": markers,
+         "reasons": reasons,
+     }
+--- a/resources_servers/gdpval/judge_panel.py
++++ b/resources_servers/gdpval/judge_panel.py
+@@ -76,6 +76,11 @@
+     max_native_pdf_pages: Optional[int] = None
+     max_native_pdf_documents: Optional[int] = None
+     max_native_pdf_bytes: Optional[int] = None
++    # Some hosted APIs cap each image's base64 source independently of the
++    # total request body. Oversize static images are tiled losslessly before
++    # dispatch; the cap is measured on the ASCII base64 payload, not data-URL
++    # framing.
++    max_image_base64_bytes: Optional[int] = None
+     # Raster tiers are tried in order. The first complete request below the
+     # provider wire cap is used; otherwise that judge is excluded pre-dispatch.
+     raster_dpi_tiers: tuple[int, ...] = ()
+--- a/resources_servers/gdpval/multistage_orchestrator.py
++++ b/resources_servers/gdpval/multistage_orchestrator.py
+@@ -413,17 +413,63 @@
+         return repr(value)
+
+     component_types = {"responses_api_agents", "responses_api_models", "resources_servers"}
++    # Provider payload limits are transport compatibility, not scientific
++    # selection/evidence inputs. max_image_base64_bytes only selects a
++    # deterministic, lossless PNG representation. Larger raw/wire admission
++    # ceilings do not alter requests that already fit, so fingerprint them at
++    # the legacy ceilings to keep completed campaigns resumable. Lower ceilings
++    # remain fingerprinted because they can exclude previously eligible work.
++    # Model, prompt, trial-count, media-mode, and every other judge change stay
++    # bound to the campaign fingerprint.
++    transport_only_runtime_fields = frozenset({"max_image_base64_bytes"})
++    legacy_transport_ceilings = {
++        "max_raw_bytes": 330301440,
++        "max_wire_bytes": 440401920,
++        "max_serialized_request_bytes": 440401920,
++    }
++
++    # Runtime credentials are intentionally unbound so key rotation cannot fork a
++    # campaign; endpoint and model fields remain fingerprinted.
++    credential_runtime_fields = frozenset({"api_key", "openai_api_key"})
++
++    def without_nonsemantic_runtime_fields(value: Any) -> Any:
++        """Drop allow-listed non-semantic fields after normal JSON conversion.
++
++        Applying this only inside runtime-component serialization preserves the
++        old fingerprint byte-for-byte when the field is absent.  The same name
++        in a materialized row or rollout request remains result-affecting.
++        """
++        if isinstance(value, Mapping):
++            result: Dict[str, Any] = {}
++            for key, item in value.items():
++                key = str(key)
++                if key in transport_only_runtime_fields or key in credential_runtime_fields:
++                    continue
++                normalized = without_nonsemantic_runtime_fields(item)
++                ceiling = legacy_transport_ceilings.get(key)
++                if (
++                    ceiling is not None
++                    and isinstance(normalized, int)
++                    and not isinstance(normalized, bool)
++                    and normalized > ceiling
++                ):
++                    normalized = ceiling
++                result[key] = normalized
++            return result
++        if isinstance(value, list):
++            return [without_nonsemantic_runtime_fields(item) for item in value]
++        return value
+
+     def jsonable_runtime_block(block: Mapping[str, Any]) -> Dict[str, Any]:
+         """Serialize a component block without process-local bind addresses."""
+         result: Dict[str, Any] = {}
+         for key, value in block.items():
+             key = str(key)
+             if key not in component_types:
+-                result[key] = jsonable(value)
++                result[key] = without_nonsemantic_runtime_fields(jsonable(value))
+                 continue
+
+-            servers = jsonable(value)
++            servers = without_nonsemantic_runtime_fields(jsonable(value))
+             if not isinstance(servers, Mapping):
+                 result[key] = servers
+                 continue

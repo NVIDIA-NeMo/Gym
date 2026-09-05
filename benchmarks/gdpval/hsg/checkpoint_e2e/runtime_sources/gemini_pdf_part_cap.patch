@@ -1,0 +1,100 @@
+diff --git a/resources_servers/gdpval/app.py b/resources_servers/gdpval/app.py
+--- a/resources_servers/gdpval/app.py
++++ b/resources_servers/gdpval/app.py
+@@ -1008,9 +1008,20 @@
+                                 raise ValueError(
+                                     f"overflow judges require one explicit native page cap, got {caps}"
+                                 )
++                            byte_caps = {
++                                judge.max_native_pdf_bytes
++                                for judge in overflow_judges
++                                if judge.max_native_pdf_bytes is not None
++                            }
++                            if len(byte_caps) != 1:
++                                raise ValueError(
++                                    "overflow judges require one explicit native PDF byte cap, "
++                                    f"got {byte_caps}"
++                                )
+                             overflow_plan = plan_native_pdf_overflow(
+                                 native,
+                                 native_page_cap=caps.pop(),
++                                native_pdf_byte_cap=byte_caps.pop(),
+                                 image_cap=self.config.judge_max_images_per_request,
+                             )
+                         matchup_judges, media_exclusions = filter_media_eligible_judges(
+diff --git a/resources_servers/gdpval/comparison.py b/resources_servers/gdpval/comparison.py
+--- a/resources_servers/gdpval/comparison.py
++++ b/resources_servers/gdpval/comparison.py
+@@ -1611,14 +1611,18 @@
+
+
+ def plan_native_pdf_overflow(
+-    sections: dict[str, list[dict]], *, native_page_cap: int, image_cap: int
++    sections: dict[str, list[dict]],
++    *,
++    native_page_cap: int,
++    native_pdf_byte_cap: int,
++    image_cap: int,
+ ) -> dict:
+-    """Choose exactly the PDF pages needed to satisfy a native-page cap.
++    """Rasterize oversize PDFs and exactly enough pages for the page cap.
+
+-    Whole small PDFs are rasterized first. When the remaining overflow is
+-    smaller than the next document, only that document's prefix is rasterized;
+-    its untouched suffix stays native. This retains every source page while
+-    avoiding a whole-document overshoot of the request-wide image cap.
++    Any PDF above the provider's per-file limit is fully rasterized. For an
++    additional page-count overflow, whole small PDFs are rasterized first and
++    only the required prefix of the final document is rasterized. Every source
++    page remains represented while avoiding unnecessary image expansion.
+     """
+     from resources_servers.gdpval.media_conversion import pdf_page_count
+
+@@ -1649,9 +1653,24 @@
+             )
+     total_pages = sum(item["pages"] for item in documents)
+     excess = max(0, total_pages - native_page_cap)
+-    selected: list[dict] = []
+-    remaining = excess
++    forced = {
++        index for index, item in enumerate(documents) if item["bytes"] > native_pdf_byte_cap
++    }
++    selected: list[dict] = [
++        {
++            **documents[index],
++            "raster_page_start": 0,
++            "raster_page_count": int(documents[index]["pages"]),
++            "native_page_count": 0,
++            "reason": "native_pdf_byte_cap",
++        }
++        for index in sorted(forced)
++    ]
++    forced_pages = sum(int(documents[index]["pages"]) for index in forced)
++    remaining = max(0, excess - forced_pages)
+     for index in sorted(range(len(documents)), key=lambda value: (documents[value]["pages"], value)):
++        if index in forced:
++            continue
+         if remaining <= 0:
+             break
+         document = documents[index]
+@@ -1662,10 +1681,11 @@
+                 "raster_page_start": 0,
+                 "raster_page_count": raster_page_count,
+                 "native_page_count": int(document["pages"]) - raster_page_count,
++                "reason": "native_pdf_page_cap",
+             }
+         )
+         remaining -= raster_page_count
+-    raster_pages = excess - remaining
++    raster_pages = sum(int(item["raster_page_count"]) for item in selected)
+     native_pages = total_pages - raster_pages
+     total_images_after = existing_images + raster_pages
+     return {
+@@ -1676,6 +1696,7 @@
+         ),
+         "total_pdf_pages": total_pages,
+         "native_page_cap": native_page_cap,
++        "native_pdf_byte_cap": native_pdf_byte_cap,
+         "native_pages_after": native_pages,
+         "raster_pages": raster_pages,
+         "image_cap": image_cap,

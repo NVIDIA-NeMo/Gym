@@ -1,0 +1,108 @@
+diff --git a/resources_servers/gdpval/app.py b/resources_servers/gdpval/app.py
+index 2010087..34c3818 100644
+--- a/resources_servers/gdpval/app.py
++++ b/resources_servers/gdpval/app.py
+@@ -182,6 +182,10 @@ class JudgePanelMember(BaseModel):
+     # Provider limit for one image's base64 source. Oversize static PNG/JPEG
+     # images are losslessly tiled with explicit reconstruction coordinates.
+     max_image_base64_bytes: Optional[int] = None
++    # Aggregate provider limits checked on the exact content blocks before
++    # dispatch. These are independent of the serialized request-body cap.
++    max_total_image_base64_bytes: Optional[int] = None
++    max_video_files: Optional[int] = None
+     # Tried in order for images_and_text. The first lossless projection below
+     # max_serialized_request_bytes wins; otherwise this member is excluded.
+     raster_dpi_tiers: Tuple[int, ...] = ()
+@@ -461,6 +465,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
+                     max_native_pdf_documents=member.max_native_pdf_documents,
+                     max_native_pdf_bytes=member.max_native_pdf_bytes,
+                     max_image_base64_bytes=member.max_image_base64_bytes,
++                    max_total_image_base64_bytes=member.max_total_image_base64_bytes,
++                    max_video_files=member.max_video_files,
+                     raster_dpi_tiers=tuple(member.raster_dpi_tiers),
+                     max_serialized_request_bytes=member.max_serialized_request_bytes,
+                 )
+@@ -770,6 +776,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
+                 max_native_pdf_documents=rj.max_native_pdf_documents,
+                 max_native_pdf_bytes=rj.max_native_pdf_bytes,
+                 max_image_base64_bytes=rj.max_image_base64_bytes,
++                max_total_image_base64_bytes=rj.max_total_image_base64_bytes,
++                max_video_files=rj.max_video_files,
+                 raster_dpi_tiers=rj.raster_dpi_tiers,
+                 max_serialized_request_bytes=rj.max_serialized_request_bytes,
+             )
+diff --git a/resources_servers/gdpval/comparison.py b/resources_servers/gdpval/comparison.py
+index 483ff19..a2a958c 100644
+--- a/resources_servers/gdpval/comparison.py
++++ b/resources_servers/gdpval/comparison.py
+@@ -1491,6 +1491,8 @@ class Judge:
+     max_native_pdf_documents: Optional[int] = None
+     max_native_pdf_bytes: Optional[int] = None
+     max_image_base64_bytes: Optional[int] = None
++    max_total_image_base64_bytes: Optional[int] = None
++    max_video_files: Optional[int] = None
+     raster_dpi_tiers: tuple[int, ...] = ()
+     max_serialized_request_bytes: Optional[int] = None
+
+@@ -1894,6 +1896,7 @@ def preflight_judge_transport(
+     )
+     markers: list[str] = []
+     image_base64_sizes: list[int] = []
++    video_count = 0
+     for message in messages:
+         for block in message.get("content") or []:
+             text = str(block.get("text", ""))
+@@ -1902,6 +1905,8 @@ def preflight_judge_transport(
+             parsed_image = _image_data_url(block)
+             if parsed_image is not None:
+                 image_base64_sizes.append(len(parsed_image[1].encode("ascii")))
++            if block.get("type") == "video_url":
++                video_count += 1
+     create_kwargs = merge_create_kwargs(
+         {
+             "model": judge.model,
+@@ -1924,6 +1929,15 @@ def preflight_judge_transport(
+     oversized_images = [size for size in image_base64_sizes if image_cap is not None and size > image_cap]
+     if oversized_images:
+         reasons.append("provider_image_byte_cap")
++    aggregate_image_cap = judge.max_total_image_base64_bytes
++    total_image_base64_bytes = sum(image_base64_sizes)
++    if aggregate_image_cap is not None and (
++        aggregate_image_cap <= 0 or total_image_base64_bytes >= aggregate_image_cap
++    ):
++        reasons.append("provider_total_image_byte_cap")
++    video_cap = judge.max_video_files
++    if video_cap is not None and (video_cap < 0 or video_count > video_cap):
++        reasons.append("provider_video_count_cap")
+     return {
+         "eligible": not reasons,
+         "judge": judge.name,
+@@ -1931,8 +1945,12 @@ def preflight_judge_transport(
+         "serialized_request_bytes": serialized_bytes,
+         "max_serialized_request_bytes": cap,
+         "largest_image_base64_bytes": max(image_base64_sizes, default=0),
++        "total_image_base64_bytes": total_image_base64_bytes,
+         "max_image_base64_bytes": image_cap,
++        "max_total_image_base64_bytes": aggregate_image_cap,
+         "oversize_image_count": len(oversized_images),
++        "video_file_count": video_count,
++        "max_video_files": video_cap,
+         "loss_markers": markers,
+         "reasons": reasons,
+     }
+diff --git a/resources_servers/gdpval/judge_panel.py b/resources_servers/gdpval/judge_panel.py
+index 70b5a2b..b9a677e 100644
+--- a/resources_servers/gdpval/judge_panel.py
++++ b/resources_servers/gdpval/judge_panel.py
+@@ -81,6 +81,11 @@ class ResolvedJudge:
+     # dispatch; the cap is measured on the ASCII base64 payload, not data-URL
+     # framing.
+     max_image_base64_bytes: Optional[int] = None
++    # Provider-wide aggregate image and video-count limits. Unlike lossless
++    # per-image tiling, these can change judge eligibility or raster DPI and
++    # therefore remain bound to the multistage campaign fingerprint.
++    max_total_image_base64_bytes: Optional[int] = None
++    max_video_files: Optional[int] = None
+     # Raster tiers are tried in order. The first complete request below the
+     # provider wire cap is used; otherwise that judge is excluded pre-dispatch.
+     raster_dpi_tiers: tuple[int, ...] = ()

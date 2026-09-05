@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+gdpval_gpt55_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
+      openai_model: openai/openai/gpt-5.5
+
+gdpval_gemini31_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.env:JUDGE_GEMINI_API_KEY,${oc.env:JUDGE_API_KEY,dummy}}
+      openai_model: gcp/google/gemini-3.1-pro-preview
+      extra_body: {reasoning_effort: high}
+      max_concurrent_requests: ${oc.env:GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS,2}
+
+gdpval_claude48_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
+      openai_model: aws/anthropic/bedrock-claude-opus-4-8
+      # The inference gateway otherwise applies its 360-second default before
+      # Gym's 900-second request bound. Pin both LiteLLM timeout spellings.
+      extra_body: {thinking: {type: adaptive}, output_config: {effort: high}, timeout: 900, request_timeout: 900}
+
+multistage:
+  transport_assignment_repair:
+    enabled: true
+    max_file_bytes: 335544320
+    # Preserve exact large FLOAT-WAV submissions when their projected Gemini
+    # request remains below the provider's observed 500 MB hard limit.
+    max_raw_bytes: 368000000
+    max_wire_bytes: 495000000
+    framing_reserve_bytes: 4194304
+
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      entrypoint: app.py
+      strict_comparison_trials: true
+      judge_media_mode: native_pdf
+      judge_pdf_render_dpi: 144
+      judge_pdf_max_pages: 1000
+      judge_pdf_include_text: true
+      judge_max_images_per_request: 450
+      judge_reference_files_recursive: true
+      judge_transport_derivative_profile: reference-pdf-v1+video-h264-720p-crf26-aac128-min8m+ref-video-bundle8-v1
+      judge_panel:
+        - name: gpt-5.5
+          model: openai/openai/gpt-5.5
+          model_server: {type: responses_api_models, name: gdpval_gpt55_judge_model}
+          media_mode: images_and_text
+          weight: 1.0
+          create_params_overrides: {reasoning_effort: medium}
+          handles_audio: false
+          handles_video: false
+          raster_dpi_tiers: [144, 120, 108, 96, 90, 84, 81, 80, 72]
+          # Decimal ASCII/base64 bytes. The failed 120-DPI request measured
+          # 23,826,112 and the first safe tier (90 DPI) measures 11,444,976,
+          # leaving 555,024 bytes of deterministic preflight headroom.
+          max_total_image_base64_bytes: 12000000
+          max_serialized_request_bytes: 30000000
+        - name: gemini-3.1-pro
+          model: gcp/google/gemini-3.1-pro-preview
+          model_server: {type: responses_api_models, name: gdpval_gemini31_judge_model}
+          media_mode: native_pdf_overflow_images
+          weight: 1.0
+          create_params_overrides: {reasoning_effort: high}
+          handles_audio: true
+          handles_video: true
+          # Vertex Gemini rejects requests containing more than ten videos.
+          max_video_files: 10
+          max_native_pdf_pages: 1000
+          # Vertex accepts at most 50 MB per PDF. Rasterize only an individual
+          # PDF that exceeds that limit; keep smaller PDFs native.
+          max_native_pdf_bytes: 50000000
+          # Keep a 5 MB margin below Gemini's observed 500 MB hard limit.
+          max_serialized_request_bytes: 495000000
+        - name: claude-opus-4.8
+          model: aws/anthropic/bedrock-claude-opus-4-8
+          model_server: {type: responses_api_models, name: gdpval_claude48_judge_model}
+          media_mode: native_pdf
+          weight: 1.0
+          create_params_overrides: {temperature: null, extra_body: {thinking: {type: adaptive}, output_config: {effort: high}}}
+          handles_audio: false
+          handles_video: false
+          max_native_pdf_pages: 100
+          max_native_pdf_documents: 5
+          max_native_pdf_bytes: 25165824
+          # Bedrock's Claude adapter rejects any one base64 image source above
+          # 5 MiB. Oversize static images are losslessly tiled before dispatch.
+          max_image_base64_bytes: 5242880
+          max_serialized_request_bytes: 440401920

@@ -1,0 +1,213 @@
+diff --git a/resources_servers/gdpval/app.py b/resources_servers/gdpval/app.py
+index 68ecf7b55..dbe0c1615 100644
+--- a/resources_servers/gdpval/app.py
++++ b/resources_servers/gdpval/app.py
+@@ -241,6 +241,13 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
+     judge_pdf_include_text: bool = True
+     # Exact request-wide image cap for raster and PDF-overflow transports.
+     judge_max_images_per_request: int = 450
++    # Recursively transport assets below ``reference_files``. This is opt-in so
++    # older runs retain their exact scientific input contract; checkpoint E2E
++    # enables it and binds the setting into the run fingerprint.
++    judge_reference_files_recursive: bool = False
++    # Fingerprint-bound declaration of any prebuilt semantic transport
++    # derivatives used by the candidate/reference views.
++    judge_transport_derivative_profile: str = "original"
+     # Whether the (single) local judge natively reads audio / video, tracked
+     # SEPARATELY because MiniMax-M3 — the reference self-hosted judge — reads video
+     # but NOT audio (its config has an image + video tower but no audio config). So
+@@ -804,10 +811,18 @@ class GDPValResourcesServer(SimpleResourcesServer):
+         last_error: Optional[Exception] = None
+         # Cache each semantic side independently by representation and DPI.
+         # Native sections are also the exact source for provider-cap preflight.
+-        section_cache: Dict[Tuple[str, str, int], List[dict]] = {}
++        section_cache: Dict[Tuple[str, str, int, bool], List[dict]] = {}
++
++        def _recursive_reference_assets(path: Optional[Path]) -> bool:
++            return bool(
++                self.config.judge_reference_files_recursive
++                and path is not None
++                and path.name == "reference_files"
++            )
+
+         async def _section(path: Optional[Path], mode: str, render_dpi: int) -> List[dict]:
+-            key = (str(path) if path is not None else "<none>", mode, render_dpi)
++            recursive = _recursive_reference_assets(path)
++            key = (str(path) if path is not None else "<none>", mode, render_dpi, recursive)
+             if key not in section_cache:
+                 section_cache[key] = await asyncio.to_thread(
+                     build_file_section,
+@@ -819,6 +834,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
+                     include_text=self.config.judge_pdf_include_text,
+                     audio_capable=audio_capable,
+                     video_capable=video_capable,
++                    recursive=recursive,
+                 )
+             return section_cache[key]
+
+@@ -1017,6 +1033,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
+                                                     str(path) if path is not None else "<none>",
+                                                     "images_and_text",
+                                                     dpi,
++                                                    _recursive_reference_assets(path),
+                                                 ),
+                                                 None,
+                                             )
+diff --git a/resources_servers/gdpval/comparison.py b/resources_servers/gdpval/comparison.py
+index 3d4f0a0b9..3ad9ebe33 100644
+--- a/resources_servers/gdpval/comparison.py
++++ b/resources_servers/gdpval/comparison.py
+@@ -746,6 +746,7 @@ def build_file_section(
+     include_text: bool = True,
+     audio_capable: bool = False,
+     video_capable: bool = False,
++    recursive: bool = False,
+ ) -> list[dict]:
+     """Build OpenAI content blocks from all files in a directory.
+
+@@ -762,6 +763,11 @@ def build_file_section(
+     *video_capable* keep audio / video files (respectively) as native media
+     blocks (vs stubbing them) when the judge reads that modality — they are
+     independent so a video-only judge (MiniMax-M3) keeps video but stubs audio.
++    When *recursive* is true, files below nested directories are included in
++    stable relative-path order. Their relative names are retained in the judge
++    prompt so equal basenames from distinct benchmark asset directories cannot
++    collide. Office sources and their generated PDF sidecars continue to be
++    resolved together within each source directory.
+     """
+     if clean_up_list is None:
+         clean_up_list = []
+@@ -809,14 +815,25 @@ def build_file_section(
+         for block in blocks:
+             _append_block(block)
+
+-    extracted_dirs: list[Path] = []
+-    if file_dir is not None and os.path.exists(file_dir):
+-        for file_name in os.listdir(file_dir):
+-            if file_name.lower().endswith(".zip"):
+-                extract_dir, _ = _maybe_unzip(os.path.join(file_dir, file_name))
+-                if extract_dir is not None:
+-                    clean_up_list.append(extract_dir)
+-                    extracted_dirs.append(extract_dir)
++    source_root = Path(file_dir) if file_dir is not None else None
++    source_files: list[Path] = []
++    if source_root is not None and source_root.is_dir():
++        discovered = source_root.rglob("*") if recursive else source_root.iterdir()
++        source_files = sorted(
++            (path for path in discovered if path.is_file()),
++            key=lambda path: path.relative_to(source_root).as_posix(),
++        )
++
++    extracted_archives: list[tuple[Path, str, list[Path]]] = []
++    for archive in source_files:
++        if archive.suffix.lower() != ".zip":
++            continue
++        extract_dir, members = _maybe_unzip(archive)
++        if extract_dir is not None:
++            clean_up_list.append(extract_dir)
++            extracted_archives.append(
++                (extract_dir, archive.relative_to(source_root).as_posix(), members)
++            )
+
+     ignore_files = _ignore_files()
+     provenance_by_dir: dict[Path, Any] = {}
+@@ -872,16 +889,17 @@ def build_file_section(
+         except Exception as exc:
+             return f"[structured spreadsheet extraction failed: {exc}]"
+
+-    def _emit(directory: str, file_name: str) -> None:
++    def _emit(directory: str, file_name: str, *, display_name: str | None = None) -> None:
+         nonlocal no_files
+-        if file_name in ignore_files:
++        if Path(file_name).name in ignore_files:
+             return
+         full_path = Path(directory) / file_name
+-        provenance = _provenance(directory)
+-        parent = Path(directory)
++        parent = full_path.parent
++        provenance = _provenance(str(parent))
+         if full_path in provenance.suppressed_pdfs or full_path in fallback_suppressed_by_dir[parent]:
+             return
+-        _append_block({"type": "text", "text": f"\n{file_name}:\n"})
++        label = display_name or file_name
++        _append_block({"type": "text", "text": f"\n{label}:\n"})
+         info = FILE_TYPE_MAP.get(full_path.suffix.lower().lstrip(".")) or {}
+         av_identity: tuple[int, str] | None = None
+         if info.get("type") in {"AUDIO", "VIDEO"}:
+@@ -898,6 +916,12 @@ def build_file_section(
+                 no_files = False
+                 return
+         cached_office_pdf = provenance.office_pdfs.get(full_path) or fallback_pdfs_by_dir[parent].get(full_path)
++        requires_pdf_render = info.get("type") == "DOC" or not info
++        if recursive and requires_pdf_render and cached_office_pdf is None:
++            raise ValueError(
++                "recursive reference asset has no provenance-safe PDF render: "
++                f"{label}"
++            )
+         remaining_text = max(0, MAX_SECTION_TEXT_CHARS_FOR_JUDGE - text_used)
+         if media_mode == "images_and_text":
+             blocks = get_file_image_text_blocks(
+@@ -916,14 +940,14 @@ def build_file_section(
+             if blocks:
+                 _append_blocks(blocks)
+                 if av_identity is not None and any(_attachment_payload(block)[0] for block in blocks):
+-                    retained_av_payloads[av_identity] = file_name
++                    retained_av_payloads[av_identity] = label
+                 no_files = False
+             sheet_text = _structured_xlsx_text(full_path)
+             if sheet_text:
+                 _append_block(
+                     {
+                         "type": "text",
+-                        "text": f"\n{file_name} (structured spreadsheet cells):\n{sheet_text}",
++                        "text": f"\n{label} (structured spreadsheet cells):\n{sheet_text}",
+                     }
+                 )
+                 no_files = False
+@@ -939,25 +963,34 @@ def build_file_section(
+         if block is not None:
+             _append_block(block)
+             if av_identity is not None and _attachment_payload(block)[0]:
+-                retained_av_payloads[av_identity] = file_name
++                retained_av_payloads[av_identity] = label
+             no_files = False
+         sheet_text = _structured_xlsx_text(full_path)
+         if sheet_text:
+-            _append_block({"type": "text", "text": f"\n{file_name} (structured spreadsheet cells):\n{sheet_text}"})
++            _append_block(
++                {
++                    "type": "text",
++                    "text": f"\n{label} (structured spreadsheet cells):\n{sheet_text}",
++                }
++            )
+             no_files = False
+
+-    if file_dir is not None and os.path.exists(file_dir):
+-        for file_name in sorted(os.listdir(file_dir)):
+-            full_path = os.path.join(file_dir, file_name)
+-            if os.path.isdir(full_path) or file_name.lower().endswith(".zip"):
++    if source_root is not None:
++        for source in source_files:
++            if source.suffix.lower() == ".zip":
+                 continue
+-            _emit(file_dir, file_name)
++            relative_name = source.relative_to(source_root).as_posix()
++            _emit(
++                str(source_root),
++                relative_name,
++                display_name=relative_name if recursive else source.name,
++            )
+
+-    for extract_dir in extracted_dirs:
+-        for member in sorted(extract_dir.rglob("*")):
+-            if not member.is_file():
+-                continue
+-            _emit(str(member.parent), member.name)
++    for extract_dir, archive_name, members in extracted_archives:
++        for member in sorted(members, key=lambda path: path.relative_to(extract_dir).as_posix()):
++            relative_name = member.relative_to(extract_dir).as_posix()
++            display_name = f"{archive_name}!/{relative_name}" if recursive else member.name
++            _emit(str(extract_dir), relative_name, display_name=display_name)
+
+     if no_files:
+         _append_block({"type": "text", "text": "None"})
