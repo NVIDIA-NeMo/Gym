@@ -17,7 +17,7 @@ terminus_2_sandboxed_agent:
       tmux_pane_width: 160
       tmux_pane_height: 40
       dump_trajectory: false
-      debug: false
+      debug: true
       model_context_limit: 262144
       model_output_limit: null
       llm_request_timeout: 600  # 10 mins, Litellm default
