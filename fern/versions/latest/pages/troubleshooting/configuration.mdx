@@ -108,7 +108,7 @@ config_paths:
 
 ```
 nemo_gym.config_types.NoServerInstancesError: No server instances are configured, so there is nothing to run. Pass one or more configs, e.g.:
-  gym env start --config resources_servers/<env>/configs/<env>.yaml --config responses_api_models/<model>/configs/<model>.yaml
+  gym env start --config resources_servers/<env>/configs/<env>.yaml --config model_backends/<model>/configs/<model>.yaml
 ```
 
 **When**: The merged config defines no server instances — usually a wrong/empty `--config` or a

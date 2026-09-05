@@ -243,7 +243,7 @@ jobs:
       matrix:
         include:
           - provider: fireworks
-            config: responses_api_models/inference_provider/configs/fireworks.yaml
+            config: model_backends/inference_provider/configs/fireworks.yaml
             model: accounts/fireworks/models/gpt-oss-20b
             model_api_key_secret_name: FIREWORKS
     runs-on: ubuntu-latest

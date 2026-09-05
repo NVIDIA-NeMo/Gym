@@ -26,7 +26,7 @@ few-shots).
 Start vLLM with the `--reasoning-parser` that matches your model
 (e.g. `deepseek_r1` for models with a `<think>…</think>` convention;
 the parser name is declared in
-`responses_api_models/local_vllm_model/configs/nvidia/*.yaml`). Without
+`model_backends/local_vllm_model/configs/nvidia/*.yaml`). Without
 one, `math_with_judge` may extract intermediate expressions from
 truncated rollouts, and Skills' `parse_reasoning=True` default diverges
 on the same inputs.

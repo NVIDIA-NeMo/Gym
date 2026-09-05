@@ -52,7 +52,7 @@ Point Gym at one or more extra roots so your own benchmarks, environments, resou
 ├── environments/<name>/
 ├── resources_servers/<name>/
 ├── responses_api_agents/<name>/
-└── responses_api_models/<name>/
+└── model_backends/<name>/
 ```
 
 Set it as an `os.pathsep`-separated list (`:` on Linux/macOS):
@@ -197,7 +197,7 @@ policy_model_name: gpt-4o-2024-11-20
 
 # Optional: store config paths for reuse
 my_config_paths:
-  - responses_api_models/openai_model/configs/openai_model.yaml
+  - model_backends/openai_model/configs/openai_model.yaml
   - resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml
 
 # Optional: multi-node setups

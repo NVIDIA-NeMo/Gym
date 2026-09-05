@@ -3,7 +3,7 @@
 # selected here.
 config_paths:
   - responses_api_agents/osworld_agent/configs/osworld_agent.yaml
-  - responses_api_models/openai_model/configs/openai_model.yaml
+  - model_backends/openai_model/configs/openai_model.yaml
 
 osworld_simple_agent:
   responses_api_agents:

@@ -156,7 +156,7 @@ class TestGlobalConfig:
         monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
 
         hydra_main_mock = MagicMock()
-        hydra_main_mock.return_value = lambda fn: (lambda: fn(config_dict))
+        hydra_main_mock.return_value = lambda fn: lambda: fn(config_dict)
         monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
 
     def _mock_openai_topology(self, monkeypatch: MonkeyPatch, parent_version: str) -> None:
@@ -328,7 +328,7 @@ b: 2
         # Override OmegaConf.load to avoid file reads.
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
-        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        omegaconf_load_mock.side_effect = lambda path: DictConfig({}) if "env" in str(path) else original_load(path)
         monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
 
         global_config_dict = get_global_config_dict()
@@ -375,7 +375,7 @@ config_paths:
 
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
-        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        omegaconf_load_mock.side_effect = lambda path: DictConfig({}) if "env" in str(path) else original_load(path)
         monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
 
         get_global_config_dict()
@@ -465,7 +465,7 @@ config_paths:
         # Override OmegaConf.load to avoid file reads.
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
-        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        omegaconf_load_mock.side_effect = lambda path: DictConfig({}) if "env" in str(path) else original_load(path)
         monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
 
     def test_get_global_config_dict_config_paths_later_sibling_wins(
@@ -1887,6 +1887,18 @@ class TestConfigLoadErrors:
         assert len(configs) == 1
         assert f"Config path `{legacy}` is deprecated; use `{canonical}`." in caplog.text
 
+    def test_load_extra_config_paths_resolves_legacy_model_backend_path(self, caplog: LogCaptureFixture) -> None:
+        legacy = "responses_api_models/openai_model/configs/openai_model.yaml"
+        canonical = "model_backends/openai_model/configs/openai_model.yaml"
+        parser = GlobalConfigDictParser()
+
+        with caplog.at_level("WARNING"):
+            config_paths, configs = parser.load_extra_config_paths([legacy])
+
+        assert config_paths == [canonical]
+        assert len(configs) == 1
+        assert f"Config path `{legacy}` is deprecated; use `{canonical}`." in caplog.text
+
     def test_existing_legacy_config_path_takes_precedence(
         self, monkeypatch: MonkeyPatch, tmp_path: Path, caplog: LogCaptureFixture
     ) -> None:
@@ -2138,7 +2150,7 @@ class TestModelServerPairing:
         )
 
     def test_librispeech_config_fails_during_parse_with_openai_model(self) -> None:
-        model_config_path = "responses_api_models/openai_model/configs/openai_model.yaml"
+        model_config_path = "model_backends/openai_model/configs/openai_model.yaml"
 
         with raises(UnsupportedModelPairingError) as error:
             self._parse_librispeech(model_config_path)
@@ -2149,7 +2161,7 @@ class TestModelServerPairing:
         assert "--model-type vllm_model" in message
 
     def test_librispeech_config_resolves_with_vllm_model(self) -> None:
-        model_config_path = "responses_api_models/vllm_model/configs/vllm_model.yaml"
+        model_config_path = "model_backends/vllm_model/configs/vllm_model.yaml"
 
         resolved = self._parse_librispeech(model_config_path)
 

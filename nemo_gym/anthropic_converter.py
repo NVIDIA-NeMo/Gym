@@ -17,7 +17,7 @@
 This module is the single source of truth for the Anthropic <-> Responses mapping. It is
 shared by two opposite-direction consumers:
 
-* **Egress** (`responses_api_models/anthropic_model`): NeMo Gym is the client and Anthropic is
+* **Egress** (`model_backends/anthropic_model`): NeMo Gym is the client and Anthropic is
   the backend. Uses ``responses_to_anthropic`` (request) and ``anthropic_to_responses``
   (response).
 * **Ingress** (an Anthropic-Messages proxy, e.g. for the Claude Code CLI): an Anthropic client

@@ -42,10 +42,29 @@ LEGACY_CONFIG_PATH_ALIASES = {
     ),
 }
 
+LEGACY_MODEL_BACKENDS_SUBDIR = "responses_api_models"
+MODEL_BACKENDS_SUBDIR = "model_backends"
+
 
 def legacy_config_path_alias(path: str) -> str | None:
     """Return the canonical path for a legacy relative config path."""
     parsed = Path(path)
     if parsed.is_absolute():
         return None
-    return LEGACY_CONFIG_PATH_ALIASES.get(parsed.as_posix())
+    normalized = parsed.as_posix()
+    if normalized == LEGACY_MODEL_BACKENDS_SUBDIR:
+        return MODEL_BACKENDS_SUBDIR
+    if normalized.startswith(f"{LEGACY_MODEL_BACKENDS_SUBDIR}/"):
+        return normalized.replace(LEGACY_MODEL_BACKENDS_SUBDIR, MODEL_BACKENDS_SUBDIR, 1)
+    return LEGACY_CONFIG_PATH_ALIASES.get(normalized)
+
+
+def legacy_model_backend_path(path: str | Path) -> Path | None:
+    """Return the pre-MB-1553 path for a canonical relative model-backend path."""
+    parsed = Path(path)
+    if parsed.is_absolute():
+        return None
+    parts = parsed.parts
+    if not parts or parts[0] != MODEL_BACKENDS_SUBDIR:
+        return None
+    return Path(LEGACY_MODEL_BACKENDS_SUBDIR, *parts[1:])

@@ -3,7 +3,7 @@
 
 config_paths:
   - resources_servers/string_match/configs/string_match.yaml
-  - responses_api_models/vllm_model/configs/vllm_model.yaml
+  - model_backends/vllm_model/configs/vllm_model.yaml
 
 policy_base_url: http://127.0.0.1:18000/v1
 policy_api_key: not-a-real-key # pragma: allowlist secret

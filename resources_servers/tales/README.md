@@ -28,7 +28,7 @@ export PATH="$(brew --prefix)/opt/openjdk/bin:$PATH"
 # Set inference endpoint in env.yaml as in other Gym environments, then
 
 # Start environment 
-ng_run "+config_paths=[resources_servers/tales/configs/tales.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[resources_servers/tales/configs/tales.yaml,model_backends/vllm_model/configs/vllm_model.yaml]"
 
 # Collect example rollouts
 ng_collect_rollouts \

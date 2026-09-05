@@ -80,7 +80,7 @@ policy_api_key: your-policy-api-key
 policy_model_name: your-policy-model
 ```
 
-Use `responses_api_models/vllm_model/configs/vllm_model.yaml`, **not**
+Use `model_backends/vllm_model/configs/vllm_model.yaml`, **not**
 `vllm_model_for_training.yaml`, unless the policy model is a real self-hosted vLLM
 server. `vllm_model_for_training.yaml` sets `return_token_id_information: true`,
 which makes `app.py` inject a vLLM-specific `return_tokens_as_token_ids` sampling
@@ -112,7 +112,7 @@ gym eval run --no-serve \
 The legacy `ng_run` / `ng_collect_rollouts` commands are equivalent:
 
 ```bash
-ng_run "+config_paths=[environments/biomnibench_da/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" &
+ng_run "+config_paths=[environments/biomnibench_da/config.yaml,model_backends/vllm_model/configs/vllm_model.yaml]" &
 ./scripts/wait_for_servers.sh $!
 
 ng_collect_rollouts +agent_name=harbor_agent \

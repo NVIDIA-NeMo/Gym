@@ -23,6 +23,7 @@ import aiohttp
 from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
 
+from model_backends.vllm_model.app import VLLMConverter
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -50,7 +51,6 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.server_utils import get_response_json, raise_for_status
-from responses_api_models.vllm_model.app import VLLMConverter
 
 
 def _qid(text: str) -> str:

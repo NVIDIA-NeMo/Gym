@@ -56,6 +56,7 @@ runs:
           LICENSE
           resources_servers/**
           responses_api_agents/**
+          model_backends/**
           responses_api_models/**
           benchmarks/**
         files_yaml: |
@@ -67,6 +68,7 @@ runs:
           server:
             - resources_servers/**
             - responses_api_agents/**
+            - model_backends/**
             - responses_api_models/**
 
     - name: Classify changes

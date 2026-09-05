@@ -497,7 +497,7 @@ exclude-dependencies = [
 nemo-lens = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "b85578fc2b736a1804705e537001b5f45e9c715d" }
 
 [tool.setuptools.package-data]
-# The built-in asset trees (resources_servers, responses_api_agents, responses_api_models,
+# The built-in asset trees (resources_servers, responses_api_agents, model_backends,
 # benchmarks, environments — all under [tool.setuptools.packages.find]) ship their configs, READMEs,
 # and example data into the wheel via the setuptools-scm VCS file-finder, which includes git-tracked
 # files. (Adding `environments` to packages.find above is what makes that tree ship at all.) Bulk
@@ -617,8 +617,10 @@ include = [
     "resources_servers.*",
     "responses_api_agents",
     "responses_api_agents.*",
+    "model_backends",
+    "model_backends.*",
+    # Compatibility import namespace for pre-MB-1553 integrations.
     "responses_api_models",
-    "responses_api_models.*",
     "environments",
     "environments.*",
     "nemo_gym",

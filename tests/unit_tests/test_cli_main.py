@@ -636,7 +636,7 @@ class TestDispatch:
         assert captured["argv"][0] == "gym"
         config_paths, others = _split_overrides(captured["argv"][1:])
         assert any(p.endswith("benchmarks/aime24/config.yaml") for p in config_paths)
-        assert any(p.endswith("responses_api_models/openai_model/configs/openai_model.yaml") for p in config_paths)
+        assert any(p.endswith("model_backends/openai_model/configs/openai_model.yaml") for p in config_paths)
         assert others == {"++responses_create_params.reasoning.effort=low", "+wandb_project=gym-dev"}
 
     def test_dispatch_raises_on_unresolvable_attribute(self, monkeypatch: MonkeyPatch) -> None:
@@ -768,7 +768,7 @@ class TestModelFlag:
             ["eval", "run", "--model-type", "local_vllm_model", "--model", "Qwen/Qwen3-8B"],
         )
         paths, others = _split_overrides(overrides)
-        assert paths == {str(WORKING_DIR / "responses_api_models/local_vllm_model/configs/local_vllm_model.yaml")}
+        assert paths == {str(WORKING_DIR / "model_backends/local_vllm_model/configs/local_vllm_model.yaml")}
         assert others == {"+policy_model_name=Qwen/Qwen3-8B"}
 
     def test_short_alias_on_env_run(self, monkeypatch: MonkeyPatch) -> None:
@@ -1074,15 +1074,15 @@ class TestAssetSelectors:
                 ["env", "start", "--resources-server", "example_multi_step"],
                 "resources_servers/example_multi_step/configs/example_multi_step.yaml",
             ),
-            # README.md / quickstart.mdx: responses_api_models/openai_model/configs/openai_model.yaml
+            # README.md / quickstart.mdx: model_backends/openai_model/configs/openai_model.yaml
             (
                 ["env", "start", "--model-type", "openai_model"],
-                "responses_api_models/openai_model/configs/openai_model.yaml",
+                "model_backends/openai_model/configs/openai_model.yaml",
             ),
-            # model-server/vllm.mdx: responses_api_models/vllm_model/configs/vllm_model.yaml
+            # model-server/vllm.mdx: model_backends/vllm_model/configs/vllm_model.yaml
             (
                 ["env", "start", "--model-type", "vllm_model"],
-                "responses_api_models/vllm_model/configs/vllm_model.yaml",
+                "model_backends/vllm_model/configs/vllm_model.yaml",
             ),
         ],
     )
@@ -1116,7 +1116,7 @@ class TestAssetSelectors:
     def test_quickstart_resource_server_plus_model(self, monkeypatch: MonkeyPatch) -> None:
         # README.md / quickstart.mdx:
         #   ng_run "+config_paths=[resources_servers/mcqa/configs/mcqa.yaml,
-        #                          responses_api_models/openai_model/configs/openai_model.yaml]"
+        #                          model_backends/openai_model/configs/openai_model.yaml]"
         target, overrides = _dispatch_for(
             monkeypatch, ["env", "start", "--resources-server", "mcqa", "--model-type", "openai_model"]
         )
@@ -1124,24 +1124,24 @@ class TestAssetSelectors:
         paths, others = _split_overrides(overrides)
         assert paths == {
             str(WORKING_DIR / "resources_servers/mcqa/configs/mcqa.yaml"),
-            str(WORKING_DIR / "responses_api_models/openai_model/configs/openai_model.yaml"),
+            str(WORKING_DIR / "model_backends/openai_model/configs/openai_model.yaml"),
         }
         assert others == set()
 
     def test_gpqa_benchmark_plus_model(self, monkeypatch: MonkeyPatch) -> None:
         # benchmarks/gpqa/README.md:
-        #   ng_run "+config_paths=[benchmarks/gpqa/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+        #   ng_run "+config_paths=[benchmarks/gpqa/config.yaml,model_backends/vllm_model/configs/vllm_model.yaml]"
         _, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--benchmark", "gpqa", "--model-type", "vllm_model"])
         paths, others = _split_overrides(overrides)
         assert paths == {
             str(WORKING_DIR / "benchmarks/gpqa/config.yaml"),
-            str(WORKING_DIR / "responses_api_models/vllm_model/configs/vllm_model.yaml"),
+            str(WORKING_DIR / "model_backends/vllm_model/configs/vllm_model.yaml"),
         }
         assert others == set()
 
     def test_cli_reference_e2e_rollout_example(self, monkeypatch: MonkeyPatch) -> None:
         # fern .../reference/cli-commands.mdx ng_e2e_collect_rollouts example:
-        #   config_paths="responses_api_models/openai_model/configs/openai_model.yaml,
+        #   config_paths="model_backends/openai_model/configs/openai_model.yaml,
         #                 resources_servers/math_with_judge/configs/math_with_judge.yaml"
         #   ng_e2e_collect_rollouts "+config_paths=[$config_paths]"
         #       ++output_jsonl_fpath=results/test_e2e_rollout_collection/aime24.jsonl ++split=validation
@@ -1164,7 +1164,7 @@ class TestAssetSelectors:
         paths, others = _split_overrides(overrides)
         assert paths == {
             str(WORKING_DIR / "resources_servers/math_with_judge/configs/math_with_judge.yaml"),
-            str(WORKING_DIR / "responses_api_models/openai_model/configs/openai_model.yaml"),
+            str(WORKING_DIR / "model_backends/openai_model/configs/openai_model.yaml"),
         }
         assert others == {
             "+output_jsonl_fpath=results/test_e2e_rollout_collection/aime24.jsonl",
@@ -1216,7 +1216,7 @@ class TestAssetSelectors:
         paths, others = _split_overrides(overrides)
         assert paths == {
             str(WORKING_DIR / "resources_servers/format_verification/configs/freeform_formatting.yaml"),
-            str(WORKING_DIR / "responses_api_models/vllm_model/configs/vllm_model.yaml"),
+            str(WORKING_DIR / "model_backends/vllm_model/configs/vllm_model.yaml"),
         }
         assert others == {"+mode=train_preparation"}
 
@@ -1342,7 +1342,7 @@ class TestAssetSelectors:
         assert paths == {
             "extra.yaml",  # raw --config value passes through verbatim; only name selectors get rooted
             str(WORKING_DIR / "resources_servers/mcqa/configs/mcqa.yaml"),
-            str(WORKING_DIR / "responses_api_models/openai_model/configs/openai_model.yaml"),
+            str(WORKING_DIR / "model_backends/openai_model/configs/openai_model.yaml"),
         }
         assert others == set()
 
@@ -1407,7 +1407,7 @@ class TestAgentSelector:
         assert paths == {
             str(WORKING_DIR / self.HERMES),
             str(WORKING_DIR / "benchmarks/gpqa/config.yaml"),
-            str(WORKING_DIR / "responses_api_models/vllm_model/configs/vllm_model.yaml"),
+            str(WORKING_DIR / "model_backends/vllm_model/configs/vllm_model.yaml"),
         }
         assert others == set()
 
@@ -1537,6 +1537,35 @@ class TestSearchDir:
         )
         # User-dir matches are returned rooted so Hydra can resolve them.
         assert overrides == [f"+config_paths=[{tmp_path / 'benchmarks' / 'mybench' / 'config.yaml'}]"]
+
+    def test_resolves_model_from_legacy_user_dir(self, monkeypatch: MonkeyPatch, tmp_path, caplog) -> None:
+        config = tmp_path / "responses_api_models" / "custom_model" / "configs" / "custom_model.yaml"
+        config.parent.mkdir(parents=True)
+        config.write_text("policy_model: {}\n")
+
+        with caplog.at_level(logging.WARNING):
+            _, overrides = _dispatch_for(
+                monkeypatch,
+                ["env", "start", "--model-type", "custom_model", "--search-dir", str(tmp_path)],
+            )
+
+        assert overrides == [f"+config_paths=[{config}]"]
+        assert "deprecated" in caplog.text
+
+    def test_legacy_user_model_shadows_canonical_builtin(self, monkeypatch: MonkeyPatch, tmp_path, caplog) -> None:
+        config = tmp_path / "responses_api_models" / "openai_model" / "configs" / "openai_model.yaml"
+        config.parent.mkdir(parents=True)
+        config.write_text("policy_model: {}\n")
+
+        with caplog.at_level(logging.WARNING):
+            _, overrides = _dispatch_for(
+                monkeypatch,
+                ["env", "start", "--model-type", "openai_model", "--search-dir", str(tmp_path)],
+            )
+
+        assert overrides == [f"+config_paths=[{config}]"]
+        assert "deprecated" in caplog.text
+        assert "matches multiple configs" in caplog.text
 
     def test_builtin_resolves_when_search_dir_lacks_it(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         # A built-in still resolves under WORKING_DIR when a --search-dir is provided that does not shadow it.

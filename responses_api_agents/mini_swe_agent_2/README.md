@@ -362,7 +362,7 @@ uv sync --extra dev --extra sandbox
   fails with `... does not appear to be a Python project`.
 
 - Access to an OpenSandbox deployment reachable from the server process.
-- A policy model endpoint compatible with `responses_api_models/vllm_model`.
+- A policy model endpoint compatible with `model_backends/vllm_model`.
 - SWE-bench task images available to OpenSandbox. The committed smoke rows are
   `subset: verified`, so they resolve to
   `docker.io/swebench/sweb.eval.x86_64.<id>:latest` images derived from
@@ -509,7 +509,7 @@ Each input row needs the SWE-bench instance fields shown under
 the verifier in-sandbox, so the model is never called:
 
 ```bash
-CONFIG_PATHS="responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml,nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml"
+CONFIG_PATHS="responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml,nemo_gym/sandbox/providers/ecs_fargate/configs/ecs_fargate.yaml,model_backends/vllm_model/configs/vllm_model.yaml"
 
 AWS_REGION=us-east-1 ng_run "+config_paths=[$CONFIG_PATHS]" \
     ++mini_swe_agent_2.responses_api_agents.mini_swe_agent_2.run_golden=true

@@ -46,6 +46,7 @@ from openai.types.responses.function_tool import FunctionTool
 from pydantic import BaseModel, ConfigDict, Field
 from pydot import graph_from_dot_file
 
+from model_backends.vllm_model.app import VLLMConverter, split_responses_input_output_items
 from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -77,7 +78,6 @@ from responses_api_agents.swe_agents.opencode_replay import (
     parse_replay_subagent_manifest,
     parse_replay_subagent_payload,
 )
-from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 
 
 OPENHANDS_CAPTURE_OVERLAY_DIR = Path(__file__).parent / "openhands_capture_overlay"

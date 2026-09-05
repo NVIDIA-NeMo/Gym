@@ -73,7 +73,7 @@ class NemoGymLLM(BaseLLM):
 
         # Persistent HTTP client, reused across every turn of the episode. The Gym
         # vllm_model server pins a session to one vLLM engine via a cookie-based
-        # SessionMiddleware (responses_api_models/vllm_model/app.py); a fresh client
+        # SessionMiddleware (model_backends/vllm_model/app.py); a fresh client
         # per call drops that cookie, so the server mints a NEW session_id each turn
         # and round-robins it to a (usually different) engine. With many DP engines
         # that means the growing conversation prefix is almost never warm in the engine

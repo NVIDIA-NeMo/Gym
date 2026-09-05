@@ -23,7 +23,7 @@ ng_prepare_benchmark "+config_paths=[$config_paths]"
 ```bash
 WANDB_PROJECT=
 EXPERIMENT_NAME=
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
+config_paths="model_backends/vllm_model/configs/vllm_model.yaml,\
 benchmarks/browsecomp/config.yaml"
 ng_e2e_collect_rollouts \
     "+config_paths=[${config_paths}]" \

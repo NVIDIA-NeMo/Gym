@@ -62,7 +62,7 @@ def test_text_completion_uses_ruler_task_limits(source_sample: dict, subset: str
 
 
 def test_pretrain_profile_uses_raw_completions() -> None:
-    config = OmegaConf.load(REPO_ROOT / "responses_api_models/local_vllm_model/configs/pretrain_text_completion.yaml")
+    config = OmegaConf.load(REPO_ROOT / "model_backends/local_vllm_model/configs/pretrain_text_completion.yaml")
     model_config = config.policy_model.responses_api_models.local_vllm_model
 
     assert model_config.use_completions_api is True

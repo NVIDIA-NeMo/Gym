@@ -50,7 +50,7 @@ OpenSandbox needs a host-routable model-server address.
 gym env start \
   --config benchmarks/deepswe/opencode.yaml \
   --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
-  --config responses_api_models/<model>/configs/<model>.yaml
+  --config model_backends/<model>/configs/<model>.yaml
 ```
 
 As in upstream DeepSWE v1.1, the agent must commit its work. At verification time the resources server executes the

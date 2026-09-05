@@ -18,7 +18,7 @@ python responses_api_agents/anyterminal_agent/prepare.py --no-build-sif
 gym eval run \
   --config responses_api_agents/anyterminal_agent/configs/anyterminal_terminus_2.yaml \
   --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
-  --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+  --config model_backends/vllm_model/configs/vllm_model.yaml \
   --agent anyterminal_terminus_2 \
   --input responses_api_agents/anyterminal_agent/data/terminal_bench.jsonl \
   --output terminus_2_rollouts.jsonl

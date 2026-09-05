@@ -38,7 +38,7 @@ env:
   nemo_gym:  # This is passed into NeMo-Gym as the initial_global_config_dict
     is_trajectory_collection: false  # Set this to true to enable trajectory collection (no training). You may also want to increase `policy.generation.vllm_cfg.gpu_memory_utilization`
     config_paths:
-    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml  # Required! And it must be *for_training
+    - model_backends/vllm_model/configs/vllm_model_for_training.yaml  # Required! And it must be *for_training
     - environments/aviary_bbh/config_remote.yaml
 ```
 
@@ -125,7 +125,7 @@ env:
   nemo_gym:  # This is passed into NeMo-Gym as the initial_global_config_dict
     is_trajectory_collection: false  # Set this to true to enable trajectory collection (no training). You may also want to increase `policy.generation.vllm_cfg.gpu_memory_utilization`
     config_paths:
-    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml  # Required! And it must be *for_training
+    - model_backends/vllm_model/configs/vllm_model_for_training.yaml  # Required! And it must be *for_training
     - environments/aviary_bbh/config_bundled.yaml
 ```
 Following this, you can export `SETUP_COMMAND` to a snippet installing enroot prior to launching your `ray.sub` command:

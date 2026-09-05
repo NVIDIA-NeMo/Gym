@@ -2005,7 +2005,7 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
 
     ```bash
     gym eval aggregate \
-        "+config_paths=[benchmarks/aime24/config.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]" \
+        "+config_paths=[benchmarks/aime24/config.yaml,model_backends/vllm_model/configs/vllm_model.yaml]" \
         +input_glob='results/rollouts-rs*-chunk*.jsonl' \
         +output_jsonl_fpath=results/rollouts.jsonl
     ```

@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# This file must always match that of model_backends/local_vllm_model/setup.py
+from sys import platform
+
+import setuptools
+
+dependencies = [
+    "nemo-gym[dev]",
+
+    # We specifically pin the vllm dependency because we have tested on this version.
+    # Updated Mon Aug 24, 2026 with vllm==0.25.1
+    # License: Apache 2.0 https://github.com/vllm-project/vllm/blob/752a3a504485790a2e8491cacbb35c137339ad34/LICENSE
+    # "vllm==0.25.1",
+    # VLLM is resolved below since installation on Macs requires special workarounds.
+
+    # hf_transfer for faster model download from HuggingFace
+    # Updated Mon Jan 05, 2026 with vllm==0.1.9
+    # License: Apache 2.0 https://github.com/huggingface/hf_transfer/blob/51499cc4ff0fe218082e13f27881a06811913751/LICENSE
+    "hf_transfer==0.1.9",
+
+    # uvicorn is used by Gym for server spinup. We have server override logic that depends on this specific version.
+    # Updated Wed Jan 07, 2026 with uvicorn==0.40.0
+    # License: BSD 3-Clause https://github.com/Kludex/uvicorn/blob/9ff60042a53cd1bbfd5580ab0a91ea2d1d8f2f8c/LICENSE.md
+    "uvicorn==0.40.0",
+
+    # hf_transfer is used by vLLM for super fast downloads
+    # Updated Tue Feb 24, 2026 with hf_transfer==0.1.9
+    # License: Apache 2.0 https://github.com/huggingface/hf_transfer/blob/51499cc4ff0fe218082e13f27881a06811913751/LICENSE
+    "hf_transfer",
+]
+
+# We use an older version of vllm on Macs since that is the latest version pip-installable. We may need to version tests later on.
+if platform == "darwin":
+    dependencies.append("vllm==0.11.0")
+else:
+    dependencies.append("vllm==0.25.1")
+    # Pin flashinfer to the exact version vllm 0.25.1 requires — pre-compiled CUDA kernels,
+    # avoids JIT compilation on first generation. Must stay in sync with pyproject.toml [vllm].
+    # Updated Mon Aug 24, 2026 with flashinfer-python==0.6.13
+    # License: Apache 2.0 https://github.com/flashinfer-ai/flashinfer/blob/57ba7eeb7ea3003a2d6ad5d9a057c4f952709bac/LICENSE
+    dependencies.append("flashinfer-python==0.6.13")
+
+
+setuptools.setup(install_requires=dependencies)

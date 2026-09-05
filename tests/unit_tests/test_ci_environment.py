@@ -464,7 +464,12 @@ def test_shared_change_classifier_matches_gym_docs_and_server_paths() -> None:
 
     for path in ("**.md", "fern/**", "LICENSE", "benchmarks/**"):
         assert path in action
-    for path in ("resources_servers/**", "responses_api_agents/**", "responses_api_models/**"):
+    for path in (
+        "resources_servers/**",
+        "responses_api_agents/**",
+        "model_backends/**",
+        "responses_api_models/**",
+    ):
         assert path in action
 
     assert "uses: ./.github/actions/classify-changes" in unit_workflow
@@ -513,7 +518,7 @@ def test_gpu_e2e_matrix_uses_qwen_smoke_config() -> None:
     assert "test_type: gpu" in workflow
 
     assert "resources_servers/string_match/configs/string_match.yaml" in config
-    assert "responses_api_models/vllm_model/configs/vllm_model.yaml" in config
+    assert "model_backends/vllm_model/configs/vllm_model.yaml" in config
     assert "skip_venv_if_present: true" in config
     assert QWEN_MODEL in config
     assert dataset["expected_answer"] == "Paris"
@@ -599,7 +604,7 @@ def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
     assert "name: ${{ matrix.provider }}-e2e" in workflow
     assert "timeout-minutes: 20" in workflow
     assert "provider: fireworks" in workflow
-    assert "config: responses_api_models/inference_provider/configs/fireworks.yaml" in workflow
+    assert "config: model_backends/inference_provider/configs/fireworks.yaml" in workflow
     assert "model: accounts/fireworks/models/gpt-oss-20b" in workflow
     assert "model_api_key_secret_name: FIREWORKS" in workflow
     assert "MODEL_API_KEY: ${{ secrets[matrix.model_api_key_secret_name] }}" in workflow

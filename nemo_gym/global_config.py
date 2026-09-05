@@ -515,7 +515,7 @@ Duplicate config paths:
 
         raise NoServerInstancesError(
             """No server instances are configured, so there is nothing to run. Pass one or more configs, e.g.:
-  gym env start --config resources_servers/<env>/configs/<env>.yaml --config responses_api_models/<model>/configs/<model>.yaml"""
+  gym env start --config resources_servers/<env>/configs/<env>.yaml --config model_backends/<model>/configs/<model>.yaml"""
         )
 
     def validate_and_populate_defaults(
@@ -1386,7 +1386,7 @@ Found global config dict yaml:
             if not parse_config.offline:
                 environ["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
             # By default, build the directories in their individual folders using the root repository
-            # e.g. WORKING_DIR/responses_api_models/my_server
+            # e.g. WORKING_DIR/model_backends/my_server
             # Deliberately anchored at WORKING_DIR rather than the cache root: venv
             # trees don't relocate safely once built, and the key is independently
             # overridable for deployments that want them elsewhere.

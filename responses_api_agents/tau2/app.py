@@ -32,6 +32,7 @@ from fastapi import Body
 from loguru import logger
 from pydantic import ConfigDict, Field
 
+from model_backends.vllm_model.app import VLLMConverter, split_responses_input_output_items
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
@@ -48,7 +49,6 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.server_utils import get_server_url, is_nemo_gym_fastapi_entrypoint
-from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
 from tau2.data_model.simulation import SimulationRun, TextRunConfig
 from tau2.data_model.tasks import Task
 from tau2.evaluator.evaluator import EvaluationType

@@ -148,7 +148,7 @@ Cross-version links (for example, from a `main/` page to a versioned GA page) tr
 
 ### Cross-repo references (yaml configs, source files)
 
-Repository source paths like `resources_servers/example_single_tool_call/...` or `responses_api_models/...` are not part of the docs site. Link to them as **absolute GitHub URLs**:
+Repository source paths like `resources_servers/example_single_tool_call/...` or `model_backends/...` are not part of the docs site. Link to them as **absolute GitHub URLs**:
 
 ```mdx
 [example_single_tool_call.yaml](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml)

@@ -52,7 +52,7 @@ nemo-gym requires Python >=3.13.14, the binding floor here.
 
 Run this environment with **two configs**: this environment config
 (`configs/finance_agent_v2.yaml`) plus a model config
-(`responses_api_models/openai_model/configs/openai_model.yaml`, or
+(`model_backends/openai_model/configs/openai_model.yaml`, or
 `vllm_model.yaml` for a self-hosted endpoint).
 
 Endpoints and tool API keys all go in `env.yaml` at the repo root, which is
@@ -106,7 +106,7 @@ gym eval prepare --benchmark finance_agent_v2
 
 # End-to-end (prepare + start servers + collect rollouts) on the benchmark set
 gym eval run --benchmark finance_agent_v2 \
-  -c responses_api_models/openai_model/configs/openai_model.yaml
+  -c model_backends/openai_model/configs/openai_model.yaml
 ```
 
 Add `--limit 3 --concurrency 3` for a smoke run. `gym eval run` writes the scored

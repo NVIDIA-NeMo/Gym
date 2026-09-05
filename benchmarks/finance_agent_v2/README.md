@@ -76,7 +76,7 @@ gym eval prepare --benchmark finance_agent_v2
 
 # 2. Evaluate against it (auto-serves the resources server + agent).
 gym eval run --benchmark finance_agent_v2 \
-  -c responses_api_models/openai_model/configs/openai_model.yaml \
+  -c model_backends/openai_model/configs/openai_model.yaml \
   --output results/finance_agent_v2_27q.jsonl --concurrency 4
 ```
 
@@ -97,7 +97,7 @@ component name:
 ```bash
 # Terminal 1 — serve
 gym env start --benchmark finance_agent_v2 \
-  -c responses_api_models/openai_model/configs/openai_model.yaml
+  -c model_backends/openai_model/configs/openai_model.yaml
 
 # Terminal 2 — collect (repeat as needed against the same servers)
 gym eval run --no-serve --agent finance_agent_v2_benchmark_agent \

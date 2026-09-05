@@ -44,7 +44,7 @@ the source CVDP rollout artifact named above.
 Start the CVDP and model servers:
 
 ```bash
-ng_run "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+ng_run "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,model_backends/vllm_model/configs/vllm_model.yaml]"
 ```
 
 Collect repeated rollouts:
@@ -57,7 +57,7 @@ ng_collect_rollouts \
   +num_repeats=5 \
   +num_samples_in_parallel=4 \
   "+responses_create_params={max_output_tokens: 4096, temperature: 0.2, top_p: 0.7}" \
-  "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,responses_api_models/vllm_model/configs/vllm_model.yaml]"
+  "+config_paths=[resources_servers/cvdp/configs/cvdp.yaml,model_backends/vllm_model/configs/vllm_model.yaml]"
 ```
 
 Generate the CVDP report layout:
