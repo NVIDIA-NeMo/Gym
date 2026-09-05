@@ -77,7 +77,30 @@ def _unfinished_todo_outside_fences(body):
     return False
 
 
-def _markdown_outside_fences(content):
+def _strip_inline_code(line):
+    output = []
+    cursor = 0
+    while cursor < len(line):
+        if line[cursor] != "`":
+            output.append(line[cursor])
+            cursor += 1
+            continue
+
+        delimiter_end = cursor
+        while delimiter_end < len(line) and line[delimiter_end] == "`":
+            delimiter_end += 1
+        delimiter = line[cursor:delimiter_end]
+        closing = line.find(delimiter, delimiter_end)
+        if closing == -1:
+            output.append(delimiter)
+            cursor = delimiter_end
+            continue
+        output.append(" " * (closing + len(delimiter) - cursor))
+        cursor = closing + len(delimiter)
+    return "".join(output)
+
+
+def _markdown_outside_code(content):
     outside_lines = []
     fence_marker = None
     fence_length = 0
@@ -93,8 +116,19 @@ def _markdown_outside_fences(content):
                 fence_length = 0
             continue
         if fence_marker is None:
-            outside_lines.append(line)
+            outside_lines.append(_strip_inline_code(line))
     return "\n".join(outside_lines)
+
+
+MARKDOWN_LINK_PATTERN = re.compile(
+    r"""\]\(\s*(?:<([^>\n]+)>|((?:[^\s()\n]+|\([^()\n]*\))+))"""
+    r"""(?:\s+(?:"[^"\n]*"|'[^'\n]*'|\([^)]*\)))?\s*\)"""
+)
+
+
+def _markdown_link_targets(content):
+    for angle_target, plain_target in MARKDOWN_LINK_PATTERN.findall(_markdown_outside_code(content)):
+        yield angle_target or plain_target
 
 
 class TestRepositorySkills:
@@ -134,18 +168,26 @@ class TestRepositorySkills:
         assert documented_names == expected_names
 
     def test_relative_markdown_links_resolve(self):
-        markdown_link_pattern = re.compile(
-            r"""\]\(\s*(?:<([^>\n]+)>|([^\s)\n]+))(?:\s+(?:"[^"\n]*"|'[^'\n]*'|\([^)]*\)))?\s*\)"""
-        )
         for skill_dir in _canonical_skill_dirs():
             for markdown_file in skill_dir.rglob("*.md"):
-                content = _markdown_outside_fences(markdown_file.read_text())
-                for angle_target, plain_target in markdown_link_pattern.findall(content):
-                    target = angle_target or plain_target
+                for target in _markdown_link_targets(markdown_file.read_text()):
                     target = target.split("#", 1)[0].split("?", 1)[0]
                     if not target or target.startswith(("/", "http://", "https://", "mailto:")):
                         continue
                     assert (markdown_file.parent / target).exists(), f"Broken link in {markdown_file}: {target}"
+
+    @pytest.mark.parametrize(
+        ("content", "expected"),
+        [
+            ('[doc](details_(v2).md "optional title")', ["details_(v2).md"]),
+            ("[doc](<details with spaces.md>)", ["details with spaces.md"]),
+            ("`[example](missing.md)`", []),
+            ("`` `[example](missing.md)` ``", []),
+            ("```md\n[example](missing.md)\n```", []),
+        ],
+    )
+    def test_markdown_link_parser_ignores_code_and_preserves_destinations(self, content, expected):
+        assert list(_markdown_link_targets(content)) == expected
 
 
 class TestParseSkillMd:

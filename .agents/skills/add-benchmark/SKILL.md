@@ -89,9 +89,9 @@ Add focused tests for conversion, scoring boundaries, malformed model output, fa
 Coverage must remain at least 96%, and tests must assert observable behavior.
 
 For behavior-changing environment or agent code, run representative real smoke rollouts and inspect both agent and
-verifier behavior. Benchmarks additionally require the reward profiling, rollout inspection, upstream reproduction,
-same-model Gym comparison, and variance characterization in the benchmark guide. These are fidelity checks, not a
-requirement to run training.
+verifier behavior. All benchmarks additionally require the reward profiling, rollout inspection, and variance
+characterization in the benchmark guide. Ports of existing benchmarks also require upstream reproduction followed by
+a same-model Gym comparison. These are fidelity checks, not a requirement to run training.
 
 Before handoff, run scoped pre-commit checks, then the repository checks required by `AGENTS.md`. New source files need
 the NVIDIA SPDX header, and commits need DCO sign-off.
