@@ -37,6 +37,7 @@ from nemo_gym.cli.env import (
     _delete_server_venv,
     _resolve_server_dir,
     _select_shard,
+    _server_process_command_and_env,
     _test_single,
     dump_config,
     init_environment,
@@ -264,6 +265,24 @@ class TestResolveServerDir:
         monkeypatch.chdir(tmp_path)
         cfg = EnvironmentTestConfig(entrypoint="resources_servers/arc_agi")
         assert cfg.resolved_dir_path == PARENT_DIR / "resources_servers" / "arc_agi"
+
+
+def test_server_config_is_passed_in_environment_not_process_arguments(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", lambda *_args: "setup")
+    secret = "credential-fixture"  # pragma: allowlist secret
+    config = OmegaConf.create({"policy_model": {"api_key": secret}})
+
+    command, environment = _server_process_command_and_env(
+        Path("/server"),
+        config,
+        "policy_model",
+        Path("app.py"),
+    )
+
+    assert command == "setup && python app.py"
+    assert secret not in command
+    assert secret in environment["NEMO_GYM_CONFIG_DICT"]
+    assert environment["NEMO_GYM_CONFIG_PATH"] == "policy_model"
 
 
 class TestRunHelperDryRunSpinup:
