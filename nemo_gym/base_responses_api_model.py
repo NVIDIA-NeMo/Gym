@@ -43,7 +43,7 @@ from uuid import uuid4
 import orjson
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import StreamingResponse
+from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from nemo_gym.anthropic_converter import AnthropicConverter
@@ -195,7 +195,7 @@ class BaseResponsesAPIModel(BaseServer):
 
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     def setup_webserver(self) -> FastAPI:
-        app = FastAPI()
+        app = FastAPI(default_response_class=ORJSONResponse)
 
         self.setup_session_middleware(app)
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
