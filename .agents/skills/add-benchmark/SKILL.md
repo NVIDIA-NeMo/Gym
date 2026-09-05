@@ -1,260 +1,103 @@
 ---
 name: add-benchmark
 description: >
-  Guide for adding a new benchmark or training environment to NeMo-Gym.
-  Use when the user asks to add, create, or integrate a benchmark, evaluation,
-  training environment, or resources server into NeMo-Gym. Also use when wrapping
-  an existing 3rd-party benchmark library. Covers the full workflow: data preparation,
-  resources server implementation, agent wiring, YAML config, testing, and reward
-  profiling (baselining). Triggered by: "add benchmark", "new resources server",
-  "integrate benchmark", "wrap benchmark", "add training environment", "add eval".
+  Add or integrate a fixed evaluation benchmark in NeMo Gym using the current
+  manifest-backed workload flow. Use when creating a benchmark catalog entry,
+  reusing or adding a scorer, preparing a benchmark dataset, or porting an
+  upstream benchmark. Do not use for a training-only environment or a
+  component-only resources server.
 ---
 
-# Add Benchmark to NeMo-Gym
+# Add a Benchmark
 
-## Determine Integration Type
+## Read the current contract
 
-Before starting, determine which type of benchmark you're adding:
+Before editing, read these pages and follow their links only as needed:
 
-**Native benchmark** — verification logic implemented directly in a Gym resources server:
-- Resources server implements `verify()` with reward logic
-- Agent server orchestrates model calls (use `simple_agent` for single-turn, or custom agent for multi-turn)
-- Example: `code_gen`, `instruction_following`, `math_with_judge`
+- [New Environment](../../../fern/versions/latest/pages/contribute/environments/new-environment.mdx) for manifests,
+  integration profiles, validation layers, and publish readiness.
+- [Add a benchmark](../../../fern/versions/latest/pages/contribute/environments/adding-a-benchmark.mdx) for
+  benchmark-specific requirements.
+- [Prepare and Validate](../../../fern/versions/latest/pages/data/prepare-validate.mdx) and
+  [Prompt Config](../../../fern/versions/latest/pages/data/prompt-config.mdx) for data and prompt contracts.
 
-**External benchmark** — wrapping a 3rd-party library that has its own orchestration:
-- Integrate at the agent server level (not resources server)
-- Agent's `/run` endpoint wraps the external library
-- Pre-process from Gym schema to library input, post-process back to `BaseVerifyResponse`
-- Reproduce publicly reported numbers with the original repo first, then reproduce again after Gym integration
-- Add the dependency in `requirements.txt`
+Treat the current CLI, Pydantic schemas, and generated scaffold as authoritative when they disagree with prose.
 
-## Workflow
+Read [references/patterns.md](references/patterns.md) when implementation needs a concrete current example of
+manifest/config ownership, raw-row and `TaskData` design, a verifier fixture, scorer reuse, or a non-default integration
+profile. The reference illustrates relationships; regenerate the scaffold and inspect the cited code before copying it.
 
-### Step 1: Scaffold the server
+## Preserve the upstream contract
 
-Run `gym env init` to generate the directory structure:
+Record the upstream revision, license, canonical splits, task identifiers, prompt templates, scoring behavior, reward
+range, and published reference metrics before choosing the integration. For a port, reproduce the published metrics in
+the original repository before integration, then reproduce them in Gym with the same models. Inspect task-level
+discrepancies; aggregate parity alone can hide conversion and scoring errors.
 
-```bash
-gym env init --resources-server my_benchmark
-```
+Choose the narrowest integration profile that preserves the workload:
 
-This creates:
-```
-resources_servers/my_benchmark/
-├── app.py              # Server template
-├── configs/my_benchmark.yaml
-├── data/.gitignore
-├── tests/test_app.py
-├── requirements.txt
-└── README.md
-```
+- `custom-gym-verifier`: Gym owns rollout orchestration and implements or reuses the scorer.
+- `custom-gym-agent-loop`: the benchmark needs a custom Gym-hosted interaction loop.
+- `external-agent-loop`: an external framework owns one episode behind the agent's `run()` adapter; a Gym model server
+  is optional.
+- `external-rollout-driver`: a configured rollout driver coordinates collection across tasks or rollouts above the
+  agent.
 
-For external benchmarks, create the agent server manually under `responses_api_agents/my_agent/` with the same structure.
+Do not create a custom agent merely to duplicate a built-in harness. If the request is for a training-only workload or
+an independently reusable resources server, use that workload's contract instead of presenting it as a benchmark.
 
-### Step 2: Prepare data
+## Scaffold from the manifest
 
-Convert your source dataset to Gym JSONL format. Each line must have `responses_create_params.input` (OpenAI message format). Task-specific verification data goes in `verifier_metadata`.
-
-```json
-{
-  "responses_create_params": {
-    "input": [
-      {"role": "system", "content": "System prompt"},
-      {"role": "user", "content": "Problem statement"}
-    ]
-  },
-  "verifier_metadata": {
-    "test_cases": [{"input": "...", "expected_output": "..."}],
-    "task_id": "unique_id"
-  }
-}
-```
-
-**Data conversion**: Write conversion scripts in the **source repo** (e.g. your dataset repository), not in NeMo-Gym. Prompt files also belong in the source repo. Exception: when there is no external source repo. See `references/patterns.md` § "Data Conversion Script Pattern".
-
-**`example.jsonl`**: Generate 5 entries for smoke testing. This file is committed directly to git in `data/example.jsonl`.
-
-**`train`/`validation` datasets**: Upload to the GitLab dataset registry — these must NOT be committed to git.
+Search for reusable components first, then generate the workload skeleton:
 
 ```bash
-gym dataset upload --storage gitlab \
-    --name my_benchmark \
-    --revision 0.0.1 \
-    --input resources_servers/my_benchmark/data/my_dataset.jsonl
+gym search resources-servers "<scoring behavior>"
+gym search benchmarks "<task domain>"
+
+gym env init --benchmark <name> --profile custom-gym-verifier \
+  --reuse-verifier <scorer> --reward-range <low> <high> --higher-is-better
+
+# New scorer with the scaffold's default [0, 1], higher-is-better reward contract.
+gym env init --benchmark <name> --profile custom-gym-verifier
 ```
 
-Requires MLflow credentials in `env.yaml` (or passed via CLI):
-```yaml
-mlflow_tracking_uri: <your-gitlab-mlflow-tracking-uri>
-mlflow_tracking_token: <your-gitlab-api-token>
-```
+The reward flags are accepted only with `--reuse-verifier`. For a new scorer with a different reward contract, update
+the generated manifest and verifier fixture/tests together. Select another `--profile` when the upstream benchmark owns
+more of the rollout loop. Inspect `gym env init --help` rather than guessing flags.
 
-**`data/.gitignore`**: The scaffold generates default patterns (`*train.jsonl`, `*validation.jsonl`, etc.). If your filename doesn't match (e.g. `my_eval.jsonl`), add a custom pattern (e.g. `*eval.jsonl`). If data was previously tracked, run `git rm --cached <file>`.
+## Implement the authored and runtime contracts
 
-**Validate** your data:
-```bash
-# Validate example data (for PR submission)
-gym dataset collate --config resources_servers/my_benchmark/configs/my_benchmark.yaml \
-    --output-dir /tmp/prepare \
-    --mode example_validation
+- The manifest owns catalog metadata, integration profile, reward semantics, provenance, and publish-readiness fields.
+- Hydra config remains authoritative for runtime composition: datasets, agents, models, resources servers, and wiring.
+- Keep stable task IDs and keep private answer keys and scorer inputs out of `responses_create_params.input`. Follow the
+  resources server's `TaskData` schema and request model for field placement: current rows commonly use flat task
+  fields; use legacy `verifier_metadata` only when the wire contract declares it.
+- Every benchmark declares `canonical_split` and `standard_prompt_config`, and at least one benchmark dataset declares
+  `prepare_script`. A dataset's `prompt_config`, when present, must match the standard prompt contract.
+- Provide a deterministic `VERIFIER_FIXTURE` for a custom verifier and test both accepted and rejected behavior.
+- Do not assume rewards are binary. Implement the declared range and optimization direction.
+- Preserve Responses API items, session cookies, and trace context across multi-turn or external integrations.
+- Pin or bound new dependencies, document non-Python prerequisites, and keep Apache-2.0 license compatibility.
 
-# Download and prepare train/validation from GitLab
-gym dataset collate --config resources_servers/my_benchmark/configs/my_benchmark.yaml \
-    --output-dir data/my_benchmark \
-    --mode train_preparation \
-    --download \
-    +data_source=gitlab
-```
+For async HTTP, subprocesses, optional fields, and external-tool installation, follow the repository-level
+`AGENTS.md`; do not copy those evolving rules into the skill.
 
-### Step 3: Implement verify()
+## Validate in layers
 
-Edit `app.py`. The `verify()` method receives model output + `verifier_metadata`, returns reward.
-
-For code execution benchmarks, see `references/patterns.md` § "Subprocess Execution with Ray" and "Resources Server Pattern".
-
-Critical rules:
-- Return `reward` as 0.0 or 1.0 (binary)
-- Handle empty/missing model output gracefully — return 0.0, don't crash
-- Must handle 4k-65k concurrent requests without crashing
-- Use `asyncio.Semaphore` for subprocess concurrency control
-- For Ray remote tasks: `result = await future` (Ray futures are directly awaitable). Never call `ray.get()` in async context.
-- Decode subprocess output with `errors="replace"`
-- Strip `<think>`/`<thinking>` blocks before parsing model output (thinking models emit these)
-- Tests should `pytest.mark.skipif` when external tools aren't installed
-- If the benchmark auto-installs its tool (see Step 3b), add a `pytest_configure` hook in `conftest.py` to run the install before test collection — `skipif` evaluates at import time, before fixtures run
-
-### Step 3b: Auto-install external tools (if applicable)
-
-If the benchmark requires an external tool (compiler, runtime, etc.), auto-install it on server startup so users don't need manual setup. See `references/patterns.md` § "External Tool Auto-Install Pattern".
-
-Key points:
-- Create `setup_<tool>.py` with `ensure_<tool>()` — checks PATH, forks on `sys.platform` (brew on macOS, build from source on Linux)
-- Call it in `model_post_init()` before semaphore init
-- Build scripts should be idempotent and install into a local gitignored prefix
-- Add a `pytest_configure` hook in `tests/conftest.py` that calls `ensure_<tool>()` before collection
-
-### Step 4: Wire YAML config
-
-Edit `configs/my_benchmark.yaml`. Define the resources server instance and agent pairing(s). See `references/patterns.md` § "YAML Config Pattern".
-
-Key points:
-- `verified: false` is auto-added by pre-commit hook (set to `true` after baselining)
-- `license` is required for `train` and `validation` datasets
-- Agent references resources server and model server by instance name
-
-For multi-turn benchmarks, either use `proof_refinement_agent` or create a custom agent. See `references/patterns.md` § "Agent Patterns".
-
-For `train`/`validation` datasets, add `gitlab_identifier` alongside `jsonl_fpath`:
-```yaml
-datasets:
-- name: my_dataset
-  type: train
-  jsonl_fpath: resources_servers/my_benchmark/data/my_dataset.jsonl
-  gitlab_identifier:
-    dataset_name: my_benchmark
-    version: 0.0.1
-    artifact_fpath: my_dataset.jsonl
-  license: MIT
-- name: example
-  type: example
-  jsonl_fpath: resources_servers/my_benchmark/data/example.jsonl
-```
-
-Both fields must coexist: `jsonl_fpath` is the local download destination, `gitlab_identifier` tells the system where to fetch from. `example` datasets don't need `gitlab_identifier` — they're committed to git directly.
-
-### Step 5: Test
+Run the generated contract checks before broader tests:
 
 ```bash
-# Run server tests (creates isolated .venv, slow on first run)
-gym env test --resources-server my_benchmark
-
-# Run core library tests to check nothing broke
-pytest tests/unit_tests/ -x
+gym env validate <name> --kind benchmark
+gym env test <name> --kind benchmark
 ```
 
-Test coverage must be >= 95%. Write tests for: verify pass, verify fail (wrong output), verify fail (no code extracted), verify fail (compilation error if applicable), verify timeout.
+Add focused tests for conversion, scoring boundaries, malformed model output, failure handling, and state isolation.
+Coverage must remain at least 96%, and tests must assert observable behavior.
 
-### Step 6: Smoke test end-to-end
+For behavior-changing environment or agent work, run representative real smoke rollouts and inspect both agent and
+verifier behavior. All benchmarks additionally require the reward profiling, rollout inspection, and variance
+characterization in the benchmark guide. Ports of existing benchmarks also require upstream reproduction followed by
+a same-model Gym comparison. These are fidelity checks, not a requirement to run training.
 
-```bash
-# Start servers
-gym env start \
-    --config resources_servers/my_benchmark/configs/my_benchmark.yaml \
-    --model-type openai_model
-
-# Quick test with example data
-gym eval run --no-serve \
-  --agent my_benchmark_simple_agent \
-  --input resources_servers/my_benchmark/data/example.jsonl \
-  --output results/example_rollouts.jsonl \
-  --num-repeats 1 \
-  --max-output-tokens 16384 \
-  --temperature 1.0
-
-# Inspect results
-```
-
-### Step 7: Baseline (reward profiling)
-
-Run against multiple models to validate correctness. Recommended suite:
-- Your policy model of interest
-- At least one open-source instruct model (e.g. Qwen 3 30B A3B Instruct)
-- At least one open-source thinking model (e.g. Qwen 3 30B A3B Thinking)
-- At least one closed-source model (e.g. GPT-5 Nano or GPT-5)
-
-```bash
-# Collect rollouts
-gym eval run --no-serve \
-  --agent my_benchmark_simple_agent \
-  --input resources_servers/my_benchmark/data/my_dataset.jsonl \
-  --output results/rollouts.jsonl \
-  --num-repeats 5 \
-  --max-output-tokens 16384 \
-  --temperature 1.0
-
-# Compute per-task pass rates
-gym eval profile --inputs resources_servers/my_benchmark/data/my_dataset.jsonl \
-  --rollouts results/rollouts.jsonl
-
-# Aggregate metrics (pass@1 = avg_reward, pass@k from max_reward)
-python scripts/print_aggregate_results.py +jsonl_fpath=results/profiled.jsonl
-```
-
-Increase `num_repeats` until variance < 1% across runs on the same model.
-
-Closed-source models should score at or above open-source models. If not, investigate for bugs. Inspect actual failure cases in the rollout JSONL, not just aggregate numbers.
-
-For external benchmarks: reproduce the original repo's published numbers first. Then reproduce after Gym integration. Scores should match.
-
-### Step 8: Pre-commit and PR
-
-```bash
-pre-commit run --all-files
-```
-
-First run may fail as hooks auto-modify files (`verified: false` flag, README table). Stage changes and run again.
-
-Set `verified: true` in YAML config after successful baselining. Include W&B links and screenshots of results in the PR description.
-
-To avoid committing unrelated auto-fixes from other servers, scope pre-commit to your files:
-```bash
-pre-commit run --files resources_servers/my_benchmark/**/*
-```
-If hooks modify files in other directories, discard those changes:
-```bash
-git checkout -- resources_servers/other_server/
-```
-
-## Constraints
-
-- Use NeMo Gym's OpenAI client (`nemo_gym/openai_utils.py`), not LiteLLM/Anthropic/other
-- **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through `nemo_gym.server_utils.request()` (aiohttp). httpx has O(n^2) connection pooling that hangs at high concurrency. When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter — see `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the pattern and `fern/versions/latest/pages/infrastructure/engineering-notes/aiohttp-vs-httpx.mdx` for the rationale.
-- Pass configuration through Gym config (YAML), not environment variables
-- Code must run on Linux
-- `/run` endpoint must be async
-- Errors from tool execution or bad model output must return error responses, not crash
-- All commits require DCO sign-off (`-s`) and cryptographic signature (`-S`)
-
-## Reference
-
-For detailed code patterns, schemas, and examples: see [references/patterns.md](references/patterns.md).
+Before handoff, run scoped pre-commit checks, then the repository checks required by `AGENTS.md`. New source files need
+the NVIDIA SPDX header, and commits need DCO sign-off.

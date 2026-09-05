@@ -11,7 +11,9 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - Prefer focused changes. Do not make unrelated "drive-by" edits. If a drive-by fix is worth keeping, open a separate issue or PR.
 - Intentional synthetic scaling of environments is fine when scoped via an issue or focused PR; do not dump unreviewed bulk diffs.
 - You (the human author) own every line submitted. Treat model output as untrusted until reviewed.
-- For environment or agent changes: run real rollouts with a model and inspect agent and verifier behavior. Green unit tests alone are not enough.
+- For behavior-changing environment or agent work: run representative real smoke rollouts with a model and inspect
+  agent and verifier behavior. Green unit tests alone are not enough. Metadata-only catalog or manifest changes and
+  docs-only changes do not require model compute.
 - Before opening a PR, run the local checks that mirror CI: tests (skip or N/A for docs-only), `pre-commit run --all-files`, and DCO sign-off (`git commit -s`). Cryptographic `-S` signing is optional and not required.
 - AI-generated tests must assert real behavior; avoid vacuous pass-through tests.
 - Prefer the vetted skills under `.agents/skills/` (see [Agent Skills](https://docs.nvidia.com/nemo/gym/latest/contribute/agent-skills)).
@@ -50,7 +52,11 @@ For full architecture and concepts (environments, training approaches, verificat
 
 The typical workflow is to create your own environments tailored to your evaluation or training task. An environment consists of:
 
-1. **Dataset** — JSONL with one task per row. NeMo Gym uses the OpenAI Responses API as its native format because it natively represents multi-turn, tool-calling agentic trajectories without custom serialization. Each row has `responses_create_params.input` (the input messages in Responses API format) and `verifier_metadata` (task-specific data passed to the verifier)
+1. **Dataset** — JSONL with one task per row. Runnable rows use `responses_create_params` as the OpenAI Responses
+   API model-input envelope; raw benchmark rows may instead provide fields that a prompt config renders into that
+   envelope. Task-owned fields follow the resources server's `TaskData` schema and request model. Keep answer keys out
+   of `responses_create_params.input`; current schemas commonly use flat task fields, while legacy wire contracts may
+   explicitly require `verifier_metadata`.
 2. **Resources Server** — implements verification logic, environment-specific tools, and per-task state isolation
 3. **Agent Harness** — reuse a built-in agent harness (e.g. OpenHands) or bring your own
 4. **Model** — use any LLM endpoint via the Model Server (supports inference providers like OpenAI, and vLLM for local/open models), or manage inference in your own agent harness
@@ -68,10 +74,21 @@ For guidance on how to build environments, see `fern/versions/latest/pages/envir
 
 ## Communication & Async Patterns
 
-Servers communicate via `ServerClient`, which wraps aiohttp with retry logic (3 tries, exponential backoff) and connection pooling via a singleton aiohttp client.
+New or modified async HTTP must ultimately use NeMo Gym's singleton aiohttp client, which provides connection pooling,
+retries, and trace propagation. Treat existing direct-httpx integrations as legacy exceptions: do not copy them, and
+migrate them only when the requested issue or PR includes that transport work.
 
-- **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through NeMo Gym's global aiohttp client (`nemo_gym.server_utils.request()`). Do not use `httpx.AsyncClient` — httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency (16k+ requests). When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter. See `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the adapter pattern.
-- **Propagate session cookies** through all downstream calls (`cookies=request.cookies`) for stateful environments.
+- **Configured Gym server-to-server calls:** use `self.server_client.get()` / `.post()` so the configured server name,
+  rollout route, and shared transport are preserved.
+- **Lower-level or external async HTTP:** use `nemo_gym.server_utils.request()`. For OpenAI-compatible semantics, use
+  `NeMoGymAsyncOpenAI`, which uses the same Gym transport. Do not create `httpx.AsyncClient` instances —
+  httpx/httpcore connection pooling hangs at high concurrency (16k+ requests). When an external library requires an
+  httpx-shaped client, replace its transport with an aiohttp adapter; see `TavilySearchAIOHTTPClient` in
+  `resources_servers/tavily_search/app.py`.
+- **Propagate session cookies:** pass the relevant cookie jar on every downstream call and replace or merge it from the
+  response as required by that service's protocol. Agent loops must keep model-server and resources-server cookie jars
+  separate, seed them from the appropriate inbound or session-start response, and mirror required final cookies onto
+  the outbound FastAPI response.
 - Use `asyncio.Semaphore` to bound concurrent subprocess/external calls
 - For Ray remote tasks in async code: `result = await future` (Ray futures are directly awaitable). Never call `ray.get()` directly in async context.
 - Decode all subprocess output with `errors="replace"` to handle non-UTF8
