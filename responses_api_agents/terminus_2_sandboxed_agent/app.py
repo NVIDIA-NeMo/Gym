@@ -274,6 +274,7 @@ class NeMoGymTerminus2(Terminus2):
         self._dump_trajectory_enabled = dump_trajectory
         self._times_spent = []
         self._num_proactive_compactions = 0
+        self._is_check_proactive_summarization = False
         super().__init__(*args, **kwargs)
 
     def _init_llm(self, *args: Any, **kwargs: Any) -> BaseLLM:
@@ -290,8 +291,15 @@ class NeMoGymTerminus2(Terminus2):
 
         return res
 
+    def _count_total_tokens(self, *args, **kwargs):
+        if self._is_check_proactive_summarization:
+            return self._nemo_gym_llm.usages[-1].total_tokens
+        return super()._count_total_tokens(*args, **kwargs)
+
     async def _check_proactive_summarization(self, *args, **kwargs):
+        self._is_check_proactive_summarization = True
         res = await super()._check_proactive_summarization(*args, **kwargs)
+        self._is_check_proactive_summarization = False
         if res:
             self._num_proactive_compactions += 1
         return res
