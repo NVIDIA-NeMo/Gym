@@ -31,6 +31,7 @@ async def cleanup_sandboxes(
     run_id: str,
     user: str,
     reap: bool,
+    tls_verify: bool = False,
 ) -> int:
     """List exact run-owned sandboxes and optionally delete them."""
     base_url = domain.strip().rstrip("/")
@@ -45,7 +46,12 @@ async def cleanup_sandboxes(
         normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._-")
         scope[key] = normalized[:63].strip("._-") or "metadata"
 
-    connector = aiohttp.TCPConnector(limit=REAP_CONCURRENCY, limit_per_host=REAP_CONCURRENCY)
+    connector_kwargs: dict[str, Any] = {"limit": REAP_CONCURRENCY, "limit_per_host": REAP_CONCURRENCY}
+    # Same default as the provider's connection.tls_verify: no certificate verification
+    # unless asked for, so cells behind a self-signed load balancer work out of the box.
+    if not tls_verify:
+        connector_kwargs["ssl"] = False
+    connector = aiohttp.TCPConnector(**connector_kwargs)
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
     async with aiohttp.ClientSession(
         connector=connector,
@@ -143,6 +149,8 @@ def _run(
     access_key: str,
     protocol: str,
     args: argparse.Namespace,
+    *,
+    tls_verify: bool = False,
 ) -> int:
     """Run the cleanup and turn its failures into a message and a status."""
     try:
@@ -154,6 +162,7 @@ def _run(
                 run_id=args.run_id,
                 user=args.user,
                 reap=args.reap,
+                tls_verify=tls_verify,
             )
         )
     except (aiohttp.ClientError, OSError, TypeError, ValueError) as error:
@@ -178,6 +187,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--user", required=True)
     parser.add_argument("--reap", action="store_true", help="Delete exact matches; otherwise only audit them.")
+    parser.add_argument(
+        "--tls-verify",
+        action="store_true",
+        help="Verify the server certificate (off by default, like connection.tls_verify).",
+    )
     args = parser.parse_args(argv)
 
     for name, value in (("run-id", args.run_id), ("user", args.user)):
@@ -188,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         for name, value in (("domain", args.domain), ("api-key", args.api_key)):
             if value is None or not value.strip():
                 parser.error(f"--{name} is required when --connection-config is omitted")
-        return _run(parser, args.domain.strip(), args.api_key.strip(), args.protocol, args)
+        return _run(parser, args.domain.strip(), args.api_key.strip(), args.protocol, args, tls_verify=args.tls_verify)
     for name, value in (("domain", args.domain), ("api-key", args.api_key)):
         if value is not None:
             parser.error(f"--{name} cannot be combined with --connection-config")
@@ -217,7 +231,9 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(protocol, str) or protocol.strip() not in {"http", "https"}:
             raise ValueError("connection config 'sandbox.opensandbox.connection.protocol' must be http or https")
 
-        return _run(parser, domain.strip(), access_key.strip(), protocol.strip(), args)
+        tls_verify = bool(connection.get("tls_verify", False)) or args.tls_verify
+
+        return _run(parser, domain.strip(), access_key.strip(), protocol.strip(), args, tls_verify=tls_verify)
     except yaml.YAMLError:
         print("OpenSandbox cleanup failed: invalid YAML connection config", file=sys.stderr)
         return 1
