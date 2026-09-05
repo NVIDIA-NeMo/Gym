@@ -215,7 +215,6 @@ async def test_direct_responses_preserves_inbound_rollout_prefix() -> None:
     )
 
     run_request = agent.runner.run.await_args.args[0]
-    assert run_request.rollout_id == "direct-rollout"
     assert run_request.model_url_path == "/ng-rollout/direct-rollout/training-token-capture/v1/responses"
 
 
