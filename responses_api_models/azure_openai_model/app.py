@@ -13,11 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from asyncio import Semaphore
-from time import time
-from uuid import uuid4
+from urllib.parse import quote
 
 from fastapi import Request
-from openai import AsyncAzureOpenAI
+from pydantic import model_validator
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
@@ -25,12 +24,13 @@ from nemo_gym.base_responses_api_model import (
     SimpleResponsesAPIModel,
 )
 from nemo_gym.openai_utils import (
+    NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from responses_api_models.vllm_model.app import VLLMConverter
+from nemo_gym.responses_converter import VLLMConverter
 
 
 class AzureOpenAIModelServerConfig(BaseResponsesAPIModelConfig):
@@ -40,15 +40,27 @@ class AzureOpenAIModelServerConfig(BaseResponsesAPIModelConfig):
     default_query: dict
     num_concurrent_requests: int
 
+    @model_validator(mode="after")
+    def _require_api_version(self) -> "AzureOpenAIModelServerConfig":
+        if not self.default_query.get("api-version"):
+            raise ValueError("default_query must include a non-empty 'api-version'")
+        if self.num_concurrent_requests < 1:
+            raise ValueError("num_concurrent_requests must be at least 1")
+        return self
+
 
 class AzureOpenAIModelServer(SimpleResponsesAPIModel):
     config: AzureOpenAIModelServerConfig
 
     def model_post_init(self, context):
-        self._client = AsyncAzureOpenAI(
-            azure_endpoint=self.config.openai_base_url,
+        endpoint = self.config.openai_base_url.rstrip("/")
+        deployment = quote(self.config.openai_model, safe="")
+        self._client = NeMoGymAsyncOpenAI(
+            base_url=f"{endpoint}/openai/deployments/{deployment}",
             api_key=self.config.openai_api_key,
-            api_version=self.config.default_query.get("api-version"),
+            default_query=self.config.default_query,
+            auth_header_name="api-key",
+            auth_header_prefix="",
         )
         self._converter = VLLMConverter(return_token_id_information=False)
         self._semaphore: Semaphore = Semaphore(self.config.num_concurrent_requests)
@@ -61,35 +73,12 @@ class AzureOpenAIModelServer(SimpleResponsesAPIModel):
             chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
             chat_completion_params_dict = chat_completion_create_params.model_dump(exclude_unset=True)
             chat_completion_params_dict["model"] = self.config.openai_model
-            chat_completion_response = await self._client.chat.completions.create(**chat_completion_params_dict)
+            response_dict = await self._client.create_chat_completion(**chat_completion_params_dict)
+            chat_completion_response = NeMoGymChatCompletion.model_validate(response_dict)
 
-        choice = chat_completion_response.choices[0]
-        response_output = self._converter.postprocess_chat_response(choice)
-        response_output_dicts = [item.model_dump() for item in response_output]
-        return NeMoGymResponse(
-            id=f"resp_{uuid4().hex}",
-            created_at=int(time()),
-            model=self.config.openai_model,
-            object="response",
-            output=response_output_dicts,
-            tool_choice=body.tool_choice if "tool_choice" in body else "auto",
-            parallel_tool_calls=body.parallel_tool_calls,
-            tools=body.tools,
-            temperature=body.temperature,
-            top_p=body.top_p,
-            background=body.background,
-            max_output_tokens=body.max_output_tokens,
-            max_tool_calls=body.max_tool_calls,
-            previous_response_id=body.previous_response_id,
-            prompt=body.prompt,
-            reasoning=body.reasoning,
-            service_tier=body.service_tier,
-            text=body.text,
-            top_logprobs=body.top_logprobs,
-            truncation=body.truncation,
-            metadata=body.metadata,
-            instructions=body.instructions,
-            user=body.user,
+        return self._converter.chat_completion_to_response(
+            responses_create_params=body.model_copy(update={"model": self.config.openai_model}),
+            chat_completion=chat_completion_response,
         )
 
     async def chat_completions(
@@ -97,7 +86,8 @@ class AzureOpenAIModelServer(SimpleResponsesAPIModel):
     ) -> NeMoGymChatCompletion:
         body_dict = body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.openai_model
-        openai_response_dict = await self._client.chat.completions.create(**body_dict)
+        async with self._semaphore:
+            openai_response_dict = await self._client.create_chat_completion(**body_dict)
         return NeMoGymChatCompletion.model_validate(openai_response_dict)
 
 

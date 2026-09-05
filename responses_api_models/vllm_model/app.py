@@ -330,7 +330,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         ]
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
-        self._endpoint_file_mtime: Optional[float] = None
+        self._endpoint_file_signature: Optional[tuple[int, int]] = None
         self._endpoint_missing_since: Optional[float] = None
         self._endpoint_last_check_at: Optional[float] = None
 
@@ -904,7 +904,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             3. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/entrypoints/openai/serving_engine.py#L948
             4. https://github.com/vllm-project/vllm/blob/685c99ee77b4818dcdd15b30fe0e0eff0d5d22ec/vllm/sampling_params.py#L463
             """
-            result_content_str = e.response_content.decode()
+            result_content_str = e.response_content.decode(errors="replace")
 
             is_out_of_context_length = e.status == 400 and (
                 "context length" in result_content_str or "max_tokens" in result_content_str
@@ -1357,7 +1357,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         try:
             completion_dict = await client.create_completion(**completion_body)
         except ClientResponseError as e:
-            result_content_str = e.response_content.decode()
+            result_content_str = e.response_content.decode(errors="replace")
             is_out_of_context_length = e.status == 400 and (
                 "context length" in result_content_str or "max_tokens" in result_content_str
             )
@@ -1658,7 +1658,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             return
         self._endpoint_last_check_at = now
         try:
-            mtime = os.stat(self.config.endpoint_file).st_mtime
+            stat_result = os.stat(self.config.endpoint_file)
+            signature = (stat_result.st_mtime_ns, stat_result.st_size)
         except FileNotFoundError:
             # Serving jobs remove the endpoint file while rotating;
             # keep the current clients until the successor publishes.
@@ -1667,7 +1668,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         except OSError:
             # Transient filesystem trouble is not a backend exit; retry the current clients.
             return
-        if mtime == self._endpoint_file_mtime:
+        if signature == self._endpoint_file_signature:
             if self._endpoint_missing_since is not None:
                 self._note_endpoint_unpublished()
             return
@@ -1676,7 +1677,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 url = endpoint_stream.read().strip()
         except OSError:
             return
-        self._endpoint_file_mtime = mtime
+        self._endpoint_file_signature = signature
         if not url:
             # An empty file is as unpublished as a missing one.
             self._note_endpoint_unpublished()
