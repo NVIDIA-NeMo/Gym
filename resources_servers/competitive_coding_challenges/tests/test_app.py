@@ -125,6 +125,7 @@ def test_setup_webserver_initializes_evaluator(server: CompetitiveCodingChalleng
             "test_batch_size": server.config.test_batch_size,
             "time_scale": server.config.time_scale,
             "shared_dir": server.config.shared_dir,
+            "local_compile_dir": server.config.local_compile_dir,
             "run_all_tests": False,
         },
         num_parallel_requests=server.config.num_parallel_requests,
