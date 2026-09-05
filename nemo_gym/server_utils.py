@@ -898,9 +898,7 @@ class SimpleServer(BaseServer):
 
                 return JSONResponse(content=response_content, status_code=500)
             except CancelledError:
-                # Client disconnects are normal cancellation control flow. Let the outer
-                # cancellation middleware consume them instead of turning them into a 500.
-                raise
+                return JSONResponse(content="Request was cancelled", status_code=500)
             except Exception as e:
                 print(
                     f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
