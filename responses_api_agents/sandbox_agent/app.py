@@ -81,7 +81,10 @@ async def stage_and_run_eval(
             )
         local = Path(td) / "reward"
         await provider.download_file(handle, reward_file, local)
-        return float(local.read_text().strip() or 0.0)
+        reward = local.read_text().strip()
+        if not reward:
+            raise RuntimeError(f"reward file {reward_file} is empty")
+        return float(reward)
 
 
 class SandboxAgentConfig(BaseResponsesAPIAgentConfig):
@@ -286,7 +289,7 @@ class SandboxAgent(SimpleResponsesAPIAgent):
             for cmd in self.config.setup_commands:
                 r = await self._provider.exec(handle, cmd, timeout_s=900)
                 if r.return_code != 0:
-                    LOG.warning("setup failed (%d): %s | %s", r.return_code, cmd, (r.stderr or "")[:300])
+                    raise RuntimeError(f"setup failed ({r.return_code}): {cmd} | {(r.stderr or '')[:300]}")
 
             pm = re.match(r"https?://([^:/]+):(\d+)", model_url)
             if pm:
