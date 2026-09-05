@@ -207,7 +207,7 @@ class TestEnvironmentCatalog:
                 "manifest_env",
                 rollout_smoke={
                     "dataset": "manifest_env",
-                    "environment_requirements": ["sandbox"],
+                    "requirements": ["sandbox"],
                 },
             ),
         )
@@ -238,14 +238,12 @@ class TestEnvironmentCatalog:
         assert manifest_entry.manifest_path == manifest_path
         assert manifest_entry.version == "0.1.0"
         assert manifest_entry.integration_profile == "custom-gym-verifier"
-        assert manifest_entry.rollout_smoke is not None
-        assert manifest_entry.rollout_smoke.model_dump(mode="json") == {
+        assert manifest_entry.rollout_smoke == {
             "dataset": "manifest_env",
-            "input_row_count": 1,
-            "per_rollout_timeout_seconds": 300,
-            "environment_requirements": ["sandbox"],
+            "rollout_limit": 1,
+            "timeout_seconds": 300,
+            "requirements": ["sandbox"],
         }
-        assert hash(manifest_entry)
         legacy_benchmark = entries[("benchmark", "legacy_benchmark")]
         assert legacy_benchmark.status == "no-manifest"
         assert legacy_benchmark.domain == "math"

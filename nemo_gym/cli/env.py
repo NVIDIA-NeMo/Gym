@@ -48,7 +48,7 @@ from nemo_gym.cli.utils import (
     render_component_inspection,
 )
 from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
-from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile, RolloutSmoke
+from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile
 from nemo_gym.environment.onboarding import (
     EnvironmentOnboardingError,
     VerifierReport,
@@ -1246,7 +1246,14 @@ def _print_validation_report(report: EnvironmentValidationReport, *, json_output
     for dataset in report.datasets:
         rich.print(f"    {dataset.name}: {dataset.rows} rows ({dataset.type})")
     if report.rollout_smoke:
-        rich.print(f"[green]✓[/green] Rollout smoke: {_format_rollout_smoke(report.rollout_smoke)}")
+        requirements = ", ".join(report.rollout_smoke["requirements"]) or "none"
+        rich.print(
+            "[green]✓[/green] Rollout smoke: "
+            f"dataset={report.rollout_smoke['dataset']} "
+            f"limit={report.rollout_smoke['rollout_limit']} "
+            f"timeout={report.rollout_smoke['timeout_seconds']}s "
+            f"requirements={requirements}"
+        )
     if report.synchronized_fields:
         rich.print(f"[green]✓[/green] Synchronized: {', '.join(report.synchronized_fields)}")
     for warning in report.warnings:
@@ -1431,15 +1438,11 @@ def _inspect_environment(
         return
     entry = resolve_catalog_entry(name, kind, entries=entries)
     parsed = read_environment_details(entry.config_path)
-    json_output = bool(global_config_dict.get(JSON_OUTPUT_KEY_NAME, False))
-    details: Dict[str, object] = {"config": str(entry.config_path.resolve()), "status": entry.status}
+    details = {"config": str(entry.config_path.resolve()), "status": entry.status}
     if entry.manifest_path is not None:
         details["manifest"] = str(entry.manifest_path.resolve())
     if entry.rollout_smoke is not None:
-        smoke_label = "rollout_smoke" if json_output else "rollout smoke"
-        details[smoke_label] = (
-            entry.rollout_smoke.model_dump(mode="json") if json_output else _format_rollout_smoke(entry.rollout_smoke)
-        )
+        details["rollout smoke"] = entry.rollout_smoke
     for label, value in (
         ("version", entry.version),
         ("profile", entry.integration_profile),
@@ -1461,7 +1464,7 @@ def _inspect_environment(
         description = f"{description}\nValue: {parsed['value']}" if description else f"Value: {parsed['value']}"
 
     render_component_inspection(
-        json_output=json_output,
+        json_output=global_config_dict.get(JSON_OUTPUT_KEY_NAME, False),
         name=name,
         type_noun=entry.kind,
         domain=entry.domain or parsed["domain"],
@@ -1475,18 +1478,8 @@ def _inspect_environment(
     )
 
 
-def _format_rollout_smoke(smoke: RolloutSmoke) -> str:
-    requirements = ", ".join(requirement.value for requirement in smoke.environment_requirements) or "none"
-    return (
-        f"dataset={smoke.dataset} "
-        f"input_rows={smoke.input_row_count} "
-        f"per_rollout_timeout={smoke.per_rollout_timeout_seconds}s "
-        f"environment_requirements={requirements}"
-    )
-
-
 def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
-    payload: Dict[str, object] = {
+    payload = {
         "name": entry.name,
         "kind": entry.kind,
         "status": entry.status,
@@ -1499,7 +1492,7 @@ def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
         "lifecycle": entry.lifecycle,
     }
     if entry.rollout_smoke is not None:
-        payload["rollout_smoke"] = entry.rollout_smoke.model_dump(mode="json")
+        payload["rollout_smoke"] = entry.rollout_smoke
     return payload
 
 

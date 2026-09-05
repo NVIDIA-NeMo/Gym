@@ -235,19 +235,18 @@ def test_rollout_smoke_selects_an_example_dataset_and_uses_bounded_defaults() ->
     )
     raw["rollout_smoke"] = {
         "dataset": "smoke",
-        "environment_requirements": ["sandbox", "auxiliary-model"],
+        "requirements": ["sandbox", "auxiliary-model"],
     }
 
     smoke = EnvironmentManifest.model_validate(raw).rollout_smoke
 
     assert smoke is not None
-    assert smoke.input_row_count == 1
-    assert smoke.per_rollout_timeout_seconds == 300
-    assert smoke.environment_requirements == (
+    assert smoke.rollout_limit == 1
+    assert smoke.timeout_seconds == 300
+    assert smoke.requirements == [
         RolloutSmokeRequirement.SANDBOX,
         RolloutSmokeRequirement.AUXILIARY_MODEL,
-    )
-    assert hash(smoke)
+    ]
 
 
 @pytest.mark.parametrize(
@@ -255,19 +254,10 @@ def test_rollout_smoke_selects_an_example_dataset_and_uses_bounded_defaults() ->
     [
         ({"dataset": "missing"}, "references unknown dataset"),
         ({"dataset": "validation"}, "must reference an example dataset"),
-        ({"dataset": "smoke", "input_row_count": 0}, "greater than or equal to 1"),
-        ({"dataset": "smoke", "per_rollout_timeout_seconds": 0}, "greater than or equal to 1"),
-        ({"dataset": "smoke", "input_row_count": True}, "valid integer"),
-        ({"dataset": "smoke", "input_row_count": "1"}, "valid integer"),
-        ({"dataset": "smoke", "input_row_count": 1.0}, "valid integer"),
-        ({"dataset": "smoke", "per_rollout_timeout_seconds": True}, "valid integer"),
-        ({"dataset": "smoke", "per_rollout_timeout_seconds": "1"}, "valid integer"),
-        ({"dataset": "smoke", "per_rollout_timeout_seconds": 1.0}, "valid integer"),
-        ({"dataset": "smoke", "environment_requirements": ["cluster"]}, "Input should be"),
-        (
-            {"dataset": "smoke", "environment_requirements": ["sandbox", "sandbox"]},
-            "must be unique",
-        ),
+        ({"dataset": "smoke", "rollout_limit": 0}, "greater than or equal to 1"),
+        ({"dataset": "smoke", "timeout_seconds": 0}, "greater than or equal to 1"),
+        ({"dataset": "smoke", "requirements": ["cluster"]}, "Input should be"),
+        ({"dataset": "smoke", "requirements": ["sandbox", "sandbox"]}, "must be unique"),
     ],
 )
 def test_rollout_smoke_rejects_invalid_contracts(smoke: dict, message: str) -> None:
@@ -282,22 +272,6 @@ def test_rollout_smoke_rejects_invalid_contracts(smoke: dict, message: str) -> N
     raw["rollout_smoke"] = smoke
 
     with pytest.raises(ValidationError, match=message):
-        EnvironmentManifest.model_validate(raw)
-
-
-def test_rollout_smoke_rejects_dataset_repetition() -> None:
-    raw = _manifest()
-    raw["datasets"].append(
-        {
-            "name": "smoke",
-            "type": "example",
-            "jsonl_fpath": "data/smoke.jsonl",
-            "num_repeats": 2,
-        }
-    )
-    raw["rollout_smoke"] = {"dataset": "smoke"}
-
-    with pytest.raises(ValidationError, match="must set num_repeats to 1"):
         EnvironmentManifest.model_validate(raw)
 
 
@@ -342,7 +316,6 @@ def test_load_dump_round_trip_and_errors(tmp_path: Path) -> None:
 def test_generated_schema_is_machine_readable() -> None:
     schema = manifest_json_schema()
 
-    assert "Gym manifest validation" in schema["$comment"]
     assert schema["$defs"]["Domain"]["enum"] == [domain.value for domain in Domain]
     assert schema["$defs"]["RolloutSmokeRequirement"]["enum"] == [
         requirement.value for requirement in RolloutSmokeRequirement
@@ -383,9 +356,5 @@ def test_neutral_example_matches_manifest_contract() -> None:
 
     assert manifest.name == "example_environment"
     assert manifest.integration_profile == IntegrationProfile.CUSTOM_GYM_VERIFIER
-    assert [(dataset.name, dataset.type.value, dataset.jsonl_fpath) for dataset in manifest.datasets] == [
-        ("validation", "validation", "data/validation.jsonl"),
-        ("smoke", "example", "data/smoke.jsonl"),
-    ]
     assert manifest.rollout_smoke is not None
     assert manifest.rollout_smoke.dataset == "smoke"

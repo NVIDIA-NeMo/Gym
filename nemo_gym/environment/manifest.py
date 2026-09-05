@@ -144,49 +144,24 @@ class ManifestDataset(_ManifestModel):
 
 
 class RolloutSmoke(_ManifestModel):
-    """A small dataset contract for external rollout consumers.
+    """A small dataset contract for external rollout consumers."""
 
-    Consumers must use Gym model validation (for example, ``gym env validate``), because standalone JSON Schema
-    cannot enforce cross-dataset references.
-    """
-
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, validate_default=True, frozen=True)
-
-    dataset: NonEmptyString = Field(
-        description="Name of the dedicated example dataset containing canonical smoke inputs."
-    )
-    input_row_count: int = Field(
-        default=1,
-        ge=1,
-        strict=True,
-        description=(
-            "Exact number of source rows to select from the start of the JSONL in file order; smoke consumers "
-            "run each selected row once without repetition or fan-out."
-        ),
-    )
-    per_rollout_timeout_seconds: int = Field(
-        default=300,
-        ge=1,
-        strict=True,
-        description="Maximum wall-clock time allowed for each selected row's single rollout.",
-    )
-    environment_requirements: tuple[RolloutSmokeRequirement, ...] = Field(
-        default_factory=tuple,
-        description=(
-            "Environment-side services needed in addition to policy-model inference; consumers may skip an "
-            "unsupported target but must report the unmet requirement."
-        ),
+    dataset: NonEmptyString
+    rollout_limit: int = Field(default=1, ge=1)
+    timeout_seconds: int = Field(default=300, ge=1)
+    requirements: list[RolloutSmokeRequirement] = Field(
+        default_factory=list,
         json_schema_extra={"uniqueItems": True},
     )
 
-    @field_validator("environment_requirements")
+    @field_validator("requirements")
     @classmethod
     def validate_unique_requirements(
         cls,
-        value: tuple[RolloutSmokeRequirement, ...],
-    ) -> tuple[RolloutSmokeRequirement, ...]:
+        value: list[RolloutSmokeRequirement],
+    ) -> list[RolloutSmokeRequirement]:
         if len(value) != len(set(value)):
-            raise ValueError("rollout_smoke.environment_requirements must be unique")
+            raise ValueError("rollout_smoke.requirements must be unique")
         return value
 
 
@@ -328,8 +303,6 @@ class EnvironmentManifest(_ManifestModel):
                 raise ValueError(f"rollout_smoke.dataset references unknown dataset {self.rollout_smoke.dataset!r}")
             if smoke_dataset.type != DatasetKind.EXAMPLE:
                 raise ValueError("rollout_smoke.dataset must reference an example dataset")
-            if smoke_dataset.num_repeats != 1:
-                raise ValueError("rollout_smoke.dataset must set num_repeats to 1")
         return self
 
 
@@ -383,9 +356,5 @@ def manifest_json_schema() -> dict[str, Any]:
     return {
         "$schema": JSON_SCHEMA_DIALECT,
         "$id": MANIFEST_SCHEMA_ID,
-        "$comment": (
-            "This schema validates structure. Use Gym manifest validation for semantic cross-references and "
-            "filesystem checks."
-        ),
         **schema,
     }

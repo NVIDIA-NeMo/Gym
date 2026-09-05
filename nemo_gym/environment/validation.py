@@ -27,7 +27,6 @@ from nemo_gym.environment.manifest import (
     EnvironmentKind,
     EnvironmentManifest,
     ManifestDataset,
-    RolloutSmoke,
     dump_manifest,
     load_manifest,
 )
@@ -76,17 +75,12 @@ class EnvironmentValidationReport:
     datasets: tuple[DatasetValidation, ...]
     rollout_driver: str | None = None
     grading_mode: str | None = None
+    rollout_smoke: dict[str, Any] | None = None
     synchronized_fields: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
-    rollout_smoke: RolloutSmoke | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        payload = asdict(self)
-        if self.rollout_smoke is None:
-            payload.pop("rollout_smoke")
-        else:
-            payload["rollout_smoke"] = self.rollout_smoke.model_dump(mode="json")
-        return payload
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -564,20 +558,18 @@ def _validate_benchmark_prompt_contract(manifest: EnvironmentManifest) -> None:
 def _validate_rollout_smoke(
     manifest: EnvironmentManifest,
     dataset_reports: tuple[DatasetValidation, ...],
-) -> RolloutSmoke | None:
+) -> dict[str, Any] | None:
     if manifest.rollout_smoke is None:
         return None
 
     smoke = manifest.rollout_smoke
-    dataset = next((report for report in dataset_reports if report.name == smoke.dataset), None)
-    if dataset is None:
-        raise EnvironmentValidationError(f"rollout_smoke.dataset references unknown dataset {smoke.dataset!r}.")
-    if smoke.input_row_count > dataset.rows:
+    dataset = next(report for report in dataset_reports if report.name == smoke.dataset)
+    if smoke.rollout_limit > dataset.rows:
         raise EnvironmentValidationError(
-            f"rollout_smoke.input_row_count is {smoke.input_row_count}, but dataset {smoke.dataset!r} "
+            f"rollout_smoke.rollout_limit is {smoke.rollout_limit}, but dataset {smoke.dataset!r} "
             f"contains only {dataset.rows} rows."
         )
-    return smoke
+    return smoke.model_dump(mode="json")
 
 
 def _write_manifest_atomically(path: Path, manifest: EnvironmentManifest) -> None:
