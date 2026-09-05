@@ -7,7 +7,7 @@ An environment includes the dataset, agent harness, verifier, and state. The mod
 The onboarding flow below covers a complete environment or benchmark. A resources server may be a reusable scoring, tool, or state component, or it may ship a runnable composition and data. Manifest-backed onboarding currently writes canonical workloads under `environments/` and `benchmarks/`; runnable configs still colocated under `resources_servers/` remain visible as `no-manifest` migration entries.
 
 <Tip>
-For a guide to building your first resources server, refer to [Single Step Environment](/environment-tutorials/single-step-environment).
+For a guide to building your first resources server, refer to [Single Step Environment](/main/environment-tutorials/single-step-environment).
 
 </Tip>
 
@@ -100,7 +100,7 @@ Fixture execution runs directly in the resources server's dependency environment
 
 ## Guiding Principles
 
-Adding a training environment has the same local correctness requirements as [Adding A Benchmark](/contribute/environments/adding-a-benchmark): its manifest must validate and its verifier fixture must pass. Behavior-changing environment or agent code must also run representative real smoke rollouts as required by `AGENTS.md`. A full evaluation, reward profile, or training run can provide stronger evidence about measurement quality and training utility, but it is optional and is not a publication or merge compute gate.
+Adding a training environment has the same local correctness requirements as [Adding A Benchmark](/main/contribute/environments/adding-a-benchmark): its manifest must validate and its verifier fixture must pass. Behavior-changing environment or agent code must also run representative real smoke rollouts as required by `AGENTS.md`. A full evaluation, reward profile, or training run can provide stronger evidence about measurement quality and training utility, but it is optional and is not a publication or merge compute gate.
 
 When compute is available, a useful training experiment isolates the environment's effect on the targeted capability. GRPO with NeMo RL, 64 prompts per step, and 16 rollouts per prompt is one starting point; adjust it to the environment and available compute.
 
@@ -150,7 +150,7 @@ Prepare the dataset for your environment:
 Build your resources server:
 
 - Run `gym env init --resources-server my_server` to scaffold the new resources server
-- Follow the [Single Step Environment](/environment-tutorials/single-step-environment) guide to implement your specific logic
+- Follow the [Single Step Environment](/main/environment-tutorials/single-step-environment) guide to implement your specific logic
 - Implement verification logic for your tasks by defining the `verify()` function
 - Set the `domain` field in your resources server configuration (see `Domain`).
 - Complete the auto-generated `README.md` with licensing information
@@ -282,5 +282,5 @@ For multi-step scenarios, the model returns training information on response mes
 
 ## Reference
 
-- [Single Step Environment](/environment-tutorials/single-step-environment) - Introductory tutorial for creating your first resources server
-- [Environment Components](/about/architecture) - Environment component architecture
+- [Single Step Environment](/main/environment-tutorials/single-step-environment) - Introductory tutorial for creating your first resources server
+- [Environment Components](/main/about/architecture) - Environment component architecture

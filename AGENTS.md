@@ -52,7 +52,11 @@ For full architecture and concepts (environments, training approaches, verificat
 
 The typical workflow is to create your own environments tailored to your evaluation or training task. An environment consists of:
 
-1. **Dataset** — JSONL with one task per row. NeMo Gym uses the OpenAI Responses API as its native format because it natively represents multi-turn, tool-calling agentic trajectories without custom serialization. Each row has `responses_create_params.input` (the input messages in Responses API format) and `verifier_metadata` (task-specific data passed to the verifier)
+1. **Dataset** — JSONL with one task per row. Runnable rows use `responses_create_params` as the OpenAI Responses
+   API model-input envelope; raw benchmark rows may instead provide fields that a prompt config renders into that
+   envelope. Task-owned fields follow the resources server's `TaskData` schema and request model. Keep answer keys out
+   of `responses_create_params.input`; current schemas commonly use flat task fields, while legacy wire contracts may
+   explicitly require `verifier_metadata`.
 2. **Resources Server** — implements verification logic, environment-specific tools, and per-task state isolation
 3. **Agent Harness** — reuse a built-in agent harness (e.g. OpenHands) or bring your own
 4. **Model** — use any LLM endpoint via the Model Server (supports inference providers like OpenAI, and vLLM for local/open models), or manage inference in your own agent harness
@@ -71,7 +75,8 @@ For guidance on how to build environments, see `fern/versions/latest/pages/envir
 ## Communication & Async Patterns
 
 New or modified async HTTP must ultimately use NeMo Gym's singleton aiohttp client, which provides connection pooling,
-retries, and trace propagation. Treat existing direct-httpx integrations as legacy code to migrate when touched.
+retries, and trace propagation. Treat existing direct-httpx integrations as legacy exceptions: do not copy them, and
+migrate them only when the requested issue or PR includes that transport work.
 
 - **Configured Gym server-to-server calls:** use `self.server_client.get()` / `.post()` so the configured server name,
   rollout route, and shared transport are preserved.

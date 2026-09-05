@@ -77,6 +77,26 @@ def _unfinished_todo_outside_fences(body):
     return False
 
 
+def _markdown_outside_fences(content):
+    outside_lines = []
+    fence_marker = None
+    fence_length = 0
+    for line in content.splitlines():
+        fence = re.match(r"^[ \t]*(?:(?:[-+*]|\d+[.)])[ \t]+)?(`{3,}|~{3,})(.*)$", line)
+        if fence:
+            marker = fence.group(1)
+            if fence_marker is None:
+                fence_marker = marker[0]
+                fence_length = len(marker)
+            elif marker[0] == fence_marker and len(marker) >= fence_length and not fence.group(2).strip():
+                fence_marker = None
+                fence_length = 0
+            continue
+        if fence_marker is None:
+            outside_lines.append(line)
+    return "\n".join(outside_lines)
+
+
 class TestRepositorySkills:
     def test_canonical_skills_follow_discovery_contract(self):
         allowed_frontmatter = {"name", "description", "license", "allowed-tools", "metadata"}
@@ -114,10 +134,14 @@ class TestRepositorySkills:
         assert documented_names == expected_names
 
     def test_relative_markdown_links_resolve(self):
-        markdown_link_pattern = re.compile(r"\]\(([^)]+)\)")
+        markdown_link_pattern = re.compile(
+            r"""\]\(\s*(?:<([^>\n]+)>|([^\s)\n]+))(?:\s+(?:"[^"\n]*"|'[^'\n]*'|\([^)]*\)))?\s*\)"""
+        )
         for skill_dir in _canonical_skill_dirs():
             for markdown_file in skill_dir.rglob("*.md"):
-                for target in markdown_link_pattern.findall(markdown_file.read_text()):
+                content = _markdown_outside_fences(markdown_file.read_text())
+                for angle_target, plain_target in markdown_link_pattern.findall(content):
+                    target = angle_target or plain_target
                     target = target.split("#", 1)[0].split("?", 1)[0]
                     if not target or target.startswith(("/", "http://", "https://", "mailto:")):
                         continue
