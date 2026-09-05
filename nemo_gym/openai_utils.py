@@ -987,6 +987,10 @@ class NeMoGymChatCompletionAssistantMessageForTrainingParam(
 class NeMoGymChatCompletionToolMessageParam(ChatCompletionToolMessageParam):
     # Override the iterable which is annoying to work with.
     content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
+    # Absent from the OpenAI type but sent by real clients and accepted by real servers.
+    # Without it the request schema rejects the whole conversation, so an agent that calls a
+    # tool cannot receive the result.
+    name: NotRequired[str]
 
 
 class NeMoGymFunctionToolParam(FunctionToolParam):
@@ -1010,7 +1014,10 @@ NeMoGymChatCompletionMessageParam: TypeAlias = Annotated[
 
 
 class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # Inbound requests carry vendor extensions this schema does not enumerate, and the engines
+    # they are forwarded to understand them. Rejecting the request loses the caller's field and
+    # the whole conversation with it; forwarding what we do not model is the proxy's job.
+    model_config = ConfigDict(extra="allow")
 
     messages: List[NeMoGymChatCompletionMessageParam]
     model: Optional[Union[str, ChatModel]] = None
