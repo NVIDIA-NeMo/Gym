@@ -315,7 +315,10 @@ class SandboxAgent(SimpleResponsesAPIAgent):
         with tempfile.TemporaryDirectory() as td:
             local = Path(td) / "out"
             await self._provider.download_file(handle, path, local)
-            return json.loads(local.read_text().strip().splitlines()[0])
+            lines = local.read_text().splitlines()
+            if len(lines) != 1:
+                raise RuntimeError(f"expected one JSON row in {path}, got {len(lines)}")
+            return json.loads(lines[0])
 
     async def _run_nested(self, request: Request, body: SandboxAgentRunRequest) -> BaseVerifyResponse:
         row = body.model_dump()
@@ -333,19 +336,28 @@ class SandboxAgent(SimpleResponsesAPIAgent):
         handle = await self._provision_box(image, files, model_url)
         try:
             await self._provider.exec(
-                handle, f"nohup {runner_cmd} > /work/runner.out 2>&1 & echo started", timeout_s=60
+                handle, f"nohup {runner_cmd} > /work/runner.out 2>&1 & echo $! > /work/runner.pid", timeout_s=60
             )
             deadline = self.config.rollout_timeout
             waited = 0
+            status = "timeout"
             while waited < deadline:
                 await asyncio.sleep(20)
                 waited += 20
-                r = await self._provider.exec(handle, "test -f /work/done && echo DONE", timeout_s=30)
+                r = await self._provider.exec(
+                    handle,
+                    "test -f /work/done && echo DONE || kill -0 $(cat /work/runner.pid) 2>/dev/null || echo EXITED",
+                    timeout_s=30,
+                )
                 if "DONE" in (r.stdout or ""):
+                    status = "done"
+                    break
+                if "EXITED" in (r.stdout or ""):
+                    status = "exited"
                     break
             r = await self._provider.exec(handle, "tail -c 6000 /work/runner.out", timeout_s=30)
-            if "RUNNER_DONE" not in (r.stdout or ""):
-                LOG.warning("runner incomplete: %s", (r.stdout or "")[-6000:])
+            if status != "done" or "RUNNER_DONE" not in (r.stdout or ""):
+                raise RuntimeError(f"runner {status} without completion: {(r.stdout or '')[-6000:]}")
             rows = await self._download_json(handle, "/work/rollouts.jsonl")
             return BaseVerifyResponse.model_validate(rows)
         finally:
