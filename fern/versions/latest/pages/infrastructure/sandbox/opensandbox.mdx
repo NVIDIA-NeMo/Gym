@@ -29,7 +29,7 @@ Set connection values through the provider config. The shipped config reads thes
 
 | Variable | Purpose |
 | --- | --- |
-| `OPENSANDBOX_DOMAIN` | OpenSandbox server domain. Defaults to the in-cluster service name in the shipped config. |
+| `OPENSANDBOX_DOMAIN` | OpenSandbox server domain, optionally with its scheme (`https://host` sets `connection.protocol`). Defaults to the in-cluster service name in the shipped config. |
 | `OPENSANDBOX_API_KEY` | API key passed to the OpenSandbox SDK connection config. |
 
 ## Provider Config
@@ -246,4 +246,4 @@ Create retries handle transient allocation, connection, image pull, and server-s
 
 execd, the exec daemon inside each sandbox, holds every command response open for `EXECD_API_GRACE_SHUTDOWN` (default 1s) after the command's last event, which is fixed latency on each command and on the readiness probe. Set it in the sandbox spec's `env` to shorten it; the shipped SWE-bench and OpenCode configs use `50ms`, and the provider's `operations.background_poll_initial_s` (0.5) is sized to that.
 
-`connection.tls_verify` (default `false`) controls certificate verification on every connection the provider opens, both the SDK transport and PTY WebSockets. The default skips verification so that `https://` endpoints with a certificate the client cannot verify, such as a validation cluster behind a self-signed load balancer, work without extra setup; set `tls_verify: true` for endpoints with a verifiable certificate. Pair `https` endpoints with `connection.protocol: https`. The `cleanup_sandboxes.py` helper mirrors the setting with `--tls-verify` and reads `tls_verify` from `--connection-config`.
+`connection.tls_verify` (default `false`) controls certificate verification on every connection the provider opens, both the SDK transport and PTY WebSockets. The default skips verification so that `https://` endpoints with a certificate the client cannot verify, such as a validation cluster behind a self-signed load balancer, work without extra setup; set `tls_verify: true` for endpoints with a verifiable certificate. For `https` endpoints, either set `connection.protocol: https` or include the scheme in the domain (`connection.domain: https://sandbox.example`, or `OPENSANDBOX_DOMAIN=https://sandbox.example`): a scheme in the domain sets the protocol and takes precedence over `connection.protocol`. The `cleanup_sandboxes.py` helper mirrors the setting with `--tls-verify` and reads `tls_verify` from `--connection-config`.

@@ -393,7 +393,33 @@ def _to_sandbox_status(state: Any) -> SandboxStatus:
     return SandboxStatus.UNKNOWN
 
 
-@dataclass(frozen=True)
+def split_domain_scheme(domain: str) -> tuple[str, str | None]:
+    """Split a configured OpenSandbox domain into ``(domain, scheme)``.
+
+    ``"https://sandbox.example:8080/prefix/"`` -> ``("sandbox.example:8080/prefix", "https")``;
+    a bare host is returned unchanged with scheme ``None``. Surrounding whitespace
+    is stripped either way. Only ``scheme://host[:port][/path-prefix]`` is accepted:
+    other schemes, a missing host, or a query string / fragment raise ``ValueError``.
+    """
+    domain = domain.strip()
+    if "://" not in domain:
+        return domain, None
+    parts = urlsplit(domain)
+    scheme = parts.scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"connection.domain {domain!r} has unsupported scheme {parts.scheme!r}; use http or https")
+    if not parts.netloc:
+        raise ValueError(f"connection.domain {domain!r} has no host")
+    if parts.query or parts.fragment:
+        raise ValueError(
+            f"connection.domain {domain!r} must not carry a query string or fragment; "
+            "use scheme://host[:port][/path-prefix]"
+        )
+    # Keep any path prefix (a reverse proxy may mount the server under one); the SDK appends /v1.
+    return parts.netloc + parts.path.rstrip("/"), scheme
+
+
+@dataclass
 class OpenSandboxConnectionConfig:
     """OpenSandbox server connection settings.
 
@@ -406,6 +432,14 @@ class OpenSandboxConnectionConfig:
     operations per process; null means no cap. ``tls_verify`` applies to every
     connection the provider opens (SDK transport and PTY sockets) and is off by
     default; set it for endpoints whose certificate the client can verify.
+    ``domain`` may carry its scheme (``https://sandbox.example``). The scheme is
+    moved into ``protocol`` and takes precedence over a configured ``protocol``,
+    so every URL the provider builds itself (the PTY WebSocket target) agrees
+    with the SDK's base URL; the SDK receives the host plus any path prefix
+    (``sandbox.example:8080/prefix``). The SDK would accept a scheme in
+    ``domain`` on its own, but the provider reads ``protocol`` directly, hence
+    the normalization here. Only ``scheme://host[:port][/path-prefix]`` is
+    accepted: a query string or fragment is a configuration error.
     """
 
     domain: str | None = None
@@ -423,6 +457,13 @@ class OpenSandboxConnectionConfig:
     connect_retries: int = 2
     transport_backend: str = "httpx"
     tls_verify: bool = False
+
+    def __post_init__(self) -> None:
+        if self.domain is None:
+            return
+        self.domain, scheme = split_domain_scheme(self.domain)
+        if scheme is not None:
+            self.protocol = scheme
 
 
 @dataclass(frozen=True)
