@@ -2,6 +2,7 @@
 - [Nemotron 3.5 Super Evaluation setup](#nemotron-35-super-evaluation-setup)
   - [Run production evals](#run-production-evals)
     - [Typical job shapes](#typical-job-shapes)
+    - [Open problems](#open-problems)
   - [Development commands](#development-commands)
     - [vllm-router patch (decode-node cache imbalance)](#vllm-router-patch-decode-node-cache-imbalance)
       - [Measured effect](#measured-effect)
@@ -31,8 +32,9 @@ These job shapes have been tuned to finish evaluation on Nemotron 3.5 Super chec
 |Terminal Bench 2.1|Terminus 2|2|8|512|
 |Terminal Bench 2.1|OpenCode|?|?|?|
 
-Notes
-1. 
+### Open problems
+1. We can't reduce the number of prefill nodes because the TRT LLM kernel isn't large enough to support higher max_num_batched_tokens
+2. Once MTP is functional with PD-disagg / async scheduling / prefix caching / etc, we should be able to reduce the decode nodes as well.
 
 ## Development commands
 
