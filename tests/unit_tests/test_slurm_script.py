@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -292,6 +293,33 @@ def test_build_vllm_ray_serve_command_multi_node_wraps_in_symmetric_run(vllm_ser
     assert "--min-nodes 2" in cmd
     assert "nemo_gym/orchestration/ray_serve_gateway.py" in cmd
     assert "git clone" in cmd
+
+
+def test_build_vllm_ray_serve_command_multi_node_chain_survives_symmetric_run_entrypoint(vllm_service):
+    # Regression test: `ray symmetric-run`'s entrypoint (everything after `--`) must be the whole
+    # git-clone-then-install-then-launch chain as ONE unit, not split by the outer bash -lc on the
+    # chain's own `&&` operators - a naive unquoted embedding lets that outer shell live-parse
+    # those operators, so `ray symmetric-run`'s entrypoint becomes just `git clone ...`, which
+    # succeeds and exits immediately, tearing the whole Ray cluster down before the gateway ever
+    # launches. Runs the *actual* generated bash through a stand-in `ray symmetric-run` to prove
+    # the whole chain lands as a single argv token, the same way it would for the real command.
+    cmd = _build_vllm_ray_serve_command(
+        vllm_service, total_nodes=2, gym_install=_GYM_INSTALL, gpus_per_node_values=[8]
+    )
+
+    script = cmd.replace(
+        "ray symmetric-run",
+        'fake_symmetric_run() { for a in "$@"; do echo "ARG:$a"; done; }; fake_symmetric_run',
+    ).replace("if ray symmetric-run --help", "if true")
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+
+    assert result.returncode == 0, result.stderr
+    args = [line.removeprefix("ARG:") for line in result.stdout.splitlines()]
+    assert args[-3:-1] == ["bash", "-c"]
+    chain = args[-1]
+    assert "git clone" in chain
+    assert "&&" in chain
+    assert "python3 nemo_gym/orchestration/ray_serve_gateway.py" in chain
 
 
 def test_build_vllm_ray_serve_command_passes_gpus_per_node():

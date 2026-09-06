@@ -245,7 +245,18 @@ def _build_vllm_ray_serve_command(
     resource_flags = (
         "--num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE}"
     )
-    return render_vllm_ray_symmetric_run(fetch_and_run, total_nodes, resource_flags)
+    # render_vllm_ray_symmetric_run splices inner_cmd, unquoted, into a `ray symmetric-run ... --
+    # {inner_cmd}` statement that itself sits inside that template's own single-quoted `bash -lc
+    # '...'` wrapper. Without protection, fetch_and_run's `&&` chain gets live-parsed as bash
+    # operators once that outer bash -lc runs its script: `ray symmetric-run`'s entrypoint would
+    # become just the `git clone` (the first `&&`-segment), which succeeds and exits immediately,
+    # tearing down the whole Ray cluster it just stood up before the repo checkout/install/gateway
+    # launch ever run. Wrapping in `bash -c "<escaped>"` makes the whole chain one opaque token
+    # immune to that live-parsing - double quotes, not shlex.quote's single-quote style, because
+    # this text is substituted inside that template's own single-quoted region: a literal `'`
+    # (which shlex.quote would introduce) would terminate that outer quoting early.
+    escaped = fetch_and_run.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+    return render_vllm_ray_symmetric_run(f'bash -c "{escaped}"', total_nodes, resource_flags)
 
 
 def _build_ray_command(_service: RayServiceConfig) -> str:
