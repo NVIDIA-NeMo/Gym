@@ -24,7 +24,7 @@ sandbox:
       # May include the scheme (https://host): it then sets `protocol` and takes precedence over it.
       domain: ${oc.env:OPENSANDBOX_DOMAIN,opensandbox-server.opensandbox-system.svc.cluster.local}
       api_key: ${oc.env:OPENSANDBOX_API_KEY}
-      protocol: https
+      protocol: http
       request_timeout_s: 300
       use_server_proxy: true
       # Must stay below the server's keep-alive idle timeout (uvicorn: ~5s),
