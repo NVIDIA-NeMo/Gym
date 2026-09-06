@@ -37,6 +37,10 @@ sandbox:
       # "aiohttp" routes through the optional httpx-aiohttp bridge, falling
       # back to httpx with a warning when it is not installed.
       transport_backend: aiohttp
+      # Certificate verification for every connection the provider opens (SDK
+      # transport and PTY sockets). Off by default; set true for endpoints whose
+      # certificate the client can verify.
+      tls_verify: false
     create:
       request_timeout_s: 1200
       # Must exceed the spec's ready_timeout_s (1200 for mini_swe_agent_2): this

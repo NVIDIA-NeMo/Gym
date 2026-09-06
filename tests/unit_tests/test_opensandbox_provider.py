@@ -1858,3 +1858,40 @@ async def test_exec_background_retries_timed_out_status_poll(monkeypatch: pytest
 
     assert commands.status_calls == ["exec-slowpoll", "exec-slowpoll"]
     assert result.return_code == 0
+
+
+def test_tls_verify_reaches_transports(fake_opensandbox_sdk: None) -> None:
+    import ssl
+
+    ConnectionConfig = opensandbox_provider.OpenSandboxConnectionConfig
+    assert ConnectionConfig().tls_verify is False
+    assert ConnectionConfig(tls_verify=True).tls_verify is True
+
+    default = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "httpx"})
+    assert default._build_transport()._pool._ssl_context.verify_mode == ssl.CERT_NONE
+    verified = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "httpx", "tls_verify": True})
+    assert verified._build_transport()._pool._ssl_context.verify_mode == ssl.CERT_REQUIRED
+
+    httpx_aiohttp = pytest.importorskip("httpx_aiohttp", reason="optional httpx-aiohttp is not installed")
+    bridge = opensandbox_provider.OpenSandboxProvider(connection={"transport_backend": "aiohttp"})._build_transport()
+    assert isinstance(bridge, httpx_aiohttp.AiohttpTransport)
+    assert bridge.ssl_context.verify_mode == ssl.CERT_NONE
+    bridge_verified = opensandbox_provider.OpenSandboxProvider(
+        connection={"transport_backend": "aiohttp", "tls_verify": True}
+    )._build_transport()
+    assert bridge_verified.ssl_context.verify_mode == ssl.CERT_REQUIRED
+
+
+@pytest.mark.asyncio
+async def test_pty_http_client_follows_tls_verify(fake_opensandbox_sdk: None) -> None:
+    default = opensandbox_provider.OpenSandboxProvider()._pty_http_client()
+    try:
+        assert default.connector._ssl is False
+    finally:
+        await default.close()
+
+    verified = opensandbox_provider.OpenSandboxProvider(connection={"tls_verify": True})._pty_http_client()
+    try:
+        assert verified.connector._ssl is True
+    finally:
+        await verified.close()
