@@ -327,7 +327,9 @@ async def test_pool_create_uses_sdk_compatibility_image_and_proxy_auth(
     assert FakeSandbox.created_kwargs["metadata"]["purpose"] == "osworld"
     assert FakeSandbox.created_kwargs["skip_health_check"] is True
     create_connection = FakeSandbox.created_kwargs["connection_config"]
-    assert create_connection.kwargs["domain"] == "http://sandbox.example"
+    # A scheme in the configured domain is split into protocol + bare host before it reaches the SDK.
+    assert create_connection.kwargs["domain"] == "sandbox.example"
+    assert create_connection.kwargs["protocol"] == "http"
     assert create_connection.kwargs["headers"] == {
         "OPEN-SANDBOX-API-KEY": "pool-api-key"  # pragma: allowlist secret
     }
@@ -1895,3 +1897,62 @@ async def test_pty_http_client_follows_tls_verify(fake_opensandbox_sdk: None) ->
         assert verified.connector._ssl is True
     finally:
         await verified.close()
+
+
+def test_split_domain_scheme() -> None:
+    split = opensandbox_provider.split_domain_scheme
+    assert split("sandbox.example") == ("sandbox.example", None)
+    assert split(" sandbox.example\n") == ("sandbox.example", None)
+    assert split("https://sandbox.example/") == ("sandbox.example", "https")
+    assert split("HTTP://sandbox.example:8080/prefix/") == ("sandbox.example:8080/prefix", "http")
+    for bad, message in (
+        ("ftp://sandbox.example", "unsupported scheme"),
+        ("https://", "no host"),
+        ("https://sandbox.example/prefix?token=abc", "query string or fragment"),
+        ("https://sandbox.example#staging", "query string or fragment"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            split(bad)
+
+
+def test_connection_config_derives_protocol_from_domain_scheme() -> None:
+    ConnectionConfig = opensandbox_provider.OpenSandboxConnectionConfig
+
+    https = ConnectionConfig(domain="https://sandbox.example/")
+    assert (https.domain, https.protocol) == ("sandbox.example", "https")
+
+    # The shipped yaml always sets protocol (http), so a scheme in the domain must win over it.
+    override = ConnectionConfig(domain="HTTP://sandbox.example:8080/prefix/", protocol="https")
+    assert (override.domain, override.protocol) == ("sandbox.example:8080/prefix", "http")
+
+    bare = ConnectionConfig(domain="sandbox.example", protocol="https")
+    assert (bare.domain, bare.protocol) == ("sandbox.example", "https")
+    assert ConnectionConfig().domain is None
+
+    # Whitespace is normalized for every domain, not only scheme-carrying ones.
+    padded = ConnectionConfig(domain=" sandbox.example\n", protocol="http")
+    assert (padded.domain, padded.protocol) == ("sandbox.example", "http")
+
+    with pytest.raises(ValueError, match="unsupported scheme"):
+        ConnectionConfig(domain="ftp://sandbox.example")
+    with pytest.raises(ValueError, match="no host"):
+        ConnectionConfig(domain="https://")
+    with pytest.raises(ValueError, match="query string or fragment"):
+        ConnectionConfig(domain="https://sandbox.example/prefix?token=abc")
+    with pytest.raises(ValueError, match="query string or fragment"):
+        ConnectionConfig(domain="https://sandbox.example#staging")
+
+
+def test_scheme_in_domain_reaches_sdk_and_pty_protocol(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={
+            "domain": "https://sandbox.example/",
+            "api_key": "key",  # pragma: allowlist secret
+            "protocol": "http",
+        }
+    )
+    kwargs = provider._connection_config().kwargs
+    assert kwargs["domain"] == "sandbox.example"
+    assert kwargs["protocol"] == "https"
+    # The PTY WebSocket URL is built from the provider's own protocol, not the SDK's base URL.
+    assert provider._connection.protocol == "https"
