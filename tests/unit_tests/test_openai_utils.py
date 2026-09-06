@@ -27,6 +27,7 @@ from typing import (
     get_origin,
     get_type_hints,
 )
+from unittest.mock import AsyncMock
 
 import openai
 import pytest
@@ -124,6 +125,34 @@ def _response_with_output(output: list) -> dict:
 class TestOpenAIUtils:
     async def test_NeMoGymAsyncOpenAI(self) -> None:
         NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+
+    async def test_async_client_supports_provider_auth_and_default_query(self) -> None:
+        client = NeMoGymAsyncOpenAI(
+            api_key="azure-key",  # pragma: allowlist secret
+            base_url="https://example.openai.azure.com/openai/deployments/model",
+            default_query={"api-version": "2024-10-21"},
+            auth_header_name="api-key",
+            auth_header_prefix="",
+        )
+        response = object()
+        client._request_with_retry = AsyncMock(return_value=response)
+
+        result = await client._request(
+            method="POST",
+            url=f"{client.base_url}/chat/completions",
+            headers={"x-request": "value"},
+            params={"feature": "enabled"},
+        )
+
+        assert result is response
+        client._request_with_retry.assert_awaited_once_with(
+            method="POST",
+            url="https://example.openai.azure.com/openai/deployments/model/chat/completions",
+            headers={"x-request": "value", "api-key": "azure-key"},
+            params={"api-version": "2024-10-21", "feature": "enabled"},
+            _internal=False,
+            _max_connection_retries=None,
+        )
 
 
 class TestNeMoGymResponseCreateParamsNonStreaming:

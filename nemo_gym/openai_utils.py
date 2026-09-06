@@ -1088,14 +1088,29 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         description="Extra headers to include in every request.",
     )
 
+    default_query: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Query parameters to include in every request.",
+    )
+
+    auth_header_name: Optional[str] = Field(
+        default="Authorization",
+        description="Authentication header name; None disables automatic authentication.",
+    )
+    auth_header_prefix: str = Field(
+        default="Bearer ",
+        description="Text prepended to api_key in the authentication header.",
+    )
+
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
         request_headers = request_kwargs.pop("headers", {})
+        request_query = request_kwargs.pop("params", {})
+        auth_header = (
+            {self.auth_header_name: f"{self.auth_header_prefix}{self.api_key}"} if self.auth_header_name else {}
+        )
         request_kwargs = request_kwargs | {
-            "headers": self.default_headers
-            | request_headers
-            | {
-                "Authorization": f"Bearer {self.api_key}",
-            },
+            "headers": self.default_headers | request_headers | auth_header,
+            "params": self.default_query | request_query,
             "_internal": self.internal,
             "_max_connection_retries": self.max_connection_retries,
         }

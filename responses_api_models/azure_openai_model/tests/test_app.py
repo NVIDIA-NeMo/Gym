@@ -14,11 +14,13 @@
 # limitations under the License.
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
-from openai import AsyncAzureOpenAI
+from pydantic import ValidationError
 from pytest import MonkeyPatch
 
 from nemo_gym.openai_utils import (
+    NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionMessage,
     NeMoGymChoice,
@@ -60,7 +62,36 @@ class TestApp:
         return AzureOpenAIModelServer(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
     async def test_sanity(self) -> None:
-        self._setup_server()
+        server = self._setup_server()
+
+        assert server._client.base_url == ("https://prod.api.nvidia.com/llm/v1/azure/openai/deployments/dummy_model")
+        assert server._client.default_query == {"api-version": "dummy_version"}
+        assert server._client.auth_header_name == "api-key"
+        assert server._client.auth_header_prefix == ""
+
+    @pytest.mark.parametrize(
+        "updates, message",
+        [
+            ({"default_query": {}}, "api-version"),
+            ({"num_concurrent_requests": 0}, "at least 1"),
+        ],
+    )
+    def test_invalid_config_is_rejected(self, updates, message) -> None:
+        config = {
+            "host": "0.0.0.0",
+            "port": 8081,
+            "openai_base_url": "https://example.openai.azure.com",
+            "openai_api_key": "dummy_key",  # pragma: allowlist secret
+            "openai_model": "dummy/model",
+            "default_query": {"api-version": "2024-10-21"},
+            "num_concurrent_requests": 8,
+            "entrypoint": "",
+            "name": "",
+        }
+        config.update(updates)
+
+        with pytest.raises(ValidationError, match=message):
+            AzureOpenAIModelServerConfig(**config)
 
     async def test_chat_completions(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server()
@@ -91,8 +122,8 @@ class TestApp:
             called_args_chat = kwargs
             return mock_chat_data
 
-        server._client = MagicMock(spec=AsyncAzureOpenAI)
-        server._client.chat.completions.create = AsyncMock(side_effect=mock_create_chat)
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
 
         chat_no_model = client.post(
             "/v1/chat/completions",
@@ -111,7 +142,7 @@ class TestApp:
         assert chat_with_model.status_code == 200
         assert called_args_chat.get("model") == "dummy_model"
 
-        server._client.chat.completions.create.assert_any_await(
+        server._client.create_chat_completion.assert_any_await(
             messages=[{"role": "user", "content": "hi"}],
             model="dummy_model",
         )
@@ -121,8 +152,6 @@ class TestApp:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("responses_api_models.azure_openai_model.app.uuid4", lambda: FakeUUID())
-        monkeypatch.setattr("responses_api_models.azure_openai_model.app.time", lambda: FIXED_TIME)
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
 
         mock_response_data = NeMoGymChatCompletion(
@@ -137,6 +166,7 @@ class TestApp:
             created=FIXED_TIME,
             model="dummy_model",
             object="chat.completion",
+            usage={"prompt_tokens": 4, "completion_tokens": 7, "total_tokens": 12},
         )
 
         # Expected response
@@ -163,13 +193,20 @@ class TestApp:
             parallel_tool_calls=True,
             tool_choice="auto",
             tools=[],
+            status="completed",
+            usage={
+                "input_tokens": 4,
+                "input_tokens_details": {"cached_tokens": None},
+                "output_tokens": 7,
+                "output_tokens_details": {"reasoning_tokens": None},
+                "total_tokens": 12,
+            },
         )
 
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input="hello")
 
-        # Mock the Azure OpenAI client directly since responses() calls it directly
-        server._client = MagicMock(spec=AsyncAzureOpenAI)
-        server._client.chat.completions.create = AsyncMock(return_value=mock_response_data)
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(return_value=mock_response_data.model_dump())
 
         response = client.post(
             "/v1/responses",
