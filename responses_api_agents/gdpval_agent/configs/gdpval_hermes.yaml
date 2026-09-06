@@ -1,0 +1,89 @@
+# GDPVal run with a pluggable harness inside the GDPVal container.
+#
+# Swap the harness by changing the three agent_server_* fields; the deps script is resolved
+# from responses_api_agents/<harness>/scripts/<harness>_deps.sh.
+
+gdpval_hermes_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
+      openai_model: ${oc.env:JUDGE_MODEL_NAME,gcp/google/gemini-3.1-pro-preview}
+
+gdpval_hermes_resources_server:
+  resources_servers:
+    gdpval:
+      allowed_agents: [gdpval_agent]
+      entrypoint: app.py
+      domain: other
+      verified: false
+      reward_mode: rubric
+      judge_model_server:
+        type: responses_api_models
+        name: gdpval_hermes_judge_model
+      judge_panel:
+        - name: gpt-5.5
+          model: ${oc.env:JUDGE_GPT_MODEL,openai/openai/gpt-5.5}
+          create_params_overrides: { reasoning_effort: medium }
+        - name: gemini-3.1-pro
+          model: ${oc.env:JUDGE_GEMINI_MODEL,gcp/google/gemini-3.1-pro-preview}
+          create_params_overrides: { extra_body: { reasoning_effort: high } }
+          handles_audio_video: true
+        - name: claude-opus-4.8
+          model: ${oc.env:JUDGE_CLAUDE_MODEL,aws/anthropic/bedrock-claude-opus-4-8}
+          # No thinking override: it is an Anthropic messages-route field, and the judge reaches
+          # this model over chat completions, which rejects the request outright.
+          create_params_overrides: {}
+
+gdpval_hermes:
+  responses_api_agents:
+    gdpval_agent:
+      entrypoint: app.py
+      domain: other
+      description: GDPVal professional knowledge-work tasks run by a pluggable harness.
+      value: Evaluate document-producing agentic capability on GDPVal with any Gym harness.
+
+      resources_server:
+        type: resources_servers
+        name: gdpval_hermes_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      concurrency: 4
+      timeout: 5400
+      persist_deliverables_dir: ${oc.env:PERSIST_DELIVERABLES_DIR,}
+
+      agent_server_module: responses_api_agents.hermes_agent.app
+      agent_server_class: HermesAgent
+      agent_config_class: HermesAgentConfig
+      agent_kwargs:
+        max_turns: 250
+        # max_tokens is deliberately absent: hermes abandons a task whose reply comes back
+        # truncated, so any cap loses the task rather than shortening it.
+        terminal_backend: local
+        terminal_timeout: 600
+        supports_vision: true
+        # GDPVal reasoning turns outrun the harness's 90s default and get abandoned mid-flight.
+        api_call_stale_timeout: 600
+        # execute_code runs on the harness interpreter, which lacks the document libraries;
+        # the terminal reaches the container python that has them. desktop and computer_use
+        # cannot work headless. browser stays enabled because it is what carries web_search.
+        # vision is not listed here because it is not disabled by name: the tool is gated on a
+        # resolvable vision route instead, which hermes_agent supplies with supports_vision.
+        disabled_toolsets:
+          ["code_execution", "memory", "computer_use", "desktop_ui", "project"]
+
+      image: ${oc.env:GDPVAL_CONTAINER_PATH,}
+      container_workdir: /workspace
+      sandbox_provider:
+        apptainer:
+          create:
+            mount_point: /workspace
+            extra_start_args: ["--writable-tmpfs"]
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/gdpval/data/example.jsonl
