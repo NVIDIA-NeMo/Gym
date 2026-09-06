@@ -403,7 +403,12 @@ class GDPValAgent(SimpleResponsesAPIAgent):
                 cookies=request.cookies,
             )
             await raise_for_status(verify_resp)
-            return await get_response_json(verify_resp)
+            verified = await get_response_json(verify_resp)
+            # The resources server echoes only the fields it knows, so carry this one across
+            # itself; it is what agent_time_sec measures.
+            if isinstance(verified, dict):
+                verified["agent_run_time"] = round(agent_run_time, 3)
+            return verified
 
     async def _load_response(self, box: AsyncSandbox, local: Path) -> NeMoGymResponse:
         _, _, _, traj = self._paths()
