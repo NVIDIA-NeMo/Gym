@@ -179,6 +179,12 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     temperature: float | None = None
     terminal_backend: str = "local"
     terminal_timeout: int = 180
+    # hermes-agent picks its non-stream stale timeout from an allowlist keyed on the model name.
+    # It never matches here: the name it receives is model_server.name ("policy_model"), not the
+    # served model, so every model silently falls back to the 90s chat default and long reasoning
+    # turns are abandoned mid-flight. Setting it explicitly outranks that lookup; left unset the
+    # harness keeps its own default.
+    api_call_stale_timeout: Optional[int] = None
     system_prompt: Optional[str] = None
     compression_enabled: bool = True
     compression_threshold: float = 0.85
@@ -186,6 +192,9 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     api_key: Optional[str] = None
     delegation_max_iterations: int = 50
     checkpoints_enabled: bool = False
+    # Declares the served model able to read images. Off by default: a model that cannot would
+    # be handed pictures it must reject.
+    supports_vision: bool = False
 
 
 class HermesAgentRunRequest(BaseRunRequest):
@@ -239,7 +248,11 @@ class HermesAgent(SimpleResponsesAPIAgent):
 
         config: dict[str, Any] = {
             "model": self._model_name(),
-            "provider": "auto",
+            # Not "auto" or "vllm": hermes gates images in tool results on an allowlist of
+            # provider names (tools/vision_tools.py::_supports_media_in_tool_results), and only
+            # "openai" matches what gym actually fronts, an OpenAI-compatible chat endpoint.
+            # Anything else silently downgrades images to a text description.
+            "provider": "openai",
             "toolsets": ["hermes-cli"],
             "agent": {"max_turns": self.config.max_turns},
             "memory": {
@@ -261,6 +274,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 "enabled": self.config.checkpoints_enabled,
             },
         }
+        if self.config.supports_vision:
+            config["providers"] = {"openai": self._vision_provider_config()}
         return yaml.dump(config, default_flow_style=False)
 
     def model_post_init(self, __context: Any) -> None:
@@ -271,6 +286,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
         # process-global, so multiple HermesAgent instances in one process share them
         os.environ["TERMINAL_ENV"] = self.config.terminal_backend
         os.environ["TERMINAL_TIMEOUT"] = str(self.config.terminal_timeout)
+        if self.config.api_call_stale_timeout is not None:
+            os.environ["HERMES_API_CALL_STALE_TIMEOUT"] = str(self.config.api_call_stale_timeout)
 
         # Build config.yaml with config parameters
         hermes_home = tempfile.mkdtemp(prefix="hermes_agent_")
@@ -278,6 +295,39 @@ class HermesAgent(SimpleResponsesAPIAgent):
         with open(os.path.join(hermes_home, "config.yaml"), "w") as _f:
             _f.write(self._build_config())
         os.environ["HERMES_HOME"] = hermes_home
+
+    def _vision_provider_config(self) -> dict[str, Any]:
+        """Provider entry that lets ``vision_analyze`` register.
+
+        The tool is gated on ``check_vision_requirements()``, which asks whether a vision client
+        could be built. Declaring the capability is necessary but not sufficient: our served
+        checkpoints are absent from the models.dev catalogue, so without ``supports_vision`` the
+        probe skips the policy model and falls through to third-party vision providers we hold no
+        credentials for; and without an endpoint it cannot construct a client either, because the
+        probe runs before the live endpoint is recorded. Verified both ways: capability alone
+        leaves the check False, capability plus endpoint makes it True.
+        """
+        entry: dict[str, Any] = {"models": {self._model_name(): {"supports_vision": True}}}
+        entry["api_key"] = self.config.api_key or os.environ.get("OPENAI_API_KEY", "gym")  # pragma: allowlist secret
+        base_url = self._vision_base_url()
+        if base_url:
+            entry["base_url"] = base_url
+        else:
+            LOG.warning("no model base url for the vision probe; vision_analyze will not register")
+        return entry
+
+    def _vision_base_url(self) -> Optional[str]:
+        if self.config.model_server is None:
+            return None
+        try:
+            return self.resolve_model_base_url(self.config.model_server.name)
+        except Exception:
+            # A sandboxed run constructs the agent with an empty global config, so the server
+            # lookup raises KeyError. The injected client still knows the endpoint it was given.
+            try:
+                return self.server_client._build_server_base_url({})
+            except Exception:
+                return None
 
     def _model_name(self) -> str:
         return self.config.model or str(self.config.model_server.name)
