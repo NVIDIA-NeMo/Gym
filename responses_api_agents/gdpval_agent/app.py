@@ -248,7 +248,11 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         return wd, f"{wd}/input", f"{wd}/output", f"{wd}/.nv"
 
     def _build_spec(
-        self, body: GDPValAgentRunRequest, instruction: str, image: str, deps_dir: Path,
+        self,
+        body: GDPValAgentRunRequest,
+        instruction: str,
+        image: str,
+        deps_dir: Path,
         rollout_id: Optional[str],
     ) -> SandboxSpec:
         wd, _, _, traj = self._paths()

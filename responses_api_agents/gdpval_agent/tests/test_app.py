@@ -109,7 +109,8 @@ def test_deliverables_dir_defaults_to_first_repeat(tmp_path):
 def test_rollout_id_reaches_the_sandbox(tmp_path, monkeypatch):
     agent = _agent(_config(tmp_path))
     monkeypatch.setattr(
-        type(agent), "resolve_model_base_url",
+        type(agent),
+        "resolve_model_base_url",
         lambda self, name, rollout_id=None: f"http://host/ng-rollout/{rollout_id}/v1",
     )
     body = GDPValAgentRunRequest(responses_create_params={"input": []})
@@ -120,9 +121,7 @@ def test_rollout_id_reaches_the_sandbox(tmp_path, monkeypatch):
 
 def test_sandbox_env_tolerates_no_rollout_id(tmp_path, monkeypatch):
     agent = _agent(_config(tmp_path))
-    monkeypatch.setattr(
-        type(agent), "resolve_model_base_url", lambda self, name, rollout_id=None: "http://host/v1"
-    )
+    monkeypatch.setattr(type(agent), "resolve_model_base_url", lambda self, name, rollout_id=None: "http://host/v1")
     body = GDPValAgentRunRequest(responses_create_params={"input": []})
     spec = agent._build_spec(body, "instruction", "/abs/gdpval.sif", tmp_path / "deps", None)
     assert spec.env["GDPVAL_ROLLOUT_ID"] == ""

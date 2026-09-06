@@ -52,7 +52,7 @@ gdpval_hermes:
         name: policy_model
 
       concurrency: 4
-      timeout: 5400
+      timeout: 12600
       persist_deliverables_dir: ${oc.env:PERSIST_DELIVERABLES_DIR,}
 
       agent_server_module: responses_api_agents.hermes_agent.app
