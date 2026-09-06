@@ -1147,8 +1147,10 @@ class NeMoGymChatCompletionAssistantMessageForTrainingParam(
 
 
 class NeMoGymChatCompletionToolMessageParam(ChatCompletionToolMessageParam):
-    # Override the iterable which is annoying to work with.
-    content: Required[Union[str, List[NeMoGymChatCompletionContentPartTextParam]]]
+    # Override the iterable which is annoying to work with. Text-only content rejects the whole
+    # conversation the first time a vision tool returns a picture, so accept what a user message
+    # accepts.
+    content: Required[Union[str, List[NeMoGymChatCompletionContentPartParam]]]
 
 
 class NeMoGymFunctionToolParam(FunctionToolParam):
