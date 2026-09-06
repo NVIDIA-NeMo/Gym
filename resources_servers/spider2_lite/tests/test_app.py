@@ -148,11 +148,12 @@ class TestEvalUtils:
     def test_execute_sqlite_bad_sql(self, tiny_db):
         assert execute_sqlite(tiny_db, "NOT VALID SQL") == None
 
-    def test_execute_sqlite_async_ok(self, tiny_db):
+    async def test_execute_sqlite_async_ok(self, tiny_db):
         sem = asyncio.Semaphore(1)
-        rows = asyncio.get_event_loop().run_until_complete(
-            execute_sqlite_async(tiny_db, "SELECT id FROM items ORDER BY id", sem)
-        )
+        with patch(
+            "resources_servers.spider2_lite.eval_utils.ray.get", side_effect=AssertionError("blocking ray.get")
+        ):
+            rows = await execute_sqlite_async(tiny_db, "SELECT id FROM items ORDER BY id", sem)
         assert rows == [(1,), (2,)]
 
     def test_compare_result_sets_exact(self):
@@ -223,35 +224,31 @@ class TestEvalUtils:
     def test_compare_multi_empty_gold(self):
         assert not compare_multi_result_sets([], [(1,)])
 
-    def test_execute_and_compare_match(self, tiny_db):
+    async def test_execute_and_compare_match(self, tiny_db):
         sem = asyncio.Semaphore(4)
-        match, gold, pred, err = asyncio.get_event_loop().run_until_complete(
-            execute_and_compare(tiny_db, "SELECT id FROM items ORDER BY id", "SELECT id FROM items ORDER BY id", sem)
+        match, gold, pred, err = await execute_and_compare(
+            tiny_db, "SELECT id FROM items ORDER BY id", "SELECT id FROM items ORDER BY id", sem
         )
         assert match is True
         assert err is None
 
-    def test_execute_and_compare_mismatch(self, tiny_db):
+    async def test_execute_and_compare_mismatch(self, tiny_db):
         sem = asyncio.Semaphore(4)
-        match, gold, pred, err = asyncio.get_event_loop().run_until_complete(
-            execute_and_compare(tiny_db, "SELECT id FROM items", "SELECT name FROM items", sem)
+        match, gold, pred, err = await execute_and_compare(
+            tiny_db, "SELECT id FROM items", "SELECT name FROM items", sem
         )
         assert match is False
         assert err is None
 
-    def test_execute_and_compare_gold_error(self, tiny_db):
+    async def test_execute_and_compare_gold_error(self, tiny_db):
         sem = asyncio.Semaphore(4)
-        match, gold, pred, err = asyncio.get_event_loop().run_until_complete(
-            execute_and_compare(tiny_db, "INVALID SQL", "SELECT 1", sem)
-        )
+        match, gold, pred, err = await execute_and_compare(tiny_db, "INVALID SQL", "SELECT 1", sem)
         assert match is False
         assert err is not None and "gold_sql_error" in err
 
-    def test_execute_and_compare_pred_error(self, tiny_db):
+    async def test_execute_and_compare_pred_error(self, tiny_db):
         sem = asyncio.Semaphore(4)
-        match, gold, pred, err = asyncio.get_event_loop().run_until_complete(
-            execute_and_compare(tiny_db, "SELECT id FROM items", "INVALID SQL", sem)
-        )
+        match, gold, pred, err = await execute_and_compare(tiny_db, "SELECT id FROM items", "INVALID SQL", sem)
         assert match is False
         assert err is not None and "pred_sql_error" in err
 
