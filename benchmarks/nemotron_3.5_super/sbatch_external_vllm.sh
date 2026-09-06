@@ -275,7 +275,7 @@ main_job_id=$(
     sbatch \
         --parsable \
         --nodes=$NUM_NODES \
-        --time=07:00:00 \
+        --time=04:00:00 \
         --job-name=gym-$EXPERIMENT_NAME-$USER \
         --output=slurm-logs/%j-%x.log \
         --ntasks-per-node=1 \
