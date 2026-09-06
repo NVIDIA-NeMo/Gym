@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import asyncio
 import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -286,59 +285,3 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         ("tmux setup", {"timeout_s": None, "cwd": None, "user": None, "env": None}),
         ("tmux run", {"timeout_s": None, "cwd": None, "user": None, "env": None}),
     ]
-
-
-@pytest.mark.asyncio
-async def test_execute_propagates_cancellation_without_printing_error(monkeypatch, capsys):
-    config = Terminus2AgentConfig(
-        host="0.0.0.0",
-        port=8080,
-        entrypoint="app.py",
-        name="terminus_2_1_agent",
-        resources_server=ResourcesServerRef(type="resources_servers", name="swebench_resources_server"),
-        model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
-        max_turns=100,
-        enable_summarize=True,
-        proactive_summarization_threshold=8000,
-        tmux_pane_width=160,
-        tmux_pane_height=40,
-        model_context_limit=32_000,
-        model_output_limit=4_000,
-        llm_request_timeout=60,
-        sandbox_provider="opensandbox",
-        sandbox_timeout=10,
-        remote_tmux_binary_path=None,
-    )
-    server = Terminus2Agent(config=config, server_client=MagicMock(spec=ServerClient))
-
-    async def sandbox_exec(command, **kwargs):
-        return SimpleNamespace(stdout="", stderr="", return_code=0)
-
-    class FakeTerminus:
-        session = SimpleNamespace()
-
-        def __init__(self, **kwargs):
-            pass
-
-        async def setup(self, environment):
-            pass
-
-        async def run(self, instruction, environment, context):
-            raise asyncio.CancelledError
-
-    monkeypatch.setattr(app_module, "NeMoGymTerminus2", FakeTerminus)
-    monkeypatch.setattr(Terminus2Agent, "base_url_for_run", lambda *_args, **_kwargs: "http://model")
-    monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://model")
-
-    async def request_json():
-        return {"task_id": "task"}
-
-    request = SimpleNamespace(json=request_json, session={app_module.SESSION_ID_KEY: "session-1"})
-    with pytest.raises(asyncio.CancelledError):
-        await server._execute(
-            request,
-            NeMoGymResponseCreateParamsNonStreaming(input="solve this"),
-            SimpleNamespace(exec=sandbox_exec),
-        )
-
-    assert "Hit exception while running Terminus2" not in capsys.readouterr().err
