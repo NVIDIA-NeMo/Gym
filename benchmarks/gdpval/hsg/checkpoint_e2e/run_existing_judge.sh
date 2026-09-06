@@ -179,6 +179,7 @@ all_run() {
 launch_bootstrap() {
     [[ $# == 2 ]] || { usage >&2; exit 64; }
     local checkpoint source authorize account cpu_partition cpu_qos model_name state_id state_dir gemini_concurrency persistent_session
+    local judge_no_progress_seconds
     local gym_root_override expected_gym_revision export_spec old_run_dir receipt job_name job
     local reference_overlay reference_overlay_sha env_file
     local identity package_identity checkpoint_identity expected_run_id import_id package_sha
@@ -199,6 +200,10 @@ launch_bootstrap() {
     persistent_session=${CHECKPOINT_E2E_PERSISTENT_JUDGE_SESSION:-false}
     [[ $persistent_session == true || $persistent_session == false ]] \
         || fail "CHECKPOINT_E2E_PERSISTENT_JUDGE_SESSION must be true or false"
+    judge_no_progress_seconds=${CHECKPOINT_E2E_JUDGE_NO_PROGRESS_SECONDS:-1800}
+    [[ $judge_no_progress_seconds =~ ^[1-9][0-9]*$ \
+        && $judge_no_progress_seconds -ge 1800 && $judge_no_progress_seconds -le 7200 ]] \
+        || fail "CHECKPOINT_E2E_JUDGE_NO_PROGRESS_SECONDS must be an integer from 1800 through 7200"
     model_name=${CHECKPOINT_E2E_MODEL_NAME:-}
     [[ $model_name =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
         || fail "bootstrap requires an explicit safe CHECKPOINT_E2E_MODEL_NAME"
@@ -240,7 +245,7 @@ launch_bootstrap() {
         || fail "checkpoint identity is invalid"
     state_id=$(printf '%s\n' \
         "$checkpoint_identity" "$identity" "$package_identity" "$model_name" "$authorize" \
-        "$gemini_concurrency" "$persistent_session" \
+        "$gemini_concurrency" "$persistent_session" "$judge_no_progress_seconds" \
         "${gym_root_override:-default}" "${expected_gym_revision:-default}" \
         "$reference_overlay" "$reference_overlay_sha" "$env_file" \
         | sha256sum | awk '{print substr($1,1,24)}')
@@ -305,7 +310,7 @@ launch_bootstrap() {
     (( attempt <= 4 )) || fail "bootstrap submission bound reached: $latest/4"
     receipt=$submissions/attempt_${attempt}.jobid
     job_name="gdp-existing-boot-${state_id:0:10}"
-    export_spec="CHECKPOINT=$checkpoint,EXTERNAL_SOURCE=$source,ACTIVE_PACKAGE=$SCRIPT_DIR,BOOTSTRAP_STATE_DIR=$state_dir,AUTHORIZE_PROVIDER_CALLS=$authorize,EXPECTED_IMPORT_ID=$import_id,EXPECTED_PACKAGE_SOURCE_SHA256=$package_sha,EXPECTED_RUN_ID=$expected_run_id,EXPECTED_REFERENCE_OVERLAY_SHA256=$reference_overlay_sha,CHECKPOINT_E2E_OWNER_ROOT=$OWNER_ROOT,CHECKPOINT_E2E_AAV2_ROOT=$AAV2_ROOT,CHECKPOINT_E2E_DATASET=$DATASET,CHECKPOINT_E2E_REFERENCE_OVERLAY=$reference_overlay,CHECKPOINT_E2E_ENV_FILE=$env_file,CHECKPOINT_E2E_EXISTING_ROOT=$EXISTING_ROOT,CHECKPOINT_E2E_MODEL_NAME=$model_name,GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS=$gemini_concurrency,CHECKPOINT_E2E_PERSISTENT_JUDGE_SESSION=$persistent_session"
+    export_spec="CHECKPOINT=$checkpoint,EXTERNAL_SOURCE=$source,ACTIVE_PACKAGE=$SCRIPT_DIR,BOOTSTRAP_STATE_DIR=$state_dir,AUTHORIZE_PROVIDER_CALLS=$authorize,EXPECTED_IMPORT_ID=$import_id,EXPECTED_PACKAGE_SOURCE_SHA256=$package_sha,EXPECTED_RUN_ID=$expected_run_id,EXPECTED_REFERENCE_OVERLAY_SHA256=$reference_overlay_sha,CHECKPOINT_E2E_OWNER_ROOT=$OWNER_ROOT,CHECKPOINT_E2E_AAV2_ROOT=$AAV2_ROOT,CHECKPOINT_E2E_DATASET=$DATASET,CHECKPOINT_E2E_REFERENCE_OVERLAY=$reference_overlay,CHECKPOINT_E2E_ENV_FILE=$env_file,CHECKPOINT_E2E_EXISTING_ROOT=$EXISTING_ROOT,CHECKPOINT_E2E_MODEL_NAME=$model_name,GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS=$gemini_concurrency,CHECKPOINT_E2E_PERSISTENT_JUDGE_SESSION=$persistent_session,CHECKPOINT_E2E_JUDGE_NO_PROGRESS_SECONDS=$judge_no_progress_seconds"
     if [[ -n $gym_root_override ]]; then
         export_spec+=",CHECKPOINT_E2E_GYM_ROOT=$gym_root_override,CHECKPOINT_E2E_EXPECTED_GYM_REVISION=$expected_gym_revision"
     fi
@@ -349,6 +354,10 @@ launch_controller() {
     local persistent_session=${CHECKPOINT_E2E_PERSISTENT_JUDGE_SESSION:-false}
     [[ $persistent_session == true || $persistent_session == false ]] \
         || fail "CHECKPOINT_E2E_PERSISTENT_JUDGE_SESSION must be true or false"
+    local judge_no_progress_seconds=${CHECKPOINT_E2E_JUDGE_NO_PROGRESS_SECONDS:-1800}
+    [[ $judge_no_progress_seconds =~ ^[1-9][0-9]*$ \
+        && $judge_no_progress_seconds -ge 1800 && $judge_no_progress_seconds -le 7200 ]] \
+        || fail "CHECKPOINT_E2E_JUDGE_NO_PROGRESS_SECONDS must be an integer from 1800 through 7200"
     # shellcheck disable=SC1090
     source "$ACTIVE_PACKAGE/slurm_receipts.sh"
     local submissions="$RUN_DIR/existing_controller_submissions" latest=0 path name number
@@ -387,7 +396,7 @@ launch_controller() {
         -t 12:00:00 --cpus-per-task=2 --mem=8G \
         -o "$RUN_DIR/logs/%j_existing_controller.out" \
         -e "$RUN_DIR/logs/%j_existing_controller.err" \
-        --export=RUN_DIR="$RUN_DIR",CHECKPOINT_E2E_EXECUTION_PACKAGE="$ACTIVE_PACKAGE",CHECKPOINT_E2E_AUTHORIZE_PROVIDER_CALLS="$authorize",CHECKPOINT_E2E_PERSISTENT_JUDGE_SESSION="$persistent_session",GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS="$GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS",PATH="$SAFE_PATH" \
+        --export=RUN_DIR="$RUN_DIR",CHECKPOINT_E2E_EXECUTION_PACKAGE="$ACTIVE_PACKAGE",CHECKPOINT_E2E_AUTHORIZE_PROVIDER_CALLS="$authorize",CHECKPOINT_E2E_PERSISTENT_JUDGE_SESSION="$persistent_session",CHECKPOINT_E2E_JUDGE_NO_PROGRESS_SECONDS="$judge_no_progress_seconds",GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS="$GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS",PATH="$SAFE_PATH" \
         "$ACTIVE_PACKAGE/existing_judge_controller.sbatch") \
         || fail "could not submit or adopt import-only controller"
     slurm_publish_job_receipt "$RUN_DIR/EXISTING_CONTROLLER.jobid" "$job" true >/dev/null \

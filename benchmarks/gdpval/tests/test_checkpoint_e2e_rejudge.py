@@ -13,6 +13,7 @@ PACKAGE = Path(__file__).parents[1] / "hsg" / "checkpoint_e2e"
 def test_rejudge_shell_entrypoints_parse() -> None:
     scripts = [
         PACKAGE / "judge.sbatch",
+        PACKAGE / "judge_ports.sh",
         PACKAGE / "transport_prebuild.sbatch",
         PACKAGE / "prepare_rejudge_fingerprint.sh",
         PACKAGE / "rejudge_bootstrap.sbatch",

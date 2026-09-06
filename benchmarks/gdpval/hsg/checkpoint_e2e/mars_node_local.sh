@@ -5,7 +5,7 @@
 
 [[ -n ${BASH_VERSION:-} ]] || { echo "MARS_STAGE_FAIL: bash is required" >&2; return 64 2>/dev/null || exit 64; }
 
-MARS_PACKAGE_ID_EXPECTED=checkpoint-e2e-1.4.13-mars-local-r8-20260827
+MARS_PACKAGE_ID_EXPECTED=checkpoint-e2e-1.4.13-mars-local-r9-20260905
 MARS_GYM_REVISION_EXPECTED=d3f146d386c7dfe07d4fabce32c4c8b14c7917d2
 
 mars_fail() { echo "MARS_STAGE_FAIL: $*" >&2; return 64; }

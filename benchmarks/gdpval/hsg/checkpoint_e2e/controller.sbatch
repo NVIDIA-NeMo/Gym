@@ -17,6 +17,13 @@ export PYTHONUNBUFFERED=1
 
 : "${RUN_DIR:?set RUN_DIR}"
 : "${E2E_DIR:?set E2E_DIR}"
+: "${CHECKPOINT_E2E_EXECUTION_PACKAGE:?set CHECKPOINT_E2E_EXECUTION_PACKAGE}"
+[[ $CHECKPOINT_E2E_EXECUTION_PACKAGE == "$E2E_DIR" \
+    && -d $CHECKPOINT_E2E_EXECUTION_PACKAGE \
+    && ! -L $CHECKPOINT_E2E_EXECUTION_PACKAGE ]] || {
+    echo "invalid controller execution package" >&2
+    exit 64
+}
 
 # shellcheck disable=SC1090
 source "$RUN_DIR/settings.env"
@@ -24,6 +31,8 @@ source "$RUN_DIR/settings.env"
 source "$E2E_DIR/slurm_receipts.sh"
 # shellcheck disable=SC1090
 source "$E2E_DIR/judge_process_group.sh"
+# shellcheck disable=SC1090
+source "$E2E_DIR/judge_progress.sh"
 CAMPAIGN_PY="$E2E_DIR/campaign.py"
 JUDGE_STATE_PY="$E2E_DIR/judge_state.py"
 JUDGE_CACHE_ROOT="${JUDGE_DELIVERABLES:-$DELIVERABLES}"
@@ -147,14 +156,8 @@ wait_jobs() {
 judge_progress_signature() {
     local output="$RUN_DIR/judge_e2e/gdpval_aav2.jsonl"
     local journal="$RUN_DIR/judge_e2e/gdpval_aav2_multistage_state.jsonl"
-    local output_bytes=0 journal_bytes=0 cache_count=0
-    [[ ! -f $output ]] || output_bytes=$(wc -c < "$output")
-    [[ ! -f $journal ]] || journal_bytes=$(wc -c < "$journal")
-    if [[ -d $JUDGE_CACHE_ROOT ]]; then
-        cache_count=$(find "$JUDGE_CACHE_ROOT" -type f -name 'repeat_*_verify_response_*.json' -print 2>/dev/null \
-            | awk 'END {print NR + 0}') || cache_count=0
-    fi
-    printf '%s:%s:%s\n' "$output_bytes" "$journal_bytes" "$cache_count"
+    local failures="$RUN_DIR/judge_e2e/gdpval_aav2_failures.jsonl"
+    gdpval_judge_progress_signature "$output" "$journal" "$failures" "$JUDGE_CACHE_ROOT"
 }
 
 job_is_terminal() {
@@ -497,7 +500,7 @@ if [[ ! -e $RUN_DIR/PRECONVERT_PASS ]]; then
             --parsable -J "$job_name" \
             -A "$ACCOUNT" -p "$CPU_PARTITION" --qos="$CPU_QOS" \
             -o "$RUN_DIR/logs/%j_preconvert.out" -e "$RUN_DIR/logs/%j_preconvert.err" \
-            --export=ALL,RUN_DIR="$RUN_DIR",E2E_DIR="$E2E_DIR",PRECONVERT_ATTEMPT="$attempt" \
+            --export=ALL,RUN_DIR="$RUN_DIR",E2E_DIR="$E2E_DIR",CHECKPOINT_E2E_EXECUTION_PACKAGE="$CHECKPOINT_E2E_EXECUTION_PACKAGE",PRECONVERT_ATTEMPT="$attempt" \
             "$E2E_DIR/preconvert_closure.sbatch") \
             || block "could not submit or adopt preconvert attempt=$attempt"
         wait_jobs "preconvert_${attempt}" "$jid"
@@ -537,7 +540,7 @@ else
         jid=$(slurm_submit_or_adopt "$job_file" "transport-a${attempt}" "$job_name" \
             --parsable -J "$job_name" -A "$ACCOUNT" -p "$CPU_PARTITION" --qos="$CPU_QOS" \
             -o "$RUN_DIR/logs/%j_transport.out" -e "$RUN_DIR/logs/%j_transport.err" \
-            --export=RUN_DIR="$RUN_DIR",E2E_DIR="$E2E_DIR" \
+            --export=RUN_DIR="$RUN_DIR",E2E_DIR="$E2E_DIR",CHECKPOINT_E2E_EXECUTION_PACKAGE="$CHECKPOINT_E2E_EXECUTION_PACKAGE" \
             "$E2E_DIR/transport_prebuild.sbatch") \
             || block "could not submit or adopt transport prebuild attempt=$attempt"
         wait_jobs "transport_prebuild_${attempt}" "$jid"
@@ -591,7 +594,7 @@ if (( result_pass == 0 )); then
             -A "$ACCOUNT" -p "$CPU_PARTITION" --qos="$CPU_QOS" \
             -t "$JUDGE_WALL" --cpus-per-task=32 --mem=184G \
             -o "$RUN_DIR/logs/%j_judge.out" -e "$RUN_DIR/logs/%j_judge.err" \
-            --export=ALL,RUN_DIR="$RUN_DIR",JUDGE_DIR_SUFFIX=e2e,STAGES_FILE="$stages_file",DATASET="$DATASET",CONCURRENCY="$concurrency",NUM_COMPARISON_TRIALS=4,NUM_REPEATS=1,MULTISTAGE_SEED=42,MODEL_NAME="$MODEL_NAME" \
+            --export=ALL,RUN_DIR="$RUN_DIR",CHECKPOINT_E2E_EXECUTION_PACKAGE="$CHECKPOINT_E2E_EXECUTION_PACKAGE",JUDGE_DIR_SUFFIX=e2e,STAGES_FILE="$stages_file",DATASET="$DATASET",CONCURRENCY="$concurrency",NUM_COMPARISON_TRIALS=4,NUM_REPEATS=1,MULTISTAGE_SEED=42,MODEL_NAME="$MODEL_NAME" \
             "$JUDGE_SBATCH") \
             || block "could not submit or adopt judge attempt=$attempt"
         wait_judge_job "judge_attempt${attempt}_c${concurrency}" "$jid"

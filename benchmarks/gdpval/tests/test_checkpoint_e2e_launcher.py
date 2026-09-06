@@ -137,6 +137,8 @@ def _controller_fixture(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, str
     judge_sbatch = _write(e2e_dir / "judge.sbatch")
     _write(e2e_dir / "slurm_receipts.sh", (PACKAGE / "slurm_receipts.sh").read_text(encoding="utf-8"))
     _write(e2e_dir / "judge_process_group.sh", (PACKAGE / "judge_process_group.sh").read_text(encoding="utf-8"))
+    _write(e2e_dir / "judge_ports.sh", (PACKAGE / "judge_ports.sh").read_text(encoding="utf-8"))
+    _write(e2e_dir / "judge_progress.sh", (PACKAGE / "judge_progress.sh").read_text(encoding="utf-8"))
     transport_views = _write(e2e_dir / "transport_views.py")
     apptainer = _write(e2e_dir / "apptainer" / "apptainer", "#!/bin/sh\nexit 0\n", executable=True)
     sif = _write(tmp_path / "fixture.sif")
@@ -277,6 +279,7 @@ printf '%s\n' "$next"
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "RUN_DIR": str(run_dir),
         "E2E_DIR": str(e2e_dir),
+        "CHECKPOINT_E2E_EXECUTION_PACKAGE": str(e2e_dir),
         "CHECKPOINT_E2E_PYTHON": str(fake_python),
         "CHECKPOINT_E2E_AUTHORIZE_PROVIDER_CALLS": "false",
         "CHECKPOINT_E2E_POLL_SECONDS": "1",
@@ -324,6 +327,16 @@ def test_prepare_is_checkpoint_only_idempotent_and_status_is_read_only(tmp_path:
     ]
     for path in (run_dir / "campaign.json", run_dir / "settings.env", run_dir / "model_profile.env"):
         assert stat.S_IMODE(path.stat().st_mode) == 0o400
+    runtime_pins = (run_dir / "runtime_sources.sha256").read_text(encoding="utf-8")
+    for name in (
+        "MARS_PACKAGE_ID",
+        "mars_node_local.sh",
+        "gym_entrypoint.py",
+        "judge_session.py",
+        "judge_ports.sh",
+        "judge_progress.sh",
+    ):
+        assert f"  {PACKAGE / name}\n" in runtime_pins
 
     second = _run("prepare", checkpoint, environment)
     assert second.returncode == 0, second.stderr
@@ -434,6 +447,22 @@ def test_launch_contract_keeps_fast_shards_exact_recovery_and_strict_judging() -
     assert 'ROLLOUT_LIFECYCLE_SH="$SCRIPT_DIR/rollout_lifecycle.sh"' in launcher
     assert 'ROLLOUT_SHARD_COVERAGE_PY="$SCRIPT_DIR/rollout_shard_coverage.py"' in launcher
     assert 'ROLLOUT_PACKAGE_DIR="$SCRIPT_DIR"' in launcher
+    assert 'CHECKPOINT_E2E_EXECUTION_PACKAGE="$SCRIPT_DIR"' in launcher
+    assert ': "${CHECKPOINT_E2E_EXECUTION_PACKAGE:?set CHECKPOINT_E2E_EXECUTION_PACKAGE}"' in controller
+    assert (
+        '--export=ALL,RUN_DIR="$RUN_DIR",E2E_DIR="$E2E_DIR",'
+        'CHECKPOINT_E2E_EXECUTION_PACKAGE="$CHECKPOINT_E2E_EXECUTION_PACKAGE",'
+        'PRECONVERT_ATTEMPT="$attempt"' in controller
+    )
+    assert (
+        '--export=RUN_DIR="$RUN_DIR",E2E_DIR="$E2E_DIR",'
+        'CHECKPOINT_E2E_EXECUTION_PACKAGE="$CHECKPOINT_E2E_EXECUTION_PACKAGE"' in controller
+    )
+    assert (
+        '--export=ALL,RUN_DIR="$RUN_DIR",'
+        'CHECKPOINT_E2E_EXECUTION_PACKAGE="$CHECKPOINT_E2E_EXECUTION_PACKAGE",'
+        "JUDGE_DIR_SUFFIX=e2e" in controller
+    )
     assert launcher.count('"$ROLLOUT_LIFECYCLE_SH"') >= 2
     assert launcher.count('"$ROLLOUT_SHARD_COVERAGE_PY"') >= 2
     assert 'ROLLOUT_CONCURRENCY="${CHECKPOINT_E2E_ROLLOUT_CONCURRENCY:-20}"' in launcher
@@ -456,9 +485,9 @@ def test_launch_contract_keeps_fast_shards_exact_recovery_and_strict_judging() -
     assert "JUDGE_ONLY=true" in judge
     assert "RERUN_INCOMPLETE=true" in judge
     assert "num_comparison_trials=4" in judge
-    assert "JUDGE_PORT_BASE=12000" in judge
-    assert "JUDGE_PORT_SLOT_WIDTH=20" in judge
-    assert "JUDGE_PORT_SLOT_COUNT=1000" in judge
+    assert 'source "$E2E_DIR/judge_ports.sh"' in judge
+    assert "gdpval_select_judge_port_window" in judge
+    assert "JUDGE_PORT_SLOT_WIDTH=$GDPVAL_JUDGE_PORT_SLOT_WIDTH" in judge
     assert "flock -n 9" in judge
     assert "candidate_offset < JUDGE_PORT_SLOT_WIDTH" in judge
     assert "/dev/tcp/127.0.0.1/$candidate_port" in judge
@@ -471,6 +500,24 @@ def test_launch_contract_keeps_fast_shards_exact_recovery_and_strict_judging() -
     assert '--dataset "$DATASET" --expected-tasks "$EXPECTED_TASKS"' in launcher
     assert '--dataset "$DATASET" --expected-tasks "$EXPECTED_TASKS"' in controller
     assert '--dataset "$DATASET" --expected-tasks "$EXPECTED_TASKS"' in judge
+
+
+def test_full_launcher_requires_and_pins_node_local_execution_package() -> None:
+    launcher = LAUNCHER.read_text(encoding="utf-8")
+
+    expected = {
+        "MARS_PACKAGE_ID_FILE": "MARS_PACKAGE_ID",
+        "MARS_NODE_LOCAL_SH": "mars_node_local.sh",
+        "GYM_ENTRYPOINT_PY": "gym_entrypoint.py",
+        "JUDGE_SESSION_PY": "judge_session.py",
+        "JUDGE_PORTS_SH": "judge_ports.sh",
+        "JUDGE_PROGRESS_SH": "judge_progress.sh",
+    }
+    for variable, name in expected.items():
+        assert f'{variable}="$SCRIPT_DIR/{name}"' in launcher
+        # Every executable package input is checked before prepare and hashed
+        # into the campaign's immutable runtime-source inventory.
+        assert launcher.count(f'"${variable}"') >= 2
 
 
 def test_slurm_lifecycle_is_locked_revalidated_and_bounded() -> None:
@@ -1032,6 +1079,8 @@ def test_controller_judge_attempt_budget_is_global_across_restarts(tmp_path: Pat
     judge_sbatch = _write(e2e_dir / "judge.sbatch")
     _write(e2e_dir / "slurm_receipts.sh", (PACKAGE / "slurm_receipts.sh").read_text(encoding="utf-8"))
     _write(e2e_dir / "judge_process_group.sh", (PACKAGE / "judge_process_group.sh").read_text(encoding="utf-8"))
+    _write(e2e_dir / "judge_ports.sh", (PACKAGE / "judge_ports.sh").read_text(encoding="utf-8"))
+    _write(e2e_dir / "judge_progress.sh", (PACKAGE / "judge_progress.sh").read_text(encoding="utf-8"))
     transport_views = _write(e2e_dir / "transport_views.py")
     apptainer = _write(e2e_dir / "apptainer" / "apptainer", "#!/bin/sh\nexit 0\n", executable=True)
     sif = _write(tmp_path / "fixture.sif")
@@ -1192,6 +1241,7 @@ printf 'JobId=101 JobName=gdp-fixture-run-j16 Comment=%s State=COMPLETED\n' "$FA
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "RUN_DIR": str(run_dir),
         "E2E_DIR": str(e2e_dir),
+        "CHECKPOINT_E2E_EXECUTION_PACKAGE": str(e2e_dir),
         "CHECKPOINT_E2E_PYTHON": str(fake_python),
         "CHECKPOINT_E2E_AUTHORIZE_PROVIDER_CALLS": "true",
         "CHECKPOINT_E2E_POLL_SECONDS": "1",

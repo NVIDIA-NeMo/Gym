@@ -23,6 +23,12 @@ PARTIAL_PDF_OVERFLOW_PATCH="$SCRIPT_DIR/runtime_sources/partial_pdf_overflow.pat
 GEMINI_PDF_PART_CAP_PATCH="$SCRIPT_DIR/runtime_sources/gemini_pdf_part_cap.patch"
 TRANSPORT_ASSIGNMENT="$SCRIPT_DIR/runtime_sources/transport_assignment.py"
 SLURM_RECEIPTS_SH="$SCRIPT_DIR/slurm_receipts.sh"
+MARS_PACKAGE_ID_FILE="$SCRIPT_DIR/MARS_PACKAGE_ID"
+MARS_NODE_LOCAL_SH="$SCRIPT_DIR/mars_node_local.sh"
+GYM_ENTRYPOINT_PY="$SCRIPT_DIR/gym_entrypoint.py"
+JUDGE_SESSION_PY="$SCRIPT_DIR/judge_session.py"
+JUDGE_PORTS_SH="$SCRIPT_DIR/judge_ports.sh"
+JUDGE_PROGRESS_SH="$SCRIPT_DIR/judge_progress.sh"
 ROLLOUT_LIFECYCLE_SH="$SCRIPT_DIR/rollout_lifecycle.sh"
 ROLLOUT_SHARD_COVERAGE_PY="$SCRIPT_DIR/rollout_shard_coverage.py"
 PYTHON_BIN="${CHECKPOINT_E2E_PYTHON:-python3}"
@@ -243,7 +249,9 @@ prepare_campaign() {
         "$PROVIDER_RATE_LIMIT_BACKOFF_PATCH" \
         "$PARTIAL_PDF_OVERFLOW_PATCH" \
         "$GEMINI_PDF_PART_CAP_PATCH" \
-        "$TRANSPORT_ASSIGNMENT" "$SLURM_RECEIPTS_SH" \
+        "$TRANSPORT_ASSIGNMENT" "$SLURM_RECEIPTS_SH" "$MARS_PACKAGE_ID_FILE" \
+        "$MARS_NODE_LOCAL_SH" "$GYM_ENTRYPOINT_PY" "$JUDGE_SESSION_PY" \
+        "$JUDGE_PORTS_SH" "$JUDGE_PROGRESS_SH" \
         "$ROLLOUT_LIFECYCLE_SH" "$ROLLOUT_SHARD_COVERAGE_PY" \
         "$DATASET" "$ROLLOUT_SBATCH" "$SERVE_SCRIPT" \
         "$JUDGE_SBATCH" "$REFERENCE_OVERLAY" "$PARSER_PLUGIN" "$VLLM_CONTAINER" "$GDPVAL_SIF" \
@@ -326,6 +334,8 @@ prepare_campaign() {
         "$SCRIPT_DIR/VERSION" \
         "$SCRIPT_DIR/run_checkpoint_e2e.sh" \
         "$SLURM_RECEIPTS_SH" \
+        "$MARS_PACKAGE_ID_FILE" \
+        "$MARS_NODE_LOCAL_SH" \
         "$CAMPAIGN_PY" \
         "$SCRIPT_DIR/controller.sbatch" \
         "$SCRIPT_DIR/rejudge_controller.sbatch" \
@@ -334,6 +344,10 @@ prepare_campaign() {
         "$SCRIPT_DIR/prepare_rejudge_fingerprint.sh" \
         "$SCRIPT_DIR/judge_state.py" \
         "$SCRIPT_DIR/judge_process_group.sh" \
+        "$GYM_ENTRYPOINT_PY" \
+        "$JUDGE_SESSION_PY" \
+        "$JUDGE_PORTS_SH" \
+        "$JUDGE_PROGRESS_SH" \
         "$SCRIPT_DIR/preflight.sbatch" \
         "$SCRIPT_DIR/preconvert_closure.sbatch" \
         "$SCRIPT_DIR/preconvert_closure.py" \
@@ -615,7 +629,7 @@ submit_controller() {
         -o "$RUN_DIR/logs/%j_controller.out" -e "$RUN_DIR/logs/%j_controller.err")
     [[ -n $dependency ]] && args+=(--dependency="$dependency")
     slurm_submit_or_adopt "$receipt" "controller-${generation}" "$job_name" "${args[@]}" \
-        --export=ALL,RUN_DIR="$RUN_DIR",E2E_DIR="$SCRIPT_DIR",CHECKPOINT_E2E_AUTHORIZE_PROVIDER_CALLS="$authorize" \
+        --export=ALL,RUN_DIR="$RUN_DIR",E2E_DIR="$SCRIPT_DIR",CHECKPOINT_E2E_EXECUTION_PACKAGE="$SCRIPT_DIR",CHECKPOINT_E2E_AUTHORIZE_PROVIDER_CALLS="$authorize" \
         "$SCRIPT_DIR/controller.sbatch" || fail "could not submit or adopt controller generation=$generation"
 }
 

@@ -86,6 +86,8 @@ export CHECKPOINT_E2E_LOCAL_SETTINGS=$MARS_JOB_ROOT/settings.env
 export CHECKPOINT_E2E_LOCAL_EXISTING_SETTINGS=$MARS_JOB_ROOT/existing_judge.env
 # shellcheck disable=SC1090
 source "$E2E_DIR/slurm_receipts.sh"
+# shellcheck disable=SC1090
+source "$E2E_DIR/judge_progress.sh"
 
 AUTHORIZE=${CHECKPOINT_E2E_AUTHORIZE_PROVIDER_CALLS:-false}
 POLL_SECONDS=${CHECKPOINT_E2E_POLL_SECONDS:-60}
@@ -103,6 +105,7 @@ JUDGE_CONCURRENCIES=(16 8 4 1 16 8 4 1)
 JUDGE_DIR=$RUN_DIR/judge_$JUDGE_DIR_SUFFIX
 OUTPUT=$JUDGE_DIR/gdpval_aav2.jsonl
 JOURNAL=$JUDGE_DIR/gdpval_aav2_multistage_state.jsonl
+FAILURES=$JUDGE_DIR/gdpval_aav2_failures.jsonl
 JUDGE_CACHE_ROOT=$CORRECTED_TRANSPORT_VIEW_ROOT/candidate
 STATE_ROOT=$JUDGE_DIR/.checkpoint_e2e_judge_state
 FINAL_RECEIPT=$RUN_DIR/final_receipt_$JUDGE_DIR_SUFFIX.json
@@ -146,7 +149,8 @@ export GDPVAL_GEMINI_MAX_CONCURRENT_REQUESTS
     && ${#JUDGE_DIR_SUFFIX} -le 32 && $JUDGE_DIR_SUFFIX != e2e ]] \
     || block "judge suffix is invalid"
 [[ $POLL_SECONDS =~ ^[1-9][0-9]*$ && $POLL_SECONDS -le 300 \
-    && $JUDGE_NO_PROGRESS_SECONDS =~ ^[1-9][0-9]*$ && $JUDGE_NO_PROGRESS_SECONDS -le 7200 \
+    && $JUDGE_NO_PROGRESS_SECONDS =~ ^[1-9][0-9]*$ \
+    && $JUDGE_NO_PROGRESS_SECONDS -ge 1800 && $JUDGE_NO_PROGRESS_SECONDS -le 7200 \
     && $JUDGE_CANCEL_GRACE_SECONDS =~ ^[1-9][0-9]*$ && $JUDGE_CANCEL_GRACE_SECONDS -le 900 \
     && $ROTATION =~ ^[0-9]+$ && $MAX_ROTATIONS =~ ^[0-9]+$ && $MAX_ROTATIONS -le 4 ]] \
     || block "controller retry/poll contract is invalid"
@@ -207,10 +211,7 @@ wait_job() {
 }
 
 judge_progress_signature() {
-    local output_bytes=0 journal_bytes=0
-    [[ ! -f $OUTPUT ]] || output_bytes=$(wc -c < "$OUTPUT")
-    [[ ! -f $JOURNAL ]] || journal_bytes=$(wc -c < "$JOURNAL")
-    printf '%s:%s\n' "$output_bytes" "$journal_bytes"
+    gdpval_judge_progress_signature "$OUTPUT" "$JOURNAL" "$FAILURES" "$JUDGE_CACHE_ROOT"
 }
 
 wait_judge_job() {

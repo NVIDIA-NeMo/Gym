@@ -2613,6 +2613,7 @@ def test_launcher_uses_versioned_root_and_pins_transport_contract() -> None:
         "transport_prebuild.sbatch",
         "judge_state.py",
         "judge_process_group.sh",
+        "judge_ports.sh",
         "benchmarks/gdpval/prepare.py",
         "responses_api_models/vllm_model/configs/vllm_model.yaml",
         ".venv/bin/gym",

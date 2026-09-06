@@ -122,6 +122,8 @@ export CHECKPOINT_E2E_LOCAL_ENV_FILE=$ENV_FILE
 export CHECKPOINT_E2E_LOCAL_SETTINGS=$MARS_JOB_ROOT/settings.env
 # shellcheck disable=SC1090
 source "$E2E_DIR/judge_process_group.sh"
+# shellcheck disable=SC1090
+source "$E2E_DIR/judge_ports.sh"
 
 fail() { echo "CHECKPOINT_E2E_JUDGE_FAIL: $*" >&2; exit 64; }
 
@@ -325,13 +327,16 @@ export GDPVAL_MAX_TOTAL_SERIALIZED_REQUEST_BYTES_FOR_JUDGE=495000000
 
 # Gym's default head-server port is process-global. CPU nodes are shared, so
 # two unrelated eval jobs can otherwise collide before any provider request.
-# Give each Slurm job a deterministic slot below the Linux ephemeral range.
-# A node-local advisory lock closes the probe-to-bind race between these jobs;
-# checking every port in the slot also avoids unrelated listening services.
+# Ray also claims kernel-selected ports after Gym's initial probes. Keep Gym's
+# deterministic slots outside the node's actual ephemeral range so Ray cannot
+# take one during that probe-to-bind interval. A node-local advisory lock and
+# a full-slot probe still avoid other harness jobs and listening services.
 command -v flock >/dev/null || fail "flock is unavailable on the judge node"
-JUDGE_PORT_BASE=12000
-JUDGE_PORT_SLOT_WIDTH=20
-JUDGE_PORT_SLOT_COUNT=1000
+gdpval_select_judge_port_window \
+    || fail "could not select a bounded non-ephemeral Gym port window"
+JUDGE_PORT_BASE=$GDPVAL_JUDGE_PORT_BASE
+JUDGE_PORT_SLOT_WIDTH=$GDPVAL_JUDGE_PORT_SLOT_WIDTH
+JUDGE_PORT_SLOT_COUNT=$GDPVAL_JUDGE_PORT_SLOT_COUNT
 JUDGE_PORT_SEED=${SLURM_JOB_ID:-$$}
 [[ $JUDGE_PORT_SEED =~ ^[1-9][0-9]*$ ]] || fail "judge port seed must be a positive integer"
 JUDGE_PORT_LOCK_ROOT=/tmp/gdpval_e2e_port_locks_${UID}

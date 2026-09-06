@@ -16,6 +16,8 @@ PACKAGE = Path(__file__).parents[1] / "hsg" / "checkpoint_e2e"
 EXISTING_LAUNCHER = PACKAGE / "run_existing_judge.sh"
 EXISTING_CONTROLLER = PACKAGE / "existing_judge_controller.sbatch"
 MARS_HELPER = PACKAGE / "mars_node_local.sh"
+JUDGE_PROGRESS_HELPER = PACKAGE / "judge_progress.sh"
+JUDGE_PORTS_HELPER = PACKAGE / "judge_ports.sh"
 
 
 def _write(path: Path, text: str = "fixture\n", *, executable: bool = False) -> Path:
@@ -160,6 +162,98 @@ def test_existing_judge_controller_receives_execution_package() -> None:
 
     assert ': "${CHECKPOINT_E2E_EXECUTION_PACKAGE:?set CHECKPOINT_E2E_EXECUTION_PACKAGE}"' in controller
     assert 'CHECKPOINT_E2E_EXECUTION_PACKAGE="$ACTIVE_PACKAGE"' in lines[controller_index - 1]
+    assert 'CHECKPOINT_E2E_JUDGE_NO_PROGRESS_SECONDS="$judge_no_progress_seconds"' in launcher
+
+    full_controller = (PACKAGE / "controller.sbatch").read_text(encoding="utf-8")
+    assert 'source "$E2E_DIR/judge_progress.sh"' in full_controller
+    assert 'gdpval_judge_progress_signature "$output" "$journal" "$failures" "$JUDGE_CACHE_ROOT"' in full_controller
+    assert 'find "$JUDGE_CACHE_ROOT"' not in full_controller
+
+    finish = (PACKAGE / "finish_existing_prepare.sbatch").read_text(encoding="utf-8")
+    assert 'CHECKPOINT_E2E_JUDGE_NO_PROGRESS_SECONDS="$JUDGE_NO_PROGRESS_SECONDS"' in finish
+
+
+def test_existing_judge_progress_tracks_exact_assignment_caches(tmp_path: Path) -> None:
+    output = tmp_path / "judge output.jsonl"
+    journal = tmp_path / "judge journal.jsonl"
+    failures = tmp_path / "judge output_failures.jsonl"
+    candidate = tmp_path / "candidate view"
+
+    def signature() -> str:
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; gdpval_judge_progress_signature "$2" "$3" "$4" "$5"',
+                "judge-progress-test",
+                str(JUDGE_PROGRESS_HELPER),
+                str(output),
+                str(journal),
+                str(failures),
+                str(candidate),
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        return result.stdout.strip()
+
+    assert signature() == "0:0:0:0"
+    output.write_text("abc", encoding="utf-8")
+    journal.write_text("12345", encoding="utf-8")
+    task_one = candidate / "task_one"
+    task_one.mkdir(parents=True)
+    first_cache = task_one / "repeat_0_verify_response_0123456789ab.json"
+    first_cache.write_text("{}\n", encoding="utf-8")
+    assert signature() == "3:5:0:1"
+
+    failures.write_text("{}\n", encoding="utf-8")
+    assert signature() == "3:5:3:1"
+
+    # Rewriting one slot is not another completed assignment and therefore
+    # cannot reset the watchdog indefinitely.
+    first_cache.write_text('{"replacement": true}\n', encoding="utf-8")
+    assert signature() == "3:5:3:1"
+
+    # Only direct, regular, exact-assignment cache names are progress. Legacy,
+    # malformed, nested, and symlinked artifacts must not keep a stuck job alive.
+    (task_one / "repeat_0_verify_response.json").write_text("{}\n", encoding="utf-8")
+    (task_one / "repeat_x_verify_response_0123456789ab.json").write_text("{}\n", encoding="utf-8")
+    nested = task_one / "repeat_0"
+    nested.mkdir()
+    (nested / "repeat_1_verify_response_0123456789ab.json").write_text("{}\n", encoding="utf-8")
+    (task_one / "repeat_2_verify_response_0123456789ab.json").symlink_to(first_cache)
+    assert signature() == "3:5:3:1"
+
+    task_two = candidate / "task_two"
+    task_two.mkdir()
+    (task_two / "repeat_3_verify_response_0123456789abcdef.json").write_text("{}\n", encoding="utf-8")
+    assert signature() == "3:5:3:2"
+
+
+def test_bootstrap_scopes_and_forwards_judge_watchdog_override(tmp_path: Path) -> None:
+    package, checkpoint, source, _reference_overlay, _env_file, environment = _bootstrap_fixture(tmp_path)
+
+    default = _run_bootstrap(package, checkpoint, source, environment)
+    assert default.returncode == 0, (default.stdout, default.stderr)
+    overridden = _run_bootstrap(
+        package,
+        checkpoint,
+        source,
+        {**environment, "CHECKPOINT_E2E_JUDGE_NO_PROGRESS_SECONDS": "7200"},
+    )
+    assert overridden.returncode == 0, (overridden.stdout, overridden.stderr)
+    assert _state_dir(overridden) != _state_dir(default)
+    export_argument = next(
+        line
+        for line in (Path(environment["FAKE_SBATCH_ARGS"]) / "902.args").read_text(encoding="utf-8").splitlines()
+        if line.startswith("--export=")
+    )
+    assert "CHECKPOINT_E2E_JUDGE_NO_PROGRESS_SECONDS=7200" in export_argument
+
+    bootstrap = (PACKAGE / "existing_judge_bootstrap.sbatch").read_text(encoding="utf-8")
+    assert 'CHECKPOINT_E2E_JUDGE_NO_PROGRESS_SECONDS="$CHECKPOINT_E2E_JUDGE_NO_PROGRESS_SECONDS"' in bootstrap
 
 
 def test_bootstrap_preserves_reference_inputs_and_scopes_adoption_to_their_identity(tmp_path: Path) -> None:
@@ -261,6 +355,10 @@ def test_bootstrap_rejects_noncanonical_reference_input_paths(tmp_path: Path) ->
 
 
 def test_node_local_cache_marker_read_is_idempotent(tmp_path: Path) -> None:
+    package_id = (PACKAGE / "MARS_PACKAGE_ID").read_text(encoding="utf-8").strip()
+    helper = MARS_HELPER.read_text(encoding="utf-8")
+    assert f"MARS_PACKAGE_ID_EXPECTED={package_id}" in helper
+
     marker = tmp_path / ".mars-ready"
     script = r"""
 set -euo pipefail
@@ -278,7 +376,6 @@ ln -s "$marker" "$marker.link"
         ["bash", "-c", script, "marker-test", str(MARS_HELPER), str(marker)],
         check=True,
     )
-    helper = MARS_HELPER.read_text(encoding="utf-8")
     assert '$(<"$marker" 2>/dev/null)' not in helper
 
 
@@ -290,6 +387,10 @@ def test_affected_shell_entrypoints_parse() -> None:
             str(EXISTING_LAUNCHER),
             str(EXISTING_CONTROLLER),
             str(MARS_HELPER),
+            str(JUDGE_PROGRESS_HELPER),
+            str(JUDGE_PORTS_HELPER),
+            str(PACKAGE / "controller.sbatch"),
+            str(PACKAGE / "finish_existing_prepare.sbatch"),
         ],
         check=True,
     )

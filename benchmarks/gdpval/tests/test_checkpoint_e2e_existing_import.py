@@ -343,6 +343,8 @@ def test_import_controller_gates_every_scientific_phase_and_preserves_null_marke
     assert "null finish markers remain untouched" in controller
     assert "JUDGE_CONCURRENCIES=(16 8 4 1 16 8 4 1)" in controller
     assert "JUDGE_NO_PROGRESS_SECONDS" in controller
+    assert 'source "$E2E_DIR/judge_progress.sh"' in controller
+    assert 'gdpval_judge_progress_signature "$OUTPUT" "$JOURNAL" "$FAILURES" "$JUDGE_CACHE_ROOT"' in controller
     assert "scancel --signal=TERM" in controller
     assert "queue_state != RUNNING" in controller
     assert 'publish_immutable "$RUN_DIR/final_receipt_existing.tmp" "$FINAL_RECEIPT"' in controller
