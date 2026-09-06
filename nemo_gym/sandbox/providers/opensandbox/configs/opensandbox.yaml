@@ -21,6 +21,7 @@ sandbox:
     sandbox-api: opensandbox-sdk
   opensandbox:
     connection:
+      # May include the scheme (https://host): it then sets `protocol` and takes precedence over it.
       domain: ${oc.env:OPENSANDBOX_DOMAIN,opensandbox-server.opensandbox-system.svc.cluster.local}
       api_key: ${oc.env:OPENSANDBOX_API_KEY}
       protocol: http
