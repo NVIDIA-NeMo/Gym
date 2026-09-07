@@ -114,7 +114,13 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
             )
 
     client = Client()
-    llm = NeMoGymLLM(client=client, model_name="policy_model", model_context_limit=32_000, model_output_limit=4_000)
+    llm = NeMoGymLLM(
+        client=client,
+        model_name="policy_model",
+        model_context_limit=32_000,
+        model_output_limit=4_000,
+        llm_request_timeout=60,
+    )
 
     first = await llm.call("first")
     second = await llm.call(
@@ -153,7 +159,6 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
     assert [item.content for item in llm.trajectory if isinstance(item, NeMoGymEasyInputMessage)] == [
         "first",
         "second",
-        "compacted summary",
         "third",
     ]
 
@@ -176,6 +181,9 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         tmux_pane_height=40,
         dump_trajectory=dump_trajectory,
         debug=debug,
+        model_context_limit=32_000,
+        model_output_limit=4_000,
+        llm_request_timeout=60,
         sandbox_provider="opensandbox",
         sandbox_timeout=10,
         remote_tmux_binary_path=None,
@@ -198,6 +206,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
             self.kwargs = kwargs
             self._session = SimpleNamespace(stop=self.stop)
             self._times_spent = [1.0, 3.0]
+            self._num_proactive_compactions = 0
             self._num_compactions = 2
 
         async def stop(self):
@@ -211,6 +220,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
             assert self.kwargs["dump_trajectory"] is dump_trajectory
             await environment.exec("tmux run")
             self.kwargs["llm"]._times_spent.extend([2.0, 4.0])
+            self.kwargs["llm"]._num_compactions = 2
             context.n_input_tokens = 4
             context.n_output_tokens = 3
             self.kwargs["llm"].trajectory.append(
@@ -258,7 +268,10 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         "model_call_time_pct": 60.0,
         "terminus2_time_taken": 10.0,
         "model_calls_gt_10min": 0,
+        "num_proactive_compactions": 0,
         "num_compactions": 2,
+        "error": None,
+        "usages": [],
     }
     assert response.output[-1].content[0].text == "done"
     assert response.usage.input_tokens == 4

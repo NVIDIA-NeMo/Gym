@@ -1,6 +1,8 @@
 # Nemotron 3.5 Super Evaluation setup
 - [Nemotron 3.5 Super Evaluation setup](#nemotron-35-super-evaluation-setup)
   - [Run production evals](#run-production-evals)
+    - [Typical job shapes](#typical-job-shapes)
+    - [Open problems](#open-problems)
   - [Development commands](#development-commands)
     - [vllm-router patch (decode-node cache imbalance)](#vllm-router-patch-decode-node-cache-imbalance)
       - [Measured effect](#measured-effect)
@@ -11,10 +13,28 @@
 
 
 ## Run production evals
-TODO @bxyu-nvidia: Will publish these by Thu Jul 30
-
 Results will appear in that checkpoint folder.
 
+### Typical job shapes
+These job shapes have been tuned to finish evaluation on Nemotron 3.5 Super checkpoints within a 4 hour Slurm timeout window. All compute numbers assume GB200 NVL72.
+
+|Name|Argument|
+|---|---|
+|Prefill nodes|`NUM_PREFILL_NODES=<>`|
+|Decode nodes|`NUM_DECODE_NODES=<>`|
+|Concurrency|`++num_samples_in_parallel=<>`|
+
+|Benchmark|Harness|Prefill nodes|Decode nodes|Concurrency|
+|---|---|---|---|
+|SWE Bench Verified + Multilingual|OpenCode|2|2|1024|
+|SWE Bench Pro|OpenCode|4|6|1024|
+|DeepSWE (1 repeat)|OpenCode|2|2|1024|
+|Terminal Bench 2.1|Terminus 2|2|8|512|
+|Terminal Bench 2.1|OpenCode|?|?|?|
+
+### Open problems
+1. We can't reduce the number of prefill nodes because the TRT LLM kernel isn't large enough to support higher max_num_batched_tokens
+2. Once MTP is functional with PD-disagg / async scheduling / prefix caching / etc, we should be able to reduce the decode nodes as well.
 
 ## Development commands
 
