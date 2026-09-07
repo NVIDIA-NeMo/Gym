@@ -67,6 +67,7 @@ Read ownership is independent of write ownership.
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Mapping
 from importlib import import_module
 from pathlib import Path
@@ -75,7 +76,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym.token_id_capture.protocols import (
-    LineageStore,
+    LineageResolver,
     TokenSink,
     installed_lineage_store,
     installed_token_sink,
@@ -126,6 +127,28 @@ class TokenIdCaptureSettings(BaseModel):
     # ``None`` disables the kill switch.
     max_mask_fraction: float | None = None
     mask_fraction_min_samples: int = 50
+    # Store token deltas in framework-owned storage.
+    # The inference worker writes each delta before returning commit coordinates.
+    # The shared lineage store records call metadata.
+    # It also makes committed parents visible to every serving worker.
+    # No additional in-memory coordinator is used.
+    external_staging: bool = False
+    # Name of the environment variable containing the manifest-route bearer token.
+    # The serving process reads the token without adding it to serialized configuration.
+    control_auth_token_env: str = Field(
+        default="NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN",
+        min_length=1,
+    )
+
+    def resolve_control_auth_token(self) -> str:
+        """Read the control secret without serializing it into run config."""
+        token = os.environ.get(self.control_auth_token_env)
+        if not token:
+            raise ValueError(
+                "token_id_capture.external_staging requires a control bearer in "
+                f"environment variable {self.control_auth_token_env}"
+            )
+        return token
 
 
 class TokenIdCaptureConfig(BaseModel):
@@ -140,6 +163,13 @@ class TokenIdCaptureConfig(BaseModel):
     @model_validator(mode="after")
     def _validate(self) -> "TokenIdCaptureConfig":
         block = self.token_id_capture
+        if block.external_staging and not block.enabled:
+            raise ValueError("token_id_capture.external_staging requires token_id_capture.enabled")
+        if block.external_staging and block.rebuild_response:
+            raise ValueError(
+                "token_id_capture.external_staging requires rebuild_response=false because the "
+                "framework owns staged-record finalization"
+            )
         if not block.enabled:
             # Keep inactive settings for templated configurations.
             # A run may toggle only ``enabled``.
@@ -210,7 +240,7 @@ class TokenIdCaptureConfig(BaseModel):
             return None
         return self._build_endpoint(target, self.token_id_capture.sink_kwargs, TokenSink, "sink")
 
-    def build_lineage_store(self) -> LineageStore | None:
+    def build_lineage_store(self) -> LineageResolver | None:
         """Construct the configured request-time lineage store."""
         target = self.token_id_capture.lineage_store
         if not self.token_id_capture.enabled or target is None:
@@ -218,7 +248,7 @@ class TokenIdCaptureConfig(BaseModel):
         return self._build_endpoint(
             target,
             self.token_id_capture.lineage_store_kwargs,
-            LineageStore,
+            LineageResolver,
             "lineage_store",
         )
 

@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
+from nemo_gym._config_aliases import LEGACY_ENVIRONMENT_ALIASES, legacy_config_path_alias
 from nemo_gym.cli.utils import did_you_mean
 
 
@@ -396,6 +397,19 @@ def _asset_config_path(flag: str, value: str) -> str:
     if matches:
         return str(matches[0])
 
+    if flag == "environment" and value in LEGACY_ENVIRONMENT_ALIASES:
+        canonical = LEGACY_ENVIRONMENT_ALIASES[value]
+        resolved = _asset_config_path(flag, canonical)
+        logger.warning(f"`--environment {value}` is deprecated; use `--environment {canonical}`.")
+        return resolved
+
+    if canonical_path := legacy_config_path_alias(path):
+        for root in roots:
+            candidate = root / canonical_path
+            if candidate.exists():
+                logger.warning(f"Config path `{path}` is deprecated; use `{canonical_path}`.")
+                return str(candidate.resolve())
+
     # No match: build a "did you mean?" hint and the roots searched
     if flag == "benchmark":
         # Benchmarks need special handling because some use non-standard config paths (arbitrary nesting), so
@@ -473,11 +487,11 @@ ENVIRONMENT = _asset_selector("environment", repeatable=True)
 RESOURCES_SERVER_CONFIG = _asset_selector("resources-server", repeatable=True)
 MODEL_TYPE = _asset_selector("model-type")
 
-# Override for the verifier-side `allowed_agents` guard. Offered wherever --agent-type composes.
+# Override for verifier-side agent/model compatibility guards. Offered wherever runtime configs compose.
 ALLOW_UNSUPPORTED_PAIRING = _bool_flag(
     "allow-unsupported-pairing",
     "allow_unsupported_pairing",
-    "Run even if the environment's resources server does not declare support for the selected agent.",
+    "Run even if the environment's resources server does not declare support for the selected agent or model type.",
 )
 
 AGENT_TYPE = Flag(
