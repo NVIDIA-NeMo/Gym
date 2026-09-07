@@ -46,23 +46,36 @@ from responses_api_agents.nooa_agent.runner import (
 
 
 def _configure_native_file_journal() -> None:
-    """Add NOOA's portable .nooa.jsonl journal when NOOA_TRACE_DIR is set.
+    """Also write NOOA's portable .nooa.jsonl journal, on by default.
 
-    Replaces the auto-probed exporter list with the live viewer journal plus
-    the file journal, so one run produces both artifacts: the viewer session
-    and an importable native trace file. "exporters=None" (unset env) keeps
-    the auto-probe configuration untouched.
+    The live viewer journal alone loses the run's spans whenever the viewer
+    host is unreachable (observed: a run's viewer session was lost to a host
+    outage while the file artifact came out complete). The file journal is
+    the durable, importable record. Runs write it next to the rollout
+    artifacts by default; set NOOA_TRACE_DIR to relocate, or to the empty
+    string to disable.
     """
     import os
+    from pathlib import Path
 
-    trace_dir = os.getenv("NOOA_TRACE_DIR")
-    if not trace_dir:
-        return
-    from nooa.tracing import enable_tracing
+    if "NOOA_TRACE_DIR" in os.environ:
+        trace_dir = os.environ["NOOA_TRACE_DIR"]
+        if not trace_dir:
+            return  # explicitly disabled
+    else:
+        trace_dir = str(Path(__file__).resolve().parents[2] / "results" / "native-traces")
+    Path(trace_dir).mkdir(parents=True, exist_ok=True)
+    from nooa.tracing import enable_tracing, probe_otlp_endpoint
     from nooa.tracing import exporters as nooa_exporters
 
     endpoint = os.getenv("OTLP_ENDPOINT", "http://localhost:5001")
-    enable_tracing([nooa_exporters.journal(endpoint=endpoint), nooa_exporters.journal_file(trace_dir)])
+    exporters = [nooa_exporters.journal_file(trace_dir)]
+    if probe_otlp_endpoint(endpoint):
+        # Only fan out to the live viewer when it answers; an unreachable endpoint
+        # would otherwise retry-storm every model call while the file journal alone
+        # already guarantees the durable record.
+        exporters.append(noa_exporters.journal(endpoint=endpoint))
+    enable_tracing(exporters)
 
 
 _configure_native_file_journal()
