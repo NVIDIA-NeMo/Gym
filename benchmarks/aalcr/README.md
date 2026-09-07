@@ -3,6 +3,17 @@
 gym eval prepare --benchmark aalcr
 ```
 
+The upstream HuggingFace dataset is pinned to a fixed revision (`HF_REVISION` in `prepare.py`, currently
+dataset v1.0) so that scores stay reproducible when upstream publishes a new revision. To prepare against a
+different dataset version, override the revision:
+
+```bash
+gym eval prepare --benchmark aalcr ++prepare_script_args.revision=<commit-sha-or-tag>
+```
+
+Note that scores are not comparable across upstream dataset versions — v1.1 changed 16 of the 100 answer
+keys and revised the judge protocol.
+
 # Run
 ```bash
 gym eval run \

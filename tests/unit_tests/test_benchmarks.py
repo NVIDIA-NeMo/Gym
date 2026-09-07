@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -35,6 +36,26 @@ def test_pinchbench_tavily_key_is_derived_from_environment() -> None:
 
     assert benchmark["tavily_api_key"] == "${oc.env:PINCHBENCH_TAVILY_API_KEY,null}"
     assert agent["pinchbench_agent"]["responses_api_agents"]["pinchbench"]["tavily_api_key"] == ("${tavily_api_key}")
+
+
+def test_aalcr_dataset_revision_is_pinned() -> None:
+    """AA-LCR must resolve a fixed upstream revision, not `main`.
+
+    Upstream publishes breaking revisions to `main` (a past one rewrote 16 of the 100 answer keys), which
+    silently changes scores for a config that is otherwise unchanged.
+    """
+    import importlib.util
+    import inspect
+
+    repo_root = Path(__file__).parents[2]
+    prepare_fpath = repo_root / "benchmarks/aalcr/prepare.py"
+    spec = importlib.util.spec_from_file_location("_aalcr_prepare", prepare_fpath)
+    aalcr_prepare = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(aalcr_prepare)
+
+    assert re.fullmatch(r"[0-9a-f]{40}", aalcr_prepare.HF_REVISION), "pin must be a full commit sha"
+    assert inspect.signature(aalcr_prepare.prepare).parameters["revision"].default == aalcr_prepare.HF_REVISION
+    assert "resolve/main/" not in prepare_fpath.read_text()
 
 
 @pytest.fixture(autouse=True)

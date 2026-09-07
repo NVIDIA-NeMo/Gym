@@ -32,6 +32,11 @@ BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "aalcr_benchmark.jsonl"
 
+HF_REPO_ID = "ArtificialAnalysis/AA-LCR"
+# Pinned HuggingFace dataset revision. Upstream publishes breaking revisions to `main` (v1.1 rewrote 16
+# of the 100 answer keys), so resolving `main` silently changes scores. This pin is dataset v1.0.
+HF_REVISION = "bdae010bbce259820c0e34c1d7cce210d966fb75"  # pragma: allowlist secret
+
 
 # From https://github.com/NVIDIA-NeMo/Skills/blob/54d2e113c2f64bf74bda72e15f23f01b524850da/nemo_skills/dataset/aalcr/prepare.py#L94-L105
 def _dirty_filename(fname: str) -> str:
@@ -51,12 +56,23 @@ def _dirty_filename(fname: str) -> str:
     return filename_with_artifacts
 
 
-def prepare() -> Path:
+def prepare(revision: str = HF_REVISION) -> Path:
+    """Prepare the AA-LCR benchmark data at a pinned upstream dataset revision.
+
+    Args:
+        revision: HuggingFace revision (commit sha, tag or branch) for both the answer keys and the
+            source documents. Defaults to dataset v1.0. Override via
+            `++prepare_script_args.revision=<sha>` to evaluate against a different dataset version.
+    """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    data = load_dataset("ArtificialAnalysis/AA-LCR", split="test", token=get_hf_token())
+    print(f"Preparing {HF_REPO_ID} at revision {revision}")
 
-    documents_url = "https://huggingface.co/datasets/ArtificialAnalysis/AA-LCR/resolve/main/extracted_text/AA-LCR_extracted-text.zip"
+    data = load_dataset(HF_REPO_ID, split="test", revision=revision, token=get_hf_token())
+
+    documents_url = (
+        f"https://huggingface.co/datasets/{HF_REPO_ID}/resolve/{revision}/extracted_text/AA-LCR_extracted-text.zip"
+    )
     response = requests.get(documents_url)
     response.raise_for_status()
     zip_file = ZipFile(BytesIO(response.content))
