@@ -277,6 +277,12 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
 
+        if os.path.abspath(self.config.shared_dir) == "/tmp":
+            LOG.warning(
+                "CCC shared_dir is /tmp. If the resources server and sandbox run in separate containers, "
+                "/tmp may not be visible to both. Set SHARED_TEMP_DIR to a path mounted into both containers."
+            )
+
         print(
             f"Initializing CompetitiveCodingChallenges evaluator with config: {self.config.model_dump_json(indent=2)}"
         )
