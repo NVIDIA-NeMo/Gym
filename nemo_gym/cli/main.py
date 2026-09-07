@@ -674,8 +674,8 @@ COMMANDS = {
             _value_flag(
                 "status",
                 "status",
-                "Filter by validation status.",
-                choices=("experimental", "no-manifest"),
+                "Filter by manifest status.",
+                choices=("experimental", "maintained", "no-manifest"),
             ),
             _value_flag("lifecycle", "lifecycle", "Filter by lifecycle.", choices=("active", "deprecated")),
             JSON,

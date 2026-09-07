@@ -37,7 +37,7 @@ ENVIRONMENT_TOMBSTONE_FILENAME = ".nemo_gym_tombstone"
 MANIFEST_FILENAME = "manifest.yaml"
 
 CatalogKind = Literal["environment", "benchmark"]
-CatalogStatus = Literal["experimental", "no-manifest"]
+CatalogStatus = Literal["experimental", "maintained", "no-manifest"]
 
 
 class RegistryError(ConfigError):
@@ -114,7 +114,7 @@ def _manifest_entry(
         "path": manifest_path.parent,
         "description": manifest.description,
         "domain": _enum_value(manifest.domain),
-        "status": "experimental",
+        "status": "experimental" if manifest.experimental else "maintained",
         "manifest_path": manifest_path,
         "version": manifest.version,
         "integration_profile": _enum_value(manifest.integration_profile),

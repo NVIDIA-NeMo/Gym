@@ -92,10 +92,8 @@ def finalize_publication(
             f"Catalog did not resolve {entry.kind} {entry.name!r} to its exact manifest after publication checks."
         )
     published = matches[0]
-    if published.status != "experimental":
-        raise EnvironmentPublicationError(
-            f"Newly published workloads must enter as experimental, observed {published.status!r}."
-        )
+    if published.status not in {"experimental", "maintained"}:
+        raise EnvironmentPublicationError(f"Published workload has unsupported catalog status {published.status!r}.")
 
     return EnvironmentPublicationReport(
         name=validation.name,
