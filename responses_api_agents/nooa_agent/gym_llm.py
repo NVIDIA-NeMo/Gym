@@ -16,7 +16,11 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+import time
+import uuid
+from contextlib import contextmanager
+from types import SimpleNamespace
+from typing import Any, Iterator
 
 from nooa.unifiedllm import LLMResponse, Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel
@@ -34,6 +38,130 @@ from responses_api_agents.nooa_agent.observability import GymTraceHooks
 
 class PolicyCallBudgetExceeded(RuntimeError):
     """Raised when one rollout exceeds its configured policy-call budget."""
+
+
+def _journal_callbacks() -> list[Any]:
+    """Return NOOA's installed litellm journal callbacks, if tracing is enabled.
+
+    NOOA's LLM-message journal (and the viewer's LLM turns) are fed by a litellm
+    callback installed by ``nooa.tracing``. This LLM calls the Gym model server
+    directly, bypassing litellm, so the callback has to be driven by hand.
+    """
+    try:
+        import litellm
+
+        from nooa.tracing._litellm_journal import MessageJournalCallback
+    except Exception:  # pragma: no cover - litellm optional in unit tests
+        return []
+    return [cb for cb in litellm.callbacks if isinstance(cb, MessageJournalCallback)]
+
+
+@contextmanager
+def _llm_span(model: str) -> Iterator[Any]:
+    """Emit the LLM span litellm's instrumentor would have produced.
+
+    The viewer keys its LLM-turn rendering on ``openinference.span.kind = LLM``
+    spans and reconstructs message content from the journal by span id.
+    """
+    try:
+        from opentelemetry import trace as otel_trace
+
+        tracer = otel_trace.get_tracer("openinference.instrumentation.litellm")
+    except Exception:  # pragma: no cover - otel always present in practice
+        yield None
+        return
+    with tracer.start_as_current_span("litellm.completion") as span:
+        span.set_attribute("openinference.span.kind", "LLM")
+        span.set_attribute("llm.model_name", model)
+        span.set_attribute("gen_ai.operation.name", "chat")
+        yield span
+
+
+def _content_text(content: Any) -> str | None:
+    """Flatten a Responses content value to plain text."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                text = part.get("text") or part.get("output_text")
+                if text:
+                    parts.append(text)
+            elif isinstance(part, str):
+                parts.append(part)
+        return "\n".join(parts) if parts else None
+    if isinstance(content, dict):
+        return content.get("text") or content.get("output_text")
+    return None
+
+
+def _chat_items(items: list[Any]) -> list[dict[str, Any]]:
+    """Responses-API items -> chat-shaped messages the trace journal can render."""
+    out: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            out.append({"role": "user", "content": str(item)})
+            continue
+        item_type = item.get("type")
+        if item_type == "function_call":
+            out.append(
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": item.get("call_id") or item.get("id"),
+                            "type": "function",
+                            "function": {"name": item.get("name"), "arguments": item.get("arguments")},
+                        }
+                    ],
+                }
+            )
+        elif item_type == "function_call_output":
+            out.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": item.get("call_id"),
+                    "content": _content_text(item.get("output")),
+                }
+            )
+        else:
+            role = item.get("role") or ("assistant" if item_type == "message" else "user")
+            message: dict[str, Any] = {"role": role}
+            text = _content_text(item.get("content"))
+            if text is not None:
+                message["content"] = text
+            out.append(message)
+    return out
+
+
+class _JournalResponseView:
+    """Show a Gym response to the journal callback in litellm's response shape."""
+
+    __slots__ = ("_output_messages", "_usage")
+
+    def __init__(self, response: NeMoGymResponse) -> None:
+        self._output_messages = _chat_items(
+            [item.model_dump(mode="json", exclude_none=True) for item in response.output]
+        )
+        usage = response.usage
+        self._usage = (
+            None
+            if usage is None
+            else SimpleNamespace(
+                prompt_tokens=usage.input_tokens or 0,
+                completion_tokens=usage.output_tokens or 0,
+                prompt_tokens_details=usage.input_tokens_details,
+            )
+        )
+
+    @property
+    def output(self) -> Any:
+        return self._output_messages
+
+    @property
+    def usage(self) -> Any:
+        return self._usage
 
 
 class InvalidPolicyOutputError(ValueError):
@@ -203,19 +331,45 @@ class GymResponsesLLM(UnifiedLLM):
 
         body = NeMoGymResponseCreateParamsNonStreaming.model_validate(request)
         self._request_collector.append(body.model_copy(deep=True))
-        http_response = await self._server_client.post(
-            server_name=self._model_server_name,
-            url_path=self._model_url_path,
-            json=body,
-            cookies=self._cookies,
-        )
-        await raise_for_status(http_response)
-        raw = await get_response_json(http_response)
-        response = NeMoGymResponse.model_validate(raw)
-        self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
-        self._response_collector.append(response)
-        if self._trace_hooks is not None:
-            self._trace_hooks.record_model_response(response)
+        # NOOA's message journal is a litellm callback; this LLM bypasses litellm, so drive the
+        # callback by hand so the viewer receives LLM turns (same events litellm delivers).
+        callbacks = _journal_callbacks()
+        litellm_call_id = f"gym-{uuid.uuid4().hex}" if callbacks else ""
+        chat_messages = _chat_items(input_items) if callbacks else []
+        with _llm_span(self.model) as llm_span:
+            for callback in callbacks:
+                callback.log_pre_api_call(self.model, chat_messages, {"litellm_call_id": litellm_call_id})
+            started = time.time()
+            try:
+                http_response = await self._server_client.post(
+                    server_name=self._model_server_name,
+                    url_path=self._model_url_path,
+                    json=body,
+                    cookies=self._cookies,
+                )
+                await raise_for_status(http_response)
+                raw = await get_response_json(http_response)
+                response = NeMoGymResponse.model_validate(raw)
+            except BaseException:
+                for callback in callbacks:
+                    callback.log_failure_event(
+                        {"litellm_call_id": litellm_call_id}, None, started, time.time()
+                    )
+                raise
+            completed = time.time()
+            self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
+            self._response_collector.append(response)
+            if self._trace_hooks is not None:
+                self._trace_hooks.record_model_response(response)
+            if llm_span is not None:
+                llm_span.set_attribute("llm.model_name", response.model or self.model)
+            for callback in callbacks:
+                callback.log_success_event(
+                    {"litellm_call_id": litellm_call_id, "model": response.model or self.model},
+                    _JournalResponseView(response),
+                    started,
+                    completed,
+                )
 
         dumped_output = [item.model_dump(mode="json", exclude_none=True) for item in response.output]
         self._prior_outputs.extend(dumped_output)
