@@ -9,6 +9,7 @@ ifbench_benchmark_simple_agent:
   _inherit_from: ifbench_simple_agent
   responses_api_agents:
     simple_agent:
+      max_steps: 1
       resources_server:
         name: ifbench_benchmark_resources_server
       datasets:
