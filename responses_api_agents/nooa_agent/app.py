@@ -156,6 +156,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         model_cookies: dict[str, str],
         resource_cookies: dict[str, str],
         rollout_id: str | None = None,
+        sandbox_handle: str | None = None,
     ) -> tuple[NeMoGymResponse, AgentObservationBundle, NOOARunResult]:
         rollout_id = rollout_id or maybe_rollout_id_from_run_body(body) or uuid4().hex
         result = await self.runner.run(
@@ -166,6 +167,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 model_url_path=model_url_path,
                 model_cookies=model_cookies,
                 resource_cookies=resource_cookies,
+                sandbox_handle=sandbox_handle,
             )
         )
         response, observations = project_nooa_result(
@@ -283,6 +285,10 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         )
         await raise_for_status(seed)
         _merge_cookies(resource_cookies, seed)
+        seed_result = await get_response_json(seed)
+        # Seeded-sandbox environments (e.g. SWE-bench) return the container id;
+        # the agent class may opt in to running inside that container.
+        sandbox_handle = seed_result.get("sandbox_handle") if isinstance(seed_result, dict) else None
 
         try:
             async with asyncio.timeout(self.config.run_timeout_secs) as episode_timeout:
@@ -291,6 +297,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                     model_url_path=self.url_path_for_run("/v1/responses", body),
                     model_cookies=dict(request.cookies),
                     resource_cookies=resource_cookies,
+                    sandbox_handle=sandbox_handle,
                 )
         except TimeoutError as error:
             if not episode_timeout.expired():

@@ -46,6 +46,7 @@ class NOOARunRequest:
     model_url_path: str
     model_cookies: dict[str, str] = field(default_factory=dict)
     resource_cookies: dict[str, str] = field(default_factory=dict)
+    sandbox_handle: str | None = None
 
 
 @dataclass(slots=True)
@@ -131,6 +132,14 @@ class EmbeddedNOOARunner:
             (self._agent_class,),
             {"__annotations__": {tool_namespace: type(tools)}},
         )
+        if request.sandbox_handle is not None:
+            # Seeded-sandbox environments (e.g. SWE-bench) return the container
+            # id from /seed_session. Attach an exec-only sandbox so agent classes
+            # that opt in (via the ``_gym_sandbox`` class attribute) run and edit
+            # inside the verifier-owned container.
+            from responses_api_agents.nooa_agent.sandbox_attach import attach_docker_sandbox
+
+            agent_class._gym_sandbox = attach_docker_sandbox(request.sandbox_handle)
         agent = agent_class(llm=llm, **self._invocation.init_kwargs)
         if tool_namespace in vars(agent):
             raise ValueError(f"tool_namespace {tool_namespace!r} collides with an existing agent attribute")
