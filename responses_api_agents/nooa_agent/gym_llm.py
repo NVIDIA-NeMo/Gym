@@ -336,6 +336,10 @@ class GymResponsesLLM(UnifiedLLM):
         callbacks = _journal_callbacks()
         litellm_call_id = f"gym-{uuid.uuid4().hex}" if callbacks else ""
         chat_messages = _chat_items(input_items) if callbacks else []
+        if callbacks and instructions:
+            # litellm carries the system message as messages[0]; the Responses API keeps it in
+            # `instructions`. Mirror the native shape so the journal records the system prompt.
+            chat_messages.insert(0, {"role": "system", "content": instructions})
         with _llm_span(self.model) as llm_span:
             for callback in callbacks:
                 callback.log_pre_api_call(self.model, chat_messages, {"litellm_call_id": litellm_call_id})
