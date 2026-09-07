@@ -479,7 +479,8 @@ async def test_real_runner_composes_and_restores_preexisting_nooa_hooks() -> Non
             )
         )
         assert result.return_value == "cold"
-        assert calls[0] == "before:answer:composed-hooks"
+        # The trace session is unique per run: rollout id plus a short uuid suffix.
+        assert calls[0].startswith("before:answer:composed-hooks-")
         assert calls[-1].startswith("after:answer:")
         assert get_hooks() is existing
     finally:

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -174,8 +175,12 @@ class EmbeddedNOOARunner:
                 observation_gaps=observation_gaps,
             )
 
+        # Unique per-run trace session: the rollout id is stable across attempts, so reusing
+        # it as the viewer session merges every run of a task into one session. The rollout id
+        # itself stays authoritative for the trajectory, turn identity, and capture keying.
+        trace_session = f"{request.rollout_id}-{uuid.uuid4().hex[:8]}"
         try:
-            with session_scope(request.rollout_id), hooks_scope(trace_hooks):
+            with session_scope(trace_session), hooks_scope(trace_hooks):
                 return_value = await entrypoint(**arguments)
         except PolicyCallBudgetExceeded as error:
             return snapshot(
