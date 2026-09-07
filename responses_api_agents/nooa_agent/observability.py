@@ -26,6 +26,7 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     ToolCallObservation,
     TrajectoryRecord,
+    TrajectoryToolCall,
     TrajectoryTurn,
 )
 
@@ -39,6 +40,14 @@ class _InvocationContext:
 
 
 @dataclass(slots=True)
+class _CodeExecContext:
+    invocation_id: str
+    tool_call_id: str
+    started_at: float
+    started_monotonic: float
+
+
+@dataclass(slots=True)
 class NOOATraceSnapshot:
     """Immutable-by-convention projection inputs captured during one NOOA run."""
 
@@ -46,6 +55,7 @@ class NOOATraceSnapshot:
     invocations: list[AgentInvocation] = field(default_factory=list)
     model_calls: dict[str, list[ModelCallRef]] = field(default_factory=dict)
     turns: list[TrajectoryTurn] = field(default_factory=list)
+    tool_calls: list[ToolCallObservation] = field(default_factory=list)
     task_id: str = "unknown"
     rollout_id: str = "unknown"
 
@@ -70,6 +80,7 @@ class GymTraceHooks:
         self._invocations: dict[str, AgentInvocation] = {}
         self._turn_counts: dict[str, int] = {}
         self._turns: list[TrajectoryTurn] = []
+        self._tool_calls: list[ToolCallObservation] = []
 
     @property
     def invocation_id(self) -> str:
@@ -81,6 +92,7 @@ class GymTraceHooks:
             invocations=[invocation.model_copy(deep=True) for invocation in self._invocations.values()],
             model_calls={key: list(value) for key, value in self._snapshot.model_calls.items()},
             turns=[turn.model_copy(deep=True) for turn in self._turns],
+            tool_calls=[record.model_copy(deep=True) for record in self._tool_calls],
             task_id=self._snapshot.task_id,
             rollout_id=self._snapshot.rollout_id,
         )
@@ -203,8 +215,18 @@ class GymTraceHooks:
         execution_id: str,
         generation_id: str | None = None,
         **kwargs: Any,
-    ) -> None:
-        return None
+    ) -> _CodeExecContext:
+        # NOOA's own tool executions (python_cell) are invisible to Gym's trajectory
+        # otherwise: only Gym-assigned resource tools emit execution records. Emit a
+        # ToolCallObservation so ng_trajectory.tool_calls carries per-execution spans;
+        # the collector joins the model-visible output from the conversation by
+        # (invocation_id, tool_call_id).
+        return _CodeExecContext(
+            invocation_id=self.invocation_id,
+            tool_call_id=str(kwargs.get("tool_call_id") or execution_id),
+            started_at=time(),
+            started_monotonic=perf_counter(),
+        )
 
     def after_code_execution(
         self,
@@ -216,7 +238,21 @@ class GymTraceHooks:
         execution_id: str,
         **kwargs: Any,
     ) -> None:
-        return None
+        if not isinstance(context, _CodeExecContext):
+            return
+        self._tool_calls.append(
+            ToolCallObservation(
+                invocation_id=context.invocation_id,
+                tool_call_id=context.tool_call_id,
+                tool_name="python_cell",
+                started_at=context.started_at,
+                completed_at=time(),
+                duration_ms=max(0.0, (perf_counter() - context.started_monotonic) * 1000),
+                timing_source="harness",
+                status="failed" if exception is not None else "completed",
+                error_type=type(exception).__name__ if exception is not None else None,
+            )
+        )
 
     def before_method_invocation(
         self,
@@ -281,15 +317,19 @@ def nooa_producer_trajectory(trace: NOOATraceSnapshot) -> TrajectoryRecord:
 
     Gym's rollout collector accepts turn records only from a producer-emitted
     ``ng_trajectory``; observation records have no turn variant. Without this,
-    the agent-turn health checks stay unobserved. Invocations and tool calls are
-    deliberately omitted: the collector treats producer invocations as
-    authoritative and would drop the conversation-carrying observation records,
-    so only turn facts belong here.
+    the agent-turn health checks stay unobserved. Invocations are deliberately
+    omitted: the collector treats producer invocations as authoritative and
+    would drop the conversation-carrying observation records. Turn and
+    tool-call facts belong here; the collector merges tool records with the
+    model-visible output from the conversation.
     """
     return TrajectoryRecord(
         task_id=trace.task_id,
         rollout_id=trace.rollout_id,
         turns=[turn.model_copy(deep=True) for turn in trace.turns],
+        # ToolCallObservation -> TrajectoryToolCall: pydantic won't coerce a parent-class
+        # instance into the subclass field, so widen explicitly.
+        tool_calls=[TrajectoryToolCall.model_validate(record.model_dump()) for record in trace.tool_calls],
     )
 
 
@@ -399,7 +439,9 @@ def project_nooa_result(
         )
 
     known_invocations = {invocation.invocation_id for invocation in invocations}
-    tool_records = [
+    # Gym-assigned resource-tool executions plus NOOA's own code executions, keyed so the
+    # collector merges them with the model-visible output from the conversation.
+    tool_records: list[ToolCallObservation] = [
         ToolCallObservation(
             invocation_id=(
                 execution.invocation_id
@@ -417,4 +459,10 @@ def project_nooa_result(
         )
         for execution in tool_executions
     ]
+    seen_tool_keys = {(record.invocation_id, record.tool_call_id) for record in tool_records}
+    tool_records.extend(
+        record
+        for record in trace.tool_calls
+        if (record.invocation_id, record.tool_call_id) not in seen_tool_keys
+    )
     return response, AgentObservationBundle(source="nooa", records=[*invocations, *tool_records], gaps=gaps)

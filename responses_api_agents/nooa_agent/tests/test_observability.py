@@ -369,3 +369,67 @@ def test_turns_flow_through_collector_projection_without_turn_gap() -> None:
     assert canonical.turns[0].rollout_id == "0-0"
     gap_codes = [gap.code for gap in canonical.gaps]
     assert "turns_unavailable" not in gap_codes
+
+
+def test_code_execution_emits_tool_call_observation() -> None:
+    hooks = GymTraceHooks(
+        ModelServerRef(type="responses_api_models", name="policy_model"),
+        task_id="task-0",
+        rollout_id="0-0",
+    )
+
+    context = hooks.before_code_execution(
+        agent=None,
+        code="print(1)",
+        execution_id="exec-1",
+        generation_id="gen-1",
+        tool_call_id="call_abc",
+    )
+    hooks.after_code_execution(
+        agent=None,
+        code="print(1)",
+        result=None,
+        exception=None,
+        context=context,
+        execution_id="exec-1",
+        tool_call_id="call_abc",
+    )
+    failed_context = hooks.before_code_execution(
+        agent=None,
+        code="boom()",
+        execution_id="exec-2",
+        tool_call_id="call_def",
+    )
+    hooks.after_code_execution(
+        agent=None,
+        code="boom()",
+        result=None,
+        exception=ValueError("boom"),
+        context=failed_context,
+        execution_id="exec-2",
+        tool_call_id="call_def",
+    )
+
+    snapshot = hooks.snapshot()
+    assert [record.tool_call_id for record in snapshot.tool_calls] == ["call_abc", "call_def"]
+    assert all(record.tool_name == "python_cell" for record in snapshot.tool_calls)
+    assert all(record.timing_source == "harness" for record in snapshot.tool_calls)
+    assert [record.status for record in snapshot.tool_calls] == ["completed", "failed"]
+    assert snapshot.tool_calls[1].error_type == "ValueError"
+
+    # The producer trajectory widens them to TrajectoryToolCall records.
+    trajectory = nooa_producer_trajectory(snapshot)
+    assert [tool.tool_call_id for tool in trajectory.tool_calls] == ["call_abc", "call_def"]
+    assert trajectory.tool_calls[0].duration_ms is not None
+
+    # And the observation bundle merges them with Gym's own tool executions.
+    projected, bundle = project_nooa_result(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="Question"),
+        return_value="done",
+        model_responses=[],
+        tool_executions=[],
+        trace=snapshot,
+        result_present=True,
+    )
+    tool_records = [record for record in bundle.records if isinstance(record, ToolCallObservation)]
+    assert [record.tool_call_id for record in tool_records] == ["call_abc", "call_def"]
