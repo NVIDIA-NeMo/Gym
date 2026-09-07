@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Download and convert the pinned 50-question BigFinanceBench public subset."""
 
 from __future__ import annotations
@@ -14,6 +26,7 @@ from pathlib import Path
 ENV_DIR = Path(__file__).parent
 DATA_DIR = ENV_DIR / "data"
 SPEC_FPATH = ENV_DIR / "upstream_spec.json"
+# Gym invokes benchmark prepare scripts from the repository root.
 OUTPUT_FPATH = Path("benchmarks/big_finance/data/big_finance_public_50.jsonl")
 EXPECTED_COUNT = 50
 _UPSTREAM_SHA = "d794a65fe583edc6852b44c817b0a2aef33ca831"  # pragma: allowlist secret
