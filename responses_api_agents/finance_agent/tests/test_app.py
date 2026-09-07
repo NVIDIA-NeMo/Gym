@@ -539,6 +539,33 @@ class TestResponses:
         assert [item["role"] for item in res.json()["output"] if item["type"] == "message"] == ["assistant"]
         assert res.json()["output"][0]["content"][0]["text"] == "Revenue was $100B."
 
+    def test_finish_profile_executes_tools_when_prose_and_calls_share_a_turn(self) -> None:
+        config = _make_config(
+            max_steps=3,
+            prose_only_behavior="finish",
+            tool_call_execution="concurrent",
+        )
+        agent, client = _make_agent_and_client(config)
+        mixed_response = _text_response("I will verify that figure.")
+        mixed_response["output"].extend(
+            _tool_call_response("sec_filing_search", "{}", call_id="call_search")["output"]
+        )
+        model_mock = _dotjson_mock(
+            mixed_response,
+            _text_response("Revenue was $100B.", resp_id="resp_2"),
+        )
+        resource_mock = _dotjson_mock({"result": "filing data"})
+        agent.server_client.post = AsyncMock(side_effect=_route(model_mock, resource_mock))
+
+        res = client.post("/v1/responses", json=_INPUT)
+
+        assert res.status_code == 200
+        resource_calls = [
+            call for call in agent.server_client.post.call_args_list if call.kwargs["server_name"] == _RS_SERVER
+        ]
+        assert [call.kwargs["url_path"] for call in resource_calls] == ["/sec_filing_search"]
+        assert res.json()["metadata"]["stop_reason"] == "assistant_message"
+
     def test_continue_injection_stops_at_submit_final_result(self) -> None:
         """Continue.-loop must yield as soon as a done-tool fires -- otherwise
         the agent could keep looping past a legitimate terminal tool call.

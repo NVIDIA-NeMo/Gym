@@ -158,8 +158,9 @@ class FinanceAgentConfig(BaseResponsesAPIAgentConfig):
     done_tools: List[str] = Field(
         default_factory=lambda: ["submit_final_result"],
         description="Tool names that signal the agent loop should terminate. "
-        "When any tool call in a batch matches, remaining calls are skipped "
-        "and the loop exits.",
+        "Sequential execution skips later calls when a terminal tool is "
+        "invoked; concurrent execution finishes the full batch and exits only "
+        "when a terminal call succeeds.",
     )
     model_call_timeout: Optional[float] = Field(
         default=None,
