@@ -1,0 +1,16 @@
+config_paths:
+  - responses_api_agents/nemo_fabric_agent/configs/nemo_fabric_agent.yaml
+
+nemo_fabric_mini_swe_agent:
+  _inherit_from: nemo_fabric_agent
+  responses_api_agents:
+    nemo_fabric_agent:
+      adapter_id: nvidia.fabric.mini-swe-agent
+      model_provider: anthropic
+      harness_settings: {}
+      fabric_config:
+        environment:
+          env:
+            MSWEA_COST_TRACKING: ignore_errors
+        runtime:
+          max_turns: 8

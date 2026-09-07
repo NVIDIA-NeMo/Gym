@@ -19,12 +19,13 @@ import json
 import logging
 import os
 from copy import deepcopy
-from time import time, time_ns
+from threading import Lock
+from time import monotonic, time, time_ns
 from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request
-from pydantic import Field
+from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
@@ -49,6 +50,28 @@ from nemo_gym.responses_converter import (
     split_responses_input_output_items,  # noqa: F401
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.token_id_capture import (
+    NG_CAPTURE_FIELD,
+    NG_COMMIT_COORDS_FIELD,
+    current_capture_context,
+    mark_external_staging_committed,
+)
+from nemo_gym.token_id_capture.config import token_id_capture_config
+from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
+from nemo_gym.token_id_capture.protocols import CaptureLedger
+from nemo_gym.token_id_capture.records import (
+    TOKEN_FIELDS,
+    response_to_output_items,
+    strip_token_fields,
+)
+from nemo_gym.token_id_capture.staging.records import (
+    INVALID_COMMIT_COORDS_REASON,
+    WORKER_CAPTURE_FAILED_REASON,
+    WORKER_MISSING_COMMIT_COORDS_REASON,
+    CallRecord,
+    CaptureLedgerCommit,
+    CommitCoords,
+)
 
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
@@ -167,6 +190,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
     sequential_reasoning_allowed: bool = True
 
+    # Opt in to supplying a verified parent's exact tokens to the engine.
+    # Prefix supply requires generation-time prompt_token_ids as proof.
+    # Stock vLLM does not support the required_prefix_token_ids extension.
+    # Prefix supply is incompatible with use_completions_api=true.
+    supply_prefix_token_ids: bool = False
+
     # As of Feb 2026, we default this to False since majority of open source models aren't responses native with the exception of GPT-OSS
     is_responses_native: bool = False
 
@@ -193,12 +222,35 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     extra_body: Optional[Dict[str, Any]] = None
 
     default_headers: Dict[str, str] = Field(default_factory=dict)
+
+    # Optional path to a file that publishes the current backend base_url.
+    # Used for shared serving jobs that move hosts when they restart.
+    endpoint_file: Optional[str] = None
+
+    # How long a missing endpoint file allows for the use of the last-known-good clients.
+    endpoint_stale_grace_s: float = 300.0
+
+    # Connection-error retry bound applied to clients when endpoint_file is set.
+    endpoint_connection_retries: Optional[int] = 8
+
+    # How often endpoint_file may be stat'd; otherwise the `os.stat` results is cached and reused.
+    endpoint_check_interval_s: float = 10.0
     # Optional prefix for resolving relative ``metadata.audio_path`` (or
     # entries in ``metadata.audio_paths``) against. Absolute paths are used
     # as-is. When unset, relative paths raise. Audio is always inlined as a
     # ``data:audio/<fmt>;base64,...`` URI at request time — keeps the JSONL
     # small without depending on vLLM's ``--allowed-local-media-path``.
     audio_root: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate_prefix_supply(self) -> "VLLMModelConfig":
+        if self.supply_prefix_token_ids and not self.return_token_id_information:
+            raise ValueError("supply_prefix_token_ids requires return_token_id_information=true")
+        if self.supply_prefix_token_ids and self.use_completions_api:
+            raise ValueError("supply_prefix_token_ids is not supported with use_completions_api=true")
+        if self.supply_prefix_token_ids and self.is_responses_native:
+            raise ValueError("supply_prefix_token_ids is not supported with is_responses_native=true")
+        return self
 
     # When True, outbound calls go to vLLM's /v1/completions endpoint instead
     # of /v1/chat/completions. The Gym /v1/responses and /v1/chat/completions
@@ -241,6 +293,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         "mm_processor_kwargs",
         "required_prefix_token_ids",
     )
+    _external_capture_enabled: bool = PrivateAttr(default=False)
 
     def get_converter(self) -> "VLLMConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
@@ -269,14 +322,36 @@ class VLLMModel(SimpleResponsesAPIModel):
                 base_url=base_url,
                 api_key=self.config.api_key,
                 default_headers=self.config.default_headers,
+                max_connection_retries=(
+                    self.config.endpoint_connection_retries if self.config.endpoint_file else None
+                ),
             )
             for base_url in self.config.base_url
         ]
 
         self._session_id_to_client: Dict[str, NeMoGymAsyncOpenAI] = dict()
+        self._endpoint_file_mtime: Optional[float] = None
+        self._endpoint_missing_since: Optional[float] = None
+        self._endpoint_last_check_at: Optional[float] = None
 
         self._converter = self.get_converter()
         self._transport_call_index = 0
+
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        capture_config = token_id_capture_config(global_config) if global_config is not None else None
+        self._external_capture_enabled = bool(
+            capture_config is not None and capture_config.token_id_capture.external_staging
+        )
+        if self._external_capture_enabled:
+            if self.config.use_completions_api:
+                raise ValueError("token_id_capture.external_staging does not support use_completions_api=true")
+            if self.config.is_responses_native:
+                raise ValueError("token_id_capture.external_staging requires the chat-backed Responses API path")
+            if self.config.return_token_id_information:
+                raise ValueError(
+                    "token_id_capture.external_staging requires return_token_id_information=false; "
+                    "worker custody replaces the token echo"
+                )
 
         self._chat_template_tokenizer = None
         if self.config.use_completions_api and self.config.render_chat_template:
@@ -336,7 +411,11 @@ class VLLMModel(SimpleResponsesAPIModel):
         chat_completion_response = await self.chat_completions(request, chat_completion_create_params)
 
         return self._converter.chat_completion_to_response(
-            responses_create_params=body, chat_completion=chat_completion_response
+            responses_create_params=body,
+            chat_completion=chat_completion_response,
+            # Keep the backend envelope id only for captured requests. Terminal
+            # attribution matches it to the ledger row.
+            preserve_envelope_id=self._preserve_envelope_id(),
         )
 
     def _apply_sampling_overrides(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -430,6 +509,21 @@ class VLLMModel(SimpleResponsesAPIModel):
             encoded = base64.b64encode(f.read()).decode("ascii")
         return f"data:audio/{mime};base64,{encoded}"
 
+    @staticmethod
+    def _strip_hosted_only_tool_fields(body_dict: Dict[str, Any]) -> None:
+        """Remove OpenAI-hosted-only fields from function tool definitions.
+
+        ``strict`` is an OpenAI-hosted schema-enforcement flag that vLLM does
+        not implement: its FunctionDefinition keeps the unknown key, and chat
+        templates that render unknown function-definition keys (e.g.
+        Nemotron's ``render_extra_keys``) inject it into the prompt,
+        perturbing every tool-bearing request. Strip it at the vLLM boundary
+        so hosted providers keep their ``strict`` semantics.
+        """
+        for tool_dict in body_dict.get("tools") or []:
+            if tool_dict.get("type") == "function":
+                (tool_dict.get("function") or {}).pop("strict", None)
+
     def _preprocess_chat_completion_create_params(self, request: Request, body_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Preprocess the body dict before issuing a chat completion request.
 
@@ -446,6 +540,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             The (possibly mutated) ``body_dict`` that will be forwarded to
             ``client.create_chat_completion``.
         """
+        self._strip_hosted_only_tool_fields(body_dict)
+
         if self.config.replace_developer_role_with_system:
             for message_dict in body_dict["messages"]:
                 if message_dict.get("role") == "developer":
@@ -603,7 +699,138 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         self._apply_sampling_overrides(body_dict)
         self._validate_single_choice_token_request(body_dict)
+        if self._external_capture_enabled:
+            body_dict = self._apply_external_capture(body_dict)
+        else:
+            body_dict = self._apply_prefix_supply(body_dict)
+
         return body_dict
+
+    def _preserve_envelope_id(self) -> bool:
+        """Keep the backend envelope id only for requests with an active external-capture context."""
+        context = current_capture_context()
+        return context is not None and context.external_staging
+
+    def _apply_external_capture(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Add worker capture metadata to an admitted chat request.
+
+        If parent resolution did not admit the call, forward the request without capture metadata.
+        The lineage store has already recorded that capture failure.
+        The worker returns the completion without staging token data.
+        """
+        context = current_capture_context()
+        if context is None or not context.external_staging:
+            return body_dict
+        admission = context.capture_admission
+        if admission is None:
+            return body_dict
+        body_dict[NG_CAPTURE_FIELD] = admission.model_dump(mode="json")
+        body_dict.update(
+            logprobs=True,
+            top_logprobs=0,
+            return_tokens_as_token_ids=True,
+        )
+        if admission.mode == "token_in":
+            body_dict["required_prefix_token_ids"] = list(admission.required_prefix_token_ids)
+        return body_dict
+
+    # Protect the ``[supplied, eligible, total]`` diagnostic counts.
+    # Eligible calls have a resolved parent.
+    _prefix_supply_counts: List[int] = PrivateAttr(default_factory=lambda: [0, 0, 0])
+    _prefix_supply_lock: Any = PrivateAttr(default_factory=Lock)
+
+    def _apply_prefix_supply(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Add a verified parent's exact tokens to a compatible engine request.
+
+        Prefix supply is opt-in.
+        A unique parent match provides the cumulative token prefix.
+        The backend must implement the ``required_prefix_token_ids`` extension.
+        Stock vLLM does not implement this extension.
+        ``prefix_requested`` records that the request included the prefix.
+        Only generation-time ``prompt_token_ids`` can prove that the backend applied it.
+        That proof sets ``prefix_supplied``.
+        A missing or ambiguous parent leaves the request unchanged.
+        """
+        if not self.config.supply_prefix_token_ids:
+            return body_dict
+        context = current_capture_context()
+        # The parent was resolved before dispatch from the request as received.
+        # Conversion and preprocessing may have reshaped this body.
+        # Re-resolving here could select against a representation never indexed.
+        parent_tokens = context.parent_tokens if context is not None else []
+        with self._prefix_supply_lock:
+            self._prefix_supply_counts[2] += 1
+            if parent_tokens:
+                self._prefix_supply_counts[1] += 1
+        if context is None:
+            # An uncorrelated rollout call has no verified parent.
+            return body_dict
+        if not parent_tokens:
+            return body_dict
+        if context.external_staging:
+            # External path: worker fetches prefix from TQ via staging_chain in ng_capture.
+            # Do not put the large token array in the request body.
+            return body_dict
+        body_dict["required_prefix_token_ids"] = parent_tokens
+        # This records intent only.
+        # ``prefix_supplied`` remains false until generation-time prompt_token_ids prove application.
+        context.prefix_requested = True
+        return body_dict
+
+    @staticmethod
+    def _generation_prompt_token_ids(response: dict) -> Any:
+        """Return the prompt token IDs reported by generation.
+
+        Prefer the message-level token bundle over top-level transport fields.
+        Token capture uses the same source order.
+        """
+        choices = response.get("choices")
+        choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+        message = choice.get("message")
+        if isinstance(message, dict) and message.get("prompt_token_ids") is not None:
+            return message["prompt_token_ids"]
+        return response.get("prompt_token_ids")
+
+    def _verify_generation_prefix(self, body_dict: dict, response: dict) -> None:
+        """Require generation-time proof that the engine applied the requested prefix."""
+        context = current_capture_context()
+        if context is None or not context.prefix_requested:
+            return
+        required = body_dict.get("required_prefix_token_ids")
+        if not required:
+            raise RuntimeError("A requested token prefix was removed before generation.")
+        tokens = self._generation_prompt_token_ids(response)
+        if not isinstance(tokens, list):
+            raise RuntimeError(
+                f"`{self.config.name}` (base_url={self.config.base_url}) requested "
+                "required_prefix_token_ids, but the generation response did not include prompt_token_ids "
+                "proving which prompt the engine used. The backend must implement the "
+                "required_prefix_token_ids extension and return generation-time prompt token ids. "
+                "Disabling supply_prefix_token_ids is the fallback."
+            )
+        tokens = [int(token) for token in tokens]
+        if tokens[: len(required)] != list(required):
+            raise RuntimeError(
+                f"`{self.config.name}` (base_url={self.config.base_url}) returned generation "
+                "prompt_token_ids that do not start with required_prefix_token_ids. The backend must "
+                "implement the required_prefix_token_ids extension and return generation-time prompt "
+                "token ids that extend the supplied prefix. Disabling supply_prefix_token_ids is the fallback."
+            )
+        # This proves that the served prompt extended the exact parent tokens.
+        # It does not prove how the backend produced that prompt.
+        # A prefix-stable re-render still satisfies the training invariant.
+        context.prefix_supplied = True
+        with self._prefix_supply_lock:
+            self._prefix_supply_counts[0] += 1
+            supplied, eligible, total = self._prefix_supply_counts
+        if supplied % 10 == 0:
+            LOG.info(
+                "prefix supply: %d/%d eligible calls supplied (%.0f%%; %d enabled calls total)",
+                supplied,
+                eligible,
+                100.0 * supplied / eligible,
+                total,
+            )
 
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
@@ -722,6 +949,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         choice_dict = chat_completion_dict["choices"][0]
+        self._verify_generation_prefix(body_dict, chat_completion_dict)
         if self.config.uses_reasoning_parser:
             # See the TODO wrt reasoning_content above
             reasoning_content = choice_dict["message"].get("reasoning_content") or choice_dict["message"].get(
@@ -741,6 +969,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             assert not (choice_dict["message"].get("reasoning_content") or choice_dict["message"].get("reasoning")), (
                 f"NeMo Gym server `{self.config.name}` config has explicitly been set to not use a reasoning parser i.e. `uses_reasoning_parser: false`. Please do not use a reasoning parser in your vLLM endpoint, or fix the `{self.config.name}` server config!"
             )
+
+        if self._external_capture_enabled:
+            await self._finalize_external_capture(chat_completion_dict)
 
         if self.config.return_token_id_information:
             message_dict = choice_dict["message"]
@@ -807,6 +1038,142 @@ class VLLMModel(SimpleResponsesAPIModel):
             choice_dict["message"] = NeMoGymChatCompletionMessageForTraining.model_validate(message_dict)
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
+
+    async def _finalize_external_capture(self, payload: Dict[str, Any]) -> None:
+        """Validate and record a response staged by the inference worker.
+
+        The worker returns commit coordinates only after ``StagingSink.stage`` succeeds.
+        This method validates those coordinates against the active call.
+        It then records the call in the lineage store.
+        Finally, it removes token data and commit coordinates from the served response.
+        """
+        context = current_capture_context()
+        if context is None or not context.external_staging or context.lineage_store is None:
+            return
+        ledger = context.lineage_store
+        if not isinstance(ledger, CaptureLedger):
+            raise ValueError("external staging requires a CaptureLedger on the capture context")
+        coords_payload = payload.pop(NG_COMMIT_COORDS_FIELD, None)
+        admission = context.capture_admission
+        if admission is None:
+            # UNRESOLVED — the ledger already carries this call's poison row.
+            self._strip_capture_transport_fields(payload)
+            return
+        try:
+            if coords_payload is None:
+                await ledger.record_failure(
+                    context.rollout_id,
+                    context.model_call_id,
+                    WORKER_MISSING_COMMIT_COORDS_REASON,
+                )
+                return
+            coords = CommitCoords.model_validate(coords_payload)
+            if coords.rollout_id != context.rollout_id or coords.model_call_id != context.model_call_id:
+                raise ValueError(
+                    f"coordinates for {coords.rollout_id}/{coords.model_call_id} do not match the "
+                    f"active capture context {context.rollout_id}/{context.model_call_id}"
+                )
+            if coords.disposition == "capture_failed":
+                await ledger.record_failure(
+                    context.rollout_id,
+                    context.model_call_id,
+                    WORKER_CAPTURE_FAILED_REASON,
+                )
+                return
+            if coords.parent_call_id != admission.parent_call_id or coords.prev_len != admission.prev_len:
+                raise ValueError(f"coordinates for {coords.model_call_id} diverge from admission")
+            # Store the response ID returned to the agent with the corresponding lineage row.
+            # A missing ID makes that association impossible.
+            # Treat a missing ID as a capture failure.
+            response_id = str(payload.get("id") or "")
+            if not response_id:
+                raise ValueError(f"served response for {coords.model_call_id} carries no envelope id")
+            child_staging_chain = list(context.parent_staging_chain) + [str(coords.staging_key)]
+            response_items, _ = strip_token_fields(response_to_output_items(payload))
+            # Compute one fingerprint for the response items.
+            # Compute another for the request and response items together.
+            # If either input cannot be fingerprinted, store no fingerprints and continue recording the call.
+            try:
+                output_fingerprint = assistant_fingerprint(list(response_items)) or None
+                continuation_fingerprint = (
+                    assistant_fingerprint(list(context.request_items or []) + list(response_items)) or None
+                )
+            except (TypeError, ValueError):
+                output_fingerprint = None
+                continuation_fingerprint = None
+            # The lineage row omits token arrays because the worker stores token deltas separately.
+            # Finalization verifies both hashes against those staged token deltas.
+            # ``CallRecord`` re-validates the manifest-row invariants (contiguous
+            # lengths, root/child mode); a ValidationError poisons the call below.
+            record = CallRecord(
+                model_call_id=coords.model_call_id,
+                parent_call_id=coords.parent_call_id,
+                prev_len=coords.prev_len,
+                delta_len=coords.delta_len,
+                cum_len=coords.cum_len,
+                weight_version=coords.weight_version,
+                digest=coords.digest,
+                extras_digest=coords.extras_digest,
+                staging_key=coords.staging_key,
+                mode=admission.mode,
+                chain_hash=coords.chain_hash,
+                cumulative_hash=coords.cumulative_hash,
+                response_id=response_id,
+                admitted_at=context.admitted_at,
+                output_fingerprint=output_fingerprint,
+                continuation_fingerprint=continuation_fingerprint,
+                fingerprint_version=FINGERPRINT_VERSION,
+            )
+            commit = CaptureLedgerCommit(
+                rollout_id=context.rollout_id,
+                record=record,
+                staging_chain=tuple(child_staging_chain),
+                request_items=list(context.request_items or []),
+                response_items=response_items,
+            )
+            await ledger.record(commit)
+            mark_external_staging_committed(
+                rollout_id=coords.rollout_id,
+                model_call_id=coords.model_call_id,
+            )
+        except Exception:
+            # Worker/framework payloads are an external integrity boundary.
+            # Poison capture without turning a valid model completion into a
+            # harness failure.
+            LOG.exception(
+                "Worker capture acknowledgement failed for rollout %s call %s",
+                context.rollout_id,
+                context.model_call_id,
+            )
+            try:
+                await ledger.record_failure(
+                    context.rollout_id,
+                    context.model_call_id,
+                    INVALID_COMMIT_COORDS_REASON,
+                )
+            except Exception:
+                LOG.exception(
+                    "Could not poison rollout %s call %s after a failed acknowledgement",
+                    context.rollout_id,
+                    context.model_call_id,
+                )
+        finally:
+            self._strip_capture_transport_fields(payload)
+
+    @staticmethod
+    def _strip_capture_transport_fields(payload: Dict[str, Any]) -> None:
+        """Keep token IDs, logprobs, routes, and coordinates off the agent hop."""
+        payload.pop(NG_COMMIT_COORDS_FIELD, None)
+        payload.pop("prompt_token_ids", None)
+        for choice in payload.get("choices") or []:
+            if not isinstance(choice, dict):
+                continue
+            choice.pop("logprobs", None)
+            choice.pop("token_ids", None)
+            message = choice.get("message")
+            if isinstance(message, dict):
+                for field_name in TOKEN_FIELDS:
+                    message.pop(field_name, None)
 
     @staticmethod
     def _require_token_id_list(value: Any, field_name: str) -> List[Any]:
@@ -922,10 +1289,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         return {field: body_dict[field] for field in cls._TOKENIZE_CHAT_FIELDS if field in body_dict}
 
     def _validate_single_choice_token_request(self, body_dict: Dict[str, Any]) -> None:
-        if self.config.return_token_id_information and body_dict.get("n") not in (None, 1):
-            raise ValueError(
-                f"NeMo Gym server `{self.config.name}` requires n=1 when return_token_id_information=true."
-            )
+        context = current_capture_context()
+        external_capture = context is not None and context.external_staging
+        if (self.config.return_token_id_information or external_capture) and body_dict.get("n") not in (None, 1):
+            raise ValueError(f"NeMo Gym server `{self.config.name}` requires n=1 for token capture.")
 
     async def _chat_completions_via_completions_api(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming
@@ -953,6 +1320,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         modes — /v1/completions is text-only.
         """
         body_dict = body.model_dump(exclude_unset=True)
+        # This path never runs _preprocess_chat_completion_create_params, and
+        # _render_messages_via_chat_template hands tools to apply_chat_template,
+        # so hosted-only fields must be stripped here too.
+        self._strip_hosted_only_tool_fields(body_dict)
         messages = body_dict.get("messages", []) or []
         metadata = body_dict.get("metadata", {}) or {}
 
@@ -1270,7 +1641,80 @@ class VLLMModel(SimpleResponsesAPIModel):
             ],
         )
 
+    def _maybe_rebind_endpoint(self) -> None:
+        """Rebind clients when a shared serving job publishes a new endpoint.
+
+        Raises when the endpoints have stayed unpublished for longer than `endpoint_stale_grace_s`.
+        """
+        if not self.config.endpoint_file:
+            return
+        now = monotonic()
+        if (
+            self._endpoint_last_check_at is not None
+            and now - self._endpoint_last_check_at < self.config.endpoint_check_interval_s
+        ):
+            if self._endpoint_missing_since is not None:
+                self._note_endpoint_unpublished()
+            return
+        self._endpoint_last_check_at = now
+        try:
+            mtime = os.stat(self.config.endpoint_file).st_mtime
+        except FileNotFoundError:
+            # Serving jobs remove the endpoint file while rotating;
+            # keep the current clients until the successor publishes.
+            self._note_endpoint_unpublished()
+            return
+        except OSError:
+            # Transient filesystem trouble is not a backend exit; retry the current clients.
+            return
+        if mtime == self._endpoint_file_mtime:
+            if self._endpoint_missing_since is not None:
+                self._note_endpoint_unpublished()
+            return
+        try:
+            with open(self.config.endpoint_file) as endpoint_stream:
+                url = endpoint_stream.read().strip()
+        except OSError:
+            return
+        self._endpoint_file_mtime = mtime
+        if not url:
+            # An empty file is as unpublished as a missing one.
+            self._note_endpoint_unpublished()
+            return
+        self._endpoint_missing_since = None
+        if [url] == self.config.base_url:
+            return
+        print(
+            f"vllm_model '{self.config.name}': backend endpoint changed "
+            f"{self.config.base_url} -> {[url]}; rebinding clients.",
+            flush=True,
+        )
+        self.config.base_url = [url]
+        self._clients = [
+            NeMoGymAsyncOpenAI(
+                base_url=url,
+                api_key=self.config.api_key,
+                default_headers=self.config.default_headers,
+                max_connection_retries=self.config.endpoint_connection_retries,
+            )
+        ]
+        # Every session re-resolves onto the new host.
+        self._session_id_to_client.clear()
+
+    def _note_endpoint_unpublished(self) -> None:
+        now = monotonic()
+        if self._endpoint_missing_since is None:
+            self._endpoint_missing_since = now
+        elif now - self._endpoint_missing_since > self.config.endpoint_stale_grace_s:
+            raise RuntimeError(
+                f"vllm_model endpoint file {self.config.endpoint_file} unpublished (absent "
+                f"or empty) for {now - self._endpoint_missing_since:.0f}s (grace "
+                f"{self.config.endpoint_stale_grace_s:.0f}s); refusing to keep serving "
+                "against a backend that is no longer published."
+            )
+
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
+        self._maybe_rebind_endpoint()
         session_id = request.session[SESSION_ID_KEY]
         if session_id not in self._session_id_to_client:
             # Uvicorn workers do not share this cache. A stable assignment keeps

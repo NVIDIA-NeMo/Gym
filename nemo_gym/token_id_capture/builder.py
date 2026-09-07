@@ -15,25 +15,20 @@
 
 """Build trainable trajectories from a frozen token capture.
 
-The builder consumes ``TokenEntry`` records from a ``TokenCaptureSnapshot``.
-The snapshot is frozen before the consumer passes its entries to the builder.
+The consumer freezes a ``TokenCaptureSnapshot`` before passing its ``TokenEntry`` records here.
+The builder can return multiple trajectories when a rollout contains independent call chains.
 
-``per_request`` creates one training sequence per call.
-It does not infer relationships between calls.
-It can return multiple trajectories.
+Each current record states whether the call starts a root, continues a verified parent, or has unresolved ancestry.
+The builder verifies every resolved parent against the child's prompt tokens before joining the calls.
+An unresolved call begins a separate fragment.
+The builder never infers a parent across that boundary.
 
-``prefix_merging`` chains calls by token-prefix relationships.
-Each call uses the earlier call with the longest matching cumulative sequence as its parent.
-The cumulative sequence contains the prompt and generation.
-This strategy rebuilds an append-only rollout as one chain.
-A rewritten or compacted prompt starts a new root.
-Identical candidate parents are ambiguous.
-The builder quarantines the ambiguous subtree.
+``prefix_merging`` uses token-prefix matching only when a verified parent is absent from the frozen snapshot.
+For example, capture can filter a parent that generated no tokens.
+In that case, prefix matching may reconnect the child to a verified surviving ancestor.
 
-Both strategies are independent of capture order.
-``prefix_merging`` processes entries by increasing prompt length.
-This order comes from the tokens.
-A parent's prompt is shorter than its child's prompt.
+The build does not depend on capture order.
+``prefix_merging`` processes entries by increasing prompt length because a parent's prompt is shorter than its child's.
 
 Loss masks follow token provenance.
 Policy-generated tokens have a mask value of 1 and retain their captured log probabilities.
@@ -45,7 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
-from nemo_gym.token_id_capture.records import TokenEntry
+from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, compute_digest
 
 
 @dataclass
@@ -95,8 +90,20 @@ class BuildNotes:
     # These calls have a retry sibling that the harness may not have kept.
     # A final-call retry is unresolved because no later call identifies the survivor.
     unresolved_retries: list[str] = field(default_factory=list)
+    # Terminal attribution names the call whose response the verifier scored.
+    # ``terminal_chain`` reports what the builder did with it:
+    #   ""             no terminal was given; legacy single-chain policy applies
+    #   "delivered"    the root-to-terminal chain is clean and is the main chain
+    #   "broken"       the terminal's chain crosses a quarantined boundary
+    #   "not_captured" the named call is absent from the buildable entries
+    terminal_call_id: str | None = None
+    terminal_chain: str = ""
     # Calls without generated tokens are excluded from the chain.
     empty_generation_calls: list[str] = field(default_factory=list)
+    # Count why recorded parent links were not used.
+    parent_link_failures: dict[str, int] = field(default_factory=dict)
+    # These calls begin fragments after an unproven parent boundary.
+    unresolved_parent_calls: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -106,15 +113,6 @@ class BuildOutput:
     notes: BuildNotes = field(default_factory=lambda: BuildNotes(builder=""))
 
 
-def per_request(entries: list[TokenEntry]) -> BuildOutput:
-    ordered = sorted(entries, key=lambda e: (len(e.prompt_token_ids), e.model_call_id))
-    chains = [
-        Chain(chain_id=f"req-{i}", root_prompt=list(e.prompt_token_ids), links=[ChainLink(entry=e, interstitial=[])])
-        for i, e in enumerate(ordered)
-    ]
-    return BuildOutput(chains=chains, notes=BuildNotes(builder="per_request", chains=len(chains)))
-
-
 @dataclass(eq=False)  # Identity-based equality keeps nodes hashable.
 class _Node:
     entry: TokenEntry
@@ -122,6 +120,7 @@ class _Node:
     parent: "_Node | None" = None
     children: list["_Node"] = field(default_factory=list)
     quarantined: bool = False
+    unresolved_boundary: bool = False
 
 
 @dataclass
@@ -155,17 +154,148 @@ class _PrefixIndex:
         return (best[0], len(best) > 1) if best else (None, False)
 
 
-def _infer_parent(prompt: list[int], index: _PrefixIndex) -> tuple["_Node | None", bool]:
-    """Infer the parent from the longest cumulative prefix.
+def _resolve_parent(
+    node: "_Node",
+    by_call_id: dict[str, "_Node"],
+    prefix_index: _PrefixIndex,
+) -> tuple["_Node | None", bool, str | None]:
+    """Find this call's parent.
 
-    This is the fallback when no verified parent link exists.
-    Identical cumulative sequences are ambiguous.
-    The caller quarantines an ambiguous subtree.
+    New records preserve the request-time parent decision.
+    Token-prefix matching recovers a resolved link whose parent is absent from this build.
+    This can happen when the parent had an empty generation and was filtered out.
+    ``note`` reports why the recorded link was not used as recorded.
     """
-    return index.infer_parent(prompt)
+    prompt = list(node.entry.prompt_token_ids)
+    resolution = node.entry.parent_resolution
+    if resolution == ParentResolutionStatus.ROOT:
+        return None, False, None
+    if resolution == ParentResolutionStatus.UNRESOLVED:
+        return None, False, "parent_unresolved"
+    claimed = node.entry.parent_call_id
+    if resolution == ParentResolutionStatus.RESOLVED or claimed is not None:
+        if claimed is None:
+            return None, False, "resolved_parent_missing_id"
+        parent = by_call_id.get(claimed)
+        if parent is None:
+            # An absent parent is not evidence of conflict.
+            # Prefix matching may attach the child to a verified surviving ancestor.
+            # A digest mismatch remains a hard boundary.
+            inferred, ambiguous = prefix_index.infer_parent(prompt)
+            if inferred is not None and not ambiguous:
+                return inferred, False, "parent_call_id_missing_recovered"
+            return None, False, "parent_call_id_missing"
+        cum_len = parent.entry.cum_len
+        if cum_len is None:
+            cum_len = len(parent.cumulative)
+        if cum_len <= len(prompt) and compute_digest(prompt[:cum_len]) == (
+            parent.entry.digest or compute_digest(parent.cumulative)
+        ):
+            return parent, False, None
+        return None, False, "parent_digest_mismatch"
+    # Every supported record carries a request-time decision.
+    # Never guess a parent for a nonconforming record.
+    return None, False, "missing_resolution"
 
 
-def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
+def _materialize_delta_prompts(entries: list[TokenEntry]) -> tuple[list[TokenEntry], list[str]]:
+    """Rebuild full prompts for delta records by walking their parent chains.
+
+    Return full-prompt entries and call ids with broken chains.
+    """
+    by_id = {entry.model_call_id: entry for entry in entries}
+    cumulative: dict[str, list[int] | None] = {}
+
+    def cum_of(call_id: str) -> list[int] | None:
+        if call_id in cumulative:
+            return cumulative[call_id]
+
+        path: list[TokenEntry] = []
+        seen: set[str] = set()
+        current_id = call_id
+        while current_id not in cumulative:
+            if current_id in seen or len(path) > 10_000:
+                cumulative[current_id] = None
+                break
+            seen.add(current_id)
+            entry = by_id.get(current_id)
+            if entry is None:
+                cumulative[current_id] = None
+                break
+            if not entry.prompt_is_delta:
+                cumulative[current_id] = list(entry.prompt_token_ids) + list(entry.generation_token_ids)
+                break
+            path.append(entry)
+            if entry.parent_call_id is None:
+                cumulative[current_id] = None
+                break
+            current_id = entry.parent_call_id
+
+        value = cumulative[current_id]
+        if value is None:
+            for entry in path:
+                cumulative[entry.model_call_id] = None
+            return None
+        for entry in reversed(path):
+            value = value + list(entry.prompt_token_ids) + list(entry.generation_token_ids)
+            cumulative[entry.model_call_id] = value
+        return cumulative[call_id]
+
+    materialized: list[TokenEntry] = []
+    broken: list[str] = []
+    for entry in entries:
+        if not entry.prompt_is_delta:
+            materialized.append(entry)
+            continue
+        cum = cum_of(entry.model_call_id)
+        if cum is None:
+            broken.append(entry.model_call_id)
+            continue
+        full_prompt = cum[: len(cum) - len(entry.generation_token_ids)]
+        rebuilt = entry.model_copy(update={"prompt_token_ids": full_prompt, "prompt_is_delta": False})
+        # Verify the reconstructed full sequence.
+        if rebuilt.digest and compute_digest(cum) != rebuilt.digest:
+            broken.append(entry.model_call_id)
+            continue
+        materialized.append(rebuilt)
+    return materialized, broken
+
+
+class _NullPrefixIndex:
+    """Avoid building a token-prefix index when every parent is present.
+
+    Every supported entry carries a request-time parent decision.
+    Only missing-parent recovery needs the trie.
+    """
+
+    def add(self, candidate: "_Node") -> None:
+        return
+
+    def infer_parent(self, prompt: list[int]) -> tuple["_Node | None", bool]:
+        return None, False
+
+
+def prefix_merging(entries: list[TokenEntry], terminal_call_id: str | None = None) -> BuildOutput:
+    # An at-least-once transport can deliver one entry twice.
+    # Conflicting payloads for one id are corrupt.
+    deduped: dict[str, TokenEntry] = {}
+    duplicate_conflicts: list[str] = []
+    for candidate in entries:
+        previous = deduped.get(candidate.model_call_id)
+        if previous is None:
+            deduped[candidate.model_call_id] = candidate
+        elif (list(previous.prompt_token_ids), list(previous.generation_token_ids)) != (
+            list(candidate.prompt_token_ids),
+            list(candidate.generation_token_ids),
+        ):
+            duplicate_conflicts.append(candidate.model_call_id)
+    entries = list(deduped.values())
+
+    # Chain construction assumes full prompts.
+    # Materialize delta records before sorting or checking parent digests.
+    # Exclude a record when its parent chain cannot be reconstructed exactly.
+    entries, unreconstructable = _materialize_delta_prompts(entries)
+
     # A call without generated tokens has no training signal.
     # Its cumulative sequence equals its prompt.
     # Keeping it would make it the parent of another call with the same prompt.
@@ -174,8 +304,19 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
     empty_generation = [e.model_call_id for e in entries if not e.generation_token_ids]
     entries = [e for e in entries if e.generation_token_ids]
     if not entries:
+        # Report delta reconstruction failures even when no entries remain.
         return BuildOutput(
-            chains=[], notes=BuildNotes(builder="prefix_merging", empty_generation_calls=empty_generation)
+            chains=[],
+            notes=BuildNotes(
+                builder="prefix_merging",
+                empty_generation_calls=empty_generation,
+                terminal_call_id=terminal_call_id,
+                terminal_chain="not_captured" if terminal_call_id else "",
+                parent_link_failures=(
+                    {"delta_chain_unreconstructable": len(unreconstructable)} if unreconstructable else {}
+                ),
+                unresolved_parent_calls=list(unreconstructable),
+            ),
         )
 
     # Increasing prompt length defines an order from the tokens.
@@ -186,12 +327,35 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
     nodes: list[_Node] = []
     roots: list[_Node] = []
     quarantined: list[str] = []
-    prefix_index = _PrefixIndex()
+    # The trie exists only for missing-parent recovery.
+    surviving_ids = {e.model_call_id for e in ordered}
+    needs_prefix_index = any(e.parent_call_id is not None and e.parent_call_id not in surviving_ids for e in ordered)
+    prefix_index = _PrefixIndex() if needs_prefix_index else _NullPrefixIndex()
+
+    nodes_by_call_id: dict[str, _Node] = {}
+    parent_link_failures: dict[str, int] = {}
+    unresolved_parent_calls: list[str] = []
+    for call_id in duplicate_conflicts:
+        parent_link_failures["duplicate_call_id_conflict"] = (
+            parent_link_failures.get("duplicate_call_id_conflict", 0) + 1
+        )
+        unresolved_parent_calls.append(call_id)
+    for call_id in unreconstructable:
+        parent_link_failures["delta_chain_unreconstructable"] = (
+            parent_link_failures.get("delta_chain_unreconstructable", 0) + 1
+        )
+        unresolved_parent_calls.append(call_id)
 
     for entry in ordered:
         prompt = list(entry.prompt_token_ids)
         node = _Node(entry=entry, cumulative=prompt + list(entry.generation_token_ids))
-        parent, ambiguous = _infer_parent(prompt, prefix_index)
+        parent, ambiguous, note = _resolve_parent(node, nodes_by_call_id, prefix_index)
+        if note:
+            parent_link_failures[note] = parent_link_failures.get(note, 0) + 1
+            # A recovered fallback found a safe parent.
+            if not note.endswith("_recovered"):
+                node.unresolved_boundary = True
+                unresolved_parent_calls.append(entry.model_call_id)
         if parent is not None:
             node.parent = parent
             if ambiguous:
@@ -203,6 +367,18 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
             roots.append(node)
         nodes.append(node)
         prefix_index.add(node)
+        nodes_by_call_id[entry.model_call_id] = node
+
+    # Terminal attribution names the call whose response the verifier scored.
+    # The ancestry set holds every call on the root-to-terminal path.
+    # Retry resolution and chain selection prefer this evidence when present.
+    terminal_node = nodes_by_call_id.get(terminal_call_id) if terminal_call_id else None
+    terminal_ancestry: set[int] = set()
+    if terminal_node is not None:
+        ancestor: _Node | None = terminal_node
+        while ancestor is not None:
+            terminal_ancestry.add(id(ancestor))
+            ancestor = ancestor.parent
 
     # Resolve retry siblings.
     # A harness can retry after a timeout, server error, or dropped stream.
@@ -212,7 +388,8 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
     # A recorded parent link identifies the sibling retained by the harness.
     # Without a link, retain the sibling extended by a later call.
     # Neither method can resolve a retry of the final call.
-    # Mark that retry as unresolved.
+    # An attributed terminal resolves it: the kept sibling is on the terminal path.
+    # Otherwise mark that retry as unresolved.
     # The consumer masks the rollout instead of training on an unconfirmed generation.
     unresolved_retries: list[str] = []
     # Group calls by parent identity.
@@ -230,12 +407,20 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
         for retry_group in by_prompt.values():
             if len(retry_group) < 2:
                 continue
-            extended = [n for n in retry_group if any(not child.quarantined for child in n.children)]
-            if extended:
-                keep = set(extended)
+            on_terminal_path = [n for n in retry_group if id(n) in terminal_ancestry]
+            if on_terminal_path:
+                # The verified terminal identifies the sibling the harness kept.
+                keep = set(on_terminal_path)
             else:
-                keep = {min(retry_group, key=lambda n: n.entry.model_call_id)}
-                unresolved_retries.extend(n.entry.model_call_id for n in retry_group)
+                extended = [n for n in retry_group if any(not child.quarantined for child in n.children)]
+                if extended:
+                    keep = set(extended)
+                else:
+                    keep = {min(retry_group, key=lambda n: n.entry.model_call_id)}
+                    # With an attributed terminal, a group off the terminal path
+                    # cannot reach the delivered chain, so it never masks.
+                    if terminal_node is None:
+                        unresolved_retries.extend(n.entry.model_call_id for n in retry_group)
             for node in retry_group:
                 if node not in keep and not node.quarantined:
                     node.quarantined = True
@@ -243,17 +428,16 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
 
     chains: list[Chain] = []
 
-    # Materialize root-to-leaf chains without recursion.
-    # Agent rollouts can exceed Python's recursion limit.
-    for leaf in (node for node in nodes if not node.children):
+    def path_to(node: _Node) -> list[_Node]:
+        # Iterative root-to-node paths: agent rollouts can exceed the recursion limit.
         reverse_path: list[_Node] = []
-        current: _Node | None = leaf
+        current: _Node | None = node
         while current is not None:
             reverse_path.append(current)
             current = current.parent
-        path = list(reversed(reverse_path))
-        if any(node.quarantined for node in path):
-            continue
+        return list(reversed(reverse_path))
+
+    def chain_from(path: list[_Node]) -> Chain:
         root = path[0]
         chain = Chain(chain_id="", root_prompt=list(root.entry.prompt_token_ids))
         prev_cumulative = list(root.entry.prompt_token_ids)
@@ -261,10 +445,41 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
             interstitial = [] if step == 0 else list(node.entry.prompt_token_ids[len(prev_cumulative) :])
             chain.links.append(ChainLink(entry=node.entry, interstitial=interstitial))
             prev_cumulative = list(node.entry.prompt_token_ids) + list(node.entry.generation_token_ids)
-        chains.append(chain)
+        return chain
+
+    # The terminal chain ends at the attributed call, not at a leaf.
+    # Calls that extend the terminal were served after the kept response.
+    # They are outside the verified trajectory and are truncated away.
+    terminal_chain_status = ""
+    terminal_chain: Chain | None = None
+    if terminal_call_id:
+        if terminal_node is None:
+            terminal_chain_status = "not_captured"
+        else:
+            terminal_path = path_to(terminal_node)
+            if any(node.quarantined or node.unresolved_boundary for node in terminal_path):
+                # An unresolved boundary on the delivered path is not repairable by attribution.
+                # The consumer masks it.
+                terminal_chain_status = "broken"
+            else:
+                terminal_chain = chain_from(terminal_path)
+                terminal_chain_status = "delivered"
+
+    # Materialize root-to-leaf chains.
+    # A leaf chain through the terminal is represented by the truncated main chain.
+    for leaf in (node for node in nodes if not node.children):
+        path = path_to(leaf)
+        if any(node.quarantined for node in path):
+            continue
+        if terminal_chain is not None and terminal_node in path:
+            continue
+        chains.append(chain_from(path))
+    if terminal_chain is not None:
+        chains.insert(0, terminal_chain)
 
     # Deliver only one chain per rollout.
-    # Choose the chain whose root call completed first.
+    # An attributed terminal names the delivered chain directly.
+    # Without one, choose the chain whose root call completed first.
     #
     # Completion order matches dispatch order for a sequential harness.
     # The model server awaits token capture before returning the response.
@@ -283,8 +498,8 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
     # Ordering cannot recover that identity.
     # Some harnesses can route sub-agent calls to a different model server.
     #
-    # These shapes require future work.
-    # A split rollout reports multiple chains and a delivered fraction below 1.
+    # These shapes are exactly what terminal attribution resolves.
+    # Without it, a split rollout reports multiple chains and a delivered fraction below 1.
     def selection_key(c: Chain) -> tuple:
         # Sort by the earliest root.
         # Break timestamp ties by call ID.
@@ -295,7 +510,7 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
         return (root.created_at, root.model_call_id)
 
     if chains:
-        main = min(chains, key=selection_key)
+        main = terminal_chain if terminal_chain is not None else min(chains, key=selection_key)
         main.chain_id = "main"
         branch = 0
         for c in chains:
@@ -314,20 +529,32 @@ def prefix_merging(entries: list[TokenEntry]) -> BuildOutput:
         delivered_fraction=round(delivered / captured, 4) if captured else 0.0,
         unresolved_retries=unresolved_retries,
         empty_generation_calls=empty_generation,
+        terminal_call_id=terminal_call_id,
+        terminal_chain=terminal_chain_status,
+        parent_link_failures=parent_link_failures,
+        unresolved_parent_calls=unresolved_parent_calls,
     )
     return BuildOutput(chains=chains, quarantined=quarantined, notes=notes)
 
 
-_BUILDERS: dict[str, Callable[[list[TokenEntry]], BuildOutput]] = {
-    "per_request": per_request,
+_BUILDERS: dict[str, Callable[..., BuildOutput]] = {
     "prefix_merging": prefix_merging,
 }
 
 
-def run_builder(entries: list[TokenEntry], builder: str = "prefix_merging") -> BuildOutput:
-    """Chain frozen snapshot entries with the named strategy."""
+def run_builder(
+    entries: list[TokenEntry],
+    builder: str = "prefix_merging",
+    terminal_call_id: str | None = None,
+) -> BuildOutput:
+    """Chain frozen snapshot entries with the named strategy.
+
+    ``terminal_call_id`` anchors chain selection for ``prefix_merging``.
+    """
     if builder not in _BUILDERS:
         raise ValueError(f"unknown builder {builder!r}; known: {sorted(_BUILDERS)}")
+    if builder == "prefix_merging":
+        return prefix_merging(entries, terminal_call_id=terminal_call_id)
     return _BUILDERS[builder](entries)
 
 
@@ -391,8 +618,6 @@ def project_main_chain_response(rollout_id: str, out: BuildOutput, model: str = 
     """
     if not out.chains:
         raise ValueError("capture produced no safe trainable chain")
-    if out.notes.builder == "per_request" and len(out.chains) != 1:
-        raise ValueError("per_request produced multiple trajectories for a single-response delivery")
     mains = [c for c in out.chains if c.chain_id == "main"] or out.chains[:1]
     output = project_chain_to_output_items(mains[0])
     if not any(item.get("generation_token_ids") for item in output):

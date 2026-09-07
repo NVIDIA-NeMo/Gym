@@ -35,7 +35,9 @@ numpy<2
 pynput
 ag2
 
-Pillow~=11.0.0
+# osworld pins pillow>=11.0.0,<11.1.dev0; overrides.txt bypasses that stale
+# constraint so the CVE fix can install.
+Pillow==12.3.0
 scikit-learn
 matplotlib~=3.7.4
 func-timeout

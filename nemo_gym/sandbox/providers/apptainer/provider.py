@@ -111,6 +111,7 @@ class ApptainerExecConfig:
     """Settings for running commands inside an Apptainer sandbox."""
 
     default_timeout_s: float | None = 180
+    timeout_grace_s: float = 15
     fakeroot_for_root: bool = True
     default_binds: list[str] = field(default_factory=list)
     extra_exec_args: list[str] = field(default_factory=list)
@@ -119,6 +120,8 @@ class ApptainerExecConfig:
     def __post_init__(self) -> None:
         if self.default_timeout_s is not None and self.default_timeout_s <= 0:
             raise ValueError("exec.default_timeout_s must be > 0")
+        if self.timeout_grace_s < 0:
+            raise ValueError("exec.timeout_grace_s must be >= 0")
         if self.concurrency < 1:
             raise ValueError("exec.concurrency must be >= 1")
 
@@ -335,10 +338,18 @@ class ApptainerProvider:
                     timeout=timeout_s,
                 )
             except asyncio.TimeoutError as e:
+                # Graceful timeout: SIGTERM the process group first and give it a short grace period
+                # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
+                # handler), THEN SIGKILL if it hasn't exited.
                 with contextlib.suppress(ProcessLookupError):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                with contextlib.suppress(Exception):
-                    await proc.wait()
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                with contextlib.suppress(asyncio.TimeoutError, Exception):
+                    await asyncio.wait_for(proc.wait(), timeout=self._exec_config.timeout_grace_s)
+                if proc.returncode is None:  # still alive after grace -> hard kill
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    with contextlib.suppress(Exception):
+                        await proc.wait()
                 raise TimeoutError(f"apptainer command timed out after {timeout_s:g}s: {argv}") from e
 
             return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
@@ -363,10 +374,18 @@ class ApptainerProvider:
             try:
                 await asyncio.wait_for(proc.wait(), timeout=timeout_s)
             except asyncio.TimeoutError as e:
+                # Graceful timeout: SIGTERM the process group first and give it a short grace period
+                # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
+                # handler), THEN SIGKILL if it hasn't exited.
                 with contextlib.suppress(ProcessLookupError):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                with contextlib.suppress(Exception):
-                    await proc.wait()
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                with contextlib.suppress(asyncio.TimeoutError, Exception):
+                    await asyncio.wait_for(proc.wait(), timeout=self._exec_config.timeout_grace_s)
+                if proc.returncode is None:  # still alive after grace -> hard kill
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    with contextlib.suppress(Exception):
+                        await proc.wait()
                 raise TimeoutError(f"apptainer command timed out after {timeout_s:g}s: {argv}") from e
 
             out_f.seek(0)

@@ -16,6 +16,7 @@
 import base64
 import builtins
 import inspect
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -37,6 +38,7 @@ from openshell._proto import openshell_pb2, sandbox_pb2  # noqa: E402
 
 from nemo_gym.sandbox.providers.openshell import provider as openshell_provider  # noqa: E402
 from nemo_gym.sandbox.providers.openshell.provider import (  # noqa: E402
+    MAX_SANDBOX_NAME_LENGTH,
     SANDBOX_LABEL,
     SANDBOX_NAME_PREFIX,
     SANDBOX_RUNTIME_RETURN_CODE,
@@ -49,6 +51,7 @@ from nemo_gym.sandbox.providers.openshell.provider import (  # noqa: E402
     OpenShellProbeConfig,
     OpenShellProvider,
     OpenShellProviderOptions,
+    _generate_sandbox_name,
     _OpenShellSandbox,
 )
 
@@ -312,6 +315,14 @@ def test_provider_options_validation() -> None:
     assert options.providers == ["solo"]
 
 
+def test_generated_sandbox_names_fit_routable_name_limit() -> None:
+    names = [_generate_sandbox_name() for _ in range(100)]
+
+    assert len(set(names)) == len(names)
+    assert all(len(name) == MAX_SANDBOX_NAME_LENGTH for name in names)
+    assert all(re.fullmatch(rf"{re.escape(SANDBOX_NAME_PREFIX)}[0-9a-f]+", name) for name in names)
+
+
 async def test_create_success_maps_spec(make_provider, fake_client: FakeClient) -> None:
     provider = make_provider()
     spec = SandboxSpec(
@@ -327,6 +338,7 @@ async def test_create_success_maps_spec(make_provider, fake_client: FakeClient) 
     call = fake_client.create_calls[0]
     assert call["workspace"] == "default"
     assert call["name"].startswith(SANDBOX_NAME_PREFIX)
+    assert len(call["name"]) <= MAX_SANDBOX_NAME_LENGTH
     # The marker label is applied last, so user metadata cannot clobber it.
     assert call["labels"] == {"task": "demo", SANDBOX_LABEL: "1"}
     pb_spec = call["spec"]

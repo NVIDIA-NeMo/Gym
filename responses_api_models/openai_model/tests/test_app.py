@@ -137,6 +137,21 @@ class TestApp:
             messages=[{"role": "user", "content": "hi"}],
             model="dummy_model",
         )
+
+        chat_244_fields = {
+            "moderation": {"model": "omni-moderation-latest"},
+            "prompt_cache_key": "cache-key",
+            "prompt_cache_retention": "24h",
+            "safety_identifier": "safe-user",
+            "verbosity": "high",
+        }
+        forwarded = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], **chat_244_fields},
+        )
+        assert forwarded.status_code == 200
+        assert {field: called_args_chat[field] for field in chat_244_fields} == chat_244_fields
+
         calls = read_model_call_records(CaptureStore(tmp_path), "chat-test")
         assert len(calls) == 1 and calls[0].dialect == "chat"
 

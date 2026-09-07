@@ -23,7 +23,6 @@ The snapshot includes entries and incomplete state.
 Its ``snapshot_id`` identifies the exact frozen state.
 ``TokenCaptureStore`` is Gym's local sink and source implementation.
 Framework transports may provide their own sink and source.
-There is no HTTP token reader.
 This leaf package avoids imports from Gym's server stack.
 The rollout-record finalizer needs Gym's server stack.
 It is deliberately not re-exported here.
@@ -39,7 +38,6 @@ Failed or masked builds retain their capture evidence.
 from nemo_gym.token_id_capture.builder import (
     Chain,
     assert_prefix_contiguity,
-    per_request,
     prefix_merging,
     project_chain_to_output_items,
     project_main_chain_response,
@@ -52,29 +50,60 @@ from nemo_gym.token_id_capture.consumer import (
     trajectories_for_rollout,
     trajectories_from_source,
 )
+from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, canonicalize_tool_arguments
+from nemo_gym.token_id_capture.lineage import (
+    FileLineageStore,
+    IncrementalLineageStore,
+    InMemoryLineageStore,
+    LineageIndex,
+    RolloutLineage,
+    stamp_continuation,
+)
 from nemo_gym.token_id_capture.protocols import (
+    CaptureLedger,
+    LineageMatch,
+    LineageResolution,
+    LineageResolver,
     TokenCaptureSnapshot,
     TokenSink,
     TokenSource,
+    install_lineage_store,
     install_token_sink,
     install_token_source,
+    installed_lineage_store,
     installed_token_sink,
     installed_token_source,
 )
 from nemo_gym.token_id_capture.records import (
+    TOKEN_ENTRY_MIN_SCHEMA_VERSION,
     TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
     TOKEN_FIELDS,
+    UNCOMMITTED_CALL_REASON,
+    UNRESOLVED_PARENT_REASON,
+    ParentResolutionStatus,
     TokenEntry,
+    compute_digest,
+    cumulative_tokens,
     extract_token_fields,
+    stamp_lineage,
 )
 from nemo_gym.token_id_capture.sink import (
+    NG_CAPTURE_FIELD,
+    NG_COMMIT_COORDS_FIELD,
     CaptureContext,
+    capture_health_snapshot,
     capture_tokens,
     commit_entry,
     current_capture_context,
+    mark_external_staging_committed,
     register_call_intent,
     reset_token_sink,
+    resolve_parent,
     set_token_sink,
+)
+from nemo_gym.token_id_capture.staging.records import (
+    CallRecord,
+    CaptureLedgerCommit,
 )
 from nemo_gym.token_id_capture.store import TokenCaptureStore, make_token_store, validate_rollout_id
 
@@ -83,27 +112,53 @@ __all__ = [
     "Chain",
     "TokenIdCaptureConfig",
     "TokenEntry",
+    "TOKEN_ENTRY_MIN_SCHEMA_VERSION",
     "TOKEN_ENTRY_RECORD_SCHEMA_VERSION",
     "TOKEN_FIELDS",
+    "ParentResolutionStatus",
     "extract_token_fields",
+    "compute_digest",
+    "cumulative_tokens",
+    "stamp_lineage",
     "TokenCaptureStore",
     "validate_rollout_id",
     "make_token_store",
     "TokenSink",
     "TokenSource",
+    "CaptureLedger",
+    "CaptureLedgerCommit",
+    "CallRecord",
+    "LineageMatch",
+    "LineageResolution",
+    "LineageResolver",
+    "install_lineage_store",
+    "installed_lineage_store",
     "TokenCaptureSnapshot",
     "install_token_sink",
     "install_token_source",
     "installed_token_sink",
     "installed_token_source",
     "CaptureContext",
+    "NG_CAPTURE_FIELD",
+    "NG_COMMIT_COORDS_FIELD",
+    "UNCOMMITTED_CALL_REASON",
+    "UNRESOLVED_PARENT_REASON",
     "set_token_sink",
-    "reset_token_sink",
+    "capture_health_snapshot",
     "register_call_intent",
+    "reset_token_sink",
+    "resolve_parent",
     "capture_tokens",
     "commit_entry",
     "current_capture_context",
-    "per_request",
+    "mark_external_staging_committed",
+    "FileLineageStore",
+    "IncrementalLineageStore",
+    "InMemoryLineageStore",
+    "LineageIndex",
+    "RolloutLineage",
+    "assistant_fingerprint",
+    "stamp_continuation",
     "prefix_merging",
     "project_chain_to_output_items",
     "project_main_chain_response",

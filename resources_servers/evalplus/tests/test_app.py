@@ -350,35 +350,57 @@ class TestComputeMetrics:
 class TestLoadDatasetAndExpected:
     """Cover the dataset-loader fork without hitting HF / EvalPlus."""
 
-    def test_humaneval_path(self):
+    def test_humaneval_path(self, tmp_path):
         import app
 
         with (
             patch("evalplus.data.get_human_eval_plus", return_value={"HumanEval/0": {"task_id": "HumanEval/0"}}),
             patch("evalplus.data.get_human_eval_plus_hash", return_value="hash"),
+            patch("evalplus.data.utils.CACHE_DIR", str(tmp_path)),
             patch("evalplus.evaluate.get_groundtruth", return_value={"HumanEval/0": {"base": [], "plus": []}}),
         ):
             problems, expected = app._load_dataset_and_expected("humaneval", "default")
         assert "HumanEval/0" in problems
         assert "HumanEval/0" in expected
 
-    def test_mbpp_path(self):
+    def test_mbpp_path(self, tmp_path):
         import app
+        from evalplus.eval import MBPP_OUTPUT_NOT_NONE_TASKS
 
         with (
             patch(
                 "evalplus.data.get_mbpp_plus",
-                return_value={"Mbpp/0": {"canonical_solution": "x"}, "Mbpp/1": {"canonical_solution": ""}},
+                return_value={
+                    "Mbpp/0": {"canonical_solution": "x", "entry_point": "check_str"},
+                    "Mbpp/1": {"canonical_solution": "y", "entry_point": "regular_function"},
+                },
             ),
             patch("evalplus.data.get_mbpp_plus_hash", return_value="hash"),
-            patch("evalplus.data.mbpp.mbpp_serialize_inputs", create=True),
+            patch("evalplus.data.utils.CACHE_DIR", str(tmp_path)),
             patch("evalplus.evaluate.get_groundtruth", return_value={"Mbpp/0": {}, "Mbpp/1": {}}) as gt,
         ):
             problems, expected = app._load_dataset_and_expected("mbpp", "default")
-        # Only Mbpp/0 (with canonical_solution) is in the filter list passed to get_groundtruth.
         gt.assert_called_once()
         _, _, only_not_none = gt.call_args.args
-        assert only_not_none == ["Mbpp/0"]
+        assert only_not_none == MBPP_OUTPUT_NOT_NONE_TASKS
+
+    def test_corrupt_groundtruth_cache_is_recomputed(self, tmp_path):
+        import app
+
+        cache_file = tmp_path / "hash.pkl"
+        cache_file.write_bytes(b"incomplete pickle")
+        expected = {"HumanEval/0": {"base": [], "plus": []}}
+        with (
+            patch("evalplus.data.get_human_eval_plus", return_value={"HumanEval/0": {"task_id": "HumanEval/0"}}),
+            patch("evalplus.data.get_human_eval_plus_hash", return_value="hash"),
+            patch("evalplus.data.utils.CACHE_DIR", str(tmp_path)),
+            patch("evalplus.evaluate.get_groundtruth", side_effect=[EOFError, expected]) as gt,
+        ):
+            _, actual = app._load_dataset_and_expected("humaneval", "default")
+
+        assert actual == expected
+        assert gt.call_count == 2
+        assert not cache_file.exists()
 
     def test_unsupported_dataset_raises(self):
         import app

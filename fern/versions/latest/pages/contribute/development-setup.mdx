@@ -13,7 +13,7 @@ git clone git@github.com:NVIDIA-NeMo/Gym.git
 cd Gym
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
-uv venv --python 3.12
+uv venv --python 3.13.14
 source .venv/bin/activate
 uv sync --extra dev
 
@@ -26,8 +26,8 @@ pre-commit install
 **Run NeMo Gym Tests**:
 ```bash
 gym dev test                                   # Run all NeMo Gym core tests
-gym env test                                   # Run all server tests
 gym env test --resources-server example_single_tool_call    # Test a single resources server
+gym env test --all                             # Run all server tests (slow: one venv per server)
 ```
 
 **View Test Coverage**:
@@ -191,7 +191,7 @@ For GPG instead of SSH: generate a key, set `user.signingkey` to the key ID, lea
 ### Testing Issues
 
 **Problem**: Tests fail locally but not in CI
-- Check Python version (3.12+ required)
+- Check Python version (3.13.14+ required)
 - Ensure all dependencies installed: `uv sync --extra dev`
 - Run in clean environment
 

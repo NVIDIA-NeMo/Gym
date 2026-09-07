@@ -95,6 +95,8 @@ CI runs in two clearly separated stages:
 1. **Pre-merge checks** — run on every pull request. All must be green before a PR can merge.
 2. **Post-merge full test suite** — runs after merge on `main`, with no change detection. It always exercises everything.
 
+**Triggering CI (`/ok to test`):** GitHub CI workflows only run automatically for verified commits from NVIDIA-NeMo members. If your commits are unverified, or you're an external contributor, CI won't start until an NVIDIA-NeMo member comments `/ok to test <commit sha>` on the PR. This safeguards CI capacity and adds a review gate before external code can execute in CI.
+
 Reproduce the pre-merge checks locally before you push:
 
 ```bash

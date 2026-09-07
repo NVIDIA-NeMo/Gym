@@ -1,0 +1,15 @@
+config_paths:
+  - responses_api_agents/nemo_fabric_agent/configs/nemo_fabric_agent.yaml
+
+nemo_fabric_claude:
+  _inherit_from: nemo_fabric_agent
+  responses_api_agents:
+    nemo_fabric_agent:
+      adapter_id: nvidia.fabric.claude
+      harness_settings:
+        permission_mode: dontAsk
+      fabric_config:
+        runtime:
+          max_turns: 30
+        tools:
+          enabled: [Bash, Read, Write]
