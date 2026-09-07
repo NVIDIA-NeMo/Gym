@@ -25,7 +25,9 @@ upstream tool string verbatim. `/seed_session`, `/verify`,
 the shared finance loop. Its five-row `data/example.jsonl` fixture is converted
 from the first five rows of the pinned public BigFinanceBench subset and retains
 the evaluation-only, do-not-train, canary, prompt, license, and provenance
-fields. Generated rollouts and metrics are intentionally not included.
+fields. Before merge, generate and commit the required five-row
+`data/example_rollouts.jsonl` and matching `data/example_metrics.json`, then run
+`gym env test --resources-server big_finance`.
 
 See `benchmarks/big_finance/README.md` for credentials, scoring, safety,
 preparation, and standalone parity notes.
