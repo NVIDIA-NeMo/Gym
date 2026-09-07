@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import json
 
 import pytest
 
@@ -37,6 +38,7 @@ from responses_api_agents.nooa_agent.gym_tools import GymToolExecution
 from responses_api_agents.nooa_agent.observability import (
     GymTraceHooks,
     NOOATraceSnapshot,
+    nooa_producer_trajectory,
     project_nooa_result,
 )
 
@@ -304,3 +306,66 @@ def test_successful_none_result_projects_null_but_termination_without_result_doe
     assert [gap.code for gap in completed_bundle.gaps] == ["non_trainable_terminal_output"]
     assert terminated.output == []
     assert [gap.code for gap in terminated_bundle.gaps] == ["policy_budget_exceeded"]
+
+
+def test_record_model_response_emits_trajectory_turns() -> None:
+    hooks = GymTraceHooks(
+        ModelServerRef(type="responses_api_models", name="policy_model"),
+        task_id="task-0",
+        rollout_id="0-0",
+    )
+
+    hooks.record_model_response(response("resp-1", "first"))
+    hooks.record_model_response(response("resp-2", "second"))
+
+    snapshot = hooks.snapshot()
+    assert [turn.turn_no for turn in snapshot.turns] == [1, 2]
+    assert all(turn.invocation_id == "root" for turn in snapshot.turns)
+    assert all(turn.task_id == "task-0" and turn.rollout_id == "0-0" for turn in snapshot.turns)
+    assert [turn.step_count for turn in snapshot.turns] == [1, 2]
+    assert [len(turn.model_calls) for turn in snapshot.turns] == [1, 1]
+    # Turn answers carry the raw output items so structural checks see message text.
+    first_answer = snapshot.turns[0].answer
+    assert isinstance(first_answer, list) and first_answer[0]["type"] == "message"
+
+
+def test_producer_trajectory_carries_turns_and_identity() -> None:
+    hooks = GymTraceHooks(
+        ModelServerRef(type="responses_api_models", name="policy_model"),
+        task_id="astropy__astropy-12907",
+        rollout_id="0-0",
+    )
+    hooks.record_model_response(response("resp-1", "analyzing"))
+
+    trajectory = nooa_producer_trajectory(hooks.snapshot())
+
+    assert trajectory.task_id == "astropy__astropy-12907"
+    assert trajectory.rollout_id == "0-0"
+    assert len(trajectory.turns) == 1
+    # Producer invocations are deliberately omitted; the collector keeps the
+    # conversation-carrying observation records instead.
+    assert trajectory.invocations == []
+    assert trajectory.model_calls == []
+    assert trajectory.tool_calls == []
+    assert trajectory.gaps == []
+
+
+def test_turns_flow_through_collector_projection_without_turn_gap() -> None:
+    from nemo_gym.rollout_collection import _build_trajectory_record, NG_TRAJECTORY_KEY
+
+    hooks = GymTraceHooks(
+        ModelServerRef(type="responses_api_models", name="policy_model"),
+        task_id="astropy__astropy-12907",
+        rollout_id="0-0",
+    )
+    hooks.record_model_response(response("resp-1", "investigating"))
+
+    row = {"instance_id": "astropy__astropy-12907", "_ng_task_index": 0, "_ng_rollout_index": 0}
+    result = {NG_TRAJECTORY_KEY: nooa_producer_trajectory(hooks.snapshot()).model_dump(mode="json")}
+
+    canonical = _build_trajectory_record(row, result)
+
+    assert len(canonical.turns) == 1
+    assert canonical.turns[0].rollout_id == "0-0"
+    gap_codes = [gap.code for gap in canonical.gaps]
+    assert "turns_unavailable" not in gap_codes

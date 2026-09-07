@@ -36,7 +36,7 @@ from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
-from responses_api_agents.nooa_agent.observability import project_nooa_result
+from responses_api_agents.nooa_agent.observability import nooa_producer_trajectory, project_nooa_result
 from responses_api_agents.nooa_agent.runner import (
     EmbeddedNOOARunner,
     NOOARunFailure,
@@ -327,6 +327,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             result[NOOA_TERMINATION_REASON_KEY] = run_result.termination_reason
             result[NOOA_TERMINATION_ERROR_KEY] = run_result.termination_error
         result["ng_agent_observations"] = observations.model_dump(mode="json")
+        result["ng_trajectory"] = nooa_producer_trajectory(run_result.trace).model_dump(mode="json")
         result["_response_cookies"] = run_result.model_cookies | run_result.resource_cookies
         return NOOAAgentVerifyResponse.model_validate(result)
 
@@ -380,6 +381,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 routing[NOOA_TERMINATION_REASON_KEY] = partial.termination_reason
                 routing[NOOA_TERMINATION_ERROR_KEY] = partial.termination_error
             routing["ng_agent_observations"] = observations.model_dump(mode="json")
+            routing["ng_trajectory"] = nooa_producer_trajectory(partial.trace).model_dump(mode="json")
             routing["_response_cookies"] = partial.model_cookies | partial.resource_cookies
         if terminal:
             routing[NG_TERMINAL_KEY] = True

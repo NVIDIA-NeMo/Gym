@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from time import perf_counter
+from time import perf_counter, time
 from typing import Any
 
 from nemo_gym.config_types import ModelServerRef
@@ -25,6 +25,8 @@ from nemo_gym.rollout_observability import (
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
+    TrajectoryRecord,
+    TrajectoryTurn,
 )
 
 
@@ -43,6 +45,9 @@ class NOOATraceSnapshot:
     output: list[Any] = field(default_factory=list)
     invocations: list[AgentInvocation] = field(default_factory=list)
     model_calls: dict[str, list[ModelCallRef]] = field(default_factory=dict)
+    turns: list[TrajectoryTurn] = field(default_factory=list)
+    task_id: str = "unknown"
+    rollout_id: str = "unknown"
 
 
 class GymTraceHooks:
@@ -52,11 +57,19 @@ class GymTraceHooks:
     its own response/tool sidecars and the final schema projection.
     """
 
-    def __init__(self, model_ref: ModelServerRef) -> None:
+    def __init__(
+        self,
+        model_ref: ModelServerRef,
+        *,
+        task_id: str = "unknown",
+        rollout_id: str = "unknown",
+    ) -> None:
         self._model_ref = model_ref
         self._current_invocation: ContextVar[str] = ContextVar(f"gym_nooa_invocation_{id(self)}", default="root")
-        self._snapshot = NOOATraceSnapshot()
+        self._snapshot = NOOATraceSnapshot(task_id=task_id, rollout_id=rollout_id)
         self._invocations: dict[str, AgentInvocation] = {}
+        self._turn_counts: dict[str, int] = {}
+        self._turns: list[TrajectoryTurn] = []
 
     @property
     def invocation_id(self) -> str:
@@ -67,15 +80,35 @@ class GymTraceHooks:
             output=list(self._snapshot.output),
             invocations=[invocation.model_copy(deep=True) for invocation in self._invocations.values()],
             model_calls={key: list(value) for key, value in self._snapshot.model_calls.items()},
+            turns=[turn.model_copy(deep=True) for turn in self._turns],
+            task_id=self._snapshot.task_id,
+            rollout_id=self._snapshot.rollout_id,
         )
 
     def record_model_response(self, response: NeMoGymResponse) -> None:
         invocation_id = self.invocation_id
         self._snapshot.output.extend(response.output)
-        if response.id:
-            self._snapshot.model_calls.setdefault(invocation_id, []).append(
-                ModelCallRef(model_ref=self._model_ref, response_id=response.id)
+        model_calls = [ModelCallRef(model_ref=self._model_ref, response_id=response.id)] if response.id else []
+        if model_calls:
+            self._snapshot.model_calls.setdefault(invocation_id, []).extend(model_calls)
+        # One agent turn per model generation: the collector only accepts turns from a
+        # producer-emitted ``ng_trajectory``, so without this the agent-turn health checks
+        # stay unobserved. ``answer`` keeps the raw output items (messages + function
+        # calls) so structural checks see both message text and tool calls.
+        turn_no = self._turn_counts.get(invocation_id, 0) + 1
+        self._turn_counts[invocation_id] = turn_no
+        self._turns.append(
+            TrajectoryTurn(
+                invocation_id=invocation_id,
+                task_id=self._snapshot.task_id,
+                rollout_id=self._snapshot.rollout_id,
+                turn_no=turn_no,
+                timestamp=time(),
+                answer=[item.model_dump(mode="json", exclude_none=True) for item in response.output],
+                step_count=turn_no,
+                model_calls=model_calls,
             )
+        )
 
     def record_tool_execution(self, execution: Any) -> None:
         self._snapshot.output.extend(
@@ -241,6 +274,23 @@ class GymTraceHooks:
         **kwargs: Any,
     ) -> None:
         return None
+
+
+def nooa_producer_trajectory(trace: NOOATraceSnapshot) -> TrajectoryRecord:
+    """Emit the producer trajectory carrying Gym agent turns.
+
+    Gym's rollout collector accepts turn records only from a producer-emitted
+    ``ng_trajectory``; observation records have no turn variant. Without this,
+    the agent-turn health checks stay unobserved. Invocations and tool calls are
+    deliberately omitted: the collector treats producer invocations as
+    authoritative and would drop the conversation-carrying observation records,
+    so only turn facts belong here.
+    """
+    return TrajectoryRecord(
+        task_id=trace.task_id,
+        rollout_id=trace.rollout_id,
+        turns=[turn.model_copy(deep=True) for turn in trace.turns],
+    )
 
 
 def _input_items(value: Any) -> list[Any]:

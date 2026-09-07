@@ -104,7 +104,11 @@ class EmbeddedNOOARunner:
         responses: list[NeMoGymResponse] = []
         executions: list[GymToolExecution] = []
         observation_gaps: list[ObservationGap] = []
-        trace_hooks = GymTraceHooks(ModelServerRef(type="responses_api_models", name=self._model_server_name))
+        trace_hooks = GymTraceHooks(
+            ModelServerRef(type="responses_api_models", name=self._model_server_name),
+            task_id=request.task_id,
+            rollout_id=request.rollout_id,
+        )
         llm = GymResponsesLLM(
             server_client=self._server_client,
             model_server_name=self._model_server_name,
