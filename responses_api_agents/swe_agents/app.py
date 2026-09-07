@@ -274,6 +274,12 @@ class SWEBenchMetrics(BaseModel):
     agent_timed_out: Optional[bool] = None
     eval_timed_out: Optional[bool] = None
 
+    # Reward-integrity telemetry: model patch touched file(s) owned by the
+    # official test patch. Scalars here surface in wandb via the per-agent
+    # aggregation of verify-response fields (bool mean == rate).
+    touched_official_test_files: Optional[bool] = None
+    touched_official_test_files_count: Optional[int] = None
+
     # Memory watchdog signals
     oom_killed: Optional[bool] = None
     eval_oom_killed: Optional[bool] = None
@@ -848,8 +854,24 @@ git reset --hard HEAD
 # Apply model patch
 git apply --reject --recount --ignore-space-change --whitespace=nowarn /root/patch.diff || true
 
-# Apply test patch
-git apply --reject --recount --ignore-space-change --whitespace=nowarn /root/test_patch.diff || true
+# Apply test patch. Model edits to any file owned by the official test patch are
+# discarded first, and the test patch must then apply cleanly: the previous
+# lenient apply (--reject || true) silently dropped official test hunks whenever
+# the model had pre-edited the same region, letting model-authored tests displace
+# the oracle and corrupt the reward.
+if [ -s /root/test_patch.diff ]; then
+    for f in $(grep -E '^(---|\\+\\+\\+) [ab]/' /root/test_patch.diff | sed -E 's|^... [ab]/||' | sort -u); do
+        git checkout HEAD -- "$f" 2>/dev/null || rm -f -- "$f"
+    done
+    if ! git apply --recount --ignore-space-change --whitespace=nowarn /root/test_patch.diff; then
+        mkdir -p /trajectories_mount/eval_results
+        echo "FATAL: official test_patch failed to apply after resetting its files" \
+          > /trajectories_mount/eval_results/test_output.log
+        printf '{{"_test_completed": true, "exit_code": 1, "test_patch_apply_failed": true}}\\n' \
+          > /trajectories_mount/eval_results/report.json
+        exit 0
+    fi
+fi
 
 # Run install commands (non-fatal, some may fail harmlessly)
 set +e
@@ -1039,8 +1061,27 @@ cd /testbed 2>/dev/null || cd /workspace/repo 2>/dev/null || cd /app 2>/dev/null
 # Apply model patch (agent output or golden patch)
 git apply --reject --recount --ignore-space-change --ignore-whitespace /root/patch.diff || true
 
-# Apply test patch (adds/modifies test files)
-git apply --reject --recount --ignore-space-change --ignore-whitespace /root/test_patch.diff || true
+# Apply test patch (adds/modifies test files). Model edits to any file owned by
+# the official test patch are discarded first, and the test patch must then
+# apply cleanly: the previous lenient apply (--reject || true) silently dropped
+# official test hunks whenever the model had pre-edited the same region, letting
+# model-authored tests displace the oracle and corrupt the reward.
+if [ -s /root/test_patch.diff ]; then
+    for f in $(grep -E '^(---|\\+\\+\\+) [ab]/' /root/test_patch.diff | sed -E 's|^... [ab]/||' | sort -u); do
+        git checkout HEAD -- "$f" 2>/dev/null || rm -f -- "$f"
+    done
+    if ! git apply --recount --ignore-space-change --ignore-whitespace /root/test_patch.diff; then
+        mkdir -p /trajectories_mount/eval_results
+        {{
+            echo "<<<SWE_BENCH_EXT_TEST_OUTPUT_START>>>"
+            echo "FATAL: official test_patch failed to apply after resetting its files"
+            echo "<<<SWE_BENCH_EXT_TEST_OUTPUT_END>>>"
+        }} > /trajectories_mount/eval_results/test_output.log
+        printf '{{"_test_completed": true, "exit_code": 1, "test_patch_apply_failed": true}}\\n' \
+          > /trajectories_mount/eval_results/report.json
+        exit 0
+    fi
+fi
 
 # Run tests with structured output and capture to log
 mkdir -p /trajectories_mount/eval_results /workspace/test-results
@@ -2162,6 +2203,15 @@ def runner_ray_remote(params_dict: dict[str, Any]) -> Optional[Path]:
     report_file = asyncio.run(run_oh.process_single_datapoint())
 
     return report_file
+
+
+def _patch_file_paths(patch_text: str) -> set:
+    """Both-side file paths named by a unified git diff (rename-safe)."""
+    paths = set()
+    for m in re.finditer(r"^diff --git a/(\S+) b/(\S+)$", patch_text, re.M):
+        paths.add(m.group(1))
+        paths.add(m.group(2))
+    return paths
 
 
 def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
@@ -3551,6 +3601,24 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             metrics_to_update["resolved"] = resolved
         else:
             metrics_to_update["resolved"] = False
+
+        # Reward-integrity telemetry: rate at which the model patch touches files
+        # owned by the official test patch. The strict test-patch apply in the
+        # eval script stops this from displacing official tests; the wandb rate
+        # (<agent>/touched_official_test_files/mean) tracks remaining pressure.
+        test_patch_text = ""
+        for cand in ("test_patch.diff", "test.patch", "denovoswe_test_patch.diff"):
+            cand_path = params.eval_private_dir / cand
+            if cand_path.exists():
+                test_patch_text = cand_path.read_text(errors="replace")
+                break
+        if test_patch_text:
+            model_patch_text = (
+                params.model_patch_path.read_text(errors="replace") if params.model_patch_path.exists() else ""
+            )
+            touched = _patch_file_paths(model_patch_text) & _patch_file_paths(test_patch_text)
+            metrics_to_update["touched_official_test_files"] = bool(touched)
+            metrics_to_update["touched_official_test_files_count"] = len(touched)
 
         # Decide whether to mask this sample from the GRPO gradient.
         # 1) Patch passed eval but agent did not actually submit (hit max-turns
