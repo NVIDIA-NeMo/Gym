@@ -3,16 +3,25 @@
 gym eval prepare --benchmark aalcr
 ```
 
-The upstream HuggingFace dataset is pinned to a fixed revision (`HF_REVISION` in `prepare.py`, currently
-dataset v1.0) so that scores stay reproducible when upstream publishes a new revision. To prepare against a
-different dataset version, override the revision:
+# Dataset version
+
+The benchmark tracks a pinned upstream version, currently **v1.1**, rather than resolving `main` — upstream
+publishes breaking revisions in place, and v1.1 corrected 16 of the 100 answer keys.
+
+Upstream versions the answer keys and the judge protocol *together*, so `resources_servers/aalcr/versions.py`
+selects them together: one `version` fixes the dataset revision, the judge system prompt, the user prompt and
+the verdict format. Choosing them independently grades v1.1 keys under the v1.0 protocol (or the reverse),
+which matches no published version and yields a plausible but meaningless score.
+
+To reproduce results from an older version, move both selectors together:
 
 ```bash
-gym eval prepare --benchmark aalcr ++prepare_script_args.revision=<commit-sha-or-tag>
+gym eval prepare --benchmark aalcr ++prepare_script_args.version=1.0
+gym eval run --benchmark aalcr ... '++aalcr_benchmark_resources_server.resources_servers.aalcr.dataset_version=1.0'
 ```
 
-Note that scores are not comparable across upstream dataset versions — v1.1 changed 16 of the 100 answer
-keys and revised the judge protocol.
+Scores are **not comparable across upstream versions** — results produced under v1.0 must be re-run, not
+compared.
 
 # Run
 ```bash

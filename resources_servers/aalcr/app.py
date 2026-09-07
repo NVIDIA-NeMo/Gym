@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import re
 from typing import Any, Dict, Optional
 
 from nemo_gym.base_resources_server import (
@@ -24,11 +26,50 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from resources_servers.aalcr.versions import DEFAULT_VERSION, get_version
+
+
+VERDICT_CORRECT = "CORRECT"
+VERDICT_INCORRECT = "INCORRECT"
+
+_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def _parse_json_verdict(judge_response_text: str) -> Optional[str]:
+    """Extract the verdict from a JSON judge reply, or None if it is unusable.
+
+    The upstream prompt asks for "JSON, with a verdict of CORRECT or INCORRECT" without fixing a schema,
+    so accept any JSON object carrying a `verdict` key, tolerating a code fence or surrounding prose.
+    """
+    match = _JSON_OBJECT_RE.search(judge_response_text)
+    if match is None:
+        return None
+    try:
+        parsed = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+
+    for key, value in parsed.items():
+        if isinstance(key, str) and key.strip().lower() == "verdict" and isinstance(value, str):
+            verdict = value.strip().upper()
+            if verdict in (VERDICT_CORRECT, VERDICT_INCORRECT):
+                return verdict
+    return None
+
+
+def _parse_bare_verdict(judge_response_text: str) -> Optional[str]:
+    if judge_response_text in (VERDICT_CORRECT, VERDICT_INCORRECT):
+        return judge_response_text
+    return None
 
 
 class AalcrResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params_overrides: Dict[str, Any]
+    # Selects the upstream answer keys *and* the judge protocol that grades them; see versions.py.
+    dataset_version: str = DEFAULT_VERSION
 
 
 class AALCRVerifyRequest(BaseVerifyRequest):
@@ -81,16 +122,14 @@ class AalcrResourcesServer(SimpleResourcesServer):
                 **{input_tokens_band_key: reward},
             )
 
-        judge_prompt = f"""Assess whether the following CANDIDATE ANSWER is CORRECT or INCORRECT.
-For the CANDIDATE ANSWER to be correct, it must be consistent with the OFFICIAL ANSWER.
+        version = get_version(self.config.dataset_version)
+        judge_prompt = version.judge_user_prompt.format(
+            question=body.question, official_answer=body.answer, candidate_answer=candidate_answer
+        )
 
-The question, for reference only: {body.question}
-The OFFICIAL ANSWER: {body.answer}
-CANDIDATE ANSWER TO ASSESS: {candidate_answer}
-
-Reply only with CORRECT or INCORRECT."""
-
-        judge_responses_create_params = dict(input=[{"role": "user", "content": judge_prompt}])
+        judge_responses_create_params: Dict[str, Any] = dict(input=[{"role": "user", "content": judge_prompt}])
+        if version.judge_system_prompt is not None:
+            judge_responses_create_params["instructions"] = version.judge_system_prompt
         judge_responses_create_params |= self.config.judge_responses_create_params_overrides
 
         judge_response = await call_judge(
@@ -104,15 +143,10 @@ Reply only with CORRECT or INCORRECT."""
         if not judge_response_text:
             raise JudgeError("empty judge response")
 
-        if judge_response_text == "CORRECT":
-            invalid_judge_response = False
-            reward = 1.0
-        elif judge_response_text == "INCORRECT":
-            invalid_judge_response = False
-            reward = 0.0
-        else:
-            invalid_judge_response = True
-            reward = 0.0
+        parse = _parse_json_verdict if version.judge_replies_json else _parse_bare_verdict
+        verdict = parse(judge_response_text)
+        invalid_judge_response = verdict is None
+        reward = 1.0 if verdict == VERDICT_CORRECT else 0.0
 
         return AALCRVerifyResponse(
             **body.model_dump(),

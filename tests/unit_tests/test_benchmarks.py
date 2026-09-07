@@ -39,13 +39,16 @@ def test_pinchbench_tavily_key_is_derived_from_environment() -> None:
 
 
 def test_aalcr_dataset_revision_is_pinned() -> None:
-    """AA-LCR must resolve a fixed upstream revision, not `main`.
+    """AA-LCR must resolve a fixed upstream revision, not `main`, and pick its judge protocol with it.
 
-    Upstream publishes breaking revisions to `main` (a past one rewrote 16 of the 100 answer keys), which
-    silently changes scores for a config that is otherwise unchanged.
+    Upstream publishes breaking revisions to `main` (v1.1 corrected 16 of the 100 answer keys) and
+    versions the judge protocol alongside them, so a floating revision silently changes scores and a
+    revision chosen independently of the protocol silently mis-grades.
     """
     import importlib.util
     import inspect
+
+    from resources_servers.aalcr.versions import DEFAULT_VERSION, VERSIONS
 
     repo_root = Path(__file__).parents[2]
     prepare_fpath = repo_root / "benchmarks/aalcr/prepare.py"
@@ -53,8 +56,15 @@ def test_aalcr_dataset_revision_is_pinned() -> None:
     aalcr_prepare = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(aalcr_prepare)
 
-    assert re.fullmatch(r"[0-9a-f]{40}", aalcr_prepare.HF_REVISION), "pin must be a full commit sha"
-    assert inspect.signature(aalcr_prepare.prepare).parameters["revision"].default == aalcr_prepare.HF_REVISION
+    assert DEFAULT_VERSION == "1.1"
+    assert VERSIONS[DEFAULT_VERSION].revision == "9a77ef56b717057ade24ceab4d273712a0b4f19e"  # pragma: allowlist secret
+    for version in VERSIONS.values():
+        assert re.fullmatch(r"[0-9a-f]{40}", version.revision), "each pin must be a full commit sha"
+
+    # The data and the protocol are chosen by one selector; `revision` is deliberately not a parameter.
+    signature = inspect.signature(aalcr_prepare.prepare)
+    assert signature.parameters["version"].default == DEFAULT_VERSION
+    assert "revision" not in signature.parameters
     assert "resolve/main/" not in prepare_fpath.read_text()
 
 

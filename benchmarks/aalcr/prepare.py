@@ -26,6 +26,7 @@ import requests
 from datasets import load_dataset
 
 from nemo_gym.global_config import get_hf_token
+from resources_servers.aalcr.versions import DEFAULT_VERSION, get_version
 
 
 BENCHMARK_DIR = Path(__file__).parent
@@ -33,9 +34,6 @@ DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "aalcr_benchmark.jsonl"
 
 HF_REPO_ID = "ArtificialAnalysis/AA-LCR"
-# Pinned HuggingFace dataset revision. Upstream publishes breaking revisions to `main` (v1.1 rewrote 16
-# of the 100 answer keys), so resolving `main` silently changes scores. This pin is dataset v1.0.
-HF_REVISION = "bdae010bbce259820c0e34c1d7cce210d966fb75"  # pragma: allowlist secret
 
 
 # From https://github.com/NVIDIA-NeMo/Skills/blob/54d2e113c2f64bf74bda72e15f23f01b524850da/nemo_skills/dataset/aalcr/prepare.py#L94-L105
@@ -56,17 +54,18 @@ def _dirty_filename(fname: str) -> str:
     return filename_with_artifacts
 
 
-def prepare(revision: str = HF_REVISION) -> Path:
+def prepare(version: str = DEFAULT_VERSION) -> Path:
     """Prepare the AA-LCR benchmark data at a pinned upstream dataset revision.
 
-    Args:
-        revision: HuggingFace revision (commit sha, tag or branch) for both the answer keys and the
-            source documents. Defaults to dataset v1.0. Override via
-            `++prepare_script_args.revision=<sha>` to evaluate against a different dataset version.
+    Upstream publishes breaking revisions to `main` (v1.1 corrected 16 of the 100 answer keys), so the
+    revision is pinned rather than resolved. `version` selects the answer keys *and* the judge protocol
+    that grades them, which upstream versions together; set it via `++prepare_script_args.version=1.0`
+    and the matching `dataset_version` on the resources server to reproduce older results.
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    print(f"Preparing {HF_REPO_ID} at revision {revision}")
+    revision = get_version(version).revision
+    print(f"Preparing {HF_REPO_ID} v{version} at revision {revision}")
 
     data = load_dataset(HF_REPO_ID, split="test", revision=revision, token=get_hf_token())
 

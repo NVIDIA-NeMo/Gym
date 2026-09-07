@@ -18,6 +18,9 @@ aalcr_benchmark_resources_server:
         type: responses_api_models
         name: Qwen3-235B-A22B-Instruct-2507-FP8
       judge_responses_create_params_overrides: {}
+      # Selects the upstream answer keys and the judge protocol together; keep in step with
+      # `++prepare_script_args.version`. See resources_servers/aalcr/versions.py.
+      dataset_version: "1.1"
 
 aalcr_benchmark_simple_agent:
   responses_api_agents:
