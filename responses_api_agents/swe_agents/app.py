@@ -125,6 +125,18 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
 
     swebench_agent_timeout: int = Field(default=45 * 60, description="Timeout for running the agent (seconds)")
 
+    sanitize_repo_git_refs: bool = Field(
+        default=True,
+        description=(
+            "Strip future git refs from the task repo before the agent's first turn (opencode "
+            "harness). Task images ship full clones whose branches/tags often contain the gold "
+            "fix; agents have been observed extracting it via deny-list gaps (git diff <tag>, "
+            "git ls-tree, ...). Deletes all branch/remote refs, tags not reachable from the base "
+            "commit, and the reflog; keeps past tags so git-describe/setuptools-scm style version "
+            "detection still works. Outcome is recorded to the repo_refs_stripped metric."
+        ),
+    )
+
     apptainer_memory_limit_mb: int = Field(
         default=64 * 1024,
         description=(
@@ -279,6 +291,9 @@ class SWEBenchMetrics(BaseModel):
     # aggregation of verify-response fields (bool mean == rate).
     touched_official_test_files: Optional[bool] = None
     touched_official_test_files_count: Optional[int] = None
+    # True if the pre-agent git-ref sanitization ran to completion; False means
+    # the rollout's repo may still expose future refs (gold-fix archaeology).
+    repo_refs_stripped: Optional[bool] = None
 
     # Memory watchdog signals
     oom_killed: Optional[bool] = None
@@ -2087,6 +2102,44 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
                 "} && "
             )
 
+        # Strip future git refs from the task repo before the agent's first turn.
+        # Task images ship full clones whose branches/tags contain post-base
+        # history including the gold fix; agents have mined it through deny-list
+        # gaps (git diff <tag>, git ls-tree, git log -S). Deleting all
+        # branch/remote refs, non-ancestor tags, and the reflog makes future
+        # commits unreachable by any enumeration command; past tags are kept so
+        # git-describe/setuptools-scm version detection keeps working. Runs per
+        # rollout because the container overlay is ephemeral (~0.2s on the
+        # largest repo in the pool). Best-effort: a failure must not kill the
+        # rollout, but is recorded to the repo_refs_stripped metric so the rate
+        # of unsanitized rollouts is visible in wandb, never silent.
+        sanitize_refs_cmd = ""
+        if self.config.sanitize_repo_git_refs:
+            refs_flag_path = f"{self.config.base_mounted_dir}/repo_refs_stripped"
+            # NOTE: the body is a strict &&-chain, NOT `set -e`: bash suppresses
+            # `set -e` inside any compound command whose exit status is tested
+            # (this subshell sits left of &&), so errexit would silently never
+            # fire here and failures would be reported as success.
+            sanitize_refs_cmd = (
+                "{ ( "
+                f"{{ cd {shlex.quote(workspace_path)} 2>/dev/null || cd /workspace/repo 2>/dev/null || cd /testbed 2>/dev/null || cd /app; }} && "
+                "git rev-parse --git-dir >/dev/null && "
+                "{ git config --global --add safe.directory '*' 2>/dev/null || true; } && "
+                '_base=$(git rev-parse HEAD) && _branch=$(git rev-parse --abbrev-ref HEAD) && '
+                "git checkout -q --detach && "
+                "git for-each-ref --format='%(refname)' refs/heads refs/remotes refs/notes | xargs -r -n1 git update-ref -d && "
+                "git tag -l | sort > /tmp/.all_tags && "
+                '{ git for-each-ref --format="%(refname:short)" --merged="$_base" refs/tags 2>/dev/null '
+                "|| for _t in $(git tag -l); do "
+                '{ git merge-base --is-ancestor "$(git rev-parse "$_t^{commit}")" "$_base" 2>/dev/null && echo "$_t"; } || true; '
+                "done; } | sort > /tmp/.past_tags && "
+                "comm -23 /tmp/.all_tags /tmp/.past_tags | xargs -r -n50 git tag -d >/dev/null && "
+                '{ [ "$_branch" = HEAD ] || git checkout -qB "$_branch" "$_base"; } && '
+                "{ git reflog expire --expire=now --all 2>/dev/null || true; } && "
+                "{ git remote | xargs -r -n1 git remote remove 2>/dev/null || true; } "
+                f") >/tmp/sanitize_refs.log 2>&1 && echo 1 > {refs_flag_path} || echo 0 > {refs_flag_path}; }} && "
+            )
+
         agent_main_cmd = (
             "mkdir -p /tmp/ && "
             "export PATH=/opencode_setup/bun/bin:$PATH && "
@@ -2104,6 +2157,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             f"echo {shlex.quote(config_str)} >{config_file_path} && "
             f"{conda_activate_cmd}"
             f"{denovoswe_clean_cmd}"
+            f"{sanitize_refs_cmd}"
             f"{baseline_fix_cmd}"
             "./evaluation/benchmarks/swe_bench/scripts/run_infer.sh "
             f"    {self.config.agent_framework_commit} "  # $1: opencode commit
@@ -3619,6 +3673,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
             touched = _patch_file_paths(model_patch_text) & _patch_file_paths(test_patch_text)
             metrics_to_update["touched_official_test_files"] = bool(touched)
             metrics_to_update["touched_official_test_files_count"] = len(touched)
+
+        # Outcome of the pre-agent git-ref sanitization (see sanitize_repo_git_refs).
+        # False = this rollout's repo may still have exposed future refs.
+        refs_flag = params.persistent_dir / "repo_refs_stripped"
+        if refs_flag.exists():
+            metrics_to_update["repo_refs_stripped"] = refs_flag.read_text().strip() == "1"
 
         # Decide whether to mask this sample from the GRPO gradient.
         # 1) Patch passed eval but agent did not actually submit (hit max-turns
