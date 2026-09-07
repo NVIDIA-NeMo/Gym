@@ -1,0 +1,58 @@
+# BigFinanceBench tools-only server. Combine with a policy model overlay.
+big_finance_resources_server:
+  resources_servers:
+    big_finance:
+      allowed_agents: [finance_agent]
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Pinned BigFinanceBench web, EDGAR, fetch, Python, and final-answer tools
+      value: Run the public BigFinanceBench scaffold in NeMo Gym
+      serp_api_key: ${oc.select:serp_api_key,${oc.env:SERP_API_KEY,null}}
+      tavily_api_key: ${oc.select:tavily_api_key,${oc.env:TAVILY_API_KEY,null}}
+      sec_edgar_user_agent: ${oc.select:sec_edgar_user_agent,${oc.env:SEC_EDGAR_USER_AGENT,null}}
+      web_search_timeout_s: 30
+      edgar_timeout_s: 20
+      fetch_timeout_s: 30
+      python_exec_timeout_s: 5
+      judge_model_server:
+        type: responses_api_models
+        name: big_finance_judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 16384
+      judge_call_timeout_s: 1800
+      reward_mode: ${oc.select:big_finance_reward_mode,final_answer}
+
+big_finance:
+  responses_api_agents:
+    finance_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: big_finance_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      no_tool_call_nudge: Continue.
+      max_time_seconds: null
+      abort_on_tool_error_types: []
+      done_tools: [final_answer]
+      prose_only_behavior: finish
+      tool_call_execution: concurrent
+      max_steps: 50
+      truncate_on_overflow: false
+      tool_call_timeout: 300
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/big_finance/data/example.jsonl
+          license: Creative Commons Attribution 4.0 International
+
+big_finance_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:big_finance_judge_base_url,https://api.openai.com/v1}
+      openai_api_key: ${oc.select:big_finance_judge_api_key,unset}
+      openai_model: ${oc.select:big_finance_judge_model_name,gpt-5-mini}
