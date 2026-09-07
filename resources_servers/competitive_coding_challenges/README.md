@@ -24,7 +24,7 @@ competitive_coding_challenges
     num_parallel_requests: 16
     time_scale: 2.0
     shared_dir: ${oc.env:SHARED_TEMP_DIR,/tmp}
-    local_compile_dir: ${oc.env:LOCAL_COMPILE_DIR,null}
+    local_compile_dir: ${oc.env:LOCAL_COMPILE_DIR,/tmp/nemo-gym-compile}
 ```
 
 You must set the following at runtime:
@@ -33,7 +33,8 @@ You must set the following at runtime:
 
 and optionally can set to following:
 - `export CCC_LOG_JSONL_PATH=` set path to view generations and runtime/compilation information (ex: stderr, stdout)
-- `export LOCAL_COMPILE_DIR=` node-local directory where compilation is staged before completed artifacts are published to `SHARED_TEMP_DIR`
+- `export LOCAL_COMPILE_DIR=` override the default `/tmp/nemo-gym-compile` staging directory before completed artifacts are published to `SHARED_TEMP_DIR`
+- `local_compile_dir: null` disable local compilation staging and compile directly in `SHARED_TEMP_DIR`
 - `test_batch_size` per problem test case parallelism
 - `num_parallel_requests` number of problems to evaluate in parallel
 - `time_scale` timeout limit factor, multiply's each problem's inherent time limit

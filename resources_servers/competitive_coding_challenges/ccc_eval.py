@@ -152,7 +152,7 @@ class CCCEvaluatorConfig(BaseEvaluatorConfig):
     time_scale: float = 2.0
     overwrite: bool = False
     shared_dir: str = "/tmp"
-    local_compile_dir: str | None = None
+    local_compile_dir: str | None = "/tmp/nemo-gym-compile"
     run_all_tests: bool = False
 
 

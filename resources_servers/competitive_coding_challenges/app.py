@@ -85,7 +85,7 @@ class CompetitiveCodingChallengesResourcesServerConfig(BaseResourcesServerConfig
     num_parallel_requests: int = 16
     time_scale: float = 2.0
     shared_dir: str = "/tmp"
-    local_compile_dir: Optional[str] = None
+    local_compile_dir: Optional[str] = "/tmp/nemo-gym-compile"
     reward_mode: Literal["binary", "fraction"] = "binary"
 
 

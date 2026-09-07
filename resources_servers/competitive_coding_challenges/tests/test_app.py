@@ -113,6 +113,7 @@ def server() -> CompetitiveCodingChallengesResourcesServer:
 
 def test_sanity(server: CompetitiveCodingChallengesResourcesServer) -> None:
     assert server.config.name == "competitive_coding_challenges"
+    assert server.config.local_compile_dir == "/tmp/nemo-gym-compile"
 
 
 def test_setup_webserver_initializes_evaluator(server: CompetitiveCodingChallengesResourcesServer) -> None:
@@ -132,6 +133,14 @@ def test_setup_webserver_initializes_evaluator(server: CompetitiveCodingChalleng
     )
     assert app is not None
     assert server._evaluator is evaluator_cls.return_value
+
+
+def test_setup_webserver_allows_disabling_local_compile_staging() -> None:
+    server = _make_server(local_compile_dir=None)
+    with patch("resources_servers.competitive_coding_challenges.app.CCCEvaluator") as evaluator_cls:
+        server.setup_webserver()
+
+    assert evaluator_cls.call_args.kwargs["config"]["local_compile_dir"] is None
 
 
 @pytest.mark.asyncio
