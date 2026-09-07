@@ -14,32 +14,11 @@
 # limitations under the License.
 """Split an IOI statement into one subtask-targeted variant per scoring row.
 
-A contestant farms partial credit by solving the easy subtasks outright, so a
-benchmark that only ever shows the general problem measures something narrower
-than the contest does. Each variant here rewrites the statement's `## Constraints`
-section to describe one subtask, exactly as the published IOI'25 evaluation
-dataset does:
-
-    ## Constraints
-    Do note that you DO NOT necessarily have to solve for the general case, but
-    only for the subproblem defined by the following constraints:
-
-    * $3 \\leq N \\leq 100\\,000$
-    * ...
-    * $N = 3$              <- the subtask's additional constraint
-
-and reduces the scoring table to the targeted row, so the model is not told
-about subtasks it is not being asked to solve.
-
-Two table shapes appear in 2026:
-
 - `| Subtask | Score | Additional Constraints |` -- five of the six tasks. One
   variant per row; rows are positionally aligned with `subtasks/*.json`.
 - `| Subtasks | $S$ | $P$ |` -- `magiccity` only, whose 50 subtasks differ solely
   in `K` and are published as eight banded rows (`6 - 10`, `13 - 50`, ...). We
-  follow the statement and emit eight variants, not fifty: the band is the unit
-  the setters chose to describe, and it keeps the generation budget proportional
-  to the problem's 100 points rather than to its subtask count.
+  follow the statement and emit eight variants, not fifty.
 """
 
 from __future__ import annotations
