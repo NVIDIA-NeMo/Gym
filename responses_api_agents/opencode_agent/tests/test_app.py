@@ -518,7 +518,7 @@ class TestRepoDir:
         assert output == scored
         assert usage == {"input_tokens": 1, "output_tokens": 2}
         command = create_process.await_args.args
-        assert command[command.index("--title") + 1] == "NG dummy title"
+        assert "--title" not in command
         assert "agent_artifact_unavailable" in {gap.code for gap in observations.gaps}
         assert repo_dir.is_dir()
         assert not workspace.exists()

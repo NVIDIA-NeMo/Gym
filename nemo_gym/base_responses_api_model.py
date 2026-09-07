@@ -853,9 +853,9 @@ _OBSERVED_PATHS = {
     "/v1/messages": "messages",
 }
 
-# OpenCode 1.17.11 sends this header with its persisted session ID for Gym's non-OpenCode-prefixed
-# provider. It is client-declared correlation evidence, not authentication; absence is fail-safe.
-_OPENCODE_SESSION_HEADER = b"x-session-id"
+# A client may declare its persisted session ID for exact correlation with an AgentInvocation.
+# It is correlation evidence, not authentication; absence is fail-safe.
+_CLIENT_SESSION_HEADER = b"x-session-id"
 
 _TERMINAL_SSE_LINES: dict[str, dict[bytes, str]] = {
     "responses": {
@@ -1322,7 +1322,7 @@ class _CaptureMiddleware:
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
-        client_session_id = _unique_request_header(scope.get("headers") or [], _OPENCODE_SESSION_HEADER)
+        client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
 
         # Give the model server a token sink keyed to this call.
         # The sink records token ids from the complete response.
@@ -1707,22 +1707,6 @@ def merge_model_call_capture_into_record(
                         exc_info=True,
                     )
                     bundle.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
-            elif bundle.source == "opencode":
-                try:
-                    from responses_api_agents.opencode_agent.observability import (
-                        associate_opencode_session_calls,
-                    )
-
-                    bundle = associate_opencode_session_calls(bundle, calls)
-                except Exception:
-                    logger.warning(
-                        "Could not associate OpenCode session calls for rollout %s.",
-                        rollout_id,
-                        exc_info=True,
-                    )
-                    bundle.gaps.append(
-                        ObservationGap(code="model_call_ownership_unavailable", detail="opencode_session_join_failed")
-                    )
             bundle = join_model_call_observations(bundle, calls)
             record["ng_agent_observations"] = bundle.model_dump(mode="json")
         except Exception:
