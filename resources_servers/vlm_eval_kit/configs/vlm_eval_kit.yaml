@@ -10,7 +10,7 @@ vlm_eval_kit_resources_server:
       # _inherit_from overrides survive the OmegaConf struct merge). Defaults =
       # the original upstream pin; omni benchmarks override to the mcore fork.
       vlmevalkit_url: https://github.com/open-compass/VLMEvalKit
-      vlmevalkit_commit: 00804217f868058f871f5ff252a7b9623c3475d9
+      vlmevalkit_commit: 00804217f868058f871f5ff252a7b9623c3475d9  # pragma: allowlist secret
       # LLM judge / fallback matcher. Declared here so benchmark-scoped
       # `_inherit_from` overrides survive the OmegaConf struct merge.
       # judge_api_key is injected via CLI override at launch.

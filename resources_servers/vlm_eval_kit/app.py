@@ -39,9 +39,9 @@ logger = logging.getLogger(__name__)
 # unaffected. The mcore fork is the authoritative source for the P00 Omni
 # benchmarks (Nemotron reference implementations land there).
 UPSTREAM_VLMEVALKIT_URL = "https://github.com/open-compass/VLMEvalKit"
-UPSTREAM_VLMEVALKIT_COMMIT = "00804217f868058f871f5ff252a7b9623c3475d9"
+UPSTREAM_VLMEVALKIT_COMMIT = "00804217f868058f871f5ff252a7b9623c3475d9"  # pragma: allowlist secret
 MCORE_VLMEVALKIT_URL = "https://gitlab-master.nvidia.com/matthieul/VLMEvalKitMcore.git"
-MCORE_VLMEVALKIT_COMMIT = "6962c8d06b2b7b26a74a73d6212c06562b63e1b7"
+MCORE_VLMEVALKIT_COMMIT = "6962c8d06b2b7b26a74a73d6212c06562b63e1b7"  # pragma: allowlist secret
 
 # Reasoning models wrap their chain-of-thought in <think>/<thinking> blocks; scorers
 # must judge only the final answer text.
