@@ -1,5 +1,6 @@
-ioi24_benchmark.jsonl
-ioi24_metadata.json
+_task_archive/
+ioi26_benchmark.jsonl
+ioi26_metadata.json
 *train.jsonl
 *validation.jsonl
 *train_prepare.jsonl

@@ -1,26 +1,28 @@
 # IOI (International Olympiad in Informatics)
 
-Gym benchmark for IOI'24, evaluated via `resources_servers/competitive_coding_challenges`.
+Gym benchmark for IOI'26, evaluated via `resources_servers/competitive_coding_challenges`.
 
 This benchmark contributes:
 
-- `prepare.py` — downloads `open-r1/ioi` + `open-r1/ioi-test-cases` from
-  HuggingFace and emits CCC-shaped artifacts (one row per (problem, subtask)
-  + a JSONL metadata file wrapped in CCC's competition shape, keyed by
-  lowercase ioi_id so a single `problem_id` string serves both metadata
-  lookup and IOI's `graders/{problem_id}.cpp` filename convention).
+- `prepare.py` — pulls everything from the official task archive
+  (`github.com/ioi/task-archive`) and emits CCC-shaped artifacts: one row per
+  (problem, subtask), plus a JSONL metadata file wrapped in CCC's competition
+  shape and keyed by the task's short code, so a single `problem_id` string
+  serves both metadata lookup and IOI's `graders/{problem_id}.cpp` filename
+  convention.
 
 - `config.yaml` — inherits the `competitive_coding_challenges` server +
-  `competitive_coding_challenges_simple_agent` configs, overrides
-  `test_file` / `shared_dir` to point at the benchmark's own data dir, and
-  wires the `benchmark`-type dataset with its `prepare_script`.
+  `competitive_coding_challenges_simple_agent` configs, overrides `test_file` /
+  `shared_dir` to point at the benchmark's own data dir, and wires the
+  `benchmark`-type dataset with its `prepare_script`.
+
 
 ## Metrics
 
 Emitted by `competitive_coding_challenges`:
 
-- `total_score` — sum across problems of max per-subtask score pooled
-  across rollouts. On the 0–600 IOI'24 scale.
+- `total_score` — sum across problems of max per-subtask score pooled across
+  rollouts. On the 0–600 IOI'26 scale.
 - `per_problem_subtask_scores` — per-problem breakdown, each with
   `total.{score,max_score}` plus per-subtask `{score, max_score}`.
 - Plus the standard pass@k/accuracy stats from `compute_pass_majority_metrics`.
@@ -28,7 +30,7 @@ Emitted by `competitive_coding_challenges`:
 ## Sandbox prerequisite (local)
 
 The CCC server compiles and runs candidate solutions inside the NeMo Skills
-sandbox over HTTP. Bring one up locally before running the benchmark:
+sandbox over HTTP. Bring one up locally before running the benchmark.
 
 There is no published image — build it from the NeMo-Skills repo:
 
@@ -47,17 +49,17 @@ elsewhere. Cluster/SLURM users can co-launch the sandbox via Skills'
 ## Running
 
 ```bash
-gym dataset collate --config benchmarks/ioi/config.yaml \
-  --output-dir benchmarks/ioi/data \
+gym dataset collate --config benchmarks/ioi26/config.yaml \
+  --output-dir benchmarks/ioi26/data \
   --mode benchmark_preparation
 
 gym env start \
-    --benchmark ioi \
+    --benchmark ioi26 \
     --model-type vllm_model
 
 gym eval run --no-serve \
-  --agent ioi_simple_agent \
-  --input benchmarks/ioi/data/ioi24_benchmark.jsonl \
+  --agent ioi26_simple_agent \
+  --input benchmarks/ioi26/data/ioi26_benchmark.jsonl \
   --output results/ioi_rollouts.jsonl \
   --num-repeats 50 \
   --temperature 1.0 \
