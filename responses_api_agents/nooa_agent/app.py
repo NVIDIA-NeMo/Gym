@@ -45,6 +45,29 @@ from responses_api_agents.nooa_agent.runner import (
 )
 
 
+def _configure_native_file_journal() -> None:
+    """Add NOOA's portable .nooa.jsonl journal when NOOA_TRACE_DIR is set.
+
+    Replaces the auto-probed exporter list with the live viewer journal plus
+    the file journal, so one run produces both artifacts: the viewer session
+    and an importable native trace file. "exporters=None" (unset env) keeps
+    the auto-probe configuration untouched.
+    """
+    import os
+
+    trace_dir = os.getenv("NOOA_TRACE_DIR")
+    if not trace_dir:
+        return
+    from nooa.tracing import enable_tracing
+    from nooa.tracing import exporters as nooa_exporters
+
+    endpoint = os.getenv("OTLP_ENDPOINT", "http://localhost:5001")
+    enable_tracing([nooa_exporters.journal(endpoint=endpoint), nooa_exporters.journal_file(trace_dir)])
+
+
+_configure_native_file_journal()
+
+
 NOOA_TERMINATION_REASON_KEY = "nooa_termination_reason"
 NOOA_TERMINATION_ERROR_KEY = "nooa_termination_error"
 
