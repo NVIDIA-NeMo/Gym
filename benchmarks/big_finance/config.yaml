@@ -1,0 +1,31 @@
+# BigFinanceBench public 50-question benchmark.
+config_paths:
+  - resources_servers/big_finance/configs/big_finance.yaml
+
+big_finance_benchmark_resources_server:
+  _inherit_from: big_finance_resources_server
+
+big_finance_benchmark_agent:
+  _inherit_from: big_finance
+  responses_api_agents:
+    finance_agent:
+      resources_server:
+        name: big_finance_benchmark_resources_server
+      no_tool_call_nudge: Continue.
+      max_time_seconds: null
+      abort_on_tool_error_types: []
+      done_tools: [final_answer]
+      # Match the upstream harness: prose without a tool call is accepted as the
+      # final answer, and independent calls emitted in one turn run concurrently.
+      prose_only_behavior: finish
+      tool_call_execution: concurrent
+      max_steps: 50
+      tool_call_timeout: 300
+      datasets:
+        - name: big_finance
+          type: benchmark
+          jsonl_fpath: benchmarks/big_finance/data/big_finance_public_50.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/big_finance/prepare.py
+          num_repeats: 1
+          license: CC BY 4.0

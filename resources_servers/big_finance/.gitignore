@@ -1,0 +1,8 @@
+# Large/generated benchmark outputs
+data/*.jsonl
+data/*.json
+
+# Keep canonical merge-readiness artifacts when they are generated.
+!data/example.jsonl
+!data/example_rollouts.jsonl
+!data/example_metrics.json
