@@ -544,16 +544,24 @@ def _merge_config_paths(overrides: list[str]) -> list[str]:
 
 
 def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
+    from pathlib import Path
+
+    from hydra import compose, initialize_config_dir
+    from hydra.core.global_hydra import GlobalHydra
     from omegaconf import OmegaConf
 
     from nemo_gym.orchestration.api import SubmitConfig
     from nemo_gym.orchestration.submit import submit
 
-    merged = OmegaConf.merge(
-        OmegaConf.load(args.config),
-        OmegaConf.from_dotlist([t.lstrip("+") for t in overrides]) if overrides else OmegaConf.create(),
-    )
-    config = SubmitConfig.model_validate(OmegaConf.to_container(merged, resolve=True))
+    config_path = Path(args.config).resolve()
+    GlobalHydra.instance().clear()
+    with initialize_config_dir(config_dir=str(config_path.parent), version_base=None):
+        composed = compose(config_name=config_path.stem, overrides=overrides)
+    # Resolve interpolations (e.g. `${my_scratch.value}`) before dropping any root-level keys that live
+    # outside SubmitConfig's schema — they may exist purely to be interpolated into the fields below.
+    resolved = OmegaConf.to_container(composed, resolve=True)
+    known_fields = resolved.keys() & SubmitConfig.model_fields.keys()
+    config = SubmitConfig.model_validate({key: resolved[key] for key in known_fields})
     submit(config, dry_run=args.dry_run)
 
 
