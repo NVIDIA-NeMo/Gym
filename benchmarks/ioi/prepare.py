@@ -35,10 +35,6 @@ It emits CCC-shaped artifacts:
   ``tests`` / ``subtask_score`` / ``score_precision`` / ``run`` / ``compile`` /
   ``grader_files``. CCC's ``_normalize_problem_metadata`` converts this legacy
   shape into its normalized ``subtasks`` / ``all_tests`` structure at load time.
-
-Statements are the markdown the setters embedded inside each ``en.pdf`` as a
-file attachment, recovered byte for byte -- not a PDF-to-text conversion. The
-PDF records that attachment's size and MD5, and both are verified here.
 """
 
 import hashlib
@@ -46,7 +42,6 @@ import json
 import shutil
 import subprocess
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import requests
