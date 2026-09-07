@@ -123,9 +123,18 @@ launch isolated processes or containers; every worker needs a distinct
 DISPLAY, HOME, temporary directory, artifact directory, ports, and rollout
 file. Do not place multiple PyAutoGUI sessions on one display.
 
+The portable sequential command is:
+
+```bash
+../../.venv/bin/gym eval run --no-serve -v \
+  --concurrency 1 \
+  --output ../../results/webvoyager/full/rollouts.jsonl
+```
+
 Reconcile worker outputs against the pinned denominator:
 
 ```bash
+cd ../..
 ./.venv/bin/python benchmarks/webvoyager/summarize.py \
   results/webvoyager/full/workers \
   --dataset benchmarks/webvoyager/data/webvoyager.jsonl \
@@ -136,6 +145,19 @@ Reconcile worker outputs against the pinned denominator:
 A reportable result has all 552 task IDs exactly once and no unresolved
 missing, duplicate, unexpected, masked, or infrastructure rows.
 
-For policy-specific serving parameters, training failure semantics, AgentEnv
-integration, and complete copyable commands, see the
-[repository runbook](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/webvoyager/runbook.md).
+## Runtime and training safety
+
+Browser leases are acquired and released asynchronously. Synchronous
+Playwright calls stay on a session-affine thread, while each headed PyAutoGUI
+session remains isolated in its own process or container and X display.
+Provider implementations must release leases idempotently and enforce an
+external TTL for process or node loss.
+
+Browser-provider, proxy/CAPTCHA, model-server, and judge failures produce
+masked retryable samples instead of reward-zero policy examples. Only a
+completed trajectory judged unsuccessful is a valid reward-zero sample.
+
+The checked-in profile YAML and recipe-lock JSON files are the authoritative
+source for model-specific protocol and serving parameters. Cluster images,
+scheduler scripts, caches, checkpoint placement, and large run artifacts are
+deployment concerns and are intentionally outside this benchmark tutorial.

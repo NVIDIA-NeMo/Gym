@@ -43,10 +43,24 @@ proxy/CAPTCHA availability, judge behavior, and exact policy serving assets
 remain part of the reproducibility contract. Direct policy comparison also
 requires those inputs to be held fixed.
 
-Start with the [end-to-end runbook](runbook.md). Model-specific details are in
-[Nano Omni](nano-omni.md) and [Qwen3.5-122B-A10B](qwen35.md). Browser supply,
-thread/process isolation, AgentEnv integration, and training cleanup behavior
-are described in [runtime architecture](runtime-architecture.md).
+The profile YAML and recipe-lock JSON files are the machine-readable authority
+for model-specific serving behavior. For complete prerequisites, setup, smoke,
+full-population execution, and reconciliation, use the
+[Fern WebVoyager tutorial](../../fern/versions/latest/pages/evaluation-tutorials/webvoyager.mdx).
+
+## Runtime boundary
+
+The visual-browser service acquires browser leases asynchronously while each
+live session keeps synchronous Playwright work on one session-affine thread.
+Headed coordinate input remains process-isolated: one visual-browser process
+owns one X display and one active PyAutoGUI session. Scale with isolated
+processes or containers, not threads sharing a display.
+
+Browser-provider, proxy/CAPTCHA, model-server, and judge failures are masked
+and routed to retry rather than converted into policy reward zero. Policy
+trajectories that complete and are judged unsuccessful remain valid
+zero-reward samples. Providers must release leases idempotently and enforce an
+external TTL as a backstop for process or node loss.
 
 ## Standard Gym flow
 
@@ -86,14 +100,10 @@ Stop `gym env start` with Ctrl-C. Gym currently has no separate `env stop`
 command and does not own an external proxy, judge gateway, or externally
 managed model server.
 
-One visual-browser resource process owns one X display and permits one active
-session. Scale by launching isolated processes or containers with distinct
-DISPLAY, HOME, temporary, artifact, and output paths; do not add threads that
-share a display.
-
 ## Fixed-denominator reporting
 
 ```bash
+cd ../..
 ./.venv/bin/python benchmarks/webvoyager/summarize.py \
   results/webvoyager/qwen/rollouts.jsonl \
   --dataset benchmarks/webvoyager/data/webvoyager.jsonl \
