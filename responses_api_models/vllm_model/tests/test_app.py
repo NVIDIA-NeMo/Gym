@@ -63,6 +63,9 @@ from nemo_gym.token_id_capture import (
     resolve_parent,
     set_token_sink,
 )
+from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
+from nemo_gym.token_id_capture.records import response_to_output_items
+from nemo_gym.token_id_capture.staging.records import CaptureAdmission
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
     VLLMModel,
@@ -5420,6 +5423,236 @@ class TestPrefixSupply:
             reset_token_sink(token)
 
         assert out["required_prefix_token_ids"] == real_tokens_including_reasoning
+
+    def test_responses_reasoning_echo_supplies_the_exact_captured_prefix(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        config = VLLMModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            base_url="http://api.openai.com/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="vllm_model",
+            return_token_id_information=True,
+            uses_reasoning_parser=True,
+            uses_interleaved_reasoning=False,
+            supply_prefix_token_ids=True,
+        )
+        capture_config = {
+            "token_id_capture": {
+                "enabled": True,
+                "dir": str(tmp_path),
+                "rebuild_response": False,
+            }
+        }
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=capture_config))
+        model = VLLMModel(
+            config=config,
+            server_client=MagicMock(spec=ServerClient, global_config_dict=capture_config),
+        )
+        requests: list[dict[str, Any]] = []
+        first_cumulative_tokens = [10, 11, 20, 21, 22]
+
+        def completion(
+            response_id: str,
+            prompt_token_ids: list[int],
+            generation_token_ids: list[int],
+            content: str,
+            *,
+            reasoning: str | None = None,
+        ) -> dict[str, Any]:
+            message = {"role": "assistant", "content": content}
+            if reasoning is not None:
+                message["reasoning_content"] = reasoning
+            return {
+                "id": response_id,
+                "object": "chat.completion",
+                "created": 0,
+                "model": "dummy_model",
+                "prompt_token_ids": prompt_token_ids,
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "token_ids": generation_token_ids,
+                        "message": message,
+                        "logprobs": {
+                            "content": [
+                                {
+                                    "token": f"token_id:{token_id}",
+                                    "logprob": -0.1,
+                                    "bytes": None,
+                                    "top_logprobs": [],
+                                }
+                                for token_id in generation_token_ids
+                            ]
+                        },
+                    }
+                ],
+            }
+
+        async def mock_create_chat_completion(**kwargs):
+            requests.append(kwargs)
+            if len(requests) == 1:
+                return completion(
+                    "chatcmpl-first",
+                    [10, 11],
+                    [20, 21, 22],
+                    "answer",
+                    reasoning="hidden reasoning",
+                )
+            assert kwargs["required_prefix_token_ids"] == first_cumulative_tokens
+            return completion("chatcmpl-second", first_cumulative_tokens + [30], [40], "done")
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        mock_client.create_tokenize = AsyncMock(
+            side_effect=AssertionError("inline generation prompt tokens must prove prefix supply")
+        )
+        model._clients = [mock_client]
+        client = TestClient(model.setup_webserver())
+        path = "/ng-rollout/reasoning-prefix/training-token-capture/v1/responses"
+        first_input = [{"role": "user", "content": "question"}]
+
+        first_response = client.post(path, json={"model": "dummy_model", "input": first_input})
+
+        assert first_response.status_code == 200
+        first_output = first_response.json()["output"]
+        assert [item["type"] for item in first_output] == ["reasoning", "message"]
+        assert first_output[0]["summary"][0]["text"] == "hidden reasoning"
+        assert first_output[1]["content"][0]["text"] == "answer"
+        echoed_output = [
+            {
+                key: value
+                for key, value in item.items()
+                if key
+                not in {
+                    "prompt_token_ids",
+                    "generation_token_ids",
+                    "generation_log_probs",
+                    "routed_experts",
+                }
+            }
+            for item in first_output
+        ]
+
+        second_response = client.post(
+            path,
+            json={
+                "model": "dummy_model",
+                "input": first_input + echoed_output + [{"role": "user", "content": "next"}],
+            },
+        )
+
+        assert second_response.status_code == 200, second_response.text
+        assert len(requests) == 2
+        assert "hidden reasoning" not in str(requests[1]["messages"])
+        assert requests[1]["required_prefix_token_ids"] == first_cumulative_tokens
+        first_entry, second_entry = TokenCaptureStore(tmp_path).read_entries("reasoning-prefix")
+        assert [item["type"] for item in first_entry.output_items] == ["reasoning", "message"]
+        assert first_entry.prompt_token_ids + first_entry.generation_token_ids == first_cumulative_tokens
+        assert second_entry.parent_call_id == first_entry.model_call_id
+        assert second_entry.prefix_requested is True
+        assert second_entry.prefix_supplied is True
+        assert mock_client.create_tokenize.await_count == 0
+
+    def test_external_capture_fingerprints_the_served_responses_shape(self, monkeypatch: MonkeyPatch) -> None:
+        """Fingerprint the Responses payload after reasoning is separated from the answer."""
+
+        server = self._server(monkeypatch, enabled=True)
+        ledger = InMemoryLineageStore()
+        digest = "1" * 64
+        extras_digest = "2" * 64
+        chain_hash = "3" * 64
+        cumulative_hash = "4" * 64
+        coords = {
+            "rollout_id": "reasoning-external",
+            "model_call_id": "call-1",
+            "prev_len": 0,
+            "delta_len": 5,
+            "cum_len": 5,
+            "weight_version": 0,
+            "digest": digest,
+            "extras_digest": extras_digest,
+            "staging_key": "stage-call-1",
+            "chain_hash": chain_hash,
+            "cumulative_hash": cumulative_hash,
+        }
+        context = CaptureContext(
+            rollout_id="reasoning-external",
+            model_call_id="call-1",
+            token_sink=None,
+            lineage_store=ledger,
+            external_staging=True,
+            capture_admission=CaptureAdmission(
+                rollout_id="reasoning-external",
+                model_call_id="call-1",
+                mode="text",
+            ),
+            request_items=[{"role": "user", "content": "question"}],
+        )
+        internal_chat_payload = {
+            "id": "chatcmpl-reasoning",
+            "ng_commit_coords": coords,
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "<think>hidden reasoning</think>answer",
+                    }
+                }
+            ],
+        }
+        served_response = {
+            "id": "chatcmpl-reasoning",
+            "object": "response",
+            "output": [
+                {
+                    "id": "reasoning-1",
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "hidden reasoning"}],
+                },
+                {
+                    "id": "message-1",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "answer", "annotations": []}],
+                },
+            ],
+        }
+
+        token = set_token_sink(context)
+        try:
+            server._prepare_external_capture(internal_chat_payload)
+            asyncio.run(server._finalize_served_response(served_response))
+        finally:
+            reset_token_sink(token)
+
+        assert context.committed is True
+        assert context.external_commit_coords == coords
+        assert "ng_commit_coords" not in internal_chat_payload
+        manifest = asyncio.run(ledger.manifest("reasoning-external"))
+        record = manifest["records"][0]
+        assert record["output_fingerprint"] == assistant_fingerprint(served_response["output"])
+        assert record["output_fingerprint"] != assistant_fingerprint(
+            [{"role": "assistant", "content": "<think>hidden reasoning</think>answer"}]
+        )
+        anthropic_items = response_to_output_items(
+            {
+                "id": "chatcmpl-reasoning",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "hidden reasoning", "signature": ""},
+                    {"type": "text", "text": "answer"},
+                ],
+            }
+        )
+        assert [item["type"] for item in anthropic_items] == ["reasoning", "message"]
+        assert assistant_fingerprint(anthropic_items) == record["output_fingerprint"]
 
 
 class TestPrefixSupplyAccounting:

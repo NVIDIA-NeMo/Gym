@@ -194,6 +194,9 @@ class BaseResponsesAPIModel(BaseServer):
 
 
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+    async def _finalize_served_response(self, response: Any) -> None:
+        """Finalize capture from the response representation returned to the client."""
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
@@ -255,7 +258,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         _reject_external_capture_streaming(body)
         if not body.get("stream"):
             params = _validate_responses_params(body)
-            return _orjson_dispatch_response(await self._invoke_responses(request, params))
+            response = await self._invoke_responses(request, params)
+            await self._finalize_served_response(response)
+            return _orjson_dispatch_response(response)
 
         cleaned, ns_map = sanitize_streaming_responses_body(body)
         try:
@@ -300,7 +305,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         _reject_external_capture_streaming(body)
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
-            return _orjson_dispatch_response(await self._invoke_chat_completions(request, params))
+            response = await self._invoke_chat_completions(request, params)
+            await self._finalize_served_response(response)
+            return _orjson_dispatch_response(response)
 
         cleaned, include_usage = sanitize_streaming_chat_body(body)
         params = _validate_chat_params(cleaned)
@@ -349,6 +356,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         response = await self._invoke_responses(request, params)
         model_name = body.get("model") or response.model
         anthropic_response = _ANTHROPIC_CONVERTER.responses_to_anthropic_response(response, model=model_name)
+        await self._finalize_served_response(anthropic_response)
         if body.get("stream"):
             return StreamingResponse(
                 _ANTHROPIC_CONVERTER.anthropic_response_to_sse(anthropic_response),

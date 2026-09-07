@@ -105,6 +105,9 @@ class CaptureContext:
     # ``resolve_parent`` so the commit hook can publish the ledger row with
     # the exact representation the next request will echo.
     request_items: list[dict] | None = None
+    # The worker acknowledgement arrives on the internal Chat response.
+    # Finalization consumes it after conversion to the served API dialect.
+    external_commit_coords: dict[str, Any] | None = None
 
     @property
     def parent_call_id(self) -> str | None:
