@@ -41,6 +41,9 @@ def prepare() -> Path:
             "task_name": task_toml["task"]["name"],
             "docker_image": task_toml["environment"]["docker_image"],
             "task_folder": str(task_dir.relative_to(BENCHMARK_DIR.parent.parent)),
+            # Terminal-Bench declares a per-task agent budget. Carry it through so the
+            # agent can honour it instead of applying one flat wall to every task.
+            "agent_timeout_sec": (task_toml.get("agent") or {}).get("timeout_sec"),
         }
 
         f_out.write(json.dumps(sample) + "\n")
