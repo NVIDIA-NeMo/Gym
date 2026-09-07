@@ -105,7 +105,13 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
         while True:
             step += 1
-            new_body = body.model_copy(update={"input": body.input + new_outputs})
+            # max_tool_calls is an agent-loop bound (enforced below via config.max_steps), not
+            # a model-call field; down-converting (Chat Completions) model servers reject it,
+            # so strip it from the model-facing request. See responses_converter
+            # unsupported_fields.
+            new_body = body.model_copy(
+                update={"input": body.input + new_outputs, "max_tool_calls": None}
+            )
             if collect_trajectory:
                 turn_timestamp = time()
 
