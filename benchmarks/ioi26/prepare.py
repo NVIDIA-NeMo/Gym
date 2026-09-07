@@ -41,11 +41,9 @@ import hashlib
 import json
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import requests
-
 from subtask_split import split as split_subtasks
 
 
@@ -75,7 +73,7 @@ COMPETITION_ID = "ioi26"
 
 #: NeMo Skills discovers a benchmark through this module. `ccc` is the evaluator
 #: that reads the normalized metadata written beside it.
-NS_INIT = '''GENERATION_ARGS = "++prompt_config=generic/default ++eval_type=ccc"
+NS_INIT = """GENERATION_ARGS = "++prompt_config=generic/default ++eval_type=ccc"
 METRICS_TYPE = "ccc"
 DATASET_GROUP = "code"
 EVAL_ARGS = "++eval_type=ccc"
@@ -87,7 +85,7 @@ SANDBOX_ENV_VARS = [
     "NUM_WORKERS=1",
     "STATEFUL_SANDBOX=0",
 ]
-'''
+"""
 
 # Only these paths are checked out. `solutions/` and `translations/` are most of
 # the year's bulk and neither is used for evaluation.
@@ -119,8 +117,7 @@ def fetch_archive(force: bool = False) -> Path:
     if ARCHIVE_DIR.exists():
         shutil.rmtree(ARCHIVE_DIR)
     print(f"Cloning {ARCHIVE_REPO} ({ARCHIVE_YEAR} only; this pulls a few hundred MB) ...")
-    _run("git", "clone", "--filter=blob:none", "--no-checkout", "--depth", "1",
-         ARCHIVE_REPO, str(ARCHIVE_DIR))
+    _run("git", "clone", "--filter=blob:none", "--no-checkout", "--depth", "1", ARCHIVE_REPO, str(ARCHIVE_DIR))
     _run("git", "sparse-checkout", "init", "--no-cone", cwd=ARCHIVE_DIR)
     _run("git", "sparse-checkout", "set", *SPARSE_PATHS, cwd=ARCHIVE_DIR)
     _run("git", "checkout", cwd=ARCHIVE_DIR)
@@ -143,10 +140,7 @@ def statement_markdown(pdf_path: Path) -> str:
     pdf = pikepdf.open(pdf_path)
     try:
         if "markdown" not in pdf.attachments:
-            raise SystemExit(
-                f"{pdf_path}: no 'markdown' attachment; found "
-                f"{list(pdf.attachments) or 'none'}"
-            )
+            raise SystemExit(f"{pdf_path}: no 'markdown' attachment; found {list(pdf.attachments) or 'none'}")
         spec = pdf.attachments["markdown"]
         data = spec.get_file().read_bytes()
         params = spec.obj.get("/EF").get("/F").get("/Params")
@@ -231,14 +225,19 @@ def prepare() -> Path:
     run_code = requests.get(RUN_URL, timeout=60).text
     compile_code = requests.get(COMPILE_URL, timeout=60).text
     if CXX_STANDARD_FROM not in compile_code:
-        print(f"  NOTE: upstream compile script no longer mentions {CXX_STANDARD_FROM}; "
-              f"check it still targets {CXX_STANDARD_TO}")
+        print(
+            f"  NOTE: upstream compile script no longer mentions {CXX_STANDARD_FROM}; "
+            f"check it still targets {CXX_STANDARD_TO}"
+        )
     compile_code = compile_code.replace(CXX_STANDARD_FROM, CXX_STANDARD_TO)
     run_code = run_code.replace(CXX_STANDARD_FROM, CXX_STANDARD_TO)
 
     task_dirs = sorted(
-        p for day in sorted(year_dir.iterdir()) if day.is_dir()
-        for p in sorted(day.iterdir()) if (p / "problem.json").is_file()
+        p
+        for day in sorted(year_dir.iterdir())
+        if day.is_dir()
+        for p in sorted(day.iterdir())
+        if (p / "problem.json").is_file()
     )
     if not task_dirs:
         raise SystemExit(f"no tasks with a problem.json under {year_dir}")
@@ -255,8 +254,7 @@ def prepare() -> Path:
         tests_dir = task_dir / "tests"
 
         archive = [
-            (p.stem, json.loads(p.read_text(encoding="utf-8")))
-            for p in sorted((task_dir / "subtasks").glob("*.json"))
+            (p.stem, json.loads(p.read_text(encoding="utf-8"))) for p in sorted((task_dir / "subtasks").glob("*.json"))
         ]
         scored = [(name, d) for name, d in archive if d.get("score")]
 
@@ -336,20 +334,16 @@ def prepare() -> Path:
     wrapped = {"competition_id": COMPETITION_ID, "metadata": dict(metadata)}
     with open(METADATA_FPATH, "w") as f:
         json.dump(wrapped, f)
-    grand_total = sum(
-        st["score"] for problem in metadata.values() for st in problem["subtasks"].values()
-    )
+    grand_total = sum(st["score"] for problem in metadata.values() for st in problem["subtasks"].values())
     print(
         f"Wrote CCC-wrapped metadata for {len(metadata)} problems to {METADATA_FPATH} "
         f"(keys: {sorted(metadata)}; {grand_total:g} points total)"
     )
 
     NS_DIR.mkdir(parents=True, exist_ok=True)
-    (NS_DIR / "test.jsonl").write_text(
-        "\n".join(json.dumps(r) for r in benchmark_rows) + "\n", encoding="utf-8"
-    )
+    (NS_DIR / "test.jsonl").write_text("\n".join(json.dumps(r) for r in benchmark_rows) + "\n", encoding="utf-8")
     with open(NS_DIR / "test_metadata.json", "w") as f:
-        json.dump(metadata, f)          # bare problem_id -> metadata, as CCC wants
+        json.dump(metadata, f)  # bare problem_id -> metadata, as CCC wants
     (NS_DIR / "__init__.py").write_text(NS_INIT, encoding="utf-8")
     print(f"Wrote the NeMo Skills dataset to {NS_DIR}")
 

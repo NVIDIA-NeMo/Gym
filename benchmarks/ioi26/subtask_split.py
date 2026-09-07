@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+
 SCORING_HEADING = re.compile(r"^##\s+.*(?:subtask|scoring).*$", re.IGNORECASE)
 NEXT_H2 = re.compile(r"^##\s")
 CONSTRAINTS_HEADING = re.compile(r"^##\s+Constraints\s*$", re.IGNORECASE)
@@ -44,11 +45,11 @@ BAND = re.compile(r"^\s*(\d+)\s*(?:[-–—]\s*(\d+))?\s*$")
 class Variant:
     """One subtask-targeted statement."""
 
-    label: str          # the row's own label, e.g. "1" or "6 - 10"
-    score: float        # points as printed in the table
-    constraint: str     # additional-constraints text ("" when there are none)
-    statement: str      # the rewritten markdown
-    band: tuple[int, int] | None = None   # inclusive subtask range, magiccity only
+    label: str  # the row's own label, e.g. "1" or "6 - 10"
+    score: float  # points as printed in the table
+    constraint: str  # additional-constraints text ("" when there are none)
+    statement: str  # the rewritten markdown
+    band: tuple[int, int] | None = None  # inclusive subtask range, magiccity only
 
 
 def _section(lines: list[str], predicate) -> tuple[int, int] | None:
@@ -101,9 +102,7 @@ def _rewrite_constraints(lines: list[str], constraint: str) -> list[str]:
     body = lines[start + 1 : end]
 
     # Append after the last bullet so it reads as one list.
-    last_bullet = max(
-        (i for i, line in enumerate(body) if line.lstrip().startswith("*")), default=-1
-    )
+    last_bullet = max((i for i, line in enumerate(body) if line.lstrip().startswith("*")), default=-1)
     added = [f"* {constraint}"] if constraint else []
     if last_bullet >= 0:
         body = body[: last_bullet + 1] + added + body[last_bullet + 1 :]
@@ -137,8 +136,10 @@ def split(statement: str) -> list[Variant]:
     if not rows:
         return []
 
-    banded = "additional constraints" not in " ".join(rows[0]).lower() and len(rows[0]) >= 3 and any(
-        BAND.match(r[0]) and BAND.match(r[0]).group(2) for r in rows
+    banded = (
+        "additional constraints" not in " ".join(rows[0]).lower()
+        and len(rows[0]) >= 3
+        and any(BAND.match(r[0]) and BAND.match(r[0]).group(2) for r in rows)
     )
 
     variants: list[Variant] = []
@@ -155,10 +156,7 @@ def split(statement: str) -> list[Variant]:
             high = int(m.group(2) or m.group(1))
             band = (low, high)
             # Derived, not lifted: the section states subtask i uses K = i.
-            constraint = (
-                f"$K = {low}$" if low == high
-                else f"$K$ is an integer with ${low} \\leq K \\leq {high}$"
-            )
+            constraint = f"$K = {low}$" if low == high else f"$K$ is an integer with ${low} \\leq K \\leq {high}$"
             score = float(score_text) * (high - low + 1)
         else:
             band = None
@@ -173,7 +171,6 @@ def split(statement: str) -> list[Variant]:
             rewritten = rewritten[:s] + _reduced_scoring(heading, table_header, row, prose) + rewritten[e:]
 
         variants.append(
-            Variant(label=label, score=score, constraint=constraint,
-                    statement="\n".join(rewritten), band=band)
+            Variant(label=label, score=score, constraint=constraint, statement="\n".join(rewritten), band=band)
         )
     return variants
