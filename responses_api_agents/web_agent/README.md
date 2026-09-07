@@ -19,6 +19,11 @@ Python. Policy failure remains a valid zero-reward sample. Browser-provider,
 proxy/CAPTCHA, model transport, and judge failures set `mask_sample` and are
 routed to recovery instead of training.
 
+For Nano Omni, the model server's reasoning and tool-call parsers are the
+protocol boundary. The agent validates parser-produced structured calls but
+does not decode nested action strings, repair delimiters, infer aliases, or
+silently change out-of-range action arguments.
+
 Verification is episode-scoped. The agent retains immutable screenshot
 evidence, closes the browser, and then calls the external WebVoyager judge.
 Transient judge failures can therefore be retried without replaying live-site

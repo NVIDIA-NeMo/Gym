@@ -40,6 +40,18 @@ For setup, smoke, full execution, and reconciliation, use [runbook.md](runbook.m
 
 ## Validation evidence
 
+A pair of sequential full-population runs exercised the parser-faithful
+contract above with the tuned `iter_0004622` checkpoint:
+
+| Repetition | Result | Completeness |
+| --- | ---: | --- |
+| r1 | 415/552, 75.18% | 552 valid unique; no missing, malformed, or duplicate tasks |
+| r2 | 420/552, 76.09% | 552 valid unique; no missing, malformed, or duplicate tasks |
+
+The repetitions used the same frozen source, model serving recipe, task data,
+browser runtime, proxy/CAPTCHA service, judge, and generation parameters. The
+mean was 417.5/552, or 75.63%, and the runs differed by five tasks.
+
 A previous reference-aligned Gym control completed the maintained population
 at 428/552, while the maintained golden was 429/552. A later hash-sealed PR
 candidate completed 421/552 with all 552 task IDs accounted and no unresolved

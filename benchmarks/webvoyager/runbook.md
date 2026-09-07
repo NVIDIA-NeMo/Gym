@@ -110,6 +110,14 @@ printf '\n'
 The endpoint must implement the pinned Nano Omni parser/template contract in
 `nano_omni_recipe_lock.json`.
 
+Treat the endpoint's reasoning parser and tool-call parser as part of the
+model-serving contract. Gym expects their standard structured tool calls and
+validates them against the browser schema. It deliberately does not decode a
+quoted inner action payload, append missing JSON delimiters, infer tool aliases,
+or clamp out-of-range Nano Omni arguments. Confirm parser output in the smoke
+gate before starting 552 tasks; invalid output follows the bounded parse-retry
+or policy-failure path.
+
 ## 6. Prefetch and start servers
 
 ```bash

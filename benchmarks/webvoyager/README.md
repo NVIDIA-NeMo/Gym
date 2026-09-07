@@ -20,19 +20,28 @@ preconditions and serving recipes are also held fixed.
 
 ## Full-population validation
 
-The latest pre-merge validation ran both policy profiles against the same
-hash-pinned 552-task population and `visual_browser` runtime:
+Full-population evidence covers both policy profiles against the same
+hash-pinned 552-task population and `visual_browser` runtime. The current Nano
+Omni parsing contract was repeated twice from the same frozen source and
+serving recipe:
 
 | Policy | Successful tasks | Strict SR | Completeness |
 | --- | ---: | ---: | --- |
 | Qwen3.5-122B-A10B-FP8 | 300/552 | 54.35% | 552 valid unique; no missing, invalid, or duplicate-valid tasks |
-| Nano Omni tuned checkpoint `iter_0004622` | 398/552 | 72.10% | 552 valid unique; no missing, invalid, or duplicate-valid tasks |
+| Nano Omni `iter_0004622`, parser-faithful r1 | 415/552 | 75.18% | 552 valid unique; no missing, malformed, or duplicate tasks |
+| Nano Omni `iter_0004622`, parser-faithful r2 | 420/552 | 76.09% | 552 valid unique; no missing, malformed, or duplicate tasks |
 
-These runs used a frozen execution snapshot matching this implementation line
-before its PR history was reorganized. They are rollout evidence for the
-runtime and fixed-denominator reconciliation, not stable leaderboard claims:
-live-site state, proxy/CAPTCHA availability, judge behavior, and exact policy
-serving assets remain part of the reproducibility contract.
+The Nano Omni repetitions trust the model server's configured reasoning and
+tool-call parsers. Gym validates their structured calls against the declared
+browser-tool contract but does not repair malformed JSON, complete missing
+delimiters, infer aliases, or silently clamp action arguments. They averaged
+417.5/552, or 75.63%, with a five-task run-to-run difference.
+
+These results are rollout evidence for the runtime and fixed-denominator
+reconciliation, not stable leaderboard claims. Live-site state,
+proxy/CAPTCHA availability, judge behavior, and exact policy serving assets
+remain part of the reproducibility contract. Direct policy comparison also
+requires those inputs to be held fixed.
 
 Start with the [end-to-end runbook](runbook.md). Model-specific details are in
 [Nano Omni](nano-omni.md) and [Qwen3.5-122B-A10B](qwen35.md). Browser supply,
