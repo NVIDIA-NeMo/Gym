@@ -41,3 +41,13 @@ def test_nested_reference_paths_keep_their_subdirectory(tmp_path):
 
 def test_no_reference_files_renders_none(tmp_path):
     assert "None" in _section(_build_gdpval_user_prompt("t", None))
+
+
+def test_prompt_advertises_the_registered_exec_tool_name():
+    # Stirrup registers the exec tool as `code_exec` (get_code_exec_tool default,
+    # which apptainer_provider does not override). Advertising `run_shell` named a
+    # tool the model was never given.
+    prompt = _build_gdpval_user_prompt("t", None)
+
+    assert "`code_exec` tool" in prompt
+    assert "run_shell" not in prompt
