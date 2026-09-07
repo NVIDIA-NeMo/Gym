@@ -684,6 +684,60 @@ class TestApp:
         }
         assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
 
+    async def test_responses_stops_on_endless_reasoning_only(self) -> None:
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(
+                type="responses_api_models",
+                name="my server name",
+            ),
+            resources_server=ResourcesServerRef(
+                type="resources_servers",
+                name="",
+            ),
+            max_consecutive_stalled_steps=3,
+        )
+        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        app = server.setup_webserver()
+        client = TestClient(app)
+
+        mock_response_reasoning_data = {
+            "id": "resp_stalled",
+            "created_at": 1753983920.0,
+            "model": "dummy_model",
+            "object": "response",
+            "output": [
+                {
+                    "id": "msg_stalled",
+                    "summary": [
+                        {
+                            "text": "I'm still thinking",
+                            "type": "summary_text",
+                        }
+                    ],
+                    "status": "completed",
+                    "type": "reasoning",
+                }
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+
+        dotjson_mock = AsyncMock()
+        dotjson_mock.read.return_value = json.dumps(mock_response_reasoning_data)
+        dotjson_mock.cookies = MagicMock()
+        server.server_client.post.return_value = dotjson_mock
+
+        res = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]})
+        assert res.status_code == 200
+
+        # A model that never emits an assistant message must not loop forever.
+        assert server.server_client.post.call_count == 3
+
     async def test_usage_sanity(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",

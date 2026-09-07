@@ -60,6 +60,7 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_steps: int = None
+    max_consecutive_stalled_steps: int = 4
 
 
 class SimpleAgentRunRequest(BaseRunRequest):
@@ -100,6 +101,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         new_outputs = []
         usage = None
         step = 0
+        consecutive_stalled_steps = 0
         invocation_status = "completed"
         model_server_cookies = None
 
@@ -170,6 +172,15 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             ]
             if not all_fn_calls and all_output_messages:
                 break
+
+            # A reasoning-only turn is legitimate; an unbounded run of them is not.
+            if not all_fn_calls and not all_output_messages:
+                consecutive_stalled_steps += 1
+                if consecutive_stalled_steps >= self.config.max_consecutive_stalled_steps:
+                    invocation_status = "incomplete"
+                    break
+            else:
+                consecutive_stalled_steps = 0
 
             for output_function_call in all_fn_calls:
                 if collect_trajectory:
