@@ -5,6 +5,8 @@ finance_agent:
       # Loop policy mirroring vals-ai/finance-agent: bounded by turns rather than
       # wall clock, and every tool error is handed back to the model.
       no_tool_call_nudge: Continue.
+      prose_only_behavior: nudge
+      tool_call_execution: sequential
       max_time_seconds: null
       abort_on_tool_error_types: []
       max_steps: 50

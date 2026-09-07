@@ -12,16 +12,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Multi-turn tool-calling loop for the Vals AI finance agent benchmarks.
+"""Multi-turn tool-calling loop for finance research benchmarks.
 
-One loop serves both benchmarks. Everything that differs between them is a
+One loop serves all benchmark profiles. Everything that differs between them is a
 config value, not a branch in this file: the nudge injected on a prose-only
 turn, whether the run is bounded by turns or by wall clock, and which tool
 errors abort a rollout instead of being handed back to the model. Those three
 fields are required, so a config states its policy rather than inheriting a
-default that happens to suit the other benchmark.
+default that happens to suit another benchmark. Additional policies select
+whether prose ends a rollout and whether a tool-call batch runs concurrently.
 
-The values each benchmark uses are pinned against the upstream package by tests
+The values the Vals profiles use are pinned against the upstream package by tests
 in ``resources_servers/finance_agent_v2/tests``, which is where that package is
 installed.
 """
@@ -32,7 +33,7 @@ import logging
 import re
 import time
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any, List, Literal, Optional, Tuple
 
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field
@@ -110,6 +111,7 @@ class StopReason(str, Enum):
     """
 
     DONE_TOOL = "done_tool"
+    ASSISTANT_MESSAGE = "assistant_message"
     MAX_TURNS = "max_turns"
     MAX_TIME = "max_time"
     MAX_OUTPUT_TOKENS = "max_output_tokens"
@@ -123,6 +125,18 @@ class FinanceAgentConfig(BaseResponsesAPIAgentConfig):
         ...,
         description="Injected as a user message when a turn produces prose and "
         "no tool call, so the loop continues instead of stopping.",
+    )
+    prose_only_behavior: Literal["nudge", "finish"] = Field(
+        default="nudge",
+        description="What to do when a turn contains assistant prose but no "
+        "tool call. 'nudge' injects no_tool_call_nudge and continues; "
+        "'finish' returns the assistant response immediately.",
+    )
+    tool_call_execution: Literal["sequential", "concurrent"] = Field(
+        default="sequential",
+        description="Whether tool calls emitted in one model turn execute in "
+        "model order or concurrently. Concurrent results are still appended "
+        "in the original call order.",
     )
     max_time_seconds: Optional[float] = Field(
         ...,
@@ -254,6 +268,60 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             None,
         )
 
+    async def _execute_tool_call(
+        self,
+        output_function_call: NeMoGymResponseFunctionToolCall,
+        cookies: Any,
+    ) -> Tuple[str, Any]:
+        """Execute one tool call and render failures as tool outputs."""
+        try:
+            coro = self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path=f"/{output_function_call.name}",
+                json=json.loads(output_function_call.arguments),
+                cookies=cookies,
+            )
+            api_response = await asyncio.wait_for(coro, timeout=self.config.tool_call_timeout)
+            response_cookies = api_response.cookies
+            tool_output = (await api_response.content.read()).decode()
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Tool call '%s' timed out after %ss",
+                output_function_call.name,
+                self.config.tool_call_timeout,
+            )
+            response_cookies = None
+            tool_output = json.dumps(
+                {
+                    "error": f"Tool call timed out after {self.config.tool_call_timeout}s. "
+                    "Please try a different approach or submit your final answer."
+                }
+            )
+        except Exception as e:
+            logger.error(
+                "Tool call '%s' failed: %s: %s",
+                output_function_call.name,
+                type(e).__name__,
+                e,
+            )
+            response_cookies = None
+            tool_output = json.dumps(
+                {
+                    "error": f"Tool call failed: {type(e).__name__}: {e}. "
+                    "Please try a different approach or submit your final answer."
+                }
+            )
+        return tool_output, response_cookies
+
+    @staticmethod
+    def _merge_cookies(cookies: Any, updates: List[Any]) -> Any:
+        """Merge concurrent response cookies deterministically in call order."""
+        merged = dict(cookies.items())
+        for update in updates:
+            if update is not None:
+                merged.update(update.items())
+        return merged
+
     async def responses(
         self,
         request: Request,
@@ -350,6 +418,9 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             ]
 
             if not all_fn_calls and all_output_messages:
+                if self.config.prose_only_behavior == "finish":
+                    stop_reason = StopReason.ASSISTANT_MESSAGE
+                    break
                 # Prose between tool calls does not end the run; the nudge keeps
                 # the model going until it calls a done tool or a limit is hit.
                 new_outputs.append(NeMoGymEasyInputMessage(role="user", content=self.config.no_tool_call_nudge))
@@ -357,42 +428,47 @@ class FinanceAgent(SimpleResponsesAPIAgent):
 
             done = False
             aborted = False
+            if self.config.tool_call_execution == "concurrent":
+                results = await asyncio.gather(
+                    *(self._execute_tool_call(call, resources_server_cookies) for call in all_fn_calls)
+                )
+                resources_server_cookies = self._merge_cookies(
+                    resources_server_cookies,
+                    [cookies for _, cookies in results],
+                )
+                for output_function_call, (tool_output, _) in zip(all_fn_calls, results):
+                    new_outputs.append(
+                        NeMoGymFunctionCallOutput(
+                            type="function_call_output",
+                            call_id=output_function_call.call_id,
+                            output=tool_output,
+                        )
+                    )
+
+                # All calls in a concurrent batch run. A successful terminal
+                # call takes precedence over other failures in that same batch.
+                done = any(
+                    call.name in done_tools_set and self._tool_error_message(tool_output) is None
+                    for call, (tool_output, _) in zip(all_fn_calls, results)
+                )
+                if done:
+                    stop_reason = StopReason.DONE_TOOL
+                else:
+                    aborted = any(self._aborting_error_type(tool_output) for tool_output, _ in results)
+                    if aborted:
+                        stop_reason = StopReason.ERROR
+
+                if done or aborted:
+                    break
+                continue
+
             for output_function_call in all_fn_calls:
-                try:
-                    coro = self.server_client.post(
-                        server_name=self.config.resources_server.name,
-                        url_path=f"/{output_function_call.name}",
-                        json=json.loads(output_function_call.arguments),
-                        cookies=resources_server_cookies,
-                    )
-                    api_response = await asyncio.wait_for(coro, timeout=self.config.tool_call_timeout)
-                    resources_server_cookies = api_response.cookies
-                    tool_output = (await api_response.content.read()).decode()
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "Tool call '%s' timed out after %ss",
-                        output_function_call.name,
-                        self.config.tool_call_timeout,
-                    )
-                    tool_output = json.dumps(
-                        {
-                            "error": f"Tool call timed out after {self.config.tool_call_timeout}s. "
-                            "Please try a different approach or submit your final answer."
-                        }
-                    )
-                except Exception as e:
-                    logger.error(
-                        "Tool call '%s' failed: %s: %s",
-                        output_function_call.name,
-                        type(e).__name__,
-                        e,
-                    )
-                    tool_output = json.dumps(
-                        {
-                            "error": f"Tool call failed: {type(e).__name__}: {e}. "
-                            "Please try a different approach or submit your final answer."
-                        }
-                    )
+                tool_output, response_cookies = await self._execute_tool_call(
+                    output_function_call,
+                    resources_server_cookies,
+                )
+                if response_cookies is not None:
+                    resources_server_cookies = response_cookies
 
                 tool_response = NeMoGymFunctionCallOutput(
                     type="function_call_output",

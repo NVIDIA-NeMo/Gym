@@ -1,0 +1,80 @@
+{
+  "upstream_commit_id": "d794a65fe583edc6852b44c817b0a2aef33ca831",
+  "repository": "https://github.com/Rogo-Technologies/big-finance-benchmark",
+  "tools_package_repository": "https://github.com/wowowoxuan1994/big-finance-benchmark",
+  "tools_package_commit_id": "b533a0ab670f2b1b1eb2bbfa6add836f1cf21475",
+  "dataset_url": "https://raw.githubusercontent.com/Rogo-Technologies/big-finance-benchmark/d794a65fe583edc6852b44c817b0a2aef33ca831/data/big_finance_subset.jsonl",
+  "dataset_license": "CC BY 4.0",
+  "system_prompt": "You are answering finance research questions for an academic benchmark.\n\nYou have access to a small set of tools: web search, SEC EDGAR filings, URL fetching with optional in-document retrieval, a sandboxed Python REPL, and a final-answer tool. Use them to investigate primary sources, perform calculations, and arrive at a single defensible answer.\n\nWhen you are confident in your answer, call the `final_answer` tool with a short response. Reference answers are typically a single number with units; match that format when possible. If the question cannot be answered from the available sources, say so explicitly in `final_answer`.\n",
+  "tool_order": ["web_search", "edgar_search", "fetch_url", "python_exec", "final_answer"],
+  "tools": [
+    {
+      "type": "function",
+      "name": "web_search",
+      "description": "Search the open web. Returns up to 5 results, each with a title, URL, and short snippet. Use this for general lookup; for SEC filings prefer `edgar_search`.",
+      "parameters": {
+        "type": "object",
+        "properties": {"query": {"type": "string", "description": "The search query."}},
+        "required": ["query"],
+        "additionalProperties": false
+      },
+      "strict": false
+    },
+    {
+      "type": "function",
+      "name": "edgar_search",
+      "description": "List recent SEC EDGAR filings for a public company by ticker. Returns a list of filings with form type (10-K, 10-Q, 8-K, etc.), filing date, accession number, and the URL of the primary document. Use `fetch_url` to read a filing's contents.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "ticker": {"type": "string", "description": "U.S. listed-equity ticker symbol (e.g. AAPL, MSFT)."},
+          "form_type": {"type": "string", "description": "Optional form filter (e.g. '10-K', '10-Q', '8-K', 'DEF 14A')."},
+          "limit": {"type": "integer", "description": "Maximum filings to return. Default 20.", "minimum": 1, "maximum": 50}
+        },
+        "required": ["ticker"],
+        "additionalProperties": false
+      },
+      "strict": false
+    },
+    {
+      "type": "function",
+      "name": "fetch_url",
+      "description": "Fetch a URL and return its readable text content. Handles HTML and PDF; PDF press releases and older filings are extracted to text via pymupdf. If `query` is provided, returns the top relevant paragraph chunks (BM25-ranked); otherwise returns the head of the page truncated to the token budget. Useful for SEC filings, press releases, and web pages discovered via `web_search`.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "url": {"type": "string", "description": "The URL to fetch."},
+          "query": {"type": "string", "description": "Optional. If provided, return only the most relevant chunks of the page for this query rather than the head of the document."},
+          "max_tokens": {"type": "integer", "description": "Token budget for the returned content. Default 6000.", "minimum": 500, "maximum": 20000}
+        },
+        "required": ["url"],
+        "additionalProperties": false
+      },
+      "strict": false
+    },
+    {
+      "type": "function",
+      "name": "python_exec",
+      "description": "Execute a short Python snippet and return its captured stdout/stderr. Use it for arithmetic, unit conversions, and small calculations against values you have already retrieved. The interpreter runs with a 5-second timeout in an isolated child process; it is not a security sandbox. There is no persistent state between calls — each call runs a fresh interpreter.",
+      "parameters": {
+        "type": "object",
+        "properties": {"code": {"type": "string", "description": "Python source code to execute."}},
+        "required": ["code"],
+        "additionalProperties": false
+      },
+      "strict": false
+    },
+    {
+      "type": "function",
+      "name": "final_answer",
+      "description": "Submit your final answer to the question and end the session. The reference answers in this benchmark are typically a single number with units (e.g. '$410.5 million', '47%', '2.1'). Match that format when possible. If the question cannot be answered from the available sources, state that explicitly.",
+      "parameters": {
+        "type": "object",
+        "properties": {"answer": {"type": "string", "description": "The final answer to the question."}},
+        "required": ["answer"],
+        "additionalProperties": false
+      },
+      "strict": false
+    }
+  ]
+}
