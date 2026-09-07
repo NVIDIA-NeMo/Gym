@@ -285,6 +285,14 @@ def test_build_vllm_ray_serve_command_single_node_no_ray_bootstrap(vllm_service)
     assert "vllm serve" not in cmd  # the gateway itself launches vllm serve, not this bash command
 
 
+def test_build_vllm_ray_serve_command_installs_git_if_missing(vllm_service):
+    # Model-serving images (e.g. vllm/vllm-openai) don't always bundle git.
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gym_install=_GYM_INSTALL, gpus_per_node_values=[])
+    assert "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git)" in cmd
+    # The git-install guard must come before the clone it's guarding.
+    assert cmd.index("command -v git") < cmd.index("git clone")
+
+
 def test_build_vllm_ray_serve_command_multi_node_wraps_in_symmetric_run(vllm_service):
     cmd = _build_vllm_ray_serve_command(
         vllm_service, total_nodes=2, gym_install=_GYM_INSTALL, gpus_per_node_values=[8]
