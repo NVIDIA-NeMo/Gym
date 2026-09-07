@@ -132,6 +132,8 @@ def test_nano_omni_and_qwen_share_runtime_and_dataset_but_not_policy_protocol() 
     assert qwen_agent["environment_server"]["name"] == "webvoyager_environment"
     assert nano_agent["datasets"] == qwen_agent["datasets"]
     assert nano_agent["policy_protocol"] == "nano_omni_toolcall"
+    assert "nano_omni_action_recovery" not in nano_agent
+    assert "nano_omni_tool_alias_recovery" not in nano_agent
     assert qwen_agent["policy_protocol"] == "qwen_xml_computer_use"
     assert qwen_agent["max_image_history"] == 20
     assert qwen_agent["qwen_fold_size"] == 10

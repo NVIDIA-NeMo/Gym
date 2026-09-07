@@ -15,10 +15,6 @@ web_agent:
       max_steps: 15
       policy_protocol: nano_omni_toolcall
       max_parse_retries: 2
-      # Shared agent defaults preserve strict parsing and do not alter
-      # trajectories. Individual benchmark profiles opt into recovery.
-      nano_omni_action_recovery: strict
-      nano_omni_tool_alias_recovery: strict
       nano_omni_max_computer_actions: 20
       nano_omni_parse_retry_feedback: false
       nano_omni_parse_retry_temperature: null

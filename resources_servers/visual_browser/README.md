@@ -29,5 +29,6 @@ Credentials, proxy authentication, CAPTCHA solution tokens, and complete URL
 paths are never logged.
 
 The computer-use schema caps one scroll action at 50 wheel clicks, and the
-shared driver clamps the value again at execution time. This prevents malformed
-model output such as `scroll_amount=100000` from blocking a worker.
+shared driver rejects values outside that contract. This prevents malformed
+model output such as `scroll_amount=100000` from blocking a worker without
+silently changing the parsed action.

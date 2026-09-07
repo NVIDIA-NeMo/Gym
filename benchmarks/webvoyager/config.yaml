@@ -32,8 +32,6 @@ webvoyager_benchmark_agent:
       policy_protocol: nano_omni_toolcall
       max_steps: 100
       max_parse_retries: 2
-      nano_omni_action_recovery: repair_single_closing_bracket
-      nano_omni_tool_alias_recovery: webvoyager_v3
       nano_omni_parse_retry_delay_secs: 1.0
       model_turn_max_retries: 19
       model_retry_delay_secs: 5.0

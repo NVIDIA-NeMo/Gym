@@ -480,10 +480,6 @@ def test_navigation_and_tool_dispatch(monkeypatch: pytest.MonkeyPatch, tmp_path:
             },
             "scroll",
         ),
-        (
-            {"action": "scroll", "scroll_parameters": {"scroll_direction": "right", "scroll_amount": 100000}},
-            "hscroll",
-        ),
         ({"action": "left_click_drag", "start_coordinate": [0, 0], "coordinate": [1, 1]}, "dragTo"),
     ],
 )
@@ -501,6 +497,16 @@ def test_execute_computer_actions(
 
     if expected_method is not None:
         assert any(call[0] == expected_method for call in pyautogui.calls)
+
+
+def test_execute_computer_rejects_scroll_outside_schema(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _install_pyautogui(monkeypatch)
+    driver = _driver(tmp_path)
+
+    with pytest.raises(ValueError, match="scroll_amount must be in"):
+        driver._execute_computer(
+            {"action": "scroll", "scroll_parameters": {"scroll_direction": "right", "scroll_amount": 100000}}
+        )
 
 
 def test_reference_default_pointer_locations_and_zero_wait(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -94,8 +94,6 @@ class WebAgentConfig(BaseResponsesAPIAgentConfig):
     policy_protocol: Literal["nano_omni_toolcall", "qwen_xml_computer_use"] = "nano_omni_toolcall"
     max_steps: int = Field(default=15, ge=1, le=200)
     max_parse_retries: int = Field(default=2, ge=0, le=10)
-    nano_omni_action_recovery: Literal["strict", "decode_string", "repair_single_closing_bracket"] = "strict"
-    nano_omni_tool_alias_recovery: Literal["strict", "webvoyager_v3"] = "strict"
     nano_omni_max_computer_actions: int = Field(default=20, ge=1, le=100)
     nano_omni_parse_retry_feedback: bool = False
     nano_omni_parse_retry_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
@@ -184,8 +182,6 @@ def _parse_response_action(
     *,
     policy_protocol: Literal["nano_omni_toolcall", "qwen_xml_computer_use"] = "nano_omni_toolcall",
     qwen_state: QwenPolicyState | None = None,
-    nano_omni_action_recovery: Literal["strict", "decode_string", "repair_single_closing_bracket"] = "strict",
-    nano_omni_tool_alias_recovery: Literal["strict", "webvoyager_v3"] = "strict",
     nano_omni_max_computer_actions: int = 20,
 ):
     if profile != WebActionProfile.COMPUTER_USE:
@@ -193,8 +189,6 @@ def _parse_response_action(
     if policy_protocol == "nano_omni_toolcall":
         return parse_nano_omni_tool_calls(
             response.output,
-            recovery=nano_omni_action_recovery,
-            alias_recovery=nano_omni_tool_alias_recovery,
             max_computer_actions=nano_omni_max_computer_actions,
         )
     if qwen_state is None:
@@ -387,18 +381,6 @@ def _action_call_names(action: Any) -> str:
     calls = getattr(action, "arguments", {}).get("calls", [])
     names = [str(call.get("name", "unknown")) for call in calls if isinstance(call, dict)]
     return ",".join(names) or getattr(action, "name", "unknown")
-
-
-def _nano_omni_recovery_modes(action: Any) -> str:
-    metadata = getattr(action, "metadata", {})
-    records = metadata.get("nano_omni_parse", {}).get("calls", []) if isinstance(metadata, dict) else []
-    modes: list[str] = []
-    for record in records:
-        if not isinstance(record, dict):
-            continue
-        modes.append(str(record.get("recovery_mode", "strict")))
-        modes.extend(str(mode) for mode in record.get("alias_recovery_modes", []))
-    return ",".join(modes) or "strict"
 
 
 def _repeatable_action_signature(action: Any) -> str | None:
@@ -764,8 +746,6 @@ class WebAgent(SimpleResponsesAPIAgent):
                             task.action_profile,
                             policy_protocol=self.config.policy_protocol,
                             qwen_state=qwen_state,
-                            nano_omni_action_recovery=self.config.nano_omni_action_recovery,
-                            nano_omni_tool_alias_recovery=self.config.nano_omni_tool_alias_recovery,
                             nano_omni_max_computer_actions=self.config.nano_omni_max_computer_actions,
                         )
                         # Both maintained policy adapters add only a
@@ -775,7 +755,7 @@ class WebAgent(SimpleResponsesAPIAgent):
                             qwen_state.record_response(qwen_response_text(model_response), action)
                         LOG.info(
                             "event=web_action_parsed benchmark=%s task=%s step=%d parse_attempt=%d "
-                            "action=%s calls=%s terminal=%s recovery_modes=%s",
+                            "action=%s calls=%s terminal=%s",
                             task.benchmark.value,
                             task.task_id,
                             step_index,
@@ -783,7 +763,6 @@ class WebAgent(SimpleResponsesAPIAgent):
                             action.name,
                             _action_call_names(action),
                             action.terminal,
-                            _nano_omni_recovery_modes(action),
                         )
                         break
                     except ActionParseError as exc:

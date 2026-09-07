@@ -28,11 +28,13 @@ The checked-in public-model serving profile is
 Do not combine a checkpoint with tokenizer or template assets reconstructed
 for a different model.
 
-The policy adapter applies bounded syntax recovery to outputs the model already
-chose: JSON-string decoding, one missing closing bracket, and known tool-name
-aliases. It does not rewrite tasks or add a browser strategy. The shared
-executor clamps pathological scroll amounts to protect the worker from a
-model-generated `scroll 100000` stall.
+The model server's reasoning and tool-call parsers are authoritative. The
+policy adapter decodes the standard API transport envelope, validates the
+declared tool schema, and executes valid calls without repairing malformed
+JSON, completing missing delimiters, or guessing tool aliases. Invalid parser
+output follows the ordinary bounded parse-retry or failure path. The shared
+executor rejects pathological scroll amounts instead of silently changing
+them.
 
 For setup, smoke, full execution, and reconciliation, use [runbook.md](runbook.md).
 
@@ -41,6 +43,7 @@ For setup, smoke, full execution, and reconciliation, use [runbook.md](runbook.m
 A previous reference-aligned Gym control completed the maintained population
 at 428/552, while the maintained golden was 429/552. A later hash-sealed PR
 candidate completed 421/552 with all 552 task IDs accounted and no unresolved
-infrastructure rows. These numbers describe their recorded code, model, proxy,
-CAPTCHA, and live-site state; they are not guarantees for a later public-site
-run.
+infrastructure rows. Those historical recipes enabled bounded post-parser
+recovery and therefore are not results for the parser-faithful profile described
+above. These numbers describe their recorded code, model, proxy, CAPTCHA, and
+live-site state; they are not guarantees for a later public-site run.
