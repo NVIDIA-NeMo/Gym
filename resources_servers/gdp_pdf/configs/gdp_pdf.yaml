@@ -1,0 +1,55 @@
+gdp_pdf_resources_server:
+  resources_servers:
+    gdp_pdf:
+      allowed_agents: [gdp_pdf_agent]
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: GDP.pdf per-criterion LLM judge environment
+      value: Evaluate and optimize professional reasoning over long PDF documents
+      judge_model_server:
+        type: responses_api_models
+        name: gdp_pdf_judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 1024
+        reasoning:
+          effort: medium
+      judge_endpoint_max_concurrency: 64
+
+gdp_pdf_agent:
+  responses_api_agents:
+    gdp_pdf_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: gdp_pdf_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 1
+      documents_base_dir: benchmarks/gdp_pdf/data
+      include_page_images: true
+      source_dpi: 150
+      image_dpi: 150
+      pages_per_image: 1
+      max_images: null
+      image_format: jpeg
+      jpeg_quality: 90
+      strip_images_from_output: true
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/gdp_pdf/data/example.jsonl
+        num_repeats: 1
+        license: MIT
+
+# Artificial Analysis v4.3 uses GPT-5.6 Luna at medium reasoning. Override the
+# three judge_* values when the endpoint exposes a different model identifier.
+gdp_pdf_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:judge_base_url,https://api.openai.com/v1}
+      openai_api_key: ${oc.select:judge_api_key,unset}
+      openai_model: ${oc.select:judge_model_name,gpt-5.6-luna}

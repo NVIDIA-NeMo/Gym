@@ -1,0 +1,35 @@
+config_paths:
+  - resources_servers/gdp_pdf/configs/gdp_pdf.yaml
+
+gdp_pdf_benchmark_resources_server:
+  _inherit_from: gdp_pdf_resources_server
+  resources_servers:
+    gdp_pdf:
+      expected_task_count: 100
+      expected_domain_task_counts:
+        Construction: 10
+        Engineering: 10
+        Finance/Investing: 9
+        HR: 9
+        Healthcare: 11
+        Insurance: 9
+        Legal: 7
+        Manufacturing/Supply Chains: 10
+        Real Estate: 10
+        STEM/Research: 15
+
+gdp_pdf_benchmark_agent:
+  _inherit_from: gdp_pdf_agent
+  responses_api_agents:
+    gdp_pdf_agent:
+      resources_server:
+        type: resources_servers
+        name: gdp_pdf_benchmark_resources_server
+      datasets:
+      - name: gdp_pdf
+        type: benchmark
+        jsonl_fpath: benchmarks/gdp_pdf/data/gdp_pdf_benchmark.jsonl
+        prompt_config: benchmarks/gdp_pdf/prompts/default.yaml
+        prepare_script: benchmarks/gdp_pdf/prepare.py
+        num_repeats: 1
+        license: MIT

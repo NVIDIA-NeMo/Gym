@@ -1,0 +1,17 @@
+# One independent call is made per criterion. Per AA v4.3, the judge does not
+# receive the source PDF, extracted document text, or contestant identity.
+user: |-
+  Evaluate whether the candidate answer satisfies one rubric criterion for the task below.
+
+  Apply only the supplied criterion. Accept equivalent wording and ordinary rounding when the criterion allows it. Do not require facts that the criterion does not require. Do not use outside knowledge to repair or extend the candidate answer.
+
+  TASK:
+  {task_prompt}
+
+  CANDIDATE ANSWER:
+  {candidate_answer}
+
+  CRITERION:
+  {criterion}
+
+  Return exactly PASS if the candidate answer satisfies the criterion. Otherwise return exactly FAIL.

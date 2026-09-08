@@ -1,0 +1,3 @@
+# The GDP-specific agent replaces this seed message with the complete
+# text-plus-page-image document payload immediately before the policy call.
+user: "{question}"
