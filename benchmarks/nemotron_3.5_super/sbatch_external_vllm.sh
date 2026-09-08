@@ -10,10 +10,94 @@ MODEL_NAME="${MODEL_NAME:-$MODEL}"
 CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
+SBATCH_EXCLUDE="${SBATCH_EXCLUDE:-}"
+SBATCH_TIME="${SBATCH_TIME:-04:00:00}"
+NUM_SAMPLES_IN_PARALLEL="${NUM_SAMPLES_IN_PARALLEL:-}"
+NUM_SAMPLES_IN_PARALLEL_ARG=""
+RESUME_EVAL_ON_REQUEUE="${RESUME_EVAL_ON_REQUEUE:-0}"
+RESUME_FROM_CACHE_ARG=""
+# Independent mode starts one complete TP model replica per node. Coupled mode
+# forms one multi-node DP/EP engine per tier for models that cannot fit per node.
+VLLM_PD_DEPLOYMENT_MODE="${VLLM_PD_DEPLOYMENT_MODE:-independent}"
+# auto uses all allocated nodes when sbatch supports --segment; none omits it;
+# a positive integer requests that explicit segment size.
+VLLM_SLURM_SEGMENT="${VLLM_SLURM_SEGMENT:-auto}"
 SLURM_COMMENT="${SLURM_COMMENT:-}"
 OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-}"
 OPENSANDBOX_API_KEY="${OPENSANDBOX_API_KEY:-}"
 OPENSANDBOX_PROTOCOL="${OPENSANDBOX_PROTOCOL:-http}"
+
+if [[ -n "$NUM_SAMPLES_IN_PARALLEL" ]]; then
+    if [[ ! "$NUM_SAMPLES_IN_PARALLEL" =~ ^[1-9][0-9]*$ ]]; then
+        echo "ERROR: NUM_SAMPLES_IN_PARALLEL must be a positive integer; got '$NUM_SAMPLES_IN_PARALLEL'." >&2
+        exit 1
+    fi
+    NUM_SAMPLES_IN_PARALLEL_ARG="++num_samples_in_parallel=$NUM_SAMPLES_IN_PARALLEL"
+fi
+
+case "$RESUME_EVAL_ON_REQUEUE" in
+    0)
+        ;;
+    1)
+        RESUME_FROM_CACHE_ARG="++resume_from_cache=true"
+        ;;
+    *)
+        echo "ERROR: RESUME_EVAL_ON_REQUEUE must be 0 or 1; got '$RESUME_EVAL_ON_REQUEUE'." >&2
+        exit 1
+        ;;
+esac
+
+case "$VLLM_PD_DEPLOYMENT_MODE" in
+    independent | coupled)
+        ;;
+    *)
+        echo "ERROR: VLLM_PD_DEPLOYMENT_MODE must be independent or coupled; got '$VLLM_PD_DEPLOYMENT_MODE'." >&2
+        exit 1
+        ;;
+esac
+
+SBATCH_EXCLUDE_ARGS=()
+if [[ -n "$SBATCH_EXCLUDE" ]]; then
+    # Revalidate saved exclusion lists so removed nodes cannot invalidate the submission.
+    if ! requested_excludes=$(scontrol show hostnames "$SBATCH_EXCLUDE"); then
+        echo "ERROR: Could not expand SBATCH_EXCLUDE='$SBATCH_EXCLUDE'." >&2
+        exit 1
+    fi
+    if ! cluster_nodes=$(scontrol show nodes --oneliner); then
+        echo "ERROR: Could not query Slurm's node inventory." >&2
+        exit 1
+    fi
+
+    declare -A cluster_node_set=()
+    while IFS= read -r node_record; do
+        node=${node_record#NodeName=}
+        node=${node%% *}
+        [[ -n "$node" ]] && cluster_node_set["$node"]=1
+    done <<< "$cluster_nodes"
+
+    valid_excludes=()
+    stale_excludes=()
+    while IFS= read -r node; do
+        [[ -z "$node" ]] && continue
+        if [[ -n "${cluster_node_set[$node]:-}" ]]; then
+            valid_excludes+=("$node")
+        else
+            stale_excludes+=("$node")
+        fi
+    done <<< "$requested_excludes"
+
+    if (( ${#stale_excludes[@]} )); then
+        stale_excludes_csv=$(IFS=,; echo "${stale_excludes[*]}")
+        echo "WARNING: Ignoring exclusions absent from Slurm's current node inventory: $stale_excludes_csv" >&2
+    fi
+    if (( ${#valid_excludes[@]} )); then
+        valid_excludes_csv=$(IFS=,; echo "${valid_excludes[*]}")
+        echo "Using ${#valid_excludes[@]} valid node exclusions."
+        SBATCH_EXCLUDE_ARGS+=(--exclude="$valid_excludes_csv")
+    else
+        echo "WARNING: No requested node exclusions exist in Slurm's current node inventory." >&2
+    fi
+fi
 
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
@@ -34,6 +118,11 @@ DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
 
 ROUTER_SERVER_PORT=8000
 WORKER_SERVER_PORT=8001
+PREFILL_SERVER_PORT=8001
+DECODE_SERVER_PORT=8002
+
+PREFILL_DP_RPC_PORT=13345
+DECODE_DP_RPC_PORT=13346
 
 eval_command=$(cat <<EOF
 set -euo pipefail
@@ -45,11 +134,16 @@ cd /opt/Gym
 export NEMO_GYM_RUN_ID="\$SLURM_JOB_ID"
 export NEMO_GYM_USER="\${NEMO_GYM_USER:-\$SLURM_JOB_USER}"
 
+GYM_MODEL_PARAMS=()
 source "$VLLM_CONFIG"
 
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
-experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
+if (( $RESUME_EVAL_ON_REQUEUE )); then
+    experiment_name=$EXPERIMENT_NAME/resumable
+else
+    experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
+fi
 # export_to_csv.py derives <base>_aggregate_metrics.json from this, so the
 # default timestamped name makes the aggregate unfindable to anything that
 # did not watch the job run. Override it when results/ is already per-run.
@@ -75,6 +169,7 @@ gym eval run \
     ++split=benchmark \
     ++use_absolute_ip=true \
     ++reuse_existing_data_preparation=true \
+    $RESUME_FROM_CACHE_ARG \
     ++policy_base_url=http://\$(getent hosts "\$ROUTER_NODE" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \
     ++policy_model_name=$MODEL_NAME \
@@ -82,6 +177,7 @@ gym eval run \
     ++global_aiohttp_connector_limit_per_host=16384 \
     ++port_range_low=63000 \
     ++port_range_high=64000 \
+    $NUM_SAMPLES_IN_PARALLEL_ARG \
     "\${GYM_MODEL_PARAMS[@]}"
 
 
@@ -127,59 +223,159 @@ if [[ \$(ulimit -Hn) == "unlimited" ]] || [[ 65535 -lt \$(ulimit -Hn) ]]; then
 fi
 
 this_node_hostname=\$(hostname)
-if (( SLURM_PROCID == 0 )); then
-    read -r -a nodes <<< "\$ALL_NODES"
+read -r -a nodes <<< "\$ALL_NODES"
 
-    # @bxyu-nvidia: for --intra-node-data-parallel-size: Not sure what to set this to other than 1. I can't tell from the docs what is appropriate and 1 seems to work fine.
-    # Set a super long request timeout since some reasoning requests may take a long time to generate.
-    # Don't manually wait as vllm-router will wait for the URLs to come up
-    router_args=( \
-        --prefill-policy cache_aware \
-        --decode-policy cache_aware \
-        --balance-abs-threshold 4 \
-        --balance-rel-threshold 1.1 \
-        --vllm-pd-disaggregation \
-        --host \$this_node_hostname \
-        --port $ROUTER_SERVER_PORT \
-        --intra-node-data-parallel-size 1 \
-        --request-timeout-secs 86400 \
-        --log-level error
-    )
+if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
+    PREFILL_HEAD=\${nodes[0]}
+    DECODE_HEAD=\${nodes[$NUM_PREFILL_NODES]}
 
-    for (( i = 0; i < $NUM_PREFILL_NODES; i++ )); do
-        router_args+=(--prefill "http://\${nodes[i]}:$WORKER_SERVER_PORT")
-    done
-    for (( i = 0; i < $NUM_DECODE_NODES; i++ )); do
-        node_idx=\$(( $NUM_PREFILL_NODES + i ))
-        router_args+=(--decode "http://\${nodes[node_idx]}:$WORKER_SERVER_PORT")
-    done
+    wait_for_vllm_health() {
+        local role=\$1
+        local url=\$2
+        local pid=\$3
 
-    vllm-router "\${router_args[@]}" &
+        until curl -fs "\$url" >/dev/null; do
+            if ! kill -0 "\$pid" 2>/dev/null; then
+                local status=0
+                wait "\$pid" || status=\$?
+                (( status != 0 )) || status=1
+                echo "ERROR: \$role vLLM process exited before becoming healthy (status=\$status)." >&2
+                return "\$status"
+            fi
+            sleep 5
+        done
+    }
 
-    router_pid=\$!
-    trap 'kill "\$router_pid" 2>/dev/null || true' EXIT
-fi
+    if (( SLURM_PROCID == 0 )); then
+        # The first prefill rank owns its tier's API server. The remaining
+        # prefill ranks run headless so expert parallelism spans the tier.
+        VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
+        VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
+        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+            --host \$this_node_hostname \
+            --port $PREFILL_SERVER_PORT \
+            --data-parallel-size $NUM_PREFILL_NODES \
+            --data-parallel-address \$PREFILL_HEAD \
+            --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
+            --api-server-count 1 \
+            &
+        prefill_pid=\$!
+        trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
 
-# Split nodes here by index
-if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
-    # Prefill
-    VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
-        --host \$this_node_hostname \
-        --port $WORKER_SERVER_PORT
+        wait_for_vllm_health "prefill" "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT/health" "\$prefill_pid"
+        wait_for_vllm_health "decode" "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health" "\$prefill_pid"
+
+        vllm-router \
+            --prefill-policy cache_aware \
+            --decode-policy cache_aware \
+            --balance-abs-threshold 4 \
+            --balance-rel-threshold 1.1 \
+            --vllm-pd-disaggregation \
+            --prefill "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT" \
+            --decode "http://\$DECODE_HEAD:$DECODE_SERVER_PORT" \
+            --host \$PREFILL_HEAD \
+            --port $ROUTER_SERVER_PORT \
+            --intra-node-data-parallel-size 1 \
+            --request-timeout-secs 86400 \
+            --log-level error
+    elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+        VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
+        VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
+        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+            --headless \
+            --data-parallel-size $NUM_PREFILL_NODES \
+            --data-parallel-start-rank \$SLURM_PROCID \
+            --data-parallel-address \$PREFILL_HEAD \
+            --data-parallel-rpc-port $PREFILL_DP_RPC_PORT
+    elif (( SLURM_PROCID == $NUM_PREFILL_NODES )); then
+        # Decode mirrors prefill with one API rank and headless ranks across
+        # the other decode nodes.
+        VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
+        VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
+        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+            --host \$this_node_hostname \
+            --port $DECODE_SERVER_PORT \
+            --data-parallel-size $NUM_DECODE_NODES \
+            --data-parallel-address \$DECODE_HEAD \
+            --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
+            --api-server-count 1
+    else
+        VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
+        VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
+        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+            --headless \
+            --data-parallel-size $NUM_DECODE_NODES \
+            --data-parallel-start-rank \$(( SLURM_PROCID - $NUM_PREFILL_NODES )) \
+            --data-parallel-address \$DECODE_HEAD \
+            --data-parallel-rpc-port $DECODE_DP_RPC_PORT
+    fi
 else
-    # Decode
-    VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
-        --host \$this_node_hostname \
-        --port $WORKER_SERVER_PORT
+    # Preserve main's independent topology for models that fit one complete
+    # tensor-parallel replica on each node.
+    if (( SLURM_PROCID == 0 )); then
+        router_args=( \
+            --prefill-policy cache_aware \
+            --decode-policy cache_aware \
+            --balance-abs-threshold 4 \
+            --balance-rel-threshold 1.1 \
+            --vllm-pd-disaggregation \
+            --host \$this_node_hostname \
+            --port $ROUTER_SERVER_PORT \
+            --intra-node-data-parallel-size 1 \
+            --request-timeout-secs 86400 \
+            --log-level error
+        )
+
+        for (( i = 0; i < $NUM_PREFILL_NODES; i++ )); do
+            router_args+=(--prefill "http://\${nodes[i]}:$WORKER_SERVER_PORT")
+        done
+        for (( i = 0; i < $NUM_DECODE_NODES; i++ )); do
+            node_idx=\$(( $NUM_PREFILL_NODES + i ))
+            router_args+=(--decode "http://\${nodes[node_idx]}:$WORKER_SERVER_PORT")
+        done
+
+        vllm-router "\${router_args[@]}" &
+        router_pid=\$!
+        trap 'kill "\$router_pid" 2>/dev/null || true' EXIT
+    fi
+
+    if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+        VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
+        VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
+        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+            --host \$this_node_hostname \
+            --port $WORKER_SERVER_PORT
+    else
+        VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
+        VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
+        vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+            --host \$this_node_hostname \
+            --port $WORKER_SERVER_PORT
+    fi
 fi
 EOF
 )
 
 NUM_NODES=$((NUM_PREFILL_NODES + NUM_DECODE_NODES))
+SBATCH_SEGMENT_ARGS=()
+case "$VLLM_SLURM_SEGMENT" in
+    auto)
+        sbatch_help=$(sbatch --help 2>&1)
+        if [[ "$sbatch_help" == *"--segment"* ]]; then
+            SBATCH_SEGMENT_ARGS+=(--segment="$NUM_NODES")
+        fi
+        ;;
+    none)
+        ;;
+    *)
+        if [[ ! "$VLLM_SLURM_SEGMENT" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ERROR: VLLM_SLURM_SEGMENT must be auto, none, or a positive integer." >&2
+            exit 2
+        fi
+        SBATCH_SEGMENT_ARGS+=(--segment="$VLLM_SLURM_SEGMENT")
+        ;;
+esac
+
 batch_command=$(cat <<EOF
 set -euo pipefail
 
@@ -258,7 +454,8 @@ wait "\$server_step"
 EOF
 )
 
-# --segment > 0 otherwise the engine will hang on the second or third engine step.
+# This cluster needs --segment > 0 to avoid distributed engine hangs. Keep the
+# setting caller-configurable because coupled tiers benefit from tier-sized segments.
 submit_dir=$(pwd -P)
 # An exported connection is sent as arguments; otherwise env.yaml is read.
 if [[ -n "$OPENSANDBOX_DOMAIN" ]]; then
@@ -275,13 +472,14 @@ main_job_id=$(
     sbatch \
         --parsable \
         --nodes=$NUM_NODES \
-        --time=04:00:00 \
+        --time="$SBATCH_TIME" \
+        "${SBATCH_EXCLUDE_ARGS[@]}" \
+        "${SBATCH_SEGMENT_ARGS[@]}" \
         --job-name=gym-$EXPERIMENT_NAME-$USER \
         --output=slurm-logs/%j-%x.log \
         --ntasks-per-node=1 \
         --comment="$SLURM_COMMENT" \
         --exclusive \
-        --segment=$NUM_NODES \
         --wrap 'exec bash -c "$batch_command"'
 )
 main_job_id=${main_job_id%%;*}
