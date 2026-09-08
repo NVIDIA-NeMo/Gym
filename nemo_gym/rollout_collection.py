@@ -150,6 +150,7 @@ NG_TERMINAL_KEY = "_ng_failure_terminal"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
 _NO_RESULT_FAILURE_CLASSES = frozenset({AGENT_REQUEST_FAILED_FAILURE_CLASS, AGENT_RUN_ERROR_FAILURE_CLASS})
+AGGREGATION_ERROR_KEY = "aggregation_error"
 NG_TRAJECTORY_KEY = "ng_trajectory"
 NG_PERF_KEY = "ng_perf"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
@@ -903,6 +904,27 @@ def _truncated_body(body: Optional[bytes]) -> Optional[str]:
         return None
     text = body[: _MAX_FAILURE_BODY_CHARS * 4].decode("utf-8", "replace")
     return text[:_MAX_FAILURE_BODY_CHARS] + ("…" if len(body) > _MAX_FAILURE_BODY_CHARS else "")
+
+
+def _aggregation_error_entry(
+    agent_name: str, exc: BaseException, response_status: Optional[int] = None
+) -> Dict[str, Any]:
+    """Build the metrics-file placeholder for one agent whose aggregation failed."""
+    message = str(exc) or repr(exc)
+    if len(message) > _MAX_FAILURE_BODY_CHARS:
+        message = message[:_MAX_FAILURE_BODY_CHARS] + "…"
+    return {
+        AGENT_REF_KEY_NAME: {"name": agent_name},
+        "agent_metrics": {},
+        "key_metrics": {},
+        "group_level_metrics": [],
+        "repeat_level_metrics": [],
+        AGGREGATION_ERROR_KEY: {
+            "type": type(exc).__name__,
+            "message": message,
+            "http_status": getattr(exc, "status", None) or response_status,
+        },
+    }
 
 
 def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], Dict[str, Any]]:
@@ -1697,8 +1719,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
     ) -> Optional[Path]:
         """Call /aggregate_metrics on each agent server after rollouts complete.
 
-        Writes a single _aggregate_metrics.json with one entry per agent (same shape
-        as the old _agent_metrics.json). Returns the file path.
+        Writes a single _aggregate_metrics.json with one entry per agent. If an agent's
+        request fails, its entry contains empty metric collections plus ``aggregation_error``;
+        rerunning aggregation overwrites that entry with real metrics after the service recovers.
+        Returns the file path.
         """
         if not results:
             return None
@@ -1741,14 +1765,22 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     entry["response"] = response_metadata
                 stripped.append(entry)
 
-            agg_request = AggregateMetricsRequest(verify_responses=stripped)
-            agg_response = await server_client.post(
-                server_name=agent_name,
-                url_path="/aggregate_metrics",
-                json=agg_request,
-            )
-            await raise_for_status(agg_response)
-            agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+            agg_response = None
+            try:
+                agg_request = AggregateMetricsRequest(verify_responses=stripped)
+                agg_response = await server_client.post(
+                    server_name=agent_name,
+                    url_path="/aggregate_metrics",
+                    json=agg_request,
+                )
+                await raise_for_status(agg_response)
+                agg_result = AggregateMetrics.model_validate(await get_response_json(agg_response))
+            except Exception as exc:
+                logger.exception(
+                    "Aggregate-metrics request failed for agent '%s'; writing a repairable error entry.",
+                    agent_name,
+                )
+                return _aggregation_error_entry(agent_name, exc, getattr(agg_response, "status", None))
 
             agent_entry = {
                 AGENT_REF_KEY_NAME: {"name": agent_name},
@@ -1768,8 +1800,16 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             all_agent_metrics.append(agent_entry)
 
             agent_name = agent_entry[AGENT_REF_KEY_NAME]["name"]
+            if AGGREGATION_ERROR_KEY in agent_entry:
+                print(
+                    f"\nAggregate metrics failed for {agent_name}:\n"
+                    + json.dumps(agent_entry[AGGREGATION_ERROR_KEY], indent=4)
+                )
+                continue
             key_metrics = agent_entry.get("key_metrics", {})
             print(f"\nKey metrics for {agent_name}:\n" + json.dumps(key_metrics, indent=4))
+
+        all_agent_metrics.sort(key=lambda entry: entry[AGENT_REF_KEY_NAME]["name"])
 
         primitive_types = (bool, int, float, str, type(None))
         metrics_to_log = dict()

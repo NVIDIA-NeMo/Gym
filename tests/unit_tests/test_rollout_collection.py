@@ -48,6 +48,7 @@ from nemo_gym.rollout_collection import (
     _DEFAULT_MAX_ROLLOUT_ATTEMPTS,
     AGENT_REQUEST_FAILED_FAILURE_CLASS,
     AGENT_RUN_ERROR_FAILURE_CLASS,
+    AGGREGATION_ERROR_KEY,
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
     NG_PERF_KEY,
@@ -3192,6 +3193,64 @@ class TestRolloutCollection:
         # Verify both agents were called
         assert mock_server_client.post.call_count == 2
 
+    async def test_call_aggregate_metrics_isolates_one_agent_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        async def post(server_name: str, url_path: str, json: AggregateMetricsRequest) -> FakeResponse:
+            assert url_path == "/aggregate_metrics"
+            if server_name == "agent_b":
+                return FakeResponse(500)
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        rows = [
+            {AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+            {AGENT_REF_KEY_NAME: {"name": "agent_b"}, TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0},
+        ]
+        results = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0},
+        ]
+
+        metrics_fpath = await RolloutCollectionHelper()._call_aggregate_metrics(
+            results, rows, tmp_path / "output.jsonl"
+        )
+
+        written = orjson.loads(metrics_fpath.read_bytes())
+        assert [entry[AGENT_REF_KEY_NAME]["name"] for entry in written] == ["agent_a", "agent_b"]
+        assert written[0]["key_metrics"]["mean/reward"] == 1.0
+        assert AGGREGATION_ERROR_KEY not in written[0]
+        assert written[1] == {
+            AGENT_REF_KEY_NAME: {"name": "agent_b"},
+            "agent_metrics": {},
+            "key_metrics": {},
+            "group_level_metrics": [],
+            "repeat_level_metrics": [],
+            AGGREGATION_ERROR_KEY: {
+                "type": "ClientResponseError",
+                "message": "500, message='boom', url='http://agent/run'",
+                "http_status": 500,
+            },
+        }
+        assert "Aggregate-metrics request failed for agent 'agent_b'" in caplog.text
+
+    async def test_call_aggregate_metrics_records_unexpected_agent_errors(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=RuntimeError("aggregator bug")))
+        rows = [{AGENT_REF_KEY_NAME: {"name": "agent_a"}}]
+
+        metrics_fpath = await RolloutCollectionHelper()._call_aggregate_metrics(
+            [{"reward": 1.0}], rows, tmp_path / "output.jsonl"
+        )
+
+        written = orjson.loads(metrics_fpath.read_bytes())
+        assert written[0][AGGREGATION_ERROR_KEY]["type"] == "RuntimeError"
+        assert written[0][AGGREGATION_ERROR_KEY]["message"] == "aggregator bug"
+
     async def test_call_aggregate_metrics_empty(self, tmp_path: Path) -> None:
         """_call_aggregate_metrics returns None for empty results."""
         helper = RolloutCollectionHelper()
@@ -3455,6 +3514,54 @@ class TestRolloutAggregationHelper:
         # though output_jsonl_fpath is used to derive the metrics path.
         assert not output_fpath.exists()
         assert (tmp_path / "rollouts_aggregate_metrics.json").exists()
+
+    async def test_standalone_aggregation_repairs_a_failed_agent_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        shard = tmp_path / "shard.jsonl"
+        records = [
+            {
+                AGENT_REF_KEY_NAME: {"name": "agent_a"},
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": 1.0,
+            },
+            {
+                AGENT_REF_KEY_NAME: {"name": "agent_b"},
+                TASK_INDEX_KEY_NAME: 1,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": 0.0,
+            },
+        ]
+        shard.write_bytes(b"\n".join(orjson.dumps(record) for record in records) + b"\n")
+        fail_agent_b = True
+
+        async def post(server_name: str, url_path: str, json: AggregateMetricsRequest) -> FakeResponse:
+            assert url_path == "/aggregate_metrics"
+            if server_name == "agent_b" and fail_agent_b:
+                return FakeResponse(500)
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        config = RolloutAggregationConfig(
+            input_glob=str(shard),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            disable_health_check=True,
+        )
+
+        metrics_fpath = await RolloutAggregationHelper().run_from_config(config)
+        first_attempt = orjson.loads(metrics_fpath.read_bytes())
+        assert AGGREGATION_ERROR_KEY not in first_attempt[0]
+        assert first_attempt[1][AGGREGATION_ERROR_KEY]["http_status"] == 500
+
+        fail_agent_b = False
+        repaired_fpath = await RolloutAggregationHelper().run_from_config(config)
+
+        assert repaired_fpath == metrics_fpath
+        repaired = orjson.loads(repaired_fpath.read_bytes())
+        assert not any(AGGREGATION_ERROR_KEY in entry for entry in repaired)
+        assert repaired[0]["key_metrics"]["mean/reward"] == 1.0
+        assert repaired[1]["key_metrics"]["mean/reward"] == 0.0
 
     async def test_health_failure_does_not_fail_aggregation(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
