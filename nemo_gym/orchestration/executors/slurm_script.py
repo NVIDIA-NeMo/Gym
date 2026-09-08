@@ -26,6 +26,7 @@ from nemo_gym.orchestration.api import (
     SubmitConfig,
     VllmServiceConfig,  # used in _BUILDERS dispatch table
     effective_ray_serve,
+    gym_install_required_message,
 )
 from nemo_gym.orchestration.executors.script_templates import (
     bash_var,
@@ -204,6 +205,14 @@ def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int) -> str
     return _build_vllm_single_instance_multi_node_command(service, total_nodes)
 
 
+def _escape_for_double_quoted_bash(text: str) -> str:
+    """Escape text for safe embedding inside a double-quoted bash string ("..."). Needed instead
+    of shlex.quote (which produces single-quote-wrapped output) whenever the text is substituted
+    inside an already-open single-quoted bash region - a literal `'` from shlex.quote would
+    terminate that outer quoting early and corrupt the command."""
+    return text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+
+
 def _build_vllm_ray_serve_command(
     service: VllmServiceConfig, total_nodes: int, gym_install: GymInstallConfig, gpus_per_node_values: list[int]
 ) -> str:
@@ -240,8 +249,11 @@ def _build_vllm_ray_serve_command(
     )
     if total_nodes <= 1:
         # No multi-node Ray cluster to join - the gateway starts its own local Ray instance and
-        # launches all instances on this one node.
-        return f"bash -lc '{fetch_and_run}'"
+        # launches all instances on this one node. Still needs double-quote escaping: fetch_and_run
+        # contains shlex.quote(service.model), which wraps its output in literal single quotes
+        # whenever the model name needs escaping (e.g. contains a space) - those would otherwise
+        # terminate this bash -lc '...' wrapper early and corrupt the command.
+        return f'bash -lc "{_escape_for_double_quoted_bash(fetch_and_run)}"'
     resource_flags = (
         "--num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE}"
     )
@@ -255,8 +267,9 @@ def _build_vllm_ray_serve_command(
     # immune to that live-parsing - double quotes, not shlex.quote's single-quote style, because
     # this text is substituted inside that template's own single-quoted region: a literal `'`
     # (which shlex.quote would introduce) would terminate that outer quoting early.
-    escaped = fetch_and_run.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
-    return render_vllm_ray_symmetric_run(f'bash -c "{escaped}"', total_nodes, resource_flags)
+    return render_vllm_ray_symmetric_run(
+        f'bash -c "{_escape_for_double_quoted_bash(fetch_and_run)}"', total_nodes, resource_flags
+    )
 
 
 def _build_ray_command(_service: RayServiceConfig) -> str:
@@ -284,12 +297,7 @@ def _build_service_command(
 ) -> str:
     if isinstance(service, VllmServiceConfig) and effective_ray_serve(service, total_nodes, gpus_per_node_values):
         if gym_install is None:
-            raise ValueError(
-                "Service requires the Ray Serve gateway (use_ray_serve or an instance spanning "
-                "multiple nodes) but driver.gym_install is not set - the gateway script "
-                "(nemo_gym/orchestration/ray_serve_gateway.py) is fetched from that repo/ref into "
-                "the vLLM service's own container. Set driver.gym_install.{repo,ref}."
-            )
+            raise ValueError(gym_install_required_message())
         return _build_vllm_ray_serve_command(service, total_nodes, gym_install, gpus_per_node_values)
     if _vllm_spans_multiple_nodes(service, total_nodes):
         return _build_vllm_ray_command(service, total_nodes)

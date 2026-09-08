@@ -19,7 +19,11 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.orchestration.api import GymInstallConfig, SubmitConfig
-from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint, render_gym_cmd
+from nemo_gym.orchestration.executors.script_templates import (
+    render_driver_entrypoint,
+    render_gym_cmd,
+    render_repo_checkout,
+)
 from nemo_gym.orchestration.executors.slurm_script import (
     _build_service_command,
     _build_vllm_command,
@@ -293,6 +297,36 @@ def test_build_vllm_ray_serve_command_installs_git_if_missing(vllm_service):
     assert cmd.index("command -v git") < cmd.index("git clone")
 
 
+def test_build_vllm_ray_serve_command_single_node_model_with_space_survives_quoting():
+    # Regression test for a real bug: shlex.quote() wraps a model name needing escaping (e.g.
+    # containing a space) in literal single quotes. Naively embedding that inside a Python-level
+    # single-quoted `bash -lc '...'` wrapper would let those literal `'` characters terminate the
+    # wrapper early, corrupting the command - everything from the space onward silently vanishes
+    # into inert extra positional args of the outer `bash -c` invocation instead of reaching the
+    # gateway. Runs the *actual* generated bash through a stand-in gateway to prove the model name
+    # survives intact, the same way test_..._multi_node_chain_survives_symmetric_run_entrypoint
+    # does for the multi-node path's `&&`-chain hazard.
+    service = VllmServiceConfig(type="vllm", container="vllm:latest", model="org/my model")
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=1, gym_install=_GYM_INSTALL, gpus_per_node_values=[])
+
+    checkout = render_repo_checkout(_GYM_INSTALL.repo, _GYM_INSTALL.ref)
+    inner = (
+        cmd.replace(checkout, "true")
+        .replace("pip install --quiet aiohttp", "true")
+        .replace("python3 nemo_gym/orchestration/ray_serve_gateway.py", "fake_gateway")
+    )
+    # fake_gateway is defined and exported *before* the generated `bash -lc "..."` command, not
+    # spliced inline into it - inline injection of "$@" would itself get corrupted by the outer
+    # double-quoting the fix introduces (the same class of bug this test guards against).
+    script = 'fake_gateway() { for a in "$@"; do echo "ARG:$a"; done; }\nexport -f fake_gateway\n' + inner + "\n"
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+
+    assert result.returncode == 0, result.stderr
+    args = [line.removeprefix("ARG:") for line in result.stdout.splitlines()]
+    assert "--model" in args, f"corrupted command, got args: {args}"
+    assert args[args.index("--model") + 1] == "org/my model"
+
+
 def test_build_vllm_ray_serve_command_multi_node_wraps_in_symmetric_run(vllm_service):
     cmd = _build_vllm_ray_serve_command(
         vllm_service, total_nodes=2, gym_install=_GYM_INSTALL, gpus_per_node_values=[8]
@@ -449,6 +483,14 @@ def test_render_driver_entrypoint_with_gym_install():
     assert "uv pip install -e . --system" in out
     assert 'exec "$@"' in out
     assert '"${GYM_CMD[@]}"' in out
+
+
+def test_render_driver_entrypoint_installs_git_if_missing():
+    # The driver container (e.g. a minimal python image) may not bundle git any more than
+    # vllm/vllm-openai does - render_repo_checkout's guard protects both callers.
+    out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
+    assert "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git)" in out
+    assert out.index("command -v git") < out.index("git clone")
 
 
 def test_render_driver_entrypoint_with_prepare():

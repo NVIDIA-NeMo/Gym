@@ -97,6 +97,21 @@ def effective_ray_serve(service: "VllmServiceConfig", total_nodes: int, gpus_per
     return total_nodes > 1 and service.number_of_instances > 1 and tp_pp > max_gpus_per_node
 
 
+def gym_install_required_message(service_name: str | None = None) -> str:
+    """Shared explanation for why driver.gym_install must be set whenever effective_ray_serve is
+    true for a service - raised both by api.py's validation (fires first, at config-load time) and
+    slurm_script.py's command building (defense-in-depth for callers of _build_service_command/
+    build_sbatch_script directly, bypassing SubmitConfig validation). One shared message so the
+    two call sites can't drift out of sync."""
+    subject = f"Service '{service_name}'" if service_name else "Service"
+    return (
+        f"{subject} requires the Ray Serve gateway (use_ray_serve or an instance spanning multiple "
+        "nodes), but driver.gym_install is not set. The gateway script "
+        "(nemo_gym/orchestration/ray_serve_gateway.py) is fetched from that repo/ref into the vLLM "
+        "service's own container - set driver.gym_install.{repo,ref}."
+    )
+
+
 class RayServiceConfig(BaseServiceConfig):
     type: Literal["ray"]
 
@@ -226,12 +241,7 @@ class SubmitConfig(_StrictModel):
             )
 
             if is_ray_serve and self.driver.gym_install is None:
-                raise ValueError(
-                    f"Service '{service_name}' requires the Ray Serve gateway (use_ray_serve or an instance "
-                    "spanning multiple nodes), but driver.gym_install is not set. The gateway script "
-                    "(nemo_gym/orchestration/ray_serve_gateway.py) is fetched from that repo/ref into the "
-                    "vLLM service's own container - set driver.gym_install.{repo,ref}."
-                )
+                raise ValueError(gym_install_required_message(service_name))
 
         if self.driver.policy_model is not None:
             if self.driver.policy_model not in self.services:
