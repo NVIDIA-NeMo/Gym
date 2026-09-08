@@ -1,0 +1,5 @@
+[
+  {"name": "orders.get", "description": "Read one order with its line items.", "inputSchema": {"type": "object", "properties": {"order_id": {"type": "string"}}, "required": ["order_id"], "additionalProperties": false}, "annotations": {"readOnlyHint": true}},
+  {"name": "orders.update_status", "description": "Set an order's status.", "inputSchema": {"type": "object", "properties": {"order_id": {"type": "string"}, "status": {"type": "string"}}, "required": ["order_id", "status"], "additionalProperties": false}, "annotations": {"readOnlyHint": false}},
+  {"name": "benchmark.submit_answer", "description": "Submit the final answer.", "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}, "order_total": {"type": "number"}}, "required": ["task_id", "order_total"], "additionalProperties": false}, "annotations": {"readOnlyHint": false}}
+]
