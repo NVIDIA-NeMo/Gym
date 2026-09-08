@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
+import sys
 import tempfile
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
@@ -29,9 +31,14 @@ from resources_servers.scicode.app import (
 from resources_servers.scicode.scicode_integration.runner import build_test_program, run_substep, sanitize_test
 
 
-def _server(test_data_fpath=None):
+def _server(test_data_fpath=None, **config_overrides):
     config = ScicodeResourcesServerConfig(
-        host="0.0.0.0", port=8080, entrypoint="", name="", test_data_fpath=test_data_fpath
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="",
+        test_data_fpath=test_data_fpath,
+        **config_overrides,
     )
     return ScicodeResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -106,6 +113,16 @@ def test_run_substep_timeout():
     assert result == {"passed": False, "error": "timeout"}
 
 
+def test_run_substep_accepts_explicit_python_interpreter():
+    assert run_substep("assert 1 == 1", timeout_secs=10.0, python_executable=sys.executable)["passed"] is True
+
+
+def test_run_substep_reports_interpreter_launch_error():
+    result = run_substep("assert True", timeout_secs=10.0, python_executable="/does/not/exist/python")
+    assert result["passed"] is False
+    assert result["error"]
+
+
 # ----------------------------
 # server
 # ----------------------------
@@ -118,6 +135,9 @@ class TestApp:
         assert config.num_processes == 20
         assert config.timeout_secs == 30.0
         assert config.test_data_fpath is None
+        assert config.test_data_md5 is None
+        assert config.grading_interpreters == []
+        assert config.required_grading_interpreters == 1
 
     @pytest.mark.asyncio
     async def test_verify_no_solutions_returns_zero(self):
@@ -147,6 +167,25 @@ class TestApp:
         server = _server(test_data_fpath="/nonexistent/test_data.h5")
         with pytest.raises(RuntimeError, match="not found"):
             await server.verify(_request(solutions={"1.1": "x = 1", "1.2": "y = 2"}))
+
+    def test_server_rejects_test_data_checksum_mismatch_at_startup(self):
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5:
+            h5.write(b"not-the-verified-release")
+            h5.flush()
+            with pytest.raises(RuntimeError, match="checksum mismatch"):
+                _server(test_data_fpath=h5.name, test_data_md5="0" * 32)
+
+    @pytest.mark.asyncio
+    async def test_server_caches_valid_test_data_checksum(self, tmp_path):
+        targets = tmp_path / "targets.h5"
+        targets.write_bytes(b"verified-targets")
+        expected_md5 = hashlib.md5(targets.read_bytes()).hexdigest()  # noqa: S324 - fixture integrity
+        server = _server(test_data_fpath=str(targets), test_data_md5=expected_md5)
+
+        with _mock_substep(passed=True):
+            result = await server.verify(_request(solutions={"1.1": "x = 1"}, n_steps=1))
+
+        assert result.reward == 1.0
 
     @pytest.mark.asyncio
     async def test_verify_relative_test_data_resolved_under_gym_root(self):
@@ -185,3 +224,101 @@ class TestApp:
         assert result.num_steps_passed == 1
         assert result.reward == 0.0
         assert result.subtask_accuracy == 0.5  # per-rollout sub-step pass fraction
+
+    @pytest.mark.asyncio
+    async def test_verify_uses_multi_environment_or(self, tmp_path):
+        old_python = tmp_path / "python-2024"
+        new_python = tmp_path / "python-2025"
+        for executable in (old_python, new_python):
+            executable.write_text("#!/bin/sh\n")
+            executable.chmod(0o755)
+
+        server = _server(
+            test_data_fpath=str(tmp_path / "targets.h5"),
+            grading_interpreters=[
+                {"name": "2024", "python_executable": str(old_python)},
+                {"name": "2025", "python_executable": str(new_python)},
+            ],
+            required_grading_interpreters=2,
+        )
+        (tmp_path / "targets.h5").write_bytes(b"fixture")
+
+        with patch.object(
+            app,
+            "run_substep",
+            side_effect=[{"passed": False, "error": "old"}, {"passed": True, "error": ""}],
+        ) as mocked_run:
+            result = await server.verify(_request(solutions={"1.1": "x = 1"}, n_steps=1))
+
+        assert mocked_run.call_count == 2
+        assert result.reward == 1.0
+        assert result.step_results == [True]
+        assert result.scored_step_ids == ["1.1"]
+        assert result.step_environment_results == [{"2024": False, "2025": True}]
+
+    @pytest.mark.asyncio
+    async def test_verify_multi_environment_short_circuits_after_pass(self, tmp_path):
+        python_path = tmp_path / "python"
+        python_path.write_text("#!/bin/sh\n")
+        python_path.chmod(0o755)
+        targets = tmp_path / "targets.h5"
+        targets.write_bytes(b"fixture")
+        server = _server(
+            test_data_fpath=str(targets),
+            grading_interpreters=[
+                {"name": "2024", "python_executable": str(python_path)},
+                {"name": "2025", "python_executable": str(python_path)},
+            ],
+            required_grading_interpreters=2,
+        )
+
+        with patch.object(app, "run_substep", return_value={"passed": True, "error": ""}) as mocked_run:
+            result = await server.verify(_request(solutions={"1.1": "x = 1"}, n_steps=1))
+
+        assert mocked_run.call_count == 1
+        assert result.step_environment_results == [{"2024": True}]
+
+    def test_server_requires_configured_interpreters_at_startup(self, tmp_path):
+        targets = tmp_path / "targets.h5"
+        targets.write_bytes(b"fixture")
+
+        with pytest.raises(RuntimeError, match="at least 2 grading interpreters"):
+            _server(test_data_fpath=str(targets), required_grading_interpreters=2)
+
+    def test_server_rejects_duplicate_interpreter_names(self):
+        with pytest.raises(RuntimeError, match="Duplicate SciCode grading interpreter name"):
+            _server(
+                grading_interpreters=[
+                    {"name": "same", "python_executable": sys.executable},
+                    {"name": "same", "python_executable": sys.executable},
+                ],
+                required_grading_interpreters=2,
+            )
+
+    def test_server_resolves_named_and_relative_interpreters(self, monkeypatch, tmp_path):
+        relative_python = tmp_path / "env" / "bin" / "python"
+        relative_python.parent.mkdir(parents=True)
+        relative_python.write_text("#!/bin/sh\n")
+        relative_python.chmod(0o755)
+        monkeypatch.setattr(app, "PARENT_DIR", tmp_path)
+        monkeypatch.setattr(app.shutil, "which", lambda name: sys.executable if name == "python-on-path" else None)
+
+        server = _server(
+            grading_interpreters=[
+                {"name": "relative", "python_executable": "env/bin/python"},
+                {"name": "path", "python_executable": "python-on-path"},
+            ],
+            required_grading_interpreters=2,
+        )
+
+        assert server._resolve_grading_interpreters() == [
+            ("relative", str(relative_python.resolve())),
+            ("path", sys.executable),
+        ]
+
+    def test_server_rejects_non_executable_interpreter(self, tmp_path):
+        not_executable = tmp_path / "python"
+        not_executable.write_text("#!/bin/sh\n")
+
+        with pytest.raises(RuntimeError, match="is not executable"):
+            _server(grading_interpreters=[{"name": "broken", "python_executable": str(not_executable)}])

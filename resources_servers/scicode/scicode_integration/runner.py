@@ -216,7 +216,7 @@ def build_test_program(full_generation: str, h5_path: str, step_number: str, san
     return program
 
 
-def run_substep(program: str, timeout_secs: float) -> dict:
+def run_substep(program: str, timeout_secs: float, python_executable: str | None = None) -> dict:
     """Run one sub-step program in a subprocess. Exit code 0 == all assertions passed."""
     # Passing a large generated solution through `python -c <program>` is
     # bounded by Linux's execve argument-size limit (ARG_MAX). SciCode's
@@ -233,9 +233,15 @@ def run_substep(program: str, timeout_secs: float) -> dict:
         ) as source:
             source.write(program)
             source_path = source.name
-        proc = subprocess.run([sys.executable, source_path], capture_output=True, timeout=timeout_secs)
+        proc = subprocess.run(
+            [python_executable or sys.executable, source_path],
+            capture_output=True,
+            timeout=timeout_secs,
+        )
     except subprocess.TimeoutExpired:
         return {"passed": False, "error": "timeout"}
+    except OSError as error:
+        return {"passed": False, "error": str(error)}
     finally:
         if source_path is not None:
             try:
