@@ -980,6 +980,8 @@ the check."""
         if held_agent_overrides is None:
             return
         override = OmegaConf.select(held_agent_overrides, f"{name}.{AGENT_SERVER_TYPE_KEY_NAME}.{agent_type}")
+        with open_dict(held_agent_overrides):
+            held_agent_overrides.pop(name, None)
         if not isinstance(override, DictConfig):
             return
         # Struct mode is what makes a field the agent does not declare an error rather than a silent add.
@@ -1210,6 +1212,7 @@ Pass each config with --config (it builds the list for you), e.g.:
         # Must run after the swap above (inherited bindings must exist to carry over) and before the
         # missing-value check below (it removes the unbound agent instance that still carries '???').
         self.compose_unbound_agent(global_config_dict, held_agent_overrides)
+        global_config_dict = OmegaConf.merge(global_config_dict, held_agent_overrides)
         self.apply_legacy_agent_aliases(global_config_dict)
 
         # Fail fast with one actionable error if any required value is still '???'. Runs *after*
