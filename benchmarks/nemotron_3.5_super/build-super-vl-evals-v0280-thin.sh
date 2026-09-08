@@ -23,6 +23,7 @@ VLLM_VERSION=0.28.0
 RAY_VERSION=2.55.1
 VLLM_ROUTER_VERSION=0.1.15
 UV_VERSION=0.12.3
+FASTOKENS_VERSION="${FASTOKENS_VERSION:-0.3.1}"
 
 BUILD_ROOT=/opt/deci-vllm
 
@@ -48,7 +49,8 @@ if [[ "${1:-}" == __inside_build ]]; then
     uv pip install --system --reinstall --no-deps .
     uv pip install --system \
         "ray==${RAY_VERSION}" \
-        "vllm-router==${VLLM_ROUTER_VERSION}"
+        "vllm-router==${VLLM_ROUTER_VERSION}" \
+        "fastokens==${FASTOKENS_VERSION}"
 
     # Leave the source tree before deleting it; uv inspects the current
     # directory while cleaning its cache.
