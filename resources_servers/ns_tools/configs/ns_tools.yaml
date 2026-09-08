@@ -70,6 +70,16 @@ ns_tools:
         port: 6000
         size: ${oc.env:NS_SANDBOX_POOL_SIZE,8}
         ttl_s: ${oc.env:NS_SANDBOX_TTL_S,14400}
+        # Pod cpu/mem LIMITS raised for burst headroom so heavy code-exec doesn't OOM-evict
+        # pods (-> sandbox pool HTTP 404); scheduling REQUESTS held at the current pool sizing.
+        # NOTE: applies to direct-create/fallback pods; prewarmed pool_ref pods take resources
+        # from the server-side Pool CRD.
+        resources:
+          cpu: 8
+          memory_mib: 32768
+        resource_requests:
+          cpu: 4
+          memory_mib: 16384
 
       domain: agent
       verified: false
