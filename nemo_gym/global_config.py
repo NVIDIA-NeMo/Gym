@@ -981,7 +981,7 @@ the check."""
             return
         override = OmegaConf.select(held_agent_overrides, f"{name}.{AGENT_SERVER_TYPE_KEY_NAME}.{agent_type}")
         with open_dict(held_agent_overrides):
-            held_agent_overrides.pop(name)
+            held_agent_overrides.pop(name, None)
         if not isinstance(override, DictConfig):
             return
         # Struct mode is what makes a field the agent does not declare an error rather than a silent add.
