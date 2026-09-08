@@ -31,8 +31,8 @@ LEGACY_JUDGE_PROTOCOL = "legacy_v1_0"
 V1_1_JUDGE_PROTOCOL = "official_v1_1"
 JudgeProtocol = Literal["legacy_v1_0", "official_v1_1"]
 
-V1_0_DATASET_REVISION = "bdae010bbce259820c0e34c1d7cce210d966fb75"
-V1_1_DATASET_REVISION = "9a77ef56b717057ade24ceab4d273712a0b4f19e"
+V1_0_DATASET_REVISION = "bdae010bbce259820c0e34c1d7cce210d966fb75"  # pragma: allowlist secret
+V1_1_DATASET_REVISION = "9a77ef56b717057ade24ceab4d273712a0b4f19e"  # pragma: allowlist secret
 
 V1_1_SYSTEM_PROMPT = """Decide whether the CANDIDATE ANSWER is correct or incorrect against the OFFICIAL ANSWER.
 Note the following points when assessing correctness:

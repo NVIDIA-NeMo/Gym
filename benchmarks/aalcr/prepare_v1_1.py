@@ -9,7 +9,7 @@ from benchmarks.aalcr.prepare import prepare_version
 
 BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "aalcr_v1_1_benchmark.jsonl"
-DATASET_REVISION = "9a77ef56b717057ade24ceab4d273712a0b4f19e"
+DATASET_REVISION = "9a77ef56b717057ade24ceab4d273712a0b4f19e"  # pragma: allowlist secret
 BENCHMARK_VERSION = "1.1"
 JUDGE_PROTOCOL = "official_v1_1"
 

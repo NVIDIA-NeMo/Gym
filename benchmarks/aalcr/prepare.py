@@ -31,7 +31,7 @@ from nemo_gym.global_config import get_hf_token
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "aalcr_v1_0_benchmark.jsonl"
-DATASET_REVISION = "bdae010bbce259820c0e34c1d7cce210d966fb75"
+DATASET_REVISION = "bdae010bbce259820c0e34c1d7cce210d966fb75"  # pragma: allowlist secret
 BENCHMARK_VERSION = "1.0.0"
 JUDGE_PROTOCOL = "legacy_v1_0"
 

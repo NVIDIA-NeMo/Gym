@@ -61,7 +61,7 @@ class TaskData(BaseModel):
         json_schema_extra={"consumed_by": ["verify", "provenance"]},
     )
     aa_lcr_dataset_revision: str = Field(
-        default="bdae010bbce259820c0e34c1d7cce210d966fb75",
+        default="bdae010bbce259820c0e34c1d7cce210d966fb75",  # pragma: allowlist secret
         pattern=r"^[0-9a-f]{40}$",
         description="Immutable Hugging Face dataset commit used to prepare this row.",
         json_schema_extra={"consumed_by": ["verify", "provenance"]},
