@@ -109,11 +109,15 @@ class TestApp:
             candidate_answer="candidate",
         )
 
-        assert len(messages) == 1
-        assert messages[0]["role"] == "user"
-        assert "The question, for reference only: question" in messages[0]["content"]
-        assert "START QUESTION" not in messages[0]["content"]
-        assert messages[0]["content"].endswith("Reply only with CORRECT or INCORRECT.")
+        expected_prompt = """Assess whether the following CANDIDATE ANSWER is CORRECT or INCORRECT.
+For the CANDIDATE ANSWER to be correct, it must be consistent with the OFFICIAL ANSWER.
+
+The question, for reference only: question
+The OFFICIAL ANSWER: answer
+CANDIDATE ANSWER TO ASSESS: candidate
+
+Reply only with CORRECT or INCORRECT."""
+        assert messages == [{"role": "user", "content": expected_prompt}]
 
     def test_v1_1_prompt_uses_official_system_and_user_messages(self) -> None:
         messages = _build_judge_input(
@@ -123,11 +127,60 @@ class TestApp:
             candidate_answer="candidate",
         )
 
-        assert messages[0] == {"role": "system", "content": V1_1_SYSTEM_PROMPT}
-        assert messages[1]["role"] == "user"
-        assert "START QUESTION question\n\nEND QUESTION" in messages[1]["content"]
-        assert "BEGIN CANDIDATE ANSWER TO ASSESS\n\ncandidate" in messages[1]["content"]
-        assert messages[1]["content"].endswith("Reply as JSON, with a verdict of CORRECT or INCORRECT.")
+        expected_system_prompt = """Decide whether the CANDIDATE ANSWER is correct or incorrect against the OFFICIAL ANSWER.
+Note the following points when assessing correctness:
+
+- Numbers should still match when they are the same value written differently, e.g., a
+  percentage, a count of percentage points, and the equivalent decimal fraction are the same
+  value: 0.675, "67.5%" and "67.5 percentage points" all match. So do different scales
+  (thousand, million, bn) and different notations (thousands separators, currency symbols,
+  LaTeX markup, and numbers written as words).
+- Where the question asks for a particular format (e.g., a percentage, a number of decimal
+  places, a unit, a rounding, or an ordering) the CANDIDATE ANSWER must meet it. If the
+  question asks for no particular format, accept any equivalent form.
+- In cases where the question asks for an ordered list, a title, honorific or article added
+  to an entry in the CANDIDATE ANSWER can change where that entry sorts. Accept the ordering
+  if it is correct either with those additions or without them.
+- Grade the value the CANDIDATE ANSWER finally commits to, and it must commit to one. Values
+  reached while working, and alternatives it considers and sets aside, do not count. If it
+  offers several values without selecting one, it is incorrect even if one of them is right.
+  Hedging is fine as long as one clearly definitive answer is given."""
+        expected_user_prompt = """Assess whether the following CANDIDATE ANSWER is CORRECT or INCORRECT.
+For the CANDIDATE ANSWER to be correct, it must be consistent with the OFFICIAL ANSWER.
+
+The question, for reference only: START QUESTION question
+
+END QUESTION
+
+The OFFICIAL ANSWER: answer
+
+END OFFICIAL ANSWER
+
+BEGIN CANDIDATE ANSWER TO ASSESS
+
+candidate
+
+END CANDIDATE ANSWER TO ASSESS
+
+Reply as JSON, with a verdict of CORRECT or INCORRECT."""
+        assert V1_1_SYSTEM_PROMPT == expected_system_prompt
+        assert messages == [
+            {"role": "system", "content": expected_system_prompt},
+            {"role": "user", "content": expected_user_prompt},
+        ]
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("CORRECT", "CORRECT"),
+            (" INCORRECT\n", "INCORRECT"),
+            ("NOT A VERDICT", None),
+            ("", None),
+            (" \n", None),
+        ],
+    )
+    def test_legacy_parser_preserves_previous_verdict_behavior(self, text: str, expected: str | None) -> None:
+        assert _parse_judge_verdict(text, LEGACY_JUDGE_PROTOCOL) == expected
 
     @pytest.mark.parametrize(
         ("text", "expected"),
@@ -145,23 +198,37 @@ class TestApp:
             "CORRECT",
             '{"verdict": "MAYBE"}',
             '{"verdict": "CORRECT", "reason": "extra"}',
+            "",
+            " \n",
         ],
     )
     def test_v1_1_parser_rejects_non_protocol_responses(self, text: str) -> None:
-        with pytest.raises(JudgeError, match="AA-LCR v1.1 judge"):
+        with pytest.raises(JudgeError, match="empty judge response|AA-LCR v1.1 judge"):
             _parse_judge_verdict(text, V1_1_JUDGE_PROTOCOL)
 
-    async def test_v1_1_verify_sends_system_prompt_and_parses_json(self) -> None:
+    def test_legacy_rows_without_provenance_use_legacy_defaults(self) -> None:
+        legacy_row = _request(LEGACY_JUDGE_PROTOCOL).model_dump(
+            exclude={"aa_lcr_version", "aa_lcr_dataset_revision", "aa_lcr_judge_protocol"}
+        )
+
+        request = AALCRVerifyRequest.model_validate(legacy_row)
+
+        assert request.aa_lcr_version == "1.0.0"
+        assert request.aa_lcr_dataset_revision == V1_0_DATASET_REVISION
+        assert request.aa_lcr_judge_protocol == LEGACY_JUDGE_PROTOCOL
+
+    @pytest.mark.parametrize(("verdict", "expected_reward"), [("CORRECT", 1.0), ("INCORRECT", 0.0)])
+    async def test_v1_1_verify_sends_system_prompt_and_parses_json(self, verdict: str, expected_reward: float) -> None:
         server = AalcrResourcesServer(
             config=_config(V1_1_JUDGE_PROTOCOL),
             server_client=MagicMock(spec=ServerClient),
         )
-        judge = AsyncMock(return_value=_response('{"verdict": "CORRECT"}'))
+        judge = AsyncMock(return_value=_response(f'{{"verdict": "{verdict}"}}'))
 
         with patch("resources_servers.aalcr.app.call_judge", judge):
             result = await server.verify(_request(V1_1_JUDGE_PROTOCOL))
 
-        assert result.reward == 1.0
+        assert result.reward == expected_reward
         assert result.invalid_judge_response is False
         judge_input = judge.await_args.kwargs["json"]["input"]
         assert [message["role"] for message in judge_input] == ["system", "user"]
@@ -175,15 +242,27 @@ class TestApp:
         with pytest.raises(ValueError, match="dataset and judge protocol mismatch"):
             await server.verify(_request(LEGACY_JUDGE_PROTOCOL))
 
-    async def test_legacy_invalid_verdict_remains_a_zero_reward(self) -> None:
+    @pytest.mark.parametrize(
+        ("judge_text", "expected_reward", "expected_invalid"),
+        [
+            ("CORRECT", 1.0, False),
+            ("INCORRECT", 0.0, False),
+            ("NOT A VERDICT", 0.0, True),
+            ("", 0.0, True),
+            (" \n", 0.0, True),
+        ],
+    )
+    async def test_legacy_verdict_preserves_previous_reward(
+        self, judge_text: str, expected_reward: float, expected_invalid: bool
+    ) -> None:
         server = AalcrResourcesServer(
             config=_config(LEGACY_JUDGE_PROTOCOL),
             server_client=MagicMock(spec=ServerClient),
         )
-        judge = AsyncMock(return_value=_response("NOT A VERDICT"))
+        judge = AsyncMock(return_value=_response(judge_text))
 
         with patch("resources_servers.aalcr.app.call_judge", judge):
             result = await server.verify(_request(LEGACY_JUDGE_PROTOCOL))
 
-        assert result.reward == 0.0
-        assert result.invalid_judge_response is True
+        assert result.reward == expected_reward
+        assert result.invalid_judge_response is expected_invalid

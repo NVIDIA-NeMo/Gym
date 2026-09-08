@@ -55,12 +55,30 @@ def test_prepare_pins_dataset_and_records_provenance(module, tmp_path) -> None:
     assert f"/resolve/{module.DATASET_REVISION}/" in requested_url
     response.raise_for_status.assert_called_once_with()
 
-    row = json.loads(output_fpath.read_text())
-    assert row["answer"] == "65.8%"
-    assert row["input_tokens_band"] == "80k-100k"
-    assert row["aa_lcr_version"] == module.BENCHMARK_VERSION
-    assert row["aa_lcr_dataset_revision"] == module.DATASET_REVISION
-    assert row["aa_lcr_judge_protocol"] == module.JUDGE_PROTOCOL
+    prompt = """BEGIN INPUT DOCUMENTS
+
+BEGIN DOCUMENT 1:
+document contents
+END DOCUMENT 1
+
+END INPUT DOCUMENTS
+
+Answer the following question using the input documents provided above.
+
+START QUESTION
+
+What percentage?
+
+END QUESTION
+"""
+    assert json.loads(output_fpath.read_text()) == {
+        "responses_create_params": {"input": [{"role": "user", "content": prompt}]},
+        **ROW,
+        "input_tokens_band": "80k-100k",
+        "aa_lcr_version": module.BENCHMARK_VERSION,
+        "aa_lcr_dataset_revision": module.DATASET_REVISION,
+        "aa_lcr_judge_protocol": module.JUDGE_PROTOCOL,
+    }
 
 
 @pytest.mark.parametrize("module", [v1_0, v1_1], ids=["v1.0", "v1.1"])

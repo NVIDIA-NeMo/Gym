@@ -198,11 +198,11 @@ Reply as JSON, with a verdict of CORRECT or INCORRECT."""
 
 def _parse_judge_verdict(judge_response_text: str, judge_protocol: JudgeProtocol) -> Optional[str]:
     text = judge_response_text.strip()
-    if not text:
-        raise JudgeError("empty judge response")
-
     if judge_protocol == LEGACY_JUDGE_PROTOCOL:
         return text if text in {"CORRECT", "INCORRECT"} else None
+
+    if not text:
+        raise JudgeError("empty judge response")
 
     try:
         payload = json.loads(text)
