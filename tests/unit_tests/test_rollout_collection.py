@@ -2135,6 +2135,102 @@ class TestRolloutCollection:
         # Seeds should track rollout index within each task (0, 1, 2 per task).
         assert seeds_seen == [0, 1, 2, 0, 1, 2]
 
+    def test_preprocess_rows_num_repeats_add_seed_dict_seeds_only_selected_agents(self, tmp_path: Path) -> None:
+        fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "apex"}}),
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "other"}}),
+        ]
+        fpath.write_text("\n".join(samples) + "\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats={"apex": 3, "_default": 1},
+            num_repeats_add_seed={"apex": True, "_default": False},
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        apex_rows = [row for row in rows if row[AGENT_REF_KEY_NAME]["name"] == "apex"]
+        other_rows = [row for row in rows if row[AGENT_REF_KEY_NAME]["name"] == "other"]
+        assert [json.loads(row["responses_create_params"]["metadata"]["extra_body"])["seed"] for row in apex_rows] == [
+            0,
+            1,
+            2,
+        ]
+        assert len(other_rows) == 1
+        assert "metadata" not in other_rows[0]["responses_create_params"]
+
+    def test_preprocess_rows_num_repeats_add_seed_prefers_dispatched_agent(self, tmp_path: Path) -> None:
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text(json.dumps({"responses_create_params": {"input": []}, "task_source": "source_agent"}) + "\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            agent_map={"source_agent": "target_agent"},
+            num_repeats=2,
+            num_repeats_add_seed={"target_agent": True, "source_agent": False},
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        assert [row[AGENT_REF_KEY_NAME]["name"] for row in rows] == ["target_agent", "target_agent"]
+        assert [json.loads(row["responses_create_params"]["metadata"]["extra_body"])["seed"] for row in rows] == [0, 1]
+
+    def test_preprocess_rows_num_repeats_add_seed_does_not_leak_across_fan_out(self, tmp_path: Path) -> None:
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text(
+            json.dumps(
+                {
+                    "responses_create_params": {"input": [], "metadata": {"trace": "original"}},
+                    "task_source": "source_agent",
+                }
+            )
+            + "\n"
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            fan_out={"source_agent": ["seeded_agent", "unseeded_agent"]},
+            num_repeats_add_seed={"seeded_agent": True, "unseeded_agent": False},
+        )
+
+        rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        seeded_row, unseeded_row = rows
+        assert json.loads(seeded_row["responses_create_params"]["metadata"]["extra_body"])["seed"] == 0
+        assert unseeded_row["responses_create_params"]["metadata"] == {"trace": "original"}
+
+    def test_preprocess_rows_num_repeats_add_seed_dict_requires_complete_policy(self, tmp_path: Path) -> None:
+        fpath = tmp_path / "input.jsonl"
+        samples = [
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "alpha"}}),
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "beta"}}),
+        ]
+        fpath.write_text("\n".join(samples) + "\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats_add_seed={"alpha": True},
+        )
+
+        with pytest.raises(ValueError, match="num_repeats_add_seed dict") as exc_info:
+            RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert "beta" in str(exc_info.value)
+
+    def test_preprocess_rows_num_repeats_add_seed_dict_unknown_agent_warns(self, tmp_path: Path) -> None:
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text(json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "alpha"}}) + "\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            num_repeats_add_seed={"alpha": True, "alpah_typo": False},
+        )
+
+        with pytest.warns(UserWarning, match="alpah_typo"):
+            rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        assert len(rows) == 1
+
     def test_preprocess_rows_num_repeats_dict_form(self, tmp_path: Path) -> None:
         """Dict-form num_repeats applies the per-agent value to each row."""
         fpath = tmp_path / "input.jsonl"

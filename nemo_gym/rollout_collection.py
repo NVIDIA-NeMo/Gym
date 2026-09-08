@@ -794,9 +794,13 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
             "Useful for mean@k."
         ),
     )
-    num_repeats_add_seed: bool = Field(
+    num_repeats_add_seed: Union[bool, Dict[str, bool]] = Field(
         default=False,
-        description='When num_repeats > 1, pass a per-rollout "seed" via metadata.extra_body (honored by vLLM model servers).',
+        description=(
+            'Whether to pass a per-rollout "seed" via metadata.extra_body (honored by vLLM model servers). '
+            "Either a bool applied to every row or a dict with the same dispatched-agent/original-routing-key "
+            "lookup and _default fallback semantics as num_repeats."
+        ),
     )
     resume_from_cache: bool = Field(
         default=False,
@@ -1039,7 +1043,7 @@ class RolloutCollectionHelper(BaseModel):
         agent_map: Optional[Dict[str, str]] = None,
         fan_out: Optional[Dict[str, List[str]]] = None,
         num_repeats: Union[int, Dict[str, int]] = 1,
-        num_repeats_add_seed: bool = False,
+        num_repeats_add_seed: Union[bool, Dict[str, bool]] = False,
         global_config_dict: Optional[DictConfig] = None,
     ) -> List[Dict]:
         """Apply run-level routing and repetition to caller-held rows.
@@ -1073,7 +1077,17 @@ class RolloutCollectionHelper(BaseModel):
 
     @staticmethod
     def _preprocess_raw_rows(raw_rows: List[Tuple[int, str, Dict]], config: RolloutCollectionConfig) -> List[Dict]:
-        if config.num_repeats_add_seed:
+        if isinstance(config.num_repeats_add_seed, bool):
+            fixed_add_seed: Optional[bool] = config.num_repeats_add_seed
+            per_agent_add_seed: Dict[str, bool] = {}
+            default_add_seed: Optional[bool] = None
+        else:
+            fixed_add_seed = None
+            per_agent_add_seed = {k: v for k, v in config.num_repeats_add_seed.items() if k != "_default"}
+            default_add_seed = config.num_repeats_add_seed.get("_default")
+            print(f"Per-agent num_repeats_add_seed: {dict(config.num_repeats_add_seed)}")
+
+        if fixed_add_seed:
             print(
                 "Adding unique `seed` values to each input via metadata.extra_body (only honored by vLLM model servers)"
             )
@@ -1117,6 +1131,7 @@ class RolloutCollectionHelper(BaseModel):
         task_idx_to_rollout_idx: Dict[int, int] = Counter()
         row_idxs_missing_agent_ref: List[int] = []
         agents_missing_from_num_repeats: set[str] = set()
+        agents_missing_from_seed_policy: set[str] = set()
         rows: List[Dict] = []
         overridden_agents: set[Tuple[str, str]] = set()
         for row_idx, row_str, row in tqdm(raw_rows, desc="Preprocessing and repeating rows"):
@@ -1193,6 +1208,16 @@ class RolloutCollectionHelper(BaseModel):
                     agents_missing_from_num_repeats.add(" / ".join(repeat_keys))
                     continue
 
+                if fixed_add_seed is not None:
+                    row_add_seed = fixed_add_seed
+                elif (seed_matched := next((k for k in repeat_keys if k in per_agent_add_seed), None)) is not None:
+                    row_add_seed = per_agent_add_seed[seed_matched]
+                elif default_add_seed is not None:
+                    row_add_seed = default_add_seed
+                else:
+                    agents_missing_from_seed_policy.add(" / ".join(repeat_keys))
+                    continue
+
                 for _ in range(row_num_repeats):
                     row = base_row.copy()
                     # Restamp only when fan-out routes this copy somewhere else; otherwise keep
@@ -1204,9 +1229,10 @@ class RolloutCollectionHelper(BaseModel):
                     row[ROLLOUT_INDEX_KEY_NAME] = task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]]
                     task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]] += 1
 
-                    if config.num_repeats_add_seed:
+                    if row_add_seed:
                         row[RESPONSES_CREATE_PARAMS_KEY_NAME] = row[RESPONSES_CREATE_PARAMS_KEY_NAME].copy()
-                        metadata = row[RESPONSES_CREATE_PARAMS_KEY_NAME].setdefault("metadata", {})
+                        metadata = (row[RESPONSES_CREATE_PARAMS_KEY_NAME].get("metadata") or {}).copy()
+                        row[RESPONSES_CREATE_PARAMS_KEY_NAME]["metadata"] = metadata
                         extra_body = json.loads(metadata.get("extra_body", "{}"))
                         extra_body["seed"] = row[ROLLOUT_INDEX_KEY_NAME]
                         metadata["extra_body"] = json.dumps(extra_body)
@@ -1233,11 +1259,26 @@ class RolloutCollectionHelper(BaseModel):
                 f"and no '_default' fallback. Listed keys: {sorted(per_agent_repeats)}"
             )
 
+        if agents_missing_from_seed_policy:
+            raise ValueError(
+                "num_repeats_add_seed dict has no entry for routing keys "
+                f"{sorted(agents_missing_from_seed_policy)} and no '_default' fallback. "
+                f"Listed keys: {sorted(per_agent_add_seed)}"
+            )
+
         unknown_agents = set(per_agent_repeats) - agents_seen
         if unknown_agents:
             warnings.warn(
                 f"num_repeats dict contains agent names that never appeared in input rows "
                 f"(possible typo?): {sorted(unknown_agents)}",
+                stacklevel=2,
+            )
+
+        unknown_seed_agents = set(per_agent_add_seed) - agents_seen
+        if unknown_seed_agents:
+            warnings.warn(
+                "num_repeats_add_seed dict contains agent names that never appeared in input rows "
+                f"(possible typo?): {sorted(unknown_seed_agents)}",
                 stacklevel=2,
             )
 
