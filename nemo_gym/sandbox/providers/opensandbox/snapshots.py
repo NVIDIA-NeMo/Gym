@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -12,206 +13,256 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Manage OpenSandbox snapshots and clean them up.
 
-Pausing a sandbox checkpoints it server-side. Interrupted runs can leave
-snapshots and paused sandboxes behind, and both hold cluster storage until
-deleted. These subcommands inventory and reclaim them through the OpenSandbox
-management API:
+"""Audit or delete OpenSandbox snapshots, and optionally the paused sandboxes that hold them.
 
-    list     print snapshots, optionally scoped to one sandbox or a state
-    delete   delete specific snapshots by id
-    cleanup  delete every matching snapshot; --kill-paused also kills paused
-             sandboxes (releasing their checkpoints); --dry-run previews
+Pausing a sandbox checkpoints it server-side. Interrupted runs leave snapshots
+and paused sandboxes behind, and both hold cluster storage until deleted. Like
+cleanup_sandboxes.py, this talks to the management API directly so it runs from
+any Python with aiohttp and PyYAML, for example as a job submitted by file path.
 
-Connection settings come from --domain / --api-key-file, falling back to the
-OPENSANDBOX_DOMAIN / OPENSANDBOX_API_KEY environment variables the sandbox
-provider itself uses. All subcommands are idempotent and safe to re-run.
-
-    python -m nemo_gym.sandbox.providers.opensandbox.snapshots list [--sandbox-id <id>] [--state Ready]
-    python -m nemo_gym.sandbox.providers.opensandbox.snapshots delete --snapshot-id <id> [<id> ...]
-    python -m nemo_gym.sandbox.providers.opensandbox.snapshots cleanup [--sandbox-id <id>] [--kill-paused] [--dry-run]
+    snapshots.py --connection-config env.yaml                         # audit every snapshot
+    snapshots.py --connection-config env.yaml --sandbox-id <id> --reap
+    snapshots.py --connection-config env.yaml --kill-paused --reap    # also delete paused sandboxes
+    snapshots.py --domain <host> --api-key <key> --snapshot-id <id> --reap
 """
 
 import argparse
 import asyncio
-import os
 import sys
-from collections import Counter
-from datetime import timedelta
-from pathlib import Path
-from traceback import format_exc
+import urllib.parse
+from collections.abc import Mapping
+from typing import Any
+
+import aiohttp
+import yaml
 
 
+REQUEST_TIMEOUT_SECONDS = 30
+REAP_CONCURRENCY = 32
 PAGE_SIZE = 100
 
 
-def _connection_config(args: argparse.Namespace):
-    from opensandbox.config import ConnectionConfig
+async def cleanup_snapshots(
+    *,
+    domain: str,
+    protocol: str,
+    access_key: str,
+    sandbox_id: str | None,
+    states: list[str] | None,
+    snapshot_ids: list[str] | None,
+    kill_paused: bool,
+    reap: bool,
+) -> int:
+    """List matching snapshots (and paused sandboxes) and optionally delete them."""
+    base_url = domain.strip().rstrip("/")
+    if "://" not in base_url:
+        base_url = f"{protocol}://{base_url}"
+    parsed_url = urllib.parse.urlsplit(base_url)
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        raise ValueError(f"invalid OpenSandbox domain: {domain!r}")
 
-    domain = args.domain or os.environ.get("OPENSANDBOX_DOMAIN")
-    if not domain:
-        raise SystemExit("Pass --domain or set OPENSANDBOX_DOMAIN")
-    if args.api_key_file:
-        api_key = Path(args.api_key_file).read_text().strip()
-    else:
-        api_key = os.environ.get("OPENSANDBOX_API_KEY")
-    return ConnectionConfig(
-        domain=domain,
-        api_key=api_key,
-        protocol=args.protocol,
-        request_timeout=timedelta(seconds=args.request_timeout_s),
-    )
+    connector = aiohttp.TCPConnector(limit=REAP_CONCURRENCY, limit_per_host=REAP_CONCURRENCY)
+    timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+    async with aiohttp.ClientSession(
+        connector=connector,
+        headers={"OPEN-SANDBOX-API-KEY": access_key},
+        timeout=timeout,
+    ) as session:
 
+        async def list_all(resource: str, params: list[tuple[str, str]]) -> list[dict[str, Any]]:
+            """Collect every page before deleting anything: deletes shift page boundaries."""
+            items: list[dict[str, Any]] = []
+            page = 1
+            while True:
+                async with session.get(
+                    f"{base_url}/v1/{resource}",
+                    allow_redirects=False,
+                    params=[*params, ("page", str(page)), ("pageSize", str(PAGE_SIZE))],
+                ) as response:
+                    if not 200 <= response.status < 300:
+                        raise ValueError(f"OpenSandbox {resource} list request failed -> HTTP {response.status}")
+                    payload = await response.json(content_type=None)
 
-async def _all_snapshots(manager, sandbox_id: str | None, states: list[str] | None) -> list:
-    """Collect matching snapshots up front: deleting while paginating shifts pages."""
-    from opensandbox.models.sandboxes import SnapshotFilter
+                if not isinstance(payload, dict):
+                    raise ValueError(f"OpenSandbox {resource} list response must be an object")
+                page_items = payload.get("items")
+                pagination = payload.get("pagination")
+                if not isinstance(page_items, list) or not isinstance(pagination, dict):
+                    raise ValueError(f"OpenSandbox {resource} list response is missing items or pagination")
+                has_next_page = pagination.get("hasNextPage")
+                if not isinstance(has_next_page, bool):
+                    raise ValueError(f"OpenSandbox {resource} list response is missing pagination.hasNextPage")
+                for item in page_items:
+                    if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
+                        raise ValueError(f"OpenSandbox {resource} list response contains an item without an id")
+                    items.append(item)
 
-    snapshots, page = [], 1
-    while True:
-        listed = await manager.list_snapshots(
-            SnapshotFilter(sandbox_id=sandbox_id, states=states, page=page, page_size=PAGE_SIZE)
-        )
-        snapshots.extend(listed.snapshot_infos)
-        if not listed.pagination.has_next_page:
-            return snapshots
-        page += 1
+                if not has_next_page:
+                    return items
+                page += 1
 
-
-async def _paused_sandbox_ids(manager) -> list[str]:
-    """Page through all sandboxes and keep the paused ones (state casing varies by server)."""
-    from opensandbox.models.sandboxes import SandboxFilter
-
-    ids, page = [], 1
-    while True:
-        listed = await manager.list_sandbox_infos(SandboxFilter(page=page, page_size=PAGE_SIZE))
-        ids.extend(info.id for info in listed.sandbox_infos if str(info.status.state or "").lower() == "paused")
-        if not listed.pagination.has_next_page:
-            return ids
-        page += 1
-
-
-async def _delete_snapshots(manager, snapshot_ids: list[str], counts: Counter, concurrency: int) -> None:
-    semaphore = asyncio.Semaphore(concurrency)
-
-    async def delete_one(snapshot_id: str) -> None:
-        async with semaphore:
-            try:
-                await manager.delete_snapshot(snapshot_id)
-                counts["snapshots_deleted"] += 1
-            except Exception:
-                counts["snapshot_delete_failed"] += 1
-                print(f"Failed to delete snapshot {snapshot_id}", format_exc())
-
-    await asyncio.gather(*(delete_one(snapshot_id) for snapshot_id in snapshot_ids))
-
-
-async def cmd_list(args: argparse.Namespace) -> int:
-    from opensandbox.manager import SandboxManager
-
-    manager = await SandboxManager.create(connection_config=_connection_config(args))
-    try:
-        snapshots = await _all_snapshots(manager, args.sandbox_id, args.state or None)
-    finally:
-        await manager.close()
-
-    for snapshot in snapshots:
-        created = snapshot.created_at.isoformat() if snapshot.created_at else "-"
-        print(f"{snapshot.id}  sandbox={snapshot.sandbox_id}  state={snapshot.status.state}  created={created}")
-    print(f"{len(snapshots)} snapshots")
-    return 0
-
-
-async def cmd_delete(args: argparse.Namespace) -> int:
-    from opensandbox.manager import SandboxManager
-
-    counts: Counter = Counter()
-    manager = await SandboxManager.create(connection_config=_connection_config(args))
-    try:
-        await _delete_snapshots(manager, args.snapshot_id, counts, args.concurrency)
-    finally:
-        await manager.close()
-
-    print(f"snapshots_deleted={counts['snapshots_deleted']} snapshot_delete_failed={counts['snapshot_delete_failed']}")
-    return 1 if counts["snapshot_delete_failed"] else 0
-
-
-async def cmd_cleanup(args: argparse.Namespace) -> int:
-    from opensandbox.manager import SandboxManager
-
-    counts: Counter = Counter()
-    manager = await SandboxManager.create(connection_config=_connection_config(args))
-    try:
-        snapshots = await _all_snapshots(manager, args.sandbox_id, None)
-        counts["snapshots_found"] = len(snapshots)
-        paused_ids = await _paused_sandbox_ids(manager) if args.kill_paused else []
-        counts["paused_sandboxes_found"] = len(paused_ids)
-
-        if args.dry_run:
-            for snapshot in snapshots:
-                print(f"would delete snapshot {snapshot.id} (sandbox={snapshot.sandbox_id})")
-            for sandbox_id in paused_ids:
-                print(f"would kill paused sandbox {sandbox_id}")
+        if snapshot_ids:
+            snapshots = [{"id": snapshot_id} for snapshot_id in snapshot_ids]
         else:
-            await _delete_snapshots(manager, [snapshot.id for snapshot in snapshots], counts, args.concurrency)
-            semaphore = asyncio.Semaphore(args.concurrency)
+            params = [("sandboxId", sandbox_id)] if sandbox_id else []
+            snapshots = await list_all("snapshots", [*params, *(("state", state) for state in states or [])])
 
-            async def kill_one(sandbox_id: str) -> None:
-                async with semaphore:
-                    try:
-                        await manager.kill_sandbox(sandbox_id)
-                        counts["paused_sandboxes_killed"] += 1
-                    except Exception:
-                        counts["sandbox_kill_failed"] += 1
-                        print(f"Failed to kill paused sandbox {sandbox_id}", format_exc())
+        paused: list[dict[str, Any]] = []
+        if kill_paused:
+            # Servers disagree on state casing, so match paused sandboxes client-side.
+            for item in await list_all("sandboxes", []):
+                status = item.get("status")
+                state = status.get("state") if isinstance(status, dict) else None
+                if str(state or "").lower() == "paused" and sandbox_id in (None, item["id"]):
+                    paused.append(item)
 
-            await asyncio.gather(*(kill_one(sandbox_id) for sandbox_id in paused_ids))
-    finally:
-        await manager.close()
+        action = "Deleting" if reap else "Would delete"
+        for snapshot in snapshots:
+            status = snapshot.get("status")
+            state = status.get("state") if isinstance(status, dict) else None
+            print(
+                f"{action} snapshot {snapshot['id']} (sandbox={snapshot.get('sandboxId', '-')} "
+                f"state={state or '-'} created={snapshot.get('createdAt', '-')})"
+            )
+        for item in paused:
+            print(f"{action} paused sandbox {item['id']}")
+        print(f"{action} {len(snapshots)} OpenSandbox snapshot(s) and {len(paused)} paused sandbox(es)")
+        if not reap:
+            return 0
 
-    print(
-        f"snapshots_found={counts['snapshots_found']} snapshots_deleted={counts['snapshots_deleted']} "
-        f"snapshot_delete_failed={counts['snapshot_delete_failed']} "
-        f"paused_sandboxes_found={counts['paused_sandboxes_found']} "
-        f"paused_sandboxes_killed={counts['paused_sandboxes_killed']} "
-        f"sandbox_kill_failed={counts['sandbox_kill_failed']}"
-    )
-    return 1 if counts["snapshot_delete_failed"] or counts["sandbox_kill_failed"] else 0
+        semaphore = asyncio.Semaphore(REAP_CONCURRENCY)
+
+        async def delete(resource: str, label: str, item_id: str) -> int:
+            url = f"{base_url}/v1/{resource}/{urllib.parse.quote(item_id, safe='')}"
+            async with semaphore:
+                try:
+                    async with session.delete(url, allow_redirects=False) as response:
+                        await response.read()
+                        if response.status == 404:
+                            print(f"{label} {item_id} was already gone")
+                            return 0
+                        if not 200 <= response.status < 300:
+                            print(f"Failed to delete {label} {item_id} -> HTTP {response.status}", file=sys.stderr)
+                            return 1
+                        print(f"Deleted {label} {item_id} -> HTTP {response.status}")
+                        return 0
+                except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as error:
+                    print(f"Failed to delete {label} {item_id} -> {error}", file=sys.stderr)
+                    return 1
+
+        # Snapshots first: deleting a paused sandbox releases its checkpoint, so this
+        # order keeps every snapshot delete a real delete rather than a 404.
+        failures = sum(await asyncio.gather(*(delete("snapshots", "snapshot", s["id"]) for s in snapshots)))
+        failures += sum(await asyncio.gather(*(delete("sandboxes", "paused sandbox", p["id"]) for p in paused)))
+        if failures:
+            print(f"{failures} OpenSandbox snapshot(s) or paused sandbox(es) were not deleted", file=sys.stderr)
+            return 1
+        return 0
 
 
-def main() -> int:
+def _run(
+    parser: argparse.ArgumentParser,
+    domain: str,
+    access_key: str,
+    protocol: str,
+    args: argparse.Namespace,
+) -> int:
+    """Run the cleanup and turn its failures into a message and a status."""
+    try:
+        return asyncio.run(
+            cleanup_snapshots(
+                domain=domain,
+                protocol=protocol,
+                access_key=access_key,
+                sandbox_id=args.sandbox_id,
+                states=args.states,
+                snapshot_ids=args.snapshot_ids,
+                kill_paused=args.kill_paused,
+                reap=args.reap,
+            )
+        )
+    except (aiohttp.ClientError, OSError, TypeError, ValueError) as error:
+        print(f"OpenSandbox snapshot cleanup failed: {error}", file=sys.stderr)
+        return 1
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    for name, func in (("list", cmd_list), ("delete", cmd_delete), ("cleanup", cmd_cleanup)):
-        sub = subparsers.add_parser(name)
-        sub.add_argument(
-            "--domain", default=None, help="OpenSandbox management API domain (default: OPENSANDBOX_DOMAIN env)"
-        )
-        sub.add_argument(
-            "--api-key-file",
-            default=None,
-            help="File holding the OpenSandbox API key (default: OPENSANDBOX_API_KEY env)",
-        )
-        sub.add_argument("--protocol", default="http", choices=["http", "https"])
-        sub.add_argument("--request-timeout-s", type=float, default=300.0)
-        sub.add_argument("--concurrency", type=int, default=16)
-        sub.set_defaults(func=func)
-    subparsers.choices["list"].add_argument("--sandbox-id", default=None, help="Only snapshots of this sandbox")
-    subparsers.choices["list"].add_argument(
-        "--state", action="append", default=None, help="Only snapshots in this state (repeatable), e.g. Ready"
+    parser.add_argument(
+        "--connection-config",
+        help="YAML file containing sandbox.opensandbox.connection, as an alternative to --domain/--api-key.",
     )
-    subparsers.choices["delete"].add_argument("--snapshot-id", nargs="+", required=True, help="Snapshot ids to delete")
-    subparsers.choices["cleanup"].add_argument("--sandbox-id", default=None, help="Only snapshots of this sandbox")
-    subparsers.choices["cleanup"].add_argument(
-        "--kill-paused", action="store_true", help="Also kill paused sandboxes, releasing their checkpoints"
+    parser.add_argument("--domain", help="OpenSandbox domain, host or full URL.")
+    parser.add_argument("--api-key", help="OpenSandbox access key.")
+    parser.add_argument(
+        "--protocol",
+        default="http",
+        choices=("http", "https"),
+        help="Scheme for --domain when it carries none (default: http).",
     )
-    subparsers.choices["cleanup"].add_argument(
-        "--dry-run", action="store_true", help="Print what would be deleted without deleting"
+    parser.add_argument("--sandbox-id", help="Only this sandbox's snapshots (and, with --kill-paused, this sandbox).")
+    parser.add_argument("--state", action="append", dest="states", help="Only snapshots in this state; repeatable.")
+    parser.add_argument(
+        "--snapshot-id",
+        action="append",
+        dest="snapshot_ids",
+        help="Exact snapshot ids instead of a listing; repeatable.",
     )
-    args = parser.parse_args()
-    return asyncio.run(args.func(args))
+    parser.add_argument(
+        "--kill-paused", action="store_true", help="Also delete paused sandboxes and their checkpoints."
+    )
+    parser.add_argument("--reap", action="store_true", help="Delete matches; otherwise only audit them.")
+    args = parser.parse_args(argv)
+
+    if args.snapshot_ids and (args.sandbox_id is not None or args.states):
+        parser.error("--snapshot-id cannot be combined with --sandbox-id or --state")
+    for name, values in (
+        ("sandbox-id", [args.sandbox_id]),
+        ("state", args.states),
+        ("snapshot-id", args.snapshot_ids),
+    ):
+        if any(value is not None and not value.strip() for value in values or []):
+            parser.error(f"--{name} must not be empty")
+
+    if args.connection_config is None:
+        for name, value in (("domain", args.domain), ("api-key", args.api_key)):
+            if value is None or not value.strip():
+                parser.error(f"--{name} is required when --connection-config is omitted")
+        return _run(parser, args.domain.strip(), args.api_key.strip(), args.protocol, args)
+    for name, value in (("domain", args.domain), ("api-key", args.api_key)):
+        if value is not None:
+            parser.error(f"--{name} cannot be combined with --connection-config")
+
+    try:
+        with open(args.connection_config, encoding="utf-8") as config_file:
+            connection: Any = yaml.safe_load(config_file)
+        if not isinstance(connection, Mapping):
+            raise ValueError("connection config must contain a YAML object")
+        path = ""
+        for key in ("sandbox", "opensandbox", "connection"):
+            path = f"{path}.{key}" if path else key
+            connection = connection.get(key)
+            if not isinstance(connection, Mapping):
+                raise ValueError(f"connection config '{path}' is required")
+
+        domain = connection.get("domain")
+        access_key = connection.get("api_key")
+        protocol = connection.get("protocol") or "http"
+        for key, value in (("domain", domain), ("api_key", access_key)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"connection config 'sandbox.opensandbox.connection.{key}' is required")
+        if not isinstance(protocol, str) or protocol.strip() not in {"http", "https"}:
+            raise ValueError("connection config 'sandbox.opensandbox.connection.protocol' must be http or https")
+
+        return _run(parser, domain.strip(), access_key.strip(), protocol.strip(), args)
+    except yaml.YAMLError:
+        print("OpenSandbox snapshot cleanup failed: invalid YAML connection config", file=sys.stderr)
+        return 1
+    except (aiohttp.ClientError, OSError, TypeError, ValueError) as error:
+        print(f"OpenSandbox snapshot cleanup failed: {error}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())
