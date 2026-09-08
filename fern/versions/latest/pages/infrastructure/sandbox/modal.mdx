@@ -1,0 +1,130 @@
+---
+title: "Modal Provider"
+description: "Configure NeMo Gym sandboxes backed by Modal."
+position: 2
+---
+
+# Modal Provider
+
+The `modal` provider creates isolated sandboxes from OCI images through the Modal Python SDK.
+It supports command execution, streaming file copies, lifecycle status, HTTPS tunnels, and
+cross-process reconnection through NeMo Gym's provider-neutral sandbox API.
+
+## Setup
+
+Install the sandbox extra and authenticate the Modal SDK:
+
+```bash
+uv sync --extra sandbox
+modal token new
+```
+
+For a package install, use:
+
+```bash
+pip install "nemo-gym[sandbox]"
+```
+
+The provider requires `modal>=1.5.5,<2.0.0`. Existing `MODAL_TOKEN_ID` and
+`MODAL_TOKEN_SECRET` environment variables also work. Credentials are read by Modal's SDK and
+do not belong in `SandboxSpec.env` or the provider YAML.
+
+## Provider Config
+
+NeMo Gym ships `nemo_gym/sandbox/providers/modal/configs/modal.yaml`. It defines the normal
+top-level `sandbox` block used by sandbox-backed agents:
+
+```yaml
+sandbox:
+  default_metadata:
+    sandbox-api: modal
+  modal:
+    connection:
+      app_name: ${oc.env:NEMO_GYM_MODAL_APP,nemo-gym-sandboxes}
+      environment_name: ${oc.env:MODAL_ENVIRONMENT,null}
+      create_app_if_missing: true
+    create:
+      timeout_s: 3600.0
+      idle_timeout_s: null
+      block_network: false
+      port_mode: encrypted
+      strict_resources: false
+    probe:
+      command: "printf ok"
+      expected_stdout: "ok"
+      timeout_s: 30.0
+      deadline_s: 180.0
+    exec:
+      default_timeout_s: 180.0
+      allow_user_rewrite: false
+    files:
+      transfer_timeout_s: 600.0
+```
+
+Pass it beside the agent and model configs:
+
+```bash
+gym env start \
+  --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
+  --config nemo_gym/sandbox/providers/modal/configs/modal.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml
+```
+
+Set `MODAL_ENVIRONMENT` when the environment must be explicit. Otherwise Modal uses the active
+profile or workspace default. `NEMO_GYM_MODAL_APP` selects the App that owns the sandboxes.
+
+## Relevant `SandboxSpec` Fields
+
+| Field | Modal behavior |
+| --- | --- |
+| `image` | Required OCI image reference. Pin a digest for reproducible runs. |
+| `entrypoint` | Overrides the image command; omitted values use a POSIX keepalive. |
+| `ttl_s` | Hard lifetime, positive and no more than 24 hours. |
+| `ready_timeout_s` | Overall provider readiness deadline. |
+| `workdir` / `env` | Passed to Modal at creation and used by NeMo Gym commands. |
+| `files` | Uploaded after readiness and before `start()` returns. |
+| `metadata` | Modal tags; at most ten tags after all defaults and overrides are merged. |
+| `resources.cpu` / `memory_mib` | Modal resource requests. |
+| `resources.gpu` / `gpu_type` | Converted to a Modal GPU string. |
+| `resources.disk_gib` | Unsupported by this API; warns or raises in strict mode. |
+| `ports` | TLS-terminated HTTPS tunnels by default. |
+
+Per-sandbox `provider_options` support `gpu`, `cloud`, `region`, `secrets`, `volumes`,
+`block_network`, `idle_timeout_s`, `image_secret`, `name`, and `tags`. Unknown values and
+`block_network` combined with exposed ports are rejected before allocation.
+
+## Reliability
+
+Create and exec requests are submitted once. Ambiguous retries could allocate a duplicate
+sandbox or execute a side-effecting command twice. Recognized transient failures are retried
+only for idempotent control-plane operations such as reconnecting, resolving a tunnel, and
+terminating a sandbox.
+
+The default readiness command validates that exec works before NeMo Gym uploads task files.
+`ready_timeout_s` bounds the whole probe, including stalled output. Failed or cancelled
+readiness terminates the allocated sandbox before propagating the error. The configured TTL is
+a remote backstop rather than a replacement for `stop()` or a context manager.
+
+Exec output is decoded with UTF-8 replacement. Modal timeout sentinels and
+`ExecTimeoutError` become `TimeoutError`; signal exits retain normal process return codes.
+Because Modal does not expose a public way to kill only one exec process, cancelling exec
+closes the sandbox to prevent delayed mutations from crossing evaluation steps.
+
+File operations use Modal's streaming filesystem API. A cancelled or timed-out transfer also
+closes the sandbox. Missing remote files become `FileNotFoundError`; other SDK filesystem errors
+are preserved.
+
+`close()` waits for remote termination, detaches the SDK connection, and clears the handle only
+after confirmed cleanup. Serialized handles reconnect by Modal sandbox ID through NeMo Gym's
+`ConnectableProvider` capability.
+
+## Security and Networking
+
+Modal supplies the isolation boundary. Outbound network access is enabled by default for tasks
+that install dependencies. Use `create.block_network: true` for offline workloads that do not
+expose ports. Keep provider credentials on the host and inject only the Secrets and Volumes the
+evaluated workload actually needs.
+
+`create.port_mode: encrypted` terminates TLS at Modal and returns an HTTPS endpoint. `h2`
+selects Modal's HTTP/2 tunnel. `unencrypted` exposes a public raw TCP socket represented as an
+`http://` endpoint.
