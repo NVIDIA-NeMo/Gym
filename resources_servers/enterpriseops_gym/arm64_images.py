@@ -6,6 +6,7 @@
 import argparse
 import hashlib
 import json
+import logging
 import os
 import subprocess
 import tempfile
@@ -16,6 +17,7 @@ from resources_servers.enterpriseops_gym.runtime import SERVICES, EnterpriseOpsS
 
 
 DEFAULT_OUTPUT_DIR = Path("~/.cache/nemo_gym/enterpriseops_gym/images")
+logger = logging.getLogger(__name__)
 
 
 def resolve_output_dir(output_dir: Path | None) -> Path:
@@ -145,7 +147,9 @@ def rebuild_all(output_dir: Path, source_cache_dir: Path, *, use_sudo: bool = Fa
         output_sif = output_dir / f"{service.domain}-arm64.sif"
         outputs.append(output_sif)
         if output_sif.is_file():
+            logger.info("ARM64 SIF already exists for %s: %s; skipping", service.domain, output_sif)
             continue
+        logger.info("ARM64 SIF does not exist for %s: %s; creating it", service.domain, output_sif)
         source_sif = source_sif_path(service, source_cache_dir)
         if not source_sif.is_file():
             pull_source_sif(service, source_sif)
@@ -154,6 +158,7 @@ def rebuild_all(output_dir: Path, source_cache_dir: Path, *, use_sudo: bool = Fa
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s", force=True)
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--all", action="store_true", help="build all seven EnterpriseOps ARM64 SIFs")
