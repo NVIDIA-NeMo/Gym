@@ -103,23 +103,6 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         )
         super().model_post_init(context)
 
-    async def _execute_nooa_episode(
-        self,
-        body: NOOAAgentRunRequest,
-        *,
-        model_url_path: str,
-        model_cookies: dict[str, str],
-        resource_cookies: dict[str, str],
-    ) -> NOOARunResult:
-        return await self.runner.run(
-            NOOARunRequest(
-                row=body,
-                model_url_path=model_url_path,
-                model_cookies=model_cookies,
-                resource_cookies=resource_cookies,
-            )
-        )
-
     def _finalize_run_result(self, run_result: NOOARunResult) -> tuple[NeMoGymResponse, AgentObservationBundle]:
         verify_response, verify_gaps = ensure_verifier_final_message(
             run_result.episode.response, run_result.return_value
@@ -142,11 +125,13 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         cookies = dict(request.cookies)
         try:
             async with self.sem, asyncio.timeout(self.config.run_timeout_secs):
-                run_result = await self._execute_nooa_episode(
-                    run_body,
-                    model_url_path=self.url_path_for_request("/v1/responses", request),
-                    model_cookies=dict(cookies),
-                    resource_cookies=dict(cookies),
+                run_result = await self.runner.run(
+                    NOOARunRequest(
+                        row=run_body,
+                        model_url_path=self.url_path_for_request("/v1/responses", request),
+                        model_cookies=dict(cookies),
+                        resource_cookies=dict(cookies),
+                    )
                 )
         except ValueError as error:
             raise HTTPException(
@@ -225,11 +210,13 @@ class NOOAAgent(SimpleResponsesAPIAgent):
 
         try:
             async with asyncio.timeout(self.config.run_timeout_secs) as episode_timeout:
-                run_result = await self._execute_nooa_episode(
-                    body,
-                    model_url_path=self.url_path_for_run("/v1/responses", body),
-                    model_cookies=dict(request.cookies),
-                    resource_cookies=resource_cookies,
+                run_result = await self.runner.run(
+                    NOOARunRequest(
+                        row=body,
+                        model_url_path=self.url_path_for_run("/v1/responses", body),
+                        model_cookies=dict(request.cookies),
+                        resource_cookies=resource_cookies,
+                    )
                 )
         except TimeoutError as error:
             if not episode_timeout.expired():
