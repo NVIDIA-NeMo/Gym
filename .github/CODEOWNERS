@@ -69,7 +69,6 @@ uv.lock @nvidia-nemo/automation
 # suggest: /nemo_gym/server_status.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/train_data_utils.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/sandbox/ @nvidia-nemo/gym_core
-# suggest: /nemo_gym/resources/ @nvidia-nemo/gym_core
 # suggest: /nemo_gym/chat_streaming.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/responses_streaming.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/discovery.py @nvidia-nemo/gym_core
@@ -91,7 +90,6 @@ uv.lock @nvidia-nemo/automation
 # suggest: /responses_api_agents/verifiers_agent/ @nvidia-nemo/gym_env_benchmarks @nvidia-nemo/gym_core
 
 # Docs
-# suggest: /docs/ @nvidia-nemo/gym_leads
 # suggest: /fern/ @nvidia-nemo/gym_leads
 
 # CI & Build (already enforced above via @nvidia-nemo/automation; kept here
