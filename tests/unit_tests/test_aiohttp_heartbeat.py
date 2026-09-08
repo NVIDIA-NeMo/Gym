@@ -110,6 +110,52 @@ def test_config_default_is_off():
     )
 
 
+async def test_beat_yields_between_batches():
+    """A heartbeat pass over many connections must yield to the event loop between batches."""
+    connector = HeartbeatTCPConnector(heartbeat=0, batch_size=4)
+
+    class FakeTransport:
+        writes = 0
+
+        def is_closing(self):
+            return False
+
+        def write(self, data):
+            assert data == CRLF
+            FakeTransport.writes += 1
+
+    class FakeProto:
+        transport = FakeTransport()
+
+    connector._acquired.update(FakeProto() for _ in range(40))  # 40 connections, batch 4 -> 10 batches
+    ticks = 0
+
+    async def ticker():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0)
+            ticks += 1
+
+    t = asyncio.create_task(ticker())
+    await asyncio.sleep(0)
+    before = ticks
+    written = await connector._beat_once()
+    t.cancel()
+    assert written == 40 and FakeTransport.writes == 40
+    assert connector.heartbeats_sent == 40
+    assert ticks - before >= 9, f"pass yielded only {ticks - before} times; expected one per batch"
+    connector._acquired.clear()  # fakes are not real protocols; do not let close() touch them
+    await connector.close()
+
+
+def test_batch_size_rejected_below_one():
+    try:
+        HeartbeatTCPConnector(heartbeat=0, batch_size=0)
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError")
+
+
 def test_negative_heartbeat_rejected():
     try:
         HeartbeatTCPConnector(heartbeat=-1)
