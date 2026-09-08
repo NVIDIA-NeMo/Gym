@@ -306,7 +306,8 @@ async def test_apptainer_services_bind_host_backed_database_directories(
         source, destination = binds[0].split(":", 1)
         assert Path(source).is_dir()
         assert Path(source).name == service.domain
-        assert destination == "/app/mcp_databases"
+        expected_destination = "/app/databases" if service.domain == "csm" else "/app/mcp_databases"
+        assert destination == expected_destination
 
     await runtime.stop()
 
@@ -353,8 +354,13 @@ async def test_apptainer_explicit_database_bind_takes_precedence(
     assets = EnterpriseOpsAssets(cache_dir=tmp_path)
     created = []
     explicit_database_dir = tmp_path / "explicit"
+    explicit_csm_database_dir = tmp_path / "explicit-csm"
     explicit_database_dir.mkdir()
-    explicit_bind = f"{explicit_database_dir}:/app/mcp_databases"
+    explicit_csm_database_dir.mkdir()
+    explicit_binds = [
+        f"{explicit_database_dir}:/app/mcp_databases",
+        f"{explicit_csm_database_dir}:/app/databases",
+    ]
 
     async def seed_root() -> Path:
         return tmp_path / "source"
@@ -372,12 +378,12 @@ async def test_apptainer_explicit_database_bind_takes_precedence(
         sandbox_factory=sandbox_factory,
         readiness_probe=lambda _url: asyncio.sleep(0),
         sandbox_metadata={"sandbox-api": "apptainer-cli"},
-        sandbox_spec={"provider_options": {"binds": explicit_bind}},
+        sandbox_spec={"provider_options": {"binds": explicit_binds}},
     )
 
     await runtime.start()
 
-    assert all(sandbox.spec.provider_options["binds"] == [explicit_bind] for sandbox in created)
+    assert all(sandbox.spec.provider_options["binds"] == explicit_binds for sandbox in created)
     await runtime.stop()
 
 

@@ -45,9 +45,9 @@ By default, the builder and runtime both use
 `--output-dir` while building and set `ENTERPRISEOPS_NATIVE_SIF_DIR` while running, or override
 `native_sif_dir` in config. Explicit entries in `native_service_images` have highest precedence.
 
-With the default Apptainer profile, Gym automatically gives each service a host-backed
-`/app/mcp_databases` directory and removes it when the environment stops. No database-path
-environment variable or bind override is required.
+With the default Apptainer profile, Gym automatically gives each service a host-backed database
+directory (`/app/databases` for CSM and `/app/mcp_databases` for the other services) and removes it
+when the environment stops. No database-path environment variable or bind override is required.
 
 ## Select another Sandbox API provider
 

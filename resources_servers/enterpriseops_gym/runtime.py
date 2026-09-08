@@ -33,6 +33,7 @@ class EnterpriseOpsService:
     gym_name: str
     port: int
     image: str
+    database_dir: str = "/app/mcp_databases"
     app_target: str = "main:app"
     environment: tuple[tuple[str, str], ...] = ()
 
@@ -47,6 +48,7 @@ SERVICES = {
         "sn-csm-server",
         8001,
         _image("csm", "sha256:eaa456ac9aa85728426e7d3813a0bbca0949d6a8695be30e26f03894e6e6b189"),
+        database_dir="/app/databases",
         environment=(("API_BASE_URL", "http://127.0.0.1:8001"),),
     ),
     "teams": EnterpriseOpsService(
@@ -265,12 +267,12 @@ class EnterpriseOpsServiceRuntime:
                 binds = [binds]
             else:
                 binds = list(binds)
-            if not any(self._bind_destination(bind) == "/app/mcp_databases" for bind in binds):
+            if not any(self._bind_destination(bind) == service.database_dir for bind in binds):
                 if self.session_db_root is None:
                     raise RuntimeError("EnterpriseOps Apptainer database storage was not initialized")
                 service_database_dir = self.session_db_root / service.domain
                 service_database_dir.mkdir(parents=True, exist_ok=True)
-                binds.append(f"{service_database_dir}:/app/mcp_databases")
+                binds.append(f"{service_database_dir}:{service.database_dir}")
             provider_options["binds"] = binds
         known = SandboxSpec(
             image=self.service_image(service),
@@ -306,8 +308,10 @@ class EnterpriseOpsServiceRuntime:
         configured_binds = self.sandbox_spec.get("provider_options", {}).get("binds", [])
         if isinstance(configured_binds, str):
             configured_binds = [configured_binds]
-        if any(self._bind_destination(bind) == "/app/mcp_databases" for bind in configured_binds):
-            logger.info("EnterpriseOps Apptainer services will use the configured /app/mcp_databases bind")
+        configured_destinations = {self._bind_destination(bind) for bind in configured_binds}
+        required_destinations = {service.database_dir for service in SERVICES.values()}
+        if required_destinations <= configured_destinations:
+            logger.info("EnterpriseOps Apptainer services will use the configured database binds")
             return
         self.session_db_root = Path(tempfile.mkdtemp(prefix="nemo-gym-enterpriseops-"))
         logger.info(

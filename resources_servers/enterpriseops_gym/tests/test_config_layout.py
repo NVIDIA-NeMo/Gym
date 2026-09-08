@@ -27,8 +27,7 @@ def test_base_config_uses_optional_native_sif_directory_override() -> None:
     base_config = (CONFIG_DIR / "enterpriseops_gym.yaml").read_text()
 
     assert (
-        "native_sif_dir: "
-        "${oc.env:ENTERPRISEOPS_NATIVE_SIF_DIR,'~/.cache/nemo_gym/enterpriseops_gym/images'}"
+        "native_sif_dir: ${oc.env:ENTERPRISEOPS_NATIVE_SIF_DIR,'~/.cache/nemo_gym/enterpriseops_gym/images'}"
     ) in base_config
     assert (CONFIG_DIR / "enterpriseops_gym_apptainer.yaml").is_file()
 
