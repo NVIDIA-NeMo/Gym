@@ -11,9 +11,33 @@ CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
 SLURM_COMMENT="${SLURM_COMMENT:-}"
+SBATCH_TIME="${SBATCH_TIME:-04:00:00}"
+# Resumable runs use one stable output path and ask Slurm to warn the batch shell
+# before the allocation expires. Exit 75 (EX_TEMPFAIL) means completed rows are
+# valid and the same evaluation may be submitted again with resume enabled.
+RESUME_EVAL_ON_REQUEUE="${RESUME_EVAL_ON_REQUEUE:-0}"
+PREDEADLINE_SECONDS="${PREDEADLINE_SECONDS:-900}"
+RESUME_FROM_CACHE_ARG=""
+RESUMABLE_EXIT_CODE=75
 OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-}"
 OPENSANDBOX_API_KEY="${OPENSANDBOX_API_KEY:-}"
 OPENSANDBOX_PROTOCOL="${OPENSANDBOX_PROTOCOL:-http}"
+
+case "$RESUME_EVAL_ON_REQUEUE" in
+    0)
+        ;;
+    1)
+        if [[ ! "$PREDEADLINE_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ERROR: PREDEADLINE_SECONDS must be a positive integer; got '$PREDEADLINE_SECONDS'." >&2
+            exit 1
+        fi
+        RESUME_FROM_CACHE_ARG="++resume_from_cache=true"
+        ;;
+    *)
+        echo "ERROR: RESUME_EVAL_ON_REQUEUE must be 0 or 1; got '$RESUME_EVAL_ON_REQUEUE'." >&2
+        exit 1
+        ;;
+esac
 
 should_run_eval=$(( $# > 0 ))
 if (( should_run_eval )); then
@@ -49,7 +73,11 @@ source "$VLLM_CONFIG"
 
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
-experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
+if (( $RESUME_EVAL_ON_REQUEUE )); then
+    experiment_name=$EXPERIMENT_NAME/resumable
+else
+    experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
+fi
 # export_to_csv.py derives <base>_aggregate_metrics.json from this, so the
 # default timestamped name makes the aggregate unfindable to anything that
 # did not watch the job run. Override it when results/ is already per-run.
@@ -75,6 +103,7 @@ gym eval run \
     ++split=benchmark \
     ++use_absolute_ip=true \
     ++reuse_existing_data_preparation=true \
+    $RESUME_FROM_CACHE_ARG \
     ++policy_base_url=http://\$(getent hosts "\$ROUTER_NODE" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \
     ++policy_model_name=$MODEL_NAME \
@@ -198,18 +227,30 @@ srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 --kill-on-bad-ex
         exec "\$@"
     ' bash bash -c "\$vllm_command" &
 server_step=\$!
+eval_step=""
+predeadline_received=0
 
 cleanup_server() {
     job_status=\$?
-    trap - EXIT INT TERM
+    trap - EXIT INT TERM USR1
     set +e
     kill "\$server_step" 2>/dev/null || true
     wait "\$server_step" 2>/dev/null || true
     exit "\$job_status"
 }
+handle_predeadline() {
+    predeadline_received=1
+    echo "Slurm deadline is approaching; stopping Gym after preserving completed rollout rows." >&2
+    if [[ -n "\$eval_step" ]]; then
+        # Terminating the srun step stops new rollout work and lets the step
+        # unwind before the allocation is forcibly killed at its deadline.
+        kill -TERM "\$eval_step" 2>/dev/null || true
+    fi
+}
 trap cleanup_server EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap handle_predeadline USR1
 
 if (( $should_run_eval )); then
     # No need to wait for endpoint since Gym will wait for model endpoints to spin up before proceeding.
@@ -237,9 +278,22 @@ if (( $should_run_eval )); then
         ' &
     eval_step=\$!
 
+    if (( predeadline_received )); then
+        kill -TERM "\$eval_step" 2>/dev/null || true
+        wait "\$eval_step" 2>/dev/null || true
+        echo "Evaluation is incomplete but resumable; exiting with status $RESUMABLE_EXIT_CODE." >&2
+        exit $RESUMABLE_EXIT_CODE
+    fi
+
     completed_pid=""
     completed_status=0
     wait -n -p completed_pid "\$server_step" "\$eval_step" || completed_status=\$?
+
+    if (( predeadline_received )); then
+        wait "\$eval_step" 2>/dev/null || true
+        echo "Evaluation is incomplete but resumable; exiting with status $RESUMABLE_EXIT_CODE." >&2
+        exit $RESUMABLE_EXIT_CODE
+    fi
 
     if [[ "\$completed_pid" == "\$server_step" ]]; then
         if (( completed_status == 0 )); then
@@ -258,6 +312,13 @@ wait "\$server_step"
 EOF
 )
 
+SBATCH_SIGNAL_ARGS=()
+if (( should_run_eval && RESUME_EVAL_ON_REQUEUE )); then
+    # B: targets the batch shell. Its handler terminates only the Gym step, then
+    # the existing EXIT trap shuts down vLLM and preserves status 75.
+    SBATCH_SIGNAL_ARGS+=(--signal="B:USR1@$PREDEADLINE_SECONDS")
+fi
+
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
 submit_dir=$(pwd -P)
 # An exported connection is sent as arguments; otherwise env.yaml is read.
@@ -275,7 +336,8 @@ main_job_id=$(
     sbatch \
         --parsable \
         --nodes=$NUM_NODES \
-        --time=04:00:00 \
+        --time="$SBATCH_TIME" \
+        "${SBATCH_SIGNAL_ARGS[@]}" \
         --job-name=gym-$EXPERIMENT_NAME-$USER \
         --output=slurm-logs/%j-%x.log \
         --ntasks-per-node=1 \
