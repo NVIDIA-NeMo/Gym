@@ -24,7 +24,7 @@ from time import monotonic, time, time_ns
 from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from aiohttp.client_exceptions import ClientResponseError
-from fastapi import Request
+from fastapi import Request, Response
 from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.base_responses_api_model import (
@@ -75,6 +75,7 @@ from nemo_gym.token_id_capture.staging.records import (
 
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
+_PROPAGATE_CONTEXT_ERROR_ATTRIBUTE = "nemo_gym_vllm_propagate_context_error"
 
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "run_id": "x-nemo-gym-log-run-id",
@@ -177,6 +178,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     return_token_id_information: bool
     # Request inline prompt and generation token IDs from compatible vLLM endpoints.
     request_prompt_and_generation_token_ids: bool = False
+    propagate_context_overflow_errors: bool = True
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
@@ -294,6 +296,22 @@ class VLLMModel(SimpleResponsesAPIModel):
         "required_prefix_token_ids",
     )
     _external_capture_enabled: bool = PrivateAttr(default=False)
+
+    def setup_exception_middleware(self, app) -> None:
+        @app.middleware("http")
+        async def context_error_middleware(request: Request, call_next):
+            try:
+                return await call_next(request)
+            except ClientResponseError as error:
+                if getattr(error, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, False):
+                    return Response(
+                        content=error.response_content,
+                        status_code=error.status,
+                        media_type="application/json",
+                    )
+                raise
+
+        super().setup_exception_middleware(app)
 
     def get_converter(self) -> "VLLMConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
@@ -910,6 +928,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "context length" in result_content_str or "max_tokens" in result_content_str
             )
             if is_out_of_context_length:
+                if self.config.propagate_context_overflow_errors:
+                    setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
+                    raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
                 return res
@@ -1362,6 +1383,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 "context length" in result_content_str or "max_tokens" in result_content_str
             )
             if is_out_of_context_length:
+                if self.config.propagate_context_overflow_errors:
+                    setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
+                    raise
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
                 return res
