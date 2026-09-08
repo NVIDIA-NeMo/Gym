@@ -39,7 +39,7 @@ permissions:
 
 jobs:
   ephemeral-runner-routing:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_ephemeral_runner_routing.yml@d0878a142525ff79366ca96fbc0b306cd8d64670 # v1.9.0
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_ephemeral_runner_routing.yml@4fe957d4ea5816af1d67fae130bbab4b434c10b3 # v1.9.2
     with:
       lane: ${{ vars.NEMO_CI_EPHEMERAL_LANE }}
       legacy_label: ${{ vars.NON_NVIDIA_RUNNER_PREFIX }}
@@ -51,7 +51,7 @@ jobs:
     uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@d0878a142525ff79366ca96fbc0b306cd8d64670 # v1.9.0
     with:
       default_runner_prefix: ${{ vars.DEFAULT_RUNNER_PREFIX }}
-      non_nvidia_runner_prefix: ${{ needs.ephemeral-runner-routing.outputs.runner_label }}
+      non_nvidia_runner_prefix: ${{ needs.ephemeral-runner-routing.outputs.runner_label_base }}
       default_test_data_path: ${{ vars.DEFAULT_TEST_DATA_PATH }}
       non_nvidia_test_data_path: ${{ vars.NON_NVIDIA_TEST_DATA_PATH }}
       default_registry: ${{ vars.DEFAULT_CONTAINER_REGISTRY }}
@@ -113,7 +113,7 @@ jobs:
         needs.classify_changes.result == 'success' &&
         (needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')
       }}
-    runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}
+    runs-on: ${{ startsWith(needs.pre-flight.outputs.runner_prefix, 'ephe-v2-') && format('{0}-a{1}', needs.pre-flight.outputs.runner_prefix, github.run_attempt) || needs.pre-flight.outputs.runner_prefix }}
     environment: ${{ contains(needs.pre-flight.outputs.registry, 'azure') && 'nemo-ci' || '' }}
     outputs:
       image: ${{ steps.image.outputs.image }}
@@ -194,7 +194,7 @@ jobs:
             model: Qwen/Qwen2.5-0.5B-Instruct
             model_revision: 7ae557604adf67be50417f59c2c2f167def9a775 # pragma: allowlist secret
             artifact_name: gpu-e2e-qwen-vllm
-    runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}
+    runs-on: ${{ startsWith(needs.pre-flight.outputs.runner_prefix, 'ephe-v2-') && format('{0}-a{1}', needs.pre-flight.outputs.runner_prefix, github.run_attempt) || needs.pre-flight.outputs.runner_prefix }}
     timeout-minutes: 30
     steps:
       - name: Checkout repository
