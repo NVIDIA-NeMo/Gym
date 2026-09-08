@@ -133,11 +133,6 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                         resource_cookies=dict(cookies),
                     )
                 )
-        except ValueError as error:
-            raise HTTPException(
-                status_code=422,
-                detail=f"NOOA argument mapping failed for /v1/responses: {error}",
-            ) from error
         for name, value in (run_result.model_cookies | run_result.resource_cookies).items():
             response.set_cookie(name, value)
         return run_result.episode.response
