@@ -21,7 +21,6 @@ VLLM_BINARY_SHA=2cf0a6915ce544dc493a0990f2ea38d81601128a
 VLLM_VERSION=0.28.0
 
 RAY_VERSION=2.55.1
-VLLM_ROUTER_VERSION=0.1.15
 UV_VERSION=0.12.3
 FASTOKENS_VERSION="${FASTOKENS_VERSION:-0.3.1}"
 
@@ -49,7 +48,6 @@ if [[ "${1:-}" == __inside_build ]]; then
     uv pip install --system --reinstall --no-deps .
     uv pip install --system \
         "ray==${RAY_VERSION}" \
-        "vllm-router==${VLLM_ROUTER_VERSION}" \
         "fastokens==${FASTOKENS_VERSION}"
 
     # Leave the source tree before deleting it; uv inspects the current
@@ -67,7 +65,6 @@ vllm_sha=${VLLM_SHA}
 vllm_binary_sha=${VLLM_BINARY_SHA}
 vllm_version=${VLLM_VERSION}
 ray_version=${RAY_VERSION}
-vllm_router_version=${VLLM_ROUTER_VERSION}
 uv_version=${UV_VERSION}
 EOF
     exit 0
