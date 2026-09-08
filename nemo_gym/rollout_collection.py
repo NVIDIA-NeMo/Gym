@@ -593,7 +593,16 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
 class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
     num_samples_in_parallel: Optional[int] = Field(
-        default=None, description="Limit the number of concurrent samples running at once."
+        default=None,
+        ge=1,
+        description="Limit the number of concurrent samples running at once.",
+    )
+    num_samples_in_parallel_by_agent: Dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Optional per-agent concurrent sample limits. Each configured limit is an upper bound within "
+            "the run-wide num_samples_in_parallel limit; agents omitted from this mapping use only the run-wide limit."
+        ),
     )
     responses_create_params: Dict[str, Any] = Field(
         default_factory=dict,
@@ -625,6 +634,16 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
     @classmethod
     def _validate_health_check_ignored_checks(cls, value):
         return _normalize_health_check_ignored_checks(value)
+
+    @model_validator(mode="after")
+    def _validate_agent_concurrency_limits(self) -> "SharedRolloutCollectionConfig":
+        blank_names = [name for name in self.num_samples_in_parallel_by_agent if not name.strip()]
+        if blank_names:
+            raise ValueError("num_samples_in_parallel_by_agent keys must be non-empty agent names")
+        invalid_limits = {name: limit for name, limit in self.num_samples_in_parallel_by_agent.items() if limit < 1}
+        if invalid_limits:
+            raise ValueError(f"num_samples_in_parallel_by_agent values must be >= 1, got {invalid_limits}")
+        return self
 
     count_failure_classes_as_zero: List[str] = Field(
         default_factory=list,
@@ -1331,6 +1350,11 @@ class RolloutCollectionHelper(BaseModel):
         if config.num_samples_in_parallel:
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
             semaphore = Semaphore(config.num_samples_in_parallel)
+        if config.num_samples_in_parallel_by_agent:
+            print(
+                "Per-agent concurrent request limits: "
+                + json.dumps(config.num_samples_in_parallel_by_agent, sort_keys=True)
+            )
 
         # Resolve capture dirs once so each rollout's captured model calls can be folded
         # into its record below (uniform across agents; no-op when capture is off / dirs absent).
@@ -1408,6 +1432,7 @@ class RolloutCollectionHelper(BaseModel):
             semaphore=semaphore,
             route_failures_to_sidecar=config.route_failures_to_sidecar,
             interleave_by_agent=True,
+            num_samples_in_parallel_by_agent=config.num_samples_in_parallel_by_agent,
         ):
             completed = await future
             row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
@@ -1914,6 +1939,27 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             f"--allow-unsupported-pairing (or set {ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME}=1) to bypass the check."
         )
 
+    @staticmethod
+    def _validate_agent_concurrency_limit_names(limits: Mapping[str, int], global_config_dict: DictConfig) -> None:
+        available = {
+            str(name)
+            for name, block in global_config_dict.items()
+            if isinstance(block, DictConfig) and "responses_api_agents" in block
+        }
+        unknown = sorted(set(limits) - available)
+        if not unknown:
+            return
+        hints = []
+        for name in unknown:
+            if name in global_config_dict:
+                hints.append(f"{name!r} (exists but is not an agent instance)")
+                continue
+            close = get_close_matches(name, available, n=1)
+            hints.append(f"{name!r}" + (f" (did you mean {close[0]!r}?)" if close else ""))
+        raise ValueError(
+            "num_samples_in_parallel_by_agent references agents not present in the running config: " + ", ".join(hints)
+        )
+
     def _run_examples_with_metadata(
         self,
         examples: List[Dict],
@@ -1921,6 +1967,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         semaphore: Optional[Semaphore] = None,
         route_failures_to_sidecar: bool = False,
         interleave_by_agent: bool = False,
+        num_samples_in_parallel_by_agent: Optional[Mapping[str, int]] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
@@ -1937,39 +1984,46 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         self.resolve_task_sources(examples, server_client.global_config_dict)
         self._validate_agent_names(examples, server_client.global_config_dict)
         self._validate_agent_pairings(examples, server_client.global_config_dict)
+        agent_limits = num_samples_in_parallel_by_agent or {}
+        self._validate_agent_concurrency_limit_names(agent_limits, server_client.global_config_dict)
+        agent_semaphores = {name: Semaphore(limit) for name, limit in agent_limits.items()}
         if interleave_by_agent:
             examples = _round_robin_by_agent(examples)
         semaphore = semaphore or nullcontext()
 
         async def _post_subroutine(row: Dict) -> _CompletedRollout:
-            async with semaphore:
-                started_at = time()
-                res = None
-                try:
-                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                    await raise_for_status(res)
-                    result = await get_response_json(res)
-                    # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
-                    # from summed model-call/tool latencies to account for additional overhead.
-                    rollout_latency_ms = (time() - started_at) * 1000
-                    return _CompletedRollout(row=row, result=result, rollout_latency_ms=rollout_latency_ms)
-                except Exception as e:
-                    print(
-                        "[rollout_collection] /run failed "
-                        f"status={getattr(res, 'status', None)} "
-                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                        flush=True,
-                    )
-                    if not route_failures_to_sidecar or not isinstance(e, _RUN_FAILURE_ERRORS):
-                        raise
-                    if res is not None:
-                        res.release()
-                    # The status comes from the error when it carries one, and from the response
-                    # when the body was the part that failed.
-                    status = getattr(e, "status", None) or getattr(res, "status", None)
-                    return _CompletedRollout(
-                        row=row, result=_agent_request_failure_row(e, status), rollout_latency_ms=None
-                    )
+            agent_name = row[AGENT_REF_KEY_NAME]["name"]
+            agent_semaphore = agent_semaphores.get(agent_name)
+            agent_context = agent_semaphore if agent_semaphore is not None else nullcontext()
+            async with agent_context:
+                async with semaphore:
+                    started_at = time()
+                    res = None
+                    try:
+                        res = await server_client.post(server_name=agent_name, url_path="/run", json=row)
+                        await raise_for_status(res)
+                        result = await get_response_json(res)
+                        # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
+                        # from summed model-call/tool latencies to account for additional overhead.
+                        rollout_latency_ms = (time() - started_at) * 1000
+                        return _CompletedRollout(row=row, result=result, rollout_latency_ms=rollout_latency_ms)
+                    except Exception as e:
+                        print(
+                            "[rollout_collection] /run failed "
+                            f"status={getattr(res, 'status', None)} "
+                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                            flush=True,
+                        )
+                        if not route_failures_to_sidecar or not isinstance(e, _RUN_FAILURE_ERRORS):
+                            raise
+                        if res is not None:
+                            res.release()
+                        # The status comes from the error when it carries one, and from the response
+                        # when the body was the part that failed.
+                        status = getattr(e, "status", None) or getattr(res, "status", None)
+                        return _CompletedRollout(
+                            row=row, result=_agent_request_failure_row(e, status), rollout_latency_ms=None
+                        )
 
         def _as_completed_in_dispatch_order() -> Iterator[Future]:
             # Create tasks in dispatch order before passing them to as_completed. Passing raw
@@ -1993,6 +2047,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
         route_failures_to_sidecar: bool = False,
+        num_samples_in_parallel_by_agent: Optional[Mapping[str, int]] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -2004,6 +2059,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
         that ends every rollout still in flight. It defaults off because those rollouts then leave
         the score.
+
+        ``num_samples_in_parallel_by_agent`` optionally adds a narrower semaphore for named agents.
+        The caller-supplied ``semaphore`` remains the run-wide upper bound.
 
         Every future resolves to exactly the ``(row, result)`` pair Gym's own `/run` endpoint
         returned — no Gym-private fields are ever added to ``result``.
@@ -2020,6 +2078,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 head_server_config=head_server_config,
                 semaphore=semaphore,
                 route_failures_to_sidecar=route_failures_to_sidecar,
+                num_samples_in_parallel_by_agent=num_samples_in_parallel_by_agent,
             ),
         )
 
