@@ -31,9 +31,11 @@ from aiohttp import ClientConnectorError, ClientResponseError, ServerDisconnecte
 from omegaconf import DictConfig, OmegaConf
 from pydantic import ValidationError
 
+import nemo_gym.batch_status
 import nemo_gym.rollout_collection
 import nemo_gym.token_id_capture.delivery
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.batch_status import observe_materialized_rows
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
@@ -360,6 +362,170 @@ class TestRolloutCollection:
             "gamma",
         ]
         empty_global_config.assert_called_once_with()
+
+    async def test_batch_status_tracks_collection_and_standalone_aggregation_repair(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+    ) -> None:
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        AGENT_REF_KEY_NAME: {"name": agent},
+                        TASK_SOURCE_KEY_NAME: f"{agent}_source",
+                        "responses_create_params": {"input": []},
+                    }
+                )
+                for agent in ("alpha", "beta")
+            )
+            + "\n"
+        )
+        output_fpath = tmp_path / "rollouts.jsonl"
+        manifest_fpath = tmp_path / "batch_manifest.json"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(output_fpath),
+            batch_manifest_fpath=str(manifest_fpath),
+            disable_health_check=True,
+        )
+        materialized_rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        observations = observe_materialized_rows(materialized_rows)
+        manifest_fpath.write_bytes(
+            orjson.dumps(
+                {
+                    "schema_version": "1",
+                    "members": {
+                        f"{agent}-benchmark": {
+                            "agent_name": agent,
+                            "task_sources": observed.task_sources,
+                            "dataset_sha256": observed.dataset_sha256,
+                            "expected_task_count": observed.task_count,
+                            "expected_rollout_count": observed.rollout_count,
+                            "repeat_policy": observed.repeat_policy.model_dump(),
+                            "resolved_recipe_sha256": "a" * 64,
+                            "metric_keys": ["mean/reward"],
+                        }
+                        for agent, observed in observations.items()
+                    },
+                }
+            )
+        )
+
+        fail_beta_aggregation = True
+
+        async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
+            if url_path == "/run":
+                return FakeResponse(200, {"reward": 1.0 if server_name == "alpha" else 0.0})
+            assert url_path == "/aggregate_metrics"
+            if server_name == "beta" and fail_beta_aggregation:
+                return FakeResponse(500)
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        server_client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        server_client.global_config_dict = OmegaConf.create(
+            {
+                "alpha": {"responses_api_agents": {}},
+                "beta": {"responses_api_agents": {}},
+            }
+        )
+        monkeypatch.setattr(nemo_gym.batch_status, "BATCH_STATUS_WRITE_INTERVAL_SECONDS", 0)
+        status_snapshots = []
+        atomic_write = nemo_gym.batch_status._atomic_write_json
+
+        def capture_status_write(path: Path, payload: dict) -> None:
+            status_snapshots.append(deepcopy(payload))
+            atomic_write(path, payload)
+
+        monkeypatch.setattr(nemo_gym.batch_status, "_atomic_write_json", capture_status_write)
+
+        await RolloutCollectionHelper().run_from_config(config)
+
+        status_fpath = tmp_path / "batch_status.json"
+        status = orjson.loads(status_fpath.read_bytes())
+        assert status["members"]["alpha"]["completed_rollout_count"] == 1
+        assert status["members"]["alpha"]["aggregation_status"] == "complete"
+        assert status["members"]["beta"]["completed_rollout_count"] == 1
+        assert status["members"]["beta"]["aggregation_status"] == "error"
+        assert status["members"]["beta"][AGGREGATION_ERROR_KEY] == {
+            "type": "ClientResponseError",
+            "http_status": 500,
+        }
+        observed_progress = {
+            sum(member["completed_rollout_count"] for member in snapshot["members"].values())
+            for snapshot in status_snapshots
+        }
+        assert observed_progress == {0, 1, 2}
+
+        fail_beta_aggregation = False
+        aggregate_config = RolloutAggregationConfig(
+            input_glob=str(output_fpath),
+            output_jsonl_fpath=str(output_fpath),
+            batch_manifest_fpath=str(manifest_fpath),
+            disable_health_check=True,
+        )
+        await RolloutAggregationHelper().run_from_config(aggregate_config)
+
+        repaired_status = orjson.loads(status_fpath.read_bytes())
+        assert repaired_status["members"]["alpha"]["aggregation_status"] == "complete"
+        assert repaired_status["members"]["beta"]["aggregation_status"] == "complete"
+        assert repaired_status["members"]["alpha"]["observed_metric_keys"] == ["mean/reward"]
+        assert repaired_status["members"]["beta"]["observed_metric_keys"] == ["mean/reward"]
+        assert not any(AGGREGATION_ERROR_KEY in member for member in repaired_status["members"].values())
+
+    async def test_batch_manifest_is_validated_before_existing_outputs_are_cleared(self, tmp_path: Path) -> None:
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(
+            json.dumps(
+                {
+                    AGENT_REF_KEY_NAME: {"name": "alpha"},
+                    TASK_SOURCE_KEY_NAME: "alpha_source",
+                    "responses_create_params": {"input": []},
+                }
+            )
+            + "\n"
+        )
+        output_fpath = tmp_path / "rollouts.jsonl"
+        output_fpath.write_bytes(b"existing rollout\n")
+        failures_fpath = _failures_path_for(output_fpath)
+        failures_fpath.write_bytes(b"existing failure\n")
+        manifest_fpath = tmp_path / "batch_manifest.json"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(output_fpath),
+            batch_manifest_fpath=str(manifest_fpath),
+            disable_health_check=True,
+        )
+        materialized_rows = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+        observations = observe_materialized_rows(materialized_rows)
+        observed = observations["alpha"]
+        manifest_fpath.write_bytes(
+            orjson.dumps(
+                {
+                    "schema_version": "1",
+                    "members": {
+                        "alpha-benchmark": {
+                            "agent_name": "alpha",
+                            "task_sources": observed.task_sources,
+                            "dataset_sha256": "0" * 64,
+                            "expected_task_count": observed.task_count,
+                            "expected_rollout_count": observed.rollout_count,
+                            "repeat_policy": observed.repeat_policy.model_dump(),
+                            "resolved_recipe_sha256": "a" * 64,
+                            "metric_keys": ["mean/reward"],
+                        }
+                    },
+                }
+            )
+        )
+
+        with pytest.raises(ConfigError, match="dataset_sha256 mismatch"):
+            await RolloutCollectionHelper().run_from_config(config)
+
+        assert output_fpath.read_bytes() == b"existing rollout\n"
+        assert failures_fpath.read_bytes() == b"existing failure\n"
 
     async def test_run_examples_queues_preordered_rows_deterministically(
         self, monkeypatch: pytest.MonkeyPatch
@@ -3921,6 +4087,12 @@ class TestE2EInputJsonlFpathRejected:
     def test_e2e_config_accepts_without_input_jsonl_fpath(self) -> None:
         config = E2ERolloutCollectionConfig.model_validate({"output_jsonl_fpath": "out.jsonl", "split": "train"})
         assert config.split == "train"
+
+    def test_e2e_config_preserves_batch_manifest_path(self) -> None:
+        config = E2ERolloutCollectionConfig.model_validate(
+            {"output_jsonl_fpath": "out.jsonl", "split": "benchmark", "batch_manifest_fpath": "batch_manifest.json"}
+        )
+        assert config.batch_manifest_fpath == "batch_manifest.json"
 
     def test_no_serve_config_still_accepts_input_jsonl_fpath(self) -> None:
         config = RolloutCollectionConfig.model_validate(

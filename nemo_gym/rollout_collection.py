@@ -44,6 +44,7 @@ from nemo_gym.base_responses_api_model import (
     model_call_capture_dirs_from_config,
     observability_enabled_from_config,
 )
+from nemo_gym.batch_status import AGGREGATION_ERROR_KEY, BatchStatusTracker
 from nemo_gym.config_types import (
     BaseNeMoGymCLIConfig,
     BaseServerConfig,
@@ -150,7 +151,6 @@ NG_TERMINAL_KEY = "_ng_failure_terminal"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
 _NO_RESULT_FAILURE_CLASSES = frozenset({AGENT_REQUEST_FAILED_FAILURE_CLASS, AGENT_RUN_ERROR_FAILURE_CLASS})
-AGGREGATION_ERROR_KEY = "aggregation_error"
 NG_TRAJECTORY_KEY = "ng_trajectory"
 NG_PERF_KEY = "ng_perf"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
@@ -593,6 +593,13 @@ def _normalize_health_check_ignored_checks(value) -> List[str]:
 
 class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLIConfig):
     output_jsonl_fpath: str = Field(description="The output data jsonl file path.")
+    batch_manifest_fpath: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional Eval Factory batch_manifest.json. Gym validates it against materialized inputs and writes "
+            "batch_status.json alongside it."
+        ),
+    )
     num_samples_in_parallel: Optional[int] = Field(
         default=None,
         ge=1,
@@ -1324,6 +1331,7 @@ class RolloutCollectionHelper(BaseModel):
         output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
         if config.resume_from_cache and config.materialized_jsonl_fpath.exists() and output_fpath.exists():
+            should_clear_outputs = False
             (
                 input_rows,
                 rows,
@@ -1333,6 +1341,7 @@ class RolloutCollectionHelper(BaseModel):
             persisted_rows = list(rows)
             persisted_results = list(results)
         else:
+            should_clear_outputs = True
             if config.resume_from_cache:
                 if not output_fpath.exists():
                     print(f"Skipping resume_from_cache because output_fpath {output_fpath} doesn't exist!")
@@ -1365,8 +1374,21 @@ class RolloutCollectionHelper(BaseModel):
                 for row in tqdm(input_rows, desc="Writing materialized rows"):
                     f.write(orjson.dumps(row) + b"\n")
 
+        batch_tracker = None
+        if config.batch_manifest_fpath:
+            with config.materialized_jsonl_fpath.open("rb") as materialized_file:
+                materialized_rows = [orjson.loads(line) for line in materialized_file if line.strip()]
+            batch_tracker = BatchStatusTracker(Path(config.batch_manifest_fpath), materialized_rows)
+
+        if should_clear_outputs:
             output_fpath.unlink(missing_ok=True)
             failures_fpath.unlink(missing_ok=True)
+
+        batch_failure_rows: List[Dict] = []
+        if batch_tracker is not None:
+            batch_failure_rows = list(_latest_failure_rows([failures_fpath]).values())
+            batch_tracker.write_status(persisted_results, batch_failure_rows, force=True)
+            print(f"Validated batch manifest and initialized status at {batch_tracker.status_fpath}")
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
@@ -1552,6 +1574,8 @@ class RolloutCollectionHelper(BaseModel):
                 )
                 failures_file.write(serialized + b"\n")
                 failures_file.flush()
+                if batch_tracker is not None:
+                    batch_failure_rows.append(result)
             else:
                 # Success → main jsonl.
                 results_file.write(serialized + b"\n")
@@ -1577,6 +1601,9 @@ class RolloutCollectionHelper(BaseModel):
             counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
             if counts_left[row[AGENT_REF_KEY_NAME]["name"]] <= 0:
                 counts_left.pop(row[AGENT_REF_KEY_NAME]["name"])
+
+            if batch_tracker is not None:
+                batch_tracker.write_status(persisted_results, batch_failure_rows)
 
             agent_name = result["agent_ref"]["name"]
             if not no_result:
@@ -1629,6 +1656,8 @@ class RolloutCollectionHelper(BaseModel):
         failures_file.close()
 
         if input_rows and not persisted_results:
+            if batch_tracker is not None:
+                batch_tracker.write_status(persisted_results, batch_failure_rows, force=True)
             raise RuntimeError(
                 f"None of the {len(input_rows)} dispatched rollouts produced a result "
                 f"{dict(failure_counts)}. Inspect {failures_fpath}; the run has no score to report."
@@ -1669,6 +1698,15 @@ class RolloutCollectionHelper(BaseModel):
                 )
             aggregate_metrics_fpath = await self._call_aggregate_metrics(
                 persisted_results + counted, persisted_rows + counted, output_fpath
+            )
+
+        if batch_tracker is not None:
+            batch_tracker.write_status(
+                persisted_results,
+                batch_failure_rows,
+                aggregate_metrics_fpath=aggregate_metrics_fpath,
+                aggregation_deferred=config.disable_aggregation,
+                force=True,
             )
 
         expected_rollouts = (
@@ -2162,6 +2200,20 @@ class RolloutAggregationConfig(BaseNeMoGymCLIConfig):
             "the merged-rollouts file."
         ),
     )
+    batch_manifest_fpath: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional Eval Factory batch_manifest.json. Gym validates it and refreshes the sibling "
+            "batch_status.json after aggregation."
+        ),
+    )
+    materialized_inputs_jsonl_fpath: Optional[str] = Field(
+        default=None,
+        description=(
+            "Full materialized-inputs JSONL used to validate a batch manifest. Defaults to the standard "
+            "sibling derived from output_jsonl_fpath."
+        ),
+    )
     merge_shards: bool = Field(
         default=True,
         description="Concatenate the matched shard JSONLs into output_jsonl_fpath alongside the metrics file.",
@@ -2242,13 +2294,31 @@ class RolloutAggregationHelper(BaseModel):
         output_fpath = Path(config.output_jsonl_fpath)
         output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
+        failures_fpaths = [failures_path_for(Path(path)) for path in input_paths]
+        latest_failure_rows = _latest_failure_rows(failures_fpaths)
+        batch_tracker = None
+        if config.batch_manifest_fpath:
+            materialized_fpath = (
+                Path(config.materialized_inputs_jsonl_fpath)
+                if config.materialized_inputs_jsonl_fpath
+                else output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
+            )
+            if not materialized_fpath.exists():
+                raise ConfigPathNotFoundError(
+                    f"Materialized inputs not found at '{materialized_fpath}'. Pass "
+                    "+materialized_inputs_jsonl_fpath=<path> when aggregating a batch from shards."
+                )
+            with materialized_fpath.open("rb") as materialized_file:
+                materialized_rows = [orjson.loads(line) for line in materialized_file if line.strip()]
+            batch_tracker = BatchStatusTracker(Path(config.batch_manifest_fpath), materialized_rows)
+            batch_tracker.write_status(results, list(latest_failure_rows.values()), force=True)
+
         if config.merge_shards:
             print(f"Merging shards into {output_fpath}")
             with output_fpath.open("wb") as out:
                 for r in results:
                     out.write(orjson.dumps(r) + b"\n")
 
-        failures_fpaths = [failures_path_for(Path(path)) for path in input_paths]
         scored_keys = {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in results}
         counted = _failure_rows_counted_as_zero(
             failures_fpaths,
@@ -2262,12 +2332,19 @@ class RolloutAggregationHelper(BaseModel):
         helper = RolloutCollectionHelper()
         scored = results + counted
         aggregate_metrics_fpath = await helper._call_aggregate_metrics(scored, scored, output_fpath)
+        if batch_tracker is not None:
+            batch_tracker.write_status(
+                results,
+                list(latest_failure_rows.values()),
+                aggregate_metrics_fpath=aggregate_metrics_fpath,
+                force=True,
+            )
 
         # The shards' own sidecars say which rollouts never made it into the files just scored.
         counted_keys = {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in counted}
         dropped = Counter(
             row.get(NG_FAILURE_CLASS_KEY) or "unknown"
-            for key, row in _latest_failure_rows(failures_fpaths).items()
+            for key, row in latest_failure_rows.items()
             if key not in scored_keys and key not in counted_keys
         )
         scored_rollouts = len(results) + len(counted)
