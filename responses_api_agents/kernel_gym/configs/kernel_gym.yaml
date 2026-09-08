@@ -6,12 +6,15 @@ kernel_gym:
       description: KernelBench one shot or coding agent
       value: Evaluate and improve agent kernel optimization
 
+      agent_server_module: responses_api_agents.claude_code_agent.app
+      agent_server_class: ClaudeCodeAgent
+      agent_config_class: ClaudeCodeAgentConfig
       agent_kwargs:
-        model: openai/nvidia/nvidia/nemotron-3-super-v3
-        model_api_key: ${oc.env:NVIDIA_API_KEY,local}
-        fabric_config:
-          runtime:
-            max_turns: 90
+        model: ${policy_model_name}
+        anthropic_api_key: ${policy_api_key}
+        anthropic_base_url: ${policy_base_url}
+        max_turns: 100
+        timeout: 1200
 
       container_formatter: "{docker_image}"
       sandbox_provider: ${sandbox}

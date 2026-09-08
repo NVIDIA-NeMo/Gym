@@ -3,6 +3,7 @@
 import argparse
 import json
 import shutil
+import tomllib
 from pathlib import Path
 
 
@@ -23,13 +24,26 @@ def build_row(repo: Path, tasks_dir: Path, image: str, level: int, problem_id: i
     shutil.copy2(ROOT / "test.sh", tests_dir / "test.sh")
     shutil.copy2(ROOT / "verify.py", tests_dir / "verify.py")
 
-    name = matches[0].stem.split("_", 1)[1].replace("_", " ")
+    prompts = tomllib.loads((repo / "src/kernelbench/prompts/prompts.toml").read_text())
+    context = {
+        "backend_display": prompts["backends"]["triton"]["backend_display"],
+        "precision_display": prompts["precision"]["fp32"]["precision_display"],
+        "ref_arch_src": reference,
+    }
     prompt = (
-        f"Optimize KernelBench Level {level} problem {problem_id}: {name}.\n"
-        "Work in /workspace. reference.py defines the required Model behavior and inputs. "
-        "Edit solution.py so it defines ModelNew with exactly equivalent outputs but lower CUDA runtime. "
-        "You may use CUDA extensions or Triton. Do not modify reference.py."
+        "\n".join(
+            (
+                prompts["shared"]["problem_statement"],
+                prompts["templates"]["common"]["arch_block"],
+                prompts["templates"]["common"]["precision_note"],
+                prompts["shared"]["instruction"],
+            )
+        )
+        .strip()
+        .format(**context)
+        + "\n"
     )
+    prompt += "\nUse the terminal as needed and save the final code to /workspace/solution.py.\n"
     return {
         "responses_create_params": {
             "input": [{"role": "user", "content": prompt}],

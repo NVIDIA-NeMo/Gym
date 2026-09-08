@@ -127,6 +127,9 @@ def _safe_config_json(params: "KernelGymInstanceConfig", indent: Optional[int] =
 class KernelGymConfig(BaseResponsesAPIAgentConfig):
     model_server: Optional[ModelServerRef] = None
 
+    agent_server_module: str
+    agent_server_class: str
+    agent_config_class: str
     agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
 
     container_formatter: str | list[str] = Field(
@@ -227,8 +230,13 @@ class KernelGymAgent(SimpleResponsesAPIAgent):
                 await sandbox.upload(local, remote)
 
             env = {
-                "NGKB_MODEL_URL": cfg.model_server_url,
-                "NGKB_AGENT_KWARGS": json.dumps(cfg.agent_kwargs),
+                "KB_MODEL_URL": cfg.model_server_url,
+                "KB_MODEL_NAME": cfg.model_name,
+                "KB_AGENT_MODULE": cfg.agent_server_module,
+                "KB_AGENT_CLASS": cfg.agent_server_class,
+                "KB_AGENT_CONFIG_CLASS": cfg.agent_config_class,
+                "KB_AGENT_KWARGS": json.dumps(cfg.agent_kwargs),
+                "KB_BODY": cfg.body.model_dump_json(),
             }
             agent_started = time.time()
             result = await sandbox.exec(
@@ -433,7 +441,7 @@ class KernelGymAgent(SimpleResponsesAPIAgent):
 
         (persistent_dir / "instruction.txt").write_text(problem_info["instruction"])
         shutil.copy2(Path(__file__).parent / "agent_runner.py", persistent_dir / "agent_runner.py")
-        params.agent_command_str = "python3 /trajectories_mount/agent_runner.py"
+        params.agent_command_str = "/opt/agent/bin/python /trajectories_mount/agent_runner.py"
 
         return params
 
@@ -462,26 +470,23 @@ class KernelGymAgent(SimpleResponsesAPIAgent):
             raise RuntimeError(f"{params.task_name} did not produce a scoreable rollout")
 
         response_path = params.persistent_dir / "response.json"
-        output_items, tools = [], []
-        if response_path.exists():
-            try:
-                data = json.loads(response_path.read_text())
-                data["model"] = params.model_name
-                saved = NeMoGymResponse.model_validate(data)
-                output_items = saved.output
-                tools = saved.tools or []
-            except (json.JSONDecodeError, ValueError) as e:
-                print(f"[{params.task_name}] response.json unreadable ({e}), treating as empty response", flush=True)
+        if not response_path.exists():
+            raise RuntimeError(f"{params.task_name} did not produce response.json")
+        saved = NeMoGymResponse.model_validate_json(response_path.read_text())
 
         return NeMoGymResponse(
             id=f"kernel-gym-{params.instance_id}",
             created_at=int(time.time()),
             model=params.model_name,
             object="response",
-            output=output_items,
+            output=saved.output,
+            status=saved.status,
+            error=saved.error,
+            incomplete_details=saved.incomplete_details,
             parallel_tool_calls=params.body.parallel_tool_calls,
             tool_choice=params.body.tool_choice,
-            tools=tools,
+            tools=saved.tools or [],
+            usage=saved.usage,
             metadata={
                 "input": json.dumps(params.body.model_dump(mode="json").get("input") or []),
                 "metrics": params.metrics_fpath.read_text(),
