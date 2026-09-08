@@ -232,7 +232,7 @@ class LegalAgentBenchHarborAgent(BaseAgent):
             kwargs["agent_model_base_url"] = api_base
         if responses_create_params.get("max_output_tokens") and not kwargs.get("agent_model_max_tokens"):
             kwargs["agent_model_max_tokens"] = responses_create_params["max_output_tokens"]
-        if kwargs.get("agent_model_top_p") is None:
+        if "agent_model_top_p" not in kwargs:
             kwargs["agent_model_top_p"] = responses_create_params.get("top_p", 0.95)
 
         self.adapter_kwargs = kwargs

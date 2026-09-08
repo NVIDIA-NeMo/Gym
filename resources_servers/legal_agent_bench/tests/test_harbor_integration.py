@@ -182,6 +182,19 @@ def test_agent_rejects_unknown_requested_skill(tmp_path) -> None:
         agent._skill_names()
 
 
+def test_agent_can_explicitly_omit_top_p(tmp_path) -> None:
+    agent = LegalAgentBenchHarborAgent(
+        logs_dir=tmp_path / "logs",
+        model_name="policy-model",
+        api_base="http://policy/v1",
+        responses_create_params={"top_p": 0.95},
+        agent_model_top_p=None,
+    )
+
+    assert agent.adapter_kwargs["agent_model_top_p"] is None
+    assert agent._create_adapter().top_p is None
+
+
 @pytest.mark.asyncio
 async def test_container_hydration_uploads_configured_skills_and_documents(tmp_path) -> None:
     skills = tmp_path / "skills"
