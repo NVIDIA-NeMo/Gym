@@ -1,5 +1,5 @@
 config_paths:
-  - nemo_gym/sandbox/providers/apptainer/configs/apptainer.yaml
+  - resources_servers/enterpriseops_gym/configs/enterpriseops_gym_apptainer.yaml
 
 enterpriseops_gym:
   resources_servers:
@@ -18,9 +18,11 @@ enterpriseops_gym:
       sandbox_provider: enterpriseops_apptainer_sandbox
       # Apptainer uses host networking and returns loopback endpoints.
       service_bind_host: 127.0.0.1
-      # On ARM64, set a native image reference for each EOps domain. For Apptainer
-      # these are prebuilt local SIF paths; OCI-native providers may use OCI refs.
+      # Explicit ARM64 image references take precedence over native_sif_dir.
       native_service_images: {}
+      # Standard output location used by `arm64_images --all`. Override with
+      # ENTERPRISEOPS_NATIVE_SIF_DIR or a config value when needed.
+      native_sif_dir: ${oc.env:ENTERPRISEOPS_NATIVE_SIF_DIR,~/.cache/nemo_gym/enterpriseops_gym/images}
       sandbox_spec:
         workdir: /app
       service_start_timeout_seconds: 60

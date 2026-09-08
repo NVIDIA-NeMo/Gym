@@ -4,6 +4,9 @@ Run the [ServiceNow EnterpriseOps-Gym](https://github.com/ServiceNow/EnterpriseO
 benchmark with Gym-managed MCP services and upstream-compatible SQL verification. See the
 [benchmark README](../../../benchmarks/enterpriseops/README.md) for split names and evaluation commands.
 
+The commands below assume an OpenAI-compatible model endpoint is already listening at the
+configured URL.
+
 ## Quick start (x86_64)
 
 ```bash
@@ -25,25 +28,26 @@ gym eval run --no-serve \
 
 The first `gym env start` downloads the pinned EnterpriseOps source checkout, its
 `gym_dbs.zip` archive, and the seven digest-pinned service images into the local provider cache.
+The resources server logs the detected architecture, sandbox provider, selected images, and
+managed database storage.
 
 ## ARM64 (Apptainer)
 
-The upstream service images are AMD64. Build native SIFs once, then start the environment with
-the ARM64 overlay:
+The upstream service images are AMD64. Build native SIFs once, then use the same prepare,
+start, and run commands shown above:
 
 ```bash
-python -m resources_servers.enterpriseops_gym.arm64_images --all \
-  --output-dir ~/.cache/nemo_gym/enterpriseops_gym/images
-
-export ENTERPRISEOPS_NATIVE_SIF_DIR=~/.cache/nemo_gym/enterpriseops_gym/images
-
-gym env start --benchmark enterpriseops \
-  --config resources_servers/enterpriseops_gym/configs/enterpriseops_gym_arm64_apptainer.yaml \
-  --model-type openai_model \
-  --model-url http://127.0.0.1:8000/v1 \
-  --model-api-key EMPTY \
-  --model <served-model-name>
+python -m resources_servers.enterpriseops_gym.arm64_images --all
 ```
+
+By default, the builder and runtime both use
+`~/.cache/nemo_gym/enterpriseops_gym/images`. To use another location, either pass
+`--output-dir` while building and set `ENTERPRISEOPS_NATIVE_SIF_DIR` while running, or override
+`native_sif_dir` in config. Explicit entries in `native_service_images` have highest precedence.
+
+With the default Apptainer profile, Gym automatically gives each service a host-backed
+`/app/mcp_databases` directory and removes it when the environment stops. No database-path
+environment variable or bind override is required.
 
 ## Select another Sandbox API provider
 
@@ -61,6 +65,8 @@ gym env start --benchmark enterpriseops \
 ```
 
 The provider must support `start`, `exec`, `stop`, and resolving declared service ports.
+Automatic database binds are added only when the resolved provider metadata identifies
+`sandbox-api: apptainer-cli`; Docker, Enroot, remote, and custom providers are left unchanged.
 
 ## Runtime model
 

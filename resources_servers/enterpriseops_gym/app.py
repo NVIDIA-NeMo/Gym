@@ -76,6 +76,9 @@ class EnterpriseOpsGymResourcesServerConfig(BaseResourcesServerConfig):
     # Native image references selected on ARM64. The Apptainer profile uses local SIFs;
     # other providers may use multi-architecture OCI references.
     native_service_images: Dict[str, str] = Field(default_factory=dict)
+    # Default location populated by ``arm64_images --all``. Explicit per-service
+    # image references above take precedence.
+    native_sif_dir: str = "~/.cache/nemo_gym/enterpriseops_gym/images"
     # The Apptainer profile keeps host-network services private; remote profiles bind all interfaces.
     service_bind_host: str = "127.0.0.1"
     # Provider-neutral settings merged into every managed service SandboxSpec.
@@ -182,6 +185,7 @@ class EnterpriseOpsGymResourcesServer(SimpleResourcesServer):
             sandbox_metadata=resolve_provider_metadata(self.config.sandbox_provider, global_config_dict),
             readiness_timeout_seconds=self.config.service_start_timeout_seconds,
             native_service_images=self.config.native_service_images,
+            native_sif_dir=Path(self.config.native_sif_dir).expanduser(),
             service_bind_host=self.config.service_bind_host,
             sandbox_spec=self.config.sandbox_spec,
         )

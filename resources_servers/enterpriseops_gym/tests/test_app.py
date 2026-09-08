@@ -19,6 +19,7 @@ import contextlib
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 
@@ -156,11 +157,13 @@ class TestSeedToolVerify:
             name="enterpriseops_gym",
             sandbox_provider="enterpriseops_sandbox",
             sandbox_spec={"resources": {"cpu": 2}},
+            native_sif_dir="/native/images",
         )
         server = EnterpriseOpsGymResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
         assert server._managed_runtime.sandbox_provider == {"test-provider": {"endpoint": "https://sandbox.example"}}
         assert server._managed_runtime.sandbox_spec == {"resources": {"cpu": 2}}
+        assert server._managed_runtime.native_sif_dir == Path("/native/images")
 
     def test_lifespan_starts_managed_services_and_uses_their_endpoints(self, gym_env, make_server) -> None:
         stub_url, state = gym_env

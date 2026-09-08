@@ -8,6 +8,7 @@ from resources_servers.enterpriseops_gym.arm64_images import (
     rebuild_all,
     render_definition,
     requirements_from_metadata,
+    resolve_output_dir,
 )
 from resources_servers.enterpriseops_gym.runtime import SERVICES
 
@@ -41,6 +42,25 @@ def test_build_command_uses_privileged_mode_without_fakeroot(tmp_path: Path) -> 
     assert command[:3] == ["sudo", "apptainer", "build"]
     assert "--fakeroot" not in command
     assert command[-2:] == [str(tmp_path / "service.sif"), str(tmp_path / "service.def")]
+
+
+def test_output_dir_prefers_explicit_cli_value(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ENTERPRISEOPS_NATIVE_SIF_DIR", str(tmp_path / "environment"))
+
+    assert resolve_output_dir(tmp_path / "explicit") == (tmp_path / "explicit").resolve()
+
+
+def test_output_dir_uses_environment_override(tmp_path: Path, monkeypatch) -> None:
+    configured = tmp_path / "environment"
+    monkeypatch.setenv("ENTERPRISEOPS_NATIVE_SIF_DIR", str(configured))
+
+    assert resolve_output_dir(None) == configured.resolve()
+
+
+def test_output_dir_defaults_to_enterpriseops_cache(monkeypatch) -> None:
+    monkeypatch.delenv("ENTERPRISEOPS_NATIVE_SIF_DIR", raising=False)
+
+    assert resolve_output_dir(None) == Path("~/.cache/nemo_gym/enterpriseops_gym/images").expanduser().resolve()
 
 
 def test_rebuild_all_pulls_missing_sources_and_writes_all_native_sifs(tmp_path: Path, monkeypatch) -> None:

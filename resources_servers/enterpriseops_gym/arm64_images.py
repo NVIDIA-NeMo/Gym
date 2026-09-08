@@ -6,12 +6,21 @@
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import tempfile
 from email.parser import Parser
 from pathlib import Path
 
 from resources_servers.enterpriseops_gym.runtime import SERVICES, EnterpriseOpsService
+
+
+DEFAULT_OUTPUT_DIR = Path("~/.cache/nemo_gym/enterpriseops_gym/images")
+
+
+def resolve_output_dir(output_dir: Path | None) -> Path:
+    configured = output_dir or Path(os.environ.get("ENTERPRISEOPS_NATIVE_SIF_DIR", DEFAULT_OUTPUT_DIR))
+    return configured.expanduser().resolve()
 
 
 def requirements_from_metadata(rootfs: Path) -> list[str]:
@@ -157,10 +166,9 @@ def main() -> None:
     if arguments.all:
         if arguments.output_sif is not None:
             parser.error("--output-sif cannot be used with --all")
-        if arguments.output_dir is None:
-            parser.error("--output-dir is required with --all")
-        source_cache_dir = arguments.source_cache_dir or arguments.output_dir.parent / "source-amd64"
-        rebuild_all(arguments.output_dir, source_cache_dir, use_sudo=arguments.sudo)
+        output_dir = resolve_output_dir(arguments.output_dir)
+        source_cache_dir = arguments.source_cache_dir or output_dir.parent / "source-amd64"
+        rebuild_all(output_dir, source_cache_dir, use_sudo=arguments.sudo)
         return
     if arguments.output_sif is None:
         parser.error("--output-sif is required with --source-sif")

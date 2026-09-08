@@ -129,6 +129,7 @@ async def test_arm64_missing_native_images_fail_before_asset_materialization(
         assets=assets,
         sandbox_provider={"test-provider": {}},
         sandbox_factory=sandbox_factory,
+        native_sif_dir=tmp_path / "missing-images",
     )
 
     with pytest.raises(RuntimeError, match="missing native ARM64 EnterpriseOps service image") as error:
@@ -234,6 +235,247 @@ def test_arm64_runtime_uses_configured_native_service_image(tmp_path: Path, monk
     )
 
     assert runtime.service_image(SERVICES["csm"]) == str(native_image)
+
+
+def test_arm64_runtime_uses_native_sif_dir_when_service_has_no_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runtime_module.platform, "machine", lambda: "aarch64")
+    native_sif_dir = tmp_path / "images"
+    native_sif_dir.mkdir()
+    native_image = native_sif_dir / "csm-arm64.sif"
+    native_image.write_bytes(b"native-arm64-sif")
+    runtime = EnterpriseOpsServiceRuntime(
+        assets=EnterpriseOpsAssets(cache_dir=tmp_path),
+        sandbox_provider={"test-provider": {}},
+        native_sif_dir=native_sif_dir,
+    )
+
+    assert runtime.service_image(SERVICES["csm"]) == str(native_image)
+
+
+def test_arm64_missing_native_image_names_default_path_and_build_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runtime_module.platform, "machine", lambda: "aarch64")
+    native_sif_dir = tmp_path / "images"
+    runtime = EnterpriseOpsServiceRuntime(
+        assets=EnterpriseOpsAssets(cache_dir=tmp_path),
+        sandbox_provider={"test-provider": {}},
+        native_sif_dir=native_sif_dir,
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        runtime.service_image(SERVICES["csm"])
+
+    assert str(native_sif_dir / "csm-arm64.sif") in str(error.value)
+    assert "python -m resources_servers.enterpriseops_gym.arm64_images --all" in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_apptainer_services_bind_host_backed_database_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runtime_module.platform, "machine", lambda: "x86_64")
+    assets = EnterpriseOpsAssets(cache_dir=tmp_path)
+    created = []
+
+    async def seed_root() -> Path:
+        return tmp_path / "source"
+
+    monkeypatch.setattr(assets, "ensure_seed_root", seed_root)
+
+    def sandbox_factory(spec):
+        sandbox = FakeSandbox(spec)
+        created.append(sandbox)
+        return sandbox
+
+    runtime = EnterpriseOpsServiceRuntime(
+        assets=assets,
+        sandbox_provider={"test-provider": {}},
+        sandbox_factory=sandbox_factory,
+        readiness_probe=lambda _url: asyncio.sleep(0),
+        sandbox_metadata={"sandbox-api": "apptainer-cli"},
+    )
+
+    await runtime.start()
+
+    for service, sandbox in zip(SERVICES.values(), created, strict=True):
+        binds = sandbox.spec.provider_options["binds"]
+        assert len(binds) == 1
+        source, destination = binds[0].split(":", 1)
+        assert Path(source).is_dir()
+        assert Path(source).name == service.domain
+        assert destination == "/app/mcp_databases"
+
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sandbox_api", ["docker-cli", "enroot", "daytona-sdk", "openshell-grpc", None])
+async def test_non_apptainer_services_do_not_receive_automatic_binds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sandbox_api: str | None
+) -> None:
+    monkeypatch.setattr(runtime_module.platform, "machine", lambda: "x86_64")
+    assets = EnterpriseOpsAssets(cache_dir=tmp_path)
+    created = []
+
+    async def seed_root() -> Path:
+        return tmp_path / "source"
+
+    monkeypatch.setattr(assets, "ensure_seed_root", seed_root)
+
+    def sandbox_factory(spec):
+        sandbox = FakeSandbox(spec)
+        created.append(sandbox)
+        return sandbox
+
+    metadata = {} if sandbox_api is None else {"sandbox-api": sandbox_api}
+    runtime = EnterpriseOpsServiceRuntime(
+        assets=assets,
+        sandbox_provider={"test-provider": {}},
+        sandbox_factory=sandbox_factory,
+        readiness_probe=lambda _url: asyncio.sleep(0),
+        sandbox_metadata=metadata,
+    )
+
+    await runtime.start()
+
+    assert all("binds" not in sandbox.spec.provider_options for sandbox in created)
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_apptainer_explicit_database_bind_takes_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runtime_module.platform, "machine", lambda: "x86_64")
+    assets = EnterpriseOpsAssets(cache_dir=tmp_path)
+    created = []
+    explicit_database_dir = tmp_path / "explicit"
+    explicit_database_dir.mkdir()
+    explicit_bind = f"{explicit_database_dir}:/app/mcp_databases"
+
+    async def seed_root() -> Path:
+        return tmp_path / "source"
+
+    monkeypatch.setattr(assets, "ensure_seed_root", seed_root)
+
+    def sandbox_factory(spec):
+        sandbox = FakeSandbox(spec)
+        created.append(sandbox)
+        return sandbox
+
+    runtime = EnterpriseOpsServiceRuntime(
+        assets=assets,
+        sandbox_provider={"test-provider": {}},
+        sandbox_factory=sandbox_factory,
+        readiness_probe=lambda _url: asyncio.sleep(0),
+        sandbox_metadata={"sandbox-api": "apptainer-cli"},
+        sandbox_spec={"provider_options": {"binds": explicit_bind}},
+    )
+
+    await runtime.start()
+
+    assert all(sandbox.spec.provider_options["binds"] == [explicit_bind] for sandbox in created)
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_apptainer_generated_database_bind_retains_existing_binds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runtime_module.platform, "machine", lambda: "x86_64")
+    assets = EnterpriseOpsAssets(cache_dir=tmp_path)
+    created = []
+
+    async def seed_root() -> Path:
+        return tmp_path / "source"
+
+    monkeypatch.setattr(assets, "ensure_seed_root", seed_root)
+
+    def sandbox_factory(spec):
+        sandbox = FakeSandbox(spec)
+        created.append(sandbox)
+        return sandbox
+
+    runtime = EnterpriseOpsServiceRuntime(
+        assets=assets,
+        sandbox_provider={"test-provider": {}},
+        sandbox_factory=sandbox_factory,
+        readiness_probe=lambda _url: asyncio.sleep(0),
+        sandbox_metadata={"sandbox-api": "apptainer-cli"},
+        sandbox_spec={"provider_options": {"binds": ["/host/input:/app/input:ro"]}},
+    )
+
+    await runtime.start()
+
+    for sandbox in created:
+        assert sandbox.spec.provider_options["binds"][0] == "/host/input:/app/input:ro"
+        assert len(sandbox.spec.provider_options["binds"]) == 2
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_apptainer_generated_database_root_is_removed_on_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runtime_module.platform, "machine", lambda: "x86_64")
+    assets = EnterpriseOpsAssets(cache_dir=tmp_path)
+
+    async def seed_root() -> Path:
+        return tmp_path / "source"
+
+    monkeypatch.setattr(assets, "ensure_seed_root", seed_root)
+    runtime = EnterpriseOpsServiceRuntime(
+        assets=assets,
+        sandbox_provider={"test-provider": {}},
+        sandbox_factory=FakeSandbox,
+        readiness_probe=lambda _url: asyncio.sleep(0),
+        sandbox_metadata={"sandbox-api": "apptainer-cli"},
+    )
+
+    await runtime.start()
+    generated_root = runtime.session_db_root
+    assert generated_root is not None and generated_root.is_dir()
+
+    await runtime.stop()
+
+    assert not generated_root.exists()
+    assert runtime.session_db_root is None
+
+
+@pytest.mark.asyncio
+async def test_apptainer_generated_database_root_is_removed_after_start_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runtime_module.platform, "machine", lambda: "x86_64")
+    generated_root = tmp_path / "generated"
+
+    def make_temp_dir(*, prefix: str) -> str:
+        assert prefix == "nemo-gym-enterpriseops-"
+        generated_root.mkdir()
+        return str(generated_root)
+
+    monkeypatch.setattr(runtime_module.tempfile, "mkdtemp", make_temp_dir)
+    assets = EnterpriseOpsAssets(cache_dir=tmp_path)
+
+    async def seed_root() -> Path:
+        return tmp_path / "source"
+
+    monkeypatch.setattr(assets, "ensure_seed_root", seed_root)
+    runtime = EnterpriseOpsServiceRuntime(
+        assets=assets,
+        sandbox_provider={"test-provider": {}},
+        sandbox_factory=FailingLaunchingSandbox,
+        sandbox_metadata={"sandbox-api": "apptainer-cli"},
+    )
+
+    with pytest.raises(RuntimeError, match="failed to start EnterpriseOps service csm"):
+        await runtime.start()
+
+    assert not generated_root.exists()
+    assert runtime.session_db_root is None
 
 
 @pytest.mark.asyncio

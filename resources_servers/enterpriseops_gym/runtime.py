@@ -7,10 +7,12 @@ import asyncio
 import contextlib
 import fcntl
 import hashlib
+import logging
 import os
 import platform
 import shutil
 import subprocess
+import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +22,9 @@ from zipfile import ZipFile
 
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxSpec
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -188,6 +193,7 @@ class EnterpriseOpsServiceRuntime:
         readiness_probe: Callable[[str], Any] | None = None,
         readiness_timeout_seconds: float = 60.0,
         native_service_images: Mapping[str, str] | None = None,
+        native_sif_dir: Path | str = "~/.cache/nemo_gym/enterpriseops_gym/images",
         service_bind_host: str = "127.0.0.1",
         sandbox_metadata: Mapping[str, str] | None = None,
         sandbox_spec: Mapping[str, Any] | None = None,
@@ -198,6 +204,7 @@ class EnterpriseOpsServiceRuntime:
         self.readiness_probe = readiness_probe or self._wait_for_endpoint
         self.readiness_timeout_seconds = readiness_timeout_seconds
         self.native_service_images = dict(native_service_images or {})
+        self.native_sif_dir = Path(native_sif_dir).expanduser()
         self.service_bind_host = service_bind_host
         self.sandbox_metadata = dict(sandbox_metadata or {})
         self.sandbox_spec = dict(sandbox_spec or {})
@@ -205,6 +212,7 @@ class EnterpriseOpsServiceRuntime:
         self.urls: dict[str, str] = {}
         self.endpoint_headers: dict[str, dict[str, str]] = {}
         self.sandboxes: list[Any] = []
+        self.session_db_root: Path | None = None
 
     def _create_sandbox(self, spec: SandboxSpec) -> AsyncSandbox:
         if self.sandbox_provider is None:
@@ -214,16 +222,20 @@ class EnterpriseOpsServiceRuntime:
     def service_image(self, service: EnterpriseOpsService) -> str:
         if not is_arm64_host():
             return service.image
-        image = self.native_service_images.get(service.domain)
-        if image is None:
-            raise RuntimeError(
-                "missing native ARM64 EnterpriseOps service image for "
-                f"{service.domain!r}; configure native_service_images for every domain"
-            )
+        image = self.native_service_images.get(
+            service.domain,
+            str(self.native_sif_dir / f"{service.domain}-arm64.sif"),
+        )
         if "://" not in image and (image.startswith(("/", ".")) or image.endswith(".sif")):
             image_path = Path(image).expanduser()
             if not image_path.is_file():
-                raise RuntimeError(f"native EnterpriseOps service image does not exist: {image_path}")
+                raise RuntimeError(
+                    "missing native ARM64 EnterpriseOps service image for "
+                    f"{service.domain!r}: {image_path}. "
+                    "Build the native image set with "
+                    "`python -m resources_servers.enterpriseops_gym.arm64_images --all`."
+                )
+            return str(image_path)
         return image
 
     def _validate_service_images(self) -> None:
@@ -246,6 +258,20 @@ class EnterpriseOpsServiceRuntime:
                 "domain": service.domain,
             }
         )
+        provider_options = dict(options.pop("provider_options", {}))
+        if self._uses_apptainer():
+            binds = provider_options.get("binds", [])
+            if isinstance(binds, str):
+                binds = [binds]
+            else:
+                binds = list(binds)
+            if not any(self._bind_destination(bind) == "/app/mcp_databases" for bind in binds):
+                if self.session_db_root is None:
+                    raise RuntimeError("EnterpriseOps Apptainer database storage was not initialized")
+                service_database_dir = self.session_db_root / service.domain
+                service_database_dir.mkdir(parents=True, exist_ok=True)
+                binds.append(f"{service_database_dir}:/app/mcp_databases")
+            provider_options["binds"] = binds
         known = SandboxSpec(
             image=self.service_image(service),
             ttl_s=options.pop("ttl_s", None),
@@ -255,12 +281,45 @@ class EnterpriseOpsServiceRuntime:
             files=options.pop("files", {}),
             metadata=metadata,
             resources=options.pop("resources", {}),
-            provider_options=options.pop("provider_options", {}),
+            provider_options=provider_options,
             ports=(service.port,),
         )
         if options:
             raise ValueError(f"unknown EnterpriseOps sandbox_spec keys: {', '.join(sorted(options))}")
         return known
+
+    def _uses_apptainer(self) -> bool:
+        return self.sandbox_metadata.get("sandbox-api") == "apptainer-cli"
+
+    @staticmethod
+    def _bind_destination(bind: Any) -> str | None:
+        if isinstance(bind, str):
+            parts = bind.split(":")
+            return parts[1] if len(parts) > 1 else None
+        if isinstance(bind, Mapping):
+            return bind.get("destination") or bind.get("target")
+        return None
+
+    def _prepare_session_db_root(self) -> None:
+        if not self._uses_apptainer():
+            return
+        configured_binds = self.sandbox_spec.get("provider_options", {}).get("binds", [])
+        if isinstance(configured_binds, str):
+            configured_binds = [configured_binds]
+        if any(self._bind_destination(bind) == "/app/mcp_databases" for bind in configured_binds):
+            logger.info("EnterpriseOps Apptainer services will use the configured /app/mcp_databases bind")
+            return
+        self.session_db_root = Path(tempfile.mkdtemp(prefix="nemo-gym-enterpriseops-"))
+        logger.info(
+            "EnterpriseOps Apptainer database storage: %s (automatically removed on shutdown)",
+            self.session_db_root,
+        )
+
+    def _cleanup_session_db_root(self) -> None:
+        session_db_root, self.session_db_root = self.session_db_root, None
+        if session_db_root is not None:
+            shutil.rmtree(session_db_root, ignore_errors=True)
+            logger.info("Removed EnterpriseOps Apptainer database storage: %s", session_db_root)
 
     async def _wait_for_endpoint(self, url: str) -> None:
         parsed = urlparse(url)
@@ -289,10 +348,17 @@ class EnterpriseOpsServiceRuntime:
         if self.sandboxes:
             return
         try:
+            logger.info(
+                "Starting EnterpriseOps services (architecture=%s, sandbox_api=%s)",
+                platform.machine(),
+                self.sandbox_metadata.get("sandbox-api", "unknown"),
+            )
             self._validate_service_images()
+            self._prepare_session_db_root()
             self.seed_root = await self.assets.ensure_seed_root()
             for service in SERVICES.values():
                 sandbox_spec = self._build_sandbox_spec(service)
+                logger.info("EnterpriseOps service %s image: %s", service.domain, sandbox_spec.image)
                 sandbox = self.sandbox_factory(sandbox_spec)
                 await sandbox.start()
                 self.sandboxes.append(sandbox)
@@ -322,15 +388,18 @@ class EnterpriseOpsServiceRuntime:
         self.urls = {}
         self.endpoint_headers = {}
         errors = []
-        stopping = asyncio.gather(
-            *(sandbox.stop() for sandbox in reversed(sandboxes)),
-            return_exceptions=True,
-        )
         try:
-            results = await asyncio.shield(stopping)
-        except asyncio.CancelledError:
-            await stopping
-            raise
+            stopping = asyncio.gather(
+                *(sandbox.stop() for sandbox in reversed(sandboxes)),
+                return_exceptions=True,
+            )
+            try:
+                results = await asyncio.shield(stopping)
+            except asyncio.CancelledError:
+                await stopping
+                raise
+        finally:
+            self._cleanup_session_db_root()
         errors = [result for result in results if isinstance(result, Exception)]
         if errors:
             failures = "; ".join(str(error) for error in errors)

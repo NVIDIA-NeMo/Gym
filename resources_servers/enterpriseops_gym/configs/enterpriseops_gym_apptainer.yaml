@@ -1,7 +1,7 @@
-# Apptainer sandbox provider config.
+# EnterpriseOps local Apptainer sandbox provider profile.
 #
-# EnterpriseOps uses this uniquely named default profile so a composed remote
-# provider can keep its standard `sandbox` name without merging two providers.
+# This benchmark-specific name avoids merging with another composed provider
+# named `sandbox` and keeps Apptainer settings out of the shared SandboxSpec.
 enterpriseops_apptainer_sandbox:
   default_metadata:
     sandbox-api: apptainer-cli
