@@ -45,6 +45,8 @@ from nemo_gym.server_utils import (
     apply_rollout_prefix,
     rollout_path_prefix,
 )
+from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
+from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
 class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
@@ -70,14 +72,21 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         self.setup_session_middleware(app)
 
-        app.post("/v1/responses")(self.responses)
+        agent_attributes = {"nemo.gym.server.name": self.config.name}
+        traced_responses = traced_endpoint(GymSpanGroup.AGENT, "gym.agent.responses", self.responses, agent_attributes)
+        app.post("/v1/responses")(traced_responses)
         # A self-call made with ``url_path_for_run`` lands on a prefixed twin.
         # ``responses`` recovers the rollout id from the path.
         # The same handler serves prefixed and unprefixed calls.
-        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/responses")(self.responses)
-        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/{TOKEN_CAPTURE_PATH_SEGMENT}/v1/responses")(self.responses)
+        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/v1/responses")(traced_responses)
+        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/{TOKEN_CAPTURE_PATH_SEGMENT}/v1/responses")(traced_responses)
 
-        run = self.run
+        # Traced *inside* rollout_context, not outside it. The span reads
+        # `current_rollout_id()` when it starts, so wrapping the other way round would
+        # start the span before the ContextVar is set and every rollout span would be
+        # missing its `nemo.gym.rollout.id` — which is exactly what a first run on real
+        # hardware showed.
+        run = traced_rollout_endpoint(self.run, agent_attributes)
 
         @wraps(run)
         async def run_with_rollout_context(*args: Any, **kwargs: Any) -> BaseVerifyResponse:

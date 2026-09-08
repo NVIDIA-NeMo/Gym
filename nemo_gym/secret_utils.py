@@ -26,14 +26,14 @@ def recursively_hide_secrets(dict_config: DictConfig) -> None:
             if isinstance(v, (DictConfig, dict)):
                 hide(v)
             elif isinstance(v, (ListConfig, list)):
-                if "token" in k or "key" in k:
+                if "token" in k or "key" in k or "header" in k:
                     node[k] = ["****"] * len(v)
                 else:
                     for inner_v in v:
                         if isinstance(inner_v, (DictConfig, dict)):
                             hide(inner_v)
             else:
-                if "token" in k or "key" in k:
+                if "token" in k or "key" in k or "header" in k:
                     node[k] = "****"
 
     with open_dict(dict_config):
