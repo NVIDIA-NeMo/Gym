@@ -1,0 +1,102 @@
+# Modal sandbox provider config.
+#
+# `sandbox` is the instance name an agent references via `sandbox_provider: sandbox`;
+# the child key `modal` selects the provider class and its value is passed to the
+# provider constructor.
+#
+# Every shipped provider config binds the same name `sandbox`, so swapping providers is
+# swapping this config path in `+config_paths` (no agent edit):
+#
+#   gym env start \
+#     --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
+#     --config nemo_gym/sandbox/providers/modal/configs/modal.yaml \
+#     --config responses_api_models/vllm_model/configs/vllm_model.yaml
+#
+# Requires the SDK: `pip install 'modal>=1.5.5,<2.0.0'` and Modal credentials via
+# `modal token new`, or MODAL_TOKEN_ID / MODAL_TOKEN_SECRET in the environment.
+# Nothing secret goes in this file.
+#
+# `default_metadata` (optional) is merged into every sandbox's spec metadata
+# (SandboxSpec.metadata) and lands on the Modal sandbox as tags; an agent's own
+# sandbox_spec.metadata overrides it.
+sandbox:
+  default_metadata:
+    sandbox-api: modal
+  modal:
+    connection:
+      # Sandboxes belong to a Modal App; it is looked up once per provider and
+      # created when missing. Use one app per project so `modal sandbox list`
+      # and the dashboard group them.
+      app_name: ${oc.env:NEMO_GYM_MODAL_APP,nemo-gym-sandboxes}
+      # Leave null to use the active profile or workspace default.
+      environment_name: ${oc.env:MODAL_ENVIRONMENT,null}
+      create_app_if_missing: true
+
+    create:
+      # Hard sandbox lifetime (Modal `timeout`). SandboxSpec.ttl_s overrides it.
+      timeout_s: 3600.0
+      # Modal activity: active exec, stdin writes, or an open tunnel connection.
+      idle_timeout_s: null
+      # With no SandboxSpec.entrypoint the container runs this keep-alive so exec
+      # has something to attach to. The loop form works under dash and busybox.
+      keepalive_shell: ["/bin/sh", "-c"]
+      keepalive_cmd: "while :; do sleep 3600; done"
+      # modal.Secret name with REGISTRY_USERNAME / REGISTRY_PASSWORD for private
+      # images. SandboxSpec.provider_options.image_secret overrides per sandbox.
+      image_secret: null
+      # modal.Secret names injected into every sandbox as env vars.
+      secrets: []
+      # Placement. Leave null to let Modal choose.
+      cloud: null
+      region: null
+      block_network: false
+      # Modal terminates TLS in front of the sandbox's plaintext HTTP service.
+      # unencrypted also exposes raw public TCP and returns an http:// endpoint.
+      port_mode: encrypted
+      # Stamped before spec.metadata / provider_options.tags; combined limit: 10 tags.
+      default_tags:
+        nemo-gym: sandbox
+      # disk_gib is not settable per sandbox on Modal. False warns once per
+      # image; true rejects the create. Use provider_options.volumes instead.
+      strict_resources: false
+      # Used when resources.gpu is set without gpu_type.
+      default_gpu_type: any
+
+    probe:
+      # Readiness probe run through exec after create. Null disables it.
+      command: "printf ok"
+      expected_stdout: "ok"
+      timeout_s: 30.0
+      # Overall budget for the probe to pass; SandboxSpec.ready_timeout_s
+      # overrides it per sandbox.
+      deadline_s: 180.0
+      stable_count: 1
+      stable_delay_s: 0.5
+
+    exec:
+      # Fallback only when timeout_s=None. AsyncSandbox.exec() normally supplies
+      # its own 180s budget; pass an explicit timeout for longer commands.
+      default_timeout_s: 180.0
+      # exec receives a shell string; this shell runs it. Use ["/bin/bash", "-lc"]
+      # for images where a login shell is needed to pick up PATH.
+      shell: ["/bin/sh", "-c"]
+      # Modal has no native per-exec user. A `user` is honoured only when
+      # allow_user_rewrite is true, by wrapping the command in `su -s SHELL USER -c`.
+      user: null
+      allow_user_rewrite: false
+
+    files:
+      # SDK streaming copies create parents and avoid buffering local files.
+      # A cancelled/timed-out transfer discards its sandbox to stop partial writes.
+      transfer_timeout_s: 600.0
+
+    operations:
+      # Retries for transient transport/5xx failures. Deterministic errors
+      # (auth, not found, invalid, rate-limited, timeouts) are not retried.
+      # Sandbox creation is never retried: it is not idempotent.
+      retries: 2
+      retry_delay_s: 0.5
+      retry_max_delay_s: 8.0
+      # How long to wait for Modal to publish tunnel metadata in endpoint().
+      tunnel_timeout_s: 50.0
+      close_timeout_s: 60.0
