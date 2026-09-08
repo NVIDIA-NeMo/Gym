@@ -207,12 +207,12 @@ cleanup_local_compile_dir() {{
 }}
 trap cleanup_local_compile_dir EXIT
 mkdir -p -- "$local_work_dir"
-cp -a -- "$shared_work_dir"/. "$local_work_dir"/
+cp -R -- "$shared_work_dir"/. "$local_work_dir"/
 cd "$local_work_dir"
 compile_status=0
 ./compile.sh || compile_status=$?
 publish_status=0
-cp -a -- "$local_work_dir"/. "$shared_work_dir"/ || publish_status=$?
+cp -R -- "$local_work_dir"/. "$shared_work_dir"/ || publish_status=$?
 if [ "$publish_status" -ne 0 ]; then
   exit "$publish_status"
 fi
@@ -429,7 +429,7 @@ def _precompile_problem(
 
 def _test_result_from_compile(compile_result: dict) -> dict:
     return {
-        "compile_success": not compile_result.get("stderr"),
+        "compile_success": compile_result.get("process_status") == "completed",
         "compile_stdout": compile_result.get("stdout", ""),
         "compile_stderr": compile_result.get("stderr", ""),
         "run_stdout": "",

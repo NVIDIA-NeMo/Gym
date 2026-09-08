@@ -30,6 +30,7 @@ def _execute_shell(_tls, _sandbox, command, *, language, timeout):
         check=False,
     )
     return {
+        "process_status": "completed" if completed.returncode == 0 else "error",
         "stdout": completed.stdout,
         "stderr": completed.stderr,
         "returncode": completed.returncode,
@@ -92,6 +93,31 @@ def test_compile_without_local_storage_preserves_shared_behavior(monkeypatch, tm
     assert (shared_work_dir / "compile_pwd.txt").read_text().strip() == str(shared_work_dir)
 
 
+def test_compile_success_uses_process_status_when_stderr_has_warnings():
+    result = ccc_eval._test_result_from_compile(
+        {
+            "process_status": "completed",
+            "stdout": "",
+            "stderr": "compiler warning\n",
+        }
+    )
+
+    assert result["compile_success"] is True
+    assert result["compile_stderr"] == "compiler warning\n"
+
+
+def test_compile_failure_uses_process_status_when_stderr_is_empty():
+    result = ccc_eval._test_result_from_compile(
+        {
+            "process_status": "error",
+            "stdout": "",
+            "stderr": "",
+        }
+    )
+
+    assert result["compile_success"] is False
+
+
 def test_compiled_solution_is_reused_without_recompiling_per_test(monkeypatch, tmp_path):
     shared_dir = tmp_path / "shared"
     precompiled_dir = shared_dir / "ccc_pre_toy"
@@ -148,7 +174,7 @@ def test_compile_failure_skips_test_staging_and_sandbox_execution(monkeypatch, t
     result = ccc_eval.run_test_case(
         {
             "compiled_solution_dir": str(shared_dir / "missing"),
-            "compile_result": {"stdout": "", "stderr": "compile failed"},
+            "compile_result": {"process_status": "error", "stdout": "", "stderr": "compile failed"},
             "test_input": "",
             "test_output": "",
             "time_scale": 1.0,
