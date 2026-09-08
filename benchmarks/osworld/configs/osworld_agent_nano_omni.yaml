@@ -1,0 +1,41 @@
+# Complete Nemotron 3 Nano Omni OSWorld profile: the upstream agent scaffold,
+# the external vLLM transport, and Gym Docker Sandbox execution.
+config_paths:
+  - responses_api_agents/osworld_agent/configs/osworld_agent.yaml
+
+policy_base_url: ${oc.env:NANO_OMNI_VLLM_BASE_URL,http://127.0.0.1:8000/v1}
+policy_api_key: ${oc.env:NANO_OMNI_VLLM_API_KEY,local-vllm}  # pragma: allowlist secret
+policy_model_name: ${oc.env:NANO_OMNI_VLLM_MODEL,nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16}
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}  # pragma: allowlist secret
+      model: ${policy_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      preserve_reasoning_in_assistant_content: true
+      replace_developer_role_with_system: false
+      sequential_reasoning_allowed: true
+      is_responses_native: false
+      chat_template_kwargs: null
+      extra_body: null
+      default_headers: {}
+
+osworld_nano_omni_agent:
+  _inherit_from: osworld_simple_agent
+  responses_api_agents:
+    osworld_agent:
+      runner_name: nemotron_v3_nano_omni_agent
+      provider_name: docker
+      sandbox_provider: osworld_sandbox
+      max_steps: 100
+      max_trajectory_length: 3
+      max_tokens: 4096
+      temperature: 0.6
+      top_p: 0.95
+      sleep_after_execution: 5.0
+      task_timeout: 7200

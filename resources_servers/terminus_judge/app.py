@@ -32,6 +32,7 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -484,6 +485,8 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                 reward = 1.0
                 failure_reason = FailureCode.NONE
 
+        except JudgeError:
+            raise
         except Exception as e:
             failure_reason = FailureCode.UNKNOWN_ERROR
             logger.error(f"terminus_judge verify | uuid={body.uuid} unknown error: {type(e).__name__} {e}")
@@ -520,20 +523,14 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
         ctx = self._judge_endpoint_max_concurrency or nullcontext()
         async with ctx:
             try:
-                response = await self.server_client.post(
+                judge_response = await call_judge(
+                    self.server_client,
                     server_name=cfg.judge_model_server.name,
                     url_path="/v1/responses",
                     json=responses_create_params,
+                    response_model=NeMoGymResponse,
                 )
 
-                judge_response = NeMoGymResponse.model_validate(await response.json())
-
-            except asyncio.TimeoutError:
-                print(
-                    "DEBUG: TerminusJudgeResourcesServer: Judge model server timeout",
-                    flush=True,
-                )
-                raise RuntimeError("Judge model server timeout")
             except Exception as e:
                 print(
                     f"DEBUG: TerminusJudgeResourcesServer: judge model server HTTP POST error: {type(e).__name__} {e}",

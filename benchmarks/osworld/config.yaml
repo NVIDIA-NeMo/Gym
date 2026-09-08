@@ -1,0 +1,41 @@
+# OSWorld benchmark composition. The agent implementation stays under
+# responses_api_agents; benchmark datasets and the default model transport are
+# selected here.
+config_paths:
+  - responses_api_agents/osworld_agent/configs/osworld_agent.yaml
+  - responses_api_models/openai_model/configs/openai_model.yaml
+
+osworld_simple_agent:
+  responses_api_agents:
+    osworld_agent:
+      datasets:
+        - name: train
+          type: train
+          jsonl_fpath: benchmarks/osworld/data/train.jsonl
+          gitlab_identifier:
+            dataset_name: osworld
+            version: 0.0.1
+            artifact_fpath: train.jsonl
+          huggingface_identifier:
+            repo_id: xlangai/osworld
+          license: Apache 2.0
+        - name: validation
+          type: validation
+          jsonl_fpath: benchmarks/osworld/data/validation.jsonl
+          gitlab_identifier:
+            dataset_name: osworld
+            version: 0.0.1
+            artifact_fpath: validation.jsonl
+          huggingface_identifier:
+            repo_id: xlangai/osworld
+          license: Apache 2.0
+        - name: example
+          type: example
+          jsonl_fpath: benchmarks/osworld/data/example.jsonl
+          license: Apache 2.0
+        - name: osworld
+          type: benchmark
+          jsonl_fpath: benchmarks/osworld/data/example.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/osworld/prepare.py
+          license: Apache 2.0

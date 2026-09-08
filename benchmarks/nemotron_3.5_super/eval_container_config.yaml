@@ -1,0 +1,122 @@
+config_paths:
+- benchmarks/gpqa/config.yaml
+- benchmarks/tau2/configs/banking_bm25_grep_artificial_analysis.yaml
+- benchmarks/tau2/configs/tau2.yaml
+- benchmarks/aalcr/config.yaml
+- benchmarks/scicode/config.yaml
+- benchmarks/omniscience/config.yaml
+- benchmarks/nemotron_3.5_super/benchmark_configs/hle_no_tools.yaml
+- benchmarks/swebench/verified/opencode.yaml
+- benchmarks/swebench/multilingual/opencode.yaml
+- benchmarks/deepswe/opencode.yaml
+- benchmarks/terminal_bench_2_1/terminus_2.yaml
+- benchmarks/swebench/pro/opencode.yaml
+- responses_api_models/vllm_model/configs/vllm_model.yaml
+- benchmarks/nemotron_3.5_super/sandbox_utils.yaml
+
+########################################
+# START Secrets
+# The following secrets identified with `dummy` must be filled in via env.yaml at runtime
+########################################
+
+nv_inference_api_key: dummy  # pragma: allowlist secret
+
+# Used in SWE Verified
+sandbox:
+  opensandbox:
+    connection:
+      domain: dummy
+      api_key: dummy  # pragma: allowlist secret
+
+# Create your own key https://artificialanalysis.ai/login -> "API Access" -> "Your API keys"
+# Each key has its own rate limit for Crit PT benchmarks.
+critpt_benchmark_resources_server:
+  resources_servers:
+    critpt:
+      allowed_agents: [critpt_agent]
+      api_key: dummy  # pragma: allowlist secret
+
+########################################
+# END Secrets
+########################################
+
+########################################
+# START Nvidia-specific configs
+########################################
+
+policy_base_url: dummy
+policy_api_key: dummy  # pragma: allowlist secret
+policy_model_name: dummy
+
+# Used in Tau3 Banking
+gpt-5_4-mini-2026-03-17:
+  responses_api_models:
+    openai_model:
+      openai_base_url: https://inference-api.nvidia.com/v1
+      openai_model: azure/openai/gpt-5.4-mini
+      openai_api_key: ${nv_inference_api_key}
+
+# Used in AA-LCR
+Qwen3-235B-A22B-Instruct-2507-FP8:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      model: nvidia/qwen/qwen-235b
+      base_url: https://inference-api.nvidia.com/v1
+      api_key: ${nv_inference_api_key}
+
+# Used in Tau2
+gpt-5_2-2025-12-11:
+  responses_api_models:
+    openai_model:
+      openai_base_url: https://inference-api.nvidia.com/v1
+      openai_model: openai/openai/gpt-5.2
+      openai_api_key: ${nv_inference_api_key}
+
+# Used in AA-Omniscience
+# TODO @bxyu-nvidia: Need to properly rename this and add this Gemini config
+genrm_model:
+  responses_api_models:
+    openai_model:
+      openai_base_url: https://inference-api.nvidia.com/v1
+      openai_model: gcp/google/gemini-3-flash-preview
+      openai_api_key: ${nv_inference_api_key}
+      max_concurrent_requests: 16
+
+hle_benchmark_equivalence_judge_model:
+  responses_api_models:
+    openai_model:
+      openai_base_url: https://inference-api.nvidia.com/v1
+      openai_api_key: ${nv_inference_api_key}
+      openai_model: azure/openai/gpt-4o
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      num_workers: 16
+
+# TODO @bxyu-nvidia: Remove these overrides to turn on various benchmarks after we do batched eval studies. This is a placeholder for container build.
+swebench_verified_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets: []
+swebench_multilingual_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets: []
+deepswe_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets: []
+terminal_bench_2_1_terminus_2_sandboxed_agent:
+  responses_api_agents:
+    terminus_2_sandboxed_agent:
+      datasets: []
+swebench_pro_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets: []
+
+########################################
+# END Nvidia-specific configs.
+########################################

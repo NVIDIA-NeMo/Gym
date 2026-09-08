@@ -30,7 +30,7 @@ from nemo_gym.cli.main import main as gym_main
 LEGACY = {
     "run": ["env", "start"],
     "test": ["env", "test"],
-    "test_all": ["env", "test"],
+    "test_all": ["env", "test", "--all"],
     "dev_test": ["dev", "test"],
     "init_resources_server": ["env", "init"],
     "list_benchmarks": ["list", "benchmarks"],
@@ -63,8 +63,7 @@ def main() -> None:
     # `reinstall` has no `gym` equivalent (`gym install` was dropped); point users at the uv command it runs.
     if key == "reinstall":
         print(
-            f"⚠  `{alias}` is deprecated and will be removed in a future release; "
-            f"run `uv sync --extra dev --group docs` instead.",
+            f"⚠  `{alias}` is deprecated and will be removed in a future release; run `uv sync --extra dev` instead.",
             file=sys.stderr,
         )
         dispatch("nemo_gym.cli.general:reinstall", sys.argv[1:])

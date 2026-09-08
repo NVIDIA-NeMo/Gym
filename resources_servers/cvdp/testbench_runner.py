@@ -13,29 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Apptainer testbench runner.
-
-This module owns the *mechanism* of CVDP verification: translating a dataset's
-docker-compose test harness (the cocotb testbench + compose file each task ships)
-into Apptainer calls and executing it in a sandbox. The resources server
-(``app.py``) owns the *policy* (the HTTP contract and reward scoring) and
-delegates execution to :class:`TestbenchRunner`.
-
-Named for what it runs — CVDP's per-task *test harness* — and deliberately kept
-distinct from the "harness" concept on the agent side (a coding agent driven by
-``responses_api_agents/cvdp_agent/``).
-
-Layout:
-- module-level pure functions: compose -> Apptainer translation (stateless).
-- :class:`TestbenchRunner`: stateful executor (SIF cache, per-image locks, the
-  lazily-built sandbox provider).
-"""
+"""Run CVDP Compose harnesses through the common sandbox API."""
 
 import asyncio
-import contextlib
 import hashlib
+import json
 import os
+import posixpath
 import shlex
+import tarfile
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
@@ -43,20 +29,16 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 import yaml
 
 from nemo_gym.sandbox import (
+    AsyncSandbox,
     SandboxCreateError,
-    SandboxProvider,
     SandboxSpec,
-    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
 )
 
 
 if TYPE_CHECKING:
     from resources_servers.cvdp.app import CVDPResourcesServerConfig
-
-
-# ----------------------------
-# Compose -> Apptainer translation (pure helpers)
-# ----------------------------
 
 
 def _safe_workspace_path(workdir: Path, rel: str) -> Optional[Path]:
@@ -81,9 +63,7 @@ def _safe_workspace_path(workdir: Path, rel: str) -> Optional[Path]:
 
 
 def _apply_substitutions(content: str, config: "CVDPResourcesServerConfig") -> str:
-    """
-    Replace image placeholders in harness file content — mirrors repository.apply_template_substitution() but with Apptainer syntax.
-    """
+    """Replace image placeholders in harness content."""
     substitutions = {
         "__VERIF_EDA_IMAGE__": config.eda_sim_image,
         "__OSS_SIM_IMAGE__": config.oss_sim_image,
@@ -95,87 +75,83 @@ def _apply_substitutions(content: str, config: "CVDPResourcesServerConfig") -> s
     return content
 
 
-def _resolve_image_for_service(
+def _normalize_build_file(path: str, content: str, config: "CVDPResourcesServerConfig") -> str:
+    content = _apply_substitutions(content, config)
+    if (
+        posixpath.basename(path).startswith("Dockerfile")
+        and config.oss_pnr_image.startswith("ghcr.io/hdl/impl/pnr")
+        and f"FROM {config.oss_pnr_image}" in content
+    ):
+        content = content.replace(
+            "https://bootstrap.pypa.io/get-pip.py",
+            "https://bootstrap.pypa.io/pip/3.9/get-pip.py",
+        )
+    return content
+
+
+def _service_build_key(
     compose_data: dict,
     service_name: str,
     harness_files: Dict[str, Optional[str]],
     config: "CVDPResourcesServerConfig",
-) -> Tuple[str, List[str]]:
-    """
-    Resolve the container image for a service that uses ``build:`` instead of
-    ``image:`` in its docker-compose definition.
-
-    Docker Compose handles ``build:`` natively by reading a Dockerfile and
-    building an image on the fly.  Apptainer cannot do this directly, so we
-    parse the Dockerfile to extract the base image (FROM) and any RUN / ADD
-    commands, then replay them via ``apptainer build`` with a def file.
-
-    Returns (base_image, post_commands) where *post_commands* are shell
-    commands for the ``%post`` section of an Apptainer definition file.
-    If the service already has ``image:``, returns (image, []).
-    """
+) -> str:
+    """Return the deterministic manifest key for a Compose ``build:`` service."""
     svc = (compose_data.get("services") or {}).get(service_name, {})
-    image = svc.get("image", "")
-    if image:
-        return image, []
-
-    # Determine Dockerfile path from build: config
     build_cfg = svc.get("build", {})
+    substituted_files = {
+        path: _normalize_build_file(path, content, config)
+        for path, content in sorted(harness_files.items())
+        if content is not None
+    }
     if isinstance(build_cfg, str):
-        dockerfile_path = os.path.join(build_cfg, "Dockerfile")
-    elif isinstance(build_cfg, dict):
-        dockerfile_path = build_cfg.get("dockerfile", "Dockerfile")
+        dockerfile_path = posixpath.join(build_cfg, "Dockerfile")
     else:
-        return "", []
+        context = str((build_cfg or {}).get("context") or ".")
+        dockerfile_path = posixpath.join(context, str((build_cfg or {}).get("dockerfile") or "Dockerfile"))
+    dockerfile_path = posixpath.normpath(dockerfile_path)
+    dockerfile = substituted_files.get(posixpath.normpath(dockerfile_path))
+    if dockerfile is None:
+        matches = [
+            content
+            for path, content in substituted_files.items()
+            if posixpath.basename(path) == posixpath.basename(dockerfile_path)
+        ]
+        dockerfile = matches[0] if len(matches) == 1 else ""
 
-    # Look for the Dockerfile in harness_files (try multiple path variants)
-    dockerfile_content = None
-    candidates = [
-        dockerfile_path,
-        f"src/{dockerfile_path}",
-        dockerfile_path.replace("src/", ""),
-    ]
-    for candidate in candidates:
-        for hf_path, hf_content in harness_files.items():
-            if hf_content and (hf_path == candidate or hf_path.endswith(os.path.basename(candidate))):
-                dockerfile_content = _apply_substitutions(hf_content, config)
+    # Include local files only when the Dockerfile can consume them.
+    uses_local_context = False
+    for line in dockerfile.splitlines():
+        parts = shlex.split(line, comments=True)
+        if parts and parts[0].upper() in {"ADD", "COPY"}:
+            sources = [part for part in parts[1:-1] if not part.startswith("--")]
+            if any("://" not in source for source in sources):
+                uses_local_context = True
                 break
-        if dockerfile_content:
-            break
+    payload_files = substituted_files if uses_local_context else {dockerfile_path: dockerfile}
+    payload = json.dumps({"build": build_cfg, "files": payload_files}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
-    if not dockerfile_content:
-        return "", []
 
-    # Parse Dockerfile: extract FROM base image and RUN/ADD commands
-    base_image = ""
-    post_commands: List[str] = []
-    for line in dockerfile_content.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.upper().startswith("FROM "):
-            parts = line.split()
-            base_image = parts[1] if len(parts) > 1 else ""
-            if " AS " in base_image.upper():
-                base_image = base_image.split()[0]
-        elif line.upper().startswith("RUN "):
-            post_commands.append(line[4:].strip())
-        elif line.upper().startswith("ADD ") and "http" in line.lower():
-            # Convert ADD <url> <dest> to wget/curl
-            parts = line.split()
-            if len(parts) >= 3:
-                url, dest = parts[1], parts[2]
-                post_commands.append(f"wget -q -O {dest} {url} || curl -sL -o {dest} {url}")
-
-    return base_image, post_commands
+def _resolve_service_image(
+    compose_data: dict,
+    service_name: str,
+    harness_files: Dict[str, Optional[str]],
+    config: "CVDPResourcesServerConfig",
+    prepared_images: Dict[str, str],
+) -> Tuple[str, Optional[str]]:
+    """Resolve a direct image or a prebuilt image from the preparation manifest."""
+    svc = (compose_data.get("services") or {}).get(service_name, {})
+    image = str(svc.get("image") or "").removeprefix("docker://")
+    if image:
+        return image, None
+    if not svc.get("build"):
+        return "", None
+    key = _service_build_key(compose_data, service_name, harness_files, config)
+    return prepared_images.get(key, ""), key
 
 
 def _parse_compose_service(compose_content: str, service_name: str) -> Dict[str, Any]:
-    """
-    Extract image, command, entrypoint, volumes, working_dir, and environment
-    from a docker-compose service definition.  The compose YAML is only used as
-    metadata — Apptainer handles the actual execution.
-    """
+    """Extract the supported fields from a Compose service."""
     data = yaml.safe_load(compose_content) or {}
     service = (data.get("services") or {}).get(service_name, {})
     return {
@@ -188,61 +164,62 @@ def _parse_compose_service(compose_content: str, service_name: str) -> Dict[str,
     }
 
 
-def _build_binds(workdir: str, compose_volumes: List[str]) -> List[str]:
-    """
-    Build a list of Apptainer bind specs ("src:dst[:opts]") from:
-    1. The standard /code/* workspace mounts
-    2. Non-/code volumes from the docker-compose service definition
+def _compose_workspace_links(compose_volumes: List[Any], workspace: str = "/code") -> List[Tuple[str, str]]:
+    """Translate Compose bind mounts into in-sandbox workspace symlinks."""
+    links: List[Tuple[str, str]] = []
+    for volume in compose_volumes:
+        if isinstance(volume, str):
+            parts = volume.split(":", 2)
+            if len(parts) < 2:
+                continue
+            source, target = parts[0], parts[1]
+        elif isinstance(volume, dict):
+            source = str(volume.get("source") or volume.get("src") or "")
+            target = str(volume.get("target") or volume.get("dst") or "")
+        else:
+            raise ValueError(f"unsupported Compose volume entry: {volume!r}")
 
-    This is the provider-facing form (one string per mount), passed through
-    ``SandboxSpec.provider_options['binds']``.
-    """
-    binds: List[str] = []
+        target = posixpath.normpath(target)
+        if not target.startswith("/"):
+            raise ValueError(f"Compose volume target must be absolute: {target!r}")
+        if target in {"/", workspace}:
+            raise ValueError(f"Compose volume target cannot replace the sandbox workspace root: {target!r}")
+        if os.path.isabs(source):
+            raise ValueError(f"host-absolute Compose volume is not provider-neutral: {source!r}")
+        source = posixpath.normpath(source.removeprefix("./"))
+        if source in {"", ".", ".."} or source.startswith("../"):
+            raise ValueError(f"Compose volume escapes the uploaded workspace: {source!r}")
+        uploaded_source = posixpath.join(workspace, source)
+        if uploaded_source != target:
+            links.append((uploaded_source, target))
+    return links
 
-    # Standard /code/* mounts
-    for vol in ["docs", "rundir", "rtl", "verif", "src"]:
-        binds.append(f"{workdir}/{vol}:/code/{vol}")
 
-    # Compose-defined volumes (skip /code mounts — handled above)
-    for vol_str in compose_volumes:
-        parts = vol_str.split(":")
-        host_path = parts[0]
-        container_path = parts[1] if len(parts) > 1 else host_path
-        opts = parts[2] if len(parts) > 2 else ""
-
-        if "/code" in container_path:
-            continue
-
-        # Resolve relative paths against workdir
-        if host_path.startswith("./") or host_path.startswith("../") or not os.path.isabs(host_path):
-            host_path = os.path.normpath(os.path.join(workdir, host_path))
-
-        bind_spec = f"{host_path}:{container_path}"
-        if opts:
-            bind_spec += f":{opts}"
-        binds.append(bind_spec)
-
-    return binds
+def _pack_workspace(workdir: Path, archive: Path) -> None:
+    """Create the opaque workspace archive transferred between sandbox services."""
+    with tarfile.open(archive, "w:gz") as tar:
+        for child in sorted(workdir.iterdir()):
+            tar.add(child, arcname=child.name)
 
 
 def _load_dot_env(workdir: str) -> Dict[str, str]:
-    """
-    Parse the src/.env file (KEY=value lines) from the workspace.
-    Docker Compose auto-loads env_file directives; Apptainer does not,
-    so we read them ourselves and pass them via --env.
-    """
+    """Load Compose-style variables from ``src/.env``."""
     env_path = os.path.join(workdir, "src", ".env")
-    env_vars: Dict[str, str] = {}
     if not os.path.isfile(env_path):
-        return env_vars
+        return {}
     with open(env_path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "=" in line:
-                key, _, val = line.partition("=")
-                env_vars[key.strip()] = val.strip()
+        return _parse_dot_env(f.read())
+
+
+def _parse_dot_env(content: str) -> Dict[str, str]:
+    env_vars: Dict[str, str] = {}
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, _, val = line.partition("=")
+            env_vars[key.strip()] = val.strip()
     return env_vars
 
 
@@ -305,27 +282,24 @@ def _build_command(entrypoint: Any, command: Any) -> List[str]:
 
 
 class TestbenchRunner:
-    """Runs a dataset's docker-compose harness inside Apptainer.
+    """Run a dataset's Compose-described harness through a configured sandbox provider."""
 
-    Owns the SIF cache, per-image pull/build locks, and the lazily-constructed
-    sandbox provider. Construct once per server (the apptainer binary is only
-    required when a sandbox is actually started, so this can be built on hosts
-    without apptainer).
-    """
-
-    def __init__(self, config: "CVDPResourcesServerConfig") -> None:
+    def __init__(
+        self,
+        config: "CVDPResourcesServerConfig",
+        named_sandbox_configs: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self.config = config
-        self._sif_locks: Dict[str, asyncio.Lock] = {}
-        self._sif_lock_guard = asyncio.Lock()
-        # Config-selected sandbox provider — built lazily on first use so this
-        # can be constructed on hosts without the backend (e.g. apptainer) present.
-        self._provider: Optional[SandboxProvider] = None
-        self._provider_lock = asyncio.Lock()
-        cache = config.sif_cache_dir
-        if not cache:
-            cache = os.path.join(Path.home(), ".cache", "nemo-gym", "sif")
-        self._sif_cache_dir = cache
-        os.makedirs(self._sif_cache_dir, exist_ok=True)
+        self._sandbox_provider = resolve_provider_config(config.sandbox_provider, named_sandbox_configs)
+        self._sandbox_metadata = resolve_provider_metadata(config.sandbox_provider, named_sandbox_configs)
+        self._prepared_images = dict(config.prepared_images)
+        if config.prepared_image_manifest:
+            manifest_path = Path(config.prepared_image_manifest).expanduser()
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            images = manifest.get("images", manifest)
+            if not isinstance(images, dict):
+                raise ValueError(f"invalid CVDP prepared image manifest: {manifest_path}")
+            self._prepared_images.update({str(key): str(value) for key, value in images.items()})
 
     async def run(
         self,
@@ -334,19 +308,7 @@ class TestbenchRunner:
         task_id: str,
         context_files: Optional[Dict[str, str]] = None,
     ) -> Tuple[int, str, List[Dict]]:
-        """
-        Write harness + RTL to a temp workspace and run verification via Apptainer.
-
-        Mirrors repository.py prepare() + obj_harness():
-          Workspace layout:
-            workdir/
-              docker-compose.yml   (parsed for service metadata, not executed directly)
-              src/                 (test scripts and .env from harness_files)
-              rtl/                 (model-generated RTL, bound as /code/rtl)
-              verif/               (empty, bound as /code/verif)
-              docs/                (empty, bound as /code/docs)
-              rundir/              (execution output, bound as /code/rundir)
-        """
+        """Run the task harness against the supplied RTL files."""
         context_files = context_files or {}
         tmp_root = self.config.harness_workspace_dir.strip()
         if tmp_root:
@@ -354,10 +316,8 @@ class TestbenchRunner:
         with tempfile.TemporaryDirectory(prefix=f"cvdp_{task_id}_", dir=tmp_root or None) as workdir:
             workdir_path = Path(workdir)
 
-            # Create all mount dirs — mirrors repository.create_folders()
             for d in ["rtl", "verif", "docs", "src", "rundir"]:
                 (workdir_path / d).mkdir()
-            # Optional per-rollout temp storage; cleaned when TemporaryDirectory exits.
             if self.config.container_tmp_bind_path:
                 (workdir_path / "rundir" / "tmp").mkdir(parents=True, exist_ok=True)
 
@@ -415,35 +375,42 @@ class TestbenchRunner:
             # Run each service — mirrors repository.obj_harness()
             compose_data = yaml.safe_load(compose_content)
             services = list((compose_data.get("services") or {}).keys())
+            if not services:
+                return 1, "No services found in docker-compose.yml", []
+
+            # Preserve shared workspace state across services.
+            archive_path = workdir_path.parent / f"{workdir_path.name}.tar.gz"
+            _pack_workspace(workdir_path, archive_path)
 
             service_results: List[Dict] = []
-            for service in services:
-                exit_code, output = await self._run_service(workdir, service, compose_content, harness_files)
-                service_results.append({"service": service, "exit_code": exit_code, "stderr": output})
+            try:
+                for service in services:
+                    exit_code, output = await self._run_service(
+                        archive_path,
+                        service,
+                        compose_content,
+                        harness_files,
+                    )
+                    service_results.append({"service": service, "exit_code": exit_code, "stderr": output})
+            finally:
+                archive_path.unlink(missing_ok=True)
+                archive_path.with_name(f"{archive_path.name}.next").unlink(missing_ok=True)
 
             final_exit_code = 0 if all(r["exit_code"] == 0 for r in service_results) else 1
             combined_stderr = "\n".join(f"[{r['service']}] {r['stderr']}" for r in service_results if r["stderr"])
             return final_exit_code, combined_stderr, service_results
 
-    def _build_sandbox_provider_config(self) -> Dict[str, Any]:
-        """Resolve the single-key sandbox provider config used for grading.
-
-        The backend is config-selected (``config.sandbox_provider``) so the
-        verifier is not hard-wired to Apptainer. When the apptainer backend is
-        used we fill in the knobs the one-shot CVDP grading path needs, without
-        clobbering anything the operator set explicitly:
-        - ``--writable-tmpfs`` so EDA tools can write to the container rootfs.
-        - readiness probe disabled — we exec the real command immediately and
-          surface its failure directly, so an extra probe round-trip is wasted.
-        - timeouts pinned to ``container_timeout``; concurrency comfortably above
-          the outer ``num_processes`` gate so the provider never bottlenecks.
-        """
-        provider_cfg: Dict[str, Any] = dict(self.config.sandbox_provider or {"apptainer": {}})
+    def _build_sandbox_provider_config(self) -> Any:
+        """Add CVDP defaults to an Apptainer provider config."""
+        if not isinstance(self._sandbox_provider, dict):
+            return self._sandbox_provider
+        provider_cfg: Dict[str, Any] = dict(self._sandbox_provider)
         if "apptainer" not in provider_cfg:
             return provider_cfg
         apptainer = dict(provider_cfg.get("apptainer") or {})
         create = dict(apptainer.get("create") or {})
         create.setdefault("start_timeout_s", self.config.container_timeout)
+        create.setdefault("mount_point", self.config.container_transfer_dir)
         create.setdefault("extra_start_args", ["--writable-tmpfs"])
         exec_cfg = dict(apptainer.get("exec") or {})
         exec_cfg.setdefault("default_timeout_s", self.config.container_timeout)
@@ -456,201 +423,138 @@ class TestbenchRunner:
         provider_cfg["apptainer"] = apptainer
         return provider_cfg
 
-    async def _get_provider(self) -> SandboxProvider:
-        """Build (once) and return the config-selected sandbox provider.
-
-        Instantiated through the generic provider registry so the grading backend
-        is swappable via config; see ``_build_sandbox_provider_config`` for the
-        apptainer defaults applied to the one-shot harness run.
-        """
-        if self._provider is None:
-            async with self._provider_lock:
-                if self._provider is None:
-                    self._provider = create_provider(self._build_sandbox_provider_config())
-        return self._provider
-
     async def _run_service(
         self,
-        workdir: str,
+        workspace_archive: Path,
         service: str,
         compose_content: str,
         harness_files: Optional[Dict[str, Optional[str]]] = None,
     ) -> Tuple[int, str]:
-        """
-        Run a single compose service via the Apptainer sandbox provider — mirrors
-        repository.log_docker().
-
-        The Docker image is pulled/built into a cached SIF first (the provider
-        does not pull or build), then the provider starts an instance with the
-        workspace ``/code/*`` mounts (and any compose-defined volumes) bound in,
-        execs the service command, and tears the instance down. Apptainer uses
-        host networking by default, so no network setup is needed.
-        """
-        path = os.path.abspath(workdir)
+        """Run one Compose service in a sandbox."""
         svc = _parse_compose_service(compose_content, service)
-
-        # Resolve image — handles both image: and build: services.
-        # Docker Compose builds from Dockerfiles automatically; for Apptainer
-        # we parse the Dockerfile and build a SIF with the equivalent commands.
-        image = svc["image"]
-        post_commands: List[str] = []
-        if not image and harness_files:
-            compose_data = yaml.safe_load(compose_content)
-            image, post_commands = _resolve_image_for_service(compose_data, service, harness_files, self.config)
+        compose_data = yaml.safe_load(compose_content) or {}
+        image, build_key = _resolve_service_image(
+            compose_data,
+            service,
+            harness_files or {},
+            self.config,
+            self._prepared_images,
+        )
         if not image:
+            if build_key:
+                return (
+                    1,
+                    f"No prepared image for service '{service}' (build key {build_key}). "
+                    "Run resources_servers/cvdp/prepare.py for this dataset",
+                )
             return 1, f"No image defined for service '{service}'"
 
+        cmd_parts = _build_command(svc["entrypoint"], svc["command"])
+        if not cmd_parts:
+            return 1, f"Service '{service}' has no explicit command. Image-default commands are not portable"
+
+        workspace = posixpath.normpath(self.config.container_workspace)
+        transfer_dir = posixpath.normpath(self.config.container_transfer_dir)
+        if not workspace.startswith("/") or workspace == "/":
+            return 1, f"container_workspace must be an absolute non-root path: {workspace!r}"
+        if not transfer_dir.startswith("/") or transfer_dir == "/":
+            return 1, f"container_transfer_dir must be an absolute non-root path: {transfer_dir!r}"
         try:
-            if post_commands:
-                sif_path = await self._ensure_built_sif(image, post_commands)
-            else:
-                sif_path = await self._ensure_sif(image)
-        except RuntimeError as exc:
+            links = _compose_workspace_links(svc["volumes"], workspace)
+        except ValueError as exc:
             return 1, str(exc)
 
-        # Per-service bind mounts and environment.
-        binds = _build_binds(path, svc["volumes"])
-        env = _build_env(svc["environment"], _load_dot_env(path))
+        dot_env: Dict[str, str] = {}
+        for path, content in (harness_files or {}).items():
+            if content is not None and posixpath.normpath(path) == "src/.env":
+                dot_env = _parse_dot_env(content)
+                break
+        env = _build_env(svc["environment"], dot_env)
         if self.config.container_tmp_bind_path:
-            binds.append(f"{path}/rundir/tmp:{self.config.container_tmp_bind_path}")
             env.update(_build_runtime_tmp_env(self.config.container_tmp_bind_path))
+            links.append((f"{workspace}/rundir/tmp", self.config.container_tmp_bind_path))
 
-        # Fix working_dir paths that don't exist under Apptainer's bind mounts.
-        # Some compose files use /src/rundir/ which exists in Docker (via volume
-        # mount) but not in Apptainer (which only binds to /code/*).
-        working_dir = svc["working_dir"] or "/code/rundir"
-        if "/code/" not in working_dir:
-            working_dir = "/code/rundir"
-
-        cmd_parts = _build_command(svc["entrypoint"], svc["command"])
-        # No explicit command -> run the image's default runscript (equivalent to
-        # the old ``apptainer run``). HOME is exported in-shell to mirror the old
-        # ``--home /code/rundir`` (apptainer refuses HOME via --env).
-        inner = shlex.join(cmd_parts) if cmd_parts else "/.singularity.d/runscript"
-        command = f"export HOME=/code/rundir; exec {inner}"
-
-        provider = await self._get_provider()
-        spec = SandboxSpec(image=sif_path, provider_options={"binds": binds})
-
-        try:
-            handle = await provider.create(spec)
-        except SandboxCreateError as exc:
-            return 1, f"apptainer instance start failed for service '{service}': {exc}"
-
-        try:
-            result = await provider.exec(
-                handle,
-                command,
-                cwd=working_dir,
-                env=env,
-                timeout_s=self.config.container_timeout,
+        setup_commands = [
+            f"mkdir -p {shlex.quote(workspace)}",
+            f"tar -xzf {shlex.quote(transfer_dir + '/cvdp-workspace.tar.gz')} -C {shlex.quote(workspace)}",
+        ]
+        for source, target in links:
+            setup_commands.extend(
+                [
+                    f"mkdir -p {shlex.quote(posixpath.dirname(target))}",
+                    f"rm -rf -- {shlex.quote(target)}",
+                    f"ln -s {shlex.quote(source)} {shlex.quote(target)}",
+                ]
             )
-        finally:
-            with contextlib.suppress(Exception):
-                await provider.close(handle)
+
+        working_dir = svc["working_dir"] or f"{workspace}/rundir"
+        if working_dir != workspace and not working_dir.startswith(f"{workspace}/"):
+            working_dir = f"{workspace}/rundir"
+        command = shlex.join(
+            [
+                "env",
+                f"HOME={workspace}/rundir",
+                "PYTHONNOUSERSITE=1",
+                *cmd_parts,
+            ]
+        )
+
+        spec_extra = dict(self.config.sandbox_spec)
+        provider_options = dict(spec_extra.pop("provider_options", {}) or {})
+        metadata = dict(self._sandbox_metadata)
+        metadata.update(spec_extra.pop("metadata", {}) or {})
+        for reserved in ("image", "workdir", "env", "files"):
+            spec_extra.pop(reserved, None)
+        spec = SandboxSpec(
+            image=image,
+            workdir=working_dir,
+            metadata=metadata,
+            provider_options=provider_options,
+            **spec_extra,
+        )
+
+        try:
+            async with AsyncSandbox(self._build_sandbox_provider_config(), spec) as sandbox:
+                await sandbox.start()
+                input_archive = f"{transfer_dir}/cvdp-workspace.tar.gz"
+                output_archive = f"{transfer_dir}/cvdp-workspace-out.tar.gz"
+                await sandbox.upload(workspace_archive, input_archive)
+                setup = await sandbox.exec(
+                    " && ".join(setup_commands),
+                    cwd="/",
+                    timeout_s=self.config.container_timeout,
+                )
+                if setup.return_code != 0:
+                    combined = (setup.stderr or "") + (setup.stdout or "")
+                    return 1, f"workspace setup failed for service '{service}': {combined}"
+
+                result = await sandbox.exec(
+                    command,
+                    cwd=working_dir,
+                    env=env,
+                    timeout_s=self.config.container_timeout,
+                )
+
+                snapshot = await sandbox.exec(
+                    f"tar -czf {shlex.quote(output_archive)} -C {shlex.quote(workspace)} .",
+                    timeout_s=self.config.container_timeout,
+                )
+                if snapshot.return_code == 0:
+                    next_archive = workspace_archive.with_name(f"{workspace_archive.name}.next")
+                    await sandbox.download(output_archive, next_archive)
+                    next_archive.replace(workspace_archive)
+                else:
+                    combined = (snapshot.stderr or "") + (snapshot.stdout or "")
+                    return 1, f"workspace snapshot failed for service '{service}': {combined}"
+        except SandboxCreateError as exc:
+            return 1, f"sandbox create failed for service '{service}': {exc}"
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return 1, f"sandbox operation failed for service '{service}': {exc}"
 
         if result.error_type == "timeout":
-            return -1, f"apptainer exec timed out after {self.config.container_timeout}s"
+            return -1, f"sandbox exec timed out after {self.config.container_timeout}s"
 
-        # Mirror the old (stderr + stdout) ordering for combined diagnostics.
         combined = (result.stderr or "") + (result.stdout or "")
         return result.return_code, combined
-
-    async def _ensure_built_sif(self, base_image: str, post_commands: List[str]) -> str:
-        """
-        Build a SIF that extends a base image with extra commands from a Dockerfile.
-
-        This replicates what ``docker compose build`` does: take a base image,
-        run additional commands (pip install, etc.), and produce a new image.
-        For Apptainer we generate a definition file and run ``apptainer build``.
-        Results are cached by a hash of the commands.
-        """
-        if not post_commands:
-            return await self._ensure_sif(base_image)
-
-        cmd_hash = hashlib.md5("\n".join(post_commands).encode()).hexdigest()[:12]
-        safe_name = base_image.replace("/", "_").replace(":", "_") + f"__built_{cmd_hash}.sif"
-        sif_path = os.path.join(self._sif_cache_dir, safe_name)
-
-        if os.path.exists(sif_path):
-            return sif_path
-
-        # Reuse the per-image locking pattern
-        async with self._sif_lock_guard:
-            if safe_name not in self._sif_locks:
-                self._sif_locks[safe_name] = asyncio.Lock()
-            lock = self._sif_locks[safe_name]
-
-        async with lock:
-            if os.path.exists(sif_path):
-                return sif_path
-
-            base_sif = await self._ensure_sif(base_image)
-
-            post_section = "\n    ".join(post_commands)
-            def_content = f"Bootstrap: localimage\nFrom: {base_sif}\n\n%post\n    {post_section}\n"
-            tmp_def = sif_path + ".def"
-            tmp_sif = sif_path + ".building"
-            with open(tmp_def, "w") as f:
-                f.write(def_content)
-
-            proc = await asyncio.create_subprocess_exec(
-                "apptainer",
-                "build",
-                "--force",
-                tmp_sif,
-                tmp_def,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await proc.communicate()
-            os.unlink(tmp_def)
-            if proc.returncode != 0:
-                if os.path.exists(tmp_sif):
-                    os.unlink(tmp_sif)
-                raise RuntimeError(f"apptainer build failed: {stderr.decode(errors='replace')}")
-            os.rename(tmp_sif, sif_path)
-            return sif_path
-
-    async def _ensure_sif(self, image: str) -> str:
-        """
-        Return the path to a cached SIF file for the given Docker image,
-        pulling it from the registry if not already cached.
-        Mirrors the cleanup() trap in repository.log_docker()'s generated shell script.
-        """
-        safe_name = image.replace("/", "_").replace(":", "_") + ".sif"
-        sif_path = os.path.join(self._sif_cache_dir, safe_name)
-
-        if os.path.exists(sif_path):
-            return sif_path
-
-        # Per-image lock to avoid concurrent pulls of the same image
-        async with self._sif_lock_guard:
-            if image not in self._sif_locks:
-                self._sif_locks[image] = asyncio.Lock()
-            lock = self._sif_locks[image]
-
-        async with lock:
-            # Double-check after acquiring lock
-            if os.path.exists(sif_path):
-                return sif_path
-
-            tmp_path = sif_path + ".pulling"
-            proc = await asyncio.create_subprocess_exec(
-                "apptainer",
-                "pull",
-                "--force",
-                tmp_path,
-                f"docker://{image}",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-                raise RuntimeError(
-                    f"apptainer pull failed for {image} (exit {proc.returncode}): {stderr.decode(errors='replace')}"
-                )
-            os.rename(tmp_path, sif_path)
-            return sif_path

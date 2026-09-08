@@ -9,5 +9,10 @@ policy_model:
       uses_reasoning_parser: true
       uses_interleaved_reasoning: true
       chat_template_kwargs: null
+      sampling_overrides: null
       extra_body: null
       default_headers: {}
+      endpoint_file: null
+      endpoint_stale_grace_s: 300.0
+      endpoint_connection_retries: 8
+      endpoint_check_interval_s: 10.0

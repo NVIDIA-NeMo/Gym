@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 import sys
 from argparse import Namespace
 from pathlib import Path
@@ -162,6 +163,20 @@ Environment variables: {env_vars_to_print}""")
 
         return final_args, env_vars
 
+    def _ray_actor_path(self) -> str:
+        """PATH for the Ray actor running vLLM.
+
+        runtime_env.py_executable gives the actor this server's venv interpreter, but does not
+        put that venv's bin directory on its PATH, so console scripts installed next to the
+        interpreter are not resolvable in the actor or its child processes. vLLM declares ninja
+        as a runtime dependency and shells out to it when compiling kernels, which fails with
+        "No such file or directory: 'ninja'" even though ninja is installed in the venv.
+
+        Prepend the interpreter's directory, keeping the inherited PATH as a fallback.
+        """
+        venv_bin_dir = str(Path(self.config.ray_worker_py_executable).resolve().parent)
+        return os.pathsep.join(filter(None, [venv_bin_dir, os.environ.get("PATH", "")]))
+
     def _select_vllm_server_head_node(self, server_args: Namespace, env_vars: Dict[str, str]) -> PlacementGroup:
         """
         Our LocalVLLMModelActor Ray actor scheduling strategy is as follows:
@@ -216,6 +231,8 @@ Total Ray cluster resources: {cluster_resources()}""")
                 env_vars={
                     "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
                     "PYTHONPATH": pythonpath,
+                    # Listed before `env_vars` so a server config can still override PATH.
+                    "PATH": self._ray_actor_path(),
                     **env_vars,
                 },
             ),

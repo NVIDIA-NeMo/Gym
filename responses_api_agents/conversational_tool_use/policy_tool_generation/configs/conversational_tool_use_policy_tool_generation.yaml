@@ -1,0 +1,27 @@
+conversational_tool_use_policy_tool_generation:
+  responses_api_agents:
+    conversational_tool_use/policy_tool_generation:
+      entrypoint: app.py
+      policy_model_server:
+        type: responses_api_models
+        name: policy_generation_model
+      judge_model_server:
+        type: responses_api_models
+        name: policy_tool_judge_model
+      max_retries: 20
+      use_refinement: true
+      initial_reference_count: 8
+      policy_refine_reference_count: 8
+      minimum_tool_count: 0
+      cohesion_judge_count: 3
+      cohesion_max_failure_fraction: 0.5
+      golden_reference_count: 2
+      golden_max_failure_fraction: 0.5
+      max_judge_concurrency: null
+      random_seed: null
+
+policy_generation_model:
+  _copy: policy_model
+
+policy_tool_judge_model:
+  _copy: policy_model

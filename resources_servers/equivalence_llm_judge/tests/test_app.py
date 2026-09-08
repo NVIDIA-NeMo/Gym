@@ -31,6 +31,7 @@ from resources_servers.equivalence_llm_judge.app import (
     LLMJudgeResourcesServer,
     LLMJudgeResourcesServerConfig,
     LLMJudgeVerifyRequest,
+    _extract_question_text,
 )
 
 
@@ -382,3 +383,65 @@ class TestApp:
         assert len(res.judge_evaluations) == 1
         # Verify only one judge call (no second pass due to length threshold)
         assert server_mock.post.call_count == 1
+
+    def test_question_extracted_from_multimodal_user_content(self) -> None:
+        """A vision row's user turn is a content list, not a string.
+
+        Shape mirrors a prepared HLE vision row: an ``input_text`` block carrying the
+        question alongside an ``input_image`` block carrying a base64 data URI. Without
+        list handling the judge receives an empty question and grades on nothing.
+        """
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"role": "system", "content": "Answer the question."},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Which piece delivers mate?"},
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/jpeg;base64,/9j/4AAQSkZJRg==",
+                            "detail": "high",
+                        },
+                    ],
+                },
+            ]
+        )
+
+        question = _extract_question_text(params, None)
+
+        assert question == "Which piece delivers mate?"
+        # The image must not leak into the judge prompt: base64 payloads are large and
+        # would blow the judge's context while telling it nothing.
+        assert "base64" not in question
+
+    def test_question_extraction_from_string_user_content_is_unchanged(self) -> None:
+        """The text-only path is untouched by multimodal handling: last user turn wins."""
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"role": "user", "content": "first question"},
+                {"role": "assistant", "content": "an answer"},
+                {"role": "user", "content": "  second question  "},
+            ]
+        )
+
+        assert _extract_question_text(params, None) == "second question"
+
+    def test_question_extraction_returns_empty_when_no_text_blocks(self) -> None:
+        """An image-only user turn has no text to extract, so the empty-string contract holds."""
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,iVBORw0KGgo=",
+                            "detail": "auto",
+                        }
+                    ],
+                }
+            ]
+        )
+
+        assert _extract_question_text(params, None) == ""

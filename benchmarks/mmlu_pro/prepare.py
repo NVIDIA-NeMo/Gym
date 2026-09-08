@@ -45,11 +45,12 @@ def prepare() -> Path:
 
     rows = []
     for example in ds:
+        question = example["question"].strip("\n")
         choices = example["options"]  # list of strings, length <= 10
         letters = OPTION_LETTERS[: len(choices)]
 
         options = [{letter: text} for letter, text in zip(letters, choices)]
-        options_text = "\n".join(f"{letter}: {text}" for letter, text in zip(letters, choices))
+        options_text = "\n".join(f"{letter}) {text}" for letter, text in zip(letters, choices))
 
         # MMLU-Pro has duplicate questions with different options across categories, so we use both in the UUID seed.
         seed_str = json.dumps({"question": example["question"], "options": choices}, sort_keys=True)
@@ -61,7 +62,7 @@ def prepare() -> Path:
             # `problem` mirrors the field name NeMo Skills' MCQ prompts use
             # (eval/aai/mcq-Nchoices), so the shared prompt yaml can reference
             # the canonical `{problem}` placeholder without per-benchmark drift.
-            "problem": f"{example['question']}\n{options_text}",
+            "problem": f"{question}\n\n{options_text}",
             "options": options,
             "expected_answer": example["answer"],
             "category": example["category"],  # not used for grading although useful

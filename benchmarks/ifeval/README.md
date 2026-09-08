@@ -30,6 +30,6 @@ gym eval run --no-serve \
 
 ## Scoring notes
 
-* `grading_mode="binary"` — reward is 1.0 only when all instructions in the prompt are satisfied. This matches Skills' `prompt_strict_accuracy`.
-* `grading_mode="fraction"` — set on the dataset row to instead get the per-instruction strict accuracy (Skills' `instruction_strict_accuracy`).
+* `grading_mode="binary"` (default) — reward is 1.0 only when all instructions in the prompt are satisfied. This matches Skills' `prompt_strict_accuracy`.
+* `grading_mode="fraction"` — set in `verifier_metadata` on the dataset row to instead get the per-instruction strict accuracy (Skills' `instruction_strict_accuracy`).
 * **Loose-mode evaluation** (Skills' `prompt_loose_accuracy` / `instruction_loose_accuracy`) is not implemented in the existing `instruction_following` server. Reproducing the four-way Skills metric breakdown would require a server-side enhancement that adds the eight-perturbation loose check to `verify()` and a custom `compute_metrics()`. This migration is data-only and reuses the existing strict-mode server.

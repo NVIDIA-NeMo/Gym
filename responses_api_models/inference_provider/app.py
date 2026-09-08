@@ -23,7 +23,6 @@ For training workloads that require token IDs, use vllm_model instead.
 from asyncio import Semaphore
 from time import time
 from typing import Any, Dict
-from uuid import uuid4
 
 from fastapi import Request
 from pydantic import Field
@@ -39,9 +38,6 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseInputTokensDetails,
-    NeMoGymResponseOutputTokensDetails,
-    NeMoGymResponseUsage,
 )
 from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
@@ -76,57 +72,15 @@ class InferenceProvider(SimpleResponsesAPIModel):
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
     ) -> NeMoGymResponse:
         chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
+        body.model = self.config.model
 
         chat_completion_response = await self.chat_completions(request, chat_completion_create_params)
 
-        choice = chat_completion_response.choices[0]
-        response_output = self._converter.postprocess_chat_response(choice)
-        response_output_dicts = [item.model_dump() for item in response_output]
-
-        usage = None
-        if chat_completion_response.usage:
-            usage = NeMoGymResponseUsage(
-                input_tokens=chat_completion_response.usage.prompt_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
-                output_tokens=chat_completion_response.usage.completion_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
-                total_tokens=chat_completion_response.usage.prompt_tokens
-                + chat_completion_response.usage.completion_tokens,
-            )
-
-        incomplete_details = None
-        if choice.finish_reason == "length":
-            incomplete_details = {"reason": "max_output_tokens"}
-        elif choice.finish_reason == "content_filter":
-            incomplete_details = {"reason": "content_filter"}
-
-        return NeMoGymResponse(
-            id=f"resp_{uuid4().hex}",
-            created_at=int(time()),
-            model=self.config.model,
-            object="response",
-            output=response_output_dicts,
-            tool_choice=body.tool_choice if body.tool_choice is not None else "auto",
-            parallel_tool_calls=body.parallel_tool_calls,
-            tools=body.tools,
-            temperature=body.temperature,
-            top_p=body.top_p,
-            background=body.background,
-            max_output_tokens=body.max_output_tokens,
-            max_tool_calls=body.max_tool_calls,
-            previous_response_id=body.previous_response_id,
-            prompt=body.prompt,
-            reasoning=body.reasoning,
-            service_tier=body.service_tier,
-            text=body.text,
-            top_logprobs=body.top_logprobs,
-            truncation=body.truncation,
-            metadata=body.metadata,
-            instructions=body.instructions,
-            user=body.user,
-            incomplete_details=incomplete_details,
-            usage=usage,
+        response = self._converter.chat_completion_to_response(
+            responses_create_params=body,
+            chat_completion=chat_completion_response,
         )
+        return response.model_copy(update={"created_at": int(time())})
 
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()

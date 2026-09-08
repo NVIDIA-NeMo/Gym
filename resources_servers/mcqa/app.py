@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
-from typing import Any, Literal, Optional
+import unicodedata
+from typing import Any, ClassVar, Literal, Optional
 
 from fastapi import FastAPI
 
@@ -22,12 +23,14 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 
 
 class MCQAResourcesServerConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     grading_mode: Optional[
         Literal[
             "strict_single_letter_boxed",
@@ -82,8 +85,8 @@ BOXED_LETTER_ONLY_PATTERN = re.compile(r"^[^A-Za-z]*([A-Z])[^A-Za-z]*$")
 # but if we see new misreadings, such as "E. coli" -> "E", we can drop them.
 BOXED_LETTER_LABEL_PATTERN = re.compile(r"^\s*([A-Z])\s*[:).\-]")
 ANSWER_COLON_PATTERN = re.compile(r"(?i)answer\s*:\s*(.+)")
-# Markdown-aware variant: tolerates **Answer: B**, __Answer__: B, etc. Captures single letter only.
-ANSWER_COLON_MD_PATTERN = re.compile(r"(?i)[*_]{0,2}Answer[*_]{0,2}\s*:[*_\s]{0,2}\s*([A-Z])(?![a-zA-Z0-9])")
+# Markdown-aware variant: captures the final-answer payload after Answer:.
+ANSWER_COLON_PAYLOAD_PATTERN = re.compile(r"(?im)[*_]{0,2}Answer[*_]{0,2}\s*:[*_\s]{0,2}(.+)")
 
 
 def _parse_answer_letter_strict_boxed(text: str, allowed_letters: set[str]) -> tuple[Optional[str], str, bool]:
@@ -114,6 +117,9 @@ def _parse_answer_letter_strict_boxed(text: str, allowed_letters: set[str]) -> t
 
 
 LATEX_TEXT_WRAP_PATTERN = re.compile(r"\\text\{\s*(.*?)\s*\}", re.S)
+LEADING_CHOICE_LETTER_PATTERN = re.compile(r"^([a-zA-Z])(?![a-zA-Z0-9])")
+LAST_STANDALONE_CHOICE_LETTER_PATTERN = re.compile(r"\b[A-Z]\b(?!.*\b[A-Z]\b)", re.S)
+CHOICE_LIST_SEPARATOR_PATTERN = re.compile(r"(?:\s*[/|&,;]\s*|\s+(?:or|and)\s+|\s+)", re.I)
 
 
 def _extract_boxed_inner(text: str) -> Optional[str]:
@@ -157,6 +163,43 @@ def _normalize_for_match(s: str) -> str:
     return " ".join(s.lower().split())
 
 
+def _contains_ambiguous_choice_list(text: str, allowed_letters: set[str]) -> bool:
+    """Return whether distinct allowed choices are presented as a list."""
+    matches = [
+        (match.group(1).upper(), match.span(1))
+        for match in CHOICE_LETTER_PATTERN.finditer(text)
+        if match.group(1).upper() in allowed_letters
+    ]
+    return any(
+        left_letter != right_letter
+        and CHOICE_LIST_SEPARATOR_PATTERN.fullmatch(text[left_span[1] : right_span[0]]) is not None
+        for (left_letter, left_span), (right_letter, right_span) in zip(matches, matches[1:])
+    )
+
+
+def _extract_choice_letter(text: str, allowed_letters: set[str]) -> Optional[str]:
+    """Extract a single valid choice letter from an answer payload."""
+    candidate = _normalize_extracted_answer(text).strip().strip("*_` \t\n\r.,;:")
+    if _contains_ambiguous_choice_list(candidate, allowed_letters):
+        return None
+
+    if len(candidate) == 1:
+        letter = candidate
+    else:
+        # Prefer a leading letter for "Answer: B because..." style payloads
+        m = LEADING_CHOICE_LETTER_PATTERN.match(candidate)
+        if m:
+            letter = m.group(1)
+        else:
+            m = LAST_STANDALONE_CHOICE_LETTER_PATTERN.search(candidate)
+            letter = m.group(0) if m else None
+    if letter:
+        up = letter.upper()
+        if up in allowed_letters:
+            return up
+    return None
+
+
 def _match_option_text(text: str, options: list[dict[str, str]], allowed_letters: set[str]) -> Optional[str]:
     """Match boxed content against option texts and return the option letter.
 
@@ -191,7 +234,36 @@ def _match_option_text(text: str, options: list[dict[str, str]], allowed_letters
     return None
 
 
+def _answer_payloads(text: str, answer_prefix: Optional[str]) -> list[str]:
+    """Collect final-answer payloads after Answer: or a row-provided prefix."""
+    text = unicodedata.normalize("NFKC", text)
+    found: list[tuple[int, str]] = []
+    for match in ANSWER_COLON_PAYLOAD_PATTERN.finditer(text):
+        found.append((match.start(), match.group(1)))
+    if answer_prefix:
+        normalized_prefix = unicodedata.normalize("NFKC", answer_prefix)
+        pattern = re.compile(re.escape(normalized_prefix) + r"\s*", re.IGNORECASE)
+        for match in pattern.finditer(text):
+            line_end = text.find("\n", match.end())
+            if line_end < 0:
+                line_end = len(text)
+            found.append((match.start(), text[match.end() : line_end]))
+    found.sort(key=lambda item: item[0])
+    return [payload for _start, payload in found]
+
+
+def _extract_from_answer_payloads(
+    text: str, allowed_letters: set[str], answer_prefix: Optional[str] = None
+) -> Optional[str]:
+    pred = None
+    for candidate in reversed(_answer_payloads(text, answer_prefix)):
+        if pred is None:
+            pred = _extract_choice_letter(candidate, allowed_letters)
+    return pred
+
+
 def _normalize_extracted_answer(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text)
     return (
         text.replace("أ", " A")
         .replace("ب", " B")
@@ -354,12 +426,14 @@ class MCQAResourcesServer(SimpleResourcesServer):
                             if pred is not None:
                                 break
             elif grading_mode == "lenient_answer_colon_md":
-                # Markdown-aware Answer: extraction handles **Answer: B**, etc.
-                md_match = ANSWER_COLON_MD_PATTERN.search(text)
-                if md_match:
-                    letter_up = md_match.group(1).strip().upper()
-                    if letter_up in allowed_letters:
-                        pred = letter_up
+                answer_prefix = (body.template_metadata or {}).get("answer_prefix")
+                pred = _extract_from_answer_payloads(
+                    text,
+                    allowed_letters,
+                    answer_prefix=answer_prefix,
+                )
+                if pred is None and answer_prefix:
+                    pred, _, _ = _parse_answer_letter_strict_boxed(text, allowed_letters)
 
         is_correct = (pred == gold) if (pred is not None and gold) else False
         reward = 1.0 if is_correct else 0.0

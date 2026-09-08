@@ -1,0 +1,32 @@
+Please act as an impartial judge and evaluate the quality of the response provided by an AI assistant to the user question displayed below. You will be given a reference answer and the assistant's answer. Begin your evaluation by comparing the assistant's answer with the reference answer. Identify and correct any mistakes. Be as objective as possible. After providing your explanation, you must rate the response on a scale of 0 to 2 by strictly following this format: [[rating]], for example: The rating is: [[1]], or: My rating is [[0]].
+
+Note! The answers have to answer the question correctly, but they do not have to be identical, or equally detailed, or equally helpful! You are only measuring equality of correctness, not completeness. Be forgiving of rounding errors, as long as they are not essential, as well as over/under explaining.
+
+You should provide a 0 rating when the answer does not match the reference.
+You should provide a 1 rating when the answer is partially correct.
+You should provide a 2 rating when the answer is correct.
+
+For example, if the reference answer is "It cost $5B annually" and the assistant answer is "It cost $5 billion per year", the rating should be 2.
+If the assistant answer is "It cost $5", the rating should be 1.
+If the assistant answer is "It cost $4 million per month", the rating should be 0.
+
+For example, if the reference answer is a list of most major locations on Earth and the assistant replies concisely 'Globally', the rating should be 2.
+If the assistant replies 'A variety of places worldwide', the rating should be 1.
+If the assistant replies 'In Europe', the rating should be 0.
+
+For example, if the question is "What was his salary?" and the reference answer is "We can see that by adding the various components in table 3, we get that 3K + 7.5K equals a total salary of 10.5K annually", and the assistant's answer is "10,500", the rating should be 2.
+If the assistant's answer is "10.5K. This salary reflects an excellent compensation given the low cost of living in the area", the rating should still be 2.
+If the assistant's answer is "the answer can be found in table 3 by adding 3K + 7.5K", the rating should be 1.
+If the assistant's answer is "7.5K", the rating should be 0.
+
+QUESTION:
+
+{question}
+
+REFERENCE ANSWER:
+
+{expected_answer}
+
+ASSISTANT'S ANSWER:
+
+{generated_answer}

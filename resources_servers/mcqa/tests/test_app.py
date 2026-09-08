@@ -541,7 +541,13 @@ class TestApp:
         assert result.extracted_answer == "B"
 
 
-def _make_verify_request(text: str, expected: str = "B", grading_mode: str = "strict_single_letter_boxed"):
+def _make_verify_request(
+    text: str,
+    expected: str = "B",
+    grading_mode: str = "strict_single_letter_boxed",
+    option_letters: str = "ABCD",
+    template_metadata: dict | None = None,
+):
     """Helper to build a MCQAVerifyRequest with proper schema."""
     response = NeMoGymResponse(
         id="resp_test",
@@ -564,9 +570,10 @@ def _make_verify_request(text: str, expected: str = "B", grading_mode: str = "st
     return MCQAVerifyRequest(
         responses_create_params={"input": [{"role": "user", "content": "Q?"}]},
         response=response,
-        options=[{"A": "opt1"}, {"B": "opt2"}, {"C": "opt3"}, {"D": "opt4"}],
+        options=[{letter: f"opt{letter}"} for letter in option_letters],
         expected_answer=expected,
         grading_mode=grading_mode,
+        template_metadata=template_metadata,
     )
 
 
@@ -653,12 +660,175 @@ class TestGradingModeAnswerColonMD:
         assert result.extracted_answer == "A"
         assert result.reward == 1.0
 
+    async def test_leading_letter_answer(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="Answer: B because C is not valid", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer == "B"
+        assert result.reward == 1.0
+
+    async def test_repeated_letter_answer(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="Answer: B/B", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer == "B"
+        assert result.reward == 1.0
+
+    async def test_wrapped_answers(self) -> None:
+        server = self._make_server()
+        cases = [
+            ("Answer: $D$", "D", "ABCD"),
+            ("Answer: (D)", "D", "ABCD"),
+            (r"\boxed{\text{Answer: G}}", "G", "ABCDEFGHIJ"),
+        ]
+        for text, expected, option_letters in cases:
+            body = _make_verify_request(text=text, expected=expected, option_letters=option_letters)
+            result = await server.verify(body)
+            assert result.extracted_answer == expected, text
+            assert result.reward == 1.0, text
+
+    async def test_unextractable_answer(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="Answer: unknown", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+    async def test_disallowed_answer(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="Answer: G", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+    async def test_ambiguous_answer_lists(self) -> None:
+        server = self._make_server()
+        cases = [
+            ("Answer: A/B/C", "A", "ABCD"),
+            ("Answer: B/I", "B", "ABCDEFGHIJ"),
+            ("**Answer: D/H**", "D", "ABCDEFGHIJ"),
+            ("Answer: A or B", "A", "ABCD"),
+            ("Answer: A and B", "A", "ABCD"),
+            ("Answer: A, B", "A", "ABCD"),
+        ]
+        for text, expected, option_letters in cases:
+            body = _make_verify_request(text=text, expected=expected, option_letters=option_letters)
+            result = await server.verify(body)
+            assert result.extracted_answer is None, text
+            assert result.reward == 0.0, text
+
+    async def test_rightmost_answer_match(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="Answer: A\nAnswer: B", expected="B")
+        result = await server.verify(body)
+        assert result.extracted_answer == "B"
+        assert result.reward == 1.0
+
+    async def test_invalid_rightmost_answer_fallback(self) -> None:
+        server = self._make_server()
+        for invalid_payload in ["unknown", "G", "A/B/C"]:
+            body = _make_verify_request(text=f"Answer: B\nAnswer: {invalid_payload}", expected="B")
+            result = await server.verify(body)
+            assert result.extracted_answer == "B", invalid_payload
+            assert result.reward == 1.0, invalid_payload
+
     async def test_no_answer_pattern(self) -> None:
         server = self._make_server()
         body = _make_verify_request(text="I think it might be B but I'm not sure", expected="B")
         result = await server.verify(body)
         assert result.extracted_answer is None
         assert result.reward == 0.0
+
+    async def test_answer_prefix_requires_metadata(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(text="the answer is (C).", expected="C")
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+    async def test_strict_boxed_final_fallback_is_row_scoped(self) -> None:
+        server = self._make_server()
+        without_prefix = _make_verify_request(
+            text=r"\boxed{H}",
+            expected="H",
+            option_letters="ABCDEFGHIJ",
+        )
+        result = await server.verify(without_prefix)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+        with_prefix = _make_verify_request(
+            text=r"\boxed{H}",
+            expected="H",
+            option_letters="ABCDEFGHIJ",
+            template_metadata={
+                "output_regex": r"NEVER_MATCH_([A-Z])",
+                "answer_prefix": "answer is",
+            },
+        )
+        result = await server.verify(with_prefix)
+        assert result.extracted_answer == "H"
+        assert result.reward == 1.0
+
+    async def test_multilingual_closing_phrases(self) -> None:
+        server = self._make_server()
+        cases = [
+            ("The answer is (C).", "answer is", "C"),
+            ("Answer is (D).", "answer is", "D"),
+            ("Die Antwort ist (D).", "Die Antwort ist", "D"),
+            ("La respuesta es (A).", "La respuesta es", "A"),
+            ("La réponse est (B).", "La réponse est", "B"),
+            ("La risposta è (C).", "La risposta è", "C"),
+            ("答えは（C）です。", "答えは", "C"),
+            ("答案是 (F)", "答案是", "F"),
+            ("답은 (G)입니다", "답은", "G"),
+            ("A resposta é (H)", "A resposta é", "H"),
+            ("उत्तर है (I)", "उत्तर है", "I"),
+        ]
+        for text, answer_prefix, expected in cases:
+            body = _make_verify_request(
+                text=text,
+                expected=expected,
+                option_letters="ABCDEFGHIJ",
+                template_metadata={
+                    "output_regex": r"NEVER_MATCH_([A-Z])",
+                    "answer_prefix": answer_prefix,
+                },
+            )
+            result = await server.verify(body)
+            assert result.extracted_answer == expected, text
+            assert result.reward == 1.0, text
+
+    async def test_multilingual_ambiguous_list_rejected(self) -> None:
+        server = self._make_server()
+        body = _make_verify_request(
+            text="答えは A/D/E/F です。",
+            expected="A",
+            option_letters="ABCDEFGHIJ",
+            template_metadata={
+                "output_regex": r"NEVER_MATCH_([A-Z])",
+                "answer_prefix": "答えは",
+            },
+        )
+        result = await server.verify(body)
+        assert result.extracted_answer is None
+        assert result.reward == 0.0
+
+    async def test_prox_regex_miss_falls_back_to_payload_parser(self) -> None:
+        """Old spaced Japanese regex misses fullwidth parens; md fallback recovers."""
+        server = self._make_server()
+        body = _make_verify_request(
+            text="段階的に考える。答えは（C）です。",
+            expected="C",
+            option_letters="ABCDEFGHIJ",
+            template_metadata={
+                "output_regex": r"答えは \(?([ABCDEFGHIJ])\)? です",
+                "answer_prefix": "答えは",
+            },
+        )
+        result = await server.verify(body)
+        assert result.extracted_answer == "C"
+        assert result.reward == 1.0
 
 
 class TestComputeMetrics:

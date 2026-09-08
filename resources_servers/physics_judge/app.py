@@ -45,6 +45,7 @@ from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import Field
 
+from nemo_gym.judge import call_judge
 from nemo_gym.openai_utils import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -53,7 +54,6 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.prompt import PromptConfig, fill_prompt, load_prompt_config
 from nemo_gym.reward_profile import compute_subset_metrics
-from nemo_gym.server_utils import get_response_json
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,
@@ -166,12 +166,13 @@ class PhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
                 temperature=responses_create_params.temperature or 0.0,
                 top_p=responses_create_params.top_p or 1.0,
             )
-            response = await self.server_client.post(
+            chat_response = await call_judge(
+                self.server_client,
                 server_name=config.judge_model_server.name,
                 url_path="/v1/chat/completions",
                 json=chat_params,
+                response_model=NeMoGymChatCompletion,
             )
-            chat_response = NeMoGymChatCompletion.model_validate(await get_response_json(response))
             content = chat_response.choices[0].message.content if chat_response.choices else None
             # Wrap chat content into a minimal NeMoGymResponse so JudgeEvaluation
             # (which requires a NeMoGymResponse) stays consistent for downstream
@@ -203,12 +204,13 @@ class PhysicsJudgeResourcesServer(LibraryJudgeMathResourcesServer):
                 return False, judge_evaluation
             return self._parse_verdict(content), judge_evaluation
 
-        response = await self.server_client.post(
+        judge_response = await call_judge(
+            self.server_client,
             server_name=config.judge_model_server.name,
             url_path="/v1/responses",
             json=responses_create_params,
+            response_model=NeMoGymResponse,
         )
-        judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
         judge_evaluation = JudgeEvaluation(responses_create_params=responses_create_params, response=judge_response)
 
         # Match the parent's "unparseable -> not equal" invariant.

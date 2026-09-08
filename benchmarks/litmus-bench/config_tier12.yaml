@@ -1,0 +1,33 @@
+# Paired direct/tool-use example covering five Tier 1 and five Tier 2 Litmus
+# questions. Each question appears twice with an identical prompt; only the
+# mcp-python row advertises the sandbox-backed Python tool.
+config_paths:
+  - resources_servers/litmus_agent/configs/litmus_agent.yaml
+
+responses_create_params:
+  max_output_tokens: 16384
+
+litmus_tier12_resources_server:
+  _inherit_from: litmus_agent
+  resources_servers:
+    litmus_agent:
+      verified: false
+      # These questions use RDKit when the model calls the Python tool.
+      sandbox_spec:
+        image: docker.io/mcs07/rdkit:latest
+        workdir: /tmp
+
+litmus_tier12_agent:
+  _inherit_from: litmus_agent_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: litmus_tier12_resources_server
+      datasets:
+        - name: litmus-tier12-paired
+          type: benchmark
+          jsonl_fpath: benchmarks/litmus-bench/data/litmus-tier12-paired_benchmark.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/litmus-bench/prepare_tier12.py
+          num_repeats: 1
+          license: CC-BY-4.0

@@ -170,27 +170,46 @@ class TestApp:
     async def test_responses_forwards_to_model(self):
         agent = _agent()
         agent.server_client.post = AsyncMock(return_value=_Resp(_model_json("x = 1"), cookies={"sid": "abc"}))
-        body = NeMoGymResponseCreateParamsNonStreaming(input="hi")
+        body = NeMoGymResponseCreateParamsNonStreaming(input="hi", temperature=0.25)
         with patch.object(app, "raise_for_status", AsyncMock()):
             result = await agent.responses(_FakeRequest(), Response(), body)
         assert result.output_text == "```python\nx = 1\n```"
+        request_json = agent.server_client.post.await_args.kwargs["json"]
+        assert isinstance(request_json, dict)
+        assert request_json["temperature"] == 0.25
+        assert request_json["input"][0]["content"] == "hi"
 
     @pytest.mark.asyncio
     async def test_run_builds_solutions_and_calls_verify(self):
         agent = _agent()
-        captured = {}
+        captured = {"model": []}
 
         def _post(server_name, url_path, json, cookies):
             if url_path == "/v1/responses":
+                captured["model"].append(json)
                 return _Resp(_model_json("x = 1"))
             captured["verify"] = json
             return _Resp({"reward": 1.0})
 
         agent.server_client.post = AsyncMock(side_effect=_post)
+        body = _run_request(problem_id="1", n_steps=2)
+        body.responses_create_params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[],
+            max_output_tokens=4096,
+            temperature=0.25,
+            top_p=0.9,
+        )
         with patch.object(app, "raise_for_status", AsyncMock()):
-            result = await agent.run(_FakeRequest(), _run_request(problem_id="1", n_steps=2))
+            result = await agent.run(_FakeRequest(), body)
 
         assert result == {"reward": 1.0}
+        assert len(captured["model"]) == 2
+        for request_json in captured["model"]:
+            assert request_json["max_output_tokens"] == 4096
+            assert request_json["temperature"] == 0.25
+            assert request_json["top_p"] == 0.9
+            assert request_json["input"][0]["role"] == "user"
+            assert request_json["input"][0]["content"]
         verify = captured["verify"]
         assert "response" in verify  # /verify requires a response field
         solutions = verify["solutions"]

@@ -30,6 +30,7 @@ from nemo_gym.sandbox.providers.daytona import provider as daytona_provider
 
 pytestmark = [
     pytest.mark.anyio,
+    pytest.mark.sandbox,
     pytest.mark.skipif(
         importlib.util.find_spec("tenacity") is None,
         reason="tenacity optional sandbox dependency is not installed",

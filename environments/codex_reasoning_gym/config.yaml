@@ -1,0 +1,34 @@
+reasoning_gym:
+  resources_servers:
+    reasoning_gym:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: Codex agent harness on Reasoning Gym tasks
+      value: Evaluate model reasoning capabilities in the Codex agent harness
+
+codex_reasoning_gym_agent:
+  responses_api_agents:
+    codex_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: reasoning_gym
+      concurrency: 8
+      model: ${policy_model_name}
+      openai_api_key: ${policy_api_key}
+      openai_base_url: ${policy_base_url}
+      sandbox_mode: danger-full-access
+      timeout: 900
+      codex_version: 0.144.4
+      system_prompt: |
+        You are a precise reasoning assistant with a shell. Use Python to calculate or verify results when helpful.
+        Follow the requested final-answer format exactly.
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: environments/codex_reasoning_gym/data/example.jsonl
+      - name: train
+        type: train
+        jsonl_fpath: environments/codex_reasoning_gym/data/train_knights_knaves.jsonl
+        license: Apache 2.0

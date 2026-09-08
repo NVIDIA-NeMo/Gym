@@ -29,6 +29,7 @@ from uuid import uuid4
 import pytest
 from fastapi import Body, Request
 from fastapi.testclient import TestClient
+from pydantic import TypeAdapter, ValidationError
 
 from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
 from nemo_gym.openai_utils import (
@@ -36,7 +37,9 @@ from nemo_gym.openai_utils import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseInputItem,
 )
+from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.responses_streaming import (
     flatten_namespace_tools,
     sanitize_streaming_responses_body,
@@ -88,6 +91,225 @@ def _function_call_item(name: str) -> dict:
     }
 
 
+# Provide one minimal valid payload for each item type in ``NeMoGymResponseInputItem``.
+# Key payloads by type tag so the fixture coverage test can detect missing entries.
+ITEM_FIXTURES: dict[str, dict] = {
+    # Items the model generates.
+    "message": {
+        "type": "message",
+        "id": "msg_1",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "hello", "annotations": []}],
+    },
+    "reasoning": {
+        "type": "reasoning",
+        "id": "rs_1",
+        "status": "completed",
+        "summary": [{"type": "summary_text", "text": "thinking"}],
+    },
+    "function_call": {
+        "type": "function_call",
+        "id": "fc_1",
+        "call_id": "call_1",
+        "name": "get_weather",
+        "arguments": "{}",
+        "status": "completed",
+    },
+    "web_search_call": {
+        "type": "web_search_call",
+        "id": "ws_1",
+        "status": "completed",
+        "action": {"type": "search", "query": "weather"},
+    },
+    "file_search_call": {
+        "type": "file_search_call",
+        "id": "fs_1",
+        "status": "completed",
+        "queries": ["report"],
+    },
+    "computer_call": {
+        "type": "computer_call",
+        "id": "cu_1",
+        "call_id": "call_cu_1",
+        "status": "completed",
+        "action": {"type": "screenshot"},
+        "pending_safety_checks": [],
+    },
+    "custom_tool_call": {
+        "type": "custom_tool_call",
+        "id": "ct_1",
+        "call_id": "call_ct_1",
+        "name": "my_tool",
+        "input": "payload",
+    },
+    "local_shell_call": {
+        "type": "local_shell_call",
+        "id": "ls_1",
+        "call_id": "call_ls_1",
+        "status": "completed",
+        "action": {
+            "type": "exec",
+            "command": ["ls", "-la"],
+            "env": {},
+        },
+    },
+    "image_generation_call": {
+        "type": "image_generation_call",
+        "id": "ig_1",
+        "status": "completed",
+        "result": None,
+    },
+    "code_interpreter_call": {
+        "type": "code_interpreter_call",
+        "id": "ci_1",
+        "status": "completed",
+        "code": "print(1)",
+        "container_id": "cntr_1",
+        "outputs": None,
+    },
+    "mcp_call": {
+        "type": "mcp_call",
+        "id": "mcp_1",
+        "name": "search",
+        "arguments": "{}",
+        "server_label": "my_server",
+    },
+    "mcp_list_tools": {
+        "type": "mcp_list_tools",
+        "id": "mlt_1",
+        "server_label": "my_server",
+        "tools": [],
+    },
+    "mcp_approval_request": {
+        "type": "mcp_approval_request",
+        "id": "mar_1",
+        "name": "search",
+        "arguments": "{}",
+        "server_label": "my_server",
+    },
+    "shell_call": {
+        "type": "shell_call",
+        "id": "sh_1",
+        "call_id": "call_sh_1",
+        "status": "completed",
+        "action": {"type": "exec", "commands": ["ls -la"], "timeout_ms": 5000},
+    },
+    "apply_patch_call": {
+        "type": "apply_patch_call",
+        "id": "ap_1",
+        "call_id": "call_ap_1",
+        "status": "completed",
+        "operation": {"type": "create_file", "path": "a.py", "diff": "+print(1)"},
+    },
+    "tool_search_call": {
+        "type": "tool_search_call",
+        "id": "ts_1",
+        "arguments": {},
+        "execution": "server",
+        "status": "completed",
+    },
+    # Client-supplied tool results and approvals.
+    "function_call_output": {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": "sunny",
+        "status": "completed",
+    },
+    "computer_call_output": {
+        "type": "computer_call_output",
+        "call_id": "call_cu_1",
+        "output": {"type": "computer_screenshot", "image_url": "data:image/png;base64,x"},
+    },
+    "custom_tool_call_output": {
+        "type": "custom_tool_call_output",
+        "call_id": "call_ct_1",
+        "output": "tool result",
+    },
+    "local_shell_call_output": {
+        "type": "local_shell_call_output",
+        "id": "lso_1",
+        "output": "total 0",
+    },
+    "mcp_approval_response": {
+        "type": "mcp_approval_response",
+        "approval_request_id": "mar_1",
+        "approve": True,
+    },
+    "shell_call_output": {
+        "type": "shell_call_output",
+        "id": "sho_1",
+        "call_id": "call_sh_1",
+        "status": "completed",
+        "output": [],
+    },
+    "apply_patch_call_output": {
+        "type": "apply_patch_call_output",
+        "id": "apo_1",
+        "call_id": "call_ap_1",
+        "status": "completed",
+    },
+    "tool_search_output": {
+        "type": "tool_search_output",
+        "id": "tso_1",
+        "execution": "server",
+        "status": "completed",
+        "tools": [],
+    },
+    "compaction_trigger": {
+        "type": "compaction_trigger",
+    },
+    "additional_tools": {
+        "type": "additional_tools",
+        "id": "at_1",
+        "role": "developer",
+        "tools": [],
+    },
+    # Context-compaction records.
+    "compaction": {
+        "type": "compaction",
+        "id": "cmp_1",
+        "encrypted_content": "opaque",
+    },
+}
+
+
+# These Responses item types have no Chat Completions representation.
+# ``ResponsesConverter.responses_to_chat_completion_create_params`` raises ``NotImplementedError`` for them.
+#
+# ``openai_model`` passes Responses requests through without conversion.
+# ``vllm_model`` and ``inference_provider`` convert requests to Chat Completions.
+CHAT_INCONVERTIBLE_TYPES = frozenset(
+    {
+        "code_interpreter_call",
+        "computer_call",
+        "custom_tool_call",
+        "file_search_call",
+        "image_generation_call",
+        "local_shell_call",
+        "mcp_approval_request",
+        "mcp_call",
+        "mcp_list_tools",
+        "web_search_call",
+        # Tool calls, tool results, and compaction records have no chat-message form.
+        "apply_patch_call",
+        "apply_patch_call_output",
+        "compaction",
+        "shell_call",
+        "shell_call_output",
+        "tool_search_call",
+        "tool_search_output",
+        # Client-supplied results, approvals, and tool definitions have no chat-message form.
+        "computer_call_output",
+        "custom_tool_call_output",
+        "local_shell_call_output",
+        "mcp_approval_response",
+        "compaction_trigger",
+        "additional_tools",
+    }
+)
+
+
 NAMESPACE_TOOL = {
     "type": "namespace",
     "name": "mcp__weather",
@@ -109,7 +331,9 @@ class TestSanitizeStreamingBody:
         cleaned, _ = sanitize_streaming_responses_body(
             {"input": [], "stream": True, "client_metadata": {"x": 1}, "prompt_cache_key": "abc", "store": False}
         )
-        assert set(cleaned) == {"input", "store"}
+        # `prompt_cache_key` is part of the request schema and survives.
+        # `client_metadata` is not part of the schema and is removed.
+        assert set(cleaned) == {"input", "store", "prompt_cache_key"}
         # the cleaned body validates against the strict params model
         NeMoGymResponseCreateParamsNonStreaming.model_validate(cleaned)
 
@@ -272,11 +496,19 @@ class TestSanitizeStreamingBody:
 
 class TestValidateStreamingParams:
     def test_prunes_nested_extra_fields(self) -> None:
-        # Codex sends `reasoning.context`, which the pinned SDK's Reasoning model forbids.
+        # Drop unknown nested fields so the remaining request can validate.
+        # Use an unsupported field name so schema additions do not change the test.
+        params = validate_streaming_responses_params(
+            {"input": [], "reasoning": {"effort": "medium", "not_a_real_reasoning_field": "x"}}
+        )
+        assert params.reasoning == {"effort": "medium"}
+
+    def test_reasoning_context_is_forwarded_now_that_the_sdk_models_it(self) -> None:
+        # The SDK models `reasoning.context`, so the sanitizer preserves it.
         params = validate_streaming_responses_params(
             {"input": [], "reasoning": {"effort": "medium", "context": "all_turns"}}
         )
-        assert params.reasoning == {"effort": "medium"}
+        assert params.reasoning == {"effort": "medium", "context": "all_turns"}
 
     def test_unfixable_errors_still_raise(self) -> None:
         import pydantic
@@ -321,7 +553,8 @@ class TestSynthesizeSSE:
         response = _build_response([_function_call_item("exec_command")]).model_dump(mode="json")
         events = self._events("".join(synthesize_responses_sse(response, {"other__tool": ("other", "tool")})))
         assert events[1]["item"]["name"] == "exec_command"
-        assert "namespace" not in events[1]["item"]
+        # Unmapped calls retain an unset `namespace` field.
+        assert events[1]["item"]["namespace"] is None
 
     def test_failure_stream_is_terminal_response_failed(self) -> None:
         events = self._events("".join(synthesize_responses_failure_sse("boom", code="server_error")))
@@ -330,6 +563,25 @@ class TestSynthesizeSSE:
         assert failed["status"] == "failed"
         assert failed["error"] == {"code": "server_error", "message": "boom"}
         assert failed["output"] == []
+
+
+# The streaming sanitizer intentionally removes these input item types.
+# The transcript preservation check excludes them.
+# For `additional_tools`, the sanitizer moves function definitions into `tools`.
+STREAMING_CONSUMED_TYPES = frozenset({"additional_tools"})
+
+
+def test_no_dead_entries_in_streaming_consumed_types() -> None:
+    """Require a fixture for every consumed item type.
+
+    The transcript test is parametrized over ``ITEM_FIXTURES``.
+    An entry without a fixture would not be tested.
+    """
+    suspicious = sorted(STREAMING_CONSUMED_TYPES - set(ITEM_FIXTURES))
+    assert not suspicious, (
+        f"{suspicious} are in STREAMING_CONSUMED_TYPES but have no fixture, so nothing checks that "
+        f"the sanitizer consumes them. Either the tag is a typo, or the type left the union."
+    )
 
 
 class _EchoModel(SimpleResponsesAPIModel):
@@ -444,3 +696,163 @@ class TestResponsesDispatchRoute:
         client, _ = _client(_FailingModel)
         with pytest.raises(RuntimeError, match="backend exploded"):
             client.post("/v1/responses", json={"input": [{"role": "user", "content": "hi"}]})
+
+
+class TestUnionItemTypesThroughDispatch:
+    """Verify item handling on streaming and non-streaming dispatch paths.
+
+    A plain JSON request validates strictly.
+    A ``stream: true`` request goes through ``sanitize_streaming_responses_body`` first.
+    The sanitizer validates each input item separately.
+    It drops invalid items with a warning.
+    This behavior allows unknown harness data without rejecting the entire request.
+    """
+
+    _ADAPTER = TypeAdapter(NeMoGymResponseInputItem)
+
+    @staticmethod
+    def _union_tags() -> set[str]:
+        """The ``type`` tags NeMoGymResponseInputItem accepts."""
+        from typing import Annotated, Literal, get_args, get_origin
+
+        def unwrap(annotation):
+            while get_origin(annotation) is Annotated:
+                annotation = get_args(annotation)[0]
+            return annotation
+
+        tags: set[str] = set()
+        for member in (unwrap(a) for a in get_args(unwrap(NeMoGymResponseInputItem))):
+            field = getattr(member, "model_fields", {}).get("type")
+            if field is None:
+                continue
+            annotation = field.annotation
+            if get_origin(annotation) is Literal:
+                tags.update(str(v) for v in get_args(annotation))
+        return tags
+
+    def test_every_union_tag_has_a_fixture(self) -> None:
+        """Require a fixture for every union member."""
+        missing = sorted(self._union_tags() - set(ITEM_FIXTURES))
+        assert not missing, (
+            f"NeMoGymResponseInputItem accepts {missing} but ITEM_FIXTURES has no payload for "
+            f"them, so the tests below skip those types. Add a minimal valid payload."
+        )
+
+    @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
+    def test_fixture_is_a_valid_union_member(self, tag: str) -> None:
+        """Require every fixture to validate as a union member."""
+        try:
+            self._ADAPTER.validate_python(ITEM_FIXTURES[tag])
+        except ValidationError as exc:  # pragma: no cover - only on a bad fixture
+            pytest.fail(f"ITEM_FIXTURES[{tag!r}] does not validate against the union: {exc}")
+
+    @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
+    def test_streaming_does_not_drop_representable_items(self, tag: str) -> None:
+        """Preserve each representable item in the transcript sent to the backend."""
+        client, server = _client(_EchoModel)
+        history = [
+            {"role": "user", "content": "first turn"},
+            ITEM_FIXTURES[tag],
+            {"role": "user", "content": "second turn"},
+        ]
+        response = client.post("/v1/responses", json={"input": history, "stream": True})
+        assert response.status_code == 200
+
+        seen = server.last_params.input
+        if tag in STREAMING_CONSUMED_TYPES:
+            assert len(seen) == len(history) - 1, (
+                f"{tag!r} is declared as consumed by the sanitizer, but it survived the streaming "
+                f"path. Remove it from STREAMING_CONSUMED_TYPES."
+            )
+            return
+        assert len(seen) == len(history), (
+            f"a {tag!r} item was dropped from the streaming transcript: sent {len(history)} input "
+            f"items, backend received {len(seen)}. Check the warning from "
+            f"sanitize_streaming_responses_body."
+        )
+        assert getattr(seen[1], "type", None) == tag
+
+    @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
+    def test_both_dispatch_paths_accept_representable_items(self, tag: str) -> None:
+        """Streamed and non-streamed agree for every type Gym can represent."""
+        client, _ = _client(_EchoModel)
+        body = {"input": [{"role": "user", "content": "hi"}, ITEM_FIXTURES[tag]]}
+
+        non_streaming = client.post("/v1/responses", json=body)
+        streaming = client.post("/v1/responses", json={**body, "stream": True})
+
+        assert non_streaming.status_code == 200, (
+            f"{tag!r} is in the union but the non-streaming path rejected it: {non_streaming.text[:400]}"
+        )
+        assert streaming.status_code == 200
+
+    def test_unrepresentable_input_item_is_dropped_when_streaming_and_rejected_otherwise(self) -> None:
+        """Verify the different handling of unrepresentable input items.
+
+        Non-streaming requests reject an item type with no union member.
+        Streaming requests drop the item.
+        """
+        client, server = _client(_EchoModel)
+        unknown = {"type": "definitely_not_a_responses_item_type", "id": "x_1"}
+        body = {"input": [{"role": "user", "content": "hi"}, unknown]}
+
+        assert client.post("/v1/responses", json=body).status_code == 422
+
+        streaming = client.post("/v1/responses", json={**body, "stream": True})
+        assert streaming.status_code == 200
+        assert len(server.last_params.input) == 1, "the unknown item should have been dropped"
+
+    @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
+    def test_union_type_is_chat_convertible_or_declared_inconvertible(self, tag: str) -> None:
+        """Classify each union type by whether Chat Completions can represent it.
+
+        The union says what Gym can carry.
+        The converter supports a subset of those item types.
+        Unsupported types raise ``NotImplementedError`` during conversion.
+        """
+        converter = ResponsesConverter(return_token_id_information=False)
+        params = NeMoGymResponseCreateParamsNonStreaming(input=[ITEM_FIXTURES[tag]])
+        try:
+            converter.responses_to_chat_completion_create_params(params)
+            convertible = True
+        except NotImplementedError:
+            convertible = False
+
+        if tag in CHAT_INCONVERTIBLE_TYPES:
+            assert not convertible, (
+                f"{tag!r} is listed in CHAT_INCONVERTIBLE_TYPES but the chat converter now handles "
+                f"it. Remove it from that list."
+            )
+        else:
+            assert convertible, (
+                f"{tag!r} is in the Gym union but responses_to_chat_completion_create_params "
+                f"raises NotImplementedError for it, so a model server that downconverts to Chat "
+                f"Completions (vllm_model, inference_provider) fails mid-rollout on it.\n"
+                f"Fix: add a `case {tag!r}` to responses_to_chat_completion_create_params, or add "
+                f"{tag!r} to CHAT_INCONVERTIBLE_TYPES to declare it Responses-only."
+            )
+
+    @pytest.mark.parametrize("tag", sorted(ITEM_FIXTURES))
+    def test_params_survive_a_dump_and_revalidate(self, tag: str) -> None:
+        """Require accepted parameters to validate again after ``model_dump``.
+
+        Servers forward a request by re-validating ``**body.model_dump()``.
+        SDK models and their corresponding ``*Param`` types may accept different values.
+        Re-validation must accept every value emitted by the first validation.
+        """
+        params = NeMoGymResponseCreateParamsNonStreaming(
+            input=[ITEM_FIXTURES[tag]],
+            tools=[{"type": "function", "name": "f", "parameters": {}, "strict": None}],
+        )
+        dumped = params.model_dump()
+        try:
+            NeMoGymResponseCreateParamsNonStreaming(**dumped)
+        except ValidationError as exc:
+            pytest.fail(
+                f"a {tag!r} item survives validation but not a dump/re-validate round trip: {exc.errors()[:2]}"
+            )
+
+    def test_chat_inconvertible_list_has_no_stale_entries(self) -> None:
+        """Require each type unsupported by Chat Completions to belong to the input union."""
+        stale = sorted(CHAT_INCONVERTIBLE_TYPES - self._union_tags())
+        assert not stale, f"CHAT_INCONVERTIBLE_TYPES names types the union does not accept: {stale}"

@@ -113,4 +113,4 @@ def reinstall():  # pragma: no cover
     # Just here for help
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
-    Popen("uv sync --extra dev --group docs", shell=True).communicate()
+    Popen("uv sync --extra dev", shell=True).communicate()

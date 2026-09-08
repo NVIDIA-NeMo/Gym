@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -283,10 +283,16 @@ def _harbor_run_mocks(
         patch.object(HarborAgent, "_build_job_config", return_value={"job_name": "mock_job"}),
     ):
         mock_gc.return_value = _GLOBAL_CONFIG
-        mock_ray.remote.return_value = MagicMock()
+
+        # The handler awaits the ray ObjectRef directly, so the mocked
+        # future must be awaitable.
+        async def _resolve_future():
+            if side_effect:
+                raise side_effect
+            return trial_dir
 
         if side_effect:
-            mock_to_thread.side_effect = side_effect
+            trial_dir = None
         else:
             trial_dir = tempfile.mkdtemp(prefix="harbor_trial_")
             (Path(trial_dir) / "result.json").write_text(json.dumps(trial_result or DEFAULT_TRIAL_RESULT))
@@ -294,7 +300,14 @@ def _harbor_run_mocks(
                 agent_dir = Path(trial_dir) / "agent"
                 agent_dir.mkdir(parents=True, exist_ok=True)
                 (agent_dir / "trajectory.json").write_text(json.dumps(trajectory))
-            mock_to_thread.return_value = trial_dir
+        mock_ray.remote.side_effect = lambda *a, **k: _resolve_future()
+        mock_ray.options.return_value.remote.side_effect = lambda *a, **k: _resolve_future()
+
+        # File parsing goes through asyncio.to_thread; run it inline.
+        async def _run_inline(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        mock_to_thread.side_effect = _run_inline
 
         yield
 
@@ -775,3 +788,75 @@ class TestMergeMessageAndReasoning:
     def test_returns_message_when_no_reasoning(self) -> None:
         assert HarborAgentUtils._merge_message_and_reasoning("answer", None) == "answer"
         assert HarborAgentUtils._merge_message_and_reasoning("answer", "") == "answer"
+
+
+# ===========================================================================
+#  LLM HTTP client teardown (per-episode session-affinity client lifecycle)
+# ===========================================================================
+
+
+def _make_terminus_agent_with_mock_llm():
+    """Build a bare Terminus2NemoGym wired to a mock NemoGymLLM, bypassing harbor's
+    real __init__. Skips the test if harbor isn't installed."""
+    pytest.importorskip("harbor")
+    from responses_api_agents.harbor_agent.custom_agents.llms.nemo_gym_llm import NemoGymLLM
+    from responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym import Terminus2NemoGym
+
+    agent = Terminus2NemoGym.__new__(Terminus2NemoGym)
+    agent.logs_dir = Path(tempfile.mkdtemp(prefix="harbor_logs_"))
+    agent.logger = MagicMock()
+    llm = MagicMock(spec=NemoGymLLM)
+    llm.aclose = AsyncMock()
+    llm.context_length_exceeded = False
+    agent._llm = llm
+    return agent, llm
+
+
+class TestLLMClientTeardown:
+    """A per-episode NemoGymLLM holds one persistent httpx client so the whole episode
+    stays pinned to a single vLLM engine (prefix-cache warmth). It must be shut down
+    when the episode ends, on every path, so connections are not leaked across
+    Ray-worker reuse."""
+
+    @pytest.mark.parametrize("super_run_side_effect", [None, RuntimeError("agent crashed")])
+    async def test_run_closes_llm_client(self, super_run_side_effect) -> None:
+        agent, llm = _make_terminus_agent_with_mock_llm()
+        from harbor.agents.terminus_2.terminus_2 import Terminus2
+
+        with patch.object(Terminus2, "run", new=AsyncMock(side_effect=super_run_side_effect)) as mock_super_run:
+            # run() handles agent errors gracefully, so it must never raise, whether the
+            # underlying agent loop succeeds or blows up.
+            await agent.run("solve the task", MagicMock(), MagicMock())
+
+        mock_super_run.assert_awaited_once()
+        # The persistent client is closed in the finally block on both paths.
+        llm.aclose.assert_awaited_once()
+
+    async def test_run_swallows_client_close_errors(self) -> None:
+        agent, llm = _make_terminus_agent_with_mock_llm()
+        llm.aclose = AsyncMock(side_effect=RuntimeError("close failed"))
+        from harbor.agents.terminus_2.terminus_2 import Terminus2
+
+        with patch.object(Terminus2, "run", new=AsyncMock()):
+            # Teardown is best-effort: a failing aclose() must not fail the trial.
+            await agent.run("solve the task", MagicMock(), MagicMock())
+
+        llm.aclose.assert_awaited_once()
+
+    async def test_aclose_closes_and_clears_http_client(self) -> None:
+        pytest.importorskip("harbor")
+        from responses_api_agents.harbor_agent.custom_agents.llms.nemo_gym_llm import NemoGymLLM
+
+        llm = NemoGymLLM.__new__(NemoGymLLM)
+        client = MagicMock()
+        client.aclose = AsyncMock()
+        llm._http_client = client
+
+        await llm.aclose()
+
+        client.aclose.assert_awaited_once()
+        assert llm._http_client is None
+
+        # Idempotent: a second close is a no-op (no underlying client to touch).
+        await llm.aclose()
+        client.aclose.assert_awaited_once()

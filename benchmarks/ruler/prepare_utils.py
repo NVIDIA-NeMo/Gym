@@ -26,18 +26,41 @@ from nemo_gym.global_config import get_hf_token
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
+TEXT_COMPLETION_OUTPUT_TOKENS = {"niah": 128, "vt": 30, "cwe": 120, "fwe": 50, "qa": 32}
+SUPPORTED_DATA_FORMATS = {"chat", "default", "base"}
 
 
-def prepare(model: str, length: int) -> Path:
-    return prepare_helper(output_name="ruler.jsonl", model=model, length=length, add_answer_prefix=True)
+def prepare(model: str, length: int, data_format: str = "chat") -> Path:
+    output_name = "ruler.jsonl" if data_format == "chat" else "ruler_pretrain.jsonl"
+    return prepare_helper(output_name=output_name, model=model, length=length, data_format=data_format, add_answer_prefix=True)
 
 
-def prepare_helper(output_name: str, model: str, length: int, add_answer_prefix: bool = True) -> Path:
+def _to_gym_sample(sample: dict, subset: str, data_format: str) -> dict:
+    content = sample["input"]
+    create_params = {"input": [{"role": "user", "content": content}]}
+    if data_format != "chat":
+        separator = "" if data_format == "default" else "\n"
+        create_params["input"][0]["content"] += separator + sample["answer_prefix"].strip()
+        task_family = subset.split("_", maxsplit=1)[0]
+        create_params["max_output_tokens"] = TEXT_COMPLETION_OUTPUT_TOKENS[task_family]
+
+    return {
+        "responses_create_params": create_params,
+        "outputs": sample["outputs"],
+        "length": sample["length"],
+        "subset": subset,
+    }
+
+
+def prepare_helper(output_name: str, model: str, length: int, data_format: str = "chat", add_answer_prefix: bool = True) -> Path:
+    if data_format not in SUPPORTED_DATA_FORMATS:
+        raise ValueError(f"Unsupported RULER data format: {data_format}")
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     output_fpath = DATA_DIR / output_name
 
     run(
-        """uv venv --python 3.12 --allow-existing --seed .venv \
+        """uv venv --python 3.13.14 --allow-existing --seed .venv \
 && source .venv/bin/activate \
 && uv pip install pyyaml bs4 scipy wonderwords html2text tenacity nltk transformers""",
         check=True,
@@ -61,7 +84,7 @@ def prepare_helper(output_name: str, model: str, length: int, add_answer_prefix:
     run(
         f"""source .venv/bin/activate \
 && python ruler_prepare_script.py \
-    --data_format=chat \
+    --data_format={data_format} \
     --setup={model}-{length} \
     --max_seq_length={length} \
     --tokenizer_path={model} \
@@ -84,18 +107,13 @@ def prepare_helper(output_name: str, model: str, length: int, add_answer_prefix:
 
         for sample in subset_samples:
             answer_prefix = sample["answer_prefix"].strip()
-            sample = {
-                "responses_create_params": {"input": [{"role": "user", "content": sample["input"]}]},
-                "outputs": sample["outputs"],
-                "length": sample["length"],
-                "subset": subset_dir.name,
-            }
-            if add_answer_prefix:
-                # status is needed in response mode but optional in chat completion mode.
-                sample["responses_create_params"]["input"].append(
-                    {"role": "assistant", "content": answer_prefix, "status": "in_progress"}
-                )
-            samples.append(sample)
+            sample_gym = _to_gym_sample(sample, subset_dir.name, data_format)
+            if add_answer_prefix and data_format == "chat":
+              # status is needed in response mode but optional in chat completion mode.
+              sample_gym["responses_create_params"]["input"].append(
+                  {"role": "assistant", "content": answer_prefix, "status": "in_progress"}
+              )
+            samples.append(sample_gym)
 
     with output_fpath.open("w") as f:
         for sample in samples:

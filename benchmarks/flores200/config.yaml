@@ -3,6 +3,9 @@ config_paths:
 
 flores200_wmt_translation_resources_server:
   _inherit_from: wmt_translation
+  resources_servers:
+    wmt_translation:
+      language_consistency_backend: flores_glotlid
 
 flores200_wmt_translation_simple_agent:
   _inherit_from: wmt_translation_simple_agent

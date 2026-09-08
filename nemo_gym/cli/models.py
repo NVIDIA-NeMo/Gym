@@ -35,7 +35,7 @@ from nemo_gym.model_registry import discover_models
 
 
 def _inspect_model(name: str, models: dict, global_config_dict) -> None:
-    """Render the ``gym list models <name>`` inspect view for one model (thin: no usage example).
+    """Render the ``gym list models <name>`` inspect view for one model.
 
     ``name`` may be a bare model or a ``<model>/<flavor>`` token; a valid flavor renders the model's
     (main) inspection.
@@ -51,6 +51,7 @@ def _inspect_model(name: str, models: dict, global_config_dict) -> None:
         name=name,
         type_noun="model",
         details={"config": str(entry.config_path.resolve())},
+        usage=f"gym env start --resources-server example_single_tool_call --model-type {name}",
     )
 
 
@@ -73,8 +74,9 @@ def list_models() -> None:
         _inspect_model(name, models, global_config_dict)
         return
 
-    # One row per passable `--model-type` value: `model` is the token, `model_group` its model.
-    rows = [{"model": entry.name, "model_group": entry.model_group} for entry in models.values()]
+    # One row per passable `--model-type` value: `model` is the token, `model_group` its model. `name` carries
+    # the same value as `model` so every component type keys its rows on `name` (`model` kept for compatibility).
+    rows = [{"name": entry.name, "model": entry.name, "model_group": entry.model_group} for entry in models.values()]
 
     # `gym search models <query>` reuses this command, narrowing to rows matching the token or its model.
     query = global_config_dict.get(QUERY_KEY_NAME)

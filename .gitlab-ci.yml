@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+stages:
+  - test
+  - report
+
+# This file is mirrored from GitHub but is active only for internal merge requests.
+workflow:
+  rules:
+    - if: >-
+        $CI_PIPELINE_SOURCE == "merge_request_event" &&
+        $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "nv-internal-main"
+    - when: never
+
+variables:
+  NEMO_CI_REF: "main"
+  TESTS_TO_RUN_ON_THIS_COMMIT: "nightly"
+  TEST_REGEX_ON_THIS_COMMIT: "NONE"
+
+gym-cpu-ci:
+  stage: test
+  interruptible: true
+  trigger:
+    project: dl/JoC/nemo-ci
+    branch: "$NEMO_CI_REF"
+    strategy: depend
+    forward:
+      # Forward this file's explicit contract, never unrelated pipeline variables.
+      yaml_variables: true
+      pipeline_variables: false
+  variables:
+    TEST_NEMO_GYM_MODULE: "True"
+    BUILD_MODULE_REGEX: "/nemo-gym/"
+    GYM_CI_CONTRACT_VERSION: "3"
+    GYM_SOURCE_PROVIDER: "gitlab"
+    GYM_GITLAB_PROJECT_ID: "$CI_PROJECT_ID"
+    GYM_GITLAB_PROJECT_PATH: "$CI_PROJECT_PATH"
+    GYM_GITLAB_PIPELINE_ID: "$CI_PIPELINE_ID"
+    GYM_GITLAB_MR_IID: "$CI_MERGE_REQUEST_IID"
+    GYM_SOURCE_SHA: "$CI_COMMIT_SHA"
+    GYM_SOURCE_REF: "$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME"
+    GYM_TARGET_REF: "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+    GYM_SLURM_ACCOUNT: "coreai_dlalgo_ci"
+    GYM_SLURM_PARTITION: "cpu_short"
+  rules:
+    - if: >-
+        $CI_PIPELINE_SOURCE == "merge_request_event" &&
+        $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "nv-internal-main"
+
+# Report transport is independent of the required bridge verdict above. This job runs after the
+# bridge reaches any terminal state and republishes the receipt-bound package written by NeMo CI.
+gym-cpu-ci-junit:
+  stage: report
+  image: python:3.12-slim
+  script:
+    - python3 -m pip install --no-cache-dir --disable-pip-version-check "defusedxml==0.7.1"
+    - >-
+      python3 .gitlab/ci/collect_downstream_junit.py
+      --output-dir collected-junit
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - collected-junit/
+    reports:
+      junit: collected-junit/**/*.xml
+  rules:
+    - if: >-
+        $CI_PIPELINE_SOURCE == "merge_request_event" &&
+        $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "nv-internal-main"
+      when: always
+  allow_failure: false
