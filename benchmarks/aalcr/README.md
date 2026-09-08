@@ -17,6 +17,17 @@ AA-LCR provides two versioned configs in one benchmark:
 gym eval prepare --benchmark aalcr/config_v1_1
 ```
 
+The v1.1 config always grades with GPT-5.6 Luna at medium reasoning effort.
+Provide its credential before running:
+
+```bash
+export AA_LCR_JUDGE_API_KEY='...'
+```
+
+`AA_LCR_JUDGE_BASE_URL` optionally overrides the default NVIDIA inference API
+URL. Data preparation does not require the credential. Evaluation fails during
+judge startup when it is absent; it never falls back to another judge.
+
 ### Run
 ```bash
 gym eval run \
