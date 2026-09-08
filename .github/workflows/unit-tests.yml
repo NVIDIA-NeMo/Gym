@@ -25,7 +25,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
-  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+  cancel-in-progress: false
 
 env:
   # Number of parallel shards for the full server suite. Keep in sync with the matrix below.

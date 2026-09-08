@@ -197,15 +197,13 @@ def test_scheduled_cicd_runs_do_not_cancel_in_progress() -> None:
     assert (
         "concurrency:\n"
         "  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}\n"
-        "  cancel-in-progress: ${{ github.event_name != 'schedule' }}\n"
-        in cicd_workflow
+        "  cancel-in-progress: ${{ github.event_name != 'schedule' }}\n" in cicd_workflow
     )
     assert (
         "concurrency:\n"
         "  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-"
         "${{ github.event_name }}\n"
-        "  cancel-in-progress: ${{ github.event_name != 'schedule' }}\n"
-        in workflow
+        "  cancel-in-progress: false\n" in workflow
     )
 
 
