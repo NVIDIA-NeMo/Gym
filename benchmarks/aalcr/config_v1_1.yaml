@@ -5,7 +5,7 @@ aalcr_v1_1_judge_model:
     openai_model:
       entrypoint: app.py
       openai_base_url: ${oc.env:AA_LCR_JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
-      openai_api_key: ${oc.env:AA_LCR_JUDGE_API_KEY,null}
+      openai_api_key: ${oc.env:NVIDIA_API_KEY,null}
       openai_model: openai/openai/gpt-5.6-luna
       extra_body:
         reasoning_effort: medium

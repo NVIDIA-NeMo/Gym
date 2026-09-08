@@ -21,7 +21,7 @@ The v1.1 config always grades with GPT-5.6 Luna at medium reasoning effort.
 Provide its credential before running:
 
 ```bash
-export AA_LCR_JUDGE_API_KEY='...'
+export NVIDIA_API_KEY='...'
 ```
 
 `AA_LCR_JUDGE_BASE_URL` optionally overrides the default NVIDIA inference API
