@@ -378,7 +378,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         except ImportError as e:
             raise ImportError(
                 f"NeMo Gym server `{self.config.name}` is configured with "
-              
                 "use_completions_api=true and render_chat_template=true, which requires "
                 "the `transformers` package to load an HF tokenizer for chat-template "
                 "rendering. Install it (`pip install transformers`) or set "

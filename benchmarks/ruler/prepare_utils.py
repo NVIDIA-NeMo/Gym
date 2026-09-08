@@ -32,7 +32,9 @@ SUPPORTED_DATA_FORMATS = {"chat", "default", "base"}
 
 def prepare(model: str, length: int, data_format: str = "chat") -> Path:
     output_name = "ruler.jsonl" if data_format == "chat" else "ruler_pretrain.jsonl"
-    return prepare_helper(output_name=output_name, model=model, length=length, data_format=data_format, add_answer_prefix=True)
+    return prepare_helper(
+        output_name=output_name, model=model, length=length, data_format=data_format, add_answer_prefix=True
+    )
 
 
 def _to_gym_sample(sample: dict, subset: str, data_format: str) -> dict:
@@ -52,7 +54,9 @@ def _to_gym_sample(sample: dict, subset: str, data_format: str) -> dict:
     }
 
 
-def prepare_helper(output_name: str, model: str, length: int, data_format: str = "chat", add_answer_prefix: bool = True) -> Path:
+def prepare_helper(
+    output_name: str, model: str, length: int, data_format: str = "chat", add_answer_prefix: bool = True
+) -> Path:
     if data_format not in SUPPORTED_DATA_FORMATS:
         raise ValueError(f"Unsupported RULER data format: {data_format}")
 
@@ -109,10 +113,10 @@ def prepare_helper(output_name: str, model: str, length: int, data_format: str =
             answer_prefix = sample["answer_prefix"].strip()
             sample_gym = _to_gym_sample(sample, subset_dir.name, data_format)
             if add_answer_prefix and data_format == "chat":
-              # status is needed in response mode but optional in chat completion mode.
-              sample_gym["responses_create_params"]["input"].append(
-                  {"role": "assistant", "content": answer_prefix, "status": "in_progress"}
-              )
+                # status is needed in response mode but optional in chat completion mode.
+                sample_gym["responses_create_params"]["input"].append(
+                    {"role": "assistant", "content": answer_prefix, "status": "in_progress"}
+                )
             samples.append(sample_gym)
 
     with output_fpath.open("w") as f:
