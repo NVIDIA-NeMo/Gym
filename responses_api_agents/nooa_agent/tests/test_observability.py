@@ -32,7 +32,7 @@ from responses_api_agents.nooa_agent.gym_llm import GymModelCall, RolloutLLMStat
 from responses_api_agents.nooa_agent.observability import (
     GymTraceHooks,
     ensure_verifier_final_message,
-    finalize_observations,
+    finalize_observation_gaps,
 )
 
 
@@ -232,10 +232,10 @@ def test_ensure_verifier_final_message_preserves_terminal_message() -> None:
     assert gaps == []
 
 
-def test_finalize_observations_appends_termination_gap() -> None:
+def test_finalize_observation_gaps_appends_termination_gap() -> None:
     bundle = AgentObservationBundle(source="nooa", records=[], gaps=[])
 
-    finalized = finalize_observations(
+    finalized = finalize_observation_gaps(
         bundle,
         termination_reason="policy_budget_exceeded",
         termination_error="budget exhausted",
