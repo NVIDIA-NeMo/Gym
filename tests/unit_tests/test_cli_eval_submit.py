@@ -17,6 +17,7 @@ import argparse
 import pytest
 import yaml
 from hydra.errors import ConfigCompositionException
+from pydantic import ValidationError
 from pytest import MonkeyPatch
 
 import nemo_gym.orchestration.submit as submit_module
@@ -102,43 +103,79 @@ class TestEvalSubmitFlatConfig:
 
 
 class TestEvalSubmitScratchNamespace:
-    """Root-level keys outside SubmitConfig's schema are allowed to exist purely for interpolation, but must
-    be resolved away before validation instead of tripping SubmitConfig's `extra="forbid"`."""
+    """Root-level keys prefixed with `_` are scratch namespaces: not part of SubmitConfig's schema, only
+    present so other fields can interpolate into them. They must be fully defined in the config file
+    itself (only pre-existing leaves may be overridden, and only with a bare `key=value`), and get
+    resolved-then-stripped before validation instead of tripping SubmitConfig's `extra="forbid"`."""
 
-    def test_extra_root_key_is_stripped_before_validation(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
-        captured = _capture_submit(monkeypatch)
+    def _write_config(self, tmp_path, **extra):
         config_path = tmp_path / "submit.yaml"
         config_path.write_text(
-            yaml.dump({"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": DRIVER, "job": JOB})
+            yaml.dump({"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": DRIVER, "job": JOB, **extra})
         )
+        return config_path
 
-        _eval_submit(_args(config_path), overrides=["+my_env_space.tag=nightly"])
+    def test_scratch_namespace_is_stripped_before_validation(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        captured = _capture_submit(monkeypatch)
+        config_path = self._write_config(tmp_path, _my_env_space={"tag": "default-tag"})
 
-        assert not hasattr(captured["config"], "my_env_space")
+        _eval_submit(_args(config_path), overrides=[])
 
-    def test_extra_root_key_is_resolved_before_being_stripped(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        assert not hasattr(captured["config"], "_my_env_space")
+
+    def test_scratch_namespace_is_resolved_before_being_stripped(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         """A field can interpolate into the scratch namespace; the interpolated value must survive even
         though the scratch namespace itself gets dropped afterwards."""
         captured = _capture_submit(monkeypatch)
-        config_path = tmp_path / "submit.yaml"
-        config_path.write_text(
-            yaml.dump({"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": DRIVER, "job": JOB})
+        config_path = self._write_config(
+            tmp_path,
+            _my_env_space={"tag": "default-tag"},
+            driver={**DRIVER, "container": "gym:${_my_env_space.tag}"},
         )
 
-        _eval_submit(
-            _args(config_path),
-            overrides=["+my_env_space.tag=nightly", "driver.container=gym:${my_env_space.tag}"],
+        _eval_submit(_args(config_path), overrides=[])
+
+        assert captured["config"].driver.container == "gym:default-tag"
+        assert not hasattr(captured["config"], "_my_env_space")
+
+    def test_bare_override_of_existing_scratch_leaf(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        captured = _capture_submit(monkeypatch)
+        config_path = self._write_config(
+            tmp_path,
+            _my_env_space={"tag": "default-tag"},
+            driver={**DRIVER, "container": "gym:${_my_env_space.tag}"},
         )
+
+        _eval_submit(_args(config_path), overrides=["_my_env_space.tag=nightly"])
 
         assert captured["config"].driver.container == "gym:nightly"
-        assert not hasattr(captured["config"], "my_env_space")
 
-    def test_without_extra_root_key_still_validates(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+    def test_bare_override_of_typo_scratch_leaf_fails(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        """Hydra itself rejects a bare override of a key that doesn't already exist, for free."""
+        config_path = self._write_config(tmp_path, _my_env_space={"tag": "default-tag"})
+
+        with pytest.raises(ConfigCompositionException):
+            _eval_submit(_args(config_path), overrides=["_my_env_space.tagg=nightly"])
+
+    def test_plus_override_into_scratch_namespace_is_rejected(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        """`+`/`++` could silently create an unused, typo'd field in a scratch namespace; refuse it
+        outright instead of letting it through."""
+        config_path = self._write_config(tmp_path, _my_env_space={"tag": "default-tag"})
+
+        with pytest.raises(ValueError, match="scratch namespace"):
+            _eval_submit(_args(config_path), overrides=["+_my_env_space.tagg=nightly"])
+
+    def test_typo_in_top_level_key_is_rejected(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        """A root key that isn't `_`-prefixed and isn't a SubmitConfig field is a real typo, not a scratch
+        namespace — it must still hit SubmitConfig's strict validation instead of being silently dropped."""
+        config_path = self._write_config(tmp_path, drivver=DRIVER)
+
+        with pytest.raises(ValidationError):
+            _eval_submit(_args(config_path), overrides=[])
+
+    def test_without_scratch_namespace_still_validates(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         captured = _capture_submit(monkeypatch)
-        config_path = tmp_path / "submit.yaml"
-        config_path.write_text(
-            yaml.dump({"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": DRIVER, "job": JOB})
-        )
+        config_path = self._write_config(tmp_path)
 
         _eval_submit(_args(config_path), overrides=[])
 
