@@ -89,7 +89,7 @@ def _request(response: NeMoGymResponse) -> BigFinanceVerifyRequest:
 
 
 def _judge_response(text: str) -> bytes:
-    return (
+    payload = json.loads(
         _response(
             [
                 {
@@ -100,10 +100,19 @@ def _judge_response(text: str) -> bytes:
                     "content": [{"type": "output_text", "text": text, "annotations": []}],
                 }
             ]
-        )
-        .model_dump_json()
-        .encode()
+        ).model_dump_json()
     )
+    # Reproduce Gym's current internal model-server serialization: OpenAI's
+    # ``schema`` alias is emitted as its Python field name ``schema_``.
+    payload["text"] = {
+        "format": {
+            "type": "json_schema",
+            "name": "rubric_grading",
+            "strict": True,
+            "schema_": {"type": "object"},
+        }
+    }
+    return json.dumps(payload).encode()
 
 
 def test_packaged_tool_surface_matches_pinned_snapshot() -> None:
