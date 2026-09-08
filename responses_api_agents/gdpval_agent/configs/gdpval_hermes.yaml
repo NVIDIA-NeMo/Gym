@@ -67,6 +67,10 @@ gdpval_hermes:
         supports_vision: true
         # GDPVal reasoning turns outrun the harness's 90s default and get abandoned mid-flight.
         api_call_stale_timeout: 600
+        # A GDPVal task is one Hermes turn, so the per-turn cap of 50 acts as a task ceiling and
+        # halts the run when it trips. Raised to match max_turns rather than disabled, which
+        # still bounds a runaway loop at about one search per iteration.
+        max_web_searches_per_turn: 250
         # execute_code runs on the harness interpreter, which lacks the document libraries;
         # the terminal reaches the container python that has them. desktop and computer_use
         # cannot work headless. browser stays enabled because it is what carries web_search.
