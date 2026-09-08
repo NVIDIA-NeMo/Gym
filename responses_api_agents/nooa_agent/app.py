@@ -35,7 +35,12 @@ from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 from responses_api_agents.nooa_agent.observability import ensure_verifier_final_message, finalize_observation_gaps
-from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunRequest, NOOARunResult
+from responses_api_agents.nooa_agent.runner import (
+    ArgumentMappingError,
+    EmbeddedNOOARunner,
+    NOOARunRequest,
+    NOOARunResult,
+)
 
 
 NOOA_TERMINATION_REASON_KEY = "nooa_termination_reason"
@@ -133,7 +138,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                         resource_cookies=dict(cookies),
                     )
                 )
-        except ValueError as error:
+        except ArgumentMappingError as error:
             raise HTTPException(
                 status_code=422,
                 detail=f"NOOA argument mapping failed for /v1/responses: {error}",

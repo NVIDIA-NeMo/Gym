@@ -35,7 +35,7 @@ from responses_api_agents.nooa_agent.app import (
     NOOAAgentRunRequest,
 )
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
-from responses_api_agents.nooa_agent.runner import NOOARunResult
+from responses_api_agents.nooa_agent.runner import ArgumentMappingError, NOOARunResult
 
 
 class FakeHTTPResponse:
@@ -192,7 +192,7 @@ async def test_run_uses_complete_row_seed_tool_and_verify_cookie_lifecycle() -> 
 @pytest.mark.asyncio
 async def test_direct_responses_reports_missing_top_level_mapping() -> None:
     agent, _ = make_agent()
-    agent.runner.run = AsyncMock(side_effect=ValueError("source 'customer_id' does not exist"))
+    agent.runner.run = AsyncMock(side_effect=ArgumentMappingError("source 'customer_id' does not exist"))
 
     with pytest.raises(HTTPException, match="customer_id") as error:
         await agent.responses(
@@ -202,6 +202,19 @@ async def test_direct_responses_reports_missing_top_level_mapping() -> None:
         )
 
     assert error.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_direct_responses_propagates_unrelated_value_error() -> None:
+    agent, _ = make_agent()
+    agent.runner.run = AsyncMock(side_effect=ValueError("agent implementation failed"))
+
+    with pytest.raises(ValueError, match="agent implementation failed"):
+        await agent.responses(
+            request(),
+            Response(),
+            body().responses_create_params,
+        )
 
 
 @pytest.mark.asyncio

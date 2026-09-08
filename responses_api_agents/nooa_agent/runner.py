@@ -57,6 +57,10 @@ class NOOARunner(Protocol):
     async def run(self, request: NOOARunRequest) -> NOOARunResult: ...
 
 
+class ArgumentMappingError(ValueError):
+    """Raised when a Gym row cannot supply the configured NOOA entrypoint arguments."""
+
+
 class EmbeddedNOOARunner:
     """Construct and invoke one isolated NOOA agent instance per Gym rollout."""
 
@@ -99,7 +103,10 @@ class EmbeddedNOOARunner:
         agent = agent_class(llm=llm, **self._invocation.init_kwargs)
         validate_agent_resource_method_bindings(agent)
 
-        arguments = materialize_arguments(request.row, self._invocation.arguments)
+        try:
+            arguments = materialize_arguments(request.row, self._invocation.arguments)
+        except ValueError as error:
+            raise ArgumentMappingError(str(error)) from error
         entrypoint = getattr(agent, self._invocation.entrypoint)
         termination_reason = None
         termination_error = None

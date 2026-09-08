@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
-from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunRequest
+from responses_api_agents.nooa_agent.runner import ArgumentMappingError, EmbeddedNOOARunner, NOOARunRequest
 
 
 class ValidAgent(Agent):
@@ -141,6 +141,22 @@ async def test_embedded_runner_maps_full_row_and_attaches_resource_methods() -> 
     assert result.episode.observations.source == "nooa"
     assert result.episode.observations.gaps == []
     assert client.post.await_args.kwargs["json"] == {"city": "Paris"}
+
+
+@pytest.mark.asyncio
+async def test_embedded_runner_classifies_argument_mapping_errors() -> None:
+    runner, _ = make_runner()
+    incomplete_row = row("Paris").model_copy(update={"agent_inputs": {}})
+
+    with pytest.raises(ArgumentMappingError, match="customer_id") as error:
+        await runner.run(
+            NOOARunRequest(
+                row=incomplete_row,
+                model_url_path="/v1/responses",
+            )
+        )
+
+    assert isinstance(error.value.__cause__, ValueError)
 
 
 @pytest.mark.asyncio
