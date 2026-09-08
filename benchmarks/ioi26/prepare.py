@@ -114,6 +114,9 @@ def fetch_archive(force: bool = False) -> Path:
         print(f"Reusing archive checkout at {ARCHIVE_DIR}")
         return year_dir
 
+    if shutil.which("git") is None:
+        raise SystemExit("git is required to fetch the IOI task archive")
+
     if ARCHIVE_DIR.exists():
         shutil.rmtree(ARCHIVE_DIR)
     print(f"Cloning {ARCHIVE_REPO} ({ARCHIVE_YEAR} only; this pulls a few hundred MB) ...")
@@ -133,7 +136,12 @@ def statement_markdown(pdf_path: Path) -> str:
     Not a conversion: the bytes are the setter's own file, and the PDF records
     its size and MD5 so both are checked.
     """
-    import pikepdf
+    try:
+        import pikepdf
+    except ModuleNotFoundError as exc:
+        if exc.name != "pikepdf":
+            raise
+        raise SystemExit("pikepdf is required to extract IOI statements: pip install pikepdf") from exc
 
     # Bind the Pdf. It owns the stream, and reading an attachment off a
     # temporary has been observed to segfault or silently yield zero bytes.
