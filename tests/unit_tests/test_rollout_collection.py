@@ -40,6 +40,7 @@ from nemo_gym.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
@@ -68,6 +69,7 @@ from nemo_gym.rollout_collection import (
     _get_max_rollout_attempts,
     _rollout_for_export,
     _rollout_request_debug_summary,
+    _round_robin_by_agent,
     loads_jsonl_line,
 )
 from nemo_gym.token_id_capture import (
@@ -219,6 +221,160 @@ class TestGetMaxRolloutAttempts:
 
 
 class TestRolloutCollection:
+    def test_round_robin_by_agent_preserves_agent_order_and_rollout_identity(self) -> None:
+        def row(agent: str, task_index: int, rollout_index: int, seed: int) -> dict:
+            return {
+                AGENT_REF_KEY_NAME: {"name": agent},
+                TASK_INDEX_KEY_NAME: task_index,
+                ROLLOUT_INDEX_KEY_NAME: rollout_index,
+                "responses_create_params": {"seed": seed},
+            }
+
+        examples = [
+            row("alpha", 0, 0, 10),
+            row("alpha", 0, 1, 11),
+            row("alpha", 1, 0, 12),
+            row("beta", 2, 0, 20),
+            row("beta", 3, 0, 21),
+            row("gamma", 4, 0, 30),
+        ]
+        original = deepcopy(examples)
+
+        scheduled = _round_robin_by_agent(examples)
+
+        expected = [examples[index] for index in (0, 3, 5, 1, 4, 2)]
+        assert [id(row) for row in scheduled] == [id(row) for row in expected]
+        assert examples == original
+
+    async def test_run_from_config_round_robins_agents_without_rewriting_repeat_identity(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+    ) -> None:
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(
+            "\n".join(
+                json.dumps(
+                    {
+                        AGENT_REF_KEY_NAME: {"name": agent},
+                        TASK_SOURCE_KEY_NAME: agent,
+                        "responses_create_params": {"input": []},
+                        "source_index": source_index,
+                    }
+                )
+                for source_index, agent in enumerate(("alpha", "alpha", "beta", "gamma"))
+            )
+            + "\n"
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            num_repeats=2,
+            num_repeats_add_seed=True,
+            num_samples_in_parallel=1,
+            disable_aggregation=True,
+            disable_health_check=True,
+        )
+        dispatched = []
+
+        async def post(server_name: str, url_path: str, json: dict) -> FakeResponse:
+            assert url_path == "/run"
+            assert server_name == json[AGENT_REF_KEY_NAME]["name"]
+            dispatched.append(json)
+            return FakeResponse(200, {"response": {}})
+
+        server_client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        server_client.global_config_dict = OmegaConf.create(
+            {
+                "alpha": {"responses_api_agents": {}},
+                "beta": {"responses_api_agents": {}},
+                "gamma": {"responses_api_agents": {}},
+            }
+        )
+
+        await RolloutCollectionHelper().run_from_config(config)
+
+        def identity(row: dict) -> tuple[str, int, int, int]:
+            extra_body = json.loads(row["responses_create_params"]["metadata"]["extra_body"])
+            return (
+                row[AGENT_REF_KEY_NAME]["name"],
+                row[TASK_INDEX_KEY_NAME],
+                row[ROLLOUT_INDEX_KEY_NAME],
+                extra_body["seed"],
+            )
+
+        assert [identity(row) for row in dispatched] == [
+            ("alpha", 0, 0, 0),
+            ("beta", 2, 0, 0),
+            ("gamma", 3, 0, 0),
+            ("alpha", 0, 1, 1),
+            ("beta", 2, 1, 1),
+            ("gamma", 3, 1, 1),
+            ("alpha", 1, 0, 0),
+            ("alpha", 1, 1, 1),
+        ]
+        materialized = [orjson.loads(line) for line in config.materialized_jsonl_fpath.read_bytes().splitlines()]
+        assert [row[AGENT_REF_KEY_NAME]["name"] for row in materialized] == [
+            "alpha",
+            "alpha",
+            "alpha",
+            "alpha",
+            "beta",
+            "beta",
+            "gamma",
+            "gamma",
+        ]
+        empty_global_config.assert_called_once_with()
+
+    async def test_run_examples_queues_preordered_rows_deterministically(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        examples = [
+            {
+                AGENT_REF_KEY_NAME: {"name": agent},
+                TASK_INDEX_KEY_NAME: task_index,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+            }
+            for task_index, agent in enumerate(("alpha", "beta", "alpha", "beta"))
+        ]
+        started = []
+        first_wave_started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def post(server_name: str, url_path: str, json: dict) -> FakeResponse:
+            assert url_path == "/run"
+            started.append((server_name, json[TASK_INDEX_KEY_NAME]))
+            if len(started) == 2:
+                first_wave_started.set()
+            await release.wait()
+            return FakeResponse(200, {"response": {}})
+
+        server_client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        server_client.global_config_dict = OmegaConf.create(
+            {
+                "alpha": {"responses_api_agents": {}},
+                "beta": {"responses_api_agents": {}},
+            }
+        )
+
+        with pytest.warns(DeprecationWarning, match="legacy path"):
+            completions = RolloutCollectionHelper()._run_examples_with_metadata(
+                examples, semaphore=asyncio.Semaphore(2)
+            )
+        await asyncio.sleep(0)
+        assert started == []
+        completion_waiters = list(completions)
+        collection = asyncio.gather(*completion_waiters)
+        try:
+            await asyncio.wait_for(first_wave_started.wait(), timeout=1)
+            assert started == [("alpha", 0), ("beta", 1)]
+        finally:
+            release.set()
+            await collection
+
+        assert started == [("alpha", 0), ("beta", 1), ("alpha", 2), ("beta", 3)]
+
     def test_rollout_request_debug_summary_compact(self) -> None:
         row = {
             AGENT_REF_KEY_NAME: {"name": "my_agent"},

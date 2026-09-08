@@ -19,7 +19,7 @@ import logging
 import os
 import warnings
 from asyncio import Future, Semaphore
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from collections.abc import Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -164,6 +164,26 @@ class _CompletedRollout:
     row: Dict[str, Any]
     result: Dict[str, Any]
     rollout_latency_ms: Optional[float]
+
+
+def _round_robin_by_agent(examples: List[Dict]) -> List[Dict]:
+    """Interleave resolved rows by agent while preserving every agent's input order.
+
+    Agent order is the order in which each name first appears. Rows are returned unchanged, so
+    task/rollout indexes, repeat seeds, and the identities used by resume remain intact.
+    """
+    queues: Dict[str, deque[Dict]] = {}
+    for row in examples:
+        agent_name = row[AGENT_REF_KEY_NAME]["name"]
+        queues.setdefault(agent_name, deque()).append(row)
+
+    interleaved: List[Dict] = []
+    while queues:
+        for agent_name in list(queues):
+            interleaved.append(queues[agent_name].popleft())
+            if not queues[agent_name]:
+                del queues[agent_name]
+    return interleaved
 
 
 def _nonnegative_int(value: Any) -> Optional[int]:
@@ -1381,10 +1401,13 @@ class RolloutCollectionHelper(BaseModel):
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
         failure_counts: Counter = Counter()
+        if len(dispatched_per_agent) > 1:
+            print(f"Dispatching rollouts round-robin across {len(dispatched_per_agent)} agents")
         for future in self._run_examples_with_metadata(
             input_rows,
             semaphore=semaphore,
             route_failures_to_sidecar=config.route_failures_to_sidecar,
+            interleave_by_agent=True,
         ):
             completed = await future
             row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
@@ -1897,6 +1920,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
         route_failures_to_sidecar: bool = False,
+        interleave_by_agent: bool = False,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
@@ -1905,11 +1929,16 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         that carries ``rollout_latency_ms`` alongside the raw ``/run`` result instead of inside it,
         so internal-only timing never has to be smuggled through (and stripped back out of) a dict
         that a direct caller of ``run_examples`` could also observe.
+
+        ``interleave_by_agent`` is enabled by the full evaluation path. Lower-level callers retain
+        the order they supplied.
         """
         server_client = self.setup_server_client(head_server_config)
         self.resolve_task_sources(examples, server_client.global_config_dict)
         self._validate_agent_names(examples, server_client.global_config_dict)
         self._validate_agent_pairings(examples, server_client.global_config_dict)
+        if interleave_by_agent:
+            examples = _round_robin_by_agent(examples)
         semaphore = semaphore or nullcontext()
 
         async def _post_subroutine(row: Dict) -> _CompletedRollout:
@@ -1942,13 +1971,21 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         row=row, result=_agent_request_failure_row(e, status), rollout_latency_ms=None
                     )
 
-        return tqdm.as_completed(
-            map(_post_subroutine, examples),
-            desc="Collecting rollouts",
-            miniters=10,
-            total=len(examples),
-            maxinterval=60,
-        )
+        def _as_completed_in_dispatch_order() -> Iterator[Future]:
+            # Create tasks in dispatch order before passing them to as_completed. Passing raw
+            # coroutines would let asyncio first put them in a set, losing the order in which they
+            # queue for the run-wide semaphore. Keep this inside a generator so collection remains
+            # lazy until the caller starts iterating, as it was before tasks were created explicitly.
+            tasks = [asyncio.create_task(_post_subroutine(row)) for row in examples]
+            yield from tqdm.as_completed(
+                tasks,
+                desc="Collecting rollouts",
+                miniters=10,
+                total=len(examples),
+                maxinterval=60,
+            )
+
+        return _as_completed_in_dispatch_order()
 
     def run_examples(
         self,
