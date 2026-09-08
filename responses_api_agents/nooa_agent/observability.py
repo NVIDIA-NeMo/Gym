@@ -248,7 +248,7 @@ def ensure_verifier_final_message(
     return response.model_copy(update={"output": output}), gaps
 
 
-def finalize_observations(
+def finalize_observation_gaps(
     observations: AgentObservationBundle,
     *,
     extra_gaps: list[ObservationGap] | None = None,
