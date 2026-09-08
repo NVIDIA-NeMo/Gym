@@ -53,6 +53,7 @@ gym eval health-check         # verify rollout artifact quality for an existing 
 gym eval profile              # compute a reward profile from rollouts
 gym eval reverify             # recompute rewards from existing rollouts without re-running inference
 gym eval compare              # compare a baseline eval run against a candidate run
+gym eval stat-test            #  statistical tests of a baseline run vs a candidate run
 
 # Contributor helpers
 gym dev test                  # run NeMo Gym's unit tests
@@ -777,7 +778,9 @@ See [Repeat-Level Metrics](/evaluation/aggregate-metrics#repeat-level-metrics) f
 
 Compare a baseline eval run against a candidate run and write a report.
 
-The report contains a metric table (the change, plus each side's value and confidence interval), split into key metrics and all other metrics, and a per-task sample-flips table. Confidence intervals are read from what each run recorded; this command does not yet perform statistical tests or issue a pass/fail verdict.
+The report contains a metric table (the change, plus each side's value and confidence interval), split into key metrics and all other metrics, and a per-task sample-flips table. Confidence intervals are read from what each run recorded.
+
+By default — provided the comparison resolves to a single agent pair, which is the usual case — `gym eval compare` also runs a paired t-test for statistical significance on every key metric with per-task pairing data (the same test [`gym eval stat-test`](#gym-eval-stat-test) runs standalone) and writes it to a separate `statistical_tests/` subdirectory next to the report. A comparison spanning several agents skips the step and says so; pass `--agent` to pick one.
 
 | Option | Description |
 | --- | --- |
@@ -788,8 +791,13 @@ The report contains a metric table (the change, plus each side's value and confi
 | `--agent NAME` | Agent to compare on both sides. Defaults to every agent present in both runs. |
 | `--baseline-agent NAME` | Agent to read from the baseline. Takes precedence over `--agent`. |
 | `--candidate-agents NAME[,NAME...]` | Agent to read from each candidate, in `--candidates` order. Takes precedence over `--agent`. |
-| `--output-dir DIR`, `-o` | Where to write the report. Defaults to the directory containing the candidate rollouts JSONL. |
+| `--output-dir DIR`, `-o` | Where to write the report. Defaults to the directory containing the candidate rollouts JSONL. The statistics step writes into a `statistical_tests/` subdirectory of it. |
 | `--report-format` | `md`, `json`, or `both` (default). |
+| `--metric METRIC[,METRIC...]` | Restrict the statistics step to specific metric(s). Defaults to every key metric with per-task pairing data. |
+| `--margin DELTA[,DELTA...]` | Smallest difference(s) that count as a real change, e.g. `0.01` for 1pp (default `0`). One value applying to every metric, or one per `--metric` in the same order. Ignored when `--alternative` is `two-sided`. |
+| `--alternative` | Which alternative hypothesis to test (default `two-sided`). See [`gym eval stat-test`](#gym-eval-stat-test). |
+| `--alpha` | Significance level for the statistics step (default `0.05`). |
+| `--no-stats` | Skip the statistics step entirely — no `statistical_tests/` directory is written. |
 
 ```bash
 gym eval compare \
@@ -803,8 +811,57 @@ Writes into the output directory:
 | --- | --- |
 | `compare_report.md` | Human-readable report. |
 | `compare_report.json` | Machine-readable result (`schema_version` `"1"`). |
+| `statistical_tests/*` | The default statistics step's own artifacts. |
 
 If a run was collected with `--disable-aggregation` it has no `*_aggregate_metrics.json`; run [`gym eval aggregate`](#gym-eval-aggregate) first, or point at the file directly with `--baseline-agg-metrics` / `--candidates-agg-metrics`.
+
+### `gym eval stat-test`
+
+Statistical test of a baseline eval run against a candidate run — the same test `gym eval compare` can run, but standalone: `gym eval stat-test` never depends on `compare` having been run, and never reads or writes `compare_report.*`.
+
+`--alternative` chooses the alternative hypothesis (the claim you are trying to demonstrate), and `--margin` sets how large a difference has to be before it counts:
+
+- **`two-sided`** (default): "did anything change at all" — for repeatability checks (same benchmark/model run twice). `--margin` is ignored.
+- **`candidate-lower`**: "the candidate metric dropped by more than `--margin`" — for detecting a real regression (e.g. for quantization: did accuracy fall by more than 1pp).
+- **`candidate-higher`**: the mirror, for detecting a real improvement.
+
+Both one-sided options are named for the *direction of the difference*, not for whether it is good news — a drop in `output_tokens` is an improvement, and the test does not presume otherwise.
+
+`--margin` defaults to `0`, so a one-sided test without one is the plain "did the candidate move at all in this direction" question. A larger margin makes a claim *harder* to establish, never easier.
+
+`significant=True` on a one-sided test means the change was demonstrated. `significant=False` means it could not be — which is **not** the same as proving the metric held steady, since an underpowered run (few tasks, high variance) also returns `False`.
+
+Reports only the raw statistical output (n, mean difference, standard error, p-value, significant) — no PASS/WARN/FAIL verdict. A metric whose paired tasks cover less than half of the larger run is reported without a verdict, and any unpaired task raises a warning.
+
+| Option | Description |
+| --- | --- |
+| `--baseline PATH` | Baseline run's rollouts JSONL. Its `*_aggregate_metrics.json` sibling is what gets read. |
+| `--candidates PATH[,PATH...]` | Candidate run's rollouts JSONL. One candidate is supported today. |
+| `--baseline-agg-metrics PATH` | Baseline's aggregate-metrics JSON, when it is not the sibling of `--baseline`. |
+| `--candidates-agg-metrics PATH[,PATH...]` | Candidate's aggregate-metrics JSON, when not the sibling of `--candidates`. |
+| `--agent NAME`, `--baseline-agent NAME`, `--candidate-agents NAME[,NAME...]` | Same agent-selection semantics as `gym eval compare`. |
+| `--test NAME` | Which statistical test to run. `paired-t-test` (the default) is the only one today; `--metric`, `--margin` and `--alternative` below belong to it. |
+| `--metric METRIC[,METRIC...]` | Metric(s) to test (bare field name, e.g. `reward`, not `mean/reward`). Defaults to every key metric with per-task pairing data. |
+| `--margin DELTA[,DELTA...]` | Smallest difference(s) that count as a real change, e.g. `0.01` for 1pp (default `0`). One value applying to every metric, or one per `--metric` in the same order. Ignored when `--alternative` is `two-sided`. |
+| `--alternative` | Which alternative hypothesis to test: `two-sided` (default), `candidate-lower`, or `candidate-higher`, as described above. |
+| `--alpha` | Significance level (default `0.05`). |
+| `--output-dir DIR`, `-o` | Parent for the `statistical_tests/` directory the report is written into. Defaults to the candidate run's own directory. |
+| `--report-format` | `md`, `json`, or `both` (default). |
+
+```bash
+# Repeatability: is the difference between two runs of the same config noise, or real?
+gym eval stat-test \
+    --baseline runs/run_a/rollouts.jsonl \
+    --candidates runs/run_b/rollouts.jsonl
+
+# Quantization: did the candidate's reward drop by more than 1pp?
+gym eval stat-test \
+    --baseline runs/bf16/rollouts.jsonl \
+    --candidates runs/nvfp4/rollouts.jsonl \
+    --metric reward --margin 0.01 --alternative candidate-lower
+```
+
+Always writes into a `statistical_tests/` directory (under `--output-dir` when given, otherwise under the candidate run's own directory), with the filename indexed by everything that makes the invocation distinct.
 
 ### `gym eval reverify`
 

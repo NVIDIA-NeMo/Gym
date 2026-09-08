@@ -26,3 +26,22 @@ def aggregate_metrics_path_for(output_fpath: Path) -> Path:
     (e.g. `gym eval compare`) derive the same path the writers produced.
     """
     return output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+
+
+def resolve_run_output_dir(
+    rollouts_jsonl_fpath: str | Path, output_dirpath: str | None = None, subdir: str | None = None
+) -> Path:
+    """Directory to write output files *about* the run identified by given `rollouts_jsonl_fpath`.
+
+    A relative path is anchored at the user's cwd, never resolved against the install root: this is a
+    *write* target, and on a wheel install that root is site-packages.
+    """
+    if output_dirpath:
+        p = Path(output_dirpath)
+    else:
+        p = Path(rollouts_jsonl_fpath).parent
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    if subdir:
+        p = p / subdir
+    return p

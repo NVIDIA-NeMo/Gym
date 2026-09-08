@@ -615,3 +615,10 @@ def compare() -> None:  # pragma: no cover
     for table in render_key_metrics_tables(result):
         print_rich_table(table)
     print("\n".join(summary_lines(result, written)))
+
+
+@exit_cleanly_on_config_error
+def stat_test() -> None:  # pragma: no cover
+    from nemo_gym.statistical_tests.common import stat_test_from_config_dict
+
+    stat_test_from_config_dict(get_global_config_dict(), "stat-test")

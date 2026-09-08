@@ -631,6 +631,73 @@ def _dataset_download(args: argparse.Namespace, overrides: list[str]) -> None:
     dispatch(targets[args.storage], overrides)
 
 
+# Run-selection flags shared by `eval compare` and `eval stat-test` -- both read the same
+# `<stem>_aggregate_metrics.json` pair and pick an agent the same way.
+_EVAL_RUN_SELECTION_FLAGS = (
+    _value_flag(
+        "baseline",
+        "baseline_rollouts_jsonl_fpath",
+        "Baseline run's rollouts JSONL (its *_aggregate_metrics.json sibling is what gets read today).",
+        quote=True,
+    ),
+    _comma_list_flag(
+        "candidates",
+        "candidate_rollouts_jsonl_fpaths",
+        "Candidate run's rollouts JSONL. Comma-separated list; one candidate is supported today.",
+        metavar="PATH[,PATH...]",
+    ),
+    _value_flag(
+        "baseline-agg-metrics",
+        "baseline_aggregate_metrics_fpath",
+        "Baseline's aggregate-metrics JSON, when it is not the sibling of --baseline.",
+        quote=True,
+    ),
+    _comma_list_flag(
+        "candidates-agg-metrics",
+        "candidate_aggregate_metrics_fpaths",
+        "Candidates' aggregate-metrics JSON, in --candidates order, when not siblings of --candidates.",
+        metavar="PATH[,PATH...]",
+    ),
+    _value_flag("agent", "agent_name", "Agent to compare on both sides (default: all shared agents)."),
+    _value_flag("baseline-agent", "baseline_agent_name", "Agent to read from the baseline's metrics."),
+    _comma_list_flag(
+        "candidate-agents",
+        "candidate_agent_names",
+        "Agent to read from each candidate's metrics, in --candidates order.",
+        metavar="NAME[,NAME...]",
+    ),
+)
+
+# Statistical-test flags on both `eval compare` (its default stats step) and `eval stat-test`.
+# `--metric`/`--margin` belong to `paired-t-test`; a test that does not declare them rejects them rather
+# than ignoring them (`statistical_tests.registry.build_config`). A test-specific knob needs no flag
+# here at all -- it rides in through Hydra as `+<field>=<value>`.
+_STATISTICAL_TEST_FLAGS = (
+    _comma_list_flag(
+        "metric",
+        "metric",
+        "Metric(s) to test, e.g. `reward` (comma-separated). Default: every key metric with per-task pairing data.",
+        metavar="METRIC[,METRIC...]",
+    ),
+    _comma_list_flag(
+        "margin",
+        "margin",
+        "Smallest difference(s) that count as a real change, e.g. 0.01 for 1pp (default: 0). One value for "
+        "every metric, or one per --metric in the same order. Ignored when --alternative is two-sided.",
+        metavar="DELTA[,DELTA...]",
+    ),
+    _value_flag(
+        "alternative",
+        "alternative",
+        "Which alternative hypothesis to test (default: two-sided). `two-sided`: did anything change at all. "
+        "`candidate-lower`: the candidate metric dropped by more than --margin. "
+        "`candidate-higher`: it rose by more than --margin.",
+        choices=("two-sided", "candidate-lower", "candidate-higher"),
+    ),
+    _value_flag("alpha", "alpha", "Significance level (default: 0.05)."),
+)
+
+
 # One-line help for each command group, shown in `gym --help`.
 GROUPS = {
     "list": "List available components (benchmarks, environments, agents, models, resources-servers).",
@@ -1074,38 +1141,7 @@ COMMANDS = {
         target="nemo_gym.cli.eval:compare",
         summary="Compare a baseline eval run against candidate runs.",
         flags=(
-            _value_flag(
-                "baseline",
-                "baseline_rollouts_jsonl_fpath",
-                "Baseline run's rollouts JSONL (its *_aggregate_metrics.json sibling is what gets read today).",
-                quote=True,
-            ),
-            _comma_list_flag(
-                "candidates",
-                "candidate_rollouts_jsonl_fpaths",
-                "Candidate run's rollouts JSONL. Comma-separated list; one candidate is supported today.",
-                metavar="PATH[,PATH...]",
-            ),
-            _value_flag(
-                "baseline-agg-metrics",
-                "baseline_aggregate_metrics_fpath",
-                "Baseline's aggregate-metrics JSON, when it is not the sibling of --baseline.",
-                quote=True,
-            ),
-            _comma_list_flag(
-                "candidates-agg-metrics",
-                "candidate_aggregate_metrics_fpaths",
-                "Candidates' aggregate-metrics JSON, in --candidates order, when not siblings of --candidates.",
-                metavar="PATH[,PATH...]",
-            ),
-            _value_flag("agent", "agent_name", "Agent to compare on both sides (default: all shared agents)."),
-            _value_flag("baseline-agent", "baseline_agent_name", "Agent to read from the baseline's metrics."),
-            _comma_list_flag(
-                "candidate-agents",
-                "candidate_agent_names",
-                "Agent to read from each candidate's metrics, in --candidates order.",
-                metavar="NAME[,NAME...]",
-            ),
+            *_EVAL_RUN_SELECTION_FLAGS,
             _value_flag(
                 "output-dir",
                 "output_dirpath",
@@ -1119,6 +1155,35 @@ COMMANDS = {
                 "Report artifacts to write (default: both).",
                 choices=("md", "json", "both"),
             ),
+            *_STATISTICAL_TEST_FLAGS,
+            _bool_flag("no-stats", "no_stats", "Skip the default statistical-test step."),
+        ),
+    ),
+    "eval stat-test": Command(
+        target="nemo_gym.cli.eval:stat_test",
+        summary="Statistical significance test between a baseline and a candidate run (default: paired-t-test).",
+        flags=(
+            *_EVAL_RUN_SELECTION_FLAGS,
+            _value_flag(
+                "output-dir",
+                "output_dirpath",
+                "Where to write the report (default: `<candidate run's directory>/statistical_tests/`).",
+                aliases=("-o",),
+                quote=True,
+            ),
+            _value_flag(
+                "report-format",
+                "report_format",
+                "Report artifacts to write (default: both).",
+                choices=("md", "json", "both"),
+            ),
+            # Choices are spelled out rather than derived from `statistical_tests.registry`:
+            # importing it here would put pydantic + the whole stats package on the path of every
+            # `gym` invocation.
+            _value_flag(
+                "test", "test", "Statistical test to run (default: paired-t-test).", choices=("paired-t-test",)
+            ),
+            *_STATISTICAL_TEST_FLAGS,
         ),
     ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),
