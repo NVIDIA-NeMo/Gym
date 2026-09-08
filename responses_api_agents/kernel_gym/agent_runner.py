@@ -1,100 +1,49 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Small, dependency-free kernel coding agent for the task sandbox."""
-
+import asyncio
+import importlib
 import json
 import os
-import subprocess
-import time
-import urllib.request
+import sys
 from pathlib import Path
-from uuid import uuid4
+
+from fastapi import Request
 
 
-def run(command: str) -> str:
-    try:
-        result = subprocess.run(command, cwd="/workspace", shell=True, text=True, capture_output=True, timeout=300)
-        output = f"exit_code={result.returncode}\n{result.stdout}{result.stderr}"
-    except subprocess.TimeoutExpired as exc:
-        output = f"exit_code=124\n{exc.stdout or ''}{exc.stderr or ''}"
-    return output[-50_000:]
+sys.path.insert(0, "/opt/Gym")
+os.environ["PATH"] = "/opt/agent/bin:" + os.environ.get("PATH", "")
 
-
-def complete(url: str, key: str, payload: dict) -> dict:
-    request = urllib.request.Request(
-        f"{url.rstrip('/')}/chat/completions",
-        data=json.dumps(payload).encode(),
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(request, timeout=300) as response:
-        return json.load(response)
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef  # noqa: E402
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming  # noqa: E402
+from nemo_gym.server_utils import ServerClient  # noqa: E402
 
 
 def main() -> None:
-    config = json.loads(os.environ["NGKB_AGENT_KWARGS"])
-    model = config["model"].removeprefix("openai/")
-    instruction = Path("/trajectories_mount/instruction.txt").read_text()
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a CUDA kernel optimization agent. Work autonomously in /workspace. "
-                "Inspect reference.py and solution.py, use shell commands to develop and test, "
-                "and leave the final implementation in solution.py. Do not only explain the answer."
-            ),
-        },
-        {"role": "user", "content": instruction},
-    ]
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "shell",
-                "description": "Run a shell command in /workspace.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"command": {"type": "string"}},
-                    "required": ["command"],
-                },
-            },
-        }
-    ]
-    final_text = ""
-    max_turns = config.get("fabric_config", {}).get("runtime", {}).get("max_turns", 90)
-    for _ in range(int(max_turns)):
-        data = complete(
-            os.environ["NGKB_MODEL_URL"],
-            config["model_api_key"],
-            {"model": model, "messages": messages, "tools": tools, "tool_choice": "auto"},
-        )
-        message = data["choices"][0]["message"]
-        messages.append(message)
-        calls = message.get("tool_calls") or []
-        if not calls:
-            final_text = message.get("content") or ""
-            break
-        for call in calls:
-            arguments = json.loads(call["function"]["arguments"])
-            messages.append({"role": "tool", "tool_call_id": call["id"], "content": run(arguments["command"])})
-
-    response = {
-        "id": f"kernel-gym-runner-{uuid4().hex}",
-        "created_at": int(time.time()),
-        "model": model,
-        "object": "response",
-        "output": [
-            {
-                "id": f"msg_{uuid4().hex}",
-                "content": [{"type": "output_text", "text": final_text, "annotations": []}],
-                "role": "assistant",
-                "status": "completed",
-                "type": "message",
-            }
-        ],
+    module = importlib.import_module(os.environ["KB_AGENT_MODULE"])
+    agent_class = getattr(module, os.environ["KB_AGENT_CLASS"])
+    config_class = getattr(module, os.environ["KB_AGENT_CONFIG_CLASS"])
+    model_url = os.environ["KB_MODEL_URL"]
+    model_server = ModelServerRef(name="policy_model", type="responses_api_models")
+    client = ServerClient.model_construct(global_config_dict={"policy_model": {"responses_api_models": {"model": {}}}})
+    client._build_server_base_url = lambda config: model_url
+    config_values = {
+        "host": "0.0.0.0",
+        "port": 0,
+        "name": "kernel_gym_harness",
+        "entrypoint": "app.py",
+        **json.loads(os.environ["KB_AGENT_KWARGS"]),
     }
-    Path("/trajectories_mount/response.json").write_text(json.dumps(response))
-    print(f"agent finished after {len(messages)} messages", flush=True)
+    if "model_server" in config_class.model_fields:
+        config_values["model_server"] = model_server
+    if "resources_server" in config_class.model_fields:
+        config_values["resources_server"] = ResourcesServerRef(name="unused", type="resources_servers")
+    agent = agent_class(config=config_class(**config_values), server_client=client)
+    body = NeMoGymResponseCreateParamsNonStreaming.model_validate_json(os.environ["KB_BODY"])
+    body.model = body.model or os.environ["KB_MODEL_NAME"]
+    response = asyncio.run(agent.responses(Request({"type": "http", "path_params": {}}), body))
+    Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
+    print(f"agent finished: {len(response.output)} output items", flush=True)
 
 
 if __name__ == "__main__":

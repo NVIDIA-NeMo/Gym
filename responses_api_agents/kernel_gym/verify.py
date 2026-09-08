@@ -29,7 +29,7 @@ result = eval_kernel_against_ref(
     num_correct_trials=5,
     num_perf_trials=100,
     device=torch.device("cuda:0"),
-    backend="cuda",
+    backend="triton",
     precision=torch.float32,
 )
 speedup = result.ref_runtime / result.runtime if result.correctness and result.runtime > 0 else 0.0
