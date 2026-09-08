@@ -4,9 +4,11 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
+import pytest
 from pytest import approx, fixture
 
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -147,6 +149,45 @@ class TestGdpPdfResourcesServer:
         assert result.all_pass == 0.0
         assert result.mean_pass == 0.0
         client.post.assert_not_awaited()
+
+    async def test_malformed_judge_output_is_retried(self, server: tuple[GdpPdfResourcesServer, MagicMock]) -> None:
+        resource, client = server
+        client.post = AsyncMock(side_effect=[_http_response("unclear"), _http_response("PASS")])
+        request = GdpPdfVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+            response=_response("candidate"),
+            verifier_metadata={
+                "task_id": "t1",
+                "task_prompt": "Analyze the filing.",
+                "domain": "Finance",
+                "rubric_criteria": [{"id": "rubric-1", "criterion": "States revenue."}],
+            },
+        )
+
+        result = await resource.verify(request)
+
+        assert result.all_pass == 1.0
+        assert client.post.await_count == 2
+
+    async def test_malformed_judge_output_fails_after_bounded_retries(
+        self, server: tuple[GdpPdfResourcesServer, MagicMock]
+    ) -> None:
+        resource, client = server
+        client.post = AsyncMock(return_value=_http_response("unclear"))
+        request = GdpPdfVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="task"),
+            response=_response("candidate"),
+            verifier_metadata={
+                "task_id": "t1",
+                "task_prompt": "Analyze the filing.",
+                "domain": "Finance",
+                "rubric_criteria": [{"id": "rubric-1", "criterion": "States revenue."}],
+            },
+        )
+
+        with pytest.raises(JudgeError, match="after 5 attempts"):
+            await resource.verify(request)
+        assert client.post.await_count == 5
 
     def test_metrics_are_task_macro_average_not_best_of_k(
         self, server: tuple[GdpPdfResourcesServer, MagicMock]

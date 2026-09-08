@@ -72,6 +72,7 @@ class GdpPdfResourcesServerConfig(BaseResourcesServerConfig):
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     judge_prompt_path: str = str(_DEFAULT_JUDGE_PROMPT)
+    judge_max_parse_attempts: int = Field(default=5, ge=1, le=10)
     judge_endpoint_max_concurrency: Optional[int] = Field(default=64, ge=1)
 
     # The benchmark config uses this to retain the fixed 100-task denominator
@@ -137,16 +138,8 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
             )
         ]
 
-        if self._judge_sem is None:
-            response = await call_judge(
-                self.server_client,
-                server_name=self.config.judge_model_server.name,
-                url_path="/v1/responses",
-                json=params,
-                response_model=NeMoGymResponse,
-            )
-        else:
-            async with self._judge_sem:
+        for _ in range(self.config.judge_max_parse_attempts):
+            if self._judge_sem is None:
                 response = await call_judge(
                     self.server_client,
                     server_name=self.config.judge_model_server.name,
@@ -154,17 +147,30 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
                     json=params,
                     response_model=NeMoGymResponse,
                 )
+            else:
+                async with self._judge_sem:
+                    response = await call_judge(
+                        self.server_client,
+                        server_name=self.config.judge_model_server.name,
+                        url_path="/v1/responses",
+                        json=params,
+                        response_model=NeMoGymResponse,
+                    )
 
-        judge_output = extract_response_text(response)
-        if not judge_output:
-            raise JudgeError(f"empty judge response for criterion {criterion_id}")
-        passed, parsed = parse_judge_verdict(judge_output)
-        return CriterionEvaluation(
-            criterion_id=criterion_id,
-            criterion=criterion_text,
-            passed=passed,
-            verdict_parsed=parsed,
-            judge_output=judge_output,
+            judge_output = extract_response_text(response)
+            passed, parsed = parse_judge_verdict(judge_output)
+            if parsed:
+                return CriterionEvaluation(
+                    criterion_id=criterion_id,
+                    criterion=criterion_text,
+                    passed=passed,
+                    verdict_parsed=True,
+                    judge_output=judge_output,
+                )
+
+        raise JudgeError(
+            f"judge returned no PASS/FAIL verdict for criterion {criterion_id} after "
+            f"{self.config.judge_max_parse_attempts} attempts"
         )
 
     async def verify(self, body: GdpPdfVerifyRequest) -> GdpPdfVerifyResponse:

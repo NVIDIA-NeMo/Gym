@@ -10,12 +10,15 @@ import pytest
 from PIL import Image
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.gdp_pdf_agent.app import (
+    _DOCUMENT_REDACTION_MARKER,
     GdpPdfAgentConfig,
     _resolve_under,
+    _strip_document_payloads,
     materialize_document,
 )
-from responses_api_agents.simple_agent.app import SimpleAgentRunRequest
+from responses_api_agents.simple_agent.app import SimpleAgentRunRequest, SimpleAgentVerifyResponse
 
 
 def _config(**overrides) -> GdpPdfAgentConfig:
@@ -97,6 +100,37 @@ def test_text_only_profile_still_includes_every_page(tmp_path: Path) -> None:
     assert not any(block["type"] == "input_image" for block in content)
     assert "complete extracted text" in content[0]["text"]
     assert "text 3" in content[-1]["text"]
+
+
+def test_redacts_complete_document_payload_from_artifacts() -> None:
+    content = [
+        {"type": "input_text", "text": "TASK:\nDo the analysis."},
+        {"type": "input_image", "image_url": "data:image/png;base64,secret-image"},
+        {"type": "input_text", "text": "SOURCE DOCUMENT TEXT:\nsecret document text"},
+    ]
+    result = SimpleAgentVerifyResponse(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": content}]),
+        response=NeMoGymResponse(
+            id="response",
+            created_at=0,
+            model="model",
+            object="response",
+            output=[],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        ),
+        reward=1.0,
+        ng_trajectory={"gaps": [], "question": content},
+    )
+
+    redacted = _strip_document_payloads(result).model_dump(mode="json")
+    serialized = json.dumps(redacted)
+
+    assert "secret document text" not in serialized
+    assert "secret-image" not in serialized
+    assert _DOCUMENT_REDACTION_MARKER in serialized
+    assert redacted["ng_trajectory"]["gaps"] == [{"code": "document_payload_redacted"}]
 
 
 def test_document_paths_cannot_escape_base(tmp_path: Path) -> None:

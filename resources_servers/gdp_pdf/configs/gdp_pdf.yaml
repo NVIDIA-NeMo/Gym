@@ -15,6 +15,7 @@ gdp_pdf_resources_server:
         max_output_tokens: 1024
         reasoning:
           effort: medium
+      judge_max_parse_attempts: 5
       judge_endpoint_max_concurrency: 64
 
 gdp_pdf_agent:
@@ -36,7 +37,7 @@ gdp_pdf_agent:
       max_images: null
       image_format: jpeg
       jpeg_quality: 90
-      strip_images_from_output: true
+      strip_document_payloads_from_output: true
       datasets:
       - name: example
         type: example

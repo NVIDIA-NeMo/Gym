@@ -25,7 +25,7 @@ The first preparation downloads the pinned public snapshot and parses/renders 4,
 
 ## Evaluate
 
-Use one rollout per task for the normal run:
+The benchmark defaults to AA's five rollouts per task:
 
 ```bash
 uv run gym eval run \
@@ -33,14 +33,13 @@ uv run gym eval run \
   --model-type openai_model \
   --agent gdp_pdf_benchmark_agent \
   --split benchmark \
-  --output results/gdp_pdf.jsonl \
-  --num-repeats 1
+  --output results/gdp_pdf.jsonl
 ```
 
-To reproduce AA's reported protocol, change only:
+For a one-rollout smoke test or routine RL iteration, override only:
 
 ```bash
---num-repeats 5
+--num-repeats 1
 ```
 
 Set `judge_base_url`, `judge_api_key`, and, if necessary, `judge_model_name` for the GPT-5.6 Luna endpoint. Policy model configuration uses the normal Gym `--model-type` and model arguments.

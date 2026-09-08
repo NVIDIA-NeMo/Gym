@@ -17,6 +17,10 @@ DATASET_ID = "surgeai/GDP.pdf"
 DATASET_REVISION = "73e94c87235e0477f8a65996086acd3f47c98d2e"  # pragma: allowlist secret
 LITEPARSE_VERSION = "2.14.4"
 SOURCE_DPI = 150
+EXPECTED_TASKS = 100
+EXPECTED_PAGES = 4_592
+EXPECTED_CRITERIA = 1_275
+EXPECTED_DOMAINS = 10
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 SOURCE_DIR = DATA_DIR / "source"
@@ -191,6 +195,24 @@ def _download_source(source_dir: Path, revision: str, allow_patterns: list[str])
     return Path(snapshot_path)
 
 
+def validate_corpus_totals(rows: list[dict[str, Any]], page_count: int) -> None:
+    """Fail closed if the pinned public corpus no longer matches AA v4.3."""
+    actual = {
+        "tasks": len(rows),
+        "pages": page_count,
+        "criteria": sum(len(row["verifier_metadata"]["rubric_criteria"]) for row in rows),
+        "domains": len({row["verifier_metadata"]["domain"] for row in rows}),
+    }
+    expected = {
+        "tasks": EXPECTED_TASKS,
+        "pages": EXPECTED_PAGES,
+        "criteria": EXPECTED_CRITERIA,
+        "domains": EXPECTED_DOMAINS,
+    }
+    if actual != expected:
+        raise ValueError(f"GDP.pdf corpus totals differ from AA v4.3: expected {expected}, found {actual}")
+
+
 def prepare(
     output_path: Path = OUTPUT_FPATH,
     source_dir: Path = SOURCE_DIR,
@@ -217,6 +239,7 @@ def prepare(
     documents_dir = Path(documents_dir)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     prepared_rows: list[dict[str, Any]] = []
+    page_count = 0
 
     for index, row in enumerate(source_rows, start=1):
         task_id = str(row.get("task_id") or index)
@@ -231,6 +254,8 @@ def prepare(
 
         document_dir = documents_dir / _safe_task_dir(task_id)
         manifest_path = prepare_document(pdf_path, document_dir, force=force, num_workers=num_workers)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        page_count += int(manifest["page_count"])
         manifest_relative = manifest_path.relative_to(output_path.parent).as_posix()
         prepared_rows.append(
             {
@@ -249,6 +274,9 @@ def prepare(
                 },
             }
         )
+
+    if limit is None:
+        validate_corpus_totals(prepared_rows, page_count)
 
     temporary = output_path.with_suffix(".jsonl.tmp")
     with temporary.open("w", encoding="utf-8") as stream:

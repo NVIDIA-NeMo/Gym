@@ -27,6 +27,10 @@ from responses_api_agents.simple_agent.app import (
 )
 
 
+_DOCUMENT_TEXT_PREFIX = "SOURCE DOCUMENT TEXT:\n"
+_DOCUMENT_REDACTION_MARKER = "[GDP.pdf document payload redacted]"
+
+
 class GdpPdfAgentConfig(SimpleAgentConfig):
     documents_base_dir: str = Field(
         description="Base directory for document manifests referenced by verifier_metadata.document_manifest."
@@ -38,7 +42,7 @@ class GdpPdfAgentConfig(SimpleAgentConfig):
     max_images: Optional[int] = Field(default=None, ge=1)
     image_format: Literal["png", "jpeg"] = "png"
     jpeg_quality: int = Field(default=90, ge=1, le=100)
-    strip_images_from_output: bool = True
+    strip_document_payloads_from_output: Literal[True] = True
 
     @model_validator(mode="after")
     def validate_dpi(self) -> "GdpPdfAgentConfig":
@@ -214,16 +218,25 @@ def materialize_document(row: dict[str, Any], base_dir: Path, config: GdpPdfAgen
     return enriched
 
 
-def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyResponse:
-    removed = False
+def _strip_document_payloads(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyResponse:
+    redacted = False
 
     def scrub(value: Any) -> Any:
-        nonlocal removed
+        nonlocal redacted
         if isinstance(value, list):
             cleaned = []
             for item in value:
                 if isinstance(item, dict) and item.get("type") == "input_image":
-                    removed = True
+                    redacted = True
+                    continue
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") == "input_text"
+                    and isinstance(item.get("text"), str)
+                    and item["text"].startswith(_DOCUMENT_TEXT_PREFIX)
+                ):
+                    redacted = True
+                    cleaned.append({**item, "text": _DOCUMENT_REDACTION_MARKER})
                     continue
                 cleaned.append(scrub(item))
             return cleaned
@@ -232,11 +245,13 @@ def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyR
         return value
 
     data = scrub(result.model_dump(mode="json"))
-    if removed:
+    if redacted:
         for key in ("ng_trajectory", "ng_agent_observations"):
             observations = data.get(key)
             if isinstance(observations, dict):
-                observations.setdefault("gaps", []).append({"code": "multimodal_history_redacted"})
+                gaps = observations.setdefault("gaps", [])
+                if not any(gap.get("code") == "document_payload_redacted" for gap in gaps if isinstance(gap, dict)):
+                    gaps.append({"code": "document_payload_redacted"})
     return SimpleAgentVerifyResponse.model_validate(data)
 
 
@@ -251,7 +266,7 @@ class GdpPdfAgent(SimpleAgent):
         row = body.model_dump(exclude_unset=True)
         enriched = await asyncio.to_thread(materialize_document, row, base_dir, self.config)
         result = await super().run(request, SimpleAgentRunRequest.model_validate(enriched))
-        return _strip_image_blocks(result) if self.config.strip_images_from_output else result
+        return _strip_document_payloads(result) if self.config.strip_document_payloads_from_output else result
 
 
 if __name__ == "__main__":

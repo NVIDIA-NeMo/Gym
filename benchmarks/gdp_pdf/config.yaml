@@ -31,5 +31,5 @@ gdp_pdf_benchmark_agent:
         jsonl_fpath: benchmarks/gdp_pdf/data/gdp_pdf_benchmark.jsonl
         prompt_config: benchmarks/gdp_pdf/prompts/default.yaml
         prepare_script: benchmarks/gdp_pdf/prepare.py
-        num_repeats: 1
+        num_repeats: 5
         license: MIT

@@ -9,4 +9,4 @@ The AA v4.3 delivery controls are explicit configuration:
 - `max_images`: optional endpoint image-count cap; only leading pages lose image coverage and all page text remains
 - `image_format`: the benchmark uses JPEG for opaque payload reduction; PNG remains available
 
-The policy gets one user turn with no tools. Base64 images are stripped from persisted rollout artifacts after the model call.
+The policy gets one user turn with no tools. Complete document text and base64 images are redacted from persisted rollout artifacts after the model call.

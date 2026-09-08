@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as parquet
+import pytest
 
 from benchmarks.gdp_pdf import prepare as prepare_module
 
@@ -21,6 +22,25 @@ def test_extract_rubric_criteria_preserves_metadata() -> None:
     assert prepare_module.extract_rubric_criteria(row) == [
         {"id": "rubric-1", "criterion": "Reports the total.", "criterion_type": "explicit"}
     ]
+
+
+def test_validate_corpus_totals(monkeypatch) -> None:
+    monkeypatch.setattr(prepare_module, "EXPECTED_TASKS", 1)
+    monkeypatch.setattr(prepare_module, "EXPECTED_PAGES", 3)
+    monkeypatch.setattr(prepare_module, "EXPECTED_CRITERIA", 1)
+    monkeypatch.setattr(prepare_module, "EXPECTED_DOMAINS", 1)
+    rows = [
+        {
+            "verifier_metadata": {
+                "domain": "Finance",
+                "rubric_criteria": [{"id": "rubric-1", "criterion": "States the result."}],
+            }
+        }
+    ]
+
+    prepare_module.validate_corpus_totals(rows, page_count=3)
+    with pytest.raises(ValueError, match="corpus totals differ"):
+        prepare_module.validate_corpus_totals(rows, page_count=2)
 
 
 def test_prepare_writes_lightweight_rows(monkeypatch, tmp_path: Path) -> None:
@@ -54,7 +74,7 @@ def test_prepare_writes_lightweight_rows(monkeypatch, tmp_path: Path) -> None:
     def fake_prepare_document(pdf_path, document_dir, **kwargs):
         document_dir.mkdir(parents=True)
         manifest = document_dir / "manifest.json"
-        manifest.write_text('{"pages": []}', encoding="utf-8")
+        manifest.write_text('{"page_count": 1, "pages": []}', encoding="utf-8")
         return manifest
 
     monkeypatch.setattr(prepare_module, "prepare_document", fake_prepare_document)
@@ -65,6 +85,7 @@ def test_prepare_writes_lightweight_rows(monkeypatch, tmp_path: Path) -> None:
         source_dir=source,
         documents_dir=output.parent / "documents",
         revision="revision",
+        limit=1,
     )
 
     assert result == output
