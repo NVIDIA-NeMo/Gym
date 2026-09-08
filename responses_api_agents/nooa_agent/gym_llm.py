@@ -125,6 +125,16 @@ def _chat_items(items: list[Any]) -> list[dict[str, Any]]:
                     "content": _content_text(item.get("output")),
                 }
             )
+        elif item_type == "reasoning":
+            # Reasoning is model-generated: keep it on the assistant side and preserve
+            # the text — summary first (what the API exposes by default), raw content
+            # otherwise. Without this branch the item fell through as a contentless
+            # user message and the journal lost the reasoning text.
+            text = _content_text(item.get("summary")) or _content_text(item.get("content"))
+            message = {"role": "assistant"}
+            if text is not None:
+                message["content"] = text
+            out.append(message)
         else:
             role = item.get("role") or ("assistant" if item_type == "message" else "user")
             message: dict[str, Any] = {"role": role}

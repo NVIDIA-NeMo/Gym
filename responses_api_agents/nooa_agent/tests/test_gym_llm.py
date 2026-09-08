@@ -313,3 +313,25 @@ async def test_duplicate_assistant_text_restores_each_prior_output_once() -> Non
     assert [item.id for item in restored] == ["msg-1", "msg-2"]
     assert [item.generation_token_ids for item in restored] == [[2], [4]]
     assert gaps == []
+
+
+def test_chat_items_preserves_reasoning_text() -> None:
+    from responses_api_agents.nooa_agent.gym_llm import _chat_items
+
+    items = [
+        # summary-form reasoning (what the Responses API returns by default)
+        {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "considering options"}]},
+        # content-form reasoning (when the API includes raw reasoning)
+        {"type": "reasoning", "id": "rs_2", "content": [{"type": "reasoning_text", "text": "deep thought"}]},
+        # plain messages keep their roles
+        {"role": "user", "content": "q"},
+        {"type": "function_call", "call_id": "c1", "name": "t", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "c1", "output": "ok"},
+    ]
+    messages = _chat_items(items)
+
+    assert messages[0] == {"role": "assistant", "content": "considering options"}
+    assert messages[1] == {"role": "assistant", "content": "deep thought"}
+    assert messages[2] == {"role": "user", "content": "q"}
+    assert messages[3]["tool_calls"][0]["function"]["name"] == "t"
+    assert messages[4] == {"role": "tool", "tool_call_id": "c1", "content": "ok"}
