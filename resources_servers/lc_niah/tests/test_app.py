@@ -89,7 +89,7 @@ def _make_request(
 
 
 def _make_server(
-    overlap_metric_rule: OverlapMetricRule = OverlapMetricRule.SEQ_MATCH,
+    overlap_metric_rule: OverlapMetricRule = OverlapMetricRule.NGRAM16,
     overlap_grading_rule: OverlapGradingRule = OverlapGradingRule.MULTIPLY,
 ) -> LCNIAHResourcesServer:
     config = LCNIAHResourcesServerConfig(
@@ -373,5 +373,5 @@ class TestServerInstantiation:
 
     def test_default_rules(self) -> None:
         config = LCNIAHResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="")
-        assert config.overlap_metric_rule == OverlapMetricRule.SEQ_MATCH
+        assert config.overlap_metric_rule == OverlapMetricRule.NGRAM16
         assert config.overlap_grading_rule == OverlapGradingRule.MULTIPLY

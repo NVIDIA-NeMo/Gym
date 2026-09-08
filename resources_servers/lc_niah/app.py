@@ -26,7 +26,7 @@
 #
 # Two config knobs decide the reward:
 #   - overlap_metric_rule  : which signal becomes `reasoning_overlap`
-#                            (seq_match | ngram16 | lcs; default seq_match)
+#                            (seq_match | ngram16 | lcs; default ngram16)
 #   - overlap_grading_rule : how answer_score and reasoning_overlap combine
 #       base     -> reward = answer_score
 #       multiply -> reward = answer_score * (1 - reasoning_overlap)  (default)
@@ -63,7 +63,7 @@ class OverlapGradingRule(str, Enum):
 class LCNIAHResourcesServerConfig(BaseResourcesServerConfig):
     name: str = "lc_niah"
     # Rule used to grade the final answer against expected_answer and reasoning_content against the input.
-    overlap_metric_rule: OverlapMetricRule = OverlapMetricRule.SEQ_MATCH
+    overlap_metric_rule: OverlapMetricRule = OverlapMetricRule.NGRAM16
     overlap_grading_rule: OverlapGradingRule = OverlapGradingRule.MULTIPLY
 
 

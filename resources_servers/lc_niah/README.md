@@ -21,7 +21,7 @@ response on two signals at once:
 Two config knobs decide the reward:
 
 - **`overlap_metric_rule`** — which overlap signal is computed and becomes the single
-  `reasoning_overlap` penalty: `seq_match` (default), `ngram16`, or `lcs`.
+  `reasoning_overlap` penalty: `seq_match`, `ngram16` (default), or `lcs`.
 - **`overlap_grading_rule`** — how `answer_score` and `reasoning_overlap` combine:
 
   | rule | reward |
