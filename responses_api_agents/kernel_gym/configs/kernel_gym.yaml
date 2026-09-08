@@ -3,8 +3,8 @@ kernel_gym:
     kernel_gym:
       entrypoint: app.py
       domain: coding
-      description: KernelBench run by a coding agent inside the task sandbox.
-      value: Evaluate GPU kernel optimization through an isolated agent lifecycle.
+      description: KernelBench one shot or coding agent
+      value: Evaluate and improve agent kernel optimization
 
       agent_kwargs:
         model: openai/nvidia/nvidia/nemotron-3-super-v3
