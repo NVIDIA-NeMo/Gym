@@ -1,28 +1,18 @@
 # kernel_gym
 
-`kernel_gym` runs a coding agent inside a GPU sandbox, then evaluates the edited kernel with [KernelBench](https://github.com/ScalingIntelligence/KernelBench) in the same sandbox.
+`kernel_gym` runs a Responses API agent in an OpenSandbox GPU sandbox and scores its kernel with [KernelBench](https://github.com/ScalingIntelligence/KernelBench).
 
-Compilation failures, incorrect kernels, and correct-but-slow kernels receive 0. Sandbox and timeout failures are masked.
+The verifier uses `eval_kernel_against_ref` with five correctness trials and 100 timing trials. Correct kernels faster than PyTorch receive reward 1; infrastructure failures are masked.
 
 ## Prepare
-
-Build and push the task image:
-
-```bash
-docker build -t registry.example/kernel-gym:kernelbench -f responses_api_agents/kernel_gym/Dockerfile .
-docker push registry.example/kernel-gym:kernelbench
-```
-
-Create a one-problem Level 1 dataset from a KernelBench checkout. Problem 19 (ReLU) is the default example.
 
 ```bash
 python responses_api_agents/kernel_gym/prepare.py \
   --kernelbench ../KernelBench \
-  --image registry.example/kernel-gym:kernelbench
+  --image registry.example/kernelbench:latest
 ```
 
-Repeat `--problem-id` to add tasks. The preparer writes public `reference.py` and baseline `solution.py` files plus a verifier script that is hidden until the agent exits.
-Five prepared rows and five completed trajectories are included in `data/example_input.jsonl` and `data/example_rollouts.jsonl`.
+The image must be pullable by OpenSandbox. Repeat `--problem-id` to select tasks.
 
 ## Run
 
@@ -34,15 +24,15 @@ export NEMO_GYM_SANDBOX_MODEL_BASE_URL=...
 gym env start \
   --config responses_api_agents/kernel_gym/configs/kernel_gym.yaml \
   --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
-  --model-type vllm_model
+  --model-type openai_model \
+  --model MODEL \
+  --model-url MODEL_URL \
+  --model-api-key MODEL_API_KEY
 
 gym eval run --no-serve \
   --agent kernel_gym \
   --input responses_api_agents/kernel_gym/data/kernelbench.jsonl \
-  --output results/kernel_gym_rollouts.jsonl \
-  --limit 1
+  --output results/kernel_gym_rollouts.jsonl
 ```
 
-## Result fields
-
-Each rollout contains `reward`, `compiled`, `correctness`, `runtime`, `ref_runtime`, `speedup`, and `mask_sample` alongside the harness trajectory.
+Each row includes the harness trajectory, reward, compilation, correctness, runtime, speedup, and mask. Five example inputs and rollouts are in `data/`.
