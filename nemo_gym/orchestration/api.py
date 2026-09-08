@@ -58,7 +58,7 @@ class VllmServiceConfig(BaseModelServiceConfig):
     # Opt-in escape hatch: run multiple instances behind a Ray Serve gateway (which handles both
     # instance creation and request routing) instead of vLLM's own --data-parallel-size/multi-node
     # DP mechanism. Most users never need to set this - it's forced on regardless of this value
-    # when the topology requires it (see SubmitConfig._effective_ray_serve).
+    # when the topology requires it (see effective_ray_serve).
     use_ray_serve: bool = False
 
     @field_validator("number_of_instances")
@@ -187,6 +187,13 @@ class SubmitConfig(_StrictModel):
             sum(p.nodes for p in compute.node_pools.values()) if isinstance(compute, SlurmComputeConfig) else 1
         )
         is_multi_node = total_nodes > 1
+        # Only one compute resource is supported, so every service's placement resolves to it -
+        # this is computed once here rather than re-derived per service.
+        gpus_per_node_values = (
+            [p.gpus_per_node for p in compute.node_pools.values() if p.gpus_per_node is not None]
+            if isinstance(compute, SlurmComputeConfig)
+            else []
+        )
 
         for service_name, service in self.services.items():
             if service.placement is None:
@@ -197,12 +204,16 @@ class SubmitConfig(_StrictModel):
                     f"({', '.join(sorted(compute_names))})."
                 )
 
+            if not isinstance(service, VllmServiceConfig):
+                continue
+
+            is_ray_serve = effective_ray_serve(service, total_nodes, gpus_per_node_values)
+
             if (
                 is_multi_node
-                and isinstance(service, VllmServiceConfig)
                 and service.number_of_instances > 1
                 and service.number_of_instances % total_nodes != 0
-                and not self._effective_ray_serve(service, total_nodes)
+                and not is_ray_serve
             ):
                 raise ValueError(
                     f"Service '{service_name}' has number_of_instances={service.number_of_instances}, which must "
@@ -210,15 +221,17 @@ class SubmitConfig(_StrictModel):
                     "deployment - each node hosts an equal share of the data-parallel replicas."
                 )
 
-            if isinstance(service, VllmServiceConfig):
-                self._validate_vllm_gpu_footprint(service_name, service, total_nodes)
-                if self._effective_ray_serve(service, total_nodes) and self.driver.gym_install is None:
-                    raise ValueError(
-                        f"Service '{service_name}' requires the Ray Serve gateway (use_ray_serve or an instance "
-                        "spanning multiple nodes), but driver.gym_install is not set. The gateway script "
-                        "(nemo_gym/orchestration/ray_serve_gateway.py) is fetched from that repo/ref into the "
-                        "vLLM service's own container - set driver.gym_install.{repo,ref}."
-                    )
+            self._validate_vllm_gpu_footprint(
+                service_name, service, total_nodes, compute, gpus_per_node_values, is_ray_serve
+            )
+
+            if is_ray_serve and self.driver.gym_install is None:
+                raise ValueError(
+                    f"Service '{service_name}' requires the Ray Serve gateway (use_ray_serve or an instance "
+                    "spanning multiple nodes), but driver.gym_install is not set. The gateway script "
+                    "(nemo_gym/orchestration/ray_serve_gateway.py) is fetched from that repo/ref into the "
+                    "vLLM service's own container - set driver.gym_install.{repo,ref}."
+                )
 
         if self.driver.policy_model is not None:
             if self.driver.policy_model not in self.services:
@@ -244,32 +257,22 @@ class SubmitConfig(_StrictModel):
 
         return self
 
-    def _effective_ray_serve(self, service: "VllmServiceConfig", total_nodes: int) -> bool:
-        """Whether the Ray Serve gateway path (see ray_serve_gateway.py) is used for this service."""
-        compute = self.compute[service.placement]
-        if not isinstance(compute, SlurmComputeConfig):
-            return service.use_ray_serve
-        gpus_per_node_values = [
-            pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node is not None
-        ]
-        return effective_ray_serve(service, total_nodes, gpus_per_node_values)
-
-    def _validate_vllm_gpu_footprint(self, service_name: str, service: "VllmServiceConfig", total_nodes: int) -> None:
-        compute = self.compute[service.placement]
-        if not isinstance(compute, SlurmComputeConfig):
-            return
-
-        gpus_per_node_values = [
-            pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node is not None
-        ]
+    def _validate_vllm_gpu_footprint(
+        self,
+        service_name: str,
+        service: "VllmServiceConfig",
+        total_nodes: int,
+        compute: "SlurmComputeConfig",
+        gpus_per_node_values: list[int],
+        is_ray_serve: bool,
+    ) -> None:
         if not gpus_per_node_values:
             return
 
         max_gpus_per_node = max(gpus_per_node_values)
         tp_pp = service.tensor_parallel_size * service.pipeline_parallel_size
-        effective_ray_serve = self._effective_ray_serve(service, total_nodes)
 
-        if total_nodes > 1 and effective_ray_serve:
+        if total_nodes > 1 and is_ray_serve:
             # Ray Serve gateway path: Ray's own placement-group scheduler packs each instance's
             # TP*PP GPUs anywhere across the shared cluster, so an instance may itself span nodes
             # and multiple instances may share a node. Only the aggregate footprint has to fit -
