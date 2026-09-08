@@ -13,7 +13,9 @@ From the Gym repository root:
 ```bash
 gym eval prepare --benchmark big_finance
 gym eval run --benchmark big_finance \
-  -c responses_api_models/openai_model/configs/openai_model.yaml
+  --model-type openai_model \
+  --split benchmark \
+  --output results/big_finance.jsonl
 gym eval reverify --benchmark big_finance --model-type openai_model \
   --inputs results/<run>_materialized_inputs.jsonl \
   --rollouts results/<run>.jsonl \
