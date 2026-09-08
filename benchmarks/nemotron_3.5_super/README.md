@@ -3,6 +3,8 @@
   - [Run production evals](#run-production-evals)
     - [Typical job shapes](#typical-job-shapes)
     - [Open problems](#open-problems)
+    - [Tuning and debug protocol](#tuning-and-debug-protocol)
+      - [Current vLLM decode speeds across engine batch sizes](#current-vllm-decode-speeds-across-engine-batch-sizes)
   - [Development commands](#development-commands)
     - [vllm-router patch (decode-node cache imbalance)](#vllm-router-patch-decode-node-cache-imbalance)
       - [Measured effect](#measured-effect)
@@ -35,6 +37,50 @@ These job shapes have been tuned to finish evaluation on Nemotron 3.5 Super chec
 ### Open problems
 1. We can't reduce the number of prefill nodes because the TRT LLM kernel isn't large enough to support higher max_num_batched_tokens
 2. Once MTP is functional with PD-disagg / async scheduling / prefix caching / etc, we should be able to reduce the decode nodes as well.
+
+### Tuning and debug protocol
+
+Prerequisites for tuning and debugging:
+1. Gym Slurm log containing the vLLM engine prints.
+2. Final Gym output aggregate metrics including the harness finish rate.
+
+1. Check if the harness finish rate is expected or not.
+   1. For example, as of Mon Sep 07, the expected finish rate for TerminalBench 2.1 + Terminus 2 harness is around 90% Terminus 2 harness finish rate.
+   2. If the finish rate is within the expected range, then usually things are fine from an infra perspective.
+2. Inspect the vLLM engine logs in the Gym Slurm logs.
+   1. Identify the prefill and decode vLLM engine logs by looking at the "Prompt throughput" and "Generation throughput". The engines that have non-zero "Prompt throughput" are the prefill engines, and the ones with non-zero "Generation throughput" are decode engines.
+3. Do I need to increase compute because of waiting requests?
+   1. Check if there are any "Waiting requests" on any of the engine types.
+      1. The typical number of waiting requests against an engine is 0 or close to 0.
+      2. If there are waiting requests built up, the number will typically be 100s or 1000s.
+   2. If there are waiting requests on any of the engines, rerun the same config with an increase in the number of that engine type.
+      1. For example, if the current shape is p2d2 and the decode engines have a lot of waiting requests, try increasing to p2d4.
+      2. Typical shapes are powers of 2 up to whatever the max NVLink shape supported is e.g. p2d8, p2d14 (segment 16), p2d16 (segment 18), etc.
+4. Do I need to increase compute because of decode speed?
+   1. Check if the finish rate is non-zero and lower than you expect. It could be 3% lower or 40% lower depending on the verbosity of the checkpoint.
+   2. Please refer to the decode speeds table below to see what compute shape you need to satisfy your latency requirement.
+5. Did something weird happen on the vLLM engine side?
+   1. If the progress rollouts/min reported in W&B is very different than usual, that may indicate a transient failure on the vLLM engine side. Try rerunning with the same config and see if the same behavior persists.
+6. Is there something else wrong?
+   1. Message @bxyu-nvidia @sdevare in Slack and share your Slurm logs and W&B.
+
+#### Current vLLM decode speeds across engine batch sizes
+Definitions
+1. Batch size: The number of requests that the engine is currently running.
+2. Engine throughput: The total tokens/s throughput for all requests, logged by vLLM every 10s interval.
+3. Effective tokens/second/request (tok/s/req): Engine throughput divided by the instantaneous batch size reported by vLLM.
+
+Written as of Mon Sep 07, 2026 using this [Super 3.5 config](https://github.com/NVIDIA-NeMo/Gym/blob/ae8d388dda62f40fe8b8105bf079be132383fe4d/benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super.sh).
+
+|Batch size|Engine throughput (tok/s)|Tok/s/req|
+|---|---|---|
+|<=16|2000|130|
+|32|2500|80|
+|64|3600|60|
+|128|6000|45|
+|256|8000|30|
+|512|9000|15|
+
 
 ## Development commands
 
