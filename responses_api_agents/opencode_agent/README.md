@@ -15,11 +15,11 @@ OpenCode must be on PATH (auto-installed on first start, or `npm install -g open
 
 ```bash
 gym env start \
-  --resources-server math_with_judge/math_with_judge_opencode_agent \
+  --config environments/opencode_math/config.yaml \
   --model-type openai_model
 
-gym eval run --no-serve --agent math_with_judge_opencode_agent \
-  --input responses_api_agents/opencode_agent/data/example.jsonl \
+gym eval run --no-serve --agent opencode_math_agent \
+  --input environments/opencode_math/data/example.jsonl \
   --output opencode_rollout.jsonl --limit 5
 ```
 

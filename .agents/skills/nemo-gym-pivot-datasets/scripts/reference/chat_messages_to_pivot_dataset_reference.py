@@ -18,6 +18,10 @@ This is a copied example from a concrete dataset conversion. It may contain
 dataset-specific imports, filters, and assumptions, and should be adapted
 before reuse.
 
+NOTE: this script imports ``analyze_rollouts``, which is not part of this repository,
+so it cannot be run as-is -- it is kept for its filtering logic and its
+chat-completion to Responses mapping.
+
 Smart filtering using error profiles from analyze_rollouts.py:
   - Reward filtering (default: only reward=1.0 trajectories)
   - Hallucinated tool calls (session termination, wrong framework, misspellings)
@@ -131,26 +135,24 @@ def chat_completion_create_params_to_responses_create_params(chat_completions_cr
 
 
 def chat_completion_message_to_expected_action(chat_completion_message):
-    """Returns None to drop the sample when arguments are malformed JSON or
-    when the assistant target has multiple tool calls (the singular
-    `expected_action` contract cannot represent parallel tool calls)."""
+    """Returns None to drop the sample when arguments are malformed JSON.
+
+    The label covers the whole model call: one tool call is a `function_call`, several emitted in
+    one response are a single `function_call_batch`.
+    """
     tool_calls = chat_completion_message.get("tool_calls") or []
     if tool_calls:
-        # Singular expected_action cannot encode parallel calls.
-        if len(tool_calls) > 1:
-            return None
-        tc = tool_calls[0]
-        expected_action = {
-            "type": "function_call",
-            "name": tc["function"]["name"],
-            "arguments": tc["function"]["arguments"],
-        }
-        if isinstance(tc["function"]["arguments"], dict):
-            expected_action["arguments"] = json.dumps(tc["function"]["arguments"])
-        try:
-            json.loads(expected_action["arguments"])
-        except (json.JSONDecodeError, TypeError):
-            return None
+        calls = []
+        for tc in tool_calls:
+            arguments = tc["function"]["arguments"]
+            if isinstance(arguments, dict):
+                arguments = json.dumps(arguments)
+            try:
+                json.loads(arguments)
+            except (json.JSONDecodeError, TypeError):
+                return None
+            calls.append({"type": "function_call", "name": tc["function"]["name"], "arguments": arguments})
+        expected_action = calls[0] if len(calls) == 1 else {"type": "function_call_batch", "calls": calls}
     else:
         expected_action = {"type": "message", "content": chat_completion_message["content"]}
     return expected_action
@@ -262,13 +264,6 @@ def extract_and_filter(args_tuple):
         # Skip chat-only
         if filter_cfg.get("skip_chat") and not msg.get("tool_calls"):
             skips["chat"] += 1
-            continue
-
-        # Skip multi-call targets so the singular expected_action row
-        # contract is not silently violated by taking tool_calls[0].
-        tc_list = msg.get("tool_calls") or []
-        if len(tc_list) > 1:
-            skips["multi_tool"] += 1
             continue
 
         # Doom loop filter

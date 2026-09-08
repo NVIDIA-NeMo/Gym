@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
+import unicodedata
 from typing import Any, ClassVar, Literal, Optional
 
 from fastapi import FastAPI
@@ -233,7 +234,36 @@ def _match_option_text(text: str, options: list[dict[str, str]], allowed_letters
     return None
 
 
+def _answer_payloads(text: str, answer_prefix: Optional[str]) -> list[str]:
+    """Collect final-answer payloads after Answer: or a row-provided prefix."""
+    text = unicodedata.normalize("NFKC", text)
+    found: list[tuple[int, str]] = []
+    for match in ANSWER_COLON_PAYLOAD_PATTERN.finditer(text):
+        found.append((match.start(), match.group(1)))
+    if answer_prefix:
+        normalized_prefix = unicodedata.normalize("NFKC", answer_prefix)
+        pattern = re.compile(re.escape(normalized_prefix) + r"\s*", re.IGNORECASE)
+        for match in pattern.finditer(text):
+            line_end = text.find("\n", match.end())
+            if line_end < 0:
+                line_end = len(text)
+            found.append((match.start(), text[match.end() : line_end]))
+    found.sort(key=lambda item: item[0])
+    return [payload for _start, payload in found]
+
+
+def _extract_from_answer_payloads(
+    text: str, allowed_letters: set[str], answer_prefix: Optional[str] = None
+) -> Optional[str]:
+    pred = None
+    for candidate in reversed(_answer_payloads(text, answer_prefix)):
+        if pred is None:
+            pred = _extract_choice_letter(candidate, allowed_letters)
+    return pred
+
+
 def _normalize_extracted_answer(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text)
     return (
         text.replace("أ", " A")
         .replace("ب", " B")
@@ -396,10 +426,14 @@ class MCQAResourcesServer(SimpleResourcesServer):
                             if pred is not None:
                                 break
             elif grading_mode == "lenient_answer_colon_md":
-                for candidate in reversed(ANSWER_COLON_PAYLOAD_PATTERN.findall(text)):
-                    pred = _extract_choice_letter(candidate, allowed_letters)
-                    if pred is not None:
-                        break
+                answer_prefix = (body.template_metadata or {}).get("answer_prefix")
+                pred = _extract_from_answer_payloads(
+                    text,
+                    allowed_letters,
+                    answer_prefix=answer_prefix,
+                )
+                if pred is None and answer_prefix:
+                    pred, _, _ = _parse_answer_letter_strict_boxed(text, allowed_letters)
 
         is_correct = (pred == gold) if (pred is not None and gold) else False
         reward = 1.0 if is_correct else 0.0

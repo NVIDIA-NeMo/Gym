@@ -19,13 +19,14 @@ Downloads MMLU-ProX from HuggingFace for each language and converts to Gym
 JSONL format compatible with the mcqa resource server.
 
 Each row embeds the full language-specific formatted question (description +
-options) in the `question` field, and carries a per-row `template_metadata`
-with an `output_regex` for language-specific answer extraction.
+options) in the `question` field, and carries per-row answer extraction
+metadata.
 """
 
 import hashlib
 import importlib.util
 import json
+import re
 import tempfile
 import urllib.request
 import uuid
@@ -145,12 +146,17 @@ def _format_entry(entry: dict, language: str, lang_libs: dict, lang_subjects: di
         f"{description}{lang_libs[language][0]}\n{entry['question']}\n{lang_libs[language][1]}\n{options_text}\n"
     )
 
-    # Build language-specific answer extraction regex
-    extract_regex = lang_libs[language][5].replace("({})", r"\(?([ABCDEFGHIJ])\)?")
+    answer_format = lang_libs[language][5]
+    prefix, _, suffix = answer_format.partition("({})")
+    answer_prefix = prefix.strip()
     if language == "en":
-        extract_regex = extract_regex.lstrip("the").strip()
-        extract_regex = extract_regex.replace("\\(", "\\**\\(")
-        extract_regex = extract_regex.replace("\\)?", "\\)?\\**")
+        answer_prefix = answer_prefix.removeprefix("the ").strip()
+    markdown_wrapper = r"\**" if language == "en" else ""
+    extract_regex = (
+        re.escape(answer_prefix)
+        + rf"\s*{markdown_wrapper}\(?([ABCDEFGHIJ])\)?{markdown_wrapper}\s*"
+        + re.escape(suffix.strip())
+    )
 
     # Same question appears across multiple languages, so we include language in the UUID seed.
     seed_str = json.dumps({"question": entry["question"], "options": choices, "language": language}, sort_keys=True)
@@ -160,7 +166,10 @@ def _format_entry(entry: dict, language: str, lang_libs: dict, lang_subjects: di
         "question": question,
         "options": options,
         "expected_answer": entry["answer"],
-        "template_metadata": {"output_regex": extract_regex},
+        "template_metadata": {
+            "output_regex": extract_regex,
+            "answer_prefix": answer_prefix,
+        },
         # language and category are not used but useful for analysis
         "language": language,
         "category": category,

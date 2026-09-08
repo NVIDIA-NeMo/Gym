@@ -14,7 +14,7 @@
 # limitations under the License.
 """Tests for the Exa search provider in browsecomp_advanced_harness.
 
-The Exa path mirrors the bc_frankie reference: search returns highlight snippets
+The Exa path mirrors the reference harness: search returns highlight snippets
 INLINE (never written to pages/, even in terminal mode); browse fetches full text
 via /contents and reuses the existing disk/inline formatting. exclude_domains are
 honored. Per-call metering records provider + function for the cost/latency summary.

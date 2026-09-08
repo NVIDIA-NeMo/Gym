@@ -944,6 +944,38 @@ class TestListEnvironments:
         out = capsys.readouterr().out
         assert "Unknown environment 'alfa'" in out and "alpha" in out
 
+    def test_inspect_suggestion_never_crosses_kinds(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # `alpha` is the only close match for `alpa`, but it is an environment: under `list benchmarks`
+        # it must not be suggested, or the user would be pointed at the wrong workload.
+        self._mock_catalog(monkeypatch, overrides={"component_name": "alpa", "catalog_kind": "benchmark"})
+
+        with raises(SystemExit):
+            list_environments()
+
+        # Collapse whitespace: rich wraps to the console width, so COLUMNS must not decide the assertion.
+        out = " ".join(capsys.readouterr().out.split())
+        assert "Unknown benchmark 'alpa'" in out
+        assert "alpha" not in out
+
+    def test_inspect_wrong_kind_points_at_the_right_command(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        self._mock_catalog(monkeypatch, overrides={"component_name": "alpha", "catalog_kind": "benchmark"})
+
+        with raises(SystemExit):
+            list_environments()
+
+        out = " ".join(capsys.readouterr().out.split())
+        assert "'alpha' is an environment, not a benchmark." in out
+        assert "gym list environments alpha" in out
+
+    def test_inspect_rejects_an_invalid_catalog_kind(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        # A bogus kind must be named as the problem, not silently emptied into "Unknown bogus 'alpha'".
+        self._mock_catalog(monkeypatch, overrides={"component_name": "alpha", "catalog_kind": "bogus"})
+
+        with raises(SystemExit):
+            list_environments()
+
+        assert "Unknown catalog kind 'bogus'" in " ".join(capsys.readouterr().out.split())
+
     def test_inspect_shows_absolute_config_path(self, monkeypatch: MonkeyPatch, capsys, tmp_path: Path) -> None:
         # Real discovery (via an extra root): the config line must be the config's absolute path.
         cfg = tmp_path / "environments" / "my_env" / "config.yaml"

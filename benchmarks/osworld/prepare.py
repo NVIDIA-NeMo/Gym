@@ -376,7 +376,7 @@ def write_env(
             f"output_jsonl_fpath: {_yaml_string(output_jsonl)}",
             "num_repeats: 1",
             f"num_samples_in_parallel: {num_samples_in_parallel}",
-            "upload_rollouts_to_wandb: false",
+            "upload_rollouts: false",
             "responses_create_params:",
             f"  max_output_tokens: {max_output_tokens}",
             f"  temperature: {temperature}",

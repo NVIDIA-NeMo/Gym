@@ -67,8 +67,8 @@ def _config(**kwargs) -> ClaudeCodeAgentConfig:
 
 
 def _make_agent(**kwargs) -> ClaudeCodeAgent:
-    # Patch only the external side effect (claude-code install/version check) so the real
-    # model_post_init still runs — it initializes the model's private attrs and the semaphore.
+    # Patch only the Claude Code installation check.
+    # The real model initialization still configures private attributes and the semaphore.
     with patch("responses_api_agents.claude_code_agent.app.ensure_claude_code"):
         return ClaudeCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
 
@@ -837,16 +837,27 @@ class TestRolloutCorrelation:
     def test_base_url_correlation(self, tmp_path: Path) -> None:
         agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
         base_url = self._run_and_capture_base_url(agent, tmp_path, rollout_id="task3-roll1")
-        # CLI appends /v1/messages -> server strips /ng-rollout/<id> and keys capture by it.
+        # The CLI appends ``/v1/messages``.
+        # The server strips the rollout prefix and uses its id for correlation.
         assert base_url == "http://model-server:9000/ng-rollout/task3-roll1"
 
         with patch.object(agent, "_resolve_base_url", return_value="http://model-server:9000"):
             assert agent._resolve_call_base_url(None) == "http://model-server:9000"
 
-        # Real Anthropic endpoint (no model server): never prefixed -- it has no stripping middleware,
-        # so a prefix would 404 every /v1/messages call.
+        # A real Anthropic endpoint has no prefix-stripping middleware.
         anthropic = _make_agent(anthropic_base_url="https://api.anthropic.com")
         assert anthropic._resolve_call_base_url("t3-r1") == "https://api.anthropic.com"
+
+    def test_training_capture_intent_reaches_the_cli_base_url(self, tmp_path: Path) -> None:
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            token_id_capture=True,
+        )
+        agent.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
+
+        base_url = self._run_and_capture_base_url(agent, tmp_path, rollout_id="task3-roll1")
+
+        assert base_url == "http://model-server:9000/ng-rollout/task3-roll1/training-token-capture"
 
 
 class TestExtractInstruction:
@@ -1030,5 +1041,6 @@ class TestConfigYaml:
         assert "claude_code_agent" in data
         inner = data["claude_code_agent"]["responses_api_agents"]["claude_code_agent"]
         assert inner["entrypoint"] == "app.py"
+        assert inner.get("token_id_capture", False) is False
         assert inner["concurrency"] == 32
         assert inner["max_turns"] == 30

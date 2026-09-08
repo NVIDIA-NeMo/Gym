@@ -75,6 +75,54 @@ SEC_FILING_SEARCH_TOOL = {
     "strict": False,
 }
 
+EDGAR_SEARCH_TOOL = {
+    "type": "function",
+    "name": "edgar_search",
+    "description": "Search the EDGAR Database through the SEC API. You should provide a search query. You can also optionally provide a start date, an end date, a page number, top N results, a list of form types, and/or a list of CIKs. The results are returned as a list of dictionaries, each containing the metadata for a filing. It does not contain the full text of the filing.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "search_query": {
+                "type": "string",
+                "description": 'The case-insensitive search-term or phrase to search the contents of fillings and their attachments. This can be a single word, phrase, or combination of words and phrases. Supported search features include wildcards (*), Boolean operators (OR, NOT), and exact phrase matching by enclosing phrases in quotation marks ("exact phrase"). By default, all terms are joined by an implicit AND operator.',
+            },
+            "form_types": {
+                "type": "array",
+                "description": "(optional) Limits search to specific EDGAR form types (e.g., ['8-K', '10-Q']) list of strings. Default: all form types",
+                "items": {"type": "string"},
+            },
+            "ciks": {
+                "type": "array",
+                "description": '(optional) Filters results to filings from specified CIKs, type list of strings. Leading zeros are optional but may be included. Example: [ "0001811414", "1318605" ]. Default: all CIKs',
+                "items": {"type": "string"},
+            },
+            "start_date": {
+                "type": "string",
+                "description": "(optional) Start date for the search range in yyyy-mm-dd format. If the value is a date that is later than 2025-04-07, it will be set to 2025-04-07.",
+                "default": "1900-01-01",
+            },
+            "end_date": {
+                "type": "string",
+                "description": "(optional) End date for the search range, in the same format as startDate. If the value is a date that is later than 2025-04-07, it will be set to 2025-04-07.",
+                "default": "2025-04-07",
+            },
+            "page": {
+                "type": "integer",
+                "description": "(optional) Used for pagination. Each page contains up to 100 matching filings. Increase the page number to retrieve the next set of 100 filings. Example: 3 retrieves the third page. Default: 1",
+                "default": 1,
+            },
+            "top_n_results": {
+                "type": "integer",
+                "description": "(optional) Return only the first N results out of 100 from the page. If not provided, all 100 results will be returned. E.g. if page is 2, and number_of_results is 10, you will receive results 100 to 110.",
+                "maximum": 100,
+                "default": 100,
+            },
+        },
+        "required": ["search_query"],
+    },
+    "strict": False,
+}
+
 PARSE_HTML_TOOL = {
     "type": "function",
     "name": "parse_html_page",
@@ -171,22 +219,35 @@ WEB_TOOL = {
 }
 
 
+SEARCH_TOOLS = {
+    "sec_filing_search": SEC_FILING_SEARCH_TOOL,
+    "edgar_search": EDGAR_SEARCH_TOOL,
+}
+
+
 def convert_entry(
     data: dict,
     include_web_search: bool = False,
+    search_tool: str = "sec_filing_search",
 ) -> dict:
     """Convert a single question entry to test format with tool definitions.
 
     Args:
         data: Dict with "question" and "expected_answer" keys.
         include_web_search: Whether to include the web search tool.
+        search_tool: Which filing-search tool to expose. One of
+            "sec_filing_search" (ticker-based metadata lookup) or
+            "edgar_search" (full-text search).
 
     Returns:
         Converted dict with responses_create_params and tools.
     """
+    if search_tool not in SEARCH_TOOLS:
+        raise ValueError(f"search_tool must be one of {sorted(SEARCH_TOOLS)}, got '{search_tool}'")
+
     question = data.get("question") or data.get("problem", "")
 
-    tools = [RETRIEVE_INFORMATION_TOOL, PARSE_HTML_TOOL, SEC_FILING_SEARCH_TOOL]
+    tools = [RETRIEVE_INFORMATION_TOOL, PARSE_HTML_TOOL, SEARCH_TOOLS[search_tool]]
     if include_web_search:
         tools = [WEB_TOOL] + tools
     tools.append(SUBMIT_TOOL)
@@ -205,7 +266,7 @@ def convert_entry(
     }
 
 
-def convert_file(input_file, output_file, include_web_search=False):
+def convert_file(input_file, output_file, include_web_search=False, search_tool="sec_filing_search"):
     """Convert a questions JSONL file to test format."""
     with open(input_file, "r") as f_in, open(output_file, "w") as f_out:
         for line in f_in:
@@ -213,7 +274,7 @@ def convert_file(input_file, output_file, include_web_search=False):
             if not line:
                 continue
             data = json.loads(line)
-            output = convert_entry(data, include_web_search)
+            output = convert_entry(data, include_web_search, search_tool)
             f_out.write(json.dumps(output) + "\n")
 
 
@@ -222,10 +283,17 @@ if __name__ == "__main__":
     parser.add_argument("--input", "-i", required=True, help="Input questions JSONL file")
     parser.add_argument("--output", "-o", required=True, help="Output test JSONL file")
     parser.add_argument("--include-web-search", "-w", action="store_true", help="Include web_search tool")
+    parser.add_argument(
+        "--search-tool",
+        "-s",
+        choices=sorted(SEARCH_TOOLS),
+        default="sec_filing_search",
+        help="Which filing-search tool to expose (default: sec_filing_search)",
+    )
     args = parser.parse_args()
 
-    convert_file(args.input, args.output, args.include_web_search)
+    convert_file(args.input, args.output, args.include_web_search, args.search_tool)
     print(f"Converted {args.input} -> {args.output}")
-    sample = convert_entry({"question": "", "expected_answer": ""}, args.include_web_search)
+    sample = convert_entry({"question": "", "expected_answer": ""}, args.include_web_search, args.search_tool)
     tools_list = [t["name"] for t in sample["responses_create_params"]["tools"]]
     print(f"Tools: {', '.join(tools_list)}")

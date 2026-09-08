@@ -16,6 +16,11 @@ gym_ci_sanitize_environment core
 unset -f gym_ci_sanitize_environment
 # shellcheck source=scripts/ci/setup_dev.sh
 source "${ci_dir}/setup_dev.sh"
+# The telemetry extra pulls in nemo-lens so the lens-present unit tests under
+# tests/unit_tests/telemetry (pytest.mark tests/unit_tests/telemetry/conftest.py::requires_lens)
+# actually run in CI instead of silently skipping, which would leave that code permanently
+# uncovered by the coverage gate below.
+uv sync --extra dev --extra telemetry
 pytest_addopts='-m "not sandbox" --cov-report= --cov-fail-under=0 --color=yes'
 if [[ -n "${GYM_CI_JUNIT_DIR:-}" ]]; then
     mkdir -p "${GYM_CI_JUNIT_DIR}"

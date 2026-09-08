@@ -17,28 +17,22 @@
 Two scoring layers:
 
   * ``verify()`` returns per-sample sentence-chrF and sentence-spBLEU, using
-    chrF as the RL reward, plus a per-rollout xCOMET-XXL ``comet_score`` and a per-rollout
-    language-consistency ``language_consistency_score`` (fraction of the generation
-    detected as the target language). The COMET score is computed by a
-    persistent Ray actor pool (one actor per GPU on the extra_gpu node) that
-    keeps the xCOMET-XXL checkpoint resident; each verify() call awaits its
-    own future before returning, so every rollout in ``rollouts.jsonl``
-    carries a finite ``comet_score`` whenever the model produced a non-empty
-    translation. Language-consistency backends are currently assumed to run
-    synchronously in-process on CPU.
+    chrF as the RL reward, plus optional per-rollout language-consistency
+    (fraction of the generation detected as the target language). It does
+    not call xCOMET. Language-consistency backends run synchronously
+    in-process on CPU.
   * ``compute_metrics(tasks)`` groups rollouts by
     ``(source_language, target_language, rollout_index)``, computes
-    corpus-chrF and corpus-spBLEU, and
-    aggregates the per-row COMET and language-consistency scores into per-pair
-    + cross-pair
-    means (``xx->xx``, ``<src>->xx``, ``xx->{tgt}``) with
-    ``std_dev_across_runs``.
+    corpus-chrF and corpus-spBLEU, fills missing per-row xCOMET-XXL scores
+    with batched ``predict`` on the extra_gpu actor pool (checkpointing
+    ``rollouts.jsonl`` after each wave), and aggregates COMET and
+    language-consistency into per-pair + cross-pair means
+    (``xx->xx``, ``<src>->xx``, ``xx->{tgt}``) with ``std_dev_across_runs``.
 """
 
 from __future__ import annotations
 
 import logging
-import threading
 import unicodedata
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
@@ -117,16 +111,19 @@ class WmtTranslationResourcesServerConfig(BaseResourcesServerConfig):
     """Config for the wmt_translation resource server.
 
     Attributes:
-        compute_comet: Run xCOMET-XXL inside ``verify()`` and aggregate in
-            ``compute_metrics``. Default True. Turn off for smoke tests or
-            RL training runs where only local spBLEU/chrF scoring is needed.
-        comet_model: HuggingFace repo for the COMET checkpoint. Resolved via
-            ``comet.download_model`` (cached under HF_HOME).
+        compute_comet: Run batched xCOMET-XXL inside ``compute_metrics``.
+            Default True. Turn off for smoke tests or RL training runs where
+            only local spBLEU/chrF scoring is needed.
+        comet_model: HuggingFace repo or local COMET checkpoint path.
+            HF repos are resolved via ``comet.download_model`` (cached under HF_HOME).
         comet_batch_size: Batch size passed to ``model.predict``.
         comet_num_shards: Number of CometActors to spawn — each loads
             xCOMET-XXL once and serves score requests from the persistent
             actor pool. Each actor requests one ``extra_gpu`` Ray resource,
             so the upper limit is the extra node(s)' GPU count.
+        comet_use_worker_python: Use the Python environment of the Ray worker
+            process instead of mirroring the resources-server Python. Enable
+            when the worker node pre-installs the COMET runtime.
         language_consistency_backend: Backend used to compute a per-rollout
             language-consistency score in ``verify()``. ``None`` disables
             language-consistency scoring.
@@ -142,6 +139,7 @@ class WmtTranslationResourcesServerConfig(BaseResourcesServerConfig):
     comet_model: str = "Unbabel/XCOMET-XXL"
     comet_batch_size: int = 16
     comet_num_shards: int = 8
+    comet_use_worker_python: bool = False
     language_consistency_backend: Optional[str] = None
     language_consistency_warning_threshold: float = Field(default=50.0, ge=0.0, le=100.0)
     strip_reasoning: bool = True
@@ -167,9 +165,8 @@ class WmtTranslationVerifyResponse(WmtTranslationVerifyRequest, BaseVerifyRespon
     sentence_chrf: float
     # Per-sample sentence-spBLEU, reported alongside chrF for comparison.
     sentence_spbleu: float
-    # Per-rollout xCOMET-XXL score (0–1). None for empty generations or
-    # actor-pool failures; aggregate corpus COMET is computed in
-    # compute_metrics().
+    # Per-rollout xCOMET-XXL score (0–1). verify() leaves this unset;
+    # compute_metrics() fills it in bulk for non-empty generations.
     comet_score: Optional[float] = None
     # Per-rollout language-consistency score (0–1): fraction of the
     # generation attributed to the target language. 0.0 for empty or
@@ -181,14 +178,14 @@ class WmtTranslationVerifyResponse(WmtTranslationVerifyRequest, BaseVerifyRespon
 # --- Ray COMET scoring --------------------------------------------------------
 
 
-def _build_comet_actor_class():
+def _build_comet_actor_class(use_worker_python: bool = False):
     """Build the persistent CometActor class.
 
     Each actor is a Ray actor that loads xCOMET-XXL once in ``__init__`` and
     serves score requests from the resident model — no per-call cold load.
     A pool of N actors (one per GPU on the extra_gpu node) is built lazily on
-    the first ``verify()`` call. Built lazily so importing this module doesn't
-    require Ray to already be initialized.
+    the first ``compute_metrics()`` call that has unscored rows. Built lazily
+    so importing this module doesn't require Ray to already be initialized.
     """
     import os
     import shutil
@@ -197,64 +194,11 @@ def _build_comet_actor_class():
     import uuid
     from pathlib import Path
 
-    # Cross-node Python setup. The server's venv python may be a symlink into
-    # a container-local uv install dir that doesn't exist on remote Ray
-    # workers. Stock python on remote workers is ABI-incompatible with the
-    # venv's compiled extensions. Fix: mirror the uv-installed python (which
-    # ships relocatable python-build-standalone binaries) to a path Ray
-    # workers can reach, and hand that to runtime_env as py_executable.
-    # One-time copy on first invocation; subsequent calls are a no-op.
-    venv_python = Path(sys.executable).resolve()
-    if not venv_python.exists():
-        raise RuntimeError(
-            f"Server-side sys.executable doesn't exist? {venv_python}. "
-            "Expected the venv's python to resolve into the local uv install."
-        )
-    uv_python_root = venv_python.parent.parent
-
-    # Default cache root assumes the canonical container mount at /opt/Gym
-    # (cluster deployments). For local dev or non-standard mounts, override
-    # via the WMT_TRANSLATION_COMET_PY_CACHE env var to any user-writable
-    # path; on multi-node clusters the override must point at a shared
-    # filesystem path so cross-node Ray actors find the mirror.
-    cache_root = Path(os.environ.get("WMT_TRANSLATION_COMET_PY_CACHE", "/opt/Gym/.cache/comet-python"))
-    mirrored_python_root = cache_root / uv_python_root.name
-    mirrored_python_bin = mirrored_python_root / "bin" / venv_python.name
-    if not mirrored_python_bin.exists():
-        LOG.info(
-            "Mirroring uv Python install %s -> %s for cross-node Ray tasks",
-            uv_python_root,
-            mirrored_python_root,
-        )
-        mirrored_python_root.parent.mkdir(parents=True, exist_ok=True)
-        # Stage per-writer; a shared staging path races on rmtree and on the final rename.
-        tmp: Path = (
-            mirrored_python_root.parent
-            / f".{mirrored_python_root.name}.tmp.{socket.gethostname()}.{os.getpid()}.{uuid.uuid4().hex[:8]}"
-        )
-        try:
-            shutil.copytree(uv_python_root, tmp, symlinks=True)
-            try:
-                tmp.rename(mirrored_python_root)
-            except OSError:
-                # Another builder won the publish; adopt their mirror if it's valid, else re-raise.
-                if not mirrored_python_bin.exists():
-                    raise
-        finally:
-            if tmp.exists():
-                shutil.rmtree(tmp, ignore_errors=True)
-
-    venv_dir = Path(sys.executable).parent.parent
-    site_packages = venv_dir / "lib" / "python3.12" / "site-packages"
-
     env_vars = {
         # Keep CUDA_VISIBLE_DEVICES untouched: when an extra node joins Ray
         # with --num-gpus=0 to hide GPUs from accounting, Ray would zero out
         # CUDA_VISIBLE_DEVICES on the actor. We need physical GPUs visible.
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-        # Site-packages (comet, torch, …) is on the shared filesystem; merge
-        # with whatever PYTHONPATH the inherited env has.
-        "PYTHONPATH": f"{site_packages}:{os.environ.get('PYTHONPATH', '')}",
     }
     # Propagate HF_HOME so actors find the cache populated by the
     # benchmark prepare step. Other HF env vars (HF_HUB_OFFLINE,
@@ -264,6 +208,49 @@ def _build_comet_actor_class():
     if os.environ.get("HF_HOME"):
         env_vars["HF_HOME"] = os.environ["HF_HOME"]
 
+    runtime_env = {"env_vars": env_vars}
+    if not use_worker_python:
+        # Cross-node Python setup. The server's venv python may be a symlink into
+        # a container-local uv install dir that doesn't exist on remote Ray
+        # workers. Mirror the relocatable uv Python to a shared path.
+        venv_python = Path(sys.executable).resolve()
+        if not venv_python.exists():
+            raise RuntimeError(
+                f"Server-side sys.executable doesn't exist? {venv_python}. "
+                "Expected the venv's python to resolve into the local uv install."
+            )
+        uv_python_root = venv_python.parent.parent
+        cache_root = Path(os.environ.get("WMT_TRANSLATION_COMET_PY_CACHE", "/opt/Gym/.cache/comet-python"))
+        mirrored_python_root = cache_root / uv_python_root.name
+        mirrored_python_bin = mirrored_python_root / "bin" / venv_python.name
+        if not mirrored_python_bin.exists():
+            LOG.info(
+                "Mirroring uv Python install %s -> %s for cross-node Ray tasks",
+                uv_python_root,
+                mirrored_python_root,
+            )
+            mirrored_python_root.parent.mkdir(parents=True, exist_ok=True)
+            # Stage per-writer; a shared staging path races on rmtree and on the final rename.
+            tmp: Path = (
+                mirrored_python_root.parent
+                / f".{mirrored_python_root.name}.tmp.{socket.gethostname()}.{os.getpid()}.{uuid.uuid4().hex[:8]}"
+            )
+            try:
+                shutil.copytree(uv_python_root, tmp, symlinks=True)
+                try:
+                    tmp.rename(mirrored_python_root)
+                except OSError:
+                    # Another builder won the publish; adopt their mirror if it's valid, else re-raise.
+                    if not mirrored_python_bin.exists():
+                        raise
+            finally:
+                if tmp.exists():
+                    shutil.rmtree(tmp, ignore_errors=True)
+        venv_dir = Path(sys.executable).parent.parent
+        site_packages = venv_dir / "lib" / "python3.12" / "site-packages"
+        env_vars["PYTHONPATH"] = f"{site_packages}:{os.environ.get('PYTHONPATH', '')}"
+        runtime_env["py_executable"] = str(mirrored_python_bin)
+
     # Schedule on the dedicated COMET node via the custom `extra_gpu` Ray
     # resource. num_gpus=0 because the node hides its GPUs from Ray accounting
     # (advertising them under `extra_gpu` instead); the env_vars flag above
@@ -271,7 +258,7 @@ def _build_comet_actor_class():
     @ray.remote(
         num_gpus=0,
         resources={"extra_gpu": 1},
-        runtime_env={"py_executable": str(mirrored_python_bin), "env_vars": env_vars},
+        runtime_env=runtime_env,
     )
     class _CometActor:  # pragma: no cover - needs live Ray cluster + CUDA + unbabel-comet checkpoint
         def __init__(self, gpu_idx: int, model_name: str):
@@ -297,7 +284,7 @@ def _build_comet_actor_class():
             # If the cache is missing, this falls back to fetching from
             # HF Hub at startup, subject to HF_HUB_OFFLINE.
             LOG.info("CometActor[%d]: loading %s on %s", gpu_idx, model_name, self._device)
-            ckpt_path = download_model(model_name)
+            ckpt_path = model_name if model_name.startswith("/") else download_model(model_name)
             self._model = load_from_checkpoint(ckpt_path)
             self._model.to(self._device).eval()
             LOG.info("CometActor[%d]: ready", gpu_idx)
@@ -307,6 +294,9 @@ def _build_comet_actor_class():
             return True
 
         def score(self, triples: List[Tuple[str, str, str]], batch_size: int) -> List[float]:
+            import os
+
+            os.chdir("/tmp")
             data = [{"src": s, "mt": m, "ref": r} for s, m, r in triples]
             result = self._model.predict(data, batch_size=batch_size, devices=self._lightning_devices)
             return list(result.scores)
@@ -320,12 +310,10 @@ def _build_comet_actor_class():
 class WmtTranslationResourcesServer(SimpleResourcesServer):
     config: WmtTranslationResourcesServerConfig
 
-    # COMET actor pool state — populated lazily on first verify() call so
+    # COMET actor pool state — populated lazily during compute_metrics() so
     # actor creation happens after Ray is fully up and `extra_gpu` is
     # advertised. Pydantic PrivateAttr keeps these out of the config schema.
     _comet_actors: List[Any] = PrivateAttr(default_factory=list)
-    _comet_state_lock: Any = PrivateAttr(default=None)
-    _comet_actor_idx: int = PrivateAttr(default=0)
     _comet_init_attempted: bool = PrivateAttr(default=False)
     # Constructing the FLORES-200 tokenizer loads its SentencePiece model from
     # disk. Keep one metric instance per server instead of repeating that work
@@ -344,21 +332,18 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
 
         Lazy on purpose: the resources server may start before the Ray
         cluster has fully stood up (head + workers join asynchronously).
-        Deferring actor creation to the first verify() call guarantees the
-        cluster is healthy when we ask for actors.
+        Deferring actor creation until aggregate scoring also keeps COMET off
+        the rollout-generation path.
         """
         if self._comet_init_attempted:
             return
         self._comet_init_attempted = True
 
-        if self._comet_state_lock is None:
-            self._comet_state_lock = threading.Lock()
-
-        actor_class = _build_comet_actor_class()
+        actor_class = _build_comet_actor_class(use_worker_python=self.config.comet_use_worker_python)
         n = max(1, self.config.comet_num_shards)
         actors = [actor_class.remote(gpu_idx=i, model_name=self.config.comet_model) for i in range(n)]
         # Block for actor readiness so init failures surface here instead
-        # of stalling verify(). xCOMET-XXL cold-load takes ~60s; large fraction
+        # of stalling aggregate scoring. xCOMET-XXL cold-load takes ~60s; a large fraction
         # of the budget is consumed by HF 429 retry backoff.
         pings = [a.ping.remote() for a in actors]
         ready, _not_ready = ray.wait(pings, num_returns=n, timeout=300.0)
@@ -390,25 +375,6 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
         else:
             LOG.info("COMET pool: %d actors ready", n)
 
-    def _dispatch_comet_score(self, src_text: str, generation: str, reference: str) -> Optional[Any]:
-        """Fire a per-rollout COMET score on the actor pool, return Ray future.
-
-        Round-robins across the actor pool under a small lock; returns the
-        Ray ObjectRef so verify() can ``await`` it directly. Returns
-        ``None`` if the pool is unavailable, in which case verify() leaves
-        ``comet_score=None`` on that row.
-        """
-        if not self._comet_actors:
-            return None
-        with self._comet_state_lock:
-            actor = self._comet_actors[self._comet_actor_idx % len(self._comet_actors)]
-            self._comet_actor_idx += 1
-        try:
-            return actor.score.remote([(src_text, generation, reference)], 1)
-        except Exception:
-            LOG.exception("COMET actor.score.remote dispatch failed")
-            return None
-
     def _score_sentence_spbleu(self, generation: str, reference: str) -> float:
         """Score one sentence while reusing the FLORES-200 tokenizer."""
         if self._sentence_spbleu_metric is None:
@@ -428,21 +394,8 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
         return self._language_consistency_backend
 
     async def verify(self, body: WmtTranslationVerifyRequest) -> WmtTranslationVerifyResponse:
-        """Return sentence spBLEU/chrF, with chrF as reward, plus per-row auxiliary scores.
-
-        Dispatches a per-rollout COMET score on the persistent actor pool
-        and awaits the future before returning, so each row in
-        rollouts.jsonl carries its own ``comet_score``. Concurrent verify()
-        coroutines all dispatch into the same pool; each await yields
-        control while its actor processes the triple, so end-to-end
-        throughput is bounded by the pool's parallel scoring rate, not by
-        the per-row await.
-        """
-        if self.config.compute_comet:
-            self._ensure_comet_actors()
-
+        """Return sentence spBLEU/chrF, with chrF as reward. Defer COMET to compute_metrics()."""
         language_consistency_backend = self._get_language_consistency_backend()
-
         raw = body.response.output_text or ""
         # Drop the reasoning preamble before scoring the actual translation.
         if self.config.strip_reasoning:
@@ -479,28 +432,13 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
                 body.target_language,
             )
 
-        comet_score: Optional[float] = None
-        if self.config.compute_comet:
-            comet_future = self._dispatch_comet_score(
-                src_text=body.text or "",
-                generation=generation,
-                reference=body.translation or "",
-            )
-            if comet_future is not None:
-                try:
-                    scores = await comet_future
-                    if scores:
-                        comet_score = float(scores[0])
-                except Exception:
-                    LOG.exception("COMET await failed for verify(); leaving comet_score=None")
-
         return WmtTranslationVerifyResponse(
             **body.model_dump(),
             reward=reward,
             generation=generation,
             sentence_chrf=sentence_chrf_score,
             sentence_spbleu=sentence_spbleu_score,
-            comet_score=comet_score,
+            comet_score=None,
             language_consistency_score=language_consistency_score,
         )
 
@@ -512,12 +450,7 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
         max_k: int,
         comet_per_pair: Dict[Tuple[str, str], List[List[float]]],
     ) -> None:
-        """Read per-row ``comet_score`` from rollout dicts and bucket by pair/k.
-
-        verify() awaits its COMET future and stores the resolved score on
-        each rollout response, so by the time compute_metrics() runs, the
-        scores are already in ``tasks``. This method just buckets them.
-        """
+        """Bucket per-row ``comet_score`` values by language pair and rollout."""
         for task_rollouts in tasks:
             for k, rollout in enumerate(task_rollouts):
                 if k >= max_k:
@@ -558,6 +491,98 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
 
     # --- Aggregate metrics ---------------------------------------------------
 
+    def _checkpoint_comet_scores(self, tasks):
+        import json
+        import os
+        from pathlib import Path
+
+        raw = os.environ.get("WMT_COMET_CHECKPOINT_JSONL")
+        path = Path(raw) if raw else Path("/results/evaluator_rollouts.jsonl")
+        if not path.exists():
+            return
+        by_key = {}
+        for task_rollouts in tasks:
+            for rollout in task_rollouts:
+                if "_ng_task_index" not in rollout:
+                    continue
+                score = rollout.get("comet_score")
+                if score is None:
+                    continue
+                key = (rollout["_ng_task_index"], rollout.get("_ng_rollout_index", 0))
+                by_key[key] = float(score)
+        tmp = path.with_name(path.name + ".comet_tmp")
+        with path.open() as inf, tmp.open("w") as out:
+            for line in inf:
+                row = json.loads(line)
+                key = (row.get("_ng_task_index"), row.get("_ng_rollout_index", 0))
+                if key in by_key:
+                    row["comet_score"] = by_key[key]
+                out.write(json.dumps(row, ensure_ascii=False) + "\n")
+        tmp.replace(path)
+        LOG.info("COMET checkpointed %d scores to %s", len(by_key), path)
+
+    def _score_missing_comet(self, tasks):
+        if not self.config.compute_comet:
+            return
+        need = []
+        for task_rollouts in tasks:
+            for rollout in task_rollouts:
+                generation = (rollout.get("generation") or "").strip()
+                if generation and rollout.get("comet_score") is None:
+                    need.append(rollout)
+        if not need:
+            return
+        self._ensure_comet_actors()
+        if not self._comet_actors:
+            raise RuntimeError("COMET actor pool empty after _ensure_comet_actors")
+        batch_size = max(1, self.config.comet_batch_size)
+        n_actors = len(self._comet_actors)
+        wave_span = batch_size * n_actors
+        n_need = len(need)
+        n_waves = (n_need + wave_span - 1) // wave_span
+        for wave_i in range(n_waves):
+            wave_start = wave_i * wave_span
+            wave_end = min(n_need, wave_start + wave_span)
+            futures = []
+            wave_chunks = []
+            actor_i = 0
+            chunk_start = wave_start
+            while chunk_start < wave_end:
+                chunk_end = min(wave_end, chunk_start + batch_size)
+                chunk = need[chunk_start:chunk_end]
+                triples = [
+                    (
+                        str(row.get("text") or ""),
+                        str(row.get("generation") or ""),
+                        str(row.get("translation") or ""),
+                    )
+                    for row in chunk
+                ]
+                futures.append(self._comet_actors[actor_i].score.remote(triples, batch_size))
+                wave_chunks.append(chunk)
+                actor_i += 1
+                chunk_start = chunk_end
+            results = ray.get(futures)
+            if len(results) != len(wave_chunks):
+                raise RuntimeError(f"COMET wave returned {len(results)} actor results for {len(wave_chunks)} chunks")
+            for chunk, scores in zip(wave_chunks, results):
+                if scores is None:
+                    raise RuntimeError(f"COMET predict returned None for {len(chunk)} triples")
+                if len(scores) != len(chunk):
+                    raise RuntimeError(f"COMET predict length mismatch: expected {len(chunk)} got {len(scores)}")
+                for rollout, score in zip(chunk, scores):
+                    rollout["comet_score"] = float(score)
+            self._checkpoint_comet_scores(tasks)
+            LOG.info(
+                "COMET batched predict wave=%d/%d n=%d remaining=%d configured_batch_size=%d actors=%d",
+                wave_i + 1,
+                n_waves,
+                wave_end - wave_start,
+                n_need - wave_end,
+                batch_size,
+                n_actors,
+            )
+
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """Compute corpus spBLEU and chrF plus optional auxiliary metrics.
 
@@ -576,6 +601,9 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
         """
         if not tasks:
             return {}
+
+        if self.config.compute_comet:
+            self._score_missing_comet(tasks)
 
         # 1. Bucket rollouts by (src, tgt) × rollout index. Use the MIN
         # rollouts-per-task as the bucket count so every bucket is
@@ -624,8 +652,8 @@ class WmtTranslationResourcesServer(SimpleResourcesServer):
             chrf_per_pair[(src, tgt)] = chrf_per_run
             spbleu_per_pair[(src, tgt)] = spbleu_per_run
 
-        # 3. COMET aggregation: bucket the per-row comet_score values that
-        # verify() already populated.
+        # 3. COMET aggregation: bucket the per-row values that
+        # _score_missing_comet() or a resumed rollout already populated.
         comet_per_pair: Dict[Tuple[str, str], List[List[float]]] = defaultdict(lambda: [list() for _ in range(max_k)])
         if self.config.compute_comet and any_comet_rows:
             self._collect_per_row_comet(tasks=tasks, max_k=max_k, comet_per_pair=comet_per_pair)

@@ -14,7 +14,7 @@
 # limitations under the License.
 """A model tool call whose `arguments` is not valid JSON must not kill the rollout.
 
-Regression test for an Inkling-Small eval that died at 34/400 samples with:
+Regression test for an eval that died part-way through a run with:
 
     File ".../responses_api_agents/browsecomp_agent/app.py", in responses
         json=json.loads(output_function_call.arguments),

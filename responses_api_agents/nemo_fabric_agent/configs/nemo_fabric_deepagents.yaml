@@ -1,0 +1,10 @@
+config_paths:
+  - responses_api_agents/nemo_fabric_agent/configs/nemo_fabric_agent.yaml
+
+nemo_fabric_deepagents:
+  _inherit_from: nemo_fabric_agent
+  responses_api_agents:
+    nemo_fabric_agent:
+      adapter_id: nvidia.fabric.langchain.deepagents
+      harness_settings: {}
+      fabric_config: {}

@@ -33,7 +33,9 @@ entry point so adding MBPP+ as a separate benchmark requires only a new
 benchmark dir (no server changes).
 """
 
+import pickle
 from asyncio import Semaphore, get_running_loop
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import ray
@@ -258,19 +260,25 @@ def _load_dataset_and_expected(dataset: str, version: str) -> tuple[Dict[str, An
         tasks_only_output_not_none: List[str] = []
     elif dataset == "mbpp":
         from evalplus.data import get_mbpp_plus, get_mbpp_plus_hash
-        from evalplus.data.mbpp import mbpp_serialize_inputs  # noqa: F401  (registers serializer)
+        from evalplus.eval import MBPP_OUTPUT_NOT_NONE_TASKS
 
         problems = get_mbpp_plus(version=version)
         problems_hash = get_mbpp_plus_hash(version=version)
-        # MBPP+: a handful of tasks have no canonical solution; evalplus
-        # filters them. Mirror its convention.
-        tasks_only_output_not_none = [tid for tid, p in problems.items() if p.get("canonical_solution")]
+        # Some MBPP tasks return objects such as re.Match that cannot be pickled.
+        # EvalPlus checks only that these task outputs are not None.
+        tasks_only_output_not_none = MBPP_OUTPUT_NOT_NONE_TASKS
     else:
         raise ValueError(f"Unsupported evalplus dataset: {dataset!r}")
 
+    from evalplus.data.utils import CACHE_DIR
     from evalplus.evaluate import get_groundtruth
 
-    expected_output = get_groundtruth(problems, problems_hash, tasks_only_output_not_none)
+    try:
+        expected_output = get_groundtruth(problems, problems_hash, tasks_only_output_not_none)
+    except (EOFError, pickle.UnpicklingError):
+        # A failed pickle write can leave a corrupt cache that blocks later startups.
+        Path(CACHE_DIR, f"{problems_hash}.pkl").unlink(missing_ok=True)
+        expected_output = get_groundtruth(problems, problems_hash, tasks_only_output_not_none)
     return problems, expected_output
 
 

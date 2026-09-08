@@ -452,13 +452,12 @@ def make_run_request(
     )
 
 
-def setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict):
-    mock_client = MagicMock()
-    mock_client.global_config_dict = {
+def setup_server_client_mocks(mock_server_client, mock_get_first_server_config_dict, extra_global_config=None):
+    mock_server_client.global_config_dict = {
         "policy_model_name": "test-policy",
         "policy_api_key": "test-key",  # pragma: allowlist secret
+        **(extra_global_config or {}),
     }
-    mock_load_from_global_config.return_value = mock_client
     mock_get_first_server_config_dict.return_value = {"host": "127.0.0.1", "port": 8000}
 
 
@@ -577,7 +576,6 @@ class TestApp:
         assert "osworld_error" in response.verifier_metadata
         assert "No 'osworld_task'" in response.verifier_metadata["osworld_error"]
 
-    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
     @patch("asyncio.to_thread")
@@ -586,10 +584,8 @@ class TestApp:
         mock_to_thread,
         mock_remote,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
         monkeypatch,
     ) -> None:
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         monkeypatch.setenv("RUN_TAG", "run-001")
 
         # Mock the Ray-remote ``.options(...).remote(...)`` call chain.
@@ -598,7 +594,11 @@ class TestApp:
         mock_to_thread.return_value = DEFAULT_RUN_RESULT
 
         server_client = MagicMock(spec=ServerClient)
-        server_client.global_config_dict = {"observability_enabled": True}
+        setup_server_client_mocks(
+            server_client,
+            mock_get_first_server_config_dict,
+            extra_global_config={"observability_enabled": True},
+        )
         agent = OSWorldAgent(config=make_config(), server_client=server_client)
         request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK, temperature=0.7, top_p=0.95)
         request = OSWorldRunRequest.model_validate(
@@ -644,7 +644,6 @@ class TestApp:
             "task_attempt": 1,
         }
 
-    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
     @patch("asyncio.to_thread")
@@ -653,16 +652,20 @@ class TestApp:
         mock_to_thread,
         mock_remote,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
     ) -> None:
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
-        global_config = mock_load_from_global_config.return_value.global_config_dict
-        global_config["osworld_sandbox"] = {
-            "default_metadata": {"sandbox-api": "docker-cli", "owner": "provider"},
-            "docker": {"create": {"use_init": False}},
-        }
         mock_remote.options.return_value.remote.return_value = MagicMock()
         mock_to_thread.return_value = DEFAULT_RUN_RESULT
+        server_client = MagicMock(spec=ServerClient)
+        setup_server_client_mocks(
+            server_client,
+            mock_get_first_server_config_dict,
+            extra_global_config={
+                "osworld_sandbox": {
+                    "default_metadata": {"sandbox-api": "docker-cli", "owner": "provider"},
+                    "docker": {"create": {"use_init": False}},
+                }
+            },
+        )
         agent = OSWorldAgent(
             config=make_config(
                 sandbox_provider="osworld_sandbox",
@@ -672,7 +675,7 @@ class TestApp:
                 },
                 vm_path="/assets/Ubuntu.qcow2",
             ),
-            server_client=MagicMock(spec=ServerClient),
+            server_client=server_client,
         )
 
         response = await agent.run(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK))
@@ -689,7 +692,6 @@ class TestApp:
         assert runner_kwargs["vm_path"] == "/assets/Ubuntu.qcow2"
         assert runner_kwargs["sandbox_vm_path"] is None
 
-    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
     @patch("asyncio.to_thread")
@@ -698,15 +700,15 @@ class TestApp:
         mock_to_thread,
         mock_remote,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
         monkeypatch,
     ) -> None:
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         monkeypatch.setenv("PROXY_CONFIG_FILE", "/unused/proxy.json")
         mock_remote.options.return_value.remote.return_value = MagicMock()
         mock_to_thread.return_value = DEFAULT_RUN_RESULT
         task = {**DEFAULT_OSWORLD_TASK, "proxy": True}
-        agent = OSWorldAgent(config=make_config(enable_proxy=False), server_client=MagicMock(spec=ServerClient))
+        server_client = MagicMock(spec=ServerClient)
+        setup_server_client_mocks(server_client, mock_get_first_server_config_dict)
+        agent = OSWorldAgent(config=make_config(enable_proxy=False), server_client=server_client)
 
         response = await agent.run(make_run_request(osworld_task=task))
 
@@ -718,7 +720,6 @@ class TestApp:
         assert response.verifier_metadata["osworld_proxy_enabled"] is False
         assert response.verifier_metadata["osworld_proxy_configured"] is False
 
-    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
     @patch("asyncio.to_thread")
@@ -727,11 +728,9 @@ class TestApp:
         mock_to_thread,
         mock_remote,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
         monkeypatch,
         tmp_path,
     ) -> None:
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         proxy_path = tmp_path / "proxy.json"
         proxy_path.write_text('[{"host":"proxy.example.com","port":3128}]\n', encoding="utf-8")
         monkeypatch.setenv("OSWORLD_ENABLE_PROXY", "1")
@@ -739,7 +738,9 @@ class TestApp:
         mock_remote.options.return_value.remote.return_value = MagicMock()
         mock_to_thread.return_value = DEFAULT_RUN_RESULT
         task = {**DEFAULT_OSWORLD_TASK, "proxy": True}
-        agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+        server_client = MagicMock(spec=ServerClient)
+        setup_server_client_mocks(server_client, mock_get_first_server_config_dict)
+        agent = OSWorldAgent(config=make_config(), server_client=server_client)
 
         response = await agent.run(make_run_request(osworld_task=task))
 
@@ -760,7 +761,6 @@ class TestApp:
         assert response.mask_sample is True
         assert response.verifier_metadata["osworld_termination_reason"] == "proxy_configuration_error"
 
-    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
     @patch("asyncio.to_thread")
@@ -769,13 +769,13 @@ class TestApp:
         mock_to_thread,
         mock_remote,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
     ) -> None:
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         mock_remote.options.return_value.remote.return_value = MagicMock()
         mock_to_thread.side_effect = RuntimeError("docker daemon unreachable")
 
-        agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+        server_client = MagicMock(spec=ServerClient)
+        setup_server_client_mocks(server_client, mock_get_first_server_config_dict)
+        agent = OSWorldAgent(config=make_config(), server_client=server_client)
         request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
 
         response = await agent.run(request)
@@ -784,7 +784,6 @@ class TestApp:
         assert "RuntimeError" in response.verifier_metadata["osworld_error"]
         assert "docker daemon unreachable" in response.verifier_metadata["osworld_error"]
 
-    @patch("responses_api_agents.osworld_agent.app.ServerClient.load_from_global_config")
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
     @patch("asyncio.to_thread")
@@ -793,10 +792,8 @@ class TestApp:
         mock_to_thread,
         mock_remote,
         mock_get_first_server_config_dict,
-        mock_load_from_global_config,
     ) -> None:
         """Score < 1.0 -> reward 0.0 (matches gym's 0/1 reward convention)."""
-        setup_server_client_mocks(mock_load_from_global_config, mock_get_first_server_config_dict)
         mock_remote.options.return_value.remote.return_value = MagicMock()
         mock_to_thread.return_value = {
             "reward": 0.0,
@@ -806,7 +803,9 @@ class TestApp:
             "steps": [],
         }
 
-        agent = OSWorldAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+        server_client = MagicMock(spec=ServerClient)
+        setup_server_client_mocks(server_client, mock_get_first_server_config_dict)
+        agent = OSWorldAgent(config=make_config(), server_client=server_client)
         response = await agent.run(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK))
 
         assert response.reward == 0.0

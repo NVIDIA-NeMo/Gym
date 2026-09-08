@@ -58,14 +58,13 @@ def _qid(text: str) -> str:
     return hashlib.sha256((text or "").encode()).hexdigest()[:10]
 
 
-# --- Progress board (ported from bc_frankie_bash_tool_w_progress_tracking
-# commits 43e59bc / 5099589 / 8cdd075) ---
+# --- Progress board ---
 # An update_progress tool whose board is OVERWRITTEN on each call (not
 # appended) and persists in the system prompt across context resets. The board
-# is framed as a ledger of SETTLED state (not the live hypothesis): a kimi26
-# A/B showed a hypothesis-anchored board REGRESSED BrowseComp-400 61.2% ->
-# 49.5%; the settled-state slots + post-reset re-derivation rule below are the
-# de-anchoring fixes from that study.
+# is framed as a ledger of SETTLED state (not the live hypothesis): an A/B
+# study showed a hypothesis-anchored board REGRESSED BrowseComp accuracy by
+# more than 10 points; the settled-state slots + post-reset re-derivation rule
+# below are the de-anchoring fixes from that study.
 
 PROGRESS_TOOL = {
     "type": "function",
@@ -148,7 +147,7 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     context_reset_pct: float = 0.3
     # Absolute token threshold for context reset. When > 0 it OVERRIDES
     # max_context_tokens * context_reset_pct. 50000 = the token-based reset
-    # standard (matches the bc_frankie_bash_tool baselines).
+    # standard (matches the reference harness baselines).
     context_reset_tokens: int = 0
     context_reset_keep_rounds: int = 3
     max_run_retries: int = 1
@@ -168,7 +167,7 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     # the board. When the context crosses the reset threshold the model gets
     # ONE warned turn (a save-the-board [SYSTEM NOTE] on its latest tool
     # result) before the reset fires; without progress the reset fires
-    # immediately as before. (ported from bc_frankie w_progress_tracking)
+    # immediately as before. (ported from the reference harness)
     progress: bool = False
 
 
@@ -234,7 +233,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
     @staticmethod
     def _last_message_text(response: NeMoGymResponse) -> str:
         """Text of the most-recent assistant message item that has non-empty content, walking
-        back from the end of the trajectory. Mirrors bc_frankie (browsecomp_agent.py:1054-1059):
+        back from the end of the trajectory. Mirrors the reference harness:
         the empty-answer retry keys on the LAST content-bearing assistant turn, NOT the
         concatenation of every assistant turn (NeMoGymResponse.output_text). So a final
         think-only turn triggers a retry even when an earlier turn emitted a real answer.
@@ -288,7 +287,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
 
         reset_threshold = self._reset_threshold(self.config)
 
-        # --- Progress board state (ported from bc_frankie w_progress_tracking) ---
+        # --- Progress board state (ported from the reference harness) ---
         # The board lives in the system prompt and is re-rendered only at the
         # initial build and on each context reset — never mid-segment.
         progress_board = ""
@@ -312,7 +311,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             return "your progress board"
 
         if self.config.progress:
-            # bc_frankie parity: active_tools = TOOLS + [PROGRESS_TOOL] (+ BASH_TOOL
+            # reference-harness parity: active_tools = TOOLS + [PROGRESS_TOOL] (+ BASH_TOOL
             # last), so update_progress goes BEFORE bash_command in the rendered
             # prompt. Tool order changes the materialized prompt bytes.
             tools = list(body.tools)
@@ -374,7 +373,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         # The model cannot see the reset coming. Warn it on its
                         # latest tool result and give it this one turn to save the
                         # board; the armed reset fires on the next iteration's
-                        # pre-call check. (ported from bc_frankie 8cdd075)
+                        # pre-call check. (ported from an internal reference harness)
                         reset_armed = True
                         pre_reset_warning_steps.append(step)
                         print(
@@ -449,7 +448,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 if self.config.progress and not reset_armed:
                     # One warned turn: process this completion normally, inject the
                     # save-the-board warning after its tool results, and reset at
-                    # the end of the NEXT turn. (ported from bc_frankie 8cdd075)
+                    # the end of the NEXT turn. (ported from an internal reference harness)
                     reset_armed = True
                     pre_reset_nudge_due = True
                     pre_reset_warning_steps.append(step)
@@ -497,8 +496,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             # --- Execute tool calls ---
             for output_function_call in all_fn_calls:
                 num_tool_calls += 1
-                # The model can emit syntactically invalid JSON for `arguments` (seen on
-                # Inkling-Small: a call truncated mid-object). Parse once, up front, and
+                # The model can emit syntactically invalid JSON for `arguments` (observed
+                # in practice: a call truncated mid-object). Parse once, up front, and
                 # treat a failure the same way a >=400 tool response is treated below —
                 # report it back to the model — instead of letting it raise out of this
                 # handler, which 500s the agent and kills the ENTIRE rollout collection
@@ -549,10 +548,10 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     resources_server_cookies = api_response.cookies
 
                     tool_output = (await api_response.content.read()).decode()
-                    # bc_frankie parity: the resources server wraps every tool result in a one-field
+                    # reference-harness parity: the resources server wraps every tool result in a one-field
                     # JSON envelope ({"results_string": "..."}), which JSON-escapes newlines — the
                     # model then sees a single escaped line instead of raw multi-line text. This was
-                    # the last remaining materialized-prompt difference vs the bc_frankie harness.
+                    # the last remaining materialized-prompt difference vs the reference harness.
                     # Unwrap it so the model sees the raw text. Error bodies (different JSON shape)
                     # and non-JSON payloads are left untouched.
                     try:
@@ -661,7 +660,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 print(f"[browsecomp][max_steps][{qid}] step={step} max_steps={self.config.max_steps}", flush=True)
                 break
 
-        # --- Board-answer fallback (ported from bc_frankie 5099589): if the run
+        # --- Board-answer fallback (ported from an internal reference harness): if the run
         # ends without an answer commit in the last content-bearing assistant
         # message but the board contains one, surface the board's answer line so
         # the judge can extract it. Appends only — a trajectory that already
@@ -708,7 +707,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 reset_count=None,
                 is_final=True,
             )
-            # Full untrimmed conversation (bc_frankie parity: one trajectory.jsonl per sample).
+            # Full untrimmed conversation (reference-harness parity: one trajectory.jsonl per sample).
             self._save_trajectory(
                 input_messages=body.input,
                 full_trajectory=full_trajectory,
@@ -780,7 +779,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 cookies = response.cookies
 
                 # Retry if the model's LAST content-bearing turn was empty after <think>-strip.
-                # (Keyed on the last assistant message, matching bc_frankie, NOT the concatenated
+                # (Keyed on the last assistant message, matching the reference harness, NOT the concatenated
                 # output_text — a final think-only turn retries even if an earlier turn had text.)
                 response_json = await get_response_json(response)
                 last_response_json = response_json
@@ -826,8 +825,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             )
             # CONTAIN the failure to this one sample. Re-raising makes /run return 500, which
             # the collector treats as fatal (raise_for_status in nemo_gym/rollout_collection.py)
-            # and every remaining sample dies with it — that cost two full 8-node allocations,
-            # one dying at 34/400 and one at 167/400, on one bad sample each.
+            # and every remaining sample dies with it — that cost two full multi-node
+            # allocations, each dying part-way through a run on one bad sample.
             #
             # Score it 0, but carry `agent_error` so the failure stays COUNTABLE in the results
             # instead of being indistinguishable from a genuine wrong answer. Always check that
@@ -957,7 +956,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         """Save the FULL untrimmed conversation for one sample to
         {snap_dir}/sample_{task_index}/attempt_{attempt}_trajectory.jsonl.
         Line 1 = metadata header; remaining lines = input prefix + every model/tool item, in order
-        (never trimmed at context resets). (bc_frankie parity: one trajectory.jsonl per sample.)"""
+        (never trimmed at context resets). (reference-harness parity: one trajectory.jsonl per sample.)"""
         sample_dir = Path(f"{self.config.snap_dir}/sample_{task_index}")
         sample_dir.mkdir(parents=True, exist_ok=True)
         path = f"{sample_dir}/attempt_{attempt}_trajectory.jsonl"
@@ -992,7 +991,25 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             if key in chat_completion_create_params:
                 tokenize_body_dict[key] = chat_completion_create_params[key]
         tokenize_response = await self._policy_model_openai_client.create_tokenize(**tokenize_body_dict)
-        return len(tokenize_response["tokens"])
+        return _prompt_tokens_from_tokenize_response(tokenize_response)
+
+
+def _prompt_tokens_from_tokenize_response(tokenize_response: dict) -> int:
+    """Prompt token count from a vLLM /tokenize response.
+
+    The response shape varies across vLLM versions: mainstream builds
+    (>=0.19.1) return {"count": N, "max_model_len": ...} and only include the
+    "tokens" list when token ids are requested, while older builds return just
+    {"tokens": [...]}. Prefer the explicit count and fall back to the token
+    list, so the agent works against both.
+    """
+    count = tokenize_response.get("count")
+    if count is not None:
+        return int(count)
+    tokens = tokenize_response.get("tokens")
+    if tokens is not None:
+        return len(tokens)
+    raise KeyError(f"/tokenize response has neither 'count' nor 'tokens'; got keys: {sorted(tokenize_response)}")
 
 
 if __name__ == "__main__":

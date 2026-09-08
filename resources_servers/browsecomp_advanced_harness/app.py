@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import functools
 import json
 import os
 import re
@@ -29,6 +30,7 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
+from pocketshell import run as pocketshell_run
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from tavily import AsyncTavilyClient
 from tavily.errors import BadRequestError
@@ -71,10 +73,10 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     # and a read-only bash_command tool is exposed for the model to grep/read them.
     workspace: str = "none"
     workspace_root: Optional[str] = None  # default: $BROWSECOMP_WS_ROOT or /tmp/browsecomp_ws
-    bash_timeout_s: float = 60.0  # match bc_frankie's _BASH_MAX_DURATION_S
+    bash_timeout_s: float = 60.0  # match the reference harness's _BASH_MAX_DURATION_S
     bash_max_concurrency: int = 64
     max_page_bytes: int = 2_000_000  # cap per-page bytes written to disk
-    # Results returned per search query (both providers). The bc_frankie Exa
+    # Results returned per search query (both providers). The reference Exa
     # reference uses 10; its Tavily path (and this harness historically) uses 5.
     max_results: int = 5
 
@@ -189,7 +191,7 @@ class TavilySearchSingleAsyncTavilyMetrics(BaseModel):
     start_time: float
     end_time: float
     time_taken: Optional[float] = None
-    # Retry counts for THIS provider request: true 429s exactly (bc_frankie
+    # Retry counts for THIS provider request: true 429s exactly (the reference harness
     # parity: status == 429), everything else retryable (500/502/503/504/520)
     # separately — never conflated.
     num_429_retries: int = 0
@@ -398,7 +400,7 @@ class ExaAIOHTTPClient(BaseModel):
 
 # ---------------------------------------------------------------------------
 # Terminal/disk mode: per-session page workspace (pages/ + manifest.tsv) and a
-# read-only bash tool. Ported from the bc_frankie harness.
+# read-only bash tool. Ported from the reference harness.
 # ---------------------------------------------------------------------------
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 _URL_RE = re.compile(r"https?://([^/]+)(/.*)?")
@@ -434,8 +436,8 @@ def _bash_truncate(s: str) -> str:
     )
 
 
-# --- bash_command guards (ported byte-for-byte from the bc_frankie_bash_tool
-# harness @ ee72d54: _bash_denylisted + _bash_allowlisted). Layered deny-first,
+# --- bash_command guards (ported byte-for-byte from an internal reference
+# harness: _bash_denylisted + _bash_allowlisted). Layered deny-first,
 # then default-deny allow-list. NOT a security boundary (the ulimit -f 0 in
 # _run_bash_readonly is the kernel backstop); these block destructive/network/
 # interpreter commands + command/process substitution + find -exec / sed -i. ---
@@ -727,7 +729,7 @@ def _last_assistant_text(response) -> str:
     """Text of the LAST assistant message item in response.output (the model's final answer).
     Replaces Response.output_text, which CONCATENATES every assistant message item — wrong when
     the model emits text alongside tool calls mid-trajectory (~49% of BrowseComp samples). Also
-    aligns with bc_frankie, which grades only the final message."""
+    aligns with the reference harness, which grades only the final message."""
     text = ""
     for item in response.output:
         if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant":
@@ -761,7 +763,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if isinstance(tavily_api_keys, str):
             tavily_api_keys = [tavily_api_keys]
 
-        # Optional Tavily client-source identity header (matches bc_frankie's
+        # Optional Tavily client-source identity header (matches the reference harness's
         # x-client-source). Value comes ONLY from the env (TAVILY_CLIENT_SOURCE);
         # not hardcoded. Empty/unset => header not sent.
         client_source = os.environ.get("TAVILY_CLIENT_SOURCE", "")
@@ -863,51 +865,56 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return BashCommandResponse(results_string=out)
 
     async def _run_bash_readonly(self, keystrokes: str, duration: float, cwd: str) -> str:
-        # Layered guard (ported from bc_frankie @ ee72d54): deny-list first
-        # (specific reason), then default-deny read-only allow-list. Either one
-        # blocking returns [blocked: ...] and skips execution.
+        """Run the command IN-PROCESS via pocketshell -- no subprocess, no sandbox.
+
+        Replaces `asyncio.create_subprocess_exec("bash", "-c", ...)`. The old
+        design relied on a command-NAME deny/allow list plus `ulimit -f 0`, which
+        never inspected path arguments (so `cat /etc/passwd` passed the guard) and
+        which its own comment described as "NOT a security boundary". pocketshell
+        cannot execute anything it does not implement, and confines every path to
+        the sample workspace, so the protection is structural.
+
+        The legacy guard is deliberately kept IN FRONT so that anything it used to
+        reject still returns the identical `[blocked: ...]` string -- existing
+        synthetic-data corpora, and models trained on them, saw those exact responses.
+
+        Output shape (stdout / --- stderr --- / [exit_code=N]) is unchanged.
+        """
         blocked = _bash_denylisted(keystrokes) or _bash_allowlisted(keystrokes)
         if blocked is not None:
             print(f"[browsecomp][bash][blocked] {blocked}: {(keystrokes or '')[:160]!r}", flush=True)
             return f"[blocked: {blocked}]\n[exit_code=-3]"
-        # Read-only enforcement backstop: `ulimit -f 0` sets RLIMIT_FSIZE=0 so the
-        # command cannot write/grow ANY file; reads + pipes still work. cwd is
-        # pinned to the session workspace; env is minimal (no inherited secrets).
-        wrapped = f"ulimit -c 0 2>/dev/null; ulimit -f 0 2>/dev/null; {keystrokes}"
-        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": cwd, "LC_ALL": "C.UTF-8"}
-        async with self._bash_semaphore:
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    "bash",
-                    "-c",
-                    wrapped,
-                    cwd=cwd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    env=env,
-                )
-            except Exception as e:
-                return f"[bash error: {e}]\n[exit_code=-2]"
-            try:
-                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=duration)
-            except asyncio.TimeoutError:
-                try:
-                    proc.kill()
-                    await proc.wait()
-                except ProcessLookupError:
-                    pass
-                return f"[command timed out after {duration:.0f}s]\n[exit_code=-1]"
 
-        stdout = _bash_truncate(stdout_b.decode(errors="replace"))
-        stderr = _bash_truncate(stderr_b.decode(errors="replace"))
-        truncated = len(stdout_b) + len(stderr_b) > (_BASH_HEAD_BYTES + _BASH_TAIL_BYTES) * 2
+        loop = asyncio.get_running_loop()
+        try:
+            # pocketshell is pure-Python and CPU-bound; keep the event loop free.
+            # A run_in_executor thread cannot be cancelled, so pocketshell enforces
+            # its own deadline internally (including a per-match regex timeout --
+            # Python backtracks where GNU grep's DFA does not). asyncio.wait_for is
+            # a belt-and-braces outer bound so a wedged thread can never stall the
+            # sample; the semaphore keeps the shared pool from being swamped.
+            async with self._bash_semaphore:
+                result = await asyncio.wait_for(
+                    loop.run_in_executor(None, functools.partial(pocketshell_run, keystrokes or "", cwd, duration)),
+                    timeout=duration + 30,
+                )
+        except asyncio.TimeoutError:
+            print(f"[browsecomp][bash] timeout: {(keystrokes or '')[:160]!r}", flush=True)
+            return f"[command timed out after {duration:.0f}s]\n[exit_code=-1]"
+        except Exception as e:  # pragma: no cover - defensive
+            print(f"🚨 [browsecomp][bash] pocketshell error: {e!r}", flush=True)
+            return f"[bash error: {e}]\n[exit_code=-2]"
+
+        stdout = _bash_truncate(result.stdout)
+        stderr = _bash_truncate(result.stderr)
+        truncated = (len(result.stdout) + len(result.stderr)) > (_BASH_HEAD_BYTES + _BASH_TAIL_BYTES) * 2
         parts = []
         if stdout:
             parts.append(stdout)
         if stderr:
             parts.append("--- stderr ---")
             parts.append(stderr)
-        parts.append(f"[exit_code={proc.returncode}{' truncated' if truncated else ''}]")
+        parts.append(f"[exit_code={result.exit_code}{' truncated' if truncated else ''}]")
         return "\n".join(parts)
 
     def _select_tavily_client(self) -> AsyncTavilyClient:
@@ -941,7 +948,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
     async def _exa_search_one(self, query: str, max_length: int, metrics: "TavilySearchMetrics") -> str:
         """Exa search: highlight snippets returned INLINE (never written to pages/, even in
-        terminal mode). Mirrors the bc_frankie Exa harness formatting exactly."""
+        terminal mode). Mirrors the reference Exa harness formatting exactly."""
         if len(query) > 400:
             return "Query is too long"
 
@@ -1010,7 +1017,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         self, query: str, page_writer: "_PageWriter", max_per_query: int, metrics: "TavilySearchMetrics"
     ) -> str:
         """Terminal mode: run one search, write each result's raw content to disk, return
-        title/url/snippet/[Saved to] metadata. Mirrors the bc_frankie harness tavily_search
+        title/url/snippet/[Saved to] metadata. Mirrors the reference harness tavily_search
         (disk mode) formatting exactly."""
         client = self._select_tavily_client()
         call_start = time()
@@ -1141,7 +1148,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         page_writer = self._get_page_writer(request.session[SESSION_ID_KEY])
         if page_writer is not None:
             # terminal mode: write each page to disk, return metadata + preview.
-            # Mirrors the bc_frankie harness tavily_extract (disk mode) formatting exactly.
+            # Mirrors the reference harness tavily_extract (disk mode) formatting exactly.
             blocks = []
             for result in result_list:
                 url = result.get("url", "") or ""
@@ -1271,7 +1278,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         judge_create_params = self.config.judge_responses_create_params.model_copy(deep=True)
         # Budget covers reasoning + final message combined (the reasoning parser splits
-        # post-hoc). 2048 made reasoning judges (e.g. GLM-5.1) burn the whole budget
+        # post-hoc). 2048 made reasoning judges burn the whole budget
         # thinking on ~2.7% of calls — no final message emitted, so output[-1] is the
         # reasoning item and parsing fails until a retry samples a shorter think.
         judge_create_params.max_output_tokens = 10240

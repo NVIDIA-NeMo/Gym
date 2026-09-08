@@ -277,11 +277,21 @@ def _manifest(composition: _Composition) -> EnvironmentManifest:
 
 
 def _asset_config(composition: _Composition) -> str:
+    # Datasets are declared on the resources server (which defines what the rows mean and how
+    # they are scored), never on the agent — the agent is a run-time choice. The scaffolded
+    # config has exactly one agent referencing the resources server, so benchmark datasets
+    # resolve their harness from that edge; the dataset-level `agent:` key stays reserved for
+    # genuinely ambiguous configs.
+    dataset_dict = composition.dataset.model_dump(mode="json", exclude_none=True)
     agent_config: dict[str, Any] = {
         "resources_server": {"type": "resources_servers", "name": composition.resource_instance},
         "model_server": {"type": "responses_api_models", "name": "policy_model"},
-        "datasets": [composition.dataset.model_dump(mode="json", exclude_none=True)],
     }
+    # When reusing a verifier from another config we do not know its inner implementation key, so
+    # a partial resources-server override could not be merged safely; the dataset stays on the
+    # agent block there (still supported).
+    if composition.reused_verifier is not None:
+        agent_config["datasets"] = [dataset_dict]
     reused_agent = composition.reused_verifier.agent_instance if composition.reused_verifier else None
     if reused_agent:
         agent_entry: dict[str, Any] = {
@@ -296,15 +306,23 @@ def _asset_config(composition: _Composition) -> str:
         "config_paths": [composition.config_reference],
         composition.agent_instance: agent_entry,
     }
+    if composition.reused_verifier is None:
+        config[composition.resource_instance] = {
+            "resources_servers": {composition.resource_implementation: {"datasets": [dataset_dict]}}
+        }
     if composition.rollout_driver:
         config["rollout_collection_driver"] = composition.rollout_driver
-    return yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+
+    res = yaml.safe_dump(config, sort_keys=False, allow_unicode=True)
+    res = f"\n{composition.agent_instance}".join(res.split(composition.agent_instance, maxsplit=1))
+
+    return res
 
 
 def _render_manifest_composition(root: Path, composition: _Composition) -> dict[Path, str]:
     asset = composition.asset_dir
     files = {
-        asset / "__init__.py": _license_header(),
+        asset / "__init__.py": _license_header().removesuffix("\n"),
         asset / "manifest.yaml": dump_manifest(_manifest(composition)),
         asset / "config.yaml": _asset_config(composition),
         asset / "README.md": _asset_readme(composition),
@@ -320,7 +338,7 @@ def _render_manifest_composition(root: Path, composition: _Composition) -> dict[
             }
         )
     else:
-        files[asset / "data" / "example.jsonl"] = _environment_example(composition.agent_instance)
+        files[asset / "data" / "example.jsonl"] = _environment_example()
 
     if composition.reused_verifier is None:
         resource_dir = root / "resources_servers" / composition.module_name
@@ -362,7 +380,7 @@ def _asset_readme(composition: _Composition) -> str:
     )
 
 
-def _environment_example(agent_instance: str) -> str:
+def _environment_example() -> str:
     return (
         json.dumps(
             {
@@ -370,7 +388,6 @@ def _environment_example(agent_instance: str) -> str:
                     "input": [{"role": "user", "content": "What is 6 x 7? Reply with only the answer."}]
                 },
                 "expected_answer": "42",
-                "agent_ref": {"type": "responses_api_agents", "name": agent_instance},
             }
         )
         + "\n"
@@ -437,14 +454,15 @@ def _resource_component_files(
     requirements: str,
 ) -> dict[Path, str]:
     return {
-        directory / "__init__.py": _license_header(),
+        directory / "__init__.py": _license_header().removesuffix("\n"),
         directory / "README.md": readme,
         directory / "app.py": _resources_server_app(module_name),
         directory / "configs" / f"{module_name}.yaml": config,
         directory / "requirements.txt": requirements,
-        directory / "tests" / "__init__.py": _license_header(),
+        directory / "tests" / "__init__.py": _license_header().removesuffix("\n"),
         directory / "tests" / "test_app.py": _resources_server_test(),
         directory / "tests" / "verifier_cases.jsonl": _verifier_cases(),
+        directory / "example.jsonl": _environment_example(),
     }
 
 
@@ -486,24 +504,14 @@ def _standalone_resources_server_config(module_name: str) -> str:
     return dedent(
         f"""\
         # Resources server: owns this environment's task verification (verify()) and reward.
+        # Datasets are declared here — the resources server defines what the rows mean and how
+        # they are scored. Which agent runs them is chosen at run time.
         {module_name}_resources_server:          # instance name — how agents/CLI refer to this server
           resources_servers:                    # server type: resources_servers | responses_api_agents | responses_api_models
             {module_name}:                      # implementation directory under resources_servers/
               entrypoint: app.py                # server entry module
               domain: other                     # task domain; change to the closest supported domain
               verified: false                   # set true once the benchmark has been baselined and reviewed
-
-        # Pair the server with the default agent and dataset slots.
-        {module_name}_simple_agent:             # pass this instance as --agent to gym eval run
-          responses_api_agents:
-            simple_agent:
-              entrypoint: app.py
-              resources_server:
-                type: resources_servers
-                name: {module_name}_resources_server
-              model_server:
-                type: responses_api_models
-                name: policy_model
               datasets:
               - name: train
                 type: train
@@ -520,6 +528,18 @@ def _standalone_resources_server_config(module_name: str) -> str:
                 type: example
                 jsonl_fpath: resources_servers/{module_name}/data/example.jsonl
                 num_repeats: 1
+
+        # Pair the server with the default agent.
+        {module_name}_simple_agent:             # pass this instance as --agent to gym eval run
+          responses_api_agents:
+            simple_agent:
+              entrypoint: app.py
+              resources_server:
+                type: resources_servers
+                name: {module_name}_resources_server
+              model_server:
+                type: responses_api_models
+                name: policy_model
         """
     )
 
@@ -547,9 +567,8 @@ def _standalone_data_gitignore() -> str:
         """\
         *train.jsonl
         *validation.jsonl
-        *train_prepare.jsonl
-        *validation_prepare.jsonl
-        *example_prepare.jsonl
+        *_prepare.jsonl
+        *_prepare.*.jsonl
         """
     )
 
@@ -676,7 +695,7 @@ def _agent_files(root: Path, directory: Path, composition: _Composition) -> dict
             " Replace run() with external episode delegation, then make responses() raise NotImplementedError."
         )
     return {
-        directory / "__init__.py": _license_header(),
+        directory / "__init__.py": _license_header().removesuffix("\n"),
         directory / "README.md": f"# {composition.agent_implementation}\n\n{instruction}\n",
         directory / "app.py": _agent_app(composition.module_name, composition.profile),
         directory / "requirements.txt": _requirements(directory, _gym_checkout_root(root)),
