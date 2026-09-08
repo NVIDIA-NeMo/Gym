@@ -25,6 +25,7 @@ from typing import Any, Iterator
 from nooa.unifiedllm import LLMResponse, Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel
 
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -38,6 +39,26 @@ from responses_api_agents.nooa_agent.observability import GymTraceHooks
 
 class PolicyCallBudgetExceeded(RuntimeError):
     """Raised when one rollout exceeds its configured policy-call budget."""
+
+
+class RolloutCallBudget:
+    """Rollout-wide policy-call budget, shared across primary and alias clients.
+
+    Per-method model strings (NOOA ``@strategy(llm=...)``) resolve to extra
+    GymResponsesLLM clients. All of them draw from one budget so a rollout's
+    total model-call count stays bounded regardless of how many models run.
+    """
+
+    __slots__ = ("max_steps", "used")
+
+    def __init__(self, max_steps: int) -> None:
+        self.max_steps = max_steps
+        self.used = 0
+
+    def charge(self) -> None:
+        if self.used >= self.max_steps:
+            raise PolicyCallBudgetExceeded(f"NOOA policy call budget exhausted after {self.max_steps} calls")
+        self.used += 1
 
 
 def _journal_callbacks() -> list[Any]:
@@ -274,18 +295,28 @@ class GymResponsesLLM(UnifiedLLM):
         trace_hooks: GymTraceHooks | None = None,
         observation_gaps: list[ObservationGap] | None = None,
         model: str = "gym-policy",
+        model_ref: ModelServerRef | None = None,
+        budget: RolloutCallBudget | None = None,
+        prior_outputs: list[dict[str, Any]] | None = None,
     ) -> None:
         super().__init__(model=model)
         self._server_client = server_client
         self._model_server_name = model_server_name
         self._model_url_path = model_url_path
         self._max_steps = max_steps
+        self._budget = budget if budget is not None else RolloutCallBudget(max_steps)
         self._request_collector = request_collector
         self._response_collector = response_collector
         self._cookies = cookies
         self._trace_hooks = trace_hooks
         self._observation_gaps = observation_gaps
-        self._prior_outputs: list[dict[str, Any]] = []
+        self._model_ref_override = model_ref
+        # Rollout-wide exact-output ledger, shared across the primary and alias
+        # clients: NOOA keeps one conversation, so an alias call may carry history
+        # produced by another client; a shared ledger lets every client restore
+        # those prior outputs byte-exactly instead of falling back to normalized
+        # items.
+        self._prior_outputs: list[dict[str, Any]] = prior_outputs if prior_outputs is not None else []
         self._reported_unrestored_outputs: set[int] = set()
         self._calls = 0
 
@@ -309,8 +340,9 @@ class GymResponsesLLM(UnifiedLLM):
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        if self._calls >= self._max_steps:
-            raise PolicyCallBudgetExceeded(f"NOOA policy call budget exhausted after {self._max_steps} calls")
+        # Shared budget: the primary client and every alias client draw from one
+        # rollout-wide allowance (self._calls still tracks this client's own calls).
+        self._budget.charge()
         self._calls += 1
 
         input_items, instructions = _responses_input(messages)
@@ -374,7 +406,7 @@ class GymResponsesLLM(UnifiedLLM):
             self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
             self._response_collector.append(response)
             if self._trace_hooks is not None:
-                self._trace_hooks.record_model_response(response)
+                self._trace_hooks.record_model_response(response, model_ref=self._model_ref_override)
             if llm_span is not None:
                 llm_span.set_attribute("llm.model_name", response.model or self.model)
             for callback in callbacks:

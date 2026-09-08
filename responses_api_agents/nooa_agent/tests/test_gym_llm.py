@@ -15,6 +15,7 @@
 
 import json
 from http.cookies import SimpleCookie
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -33,6 +34,7 @@ from responses_api_agents.nooa_agent.gym_llm import (
     GymResponsesLLM,
     InvalidPolicyOutputError,
     PolicyCallBudgetExceeded,
+    RolloutCallBudget,
 )
 
 
@@ -85,19 +87,24 @@ def make_llm(
     max_steps: int = 2,
     observation_gaps: list[ObservationGap] | None = None,
     request_collector: list[NeMoGymResponseCreateParamsNonStreaming] | None = None,
+    budget: RolloutCallBudget | None = None,
+    prior_outputs: list[dict[str, Any]] | None = None,
+    model_server_name: str = "policy_model",
 ) -> tuple[GymResponsesLLM, MagicMock, list[NeMoGymResponse]]:
     server_client = MagicMock()
     server_client.post = AsyncMock(return_value=FakeHTTPResponse(payload))
     collected: list[NeMoGymResponse] = []
     llm = GymResponsesLLM(
         server_client=server_client,
-        model_server_name="policy_model",
+        model_server_name=model_server_name,
         model_url_path="/ng-rollout/rollout-1/v1/responses",
         max_steps=max_steps,
         request_collector=request_collector if request_collector is not None else [],
         response_collector=collected,
         cookies={},
         observation_gaps=observation_gaps,
+        budget=budget,
+        prior_outputs=prior_outputs,
     )
     return llm, server_client, collected
 
@@ -335,3 +342,71 @@ def test_chat_items_preserves_reasoning_text() -> None:
     assert messages[2] == {"role": "user", "content": "q"}
     assert messages[3]["tool_calls"][0]["function"]["name"] == "t"
     assert messages[4] == {"role": "tool", "tool_call_id": "c1", "content": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_alias_clients_share_one_rollout_budget() -> None:
+    output = NeMoGymResponseOutputMessageForTraining(
+        id="msg-1",
+        content=[NeMoGymResponseOutputText(annotations=[], text="ok")],
+        prompt_token_ids=[1],
+        generation_token_ids=[2],
+        generation_log_probs=[-0.1],
+    )
+    # One budget, two clients (primary + alias): 2 calls total allowed.
+    budget = RolloutCallBudget(2)
+    shared_prior: list[dict[str, Any]] = []
+    primary, primary_client, _ = make_llm(model_response(output), budget=budget, prior_outputs=shared_prior)
+    alias, alias_client, _ = make_llm(
+        model_response(output), budget=budget, prior_outputs=shared_prior, model_server_name="subagent_model"
+    )
+
+    await primary.acall([{"role": "user", "content": "one"}])
+    await alias.acall([{"role": "user", "content": "two"}])
+
+    # Budget is combined across clients, not per-client.
+    assert budget.used == 2
+    assert primary.calls == 1
+    assert alias.calls == 1
+    primary_client.post.assert_awaited_once()
+    alias_client.post.assert_awaited_once()
+
+    with pytest.raises(PolicyCallBudgetExceeded, match="exhausted"):
+        await primary.acall([{"role": "user", "content": "three"}])
+
+
+@pytest.mark.asyncio
+async def test_alias_clients_share_the_prior_outputs_ledger() -> None:
+    output = NeMoGymResponseOutputMessageForTraining(
+        id="msg-1",
+        content=[NeMoGymResponseOutputText(annotations=[], text="shared history")],
+        prompt_token_ids=[1],
+        generation_token_ids=[2],
+        generation_log_probs=[-0.1],
+    )
+    budget = RolloutCallBudget(4)
+    shared_prior: list[dict[str, Any]] = []
+    primary, _, _ = make_llm(model_response(output), budget=budget, prior_outputs=shared_prior)
+    alias, alias_client, _ = make_llm(
+        model_response(output), budget=budget, prior_outputs=shared_prior, model_server_name="subagent_model"
+    )
+
+    await primary.acall([{"role": "user", "content": "first"}])
+    # The alias client sees the primary's output in its own prior-outputs ledger:
+    # one conversation, byte-exact restoration regardless of which client produced it.
+    assert shared_prior and shared_prior[0]["id"] == "msg-1"
+    assert alias._prior_outputs is shared_prior
+
+    await alias.acall(
+        [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "shared history"},
+            {"role": "user", "content": "second"},
+        ]
+    )
+    sent = alias_client.post.await_args_list[0].kwargs["json"].input
+    # NOOA's normalized assistant message is restored to the primary's exact output item,
+    # including training metadata the alias client never produced itself.
+    restored = [item for item in sent if getattr(item, "id", None) == "msg-1"]
+    assert restored, "alias call did not restore the primary client's prior output"
+    assert restored[0].generation_token_ids == [2]

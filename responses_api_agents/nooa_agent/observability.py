@@ -97,10 +97,22 @@ class GymTraceHooks:
             rollout_id=self._snapshot.rollout_id,
         )
 
-    def record_model_response(self, response: NeMoGymResponse) -> None:
+    def record_model_response(
+        self,
+        response: NeMoGymResponse,
+        *,
+        model_ref: ModelServerRef | None = None,
+    ) -> None:
+        """Record one model response as a turn.
+
+        ``model_ref`` overrides the hooks' default server reference so alias
+        clients (per-method model strings) attribute their calls to the Gym
+        model server that actually served them.
+        """
         invocation_id = self.invocation_id
         self._snapshot.output.extend(response.output)
-        model_calls = [ModelCallRef(model_ref=self._model_ref, response_id=response.id)] if response.id else []
+        ref = model_ref or self._model_ref
+        model_calls = [ModelCallRef(model_ref=ref, response_id=response.id)] if response.id else []
         if model_calls:
             self._snapshot.model_calls.setdefault(invocation_id, []).extend(model_calls)
         # One agent turn per model generation: the collector only accepts turns from a

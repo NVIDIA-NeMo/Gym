@@ -33,6 +33,7 @@ from responses_api_agents.nooa_agent.gym_llm import (
     GymResponsesLLM,
     InvalidPolicyOutputError,
     PolicyCallBudgetExceeded,
+    RolloutCallBudget,
 )
 from responses_api_agents.nooa_agent.gym_tools import GymToolExecution, build_tool_namespace
 from responses_api_agents.nooa_agent.mapping import materialize_arguments
@@ -100,6 +101,49 @@ class EmbeddedNOOARunner:
         if hasattr(self._agent_class, invocation.tool_namespace):
             raise ValueError(f"tool_namespace {invocation.tool_namespace!r} collides with an existing agent attribute")
 
+    def _build_alias_clients(
+        self,
+        *,
+        request: NOOARunRequest,
+        trace_hooks: GymTraceHooks,
+        model_requests: list[NeMoGymResponseCreateParamsNonStreaming],
+        responses: list[NeMoGymResponse],
+        observation_gaps: list[ObservationGap],
+        budget: RolloutCallBudget,
+        prior_outputs: list[dict[str, Any]],
+    ) -> dict[str, GymResponsesLLM]:
+        """Build one Gym-backed client per configured NOOA model string.
+
+        Alias clients share the rollout's call budget, request/response
+        collectors, and trace hooks with the primary client; only the target
+        model server and the NOOA model string differ. Each gets its own
+        cookie-jar copy so one server's session cookies never leak to
+        another; only the primary client's cookies flow back into the
+        rollout result.
+
+        Model strings that are *not* configured here still resolve through
+        NOOA's own registry, outside Gym's boundary — keep that registry
+        empty (or keyless) in Gym rollouts to preserve the trust boundary.
+        """
+        clients: dict[str, GymResponsesLLM] = {}
+        for alias, server_name in self._invocation.model_aliases.items():
+            clients[alias] = GymResponsesLLM(
+                server_client=self._server_client,
+                model_server_name=server_name,
+                model_url_path=request.model_url_path,
+                max_steps=self._max_steps,
+                request_collector=model_requests,
+                response_collector=responses,
+                cookies=dict(request.model_cookies),
+                trace_hooks=trace_hooks,
+                observation_gaps=observation_gaps,
+                model=alias,
+                model_ref=ModelServerRef(type="responses_api_models", name=server_name),
+                budget=budget,
+                prior_outputs=prior_outputs,
+            )
+        return clients
+
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
         model_requests: list[NeMoGymResponseCreateParamsNonStreaming] = []
         responses: list[NeMoGymResponse] = []
@@ -110,6 +154,11 @@ class EmbeddedNOOARunner:
             task_id=request.task_id,
             rollout_id=request.rollout_id,
         )
+        # One rollout-wide budget and one exact-output ledger: the primary
+        # client and every alias client (per-method model strings) draw from the
+        # same allowance and restore one another's prior outputs.
+        budget = RolloutCallBudget(self._max_steps)
+        prior_outputs: list[dict[str, Any]] = []
         llm = GymResponsesLLM(
             server_client=self._server_client,
             model_server_name=self._model_server_name,
@@ -120,6 +169,17 @@ class EmbeddedNOOARunner:
             cookies=request.model_cookies,
             trace_hooks=trace_hooks,
             observation_gaps=observation_gaps,
+            budget=budget,
+            prior_outputs=prior_outputs,
+        )
+        alias_clients = self._build_alias_clients(
+            request=request,
+            trace_hooks=trace_hooks,
+            model_requests=model_requests,
+            responses=responses,
+            observation_gaps=observation_gaps,
+            budget=budget,
+            prior_outputs=prior_outputs,
         )
         tool_namespace = self._invocation.tool_namespace
         tools = build_tool_namespace(
@@ -145,6 +205,15 @@ class EmbeddedNOOARunner:
             from responses_api_agents.nooa_agent.sandbox_attach import attach_docker_sandbox
 
             agent_class._gym_sandbox = attach_docker_sandbox(request.sandbox_handle)
+        if alias_clients:
+            # NOOA resolves per-method model strings (``@strategy(llm="<alias>")``,
+            # call-site ``llm=``) through the agent's ``_strategy_llm_alias_cache``,
+            # checked before its own registry. Seeding the per-rollout subclass
+            # routes those strings to the Gym-backed clients above; delegate()
+            # children are built as ``type(self)``, so subagents inherit the
+            # mapping. The attribute is per-rollout (fresh subclass each run), and
+            # on NOOA versions without per-method LLM strings it is simply unused.
+            agent_class._strategy_llm_alias_cache = alias_clients
         agent = agent_class(llm=llm, **self._invocation.init_kwargs)
         if tool_namespace in vars(agent):
             raise ValueError(f"tool_namespace {tool_namespace!r} collides with an existing agent attribute")

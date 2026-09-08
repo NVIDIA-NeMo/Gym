@@ -65,6 +65,11 @@ class NOOAInvocationConfig(BaseModel):
     arguments: dict[str, NOOAArgumentBinding]
     tool_namespace: str = "resources"
     allowed_tools: list[str] = Field(default_factory=list)
+    # NOOA model string (as used in ``@strategy(llm=...)``) -> Gym model-server name.
+    # The runner resolves each alias to a GymResponsesLLM pointed at that server, so
+    # per-method model strings route to Gym servers inside the trust boundary while
+    # every client still draws from the rollout-wide call budget.
+    model_aliases: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("agent_class")
     @classmethod
@@ -102,6 +107,19 @@ class NOOAInvocationConfig(BaseModel):
             raise ValueError(f"allowed_tools must contain unique public Python identifiers: invalid={invalid_tools}")
         if "llm" in self.init_kwargs:
             raise ValueError("init_kwargs.llm is reserved; Gym always injects the rollout LLM")
+        # Model strings are arbitrary NOOA names ("gpt-4o", "helper"), so only
+        # non-emptiness is enforced; unknown server names fail at call time with
+        # the server client's own error.
+        bad_aliases = sorted(
+            alias
+            for alias, server in self.model_aliases.items()
+            if not alias or not isinstance(server, str) or not server
+        )
+        if bad_aliases:
+            raise ValueError(
+                "model_aliases must map non-empty NOOA model strings to non-empty "
+                f"Gym model-server names: invalid={bad_aliases}"
+            )
         return self
 
 

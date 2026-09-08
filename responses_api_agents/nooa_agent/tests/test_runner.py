@@ -31,7 +31,13 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCallForTraining,
 )
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
-from responses_api_agents.nooa_agent.gym_llm import InvalidPolicyOutputError, PolicyCallBudgetExceeded
+from nemo_gym.config_types import ModelServerRef
+from responses_api_agents.nooa_agent.gym_llm import (
+    InvalidPolicyOutputError,
+    PolicyCallBudgetExceeded,
+    RolloutCallBudget,
+)
+from responses_api_agents.nooa_agent.observability import GymTraceHooks
 from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunFailure, NOOARunRequest
 
 
@@ -531,3 +537,167 @@ def test_runner_rejects_tool_namespace_collision_at_startup() -> None:
             resources_server_name="resources",
             max_steps=1,
         )
+
+
+@pytest.mark.asyncio
+async def test_model_aliases_seed_subclass_alias_cache() -> None:
+    invocation = NOOAInvocationConfig.model_validate(
+        {
+            "agent_class": f"{__name__}:ValidAgent",
+            "entrypoint": "analyze",
+            "init_kwargs": {"label": "configured"},
+            "tool_namespace": "weather",
+            "arguments": {
+                "text": {"source": "responses_create_params.input", "transform": "latest_user_text"},
+                "customer_id": {"source": "customer_id"},
+            },
+            "model_aliases": {"helper": "subagent_model"},
+        }
+    )
+    runner = EmbeddedNOOARunner(
+        invocation=invocation,
+        server_client=MagicMock(),
+        model_server_name="policy_model",
+        resources_server_name="weather_resources",
+        max_steps=3,
+    )
+    runner._agent_class = FakeAgent
+
+    request = NOOARunRequest(
+        row=row("Paris"),
+        rollout_id="aliases-1",
+        task_id="task",
+        model_url_path="/ng-rollout/aliases-1/v1/responses",
+    )
+    # Reuse the internals built by run(): drive _build_alias_clients directly.
+    budget = RolloutCallBudget(3)
+    alias_clients = runner._build_alias_clients(
+        request=request,
+        trace_hooks=GymTraceHooks(
+            ModelServerRef(type="responses_api_models", name="policy_model"),
+            task_id="task",
+            rollout_id="aliases-1",
+        ),
+        model_requests=[],
+        responses=[],
+        observation_gaps=[],
+        budget=budget,
+        prior_outputs=[],
+    )
+
+    assert set(alias_clients) == {"helper"}
+    alias = alias_clients["helper"]
+    assert alias.model == "helper"
+    assert alias._model_server_name == "subagent_model"
+    assert alias._model_ref_override == ModelServerRef(type="responses_api_models", name="subagent_model")
+    # Shared rollout plumbing: budget and exact-output ledger are the same objects.
+    assert alias._budget is budget
+    shared_ledger: list[dict[str, Any]] = []
+    rebuilt = runner._build_alias_clients(
+        request=request,
+        trace_hooks=GymTraceHooks(
+            ModelServerRef(type="responses_api_models", name="policy_model"),
+            task_id="task",
+            rollout_id="aliases-1",
+        ),
+        model_requests=[],
+        responses=[],
+        observation_gaps=[],
+        budget=budget,
+        prior_outputs=shared_ledger,
+    )
+    assert rebuilt["helper"]._prior_outputs is shared_ledger
+    # Cookie jars are per-client copies, not the request's dict.
+    rebuilt["helper"]._cookies["session"] = "seeded"
+    assert "session" not in request.model_cookies
+
+
+@pytest.mark.asyncio
+async def test_alias_cache_is_seeded_on_the_per_rollout_subclass() -> None:
+    invocation = NOOAInvocationConfig.model_validate(
+        {
+            "agent_class": f"{__name__}:ValidAgent",
+            "entrypoint": "analyze",
+            "init_kwargs": {"label": "configured"},
+            "tool_namespace": "weather",
+            "allowed_tools": ["get_weather"],
+            "arguments": {
+                "text": {"source": "responses_create_params.input", "transform": "latest_user_text"},
+                "customer_id": {"source": "customer_id"},
+            },
+            "model_aliases": {"helper": "subagent_model"},
+        }
+    )
+    client = MagicMock()
+    client.post = AsyncMock(return_value=FakeResponse())
+    runner = EmbeddedNOOARunner(
+        invocation=invocation,
+        server_client=client,
+        model_server_name="policy_model",
+        resources_server_name="weather_resources",
+        max_steps=3,
+    )
+    runner._agent_class = FakeAgent
+
+    first = await runner.run(
+        NOOARunRequest(
+            row=row("Paris"),
+            rollout_id="cache-1",
+            task_id="task",
+            model_url_path="/cache-1/v1/responses",
+        )
+    )
+    subclass = type(first.agent)
+    seeded = getattr(subclass, "_strategy_llm_alias_cache", None)
+    assert isinstance(seeded, dict) and set(seeded) == {"helper"}
+    # The seed is per-rollout: a second rollout builds a fresh subclass with its own clients.
+    second = await runner.run(
+        NOOARunRequest(
+            row=row("Berlin"),
+            rollout_id="cache-2",
+            task_id="task",
+            model_url_path="/cache-2/v1/responses",
+        )
+    )
+    assert type(second.agent) is not subclass
+    second_seed = getattr(type(second.agent), "_strategy_llm_alias_cache", None)
+    assert second_seed is not None and second_seed is not seeded
+
+
+def test_model_aliases_validation_rejects_empty_names() -> None:
+    with pytest.raises(ValueError, match="model_aliases"):
+        NOOAInvocationConfig.model_validate(
+            {
+                "agent_class": f"{__name__}:ValidAgent",
+                "entrypoint": "analyze",
+                "arguments": {
+                    "text": {"source": "responses_create_params.input", "transform": "latest_user_text"},
+                },
+                "model_aliases": {"": "subagent_model"},
+            }
+        )
+    with pytest.raises(ValueError, match="model_aliases"):
+        NOOAInvocationConfig.model_validate(
+            {
+                "agent_class": f"{__name__}:ValidAgent",
+                "entrypoint": "analyze",
+                "arguments": {
+                    "text": {"source": "responses_create_params.input", "transform": "latest_user_text"},
+                },
+                "model_aliases": {"helper": ""},
+            }
+        )
+
+
+def test_model_aliases_accept_arbitrary_model_strings() -> None:
+    config = NOOAInvocationConfig.model_validate(
+        {
+            "agent_class": f"{__name__}:ValidAgent",
+            "entrypoint": "analyze",
+            "arguments": {
+                "text": {"source": "responses_create_params.input", "transform": "latest_user_text"},
+            },
+            "model_aliases": {"gpt-4o": "strong_model", "helper": "cheap_model"},
+        }
+    )
+    assert config.model_aliases == {"gpt-4o": "strong_model", "helper": "cheap_model"}
