@@ -1,0 +1,8 @@
+results/
+deps/
+.venv/
+__pycache__/
+*.tar.gz
+anykernel_*_deps
+anykernel_results_*
+sifs/

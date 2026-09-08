@@ -1,0 +1,28 @@
+kernel_gym:
+  responses_api_agents:
+    kernel_gym:
+      entrypoint: app.py
+      domain: coding
+      description: KernelBench run by a coding agent inside the task sandbox.
+      value: Evaluate GPU kernel optimization through an isolated agent lifecycle.
+
+      agent_kwargs:
+        model: openai/nvidia/nvidia/nemotron-3-super-v3
+        model_api_key: ${oc.env:NVIDIA_API_KEY,local}
+        fabric_config:
+          runtime:
+            max_turns: 90
+
+      container_formatter: "{docker_image}"
+      sandbox_provider: ${sandbox}
+      sandbox_model_base_url: ${oc.env:NEMO_GYM_SANDBOX_MODEL_BASE_URL,https://inference-api.nvidia.com/v1}
+      concurrency: 48
+
+      model_server:
+        name: policy_model
+        type: responses_api_models
+
+      datasets:
+        - name: kernelbench
+          type: example
+          jsonl_fpath: responses_api_agents/kernel_gym/data/kernelbench.jsonl
