@@ -22,6 +22,7 @@ python responses_api_agents/kernel_gym/prepare.py \
 ```
 
 Repeat `--problem-id` to add tasks. The preparer writes public `reference.py` and baseline `solution.py` files plus a verifier script that is hidden until the agent exits.
+Five prepared rows and five completed trajectories are included in `data/example_input.jsonl` and `data/example_rollouts.jsonl`.
 
 ## Run
 
