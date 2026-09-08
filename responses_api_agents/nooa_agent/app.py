@@ -34,7 +34,7 @@ from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
-from responses_api_agents.nooa_agent.observability import ensure_verifier_final_message, finalize_observations
+from responses_api_agents.nooa_agent.observability import ensure_verifier_final_message, finalize_observation_gaps
 from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunRequest, NOOARunResult
 
 
@@ -107,7 +107,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         verify_response, verify_gaps = ensure_verifier_final_message(
             run_result.episode.response, run_result.return_value
         )
-        observations = finalize_observations(
+        observations = finalize_observation_gaps(
             run_result.episode.observations,
             extra_gaps=verify_gaps,
             termination_reason=run_result.termination_reason,
