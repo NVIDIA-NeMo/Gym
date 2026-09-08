@@ -107,6 +107,14 @@ class TestOpenCodeSandboxedAgent:
         assert (await created_spec({"resources": {"cpu": 2}, "derive_cpu_env": False})).env == {}
         assert (await created_spec({"resources": {"memory_mib": 8192}})).env == {}
 
+        # Explicit sandbox_config.env is passed through and wins over the derived caps.
+        spec = await created_spec(
+            {"resources": {"cpu": 2}, "env": {"EXECD_API_GRACE_SHUTDOWN": "50ms", "OMP_NUM_THREADS": "4"}}
+        )
+        assert spec.env["EXECD_API_GRACE_SHUTDOWN"] == "50ms"
+        assert spec.env["OMP_NUM_THREADS"] == "4"
+        assert all(spec.env[name] == "2" for name in CPU_CAP_ENV_VARS if name != "OMP_NUM_THREADS")
+
     @fixture
     def opencode_export_test_data(self) -> Dict[str, Any]:
         test_data_path = Path(__file__).parent / "opencode_export_test_data.json"

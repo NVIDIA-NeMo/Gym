@@ -948,10 +948,34 @@ NeMoGymChatCompletionMessageToolCallUnionParam = Annotated[
 ]
 
 
+def _strip_outer_tool_call_names(value: Any) -> Any:
+    """Copy tool calls carrying a redundant outer name and remove only that field."""
+    if not isinstance(value, list):
+        return value
+
+    normalized = None
+    for index, tool_call in enumerate(value):
+        if not isinstance(tool_call, dict) or "name" not in tool_call:
+            continue
+        if normalized is None:
+            normalized = list(value)
+        normalized_tool_call = dict(tool_call)
+        del normalized_tool_call["name"]
+        normalized[index] = normalized_tool_call
+
+    return value if normalized is None else normalized
+
+
+NeMoGymChatCompletionMessageToolCallsParam: TypeAlias = Annotated[
+    List[NeMoGymChatCompletionMessageToolCallUnionParam],
+    BeforeValidator(_strip_outer_tool_call_names),
+]
+
+
 class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageParam, total=False):
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
-    tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCallUnionParam]] = None
+    tool_calls: Optional[NeMoGymChatCompletionMessageToolCallsParam] = None
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(
@@ -1048,7 +1072,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
     internal: bool = Field(
         default=False,
-        description="Set this to true if this particular client is only used to call internal NeMo Gym servers.",
+        description="Set this to true for internal NeMo Gym servers, which may retry indefinitely.",
     )
 
     max_connection_retries: Optional[int] = Field(
@@ -1065,8 +1089,10 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     )
 
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
+        request_headers = request_kwargs.pop("headers", {})
         request_kwargs = request_kwargs | {
             "headers": self.default_headers
+            | request_headers
             | {
                 "Authorization": f"Bearer {self.api_key}",
             },
@@ -1083,8 +1109,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             response = await request(**request_kwargs)
 
             if response.status in RETRY_ERROR_CODES:
-                # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
-                if response.status in RATE_LIMIT_ERROR_CODES:
+                # Internal NeMo Gym servers extend max tries for retryable errors.
+                if response.status in RATE_LIMIT_ERROR_CODES and self.internal:
                     max_num_tries += 1
 
                 content = (await response.content.read()).decode()

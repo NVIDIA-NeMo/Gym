@@ -27,21 +27,24 @@ import shutil
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
 from nemo_gym.sandbox.providers.docker import DockerProvider
+from nemo_gym.server_utils import ServerClient
 from responses_api_agents.anyterminal_agent import app
 from responses_api_agents.anyterminal_agent.app import (
     _RUNNER_TEMPLATE,
     AnyTerminalAgent,
     AnyTerminalAgentConfig,
     AnyTerminalInstanceConfig,
+    AnyTerminalServerConfig,
     GymAgentHarnessProcessor,
     RunTerminalAgent,
     _build_provider,
@@ -167,8 +170,10 @@ class TestExampleData:
 # ── helpers ───────────────────────────────────────────────────────────────────────
 
 
-def _make_body(content: str = "solve this") -> NeMoGymResponseCreateParamsNonStreaming:
-    return NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": content}], model="test-model")
+def _make_body(content: str = "solve this", **kwargs) -> NeMoGymResponseCreateParamsNonStreaming:
+    return NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"role": "user", "content": content}], model="test-model", **kwargs
+    )
 
 
 def _make_instance_config(tmp_path: Path, **overrides) -> AnyTerminalInstanceConfig:
@@ -234,6 +239,70 @@ class TestReadTaskMeta:
         result = _read_task_meta(tmp_path)
         assert result.get("agent_timeout_sec") is None
         assert result.get("verifier_timeout_sec") is None
+
+
+# ── AnyTerminalAgent._setup_params ──────────────────────────────────────────────────
+
+
+def _make_setup_agent(tmp_path: Path, **config_overrides) -> AnyTerminalAgent:
+    # model_post_init has heavy side effects (deps install, provider resolution) that
+    # _setup_params doesn't touch, so bypass it and set only what _setup_params reads.
+    with patch.object(AnyTerminalAgent, "model_post_init", lambda self, context: None):
+        agent = AnyTerminalAgent(config=_config(**config_overrides), server_client=MagicMock(spec=ServerClient))
+    agent._server = AnyTerminalServerConfig(
+        run_session_id="test_session",
+        base_results_dir=tmp_path / "results",
+        model_server_url="",
+        nemo_gym_root=PARENT_DIR,
+        agent_deps_dir=tmp_path,
+    )
+    return agent
+
+
+class TestSetupParams:
+    def test_uses_per_task_timeout_by_default(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path)
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path), "agent_timeout_sec": "900"})
+
+        params = agent._setup_params(body)
+
+        assert params.tb_agent_timeout == 900
+
+    def test_global_agent_timeout_overrides_per_task_timeout(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path, global_agent_timeout=7200)
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path), "agent_timeout_sec": "900"})
+
+        params = agent._setup_params(body)
+
+        assert params.tb_agent_timeout == 7200
+
+    def test_global_agent_timeout_applies_without_per_task_timeout(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path, global_agent_timeout=7200)
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+
+        params = agent._setup_params(body)
+
+        assert params.tb_agent_timeout == 7200
+
+    def test_sandbox_ttl_is_derived_when_timeouts_would_outlive_it(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path, global_agent_timeout=12500)
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path), "verifier_timeout_sec": "900"})
+
+        params = agent._setup_params(body)
+
+        assert params.tb_sandbox_ttl == 12500 + 900 + 600
+
+    def test_sandbox_ttl_default_kept_when_already_sufficient(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path)
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path), "agent_timeout_sec": "900"})
+
+        params = agent._setup_params(body)
+
+        assert params.tb_sandbox_ttl == 7200
+
+    def test_global_agent_timeout_rejects_zero(self) -> None:
+        with pytest.raises(ValidationError, match="global_agent_timeout"):
+            _config(global_agent_timeout=0)
 
 
 # ── _instruction_from_input ───────────────────────────────────────────────────────
@@ -687,6 +756,25 @@ class TestProcessSingleDatapoint:
 
         metrics = json.loads(cfg.metrics_fpath.read_text())
         assert metrics["agent_timed_out"] is True
+        assert metrics["mask_sample"] is True
+
+    async def test_container_killed_mid_run_sets_flag_and_masks(self, tmp_path: Path) -> None:
+        # exec() on a container the TTL already removed returns error_type="sandbox" without
+        # raising, so this must be caught the same way a "timeout" is, not just via the
+        # except-block sandbox_failed path (which never fires here).
+        cfg = _make_instance_config(tmp_path)
+        sandbox = SimpleNamespace(
+            start=AsyncMock(),
+            exec=AsyncMock(return_value=_sandbox_result(return_code=125, error_type="sandbox")),
+            stop=AsyncMock(),
+        )
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
+            with patch.object(RunTerminalAgent, "_stage_tests", new=AsyncMock(return_value=None)):
+                await RunTerminalAgent(config=cfg).process_single_datapoint()
+
+        metrics = json.loads(cfg.metrics_fpath.read_text())
+        assert metrics["agent_timed_out"] is True
+        assert metrics["sandbox_failed"] is False
         assert metrics["mask_sample"] is True
 
     async def test_sandbox_start_failure_is_isolated(self, tmp_path: Path) -> None:

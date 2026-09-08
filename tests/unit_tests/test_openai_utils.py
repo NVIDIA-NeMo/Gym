@@ -12,7 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from types import UnionType
+from copy import deepcopy
+from types import SimpleNamespace, UnionType
 from typing import (
     Annotated,
     Any,
@@ -26,6 +27,7 @@ from typing import (
     get_origin,
     get_type_hints,
 )
+from unittest.mock import AsyncMock
 
 import openai
 import pytest
@@ -66,6 +68,7 @@ from openai.types.responses.response_output_item import (
 from pydantic import ValidationError
 
 from nemo_gym.openai_utils import (
+    MAX_NUM_TRIES,
     RESPONSES_TO_TRAIN,
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
@@ -123,6 +126,19 @@ def _response_with_output(output: list) -> dict:
 class TestOpenAIUtils:
     async def test_NeMoGymAsyncOpenAI(self) -> None:
         NeMoGymAsyncOpenAI(api_key="abc", base_url="https://api.openai.com/v1")
+
+    async def test_external_endpoint_retries_are_bounded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        response = SimpleNamespace(status=504, content=SimpleNamespace(read=AsyncMock(return_value=b"")))
+        request = AsyncMock(side_effect=[response] * MAX_NUM_TRIES + [SimpleNamespace(status=200)])
+        monkeypatch.setattr("nemo_gym.openai_utils.request", request)
+        monkeypatch.setattr("nemo_gym.openai_utils.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.openai_utils.raise_for_status", AsyncMock(side_effect=RuntimeError))
+
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
+        with pytest.raises(RuntimeError):
+            await client._request_with_retry()
+
+        assert request.await_count == MAX_NUM_TRIES
 
 
 class TestNeMoGymResponseCreateParamsNonStreaming:
@@ -287,6 +303,122 @@ class TestNeMoGymChatCompletionSchemas:
         assert params.tools[0]["type"] == "custom"
         assert params.messages[0]["tool_calls"][0]["type"] == "custom"
         assert params.messages[0]["generation_token_ids"] == [2]
+
+    def test_tool_call_strips_only_the_outer_name_without_mutating_input(self) -> None:
+        payload = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "name": "KB_search",
+                            "function": {
+                                "name": "KB_search",
+                                "arguments": '{"query": "hello"}',
+                            },
+                            "type": "function",
+                        }
+                    ],
+                }
+            ],
+            "model": "gpt-test",
+        }
+        original = deepcopy(payload)
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+
+        tool_call = params.messages[0]["tool_calls"][0]
+        assert tool_call["type"] == "function"
+        assert tool_call["function"] == {"name": "KB_search", "arguments": '{"query": "hello"}'}
+        assert "name" not in tool_call
+        dumped = params.model_dump()["messages"][0]["tool_calls"][0]
+        assert "name" not in dumped
+        assert dumped["function"]["name"] == "KB_search"
+        assert payload == original
+
+    def test_custom_tool_call_strips_only_the_outer_name_without_mutating_input(self) -> None:
+        payload = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "custom",
+                            "custom": {"name": "shell", "input": "echo hello"},
+                            "name": "shell",
+                        }
+                    ],
+                }
+            ],
+            "model": "gpt-test",
+        }
+        original = deepcopy(payload)
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+
+        tool_call = params.messages[0]["tool_calls"][0]
+        assert tool_call["type"] == "custom"
+        assert tool_call["custom"] == {"name": "shell", "input": "echo hello"}
+        assert "name" not in tool_call
+        assert tool_call["custom"]["name"] == "shell"
+        assert payload == original
+
+    @pytest.mark.parametrize(
+        "tool_call",
+        [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "f", "arguments": "{}"},
+                "not_a_real_field": 1,
+            },
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "f", "arguments": "{}", "not_a_real_field": 1},
+            },
+            {
+                "id": "call-1",
+                "type": "custom",
+                "custom": {"name": "shell", "input": "echo hello"},
+                "not_a_real_field": 1,
+            },
+            {
+                "id": "call-1",
+                "type": "custom",
+                "custom": {"name": "shell", "input": "echo hello", "not_a_real_field": 1},
+            },
+        ],
+    )
+    def test_tool_calls_still_reject_other_unknown_fields(self, tool_call: dict[str, Any]) -> None:
+        payload = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [tool_call],
+                }
+            ],
+            "model": "gpt-test",
+        }
+
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+
+    def test_unknown_top_level_request_key_is_still_rejected(self) -> None:
+        """Normalizing the tool-call name must not loosen the request model."""
+        with pytest.raises(ValidationError):
+            NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+                {
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "model": "gpt-test",
+                    "not_a_real_request_field": True,
+                }
+            )
 
     def test_custom_response_tool_call_round_trip(self) -> None:
         payload = {
