@@ -143,6 +143,24 @@ def _message_text(item: Any) -> str:
     return "".join(chunks)
 
 
+def _responses_output_text(response: Any) -> str:
+    """Extract judge text without validating unrelated response metadata."""
+    if not isinstance(response, dict):
+        return ""
+    output_text = response.get("output_text")
+    if isinstance(output_text, str) and output_text:
+        return output_text
+
+    chunks: list[str] = []
+    for item in response.get("output") or []:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for part in item.get("content") or []:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                chunks.append(part["text"])
+    return "".join(chunks)
+
+
 def extract_final_answer(response: NeMoGymResponse) -> Optional[str]:
     """Prefer the last valid final_answer call, then the last assistant prose."""
     prose: Optional[str] = None
@@ -349,8 +367,7 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
             timeout=self.config.judge_call_timeout_s,
         )
         await raise_for_status(response)
-        parsed_response = NeMoGymResponse.model_validate(await get_response_json(response))
-        text = "".join(_message_text(item) for item in parsed_response.output)
+        text = _responses_output_text(await get_response_json(response))
         return _parse_json_object(text), text
 
     async def verify(self, request: Request, body: BigFinanceVerifyRequest) -> BigFinanceVerifyResponse:
