@@ -190,18 +190,16 @@ async def test_run_uses_complete_row_seed_tool_and_verify_cookie_lifecycle() -> 
 
 
 @pytest.mark.asyncio
-async def test_direct_responses_reports_missing_top_level_mapping() -> None:
+async def test_direct_responses_propagates_unrelated_value_error() -> None:
     agent, _ = make_agent()
-    agent.runner.run = AsyncMock(side_effect=ValueError("source 'customer_id' does not exist"))
+    agent.runner.run = AsyncMock(side_effect=ValueError("agent implementation failed"))
 
-    with pytest.raises(HTTPException, match="customer_id") as error:
+    with pytest.raises(ValueError, match="agent implementation failed"):
         await agent.responses(
             request(),
             Response(),
             body().responses_create_params,
         )
-
-    assert error.value.status_code == 422
 
 
 @pytest.mark.asyncio
