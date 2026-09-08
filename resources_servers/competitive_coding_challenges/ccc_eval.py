@@ -12,6 +12,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, is_dataclass
+from uuid import uuid4
 
 import httpx
 
@@ -448,7 +449,7 @@ def _compile_solution_once(
     local_compile_dir: str | None,
 ) -> tuple[str, dict]:
     """Compile one generated solution and publish a reusable shared artifact."""
-    solution_dir = f"{shared_dir}/ccc_solution_{os.getpid()}_{time.time_ns()}"
+    solution_dir = f"{shared_dir}/ccc_solution_{uuid4().hex}"
     try:
         os.makedirs(os.path.join(solution_dir, "graders"), exist_ok=True)
         if precompiled_dir and os.path.isdir(precompiled_dir):
