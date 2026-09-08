@@ -1,16 +1,5 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 import json
 import shutil
 import sys
@@ -36,8 +25,6 @@ from nemo_gym.server_utils import apply_rollout_prefix
 
 
 def _format_container(container_formatter: str | list[str], task_name: str, docker_image: str) -> str:
-    """Resolve the pullable/local image reference for a task from a formatter template."""
-
     fmt = container_formatter[0] if isinstance(container_formatter, list) else container_formatter
     fmt = fmt or "docker://{docker_image}"
     docker_image = docker_image[len("docker://") :] if docker_image.startswith("docker://") else docker_image
@@ -49,7 +36,6 @@ def _format_container(container_formatter: str | list[str], task_name: str, dock
 
 
 def _read_task_meta(task_dir: Path) -> dict:
-    """Read workdir and timeouts from task.toml + Dockerfile at runtime (fallback when not in JSONL)."""
     result = {}
     toml_path = task_dir / "task.toml"
     if toml_path.exists():
@@ -96,8 +82,6 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
 
 
 def _safe_config_json(params: "KernelGymInstanceConfig", indent: Optional[int] = None) -> str:
-    """Serialize config without secrets."""
-
     def redact(value: Any, key: str = "") -> Any:
         normalized = key.lower()
         if (
@@ -177,8 +161,6 @@ class KernelGymVerifyResponse(KernelBenchMetrics, BaseVerifyResponse):
 
 
 class KernelGymAgent(SimpleResponsesAPIAgent):
-    """Single sandbox: agent runs, host stages tests, sandbox runs test.sh."""
-
     config: KernelGymConfig
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -229,6 +211,23 @@ class KernelGymAgent(SimpleResponsesAPIAgent):
             ):
                 await sandbox.upload(local, remote)
 
+            if cfg.agent_server_module == "responses_api_agents.simple_agent.app":
+                await sandbox.exec(
+                    "mkdir -p /trajectories_mount/agent_src/responses_api_agents/simple_agent", user="root"
+                )
+                source_root = Path(__file__).parents[1]
+                for local, remote in (
+                    (
+                        source_root / "simple_agent" / "__init__.py",
+                        "/trajectories_mount/agent_src/responses_api_agents/simple_agent/__init__.py",
+                    ),
+                    (
+                        source_root / "simple_agent" / "app.py",
+                        "/trajectories_mount/agent_src/responses_api_agents/simple_agent/app.py",
+                    ),
+                ):
+                    await sandbox.upload(local, remote)
+
             env = {
                 "KB_MODEL_URL": cfg.model_server_url,
                 "KB_MODEL_NAME": cfg.model_name,
@@ -246,7 +245,10 @@ class KernelGymAgent(SimpleResponsesAPIAgent):
                 env=env,
             )
             agent_run_time = time.time() - agent_started
-            agent_timed_out = result.error_type in ("timeout", "sandbox")
+            agent_timed_out = result.error_type == "timeout" or (
+                result.return_code == -1 and agent_run_time >= cfg.kb_agent_timeout
+            )
+            sandbox_failed = result.error_type == "sandbox"
             (cfg.persistent_dir / "agent_result.json").write_text(
                 json.dumps(
                     {
@@ -412,7 +414,6 @@ class KernelGymAgent(SimpleResponsesAPIAgent):
         if problem_info.get("verifier_timeout_sec"):
             config_overrides["kb_eval_timeout"] = int(float(problem_info["verifier_timeout_sec"]))
 
-        # Leave time for sandbox startup and output collection around both phases.
         effective_agent_timeout = config_overrides.get("kb_agent_timeout", self.config.kb_agent_timeout)
         effective_eval_timeout = config_overrides.get("kb_eval_timeout", self.config.kb_eval_timeout)
         required_ttl = effective_agent_timeout + effective_eval_timeout + 600
@@ -466,27 +467,22 @@ class KernelGymAgent(SimpleResponsesAPIAgent):
             or persisted.sandbox_failed
         )
         update_metrics(params.metrics_fpath, {"mask_sample": mask_sample})
-        if mask_sample:
-            raise RuntimeError(f"{params.task_name} did not produce a scoreable rollout")
-
         response_path = params.persistent_dir / "response.json"
-        if not response_path.exists():
-            raise RuntimeError(f"{params.task_name} did not produce response.json")
-        saved = NeMoGymResponse.model_validate_json(response_path.read_text())
+        saved = NeMoGymResponse.model_validate_json(response_path.read_text()) if response_path.exists() else None
 
         return NeMoGymResponse(
             id=f"kernel-gym-{params.instance_id}",
             created_at=int(time.time()),
             model=params.model_name,
             object="response",
-            output=saved.output,
-            status=saved.status,
-            error=saved.error,
-            incomplete_details=saved.incomplete_details,
+            output=saved.output if saved is not None else [],
+            status=saved.status if saved is not None else None,
+            error=saved.error if saved is not None else None,
+            incomplete_details=saved.incomplete_details if saved is not None else None,
             parallel_tool_calls=params.body.parallel_tool_calls,
             tool_choice=params.body.tool_choice,
-            tools=saved.tools or [],
-            usage=saved.usage,
+            tools=(saved.tools or []) if saved is not None else [],
+            usage=saved.usage if saved is not None else None,
             metadata={
                 "input": json.dumps(params.body.model_dump(mode="json").get("input") or []),
                 "metrics": params.metrics_fpath.read_text(),
