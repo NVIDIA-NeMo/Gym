@@ -55,6 +55,8 @@ class VllmServiceConfig(BaseModelServiceConfig):
     pipeline_parallel_size: int = 1
     trust_remote_code: bool = False
     number_of_instances: int = 1
+    # Raw extra flags appended verbatim to `vllm serve` (e.g. "--max-model-len 8192").
+    extra_args: str = ""
 
     @field_validator("number_of_instances")
     @classmethod

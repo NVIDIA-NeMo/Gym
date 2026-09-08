@@ -129,6 +129,8 @@ def _vllm_base_flags(service: VllmServiceConfig) -> str:
     )
     if service.pipeline_parallel_size > 1:
         cmd += f" --pipeline-parallel-size {service.pipeline_parallel_size}"
+    if service.extra_args:
+        cmd += " " + service.extra_args
     return cmd
 
 

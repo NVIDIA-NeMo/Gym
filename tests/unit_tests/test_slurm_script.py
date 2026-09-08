@@ -198,6 +198,22 @@ def test_build_vllm_command_pipeline_parallel_1_omits_flag(vllm_service):
     assert "--pipeline-parallel-size" not in cmd
 
 
+def test_build_vllm_command_extra_args():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        extra_args="--max-model-len 8192",
+    )
+    cmd = _build_vllm_command(service)
+    assert "--max-model-len 8192" in cmd
+
+
+def test_build_vllm_command_no_extra_args_by_default(vllm_service):
+    cmd = _build_vllm_command(vllm_service)
+    assert cmd.endswith("--tensor-parallel-size 1")
+
+
 # ---------------------------------------------------------------------------
 # _build_vllm_ray_command - single instance, TP/PP spans nodes (uses Ray core)
 # ---------------------------------------------------------------------------
