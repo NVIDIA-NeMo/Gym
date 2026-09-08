@@ -7,13 +7,17 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sys
 import tarfile
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from omegaconf import OmegaConf
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
@@ -528,6 +532,16 @@ def test_config_defaults_are_docker_and_single_concurrency() -> None:
     assert config.verifier_timeout_seconds == 3600
     assert config.runtime_build_timeout_seconds == 3600
     assert config.sandbox_staging_timeout_seconds == 900
+
+
+def test_portable_python_default_satisfies_project_requirement() -> None:
+    script = app.PORTABLE_PYTHON_SH.read_text()
+    match = re.search(r'PORTABLE_PYTHON_VERSION="\$\{PORTABLE_PYTHON_VERSION:-(?P<version>[^}]+)\}"', script)
+    assert match is not None
+
+    pyproject = tomllib.loads((app.PARENT_DIR / "pyproject.toml").read_text())
+    requires_python = SpecifierSet(pyproject["project"]["requires-python"])
+    assert Version(match.group("version")) in requires_python
 
 
 @pytest.mark.parametrize(
