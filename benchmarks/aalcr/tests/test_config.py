@@ -61,7 +61,7 @@ def _judge_response() -> NeMoGymResponse:
 
 
 def test_v1_1_uses_official_luna_medium_judge(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("NVIDIA_API_KEY", "not-a-secret")
+    monkeypatch.setenv("JUDGE_API_KEY", "not-a-secret")
 
     config = _resolved_v1_1_config()
     judge_model = SimpleModelServerConfig.model_validate(_runtime_judge_model_config(config))
@@ -74,7 +74,7 @@ def test_v1_1_uses_official_luna_medium_judge(monkeypatch: pytest.MonkeyPatch) -
 
 
 async def test_v1_1_forwards_luna_model_and_medium_reasoning(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("NVIDIA_API_KEY", "not-a-secret")
+    monkeypatch.setenv("JUDGE_API_KEY", "not-a-secret")
     judge_model = SimpleModelServerConfig.model_validate(_runtime_judge_model_config(_resolved_v1_1_config()))
     server = SimpleModelServer(
         config=judge_model,
@@ -95,7 +95,7 @@ async def test_v1_1_forwards_luna_model_and_medium_reasoning(monkeypatch: pytest
 def test_v1_1_allows_preparation_but_rejects_judge_startup_without_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    monkeypatch.delenv("JUDGE_API_KEY", raising=False)
 
     config = _resolved_v1_1_config()
     judge_model = _judge_model_config(config)
@@ -107,10 +107,11 @@ def test_v1_1_allows_preparation_but_rejects_judge_startup_without_key(
         SimpleModelServerConfig.model_validate(_runtime_judge_model_config(config))
 
 
-def test_v1_1_honors_explicit_judge_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("NVIDIA_API_KEY", "not-a-secret")
-    monkeypatch.setenv("AA_LCR_JUDGE_BASE_URL", "https://judge.example/v1")
+def test_v1_1_does_not_reuse_policy_model_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JUDGE_API_KEY", raising=False)
+    monkeypatch.setenv("NVIDIA_API_KEY", "policy-model-key")
 
     judge_model = _judge_model_config(_resolved_v1_1_config())
 
-    assert judge_model["openai_base_url"] == "https://judge.example/v1"
+    assert judge_model["openai_base_url"] == "https://inference-api.nvidia.com/v1"
+    assert judge_model["openai_api_key"] is None

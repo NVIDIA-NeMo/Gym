@@ -17,16 +17,24 @@ AA-LCR provides two versioned configs in one benchmark:
 gym eval prepare --benchmark aalcr/config_v1_1
 ```
 
-The v1.1 config always grades with GPT-5.6 Luna at medium reasoning effort.
-Provide its credential before running:
+The v1.1 config always sends its grading requests to
+`openai/openai/gpt-5.6-luna` on NVIDIA's inference gateway
+(`https://inference-api.nvidia.com/v1`) with medium reasoning effort.
+
+For a direct Gym run, `JUDGE_API_KEY` must contain a bearer token accepted by
+that gateway:
 
 ```bash
-export NVIDIA_API_KEY='...'
+: "${JUDGE_API_KEY:?Set JUDGE_API_KEY to your NVIDIA inference gateway API key}"
 ```
 
-`AA_LCR_JUDGE_BASE_URL` optionally overrides the default NVIDIA inference API
-URL. Data preparation does not require the credential. Evaluation fails during
-judge startup when it is absent; it never falls back to another judge.
+This is not an AA-LCR-specific credential. EFB stores the same gateway
+credential as `INFERENCE_API_KEY` and passes it directly to the Gym judge
+configuration, so an EFB run does not require an additional environment
+variable. In Gym's recipe environment, `NVIDIA_API_KEY` remains the policy
+model credential and is not reused for this judge. Data preparation does not
+require the judge credential. Evaluation fails during judge startup when it is
+absent; it never falls back to another judge.
 
 ### Run
 ```bash
