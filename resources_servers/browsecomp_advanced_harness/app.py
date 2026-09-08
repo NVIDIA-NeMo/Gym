@@ -290,6 +290,54 @@ def _count_provider_retry(status: int) -> None:
     counts["num_429_retries" if status == 429 else "num_other_retries"] += 1
 
 
+# ---- benchmark-contamination guard -----------------------------------------
+#
+# A provider result that quotes the benchmark itself -- a dataset mirror, a
+# leaderboard, the simple-evals repo -- hands the model the answer key. Training
+# on those rollouts teaches retrieval of the answer rather than research, and it
+# shows up later as an unearned score on the very benchmark being measured.
+#
+# Substring, case-insensitive. "browsecomp" already subsumes the org-prefixed
+# forms (openai/browsecomp), and "simple-eval" subsumes "simple-evals"; the two
+# additions are the spellings a bare "browsecomp" genuinely misses.
+CONTAMINATION_PATTERNS = ["browsecomp", "browse_comp", "simple-eval"]
+
+# Returned only when EVERY result in a response was contaminated. The normal case
+# is per-ITEM dropping: one poisoned hit out of five should cost that hit, not the
+# whole tool call, on a 60-turn rollout.
+CONTAMINATED_MESSAGE = "Search results withheld: every result referenced the benchmark itself."
+
+
+def _is_contaminated(*texts: Optional[str]) -> bool:
+    """True if any pattern appears in any of `texts` (case-insensitive)."""
+    hay = " ".join(t for t in texts if t).lower()
+    return any(p in hay for p in CONTAMINATION_PATTERNS)
+
+
+def _drop_contaminated(result_list: List[dict]) -> tuple[List[dict], int]:
+    """Split a provider result list into (kept, n_dropped).
+
+    Scans the WHOLE serialized result, not a field whitelist: exa carries its text
+    in a `highlights` LIST, so a title/url/content check would miss it entirely.
+    The cost is one lower() over the raw page text per result -- a few ms against
+    a ~17s generation call, and it buys not having to enumerate provider schemas.
+    """
+    kept = [r for r in result_list if not _is_contaminated(json.dumps(r, default=str))]
+    return kept, len(result_list) - len(kept)
+
+
+def _filter_results(result_list: List[dict], fn: str, provider: str) -> tuple[List[dict], int]:
+    """_drop_contaminated plus telemetry, so the drop rate is measurable per leg
+    rather than silent."""
+    kept, dropped = _drop_contaminated(result_list)
+    if dropped:
+        print(
+            f"[browsecomp][contamination] fn={fn} provider={provider} dropped={dropped} kept={len(kept)}",
+            flush=True,
+        )
+    return kept, dropped
+
+
 def _sum_provider_retry_counts(metrics: "TavilySearchMetrics") -> tuple:
     """(total true 429s, total other retried statuses) across a session's calls."""
     n429 = sum(c.num_429_retries for c in metrics.async_tavily_calls)
@@ -1066,7 +1114,15 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             self._record_call(metrics, "search", "exa", "error", call_start)
             print(f"[browsecomp][tool_fail][exa_search] query={query[:200]!r} error={e}", flush=True)
             return f"Search failed: {e}"
-        offered = results.get("results", []) or []
+        # Contamination guard. Filtering at each formatting site rather than at the
+        # provider call is deliberate: a result reaches the model by exactly four
+        # routes, and every one of them formats here or in one of the three sites
+        # below, so this is where all of them can be covered. Applied ABOVE the
+        # pages/ write in the loop, so a contaminated page is never written to disk.
+        raw_results = results.get("results", []) or []
+        offered, _ = _filter_results(raw_results, "search", "exa")
+        if raw_results and not offered:
+            return CONTAMINATED_MESSAGE
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
         returned = 0
@@ -1074,10 +1130,14 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         # Deep-search synthesis (outputSchema), when present. Rendered FIRST — it is the
         # highest-value part — but capped so the per-URL entries still fit; the model
         # needs those URLs for browse/bash follow-up. Deliberately NOT counted in the
-        # yield counters below: it is a synthesis, not a result.
+        # yield counters below: it is a synthesis, not a result. A synthesis that quotes
+        # the benchmark is dropped like any other contaminated result.
         answer = (results.get("output") or {}).get("content")
         if answer is not None and not isinstance(answer, str):
             answer = json.dumps(answer, ensure_ascii=False)
+        if answer and _is_contaminated(answer):
+            print("[browsecomp][contamination] fn=search provider=exa dropped=deep_answer", flush=True)
+            answer = None
         if answer:
             cap = int(max_length * _EXA_DEEP_ANSWER_MAX_FRACTION)
             if len(answer) > cap:
@@ -1188,9 +1248,20 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             return f"Search failed: {e}"
         self._record_call(metrics, "search", "tavily", "success", call_start)
 
+        # THE important one. In terminal mode the raw page is written to pages/*.txt
+        # and the model reads it later with grep/cat through the bash tool, so
+        # filtering only the returned string would leave the contamination on disk
+        # and fully readable. Filtering here, ABOVE the write loop, means the page is
+        # never written at all.
+        result_list = results.get("results", [])
+        n_in = len(result_list)
+        result_list, _ = _filter_results(result_list, "search", "tavily")
+        if n_in and not result_list:
+            return CONTAMINATED_MESSAGE
+
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
-        for ri, result in enumerate(results.get("results", []), start=1):
+        for ri, result in enumerate(result_list, start=1):
             title = result.get("title", "") or ""
             url = result.get("url", "") or ""
             snippet = (result.get("content") or "")[:500]
@@ -1306,6 +1377,14 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if not result_list:
             return BrowseResponse(results_string="No content extracted.")
 
+        # Contamination guard for the browse/extract path, which has its own write
+        # loop and does not route through any of the three search sites above.
+        # Applied ABOVE the page writes, so a contaminated page never lands on disk.
+        n_in = len(result_list)
+        result_list, _ = _filter_results(result_list, "browse", self.config.search_provider)
+        if n_in and not result_list:
+            return BrowseResponse(results_string=CONTAMINATED_MESSAGE)
+
         page_writer = self._get_page_writer(request.session[SESSION_ID_KEY])
         if page_writer is not None:
             # terminal mode: write each page to disk, return metadata + preview.
@@ -1383,10 +1462,16 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return any(hostname == domain or hostname.endswith("." + domain) for domain in self._exclude_domains)
 
     def _postprocess_search_results(self, query: str, results: dict, max_length: int) -> str:
+        result_list = results["results"]
+        n_in = len(result_list)
+        result_list, _ = _filter_results(result_list, "search", "tavily")
+        if n_in and not result_list:
+            return CONTAMINATED_MESSAGE
+
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
 
-        for result in results["results"]:
+        for result in result_list:
             title = result.get("title", "")
             url = result.get("url", "")
             content = result.get("raw_content") or result.get("content", "")
