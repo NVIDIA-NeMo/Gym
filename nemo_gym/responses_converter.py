@@ -655,6 +655,10 @@ class ResponsesConverter(BaseModel):
             reasoning_item = NeMoGymResponseReasoningItem(
                 id=f"rs_{uuid4().hex}",
                 type="reasoning",
+                # NeMo-RL's _detect_invalid_tool_call_and_malformed_thinking does
+                # len(item["content"]) whenever "content" in item; a reasoning item with
+                # content=None (the default) crashes it. Emit an empty list, not None.
+                content=[],
                 summary=[
                     NeMoGymSummary(text=reasoning_text, type="summary_text") for reasoning_text in reasoning_matches
                 ],
