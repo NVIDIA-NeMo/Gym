@@ -1605,13 +1605,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         # implementation to avoid a needless judge-server round trip.
         if self.config.execute_only:
             return await SimpleResponsesAPIAgent.aggregate_metrics(self, body)
-        response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/aggregate_metrics",
-            json=body,
-        )
-        await raise_for_status(response)
-        return AggregateMetrics.model_validate(await get_response_json(response))
+        return await self.proxy_aggregate_metrics(self.config.resources_server.name, body)
 
 
 if __name__ == "__main__":
