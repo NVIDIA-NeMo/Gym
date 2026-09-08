@@ -31,6 +31,14 @@ is standardised for SIP as the "CRLF keep-alive technique" (RFC 5626 section 4.4
 
 Enabled with ``global_aiohttp_crlf_heartbeat_seconds`` in the global config (default 0,
 off). Only connections with a request in flight receive heartbeats.
+
+Cost model. The connector runs exactly **one** background task, regardless of how many
+connections exist; it is started lazily on the first connection and cancelled in
+``close()``. Every ``heartbeat`` seconds that task makes one pass over the connector's
+acquired set (connections with a request in flight) and calls ``transport.write(b"\r\n")``
+on each. No per-connection tasks, timers or callbacks are created, and idle pooled
+connections are never touched. The per-interval work is therefore one synchronous loop
+of N small writes, where N is the number of requests in flight at that moment.
 """
 
 from __future__ import annotations
@@ -48,6 +56,9 @@ _LOG = logging.getLogger(__name__)
 
 class HeartbeatTCPConnector(TCPConnector):
     """aiohttp.TCPConnector that writes CRLF on every in-flight connection periodically.
+
+    One background task per connector (not per connection) performs the writes; see the
+    module docstring for the cost model.
 
     Args:
         heartbeat: seconds between heartbeats. Keep it well below the intermediary's idle
