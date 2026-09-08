@@ -39,19 +39,30 @@ punctuation errors both count.
 
 ## Audio plumbing
 
-Audio is carried separately from text content via
-`responses_create_params.metadata.audio_url` (a data-URI string). The
-`vllm_model` audio sidechannel reads that field and splices an `audio_url`
-content block into the user message before forwarding to vLLM Chat
-Completions. The Responses API content union has no audio variant, so audio
-cannot ride in `input.content` directly — the metadata sidechannel is the
-workaround until the schema is extended.
+Audio is carried separately from text content in `responses_create_params.metadata`.
+The `vllm_model` adapter accepts one of three mutually exclusive fields:
+
+- `audio_data`: a `data:audio/...;base64,...` URI embedded in the row.
+- `audio_path`: one audio file path resolved by the model server.
+- `audio_paths`: multiple audio file paths resolved by the model server.
+
+The adapter removes the selected metadata field and splices an `audio_url`
+content block into the user message before forwarding it to vLLM Chat
+Completions. The committed example data uses `audio_data`.
+
+This path requires an audio-capable vLLM endpoint. `--model-type vllm_model`
+selects the Gym adapter; it does not launch vLLM or change `policy_base_url`.
+Set `--model-url` to the vLLM server rather than `https://api.openai.com/v1`.
+OpenAI Chat Completions uses `input_audio`, while this adapter emits vLLM's
+`audio_url` content block.
 
 ## Running servers
 
 ```bash
 gym env start \
     --model-type vllm_model \
+    --model-url http://<vllm-host>:<port>/v1 \
+    --model <audio-capable-model> \
     --resources-server asr_with_pc
 ```
 

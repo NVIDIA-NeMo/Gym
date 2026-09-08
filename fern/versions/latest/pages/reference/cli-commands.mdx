@@ -52,6 +52,7 @@ gym eval aggregate            # merge sharded rollout results
 gym eval health-check         # verify rollout artifact quality for an existing run
 gym eval profile              # compute a reward profile from rollouts
 gym eval reverify             # recompute rewards from existing rollouts without re-running inference
+gym eval compare              # compare a baseline eval run against a candidate run
 
 # Contributor helpers
 gym dev test                  # run NeMo Gym's unit tests
@@ -67,13 +68,14 @@ These options are shared across many commands.
 | `--benchmark NAME` | Select a registered benchmark by name instead of a config path. |
 | `--resources-server NAME` | Select a registered resources server by name. |
 | `--model-type NAME` | Select a registered model server type by name (such as `openai_model` or `vllm_model`). |
+| `--agent-type NAME[/FLAVOR]` | Run the environment with a different agent harness. Refer to [Swapping the agent](#swapping-the-agent). |
 | `--search-dir DIR` | Extra root directory to search for components and configs. Repeatable. Applies everywhere Gym resolves paths — discovery, the `--<component>` selectors, `config_paths`, prompt configs, and data files — and is inherited by spawned servers. Equivalent to the `NEMO_GYM_EXTRA_ROOTS` environment variable; see [Configuration](/reference/configuration). |
 | `--json` | Emit machine-readable JSON instead of human-readable output (reporting commands only). Accepted before or after the subcommand; commands that emit no JSON reject it. |
 | `-v`, `--verbose` | Set the logging level to DEBUG. Flows through to spun-up servers. |
 | `-h`, `--help` | Show help for any group or command. |
 
 <Tip>
-The `--benchmark`, `--resources-server`, and `--model-type` selectors resolve a component name to its config file for you, so you do not need to know the project's directory layout. If you mistype a name, the CLI suggests the closest match. To point at a config file directly, use `--config <path>` instead.
+The `--benchmark`, `--resources-server`, `--model-type`, and `--agent-type` selectors resolve a component name to its config file for you, so you do not need to know the project's directory layout. If you mistype a name, the CLI suggests the closest match. To point at a config file directly, use `--config <path>` instead.
 </Tip>
 
 
@@ -88,6 +90,76 @@ Commands that need a model (`gym env start`, `gym eval run`) configure it throug
 | `--model-url` | Base URL of an existing model server endpoint. Maps to `policy_base_url`. |
 | `--model-api-key` | API key for the model server. Maps to `policy_api_key`. |
 
+
+### Swapping the agent
+
+`--agent-type NAME` runs an environment or benchmark with a different agent harness, without editing any
+config. It resolves to `responses_api_agents/NAME/configs/NAME.yaml`; use `NAME/FLAVOR` to pick a
+non-default config in that directory.
+
+```bash
+# Run Terminal-Bench 2.1 under Terminus 2 instead of the OpenCode harness its config names
+gym eval run \
+    --benchmark terminal_bench_2_1/opencode \
+    --agent-type terminus_2_sandboxed_agent \
+    --model-type vllm_model
+```
+
+Available on `gym env start`, `gym env validate`, `gym env prefetch`, and `gym eval run`. Like the other
+selectors it is pure shorthand, so `--agent-type terminus_2_sandboxed_agent` and `--config <that file>`
+behave identically.
+
+Run `gym list agents` to see the harnesses you can pass.
+
+**The composed server instance is renamed after the agent that runs it**, so metrics and `gym env status`
+report the harness actually used: composing `terminus_2_sandboxed_agent` onto
+`terminal_bench_2_1_opencode_sandboxed_agent` produces `terminal_bench_2_1_terminus_2_sandboxed_agent`.
+`gym env start` prints the instance list, which matters for the two-step flow:
+
+```bash
+gym env start \
+    --benchmark terminal_bench_2_1/opencode \
+    --agent-type terminus_2_sandboxed_agent \
+    --model-type vllm_model
+gym eval run --no-serve --agent terminal_bench_2_1_terminus_2_sandboxed_agent --input rows.jsonl
+```
+
+<Note>
+`--agent-type` chooses the harness to compose; `--agent` names the running instance to collect rollouts
+from. Because the harness is settled once the servers are up, `--agent-type` is rejected with
+`--no-serve`.
+</Note>
+
+Anything that routes rows — `--agent`, `+agent_map` values, `+fan_out` entries — must name the composed
+instance, and Gym says so rather than failing later:
+
+```text
+Routing names agent instances that no longer exist once the agent is swapped:
+  - agent_name: 'terminal_bench_2_1_opencode_sandboxed_agent' is now
+    'terminal_bench_2_1_terminus_2_sandboxed_agent'
+
+Use the name the composed config reports.
+```
+
+Rows collected before the swap are re-routed for you, so existing rollout files stay usable.
+
+<Warning>
+Some tasks only work with the harness they were built for. A resources server may pin the harnesses
+required for the task with [`allowed_agents`](/reference/configuration#resources-server-fields), and
+Gym refuses a pairing it does not list, before any server starts:
+
+```text
+'simple_agent' is not declared compatible with 1 of the agent instance(s) it would replace,
+so it cannot be scored correctly:
+  - terminal_bench_2_1_opencode_sandboxed_agent uses terminal_bench_2_1_opencode_resources_server
+    and accepts opencode_sandboxed_agent, terminus_2_sandboxed_agent
+
+Select one of: opencode_sandboxed_agent, terminus_2_sandboxed_agent. Or pass
+--allow-unsupported-pairing (or set NEMO_GYM_ALLOW_UNSUPPORTED_PAIRING=1) to bypass the check.
+```
+
+Results from an undeclared pairing might not be valid.
+</Warning>
 
 ### Hydra overrides (escape hatch)
 
@@ -143,12 +215,13 @@ All commands accept:
 
 ### `gym list benchmarks`
 
-List the benchmarks available in NeMo Gym, with their domain, agent, and configured number of repeats.
+List the benchmarks available in NeMo Gym, with their kind, manifest status, domain, and description.
 The value in the **Name** column is the benchmark identifier and can be passed to `--benchmark`.
+To see which agent harness a benchmark composes with, inspect it with `gym list benchmarks <name>`.
 
 | Option | Description |
 | --- | --- |
-| `[<name>]` | Inspect a single benchmark (config path, dataset, prepare script) instead of listing all. |
+| `[<name>]` | Inspect a single benchmark (config path, manifest status, agent, datasets) instead of listing all. |
 | `--json` | Output the benchmark list as JSON. |
 
 ```bash
@@ -438,18 +511,23 @@ gym env resolve \
 
 Validate a manifest-backed workload or legacy config without starting Ray or server subprocesses. Manifest validation resolves the Gym config offline, checks composition mirrors and datasets, and reports the resolved components. Legacy validation retains the existing config pre-flight behavior. Exits `0` when valid, or `1` with a clean message when not.
 
+By default, values a run needs but the config leaves undefined (such as `policy_base_url` from `env.yaml`) are filled with placeholders so the rest can still be checked, and reported as a warning. Pass `--strict` to fail on them instead.
+
 | Option | Description |
 | --- | --- |
 | `NAME` | Manifest-backed catalog entry to validate. |
 | `--kind environment\|benchmark` | Resolve an ambiguous catalog name. |
 | `--manifest PATH` | Validate a manifest directly instead of selecting by name. |
 | `--sync` | Atomically synchronize config-owned composition mirrors after all checks pass. |
+| `--strict` | Resolve the config exactly as a run would, with no placeholder model values. An undefined value fails instead of warning. |
 | `--json` | Output the manifest validation report as JSON. |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--environment NAME` / `--benchmark NAME` | Validate a named environment / benchmark config. |
 | `--resources-server NAME` | Validate a named resources server config. |
 | `--model-type NAME` | Also load a named model config (otherwise a dummy `policy_model` is used). |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
+| `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Refer to [Swapping the agent](#swapping-the-agent). |
+| `--allow-unsupported-pairing` | Run even if the resources server does not declare support for the selected agent. |
 | `--model` / `--model-url` / `--model-api-key` | Override model name, base URL, and API key. |
 
 ```bash
@@ -460,6 +538,9 @@ gym env validate --benchmark gsm8k
 
 # or explicit config path(s)
 gym env validate --config resources_servers/example_single_tool_call/configs/example_single_tool_call.yaml
+
+# fail unless everything a run needs is defined, credentials included
+gym env validate --resources-server example_single_tool_call --model-type openai_model --strict
 ```
 
 ### `gym env packages`
@@ -533,6 +614,8 @@ Start the NeMo Gym servers (agents, models, resources) defined by the provided c
 | `--resources-server NAME` | Load the named resources server config. |
 | `--model-type NAME` | Load the named model server type config. |
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
+| `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Refer to [Swapping the agent](#swapping-the-agent). |
+| `--allow-unsupported-pairing` | Run even if the resources server does not declare support for the selected agent. |
 | `--model`, `-m` | Served model identifier. See [Selecting the model server](#selecting-the-model-server). |
 | `--model-url` | Model server base URL. |
 | `--model-api-key` | Model server API key. |
@@ -610,14 +693,16 @@ Collate data, start the servers, and collect rollouts. This is the main evaluati
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--no-serve` | Collect against already-running servers instead of starting them. |
 | `--resume` | Resume from cached rollouts instead of recollecting. Maps to legacy `+resume_from_cache=true`. Refer to [Resume interrupted runs](#resume-interrupted-runs). |
-| `--agent`, `-a` | Agent to collect rollouts with. |
+| `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Rejected with `--no-serve`. Refer to [Swapping the agent](#swapping-the-agent). |
+| `--agent`, `-a` | Agent instance to collect rollouts with. |
+| `--allow-unsupported-pairing` | Run even if the resources server does not declare support for the selected agent. |
 | `--input`, `-i` | Input tasks JSONL file. |
 | `--output`, `-o` | Output rollouts JSONL file. |
 | `--limit` | Maximum number of tasks to run. |
 | `--num-repeats` | Rollouts per task (for mean@k metrics). Pass an int to apply to every task, or a dict keyed by `agent_ref.name` for per-agent counts (e.g. `'{simple_agent: 32, swe_agent: 1}'`) when one input file mixes agents. In dict form, the special key `_default` is the fallback for agents not explicitly listed; without it, any unlisted row's agent raises a single consolidated error. |
 | `--prompt-config` | Prompt template YAML to apply. |
 | `--concurrency` | Maximum number of concurrent samples. |
-| `--split` | Dataset split to use (`train`, `validation`, or `benchmark`). |
+| `--split` | Dataset split to use (`train`, `validation`, or `benchmark`). A dataset of the matching `type` must be declared in the loaded configs. `example` datasets are smoke-test samples, not a runnable split — run them with `--no-serve` and `--input` as shown in the [Quickstart](/get-started/quickstart). |
 | `--model`, `-m` | Served model identifier. |
 | `--model-url` | Model server base URL. |
 | `--model-api-key` | Model server API key. |
@@ -686,8 +771,8 @@ How it works:
 
 - **Materialized inputs.** On the first run, the fully expanded input rows (after `--num-repeats`, `--limit`, `--prompt-config`, and any overrides) are written to a sidecar file next to your output. The path is derived from `--output` by appending `_materialized_inputs` to the stem — so `rollouts.jsonl` produces `rollouts_materialized_inputs.jsonl`.
 - **Incremental output.** Successful rollouts are flushed to the main output JSONL after each completion; retriable failures go to a `<stem>_failures.jsonl` sidecar, so partial progress survives a crash.
-- **Failed agent calls.** An agent `/run` call that returns an error, or never returns a readable result, is recorded in the same sidecar as one attempt, with no reward. The class says whether the rollout ran: `agent_run_error` when the agent itself answered, since a NeMo Gym agent returns 500 when its handler raises, and `agent_request_failed` for a gateway status (429, 502, 503, 504) or no usable reply, neither of which says anything about the rollout. Other rollouts keep running, the score is computed over completed rollouts only, and resume re-dispatches the row up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`. A run in which nothing produced a result fails instead of reporting an empty score.
-- **Counting failures in the score.** Metrics are computed over completed rollouts only. `+count_failure_classes_as_zero=[<class>]` includes the named sidecar rows in `/aggregate_metrics` so they land in the denominator: `[agent_run_error]` counts the rollouts that reached the agent and broke, which is what a model emitting unparsable tool calls looks like from here. A row that carries no reward is scored zero for the metric input only, so neither the sidecar nor the rollouts JSONL records a verdict that no verifier gave. It works the same in `gym eval run` and `gym eval aggregate`.
+- **Failed agent calls.** By default a failed agent `/run` ends the run, because the alternative is a score reported over fewer rollouts than were asked for. Pass `+route_failures_to_sidecar=true` to let the run continue instead: the call is then recorded in the same sidecar as one attempt, with no reward. Every rollout that leaves the score is logged as it happens, whichever layer classified it, and the totals appear with the closing artifact paths. The class says whether the rollout ran: `agent_run_error` when the agent itself answered, since a NeMo Gym agent returns 500 when its handler raises, and `agent_request_failed` for a gateway status (429, 502, 503, 504) or no usable reply, neither of which says anything about the rollout. Other rollouts keep running, the score is computed over completed rollouts only, and resume re-dispatches the row up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`. A run in which nothing produced a result fails instead of reporting an empty score.
+- **Counting failures in the score.** Metrics are computed over completed rollouts only. `+count_failure_classes_as_zero=[<class>]` includes the named sidecar rows in `/aggregate_metrics` so they land in the denominator: `[agent_run_error]` counts the rollouts that reached the agent and broke, which is what a model emitting unparsable tool calls looks like from here, and needs `+route_failures_to_sidecar=true` to have anything to count. A row that carries no reward is scored zero for the metric input only, so neither the sidecar nor the rollouts JSONL records a verdict that no verifier gave. It works the same in `gym eval run` and `gym eval aggregate`.
 - **Matching.** On resume, completed work is matched by `(task_index, rollout_index)` against the materialized inputs, and already-completed rows are skipped. The run prints a summary such as the number of original input rows, rows already done, and rows that still need to be run.
 - **Fallback.** If either the materialized inputs or the output file is missing, resume is skipped and the run starts fresh. Without `--resume`, existing output is cleared before the run.
 
@@ -764,6 +849,39 @@ Writes three files next to the rollouts, named from its stem:
 | `<rollouts>_repeat_level_metrics.json` | One entry per repeat. |
 
 See [Repeat-Level Metrics](/evaluation/aggregate-metrics#repeat-level-metrics) for the full field list and how to read the variability statistics.
+
+### `gym eval compare`
+
+Compare a baseline eval run against a candidate run and write a report.
+
+The report contains a metric table (the change, plus each side's value and confidence interval), split into key metrics and all other metrics, and a per-task sample-flips table. Confidence intervals are read from what each run recorded; this command does not yet perform statistical tests or issue a pass/fail verdict.
+
+| Option | Description |
+| --- | --- |
+| `--baseline PATH` | Baseline run's rollouts JSONL. Its `*_aggregate_metrics.json` sibling is what gets read. |
+| `--candidates PATH[,PATH...]` | Candidate run's rollouts JSONL. Comma-separated; one candidate is supported today. |
+| `--baseline-agg-metrics PATH` | Baseline's aggregate-metrics JSON, when it is not the sibling of `--baseline`. |
+| `--candidates-agg-metrics PATH[,PATH...]` | Candidates' aggregate-metrics JSON, in `--candidates` order, when not siblings of `--candidates`. |
+| `--agent NAME` | Agent to compare on both sides. Defaults to every agent present in both runs. |
+| `--baseline-agent NAME` | Agent to read from the baseline. Takes precedence over `--agent`. |
+| `--candidate-agents NAME[,NAME...]` | Agent to read from each candidate, in `--candidates` order. Takes precedence over `--agent`. |
+| `--output-dir DIR`, `-o` | Where to write the report. Defaults to the directory containing the candidate rollouts JSONL. |
+| `--report-format` | `md`, `json`, or `both` (default). |
+
+```bash
+gym eval compare \
+    --baseline runs/baseline/rollouts.jsonl \
+    --candidates runs/candidate/rollouts.jsonl
+```
+
+Writes into the output directory:
+
+| File | Contents |
+| --- | --- |
+| `compare_report.md` | Human-readable report. |
+| `compare_report.json` | Machine-readable result (`schema_version` `"1"`). |
+
+If a run was collected with `--disable-aggregation` it has no `*_aggregate_metrics.json`; run [`gym eval aggregate`](#gym-eval-aggregate) first, or point at the file directly with `--baseline-agg-metrics` / `--candidates-agg-metrics`.
 
 ### `gym eval reverify`
 

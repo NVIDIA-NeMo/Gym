@@ -20,11 +20,12 @@ from unittest.mock import MagicMock, PropertyMock
 
 from omegaconf import OmegaConf
 from omegaconf.errors import ConfigKeyError
-from pytest import LogCaptureFixture, MonkeyPatch, mark, raises
+from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, mark, raises
 
 import nemo_gym.global_config
 import nemo_gym.server_utils
 from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, RESULTS_DIR, WORKING_DIR
+from nemo_gym._config_aliases import LEGACY_AGENT_ALIASES, LEGACY_CONFIG_PATH_ALIASES
 from nemo_gym.config_types import (
     AgentCompositionError,
     AlmostServerError,
@@ -36,6 +37,7 @@ from nemo_gym.config_types import (
     ServerRefNotFoundError,
     UnsupportedAgentOverrideError,
     UnsupportedAgentPairingError,
+    UnsupportedModelPairingError,
     WANDBConfig,
 )
 from nemo_gym.global_config import (
@@ -339,6 +341,49 @@ b: 2
             }
             == global_config_dict
         )
+
+    def test_duplicate_config_paths_warning_goes_to_stderr(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys: CaptureFixture
+    ) -> None:
+        """Diagnostics must stay off stdout, which carries the `--json` payload."""
+        self._mock_versions_for_testing(monkeypatch)
+
+        # Clear any lingering env vars.
+        monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
+        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        # Two roots pulling in the same child is what triggers the duplicate-path warning.
+        (tmp_path / "shared.yaml").write_text("a: 1\n")
+        for name in ("first.yaml", "second.yaml"):
+            (tmp_path / name).write_text(f"""\
+config_paths:
+- {tmp_path}/shared.yaml
+""")
+
+        exists_mock = MagicMock()
+        exists_mock.return_value = True
+        monkeypatch.setattr(nemo_gym.global_config.Path, "exists", exists_mock)
+
+        hydra_main_mock = MagicMock()
+
+        def hydra_main_wrapper(fn):
+            config_dict = DictConfig({"config_paths": [f"{tmp_path}/first.yaml", f"{tmp_path}/second.yaml"]})
+            return lambda: fn(config_dict)
+
+        hydra_main_mock.return_value = hydra_main_wrapper
+        monkeypatch.setattr(nemo_gym.global_config.hydra, "main", hydra_main_mock)
+
+        omegaconf_load_mock = MagicMock()
+        original_load = OmegaConf.load
+        omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
+        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+
+        get_global_config_dict()
+
+        captured = capsys.readouterr()
+        assert "Found configs that reference the same source config path" in captured.err
+        assert f"- {tmp_path}/shared.yaml" in captured.err
+        assert captured.out == ""
 
     def test_get_global_config_dict_config_paths_recursive(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
@@ -977,6 +1022,35 @@ contested: second_inner
         assert "viacopy.b" in missing
         assert "viainherit.b" in missing
 
+    def test_recursively_swap_keys_helper_new_struct(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            GlobalConfigDictParser, "parse_global_config_dict_from_cli", lambda *args, **kwargs: struct
+        )
+
+        parser = GlobalConfigDictParser()
+        struct = DictConfig(
+            {
+                "a": {
+                    "b": 1,
+                },
+                "a2": {
+                    "_inherit_from": "a",
+                    "c": 2,
+                },
+            },
+            flags={"struct": True},
+        )
+
+        parse_config = GlobalConfigDictParserConfig(skip_load_from_cli=False, skip_load_from_dotenv=True)
+
+        """
+        Assert no error:
+        omegaconf.errors.ConfigKeyError: Key 'c' is not in struct
+            full_key: a.c
+            object_type=dict
+        """
+        parser.parse(parse_config)
+
     def test_copy_of_missing_leaf_is_reported_not_opaque_error(self) -> None:
         # `${copy:source.model}` where source.model is unset must not raise an opaque "path does not
         # exist" error; the copy propagates MISSING so both the target and source are reported.
@@ -1332,6 +1406,8 @@ contested: second_inner
         with raises(AlmostServerError, match="almost-server.*validation errors") as exc_info:
             get_global_config_dict()
         assert isinstance(exc_info.value, ConfigError)
+        # Diagnostics must stay off stdout, which carries the `--json` payload.
+        assert all(call.kwargs.get("file") is sys.stderr for call in rich_print_mock.call_args_list)
 
     def test_almost_servers_error_flag_bypasses_value_error(self, monkeypatch: MonkeyPatch) -> None:
         """
@@ -1397,6 +1473,8 @@ contested: second_inner
         assert "Configuration Warnings" in printed_messages
         assert "license" in printed_messages
         assert "domain" in printed_messages
+        # Diagnostics must stay off stdout, which carries the `--json` payload.
+        assert all(call.kwargs.get("file") is sys.stderr for call in rich_print_mock.call_args_list)
 
     def test_use_absolute_ip(self, monkeypatch: MonkeyPatch) -> None:
         """Test that use_absolute_ip=True uses machine's hostname ip for default_host."""
@@ -1796,6 +1874,67 @@ class TestConfigLoadErrors:
         assert str(missing) in message
         assert message.count("  - ") == 1
 
+    @mark.parametrize(("legacy", "canonical"), LEGACY_CONFIG_PATH_ALIASES.items())
+    def test_load_extra_config_paths_resolves_legacy_alias(
+        self, caplog: LogCaptureFixture, legacy: str, canonical: str
+    ) -> None:
+        parser = GlobalConfigDictParser()
+
+        with caplog.at_level("WARNING"):
+            config_paths, configs = parser.load_extra_config_paths([legacy])
+
+        assert config_paths == [canonical]
+        assert len(configs) == 1
+        assert f"Config path `{legacy}` is deprecated; use `{canonical}`." in caplog.text
+
+    def test_existing_legacy_config_path_takes_precedence(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, caplog: LogCaptureFixture
+    ) -> None:
+        legacy = next(iter(LEGACY_CONFIG_PATH_ALIASES))
+        local_config = tmp_path / legacy
+        local_config.parent.mkdir(parents=True)
+        local_config.write_text("local: true\n")
+        monkeypatch.chdir(tmp_path)
+
+        parser = GlobalConfigDictParser()
+        with caplog.at_level("WARNING"):
+            config_paths, configs = parser.load_extra_config_paths([legacy])
+
+        assert config_paths == [legacy]
+        assert configs[0].local is True
+        assert "deprecated" not in caplog.text
+
+    @mark.parametrize(("legacy", "canonical"), LEGACY_AGENT_ALIASES.items())
+    def test_legacy_agent_names_route_to_canonical_instance(
+        self, caplog: LogCaptureFixture, legacy: str, canonical: str
+    ) -> None:
+        config = OmegaConf.create(
+            {
+                canonical: {},
+                "agent_name": legacy,
+                "agent_map": {"source": legacy},
+                "fan_out": {"source": [legacy]},
+            }
+        )
+
+        with caplog.at_level("WARNING"):
+            GlobalConfigDictParser.apply_legacy_agent_aliases(config)
+
+        assert config.agent_name == canonical
+        assert config.agent_map.source == canonical
+        assert config.agent_map[legacy] == canonical
+        assert config.fan_out.source == [canonical]
+        assert f"`{legacy}` -> `{canonical}`" in caplog.text
+
+    def test_legacy_agent_alias_follows_composed_agent_route(self) -> None:
+        legacy, canonical = next(iter(LEGACY_AGENT_ALIASES.items()))
+        composed = "reasoning_gym_custom_agent"
+        config = OmegaConf.create({composed: {}, "agent_map": {canonical: composed}})
+
+        GlobalConfigDictParser.apply_legacy_agent_aliases(config)
+
+        assert config.agent_map[legacy] == composed
+
     def test_load_extra_config_paths_malformed_yaml_raises_config_error(self, tmp_path: Path) -> None:
         bad = tmp_path / "bad.yaml"
         bad.write_text("foo: [1, 2\nbar: : :\n")  # invalid YAML syntax
@@ -1898,6 +2037,123 @@ class TestOpenAIVersionMatchesNemoGymConstraint:
 
         monkeypatch.setattr(importlib.metadata, "requires", raise_not_found)
         assert _openai_version_matches_nemo_gym_constraint("2.52.0") is True
+
+
+class TestModelServerPairing:
+    _ABSENT = object()
+
+    def _config(self, model_type: str = "openai_model", declared=_ABSENT) -> DictConfig:
+        resources_config = {"entrypoint": "app.py", "domain": "other"}
+        if declared is not self._ABSENT:
+            resources_config["allowed_model_types"] = declared
+        return DictConfig(
+            {
+                "audio_resources_server": {"resources_servers": {"audio": resources_config}},
+                "audio_simple_agent": {
+                    "responses_api_agents": {
+                        "simple_agent": {
+                            "entrypoint": "app.py",
+                            "resources_server": {"type": "resources_servers", "name": "audio_resources_server"},
+                            "model_server": {"type": "responses_api_models", "name": "policy_model"},
+                        }
+                    }
+                },
+                "policy_model": {"responses_api_models": {model_type: {"entrypoint": "app.py"}}},
+            }
+        )
+
+    def test_rejects_an_unsupported_model_adapter_with_an_actionable_error(self) -> None:
+        config = self._config(declared=["vllm_model", "local_vllm_model"])
+
+        with raises(UnsupportedModelPairingError) as error:
+            GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+        message = str(error.value)
+        assert "audio_simple_agent" in message
+        assert "policy_model" in message
+        assert "openai_model" in message
+        assert "audio_resources_server" in message
+        assert "--model-type vllm_model" in message
+        assert "Supported model types: vllm_model, local_vllm_model" in message
+        assert "--allow-unsupported-pairing" in message
+
+    def test_allows_a_declared_model_adapter(self) -> None:
+        config = self._config(model_type="vllm_model", declared=["vllm_model"])
+
+        GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+    @mark.parametrize("declared", [_ABSENT, None, []], ids=["key absent", "null", "empty list"])
+    def test_resources_server_without_a_restriction_remains_compatible(self, declared) -> None:
+        config = self._config(declared=declared)
+
+        GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+    def test_accepts_a_bare_model_type_string(self) -> None:
+        config = self._config(model_type="vllm_model", declared="vllm_model")
+
+        GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+    @mark.parametrize("declared", [5, {"vllm_model": True}], ids=["scalar", "mapping"])
+    def test_rejects_a_malformed_model_type_declaration(self, declared) -> None:
+        config = self._config(declared=declared)
+
+        with raises(ConfigError) as error:
+            GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+        message = str(error.value)
+        assert "audio_resources_server.resources_servers.audio.allowed_model_types" in message
+        assert "must be a list of model types" in message
+
+    def test_pairing_override_also_waives_model_compatibility(self) -> None:
+        config = self._config(declared=["vllm_model"])
+        config[ALLOW_UNSUPPORTED_PAIRING_KEY_NAME] = True
+
+        GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+    def test_dummy_model_does_not_break_model_free_parser_clients(self) -> None:
+        config = self._config(model_type="dummy_model", declared=["vllm_model"])
+
+        GlobalConfigDictParser().raise_on_unsupported_model_pairings(config)
+
+    @staticmethod
+    def _parse_librispeech(model_config_path: str) -> DictConfig:
+        initial = DictConfig(
+            {
+                "config_paths": [
+                    "benchmarks/librispeech_pc/config.yaml",
+                    model_config_path,
+                ],
+                "policy_base_url": "https://example.test/v1",
+                "policy_api_key": "test-key",
+                "policy_model_name": "test-model",
+            }
+        )
+        return GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=initial,
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+    def test_librispeech_config_fails_during_parse_with_openai_model(self) -> None:
+        model_config_path = "responses_api_models/openai_model/configs/openai_model.yaml"
+
+        with raises(UnsupportedModelPairingError) as error:
+            self._parse_librispeech(model_config_path)
+
+        message = str(error.value)
+        assert "librispeech_pc_asr_with_pc_simple_agent" in message
+        assert "type 'openai_model'" in message
+        assert "--model-type vllm_model" in message
+
+    def test_librispeech_config_resolves_with_vllm_model(self) -> None:
+        model_config_path = "responses_api_models/vllm_model/configs/vllm_model.yaml"
+
+        resolved = self._parse_librispeech(model_config_path)
+
+        assert "vllm_model" in resolved["policy_model"]["responses_api_models"]
 
 
 class TestComposeUnboundAgent:
@@ -2438,6 +2694,36 @@ class TestComposeUnboundAgent:
         resolved = self._parse_with_cli(self._config(), self._cli_override(renamed, max_turns=99), monkeypatch)
 
         assert resolved[renamed]["responses_api_agents"]["hermes_agent"]["max_turns"] == 99
+
+    def test_config_resolution_restores_held_agent_override_after_inheritance(self, monkeypatch: MonkeyPatch) -> None:
+        instance = "terminal_bench_2_1_terminus_2_sandboxed_agent"
+        agent_type = "terminus_2_sandboxed_agent"
+        config = DictConfig(
+            {
+                agent_type: {
+                    "responses_api_agents": {
+                        agent_type: {
+                            "entrypoint": "app.py",
+                            "sandbox_timeout": 10800,
+                        }
+                    }
+                },
+                instance: {
+                    "_inherit_from": agent_type,
+                    "responses_api_agents": {agent_type: {}},
+                },
+            }
+        )
+        cli = self._cli_dict(
+            {
+                instance: {"responses_api_agents": {agent_type: {"sandbox_timeout": 21600}}},
+            }
+        )
+
+        resolved = self._parse_with_cli(config, cli, monkeypatch)
+
+        assert agent_type not in resolved
+        assert resolved[instance]["responses_api_agents"][agent_type]["sandbox_timeout"] == 21600
 
     def test_command_line_override_outranks_the_carried_over_bindings(self, monkeypatch: MonkeyPatch) -> None:
         # The override must carry only the fields the user set, leaving the environment's bindings intact.
