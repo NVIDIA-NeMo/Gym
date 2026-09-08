@@ -3,6 +3,9 @@
 
 from pathlib import Path
 
+import pytest
+from omegaconf import OmegaConf
+
 
 CONFIG_DIR = Path(__file__).parents[1] / "configs"
 
@@ -24,9 +27,20 @@ def test_base_config_uses_optional_native_sif_directory_override() -> None:
     base_config = (CONFIG_DIR / "enterpriseops_gym.yaml").read_text()
 
     assert (
-        "native_sif_dir: ${oc.env:ENTERPRISEOPS_NATIVE_SIF_DIR,~/.cache/nemo_gym/enterpriseops_gym/images}"
+        "native_sif_dir: "
+        "${oc.env:ENTERPRISEOPS_NATIVE_SIF_DIR,'~/.cache/nemo_gym/enterpriseops_gym/images'}"
     ) in base_config
     assert (CONFIG_DIR / "enterpriseops_gym_apptainer.yaml").is_file()
+
+
+def test_base_config_resolves_default_native_sif_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ENTERPRISEOPS_NATIVE_SIF_DIR", raising=False)
+
+    config = OmegaConf.load(CONFIG_DIR / "enterpriseops_gym.yaml")
+
+    assert config.enterpriseops_gym.resources_servers.enterpriseops_gym.native_sif_dir == (
+        "~/.cache/nemo_gym/enterpriseops_gym/images"
+    )
 
 
 def test_shared_sandbox_spec_is_provider_neutral() -> None:

@@ -22,7 +22,7 @@ enterpriseops_gym:
       native_service_images: {}
       # Standard output location used by `arm64_images --all`. Override with
       # ENTERPRISEOPS_NATIVE_SIF_DIR or a config value when needed.
-      native_sif_dir: ${oc.env:ENTERPRISEOPS_NATIVE_SIF_DIR,~/.cache/nemo_gym/enterpriseops_gym/images}
+      native_sif_dir: ${oc.env:ENTERPRISEOPS_NATIVE_SIF_DIR,'~/.cache/nemo_gym/enterpriseops_gym/images'}
       sandbox_spec:
         workdir: /app
       service_start_timeout_seconds: 60
