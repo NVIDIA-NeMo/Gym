@@ -234,10 +234,7 @@ def _build_vllm_ray_serve_command(
     # repo/ref the driver itself checks out) instead of a separate per-service field, so the two
     # can't drift out of sync.
     fetch_and_run = (
-        # Model-serving images (e.g. vllm/vllm-openai) don't necessarily bundle git - install it on
-        # the fly if missing, the same way render_vllm_ray_symmetric_run does for the ray CLI.
-        "(command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git))"
-        f" && {render_repo_checkout(gym_install.repo, gym_install.ref)}"
+        f"{render_repo_checkout(gym_install.repo, gym_install.ref)}"
         " && pip install --quiet aiohttp"
         f" && python3 nemo_gym/orchestration/ray_serve_gateway.py {gateway_args}"
     )
