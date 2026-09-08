@@ -21,6 +21,7 @@ sandbox:
     sandbox-api: opensandbox-sdk
   opensandbox:
     connection:
+      # May include the scheme (https://host): it then sets `protocol` and takes precedence over it.
       domain: ${oc.env:OPENSANDBOX_DOMAIN,opensandbox-server.opensandbox-system.svc.cluster.local}
       api_key: ${oc.env:OPENSANDBOX_API_KEY}
       protocol: http
@@ -37,6 +38,10 @@ sandbox:
       # "aiohttp" routes through the optional httpx-aiohttp bridge, falling
       # back to httpx with a warning when it is not installed.
       transport_backend: aiohttp
+      # Certificate verification for every connection the provider opens (SDK
+      # transport and PTY sockets). Off by default; set true for endpoints whose
+      # certificate the client can verify.
+      tls_verify: false
     create:
       request_timeout_s: 1200
       # Must exceed the spec's ready_timeout_s (1200 for mini_swe_agent_2): this
@@ -68,7 +73,9 @@ sandbox:
       # Poll interval backs off from initial to interval.
       # @bxyu-nvidia: Too frequent of a poll interval can quickly reduce server performance.
       # e.g. on SWE Bench Verified 500 samples with 3 repeats = 1500 concurrent samples, we would do polling every `background_poll_interval_s` seconds
-      background_poll_initial_s: 1.0
+      # Assumes a short execd response grace (EXECD_API_GRACE_SHUTDOWN in the sandbox env; the
+      # shipped swebench and opencode configs set 50ms).
+      background_poll_initial_s: 0.5
       background_poll_interval_s: 30.0
       # Per-request budget for status polls, which are small idempotent GETs:
       # without their own short budget, each poll against an unreachable

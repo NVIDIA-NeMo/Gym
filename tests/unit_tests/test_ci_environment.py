@@ -345,14 +345,11 @@ def test_nemo_cicd_test_gate_matches_event_and_job_results(
 def test_cicd_nightly_jobs_require_upstream_success() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
 
-    # A job's own `if:` replaces (not ANDs with) the implicit success()-of-
-    # needs check, so container_build/gpu_e2e_tests/provider_e2e_tests must
-    # explicitly check needs.*.result themselves. `is_nightly` is a single
-    # source of truth on classify_changes, referenced by three downstream
-    # jobs (container_build, gpu_e2e_tests, provider_e2e_tests) instead of
-    # each re-deriving github.event_name == 'schedule' || ... . notify-failure
-    # deliberately does NOT use it (see test_notify_failure_fires_even_if_
-    # classify_changes_is_skipped for why).
+    # `is_nightly` is a single source of truth on classify_changes, referenced
+    # by three downstream jobs (container_build, gpu_e2e_tests, and
+    # provider_e2e_tests) instead of each re-deriving github.event_name.
+    # notify-failure deliberately does NOT use it (see
+    # test_notify_failure_fires_even_if_classify_changes_is_skipped for why).
     assert workflow.count("needs.classify_changes.outputs.is_nightly == 'true'") == 3
     non_definition = workflow.replace(
         "is_nightly: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}", ""
@@ -362,6 +359,18 @@ def test_cicd_nightly_jobs_require_upstream_success() -> None:
     assert workflow.count("needs.classify_changes.result == 'success' &&") == 3
     assert "(needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')" in workflow
     assert "needs.container_build.result == 'success'" in workflow
+
+
+def test_cicd_docs_only_nightly_jobs_override_skipped_unit_status() -> None:
+    jobs = _cicd_main_jobs()
+
+    # Scheduled docs-only runs skip unit_tests. The explicit status function
+    # makes GitHub evaluate each downstream condition instead of applying its
+    # implicit success() check to the skipped dependency first.
+    for job_name in ("container_build", "gpu_e2e_tests", "provider_e2e_tests"):
+        condition = jobs[job_name]["if"]
+        assert "always() && !cancelled() &&" in condition
+        assert ("(needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')") in condition
 
 
 @pytest.mark.parametrize(

@@ -1,0 +1,14 @@
+# Runs commands as host subprocesses. No container and no filesystem boundary. The agent's
+# shell has your full user access, so use a container provider for untrusted tasks.
+# Binds the name `sandbox` like every provider config, so switching is a config path swap.
+sandbox:
+  default_metadata:
+    sandbox-api: local-subprocess
+  local:
+    # Parent of the per-sandbox working directory (default: system temp dir).
+    workspace_root: outputs/local_sandbox
+    # bash, not sh: SWE-bench-style setup uses `source`, which dash lacks.
+    shell: /bin/bash
+    default_timeout_s: 180
+    # Host subprocesses contend for CPU/memory, so cap simultaneous commands.
+    concurrency: 8

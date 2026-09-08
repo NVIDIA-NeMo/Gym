@@ -264,7 +264,11 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             )
 
     async def _run(self, body: Tau2RunRequest) -> Tau2VerifyResponse:
-        body_dict = {name: getattr(body, name) for name in Tau2RunRequest.model_fields}
+        # Gym-internal request fields (e.g. `capture_rollout_id`) are marked `exclude=True`;
+        # skip them so only tau2-bench arguments reach `run_single_task`.
+        body_dict = {
+            name: getattr(body, name) for name, field in Tau2RunRequest.model_fields.items() if not field.exclude
+        }
         responses_create_params = body_dict.pop("responses_create_params").model_dump(exclude_unset=True)
 
         config: TextRunConfig = body_dict["config"]

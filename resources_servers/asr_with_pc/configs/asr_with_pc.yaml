@@ -7,6 +7,12 @@ asr_with_pc:
       value: Improve transcription quality with structural detail
       verified: false
       task_type: ASR-PC
+      # Audio is carried in responses_create_params.metadata and must be translated by a vLLM-based Gym adapter.
+      allowed_model_types:
+      - vllm_model
+      - local_vllm_model
+      - local_vllm_model_proxy
+      - vllm_model_with_compaction
 asr_with_pc_simple_agent:
   responses_api_agents:
     simple_agent:
