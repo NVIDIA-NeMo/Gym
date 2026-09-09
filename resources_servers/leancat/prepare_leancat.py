@@ -28,9 +28,22 @@ The conversion script lives here rather than in the source repo because the sour
 repo is third-party and not ours to modify -- the same exception under which
 ``math_formal_lean/prepare_minif2f.py`` is kept in-tree.
 
+Two prompt variants are supported, because the repo and the paper do not agree:
+
+    repo      prompts/static_passk.md at the pinned commit, byte-exact. This is what
+              upstream's scripts/passk.py actually reads, so it is the default.
+    paper-d1  The template printed in the paper's Appendix D.1 (arXiv v2). Same first
+              three lines, then it asks for step-by-step reasoning inside a lean4 fence
+              instead of permitting auxiliary declarations and naming the banned tokens.
+
+Which one produced the published numbers is unknown: the GitHub repo is a release mirror
+synced from a private development repo, so its prompt may post-date the paper. Run both if
+the difference matters to you.
+
 Usage:
-    python prepare_leancat.py                      # fetch pinned revision, write data/
-    python prepare_leancat.py --records local.jsonl --prompt prompts/static-passk.md
+    python prepare_leancat.py                          # repo prompt -> data/train.jsonl
+    python prepare_leancat.py --prompt-variant paper-d1  # -> data/paper_d1_train.jsonl
+    python prepare_leancat.py --records local.jsonl --prompt some/other/template.md
 """
 
 import argparse
@@ -59,6 +72,14 @@ MATHLIB_VERSION = "v4.19.0"
 
 EXPECTED_RECORDS = 100
 NUM_EXAMPLE_ROWS = 5
+
+# variant -> (local template filename, output filename prefix). The repo variant is fetched
+# and its local copy refreshed; paper-d1 is a hand transcription of a typeset listing and is
+# only ever read, never overwritten.
+PROMPT_VARIANTS = {
+    "repo": ("static-passk.md", ""),
+    "paper-d1": ("paper-d1.md", "paper_d1_"),
+}
 
 
 def fetch_text(url: str) -> str:
@@ -162,9 +183,15 @@ def main() -> None:
         help=f"Local copy of leancat_records.jsonl. Defaults to fetching {RECORDS_URL}",
     )
     parser.add_argument(
+        "--prompt-variant",
+        choices=sorted(PROMPT_VARIANTS),
+        default="repo",
+        help="Which prompt template to render with. See the module docstring for the difference.",
+    )
+    parser.add_argument(
         "--prompt",
         type=Path,
-        help=f"Local copy of the static pass@k prompt. Defaults to fetching {PROMPT_URL}",
+        help=f"Explicit template file, overriding --prompt-variant. Defaults to fetching {PROMPT_URL}",
     )
     parser.add_argument(
         "--no-statement-files",
@@ -183,7 +210,22 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    template = (args.prompt.read_text(encoding="utf-8") if args.prompt else fetch_text(PROMPT_URL)).strip()
+    prompts_dir = Path(__file__).absolute().parent / "prompts"
+    template_name, output_prefix = PROMPT_VARIANTS[args.prompt_variant]
+
+    if args.prompt is not None:
+        template = args.prompt.read_text(encoding="utf-8")
+        refresh_local_copy = False
+    elif args.prompt_variant == "repo":
+        template = fetch_text(PROMPT_URL)
+        refresh_local_copy = True
+    else:
+        # Transcribed from the paper, not fetchable; read it and leave it alone.
+        template = (prompts_dir / template_name).read_text(encoding="utf-8")
+        refresh_local_copy = False
+
+    # `.strip()` matches eval_common.load_prompt, which upstream applies to every template.
+    template = template.strip()
     if "{formal_statement}" not in template:
         raise ValueError("Prompt template does not contain the {formal_statement} placeholder")
 
@@ -199,17 +241,19 @@ def main() -> None:
 
     rows = [to_gym_row(record, template, statements) for record in records]
 
-    # Keep a copy of the exact prompt we rendered with, so a reviewer can diff it
-    # against upstream without re-running the fetch.
-    # Hyphenated, unlike the upstream filename: Gym's `no-underscore-md` pre-commit hook
-    # rejects underscores in Markdown names. Contents are byte-identical to upstream.
-    prompt_path = Path(__file__).absolute().parent / "prompts" / "static-passk.md"
-    prompt_path.parent.mkdir(parents=True, exist_ok=True)
-    prompt_path.write_text(template + "\n", encoding="utf-8")
-    print(f"Wrote prompt template to {prompt_path}")
+    if refresh_local_copy:
+        # Keep a copy of the exact prompt we rendered with, so a reviewer can diff it against
+        # upstream without re-running the fetch. Only for the fetched variant: writing a
+        # `--prompt` file's contents over static-passk.md would silently corrupt the pinned copy.
+        # Hyphenated, unlike the upstream filename: Gym's `no-underscore-md` pre-commit hook
+        # rejects underscores in Markdown names. Contents are byte-identical to upstream.
+        prompt_path = prompts_dir / template_name
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
+        prompt_path.write_text(template + "\n", encoding="utf-8")
+        print(f"Wrote prompt template to {prompt_path}")
 
-    write_jsonl(args.output_dir / "train.jsonl", rows)
-    write_jsonl(args.output_dir / "example.jsonl", rows[:NUM_EXAMPLE_ROWS])
+    write_jsonl(args.output_dir / f"{output_prefix}train.jsonl", rows)
+    write_jsonl(args.output_dir / f"{output_prefix}example.jsonl", rows[:NUM_EXAMPLE_ROWS])
 
     levels: Dict[str, int] = {}
     for row in rows:

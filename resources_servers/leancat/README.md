@@ -139,15 +139,49 @@ Two real divergences remain:
    | repo (what our rows use) | "You may introduce auxiliary definitions, instances, and lemmas before the target statement if needed. The target statement and all auxiliary code must contain no `sorry`, `admit`, `axiom`, or `unsafe` declarations." |
    | paper D.1 | "Please solve the statement step by step and provide your complete Lean4 code between ```` ```lean4 ```` and ```` ``` ```` after careful reasoning." |
 
-   We match the repo byte-for-byte, because `passk.py` reads that file and the repo is the executable artifact. But
-   it is genuinely unclear which produced the published numbers — the repo is a release mirror synced from a private
-   development repo, so its prompt may post-date the paper. Treat this as the largest single source of
-   irreducible uncertainty in any reproduction here.
+   Both are shipped. `prompts/static-passk.md` is the default; `prompts/paper-d1.md` is the paper's. Which one
+   produced the published numbers is genuinely unclear — the repo is a release mirror synced from a private
+   development repo, so its prompt may post-date the paper. See **Prompt variants** below.
 
 2. **This server's statement guard is stricter than upstream's scorer.** `verify_lean` is `has_invalid_tokens(code)`
    then compile; it never compares against the reference statement, even though `configs/evaluation_protocol.json`
    sets `"statement_changes_allowed": false`. Set `require_statement_preserved: false` to match upstream exactly;
    `statement_preserved` reports the difference either way. Running both is the informative thing to do.
+
+## Prompt variants
+
+| Variant | Template | Dataset | Config | Fidelity |
+|---|---|---|---|---|
+| `repo` (default) | `prompts/static-passk.md` | `data/train.jsonl` | `configs/leancat.yaml` | byte-exact vs upstream |
+| `paper-d1` | `prompts/paper-d1.md` | `data/paper_d1_train.jsonl` | `configs/leancat_paper_d1.yaml` | reconstruction, see below |
+
+```bash
+python prepare_leancat.py                            # repo prompt
+python prepare_leancat.py --prompt-variant paper-d1  # paper's Appendix D.1 prompt
+```
+
+Both render the same 100 problems with identical `verifier_metadata`; only the prompt differs, so a per-problem diff
+of the two runs isolates the prompt's contribution exactly.
+
+### The paper's prompt cannot be transcribed byte-exactly — read this before quoting a number from it
+
+`prompts/paper-d1.md` is a **reconstruction**, not a copy. The paper prints its prompt inside a LaTeX `lstlisting`,
+and recovering a string from typeset output requires judgement. Taken from the arXiv v2 LaTeX source
+(`main.tex`, Appendix D.1), the decisions were:
+
+- **Dropped** the uniform 4-space listing indent on every line.
+- **Dropped** the `"""` delimiters — Python string-literal markers showing it is a template, not prompt content.
+- **Dropped** the extra 4-space indent on `{formal_statement}`. The placeholder is substituted with a whole Lean
+  file beginning `import Mathlib`; indenting it would not be valid Lean, so the indent is listing cosmetics.
+- **Kept** the printed line breaks verbatim, including the two that fall mid-sentence ("…so that your code can /
+  pass the Lean4 compiler"). These are almost certainly page-width wrapping rather than real newlines, but
+  preserving what is printed is the choice that does not silently improve on the source. Unwrapping them is a
+  one-line change if you disagree, and no model will behave differently either way.
+- **Stripped** trailing whitespace, and applied `.strip()` to the whole template, as `eval_common.load_prompt` does.
+
+What is *not* in doubt is the part that matters: the paper's template asks for step-by-step reasoning inside a
+`lean4` fence, and the repo's instead permits auxiliary declarations and names the banned tokens. That is a
+substantive instruction difference, and it is what a comparison between the two runs actually measures.
 
 ## Data
 
