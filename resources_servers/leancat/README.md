@@ -201,17 +201,22 @@ python prepare_leancat.py --records local.jsonl --prompt prompts/static-passk.md
 
 ## Running it
 
-### 1. Build the sandbox (do this first — it is the long pole)
+### 1. Install Lean + Mathlib v4.19.0 — no container build needed
 
-**The stock NeMo-Skills sandbox will not work.** It pins Lean/Mathlib **v4.12.0**; LeanCat needs **v4.19.0**. On
-the wrong Mathlib the `CategoryTheory` statements fail with ordinary-looking "unknown identifier" errors, so a full
-eval returns a plausible near-zero score that looks like a model result and is not one.
+**You do not need a Lean-specific `.sqsh`.** There is no published image at Mathlib v4.19.0
+(`leanprovercommunity/mathlib` ships only `latest`/`gitpod`/`debian`), the NeMo-Skills sandbox pins **v4.12.0**
+— on which LeanCat's `CategoryTheory` statements fail with ordinary-looking "unknown identifier" errors, i.e. a
+plausible near-zero score that is not a model result — and building a correct image needs Docker, which HPC login
+nodes generally lack.
+
+`elan` installs entirely in user space, so none of that is required:
 
 ```bash
-./build_sandbox.sh /path/to/containers     # repins to v4.19.0, builds, exports a .sqsh
+./setup_lean.sh /lustre/<...>/lean4-mathlib-v4.19.0
 ```
 
-Hours, not minutes: `lake exe cache get` only hits when the Mathlib tag matches, otherwise it compiles from source.
+`lake exe cache get` downloads prebuilt Mathlib oleans because `v4.19.0` is a tagged release, so this is a large
+download rather than a multi-hour source build. Bind-mount the result into whatever base image you already have.
 
 ### 2. Verify the sandbox before spending anything on inference
 
@@ -237,3 +242,24 @@ against Table 3's specialized provers.
 The submit config cannot start the sandbox — `services:` accepts only `type: vllm` and `type: ray`, so the sandbox
 must already be reachable at `NEMO_SKILLS_SANDBOX_HOST:PORT`, launched into the same allocation with
 `srun --overlap`.
+
+## Two verification backends
+
+| | HTTP sandbox (default) | Gym sandbox (`configs/leancat_enroot.yaml`) |
+|---|---|---|
+| Selected by | `sandbox_host`/`sandbox_port` | presence of `sandbox_provider` |
+| Runs | NeMo-Skills `/execute` | `lake env lean <file>`, as upstream does |
+| Who starts it | you, out of band | this server, lazily |
+| On Slurm | a second `srun --overlap` | nothing extra |
+| Parity | matches `math_formal_lean` | matches `swebench`/`deepswe`/`litmus_agent` |
+
+The Gym backend exists because `gym eval submit` cannot start an HTTP sandbox: `ServiceConfig` is a closed union of
+`vllm` and `ray`, with no generic container service. Routing through `nemo_gym.sandbox` lets the resources server own
+its sandbox, which is what makes a one-command Slurm run possible. Providers available: `enroot` (HPC-native),
+`apptainer`, `local`, `docker`, `e2b`, and others under `nemo_gym/sandbox/providers/`.
+
+The Lean file is shipped into the sandbox base64-encoded rather than interpolated into a shell command — Lean sources
+routinely contain quotes, backslashes and unicode, and a heredoc delimiter can appear inside a proof.
+
+`reward` is 1.0 only when `lake env lean` **exits zero**. Matching the output for `error:` is not enough on its own:
+a non-zero exit with nothing matching would otherwise score as a proof.

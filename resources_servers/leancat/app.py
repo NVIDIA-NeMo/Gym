@@ -36,7 +36,7 @@ version compiles. See ``proof_utils`` for what is enforced.
 import re
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -55,7 +55,7 @@ from resources_servers.leancat.proof_utils import (
     extract_lean_code,
     find_banned_tokens,
 )
-from resources_servers.leancat.sandbox_client import Lean4SandboxClient
+from resources_servers.leancat.sandbox_client import GymSandboxLean4Client, Lean4SandboxClient
 
 
 # Terminal values of `proof_status`. Everything except COMPLETED scores 0.0; they are kept
@@ -93,6 +93,14 @@ def determine_proof_status(compiler_output: Dict[str, Any]) -> tuple[str, Option
     if process_status != "completed":
         return STATUS_SANDBOX_ERROR, f"Sandbox reported status {process_status!r}."
 
+    # The Gym sandbox backend reports `lake env lean`'s exit status, which is 0 only when
+    # Lean accepted the file. Trust it over string-matching the output: a non-zero exit
+    # with no "error:" in the captured text would otherwise score as a proof. The HTTP
+    # backend omits the key, so this is a no-op there.
+    return_code = compiler_output.get("return_code")
+    if return_code is not None and return_code != 0:
+        return STATUS_COMPILE_ERROR, f"Lean exited with status {return_code}."
+
     stdout = compiler_output.get("stdout", "")
     stderr = compiler_output.get("stderr", "")
     combined = f"{stdout}\n{stderr}".lower()
@@ -124,6 +132,16 @@ class LeanCatResourcesServerConfig(BaseResourcesServerConfig):
     # means by "solved". Turn them off only to measure how often they fire.
     require_statement_preserved: bool = True
     ban_proof_shortcuts: bool = True
+
+    # Set `sandbox_provider` to compile through `nemo_gym.sandbox` (enroot, apptainer,
+    # local, ...) instead of POSTing to an HTTP sandbox at sandbox_host:sandbox_port.
+    # Single-key provider config, e.g. {"enroot": {...}}, matching litmus_agent/swebench.
+    # The Gym route lets this server own its sandbox, which is what makes it runnable on
+    # Slurm without a second `srun --overlap` outside Gym's control.
+    sandbox_provider: Optional[Dict[str, Any]] = None
+    sandbox_spec: Dict[str, Any] = Field(default_factory=dict)
+    # Directory holding the Lean project (lakefile + Mathlib) inside the sandbox.
+    lean_project_dir: str = "/lean4/my_project"
 
 
 class LeanCatRunRequest(BaseRunRequest):
@@ -163,11 +181,19 @@ class LeanCatResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        self._sandbox_client = Lean4SandboxClient(
-            host=self.config.sandbox_host,
-            port=self.config.sandbox_port,
-            max_output_characters=self.config.max_output_characters,
-        )
+        if self.config.sandbox_provider is not None:
+            self._sandbox_client = GymSandboxLean4Client(
+                provider=self.config.sandbox_provider,
+                spec=self.config.sandbox_spec,
+                lean_project_dir=self.config.lean_project_dir,
+                max_output_characters=self.config.max_output_characters,
+            )
+        else:
+            self._sandbox_client = Lean4SandboxClient(
+                host=self.config.sandbox_host,
+                port=self.config.sandbox_port,
+                max_output_characters=self.config.max_output_characters,
+            )
 
     async def verify(self, body: LeanCatVerifyRequest) -> LeanCatVerifyResponse:
         """Score one attempt: 1.0 only if it is a valid LeanCat proof, else 0.0.
