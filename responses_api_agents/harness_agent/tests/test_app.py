@@ -13,26 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
-from nemo_gym.sandbox.providers.local import LocalProvider
+from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.harness_agent.app import (
-    HarnessAgent,
-    HarnessAgentConfig,
-    HarnessAgentRunRequest,
-    stage_and_run_eval,
-)
+from responses_api_agents.sandbox_agent.app import SandboxAgent, SandboxAgentConfig, stage_and_run_eval
 
 
-def _config(**kwargs) -> HarnessAgentConfig:
+def _config(**kwargs) -> SandboxAgentConfig:
     base = dict(
         host="0.0.0.0",
         port=8080,
@@ -40,46 +32,109 @@ def _config(**kwargs) -> HarnessAgentConfig:
         name="sbx",
         resources_server=ResourcesServerRef(type="resources_servers", name="rs"),
         model_server=ModelServerRef(type="responses_api_models", name="model"),
-        agent="opencode",
+        harness_module="nemo_gym.agents.codex",
+        harness_class="CodexHarness",
+        harness_config={
+            "model": {
+                "model": "gym-policy-model",
+                "base_url": "__SANDBOX_MODEL_URL__/v1",
+            }
+        },
+        nested_config_paths=["config.yaml"],
+        nested_agent_name="nested_agent",
         sandbox_provider={"opensandbox": {}},
     )
     base.update(kwargs)
-    return HarnessAgentConfig(**base)
+    return SandboxAgentConfig(**base)
 
 
-def _make_agent(**cfg_kwargs) -> HarnessAgent:
+def _make_agent(**cfg_kwargs) -> SandboxAgent:
     # skip provider creation and gym tar build (both side effects) during construction
     with (
-        patch("responses_api_agents.harness_agent.app.create_provider", return_value=MagicMock()),
-        patch.object(HarnessAgent, "_build_gym_tar", return_value=None),
+        patch("responses_api_agents.sandbox_agent.app.create_provider", return_value=MagicMock()),
+        patch.object(SandboxAgent, "_build_gym_tar", return_value=None),
     ):
-        return HarnessAgent(config=_config(**cfg_kwargs), server_client=MagicMock(spec=ServerClient))
+        return SandboxAgent(config=_config(**cfg_kwargs), server_client=MagicMock(spec=ServerClient))
 
 
 def test_config_defaults():
     cfg = _config()
+    assert cfg.mode == "agent_only_runner"
     assert cfg.sandbox_image == "python:3.12-slim"
     assert cfg.sandbox_python == "python3"
 
 
-def test_runner_config_carries_agent_symbols():
+def test_named_sandbox_provider_is_resolved_with_metadata():
+    provider = MagicMock()
+    global_config = {
+        "sandbox": {
+            "default_metadata": {"cluster": "cell3"},
+            "opensandbox": {"connection": {"domain": "sandbox.example"}},
+        }
+    }
+    with (
+        patch("responses_api_agents.sandbox_agent.app.get_global_config_dict", return_value=global_config),
+        patch("responses_api_agents.sandbox_agent.app.create_provider", return_value=provider) as create,
+        patch.object(SandboxAgent, "_build_gym_tar", return_value=None),
+    ):
+        agent = SandboxAgent(config=_config(sandbox_provider="sandbox"), server_client=MagicMock(spec=ServerClient))
+
+    create.assert_called_once_with({"opensandbox": {"connection": {"domain": "sandbox.example"}}})
+    assert agent._sandbox_default_metadata == {"cluster": "cell3"}
+
+
+@pytest.mark.parametrize(
+    ("mode", "kwargs", "missing"),
+    [
+        ("agent_only_runner", {"harness_module": None}, "harness_module"),
+        ("agent_only_runner", {"harness_config": None}, "harness_config"),
+        ("gym_runner", {"nested_agent_name": None}, "nested_agent_name"),
+        ("gym_runner", {"model_server": None}, "model_server"),
+    ],
+)
+def test_config_rejects_missing_mode_requirement(mode, kwargs, missing):
+    with pytest.raises(ValueError, match=missing):
+        _config(mode=mode, **kwargs)
+
+
+def test_gym_runner_config_and_script():
     agent = _make_agent(
-        agent="opencode",
+        mode="gym_runner",
+        nested_config_paths=["a.yaml", "b.yaml"],
+        nested_agent_name="nested_math",
+        nested_agent_port=12345,
+    )
+    script, runner_config, cmd = agent._runner()
+    assert runner_config["config_paths"] == ["a.yaml", "b.yaml"]
+    assert runner_config["agent_name"] == "nested_math"
+    assert runner_config["agent_port"] == 12345
+    assert "ng_collect_rollouts" in script
+    compile(script, "<gym_runner>", "exec")
+
+
+def test_gym_runner_skips_gym_tar():
+    with (
+        patch("responses_api_agents.sandbox_agent.app.create_provider", return_value=MagicMock()),
+        patch.object(SandboxAgent, "_build_gym_tar", return_value="/tmp/fake.tar.gz") as tar,
+    ):
+        nested = SandboxAgent(config=_config(mode="gym_runner"), server_client=MagicMock(spec=ServerClient))
+        assert nested._gym_tar is None
+        tar.assert_not_called()
+
+
+def test_runner_config_carries_harness_symbols():
+    agent = _make_agent(
+        harness_module="nemo_gym.agents.codex",
+        harness_class="CodexHarness",
         sandbox_python="/deps/bin/python3",
     )
     script, runner_config, cmd = agent._runner()
-    assert runner_config["agent_module"] == "responses_api_agents.opencode_agent.app"
-    assert runner_config["agent_class"] == "OpenCodeAgent"
-    assert runner_config["agent_config_class"] == "OpenCodeAgentConfig"
+    assert runner_config["harness_module"] == "nemo_gym.agents.codex"
+    assert runner_config["harness_class"] == "CodexHarness"
     assert "runner_config.json" in script
+    assert "model_base_url=harness.config.model.base_url" in script
     compile(script, "<agent_runner>", "exec")
-    assert cmd == "/deps/bin/python3 runner.py"
-
-
-def test_unknown_agent_is_rejected():
-    agent = _make_agent(agent="unknown")
-    with pytest.raises(ValueError, match="Unknown agent: unknown"):
-        agent._runner()
+    assert cmd == "/deps/bin/python3 /work/runner.py"
 
 
 def test_sandbox_model_url_preserves_remote_hostname_and_port():
@@ -87,8 +142,8 @@ def test_sandbox_model_url_preserves_remote_hostname_and_port():
     agent.server_client._build_server_base_url = MagicMock(return_value="http://model-host:8000")
     agent.server_client.global_config_dict = MagicMock()
     with (
-        patch("responses_api_agents.harness_agent.app.get_first_server_config_dict", return_value={}),
-        patch("responses_api_agents.harness_agent.app.socket.gethostbyname") as resolve,
+        patch("responses_api_agents.sandbox_agent.app.get_first_server_config_dict", return_value={}),
+        patch("responses_api_agents.sandbox_agent.app.socket.gethostbyname") as resolve,
     ):
         url = agent._sandbox_model_url(MagicMock())
     assert url == "http://model-host:8000"
@@ -100,10 +155,10 @@ def test_sandbox_model_url_prefers_backend_base_url_and_strips_v1():
     agent.server_client.global_config_dict = MagicMock()
     with (
         patch(
-            "responses_api_agents.harness_agent.app.get_first_server_config_dict",
+            "responses_api_agents.sandbox_agent.app.get_first_server_config_dict",
             return_value={"base_url": "http://vllm-node:9000/v1"},
         ),
-        patch("responses_api_agents.harness_agent.app.socket.gethostbyname") as resolve,
+        patch("responses_api_agents.sandbox_agent.app.socket.gethostbyname") as resolve,
     ):
         url = agent._sandbox_model_url(MagicMock())
     assert url == "http://vllm-node:9000"
@@ -115,57 +170,11 @@ def test_sandbox_model_url_keeps_loopback_on_dns_failure():
     agent.server_client._build_server_base_url = MagicMock(return_value="http://localhost:8000")
     agent.server_client.global_config_dict = MagicMock()
     with (
-        patch("responses_api_agents.harness_agent.app.get_first_server_config_dict", return_value={}),
-        patch("responses_api_agents.harness_agent.app.socket.gethostbyname", side_effect=OSError),
+        patch("responses_api_agents.sandbox_agent.app.get_first_server_config_dict", return_value={}),
+        patch("responses_api_agents.sandbox_agent.app.socket.gethostbyname", side_effect=OSError),
     ):
         url = agent._sandbox_model_url(MagicMock())
     assert url == "http://localhost:8000"
-
-
-def test_sandbox_model_url_preserves_training_rollout_prefix():
-    agent = _make_agent()
-    agent.server_client.global_config_dict = MagicMock()
-    request = SimpleNamespace(
-        path_params={"rollout_id": "rollout-1"},
-        url=SimpleNamespace(path="/ng-rollout/rollout-1/training-token-capture/v1/responses"),
-    )
-    with patch(
-        "responses_api_agents.harness_agent.app.get_first_server_config_dict",
-        return_value={"base_url": "http://model:8000/v1"},
-    ):
-        url = agent._sandbox_model_url(request)
-    assert url == "http://model:8000/ng-rollout/rollout-1/training-token-capture"
-
-
-async def test_run_preserves_rollout_path_and_verifier_fields():
-    agent = _make_agent()
-    agent.server_client.post = AsyncMock(side_effect=[MagicMock(), MagicMock(), MagicMock()])
-    body = HarnessAgentRunRequest(
-        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"),
-        _ng_rollout_id="rollout-1",
-    )
-    response = {
-        "id": "response-1",
-        "created_at": 0,
-        "model": "model",
-        "object": "response",
-        "output": [],
-        "parallel_tool_calls": False,
-        "tool_choice": "none",
-        "tools": [],
-    }
-    verify = body.model_dump() | {"response": response, "reward": 1.0, "custom_metric": 7}
-    with (
-        patch.object(HarnessAgent, "url_path_for_run", return_value="/ng-rollout/rollout-1/v1/responses") as path,
-        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
-        patch(
-            "responses_api_agents.harness_agent.app.get_response_json", new=AsyncMock(side_effect=[response, verify])
-        ),
-    ):
-        result = await agent.run(MagicMock(cookies={}), body)
-    path.assert_called_once_with("/v1/responses", body)
-    assert agent.server_client.post.await_args_list[1].kwargs["url_path"] == "/ng-rollout/rollout-1/v1/responses"
-    assert result.custom_metric == 7
 
 
 async def test_grading_command_failure_is_not_reward_zero():
@@ -201,56 +210,54 @@ async def test_setup_failure_closes_sandbox():
     agent._provider.close.assert_awaited_once_with(handle)
 
 
-async def test_local_provider_provisions_in_its_workspace(tmp_path):
-    server = await asyncio.start_server(lambda *_: None, "127.0.0.1", 0)
-    port = server.sockets[0].getsockname()[1]
-    agent = _make_agent()
-    agent._provider = LocalProvider(workspace_root=str(tmp_path))
-    agent._gym_tar = None
-    try:
-        handle = await agent._provision_box("", {"/work/request.json": "{}"}, f"http://127.0.0.1:{port}")
-        assert (handle.raw["workspace"] / "work" / "request.json").read_text() == "{}"
-        await agent._close_box(handle)
-        assert not handle.raw["workspace"].exists()
-    finally:
-        server.close()
-        await server.wait_closed()
+async def test_nested_runner_exit_fails_without_waiting_for_timeout():
+    agent = _make_agent(mode="gym_runner", rollout_timeout=2400)
+    handle = MagicMock()
+    agent._provision_box = AsyncMock(return_value=handle)
+    agent._provider.exec = AsyncMock(
+        side_effect=[
+            SandboxExecResult("", "", 0),
+            SandboxExecResult("EXITED\n", "", 0),
+            SandboxExecResult("killed", "", 0),
+        ]
+    )
+    agent._provider.close = AsyncMock()
+    body = MagicMock()
+    body.model_dump.return_value = {"responses_create_params": {"metadata": {}}}
 
-
-async def test_local_grading_stays_in_workspace(tmp_path):
-    provider = LocalProvider(workspace_root=str(tmp_path))
-    handle = await provider.create(SandboxSpec(image=""))
-    try:
-        reward = await stage_and_run_eval(
-            provider,
-            handle,
-            {"/tests/test.sh": "true"},
-            "bash /tests/test.sh && mkdir -p /logs/verifier && echo 1 > /logs/verifier/reward.txt",
-            "/logs/verifier/reward.txt",
-            30,
-        )
-        assert reward == 1.0
-        assert (handle.raw["workspace"] / "logs" / "verifier" / "reward.txt").is_file()
-    finally:
-        await provider.close(handle)
+    with (
+        patch.object(SandboxAgent, "_sandbox_model_url", return_value="https://model.example"),
+        patch("responses_api_agents.sandbox_agent.app.asyncio.sleep", new=AsyncMock()) as sleep,
+        pytest.raises(RuntimeError, match="runner exited.*killed"),
+    ):
+        await agent._run_nested(MagicMock(), body)
+    sleep.assert_awaited_once_with(20)
+    assert "runner.pid" in agent._provider.exec.await_args_list[0].args[1]
+    agent._provider.close.assert_awaited_once_with(handle)
 
 
 async def test_agent_runner_failure_reports_its_log():
     agent = _make_agent()
-    handle = MagicMock(provider_name="opensandbox")
+    handle = MagicMock()
     agent._provision_box = AsyncMock(return_value=handle)
     agent._provider.exec = AsyncMock(
-        side_effect=[SandboxExecResult("", "exit status 1", 1), SandboxExecResult("runner traceback", "", 0)]
+        side_effect=[
+            SandboxExecResult("", "exit status 1", 1),
+            SandboxExecResult("runner traceback", "", 0),
+        ]
     )
     agent._provider.close = AsyncMock()
     agent._download_json = AsyncMock()
     body = NeMoGymResponseCreateParamsNonStreaming(input="hello")
+
     with (
         patch.object(agent, "_sandbox_model_url", return_value="https://model.example"),
         pytest.raises(RuntimeError, match="runner failed.*runner traceback"),
     ):
         await agent.responses(MagicMock(), body)
+
     agent._download_json.assert_not_awaited()
+    agent._provider.close.assert_awaited_once_with(handle)
 
 
 async def test_download_json_requires_exactly_one_row():
@@ -263,24 +270,24 @@ async def test_download_json_requires_exactly_one_row():
 
 def test_gym_tar_built_on_init():
     with (
-        patch("responses_api_agents.harness_agent.app.create_provider", return_value=MagicMock()),
-        patch.object(HarnessAgent, "_build_gym_tar", return_value="/tmp/fake.tar.gz"),
+        patch("responses_api_agents.sandbox_agent.app.create_provider", return_value=MagicMock()),
+        patch.object(SandboxAgent, "_build_gym_tar", return_value="/tmp/fake.tar.gz"),
     ):
-        agent = HarnessAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        agent = SandboxAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
         assert agent._gym_tar == "/tmp/fake.tar.gz"
 
 
 def test_gym_source_prebuilt_path_and_url():
     with (
-        patch("responses_api_agents.harness_agent.app.create_provider", return_value=MagicMock()),
-        patch.object(HarnessAgent, "_build_gym_tar") as build,
+        patch("responses_api_agents.sandbox_agent.app.create_provider", return_value=MagicMock()),
+        patch.object(SandboxAgent, "_build_gym_tar") as build,
     ):
-        prebuilt = HarnessAgent(
+        prebuilt = SandboxAgent(
             config=_config(gym_source="/tmp/prebuilt.tar.gz"), server_client=MagicMock(spec=ServerClient)
         )
         assert str(prebuilt._gym_tar) == "/tmp/prebuilt.tar.gz"
         assert prebuilt._gym_source_url is None
-        remote = HarnessAgent(
+        remote = SandboxAgent(
             config=_config(gym_source="https://example.com/gym.tar.gz"), server_client=MagicMock(spec=ServerClient)
         )
         assert remote._gym_tar is None

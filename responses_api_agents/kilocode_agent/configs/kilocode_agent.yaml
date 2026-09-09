@@ -27,7 +27,6 @@ kilocode_agent:
       setup_timeout: 900
       timeout: 900
       extra_args: []
-      # written to kilo.json in the run dir (OpenCode-compatible config schema)
       kilo_config:
         permission:
           bash: allow

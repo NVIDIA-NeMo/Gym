@@ -20,13 +20,16 @@ from functools import partial
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 import yaml
 from omegaconf import OmegaConf
 
+from nemo_gym.agents.kilocode import KiloCodeHarness, _extract_instruction, parse_kilo_events
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
@@ -34,8 +37,6 @@ from nemo_gym.server_utils import ServerClient
 from responses_api_agents.kilocode_agent.app import (
     KiloCodeAgent,
     KiloCodeAgentConfig,
-    _extract_instruction,
-    parse_kilo_events,
 )
 
 
@@ -51,9 +52,8 @@ def _config(**kwargs) -> KiloCodeAgentConfig:
 
 
 def _make_agent(**kwargs) -> KiloCodeAgent:
-    with patch("responses_api_agents.kilocode_agent.app.KiloCodeAgent.model_post_init"):
+    with patch("responses_api_agents.kilocode_agent.app.ensure_kilo"):
         agent = KiloCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
     return agent
 
 
@@ -239,14 +239,14 @@ class TestParseKiloEvents:
 class TestDeepMerge:
     def test_nested_merge(self) -> None:
         base = {"a": {"b": 1, "c": 2}}
-        KiloCodeAgent._deep_merge(base, {"a": {"c": 3, "d": 4}})
+        KiloCodeHarness._deep_merge(base, {"a": {"c": 3, "d": 4}})
         assert base == {"a": {"b": 1, "c": 3, "d": 4}}
 
 
 class TestEnv:
     def test_env_passthrough_and_isolation(self) -> None:
         agent = _make_agent(openai_api_key="k", openai_base_url="https://x/v1", env={"FOO": "bar", "EMPTY": ""})
-        env = agent._env("/tmp/data", "/tmp/config")
+        env = agent._harness._env("/tmp/data", "/tmp/config")
         assert env["OPENAI_API_KEY"] == "k"
         assert env["OPENAI_BASE_URL"] == "https://x/v1"
         assert env["XDG_DATA_HOME"] == "/tmp/data"
@@ -260,7 +260,7 @@ class TestEnv:
 class TestBuildCommand:
     def test_command_shape(self) -> None:
         agent = _make_agent(model="policy/some-model")
-        cmd = agent._build_command(Path("/tmp/ws"), "solve it")
+        cmd = agent._harness._build_command(Path("/tmp/ws"), "solve it")
         assert cmd[:4] == ["kilo", "run", "--auto", "--pure"]
         assert "--format" in cmd and cmd[cmd.index("--format") + 1] == "json"
         assert cmd[cmd.index("-m") + 1] == "policy/some-model"
@@ -271,54 +271,47 @@ class TestBuildCommand:
 
     def test_thinking_flag_gated(self) -> None:
         agent = _make_agent(thinking=True)
-        cmd = agent._build_command(Path("/tmp/ws"), "hi")
+        cmd = agent._harness._build_command(Path("/tmp/ws"), "hi")
         assert "--thinking" in cmd
 
 
-class TestWriteConfig:
-    def test_writes_kilo_json(self, tmp_path) -> None:
+class TestBuildConfig:
+    def test_builds_kilo_config(self) -> None:
         agent = _make_agent(kilo_config={"permission": {"bash": "allow"}})
-        agent._write_kilo_config(tmp_path)
-        written = json.loads((tmp_path / "kilo.json").read_text())
-        assert written["permission"]["bash"] == "allow"
+        assert agent._harness._build_kilo_config()["permission"]["bash"] == "allow"
 
-    def test_no_config_no_file(self, tmp_path) -> None:
+    def test_no_config(self) -> None:
         agent = _make_agent()
-        agent._write_kilo_config(tmp_path)
-        assert not (tmp_path / "kilo.json").exists()
+        assert agent._harness._build_kilo_config() == {}
 
-    def test_model_registered_under_its_provider(self, tmp_path) -> None:
+    def test_model_registered_under_its_provider(self) -> None:
         # Kilo fails with "Model not found" unless the name appears in the provider's models map, so
         # the model is registered from `model` rather than repeated in every config.
         agent = _make_agent(
             model="policy/nvidia/qwen/qwen3-next-80b-a3b-instruct",
             kilo_config={"provider": {"policy": {"npm": "@ai-sdk/openai-compatible"}}},
         )
-        agent._write_kilo_config(tmp_path)
-        written = json.loads((tmp_path / "kilo.json").read_text())
-        assert written["provider"]["policy"]["models"] == {"nvidia/qwen/qwen3-next-80b-a3b-instruct": {}}
+        config = agent._harness._build_kilo_config()
+        assert config["provider"]["policy"]["models"] == {"nvidia/qwen/qwen3-next-80b-a3b-instruct": {}}
 
-    def test_existing_model_entry_preserved(self, tmp_path) -> None:
+    def test_existing_model_entry_preserved(self) -> None:
         agent = _make_agent(
             model="policy/m",
             kilo_config={"provider": {"policy": {"models": {"m": {"name": "custom"}, "other": {}}}}},
         )
-        agent._write_kilo_config(tmp_path)
-        written = json.loads((tmp_path / "kilo.json").read_text())
-        assert written["provider"]["policy"]["models"] == {"m": {"name": "custom"}, "other": {}}
+        config = agent._harness._build_kilo_config()
+        assert config["provider"]["policy"]["models"] == {"m": {"name": "custom"}, "other": {}}
 
-    def test_unknown_provider_left_alone(self, tmp_path) -> None:
+    def test_unknown_provider_left_alone(self) -> None:
         # A model on a provider kilo resolves itself (e.g. the gateway) must not fabricate a provider.
         agent = _make_agent(model="anthropic/claude", kilo_config={"provider": {"policy": {}}})
-        agent._write_kilo_config(tmp_path)
-        written = json.loads((tmp_path / "kilo.json").read_text())
-        assert written["provider"] == {"policy": {}}
+        assert agent._harness._build_kilo_config()["provider"] == {"policy": {}}
 
 
 class TestModelServer:
     def test_effective_model_prefixed_only_with_model_server(self) -> None:
-        assert _make_agent(model="policy/m")._effective_model() == "policy/m"
-        assert _make_model_server_agent(model="Qwen/Qwen3-8B")._effective_model() == "nemo/Qwen/Qwen3-8B"
+        assert _make_agent(model="policy/m")._harness._effective_model() == "policy/m"
+        assert _make_model_server_agent(model="Qwen/Qwen3-8B")._harness._effective_model() == "nemo/Qwen/Qwen3-8B"
 
     def test_base_url_resolution(self) -> None:
         assert _make_agent()._resolve_model_base_url() == ""
@@ -326,12 +319,11 @@ class TestModelServer:
         assert agent._resolve_model_base_url() == "http://model-host:9000/v1"
         assert agent._resolve_model_base_url("r1") == "http://model-host:9000/ng-rollout/r1/v1"
 
-    def test_nemo_provider_written(self, tmp_path) -> None:
+    def test_nemo_provider_built(self) -> None:
         # A slashed model name stays whole: kilo splits `-m` on the first `/` only, so the provider is
         # `nemo` and the model is `Qwen/Qwen3-8B`, which is the key it looks up in `models`.
         agent = _make_model_server_agent(model="Qwen/Qwen3-8B")
-        agent._write_kilo_config(tmp_path, agent._resolve_model_base_url())
-        provider = json.loads((tmp_path / "kilo.json").read_text())["provider"]["nemo"]
+        provider = agent._harness._build_kilo_config(agent._resolve_model_base_url())["provider"]["nemo"]
         assert provider["npm"] == "@ai-sdk/openai-compatible"
         assert provider["options"] == {
             "apiKey": "EMPTY",  # pragma: allowlist secret
@@ -345,64 +337,113 @@ class TestModelServer:
             }
         }
 
-    def test_model_server_config_written_without_kilo_config(self, tmp_path) -> None:
-        # An empty kilo_config used to short-circuit before kilo.json was written, which would leave a
-        # model-server-only run with no provider at all.
+    def test_model_server_config_built_without_kilo_config(self) -> None:
         agent = _make_model_server_agent(model="m")
-        agent._write_kilo_config(tmp_path, agent._resolve_model_base_url())
-        assert json.loads((tmp_path / "kilo.json").read_text())["provider"]["nemo"]["models"].keys() == {"m"}
+        config = agent._harness._build_kilo_config(agent._resolve_model_base_url())
+        assert config["provider"]["nemo"]["models"].keys() == {"m"}
 
-    def test_kilo_config_merged_and_overridable(self, tmp_path) -> None:
+    def test_kilo_config_merged_and_overridable(self) -> None:
         agent = _make_model_server_agent(
             model="m",
             kilo_config={"permission": {"bash": "allow"}, "provider": {"nemo": {"name": "mine"}}},
         )
-        agent._write_kilo_config(tmp_path, agent._resolve_model_base_url())
-        written = json.loads((tmp_path / "kilo.json").read_text())
-        assert written["permission"]["bash"] == "allow"
-        assert written["provider"]["nemo"]["name"] == "mine"
+        config = agent._harness._build_kilo_config(agent._resolve_model_base_url())
+        assert config["permission"]["bash"] == "allow"
+        assert config["provider"]["nemo"]["name"] == "mine"
 
-    def test_limits_and_reasoning_field_configurable(self, tmp_path) -> None:
+    def test_limits_and_reasoning_field_configurable(self) -> None:
         agent = _make_model_server_agent(
             model="m", context_window=262144, max_output_tokens=16384, reasoning_field=None
         )
-        agent._write_kilo_config(tmp_path, agent._resolve_model_base_url())
-        model = json.loads((tmp_path / "kilo.json").read_text())["provider"]["nemo"]["models"]["m"]
+        model = agent._harness._build_kilo_config(agent._resolve_model_base_url())["provider"]["nemo"]["models"]["m"]
         assert model["limit"] == {"context": 262144, "output": 16384}
         assert "interleaved" not in model
 
-    def test_rollout_prefix_applied_to_base_url(self, tmp_path) -> None:
+    def test_rollout_prefix_applied_to_base_url(self) -> None:
         agent = _make_model_server_agent(model="m")
-        agent._write_kilo_config(tmp_path, agent._resolve_model_base_url("task0-rollout1"))
-        written = json.loads((tmp_path / "kilo.json").read_text())
-        assert written["provider"]["nemo"]["options"]["baseURL"].endswith("/ng-rollout/task0-rollout1/v1")
+        config = agent._harness._build_kilo_config(agent._resolve_model_base_url("task0-rollout1"))
+        assert config["provider"]["nemo"]["options"]["baseURL"].endswith("/ng-rollout/task0-rollout1/v1")
 
     def test_command_uses_effective_model(self) -> None:
         agent = _make_model_server_agent(model="Qwen/Qwen3-8B")
-        cmd = agent._build_command(Path("/tmp/ws"), "hi")
+        cmd = agent._harness._build_command(Path("/tmp/ws"), "hi")
         assert cmd[cmd.index("-m") + 1] == "nemo/Qwen/Qwen3-8B"
 
     def test_run_kilo_threads_resolved_url_into_config_and_env(self, tmp_path) -> None:
-        # The seam _run_kilo owns: resolve once, then hand the same URL to kilo.json and the env.
-        # repo_dir is the project dir, and unlike the workspace it survives the run's cleanup.
         agent = _make_model_server_agent(model="m", repo_dir=str(tmp_path))
         proc = MagicMock()
         proc.returncode = 0
         proc.communicate = AsyncMock(return_value=(b"", b""))
-        with patch("responses_api_agents.kilocode_agent.app.asyncio.create_subprocess_exec") as spawn:
+        with patch("nemo_gym.agents.kilocode.asyncio.create_subprocess_exec") as spawn:
             spawn.return_value = proc
-            asyncio.run(agent._run_kilo("hi", None, "task0-rollout1"))
+            asyncio.run(agent._harness._run_kilo("hi", None, agent._resolve_model_base_url("task0-rollout1")))
 
         expected = "http://model-host:9000/ng-rollout/task0-rollout1/v1"
-        written = json.loads((tmp_path / "kilo.json").read_text())
-        assert written["provider"]["nemo"]["options"]["baseURL"] == expected
-        assert spawn.call_args.kwargs["env"]["OPENAI_BASE_URL"] == expected
+        env = spawn.call_args.kwargs["env"]
+        assert json.loads(env["KILO_CONFIG_CONTENT"])["provider"]["nemo"]["options"]["baseURL"] == expected
+        assert env["OPENAI_BASE_URL"] == expected
+
+    def test_run_kilo_preserves_existing_project_config(self, tmp_path) -> None:
+        original = b'{\n  "mine": true\n}\n'
+        (tmp_path / "kilo.json").write_bytes(original)
+        agent = _make_agent(repo_dir=str(tmp_path), kilo_config={"permission": {"bash": "allow"}})
+        proc = MagicMock(returncode=0)
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+
+        with patch("nemo_gym.agents.kilocode.asyncio.create_subprocess_exec", return_value=proc):
+            asyncio.run(agent._harness._run_kilo("hi", None))
+
+        assert (tmp_path / "kilo.json").read_bytes() == original
+
+    def test_run_kilo_does_not_create_project_config(self, tmp_path) -> None:
+        agent = _make_agent(repo_dir=str(tmp_path), kilo_config={"permission": {"bash": "allow"}})
+        proc = MagicMock(returncode=0)
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+
+        with patch("nemo_gym.agents.kilocode.asyncio.create_subprocess_exec", return_value=proc):
+            asyncio.run(agent._harness._run_kilo("hi", None))
+
+        assert not (tmp_path / "kilo.json").exists()
 
     def test_env_prefers_model_server_over_openai_base_url(self) -> None:
         agent = _make_model_server_agent(openai_api_key="k", openai_base_url="https://api.openai.com/v1")
-        env = agent._env("/tmp/data", "/tmp/config", agent._resolve_model_base_url("r1"))
+        env = agent._harness._env("/tmp/data", "/tmp/config", agent._resolve_model_base_url("r1"))
         assert env["OPENAI_BASE_URL"] == "http://model-host:9000/ng-rollout/r1/v1"
         assert env["OPENAI_API_KEY"] == "EMPTY"  # pragma: allowlist secret
+
+    def test_direct_endpoint_is_not_treated_as_model_server(self, tmp_path) -> None:
+        agent = _make_agent(
+            model="openai/model",
+            openai_api_key="secret",  # pragma: allowlist secret
+            openai_base_url="https://example.test/v1",
+            repo_dir=str(tmp_path),
+            kilo_config={"provider": {"openai": {}}},
+        )
+        proc = MagicMock(returncode=0)
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        with patch("nemo_gym.agents.kilocode.asyncio.create_subprocess_exec", return_value=proc) as spawn:
+            asyncio.run(agent._harness.run(NeMoGymResponseCreateParamsNonStreaming(input="hi")))
+
+        config = json.loads(spawn.call_args.kwargs["env"]["KILO_CONFIG_CONTENT"])
+        assert config["provider"]["openai"]["models"] == {"model": {}}
+        assert not (tmp_path / "kilo.json").exists()
+        assert spawn.call_args.kwargs["env"]["OPENAI_BASE_URL"] == "https://example.test/v1"
+        assert spawn.call_args.kwargs["env"]["OPENAI_API_KEY"] == "secret"  # pragma: allowlist secret
+
+    def test_cancellation_kills_group_drains_process_and_reraises(self) -> None:
+        agent = _make_agent()
+        proc = MagicMock(pid=4242, returncode=None)
+        proc.communicate = AsyncMock(side_effect=[asyncio.CancelledError(), (b"", b"")])
+        with (
+            patch("nemo_gym.agents.kilocode.asyncio.create_subprocess_exec", return_value=proc),
+            patch("nemo_gym.agents.kilocode.os.killpg") as killpg,
+            patch("nemo_gym.agents.kilocode.os.getpgid", return_value=4242),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            asyncio.run(agent._harness._run_kilo("hi", None))
+
+        killpg.assert_called_once_with(4242, 9)
+        assert proc.communicate.await_count == 2
 
 
 class TestConfigYaml:

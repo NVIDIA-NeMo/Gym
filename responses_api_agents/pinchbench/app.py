@@ -31,6 +31,13 @@ from typing import Any, Literal, Optional
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field, model_validator
 
+from nemo_gym.agents.openclaw import openclaw_session_conversation
+from nemo_gym.agents.openclaw_observability import (
+    OPENCLAW_OBSERVATION_SOURCE,
+    build_openclaw_observation_tree,
+    build_openclaw_observations,
+    discover_openclaw_session_tree,
+)
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
@@ -55,13 +62,6 @@ from nemo_gym.openai_utils import (
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, get_provider_class
-from responses_api_agents.openclaw_agent.app import openclaw_session_conversation
-from responses_api_agents.openclaw_agent.observability import (
-    OPENCLAW_OBSERVATION_SOURCE,
-    build_openclaw_observation_tree,
-    build_openclaw_observations,
-    discover_openclaw_session_tree,
-)
 
 
 _SEARCH_KEY_MAP: dict[str, str] = {"brave": "brave_api_key", "tavily": "tavily_api_key"}

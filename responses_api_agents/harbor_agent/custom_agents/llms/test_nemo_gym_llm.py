@@ -13,16 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
 from harbor.llms.base import (
     ContextLengthExceededError,
     OutputLengthExceededError,
 )
 
-from responses_api_agents.harbor_agent.custom_agents.llms.nemo_gym_llm import NemoGymLLM
+from nemo_gym.agents.terminus_2_llm import NemoGymLLM
 
 
 # ---------------------------------------------------------------------------
@@ -238,18 +237,9 @@ async def test_context_length_error_propagates():
 async def test_context_length_error_from_http_400():
     """HTTP 400 with context-length phrase raises ContextLengthExceededError."""
     llm = _make_llm()
-    mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-    mock_client.post = AsyncMock(
-        return_value=httpx.Response(
-            status_code=400,
-            text="maximum context length exceeded",
-            request=httpx.Request("POST", "http://localhost:8000/v1/chat/completions"),
-        )
-    )
-
-    with patch("httpx.AsyncClient", return_value=mock_client):
+    response = MagicMock(status=400, cookies={})
+    response.text = AsyncMock(return_value="maximum context length exceeded")
+    with patch("nemo_gym.agents.terminus_2_llm.request", new=AsyncMock(return_value=response)):
         with pytest.raises(ContextLengthExceededError):
             await llm.call(prompt="hello")
 
