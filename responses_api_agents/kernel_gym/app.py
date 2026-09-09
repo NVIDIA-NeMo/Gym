@@ -422,7 +422,9 @@ class KernelGymAgent(SimpleResponsesAPIAgent):
 
         model_server_url = self._model_server_url
         if not self.config.sandbox_model_base_url and rollout_id and model_server_url:
-            model_server_url = apply_rollout_prefix(model_server_url, rollout_id)
+            model_server_url = apply_rollout_prefix(
+                model_server_url, rollout_id, token_capture=self._token_id_capture_enabled()
+            )
 
         params = KernelGymInstanceConfig(
             **{**self.config.model_dump(), **config_overrides},
