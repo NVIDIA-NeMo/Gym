@@ -336,6 +336,22 @@ async def test_complete_partial_rollout_checkpoint_cycle(tmp_path, monkeypatch) 
             assert blocked.status_code == 409
             assert blocked.json()["error"]["code"] == "agent_prepare_incomplete"
 
+        acknowledged = await _post(
+            completed_client,
+            f"{AGENT_CHECKPOINT_URL_PREFIX}/acknowledge-completed",
+            {
+                "schema_version": 1,
+                "executions": [{"rollout_id": "completed", "attempt_index": 0}],
+            },
+        )
+        assert acknowledged.json() == {"acknowledged": [{"rollout_id": "completed", "attempt_index": 0}]}
+        completed_prepare = await _post(
+            completed_client,
+            f"{AGENT_CHECKPOINT_URL_PREFIX}/prepare",
+            prepare_body,
+        )
+        assert completed_prepare.json()["ready_to_commit"] is True
+
         identity_headers = {ROLLOUT_ID_HEADER: ROLLOUT_ID, ATTEMPT_INDEX_HEADER: "0"}
         straggler_headers = {ROLLOUT_ID_HEADER: STRAGGLER_ID, ATTEMPT_INDEX_HEADER: "0"}
         assert (await resources.post("/seed_session", headers=identity_headers)).json() == {"value": 1}

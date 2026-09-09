@@ -27,6 +27,8 @@ from nemo_gym._checkpoint import (
     AgentBoundaryRecord,
     AgentCheckpointError,
     AgentCheckpointParticipant,
+    AgentCompletedExecutionAcknowledgementError,
+    AgentExecutionIdentity,
     AgentStaleAttemptError,
     CheckpointPhase,
     ControlCapabilities,
@@ -165,6 +167,41 @@ async def test_completed_attempt_replays_retained_terminal_result() -> None:
 
 
 @pytest.mark.asyncio
+async def test_acknowledge_completed_releases_result_and_fences_attempt() -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    await participant.finish(execution, outcome="completed", result={"reward": 1.0})
+    identity = AgentExecutionIdentity(rollout_id="rollout-a", attempt_index=0)
+
+    assert await participant.acknowledge_completed([identity]) == [identity]
+    assert participant.status()["completed_unacknowledged"] == 0
+    assert participant.resolve("rollout-a", 0) is None
+    with pytest.raises(AgentStaleAttemptError):
+        await participant.begin("rollout-a", 0, task=None)
+
+    # A lost HTTP response is safe: retrying the same acknowledgement succeeds.
+    assert await participant.acknowledge_completed([identity]) == [identity]
+
+
+@pytest.mark.asyncio
+async def test_acknowledge_completed_validates_batch_before_releasing_results() -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    await participant.finish(execution, outcome="completed", result={"reward": 1.0})
+
+    with pytest.raises(AgentCompletedExecutionAcknowledgementError):
+        await participant.acknowledge_completed(
+            [
+                AgentExecutionIdentity(rollout_id="rollout-a", attempt_index=0),
+                AgentExecutionIdentity(rollout_id="rollout-a", attempt_index=1),
+            ]
+        )
+
+    assert participant.status()["completed_unacknowledged"] == 1
+    assert participant.resolve("rollout-a", 0) is execution
+
+
+@pytest.mark.asyncio
 async def test_retire_tombstones_attempt_without_execution() -> None:
     participant = AgentCheckpointParticipant()
 
@@ -257,6 +294,84 @@ async def test_prepare_route_rejects_completed_unacknowledged_result() -> None:
     assert "completed_unacknowledged=1" in prepare.json()["error"]["detail"]
     assert fence.phase == CheckpointPhase.IDLE
     assert status.json()["completed_unacknowledged"] == 1
+
+
+@pytest.mark.asyncio
+async def test_acknowledgement_route_unblocks_checkpoint_prepare() -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    await participant.finish(execution, outcome="completed", result={"reward": 1.0})
+    second_execution = await participant.begin("rollout-b", 2, task=asyncio.current_task())
+    await participant.finish(second_execution, outcome="completed", result={"reward": 2.0})
+    fence = ControlFence()
+    app = FastAPI()
+    install_control_plane(
+        app,
+        capabilities=ControlCapabilities(
+            component="responses_api_agents",
+            name="agent",
+            multi_process=MultiProcessCapability(mode="single_worker", num_workers=1),
+        ),
+        fence=fence,
+    )
+    install_agent_checkpoint(app, participant=participant, fence=fence, auth_token="secret")
+    headers = {"authorization": "Bearer secret"}
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        blocked = await client.post(
+            "/ng-control/v1/agent-checkpoint/prepare",
+            json={"checkpoint_id": "checkpoint-1", "deadline_ts": time.time() + 2},
+            headers=headers,
+        )
+        wrong_attempt = await client.post(
+            "/ng-control/v1/agent-checkpoint/acknowledge-completed",
+            json={
+                "schema_version": 1,
+                "executions": [{"rollout_id": "rollout-a", "attempt_index": 1}],
+            },
+            headers=headers,
+        )
+        acknowledged = await client.post(
+            "/ng-control/v1/agent-checkpoint/acknowledge-completed",
+            json={
+                "schema_version": 1,
+                "executions": [
+                    {"rollout_id": "rollout-a", "attempt_index": 0},
+                    {"rollout_id": "rollout-b", "attempt_index": 2},
+                ],
+            },
+            headers=headers,
+        )
+        prepared = await client.post(
+            "/ng-control/v1/agent-checkpoint/prepare",
+            json={"checkpoint_id": "checkpoint-1", "deadline_ts": time.time() + 2},
+            headers=headers,
+        )
+        duplicate = await client.post(
+            "/ng-control/v1/agent-checkpoint/acknowledge-completed",
+            json={
+                "schema_version": 1,
+                "executions": [
+                    {"rollout_id": "rollout-a", "attempt_index": 0},
+                    {"rollout_id": "rollout-b", "attempt_index": 2},
+                ],
+            },
+            headers=headers,
+        )
+
+    assert blocked.status_code == 409
+    assert wrong_attempt.status_code == 409
+    assert wrong_attempt.json()["error"]["code"] == "completed_execution_acknowledgement_error"
+    assert acknowledged.status_code == 200
+    assert acknowledged.json() == {
+        "acknowledged": [
+            {"rollout_id": "rollout-a", "attempt_index": 0},
+            {"rollout_id": "rollout-b", "attempt_index": 2},
+        ]
+    }
+    assert prepared.status_code == 200
+    assert prepared.json()["ready_to_commit"] is True
+    assert duplicate.status_code == 200
 
 
 @pytest.mark.asyncio

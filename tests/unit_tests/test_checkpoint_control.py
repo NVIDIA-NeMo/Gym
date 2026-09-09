@@ -312,6 +312,7 @@ def test_agent_server_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
     whitebox_body = whitebox_client.get(f"{CONTROL_URL_PREFIX}/capabilities").json()
     assert whitebox_body["checkpoint_mode"] == "export_restore"
     assert whitebox_body["concurrency_contract"] == "serialized_per_session"
+    assert whitebox_body["features"] == ["completed_result_acknowledgement"]
 
 
 def test_capabilities_route_reflects_live_fence_phase() -> None:
