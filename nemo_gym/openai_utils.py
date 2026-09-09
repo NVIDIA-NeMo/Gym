@@ -25,6 +25,7 @@ from typing import (
     Required,
     TypeAlias,
     Union,
+    get_args,
 )
 
 from openai.types.chat import (
@@ -138,7 +139,7 @@ from openai.types.responses.response_usage import OutputTokensDetails as Respons
 from openai.types.responses.response_usage import ResponseUsage
 from openai.types.shared.chat_model import ChatModel
 from openai.types.shared_params import FunctionDefinition
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Discriminator, Field, Tag, model_validator
 from typing_extensions import TypedDict
 
 from nemo_gym.server_utils import (
@@ -529,9 +530,8 @@ RESPONSES_TO_TRAIN = {
 # It holds only NeMoGymResponseReasoningItem, NeMoGymResponseOutputMessage
 # or NeMoGymResponseFunctionToolCall, all registered above.
 #
-# Each variant is also another member of NeMoGymResponseInputItem.
-# That union is validated in smart mode, so an unrecognised item reports the errors of every member.
-# Variants that nothing can emit only make those errors harder to read.
+# Each variant is also a member of the response item unions.
+# Complete token metadata selects that variant.
 #
 # The upstream models permit extra fields.
 # An item carrying token IDs without a declared variant still round-trips through its base class.
@@ -554,49 +554,188 @@ def training_variant_of(item_cls: type) -> type:
         ) from None
 
 
+########################################
+# Item union discrimination
+########################################
+
+# Route each item to one concrete model.
+# Shared type literals use stable shape-based tags.
+# Typeless input preserves the existing permissive fallback.
+_SIMPLE_MESSAGE_ROLES = frozenset({"user", "system", "developer"})
+_MESSAGE_ROLES = _SIMPLE_MESSAGE_ROLES | {"assistant"}
+_ITEM_STATUSES = frozenset({"in_progress", "completed", "incomplete"})
+_OUTPUT_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
+_TRAINING_TAG_SUFFIX = "__training"
+# Tags whose models have a ForTraining variant registered in RESPONSES_TO_TRAIN.
+_TRAINABLE_ITEM_TAGS = frozenset({"easy_message", "input_message", "output_message", "function_call", "reasoning"})
+
+# Exact member class -> union tag, populated from the annotated unions defined below.
+_RESPONSE_INPUT_ITEM_TAG_BY_CLASS: Dict[type, str] = {}
+_RESPONSE_OUTPUT_ITEM_TAG_BY_CLASS: Dict[type, str] = {}
+
+
+def _register_item_tags(item_union: Any, tag_by_class: Dict[type, str]) -> None:
+    """Index each union member class by its Tag, so instances discriminate by class."""
+    union_type = get_args(item_union)[0]
+    for member in get_args(union_type):
+        member_cls, *metadata = get_args(member)
+        tag = next(meta for meta in metadata if isinstance(meta, Tag))
+        tag_by_class[member_cls] = tag.tag
+
+
+def _tag_for_item_instance(value: Any, tag_by_class: Dict[type, str]) -> Optional[str]:
+    """Map an item instance to its nearest registered class tag."""
+    for cls in type(value).__mro__:
+        tag = tag_by_class.get(cls)
+        if tag is not None:
+            return tag
+    return getattr(value, "type", None)
+
+
+def _first_content_part_type(content: Any) -> Optional[str]:
+    """Return the type of the first content part, or None for empty or non-list content."""
+    if not isinstance(content, list) or not content:
+        return None
+    first_part = content[0]
+    return first_part.get("type") if isinstance(first_part, dict) else getattr(first_part, "type", None)
+
+
+def _discriminate_message_item(value: Dict[str, Any]) -> str:
+    """Choose a message model from its role, content, and status."""
+    content = value.get("content")
+    if value.get("role") in _SIMPLE_MESSAGE_ROLES:
+        if isinstance(content, list) and value.get("status") in _ITEM_STATUSES:
+            return "input_message"
+        return "easy_message"
+    if isinstance(content, list):
+        if content:
+            if _first_content_part_type(content) in _OUTPUT_CONTENT_PART_TYPES:
+                return "output_message"
+        elif isinstance(value.get("id"), str):
+            return "output_message"
+    return "easy_message"
+
+
+def _discriminate_untyped_input_item(value: Dict[str, Any]) -> str:
+    """Infer a typeless input model or use the permissive fallback."""
+    role = value.get("role")
+    content = value.get("content")
+    if role in _MESSAGE_ROLES and isinstance(content, (str, list)):
+        tag = _discriminate_message_item(value)
+        if tag == "output_message":
+            if isinstance(value.get("id"), str):
+                return tag
+        elif _first_content_part_type(content) not in _OUTPUT_CONTENT_PART_TYPES:
+            return tag
+        return "mcp_list_tools"
+    if (
+        "role" not in value
+        and isinstance(value.get("id"), str)
+        and isinstance(content, list)
+        and (not content or _first_content_part_type(content) in _OUTPUT_CONTENT_PART_TYPES)
+    ):
+        return "output_message"
+    if "arguments" in value and "name" in value:
+        return "function_call" if "call_id" in value else "mcp_call"
+    if isinstance(value.get("call_id"), str) and "output" in value:
+        return "function_call_output"
+    if isinstance(value.get("id"), str) and isinstance(value.get("summary"), list):
+        return "reasoning"
+    return "mcp_list_tools"
+
+
+def _training_variant_tag(tag: str, value: Dict[str, Any]) -> str:
+    """Route to the ForTraining member when the item carries complete token metadata."""
+    if tag in _TRAINABLE_ITEM_TAGS and REQUIRED_TOKEN_METADATA_FIELDS.issubset(value):
+        return tag + _TRAINING_TAG_SUFFIX
+    return tag
+
+
+def _discriminate_response_input_item(value: Any) -> Optional[str]:
+    """Pick the input union tag for a request item."""
+    if not isinstance(value, dict):
+        return _tag_for_item_instance(value, _RESPONSE_INPUT_ITEM_TAG_BY_CLASS)
+
+    item_type = value.get("type")
+    if item_type == "message":
+        tag = _discriminate_message_item(value)
+    elif isinstance(item_type, str):
+        tag = item_type
+    elif item_type is None:
+        tag = _discriminate_untyped_input_item(value)
+    else:
+        return None
+    return _training_variant_tag(tag, value)
+
+
+def _discriminate_response_output_item(value: Any) -> Optional[str]:
+    """Pick the output union tag for a response item."""
+    if not isinstance(value, dict):
+        return _tag_for_item_instance(value, _RESPONSE_OUTPUT_ITEM_TAG_BY_CLASS)
+
+    item_type = value.get("type")
+    if item_type == "message":
+        tag = _discriminate_message_item(value)
+    elif item_type == "function_call_output":
+        # The SDK output item additionally requires an id and a status; results without
+        # them only fit the request-input model.
+        if isinstance(value.get("id"), str) and value.get("status") in _ITEM_STATUSES:
+            tag = "function_call_output"
+        else:
+            tag = "function_call_output_input"
+    elif isinstance(item_type, str):
+        tag = item_type
+    else:
+        # _require_response_output_item_type already rejected untyped dicts.
+        return None
+    return _training_variant_tag(tag, value)
+
+
 NeMoGymResponseInputItem = Annotated[
     Union[
-        NeMoGymEasyInputMessage,
-        NeMoGymMessage,
-        NeMoGymResponseOutputMessage,
-        NeMoGymResponseFunctionToolCall,
-        NeMoGymFunctionCallOutput,
-        NeMoGymResponseReasoningItem,
-        NeMoGymResponseMcpCall,
-        NeMoGymResponseMcpListTools,
-        NeMoGymResponseMcpApprovalRequest,
+        Annotated[NeMoGymEasyInputMessage, Tag("easy_message")],
+        Annotated[NeMoGymMessage, Tag("input_message")],
+        Annotated[NeMoGymResponseOutputMessage, Tag("output_message")],
+        Annotated[NeMoGymResponseFunctionToolCall, Tag("function_call")],
+        Annotated[NeMoGymFunctionCallOutput, Tag("function_call_output")],
+        Annotated[NeMoGymResponseReasoningItem, Tag("reasoning")],
+        Annotated[NeMoGymResponseMcpCall, Tag("mcp_call")],
+        Annotated[NeMoGymResponseMcpListTools, Tag("mcp_list_tools")],
+        Annotated[NeMoGymResponseMcpApprovalRequest, Tag("mcp_approval_request")],
         # The SDK includes these items in both response output and request input.
         # Outputs are replayed as input on subsequent turns.
-        NeMoGymResponseFileSearchToolCall,
-        NeMoGymResponseFunctionWebSearch,
-        NeMoGymResponseComputerToolCall,
-        NeMoGymImageGenerationCall,
-        NeMoGymResponseCodeInterpreterToolCall,
-        NeMoGymLocalShellCall,
-        NeMoGymResponseCustomToolCall,
-        NeMoGymComputerCallOutput,
-        NeMoGymResponseCustomToolCallOutput,
-        NeMoGymLocalShellCallOutput,
-        NeMoGymMcpApprovalResponse,
+        Annotated[NeMoGymResponseFileSearchToolCall, Tag("file_search_call")],
+        Annotated[NeMoGymResponseFunctionWebSearch, Tag("web_search_call")],
+        Annotated[NeMoGymResponseComputerToolCall, Tag("computer_call")],
+        Annotated[NeMoGymImageGenerationCall, Tag("image_generation_call")],
+        Annotated[NeMoGymResponseCodeInterpreterToolCall, Tag("code_interpreter_call")],
+        Annotated[NeMoGymLocalShellCall, Tag("local_shell_call")],
+        Annotated[NeMoGymResponseCustomToolCall, Tag("custom_tool_call")],
+        Annotated[NeMoGymComputerCallOutput, Tag("computer_call_output")],
+        Annotated[NeMoGymResponseCustomToolCallOutput, Tag("custom_tool_call_output")],
+        Annotated[NeMoGymLocalShellCallOutput, Tag("local_shell_call_output")],
+        Annotated[NeMoGymMcpApprovalResponse, Tag("mcp_approval_response")],
         # Codex tool family and context management.
-        NeMoGymResponseApplyPatchToolCall,
-        NeMoGymResponseApplyPatchToolCallOutput,
-        NeMoGymResponseCompactionItem,
-        NeMoGymResponseFunctionShellToolCall,
-        NeMoGymResponseFunctionShellToolCallOutput,
-        NeMoGymResponseToolSearchCall,
-        NeMoGymResponseToolSearchOutputItem,
-        NeMoGymCompactionTrigger,
-        NeMoGymAdditionalTools,
+        Annotated[NeMoGymResponseApplyPatchToolCall, Tag("apply_patch_call")],
+        Annotated[NeMoGymResponseApplyPatchToolCallOutput, Tag("apply_patch_call_output")],
+        Annotated[NeMoGymResponseCompactionItem, Tag("compaction")],
+        Annotated[NeMoGymResponseFunctionShellToolCall, Tag("shell_call")],
+        Annotated[NeMoGymResponseFunctionShellToolCallOutput, Tag("shell_call_output")],
+        Annotated[NeMoGymResponseToolSearchCall, Tag("tool_search_call")],
+        Annotated[NeMoGymResponseToolSearchOutputItem, Tag("tool_search_output")],
+        Annotated[NeMoGymCompactionTrigger, Tag("compaction_trigger")],
+        Annotated[NeMoGymAdditionalTools, Tag("additional_tools")],
         # Training variants.
-        NeMoGymEasyInputMessageForTraining,
-        NeMoGymMessageForTraining,
-        NeMoGymResponseOutputMessageForTraining,
-        NeMoGymResponseFunctionToolCallForTraining,
-        NeMoGymResponseReasoningItemForTraining,
+        Annotated[NeMoGymEasyInputMessageForTraining, Tag("easy_message__training")],
+        Annotated[NeMoGymMessageForTraining, Tag("input_message__training")],
+        Annotated[NeMoGymResponseOutputMessageForTraining, Tag("output_message__training")],
+        Annotated[NeMoGymResponseFunctionToolCallForTraining, Tag("function_call__training")],
+        Annotated[NeMoGymResponseReasoningItemForTraining, Tag("reasoning__training")],
     ],
+    Discriminator(_discriminate_response_input_item),
     BeforeValidator(_validate_atomic_token_metadata),
 ]
+_register_item_tags(NeMoGymResponseInputItem, _RESPONSE_INPUT_ITEM_TAG_BY_CLASS)
 NeMoGymResponseInput: TypeAlias = List[NeMoGymResponseInputItem]
 
 
@@ -690,45 +829,48 @@ class NeMoGymResponseFunctionCallOutput(ResponseFunctionToolCallOutputItem):
 
 NeMoGymResponseOutputItem = Annotated[
     Union[
-        NeMoGymResponseOutputMessage,
-        NeMoGymResponseFunctionToolCall,
-        NeMoGymResponseFunctionCallOutput,
-        NeMoGymResponseReasoningItem,
-        NeMoGymResponseMcpCall,
-        NeMoGymResponseMcpListTools,
-        NeMoGymResponseMcpApprovalRequest,
-        NeMoGymResponseFileSearchToolCall,
-        NeMoGymResponseFunctionWebSearch,
-        NeMoGymResponseComputerToolCall,
-        NeMoGymImageGenerationCall,
-        NeMoGymResponseCodeInterpreterToolCall,
-        NeMoGymLocalShellCall,
-        NeMoGymResponseCustomToolCall,
-        NeMoGymResponseComputerCallOutput,
-        NeMoGymResponseCustomToolCallOutputItem,
-        NeMoGymResponseLocalShellCallOutput,
-        NeMoGymResponseMcpApprovalResponse,
-        NeMoGymResponseApplyPatchToolCall,
-        NeMoGymResponseApplyPatchToolCallOutput,
-        NeMoGymResponseCompactionItem,
-        NeMoGymResponseFunctionShellToolCall,
-        NeMoGymResponseFunctionShellToolCallOutput,
-        NeMoGymResponseToolSearchCall,
-        NeMoGymResponseToolSearchOutputItem,
-        NeMoGymResponseAdditionalTools,
+        Annotated[NeMoGymResponseOutputMessage, Tag("output_message")],
+        Annotated[NeMoGymResponseFunctionToolCall, Tag("function_call")],
+        Annotated[NeMoGymResponseFunctionCallOutput, Tag("function_call_output")],
+        Annotated[NeMoGymResponseReasoningItem, Tag("reasoning")],
+        Annotated[NeMoGymResponseMcpCall, Tag("mcp_call")],
+        Annotated[NeMoGymResponseMcpListTools, Tag("mcp_list_tools")],
+        Annotated[NeMoGymResponseMcpApprovalRequest, Tag("mcp_approval_request")],
+        Annotated[NeMoGymResponseFileSearchToolCall, Tag("file_search_call")],
+        Annotated[NeMoGymResponseFunctionWebSearch, Tag("web_search_call")],
+        Annotated[NeMoGymResponseComputerToolCall, Tag("computer_call")],
+        Annotated[NeMoGymImageGenerationCall, Tag("image_generation_call")],
+        Annotated[NeMoGymResponseCodeInterpreterToolCall, Tag("code_interpreter_call")],
+        Annotated[NeMoGymLocalShellCall, Tag("local_shell_call")],
+        Annotated[NeMoGymResponseCustomToolCall, Tag("custom_tool_call")],
+        Annotated[NeMoGymResponseComputerCallOutput, Tag("computer_call_output")],
+        Annotated[NeMoGymResponseCustomToolCallOutputItem, Tag("custom_tool_call_output")],
+        Annotated[NeMoGymResponseLocalShellCallOutput, Tag("local_shell_call_output")],
+        Annotated[NeMoGymResponseMcpApprovalResponse, Tag("mcp_approval_response")],
+        Annotated[NeMoGymResponseApplyPatchToolCall, Tag("apply_patch_call")],
+        Annotated[NeMoGymResponseApplyPatchToolCallOutput, Tag("apply_patch_call_output")],
+        Annotated[NeMoGymResponseCompactionItem, Tag("compaction")],
+        Annotated[NeMoGymResponseFunctionShellToolCall, Tag("shell_call")],
+        Annotated[NeMoGymResponseFunctionShellToolCallOutput, Tag("shell_call_output")],
+        Annotated[NeMoGymResponseToolSearchCall, Tag("tool_search_call")],
+        Annotated[NeMoGymResponseToolSearchOutputItem, Tag("tool_search_output")],
+        Annotated[NeMoGymResponseAdditionalTools, Tag("additional_tools")],
         # Local agents include prompt messages and function results in returned trajectories.
         # Accept their request models alongside the SDK output models.
-        NeMoGymEasyInputMessage,
-        NeMoGymMessage,
-        NeMoGymFunctionCallOutput,
-        NeMoGymEasyInputMessageForTraining,
-        NeMoGymMessageForTraining,
-        NeMoGymResponseOutputMessageForTraining,
-        NeMoGymResponseFunctionToolCallForTraining,
-        NeMoGymResponseReasoningItemForTraining,
+        Annotated[NeMoGymEasyInputMessage, Tag("easy_message")],
+        Annotated[NeMoGymMessage, Tag("input_message")],
+        Annotated[NeMoGymFunctionCallOutput, Tag("function_call_output_input")],
+        Annotated[NeMoGymEasyInputMessageForTraining, Tag("easy_message__training")],
+        Annotated[NeMoGymMessageForTraining, Tag("input_message__training")],
+        Annotated[NeMoGymResponseOutputMessageForTraining, Tag("output_message__training")],
+        Annotated[NeMoGymResponseFunctionToolCallForTraining, Tag("function_call__training")],
+        Annotated[NeMoGymResponseReasoningItemForTraining, Tag("reasoning__training")],
     ],
+    Discriminator(_discriminate_response_output_item),
+    BeforeValidator(_validate_atomic_token_metadata),
     BeforeValidator(_require_response_output_item_type),
 ]
+_register_item_tags(NeMoGymResponseOutputItem, _RESPONSE_OUTPUT_ITEM_TAG_BY_CLASS)
 
 
 class NeMoGymResponseInputTokensDetails(ResponseInputTokensDetails):

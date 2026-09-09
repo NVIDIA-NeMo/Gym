@@ -85,6 +85,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseCustomToolCall,
     NeMoGymResponseFileSearchToolCall,
+    NeMoGymResponseFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseFunctionWebSearch,
     NeMoGymResponseInputItem,
@@ -220,6 +221,214 @@ class TestTokenMetadataValidation:
                     "prompt_token_ids": [1],
                 },
             )
+
+    @pytest.mark.parametrize("container", ["input", "output"])
+    def test_response_items_reject_partial_metadata(self, container: str) -> None:
+        item = {
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "answer", "annotations": []}],
+            "prompt_token_ids": [1],
+        }
+
+        with pytest.raises(ValidationError, match="Token metadata must include all required fields"):
+            if container == "input":
+                NeMoGymResponseCreateParamsNonStreaming(input=[item])
+            else:
+                NeMoGymResponse.model_validate(_response_with_output([item]))
+
+
+class TestDiscriminatedResponseItems:
+    _TOKEN_METADATA = {
+        "prompt_token_ids": [1, 2],
+        "generation_token_ids": [3],
+        "generation_log_probs": [-0.1],
+        "routed_experts": [[[0, 1]]],
+    }
+
+    @pytest.mark.parametrize(
+        "payload, expected_type",
+        [
+            (
+                {"type": "message", "role": "user", "content": "question", "phase": "commentary"},
+                NeMoGymEasyInputMessage,
+            ),
+            (
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "question"}],
+                },
+                NeMoGymEasyInputMessage,
+            ),
+            (
+                {
+                    "type": "message",
+                    "role": "system",
+                    "status": "completed",
+                    "content": [{"type": "input_text", "text": "instructions"}],
+                },
+                NeMoGymMessage,
+            ),
+            (
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "answer", "annotations": []}],
+                    "phase": "final_answer",
+                },
+                NeMoGymResponseOutputMessage,
+            ),
+            (
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "input_text", "text": "local observation"}],
+                },
+                NeMoGymEasyInputMessage,
+            ),
+            (
+                {
+                    "type": "message",
+                    "id": "msg_2",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [],
+                },
+                NeMoGymResponseOutputMessage,
+            ),
+            (
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                },
+                NeMoGymEasyInputMessage,
+            ),
+        ],
+        ids=[
+            "easy-string",
+            "easy-input-content",
+            "input-status",
+            "output-content",
+            "assistant-input-content",
+            "output-empty-content",
+            "easy-empty-content",
+        ],
+    )
+    def test_message_shape_selects_concrete_class(self, payload: dict, expected_type: type) -> None:
+        request_item = NeMoGymResponseCreateParamsNonStreaming(input=[payload]).input[0]
+        response_item = NeMoGymResponse.model_validate(_response_with_output([payload])).output[0]
+
+        assert type(request_item) is expected_type
+        assert type(response_item) is expected_type
+
+    @pytest.mark.parametrize(
+        "base_type, payload",
+        [
+            (
+                NeMoGymEasyInputMessage,
+                {"type": "message", "role": "user", "content": "question", "phase": "commentary"},
+            ),
+            (
+                NeMoGymMessage,
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "status": "in_progress",
+                    "content": [{"type": "input_text", "text": "instructions"}],
+                },
+            ),
+            (
+                NeMoGymResponseOutputMessage,
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "status": "incomplete",
+                    "content": [{"type": "refusal", "refusal": "no"}],
+                    "phase": "final_answer",
+                },
+            ),
+            (
+                NeMoGymResponseFunctionToolCall,
+                {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "lookup",
+                    "arguments": "{}",
+                    "status": "completed",
+                    "namespace": "tools",
+                },
+            ),
+            (
+                NeMoGymResponseReasoningItem,
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [],
+                    "encrypted_content": "opaque",
+                },
+            ),
+        ],
+        ids=["easy-message", "input-message", "output-message", "function-call", "reasoning"],
+    )
+    def test_all_training_variants_preserve_fields_and_revalidate(self, base_type: type, payload: dict) -> None:
+        payload = {**payload, **self._TOKEN_METADATA}
+        expected_type = RESPONSES_TO_TRAIN[base_type]
+
+        request = NeMoGymResponseCreateParamsNonStreaming(input=[payload])
+        response = NeMoGymResponse.model_validate(_response_with_output([payload]))
+        assert type(request.input[0]) is expected_type
+        assert type(response.output[0]) is expected_type
+
+        request_dump = request.model_dump(mode="json", exclude_unset=True)
+        response_dump = response.model_dump(mode="json", exclude_unset=True)
+        for key, value in payload.items():
+            assert request_dump["input"][0][key] == value
+            assert response_dump["output"][0][key] == value
+
+        revalidated_request = NeMoGymResponseCreateParamsNonStreaming.model_validate(request_dump)
+        revalidated_response = NeMoGymResponse.model_validate(response_dump)
+        assert type(revalidated_request.input[0]) is expected_type
+        assert type(revalidated_response.output[0]) is expected_type
+        assert revalidated_request.model_dump(mode="json", exclude_unset=True) == request_dump
+        assert revalidated_response.model_dump(mode="json", exclude_unset=True) == response_dump
+
+        instance = expected_type.model_validate(payload)
+        assert type(NeMoGymResponseCreateParamsNonStreaming(input=[instance]).input[0]) is expected_type
+        assert type(NeMoGymResponse.model_validate(_response_with_output([instance])).output[0]) is expected_type
+
+    def test_typeless_input_uses_field_preserving_fallback(self) -> None:
+        payload = {"role": "tool", "tool_call_id": "call_1", "content": "result", "provider_field": {"x": 1}}
+
+        request = NeMoGymResponseCreateParamsNonStreaming(input=[payload])
+
+        assert type(request.input[0]) is NeMoGymResponseMcpListTools
+        assert request.model_dump(mode="json", exclude_unset=True)["input"][0] == payload
+
+    def test_function_call_output_models_route_by_output_fields(self) -> None:
+        input_payload = {"type": "function_call_output", "call_id": "call_1", "output": "result"}
+        output_payload = {
+            **input_payload,
+            "id": "fco_1",
+            "status": "completed",
+        }
+
+        request_item = NeMoGymResponseCreateParamsNonStreaming(input=[input_payload]).input[0]
+        local_output_item = NeMoGymResponse.model_validate(_response_with_output([input_payload])).output[0]
+        provider_output_item = NeMoGymResponse.model_validate(_response_with_output([output_payload])).output[0]
+
+        assert type(request_item) is NeMoGymFunctionCallOutput
+        assert type(local_output_item) is NeMoGymFunctionCallOutput
+        assert type(provider_output_item) is NeMoGymResponseFunctionCallOutput
+        assert provider_output_item.model_dump(mode="json", exclude_unset=True) == output_payload
 
 
 class TestNeMoGymChatCompletionSchemas:
