@@ -175,6 +175,36 @@ def write_jsonl(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
     print(f"Wrote {len(rows):3d} rows to {path}")
 
 
+def load_template(prompt_variant: str = "repo") -> str:
+    """Return a shipped prompt template, `.strip()`ed as ``eval_common.load_prompt`` does.
+
+    The ``repo`` variant reads the committed byte-exact copy rather than re-fetching, so
+    callers that only want rows (e.g. the benchmark prepare scripts) stay offline for the
+    prompt and pay one network call for the statements instead of two.
+    """
+    template_name, _ = PROMPT_VARIANTS[prompt_variant]
+    template = (Path(__file__).absolute().parent / "prompts" / template_name).read_text(encoding="utf-8").strip()
+    if "{formal_statement}" not in template:
+        raise ValueError(f"{template_name} does not contain the {{formal_statement}} placeholder")
+    return template
+
+
+def build_rows(prompt_variant: str = "repo") -> List[Dict[str, Any]]:
+    """Fetch the pinned upstream revision and render all 100 rows.
+
+    The shared entry point for this script and the `benchmarks/leancat*` prepare scripts, so
+    every consumer renders prompts the one way that matches upstream (statements from the
+    ``CAT_statement/*.lean`` files, trailing newline included).
+    """
+    template = load_template(prompt_variant)
+    records = load_records(fetch_text(RECORDS_URL))
+    print(f"Fetching {TARBALL_URL}")
+    with urllib.request.urlopen(TARBALL_URL) as response:
+        statements = load_statement_files(response.read())
+    print(f"Read {len(statements)} CAT_statement/*.lean files")
+    return [to_gym_row(record, template, statements) for record in records]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
