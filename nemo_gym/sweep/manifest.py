@@ -221,10 +221,23 @@ class Srun(BaseModel):
     sandbox_container: Optional[str] = None
     # Passed through to --container-mounts.
     mounts: Optional[str] = None
-    # Sandbox tier, i.e. SANDBOX_PORT / SANDBOX_WORKERS. One node only -- sessions pin to a worker
-    # by X-Session-ID, so workers is the only axis that scales here.
+    # Sandbox tier, i.e. SANDBOX_PORT / SANDBOX_WORKERS / SANDBOX_NODES.
+    #
+    # `sandbox_workers` is the per-node worker count and it is the real capacity number: the image
+    # forces STATEFUL_SANDBOX=1, which pins UWSGI_PROCESSES to 1 so each worker serves exactly one
+    # execution at a time. 32 workers on one node meant 32 concurrent executions against a driver
+    # concurrency of 4,096 (job 6706202: 1,168 session timeouts, ns_tools and lean returned
+    # nothing).
+    #
+    # `sandbox_nodes` scales the tier past one node. The launcher starts a sandbox on that many of
+    # the job's nodes and fronts them with an nginx balancer that consistent-hashes X-Session-ID,
+    # matching what each sandbox does internally, so a stateful IPython session still lands on one
+    # worker. Total concurrency is sandbox_nodes x sandbox_workers.
     sandbox_port: Optional[int] = Field(default=None, ge=1)
     sandbox_workers: Optional[int] = Field(default=None, ge=1)
+    sandbox_nodes: Optional[int] = Field(default=None, ge=1)
+    # Port the balancer listens on, i.e. SANDBOX_LB_PORT. Unused when sandbox_nodes is 1.
+    sandbox_lb_port: Optional[int] = Field(default=None, ge=1)
 
     def env(self) -> Dict[str, str]:
         pairs = {
@@ -233,6 +246,8 @@ class Srun(BaseModel):
             "MOUNTS": self.mounts,
             "SANDBOX_PORT": self.sandbox_port,
             "SANDBOX_WORKERS": self.sandbox_workers,
+            "SANDBOX_NODES": self.sandbox_nodes,
+            "SANDBOX_LB_PORT": self.sandbox_lb_port,
         }
         return {key: str(value) for key, value in pairs.items() if value is not None}
 
@@ -270,6 +285,59 @@ class Vllm(BaseModel):
             "MAX_NUM_SEQS_PER_DECODE_ENGINE": self.max_num_seqs,
         }
         return {key: str(value) for key, value in pairs.items() if value is not None}
+
+
+class VllmRouter(BaseModel):
+    """Settings for ``vllm-router``, the P/D front end every Gym server talks to.
+
+    Separate from ``vllm`` because it is a different command: ``vllm serve`` runs one engine per
+    node, ``vllm-router`` is the single process in front of all of them, and its failure modes are
+    its own.
+
+    The defaults here are the launcher's, chosen after job 6706202 produced ~483,000
+    ``ClientOSError``s against the router while the GPUs sat at 4.5% KV cache. The router
+    health-checks each engine on a 5 s timeout by default and ejects one after 3 consecutive
+    misses; a loaded engine misses easily, and every ejection drops its in-flight connections.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Per-request ceiling, i.e. ROUTER_REQUEST_TIMEOUT_S. Must be finite and shorter than the job:
+    # a wedged request holds a driver concurrency slot until it returns, and the old 86400 meant
+    # "never" inside a 4 h job. Observed elapsed_s ran to 7,995 s under the old value.
+    request_timeout_s: Optional[int] = Field(default=None, ge=1)
+    # Engine health checks, i.e. ROUTER_HEALTH_TIMEOUT_S / _INTERVAL_S / ROUTER_HEALTH_FAILURES.
+    # Generous on purpose -- a slow /health means the engine is busy, not dead.
+    health_timeout_s: Optional[int] = Field(default=None, ge=1)
+    health_interval_s: Optional[int] = Field(default=None, ge=1)
+    health_failures: Optional[int] = Field(default=None, ge=1)
+    # Admission control, i.e. ROUTER_MAX_CONCURRENT / ROUTER_QUEUE_SIZE / ROUTER_QUEUE_TIMEOUT_S.
+    # queue_size 0 makes the router return 429 the moment max_concurrent is reached.
+    max_concurrent: Optional[int] = Field(default=None, ge=1)
+    queue_size: Optional[int] = Field(default=None, ge=0)
+    queue_timeout_s: Optional[int] = Field(default=None, ge=1)
+    # Eject an engine after repeated failures, i.e. ROUTER_CIRCUIT_BREAKER. Off by default: the
+    # engines are a fixed fleet inside one job, so there is nowhere to fail over to, and opening
+    # the breaker only converts a slow engine into a dead one.
+    circuit_breaker: Optional[bool] = None
+    # i.e. ROUTER_LOG_LEVEL. `error` hides the worker-health transitions that explain a stall.
+    log_level: Optional[str] = Field(default=None, pattern=r"^(debug|info|warning|error|critical)$")
+
+    def env(self) -> Dict[str, str]:
+        pairs = {
+            "ROUTER_REQUEST_TIMEOUT_S": self.request_timeout_s,
+            "ROUTER_HEALTH_TIMEOUT_S": self.health_timeout_s,
+            "ROUTER_HEALTH_INTERVAL_S": self.health_interval_s,
+            "ROUTER_HEALTH_FAILURES": self.health_failures,
+            "ROUTER_MAX_CONCURRENT": self.max_concurrent,
+            "ROUTER_QUEUE_SIZE": self.queue_size,
+            "ROUTER_QUEUE_TIMEOUT_S": self.queue_timeout_s,
+            "ROUTER_LOG_LEVEL": self.log_level,
+        }
+        env = {key: str(value) for key, value in pairs.items() if value is not None}
+        if self.circuit_breaker is not None:
+            env["ROUTER_CIRCUIT_BREAKER"] = "1" if self.circuit_breaker else "0"
+        return env
 
 
 class GymEvalProfile(BaseModel):
@@ -331,6 +399,7 @@ class SweepManifest(BaseModel):
     sbatch: Sbatch = Field(default_factory=Sbatch)
     srun: Srun = Field(default_factory=Srun)
     vllm: Vllm = Field(default_factory=Vllm)
+    vllm_router: VllmRouter = Field(default_factory=VllmRouter)
     gym_eval_profile: GymEvalProfile = Field(default_factory=GymEvalProfile)
     gym_env_start: GymEnvStart = Field(default_factory=GymEnvStart)
     gym_eval_run: GymEvalRun = Field(default_factory=GymEvalRun)

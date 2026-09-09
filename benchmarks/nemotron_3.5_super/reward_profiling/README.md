@@ -119,9 +119,21 @@ the things you tune first, then the deployment config, then the data.
 6. **srun** — containers, for `srun --container-image`
     - `container`, `sandbox_container`, `mounts`. The container belongs here because it is built
       *from* this manifest, so the two stay together
-    - `sandbox_port`, `sandbox_workers`: the sandbox is one node, and workers is the only axis
-      that scales it, since sessions pin to a worker by `X-Session-ID`
-7. **gym_eval_run** — runtime settings, emitted as `++key=value`
+    - `sandbox_port`, `sandbox_workers`, `sandbox_nodes`, `sandbox_lb_port`: capacity is
+      `sandbox_nodes x sandbox_workers` concurrent executions, since the image runs one uWSGI
+      process per worker. Leave `sandbox_nodes` unset to use every node in the job; above one, the
+      launcher fronts them with an nginx balancer that consistent-hashes `X-Session-ID` so a
+      stateful session still pins to one worker
+7. **vllm_router** — the P/D front end, i.e. `vllm-router`
+    - `health_timeout_s`, `health_interval_s`, `health_failures`: the router ejects an engine that
+      misses its health check, and each ejection drops that engine's in-flight connections. The
+      stock 5 s / 3-miss defaults eject engines simply for being busy
+    - `request_timeout_s`: must be finite and shorter than the walltime, or a wedged request holds
+      a driver concurrency slot until the job dies
+    - `max_concurrent`, `queue_size`, `queue_timeout_s`: admission control; the stock queue is 100
+      deep and returns 429 past it
+    - `circuit_breaker`, `log_level`
+8. **gym_eval_run** — runtime settings, emitted as `++key=value`
     - `num_repeats`: rollouts per task; the spread across them is the profile. Applied by
       01_materialize.sh, which writes this many copies of each row into the materialized inputs,
       so collection itself runs with `++num_repeats=1`
@@ -130,21 +142,21 @@ the things you tune first, then the deployment config, then the data.
       passes `++` only when its env var is set, so these are defaults rather than something
       silently clobbered. `num_samples_in_parallel` falls back to `512 × decode_nodes` when
       neither the manifest nor the environment sets it, since only the launcher knows the shape
-8. **gym_eval_profile** — settings for `gym eval profile`
+9. **gym_eval_profile** — settings for `gym eval profile`
     - `allow_partial_rollouts` (default true) and `jobs` (concurrent labels). Unlike
       `gym_eval_run`, extras here are exported as environment variables rather than `++`
       overrides, so only these two are read. Separate from `gym_eval_run` because they are
       different commands:
       `allow_partial_rollouts` exists only on the profiler, so putting it under `gym_eval_run`
       sends it to collection where nothing reads it
-9. **gym_env_start** — becomes `sweep_config.yaml`, passed as `--config`
+10. **gym_env_start** — becomes `sweep_config.yaml`, passed as `--config`
     - `config_paths`: sweep-wide configs merged ahead of every entry's own. Usually just the model
       server, e.g. `responses_api_models/vllm_model/configs/vllm_model.yaml`
     - any other key: ordinary Gym config, spliced in verbatim. A config overrides whatever its own
       `config_paths` pulled in, so these beat every file — which is how a judge gets rebound
       without editing an upstream config. Do it here rather than in a file: the container is built
       from a Gym ref and has no copy of this repo, so a repo-relative path will not resolve inside it
-10. **entries** — the environments to be profiled
+11. **entries** — the environments to be profiled
     - `label` (required): nickname of profiled env. Becomes a filename and a `by_label/`
       directory, so `[A-Za-z0-9._-]` only; same for `nickname`
     - `agent` (required): `agent_ref` of the data

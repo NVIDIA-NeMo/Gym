@@ -175,8 +175,12 @@ own, or `SANDBOX_CONTAINER=<nemo-skills sqsh>`. Without it `ns_tools` falls back
 where nothing listens, and every rollout fails with a bare 500. `03_run_single.sh` starts one and waits
 for `/health` before collecting, so watch that gate rather than the rollout count.
 
-The sandbox is one node only — sessions pin to a worker by `X-Session-ID` consistent hashing, so it
-does not span nodes. Only one arm64 build exists:
+Sandbox capacity is `sandbox_nodes x sandbox_workers` concurrent executions. The image forces one
+uWSGI process per worker, so the worker count *is* the concurrency — a session pins to a worker by
+`X-Session-ID` consistent hashing and holds it. `sandbox_nodes` defaults to every node in the job;
+the sandboxes ride along on the vLLM nodes and are fronted by an nginx balancer hashing the same
+header, so they cost no extra nodes. If your environment executes code, size this rather than
+assuming GPUs are the limit. Only one arm64 build exists:
 `/lustre/fsw/portfolios/llmservice/users/igitman/images/nemo-skills-sandbox-0.7.1-arm64.sqsh`
 
 ## 04 - Adding a manifest entry into manifests/nemotron_3_5_super.yaml

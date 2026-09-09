@@ -31,7 +31,9 @@
 #   SANDBOX_CONTAINER  a nemo-skills sandbox sqsh. Without one those entries read
 #                      NEMO_SKILLS_SANDBOX_HOST/PORT, fall back to 127.0.0.1:6000 where nothing
 #                      listens, and fail with a bare 500 per rollout rather than at startup
-#   SANDBOX_PORT / SANDBOX_WORKERS         6000 / 32
+#   SANDBOX_PORT / SANDBOX_WORKERS         6000 / 64 (workers is per node)
+#   SANDBOX_NODES                          every node in the job
+#   SANDBOX_LB_PORT                        6001; unused when SANDBOX_NODES is 1
 #
 # OPTIONAL - throughput
 #   NUM_SAMPLES_IN_PARALLEL   512 x decode_nodes, or the manifest's value if it sets one
@@ -41,10 +43,20 @@
 #   SERVERS_READY_TIMEOUT_S / ENV_START_ATTEMPTS   1800 / 4
 #   ENV_YAML / MOUNTS / LOG_DIR            $PWD/env.yaml / /lustre:/lustre / SWEEP_DIR/slurm-logs
 #
-# The sandbox image runs nginx over N uWSGI workers on ONE node, hashing X-Session-ID so a
-# stateful IPython session stays pinned to a worker. It does not span nodes and
-# NEMO_SKILLS_SANDBOX_HOST takes a single host, so sandbox capacity is one node's worth --
-# measured at 483 rollouts/hr on 32 workers. Scaling past that needs a balancer in front.
+# OPTIONAL - vllm-router (the single process every Gym server talks to)
+#   ROUTER_REQUEST_TIMEOUT_S               3600
+#   ROUTER_HEALTH_TIMEOUT_S / _INTERVAL_S  60 / 120
+#   ROUTER_HEALTH_FAILURES                 10
+#   ROUTER_MAX_CONCURRENT / ROUTER_QUEUE_SIZE / ROUTER_QUEUE_TIMEOUT_S
+#                                          32768 / NUM_SAMPLES_IN_PARALLEL / 600
+#   ROUTER_CIRCUIT_BREAKER                 0 (off)
+#   ROUTER_LOG_LEVEL                       info
+#
+# Sandbox capacity is SANDBOX_NODES x SANDBOX_WORKERS concurrent executions. Each sandbox is nginx
+# over N single-process uWSGI workers, consistent-hashing X-Session-ID so a stateful IPython
+# session pins to one worker; the image forces one process per worker, so the worker count *is*
+# the concurrency. With SANDBOX_NODES > 1 the launcher fronts them with an nginx balancer that
+# hashes the same header the same way, so session -> node -> worker stays deterministic.
 set -euo pipefail
 
 # SWEEP_DIR first and on its own: it is the path to the manifest's own output, so unlike MODEL and
@@ -66,7 +78,7 @@ try:
     doc = json.loads((Path(sys.argv[1]) / "sweep_report.json").read_text())
 except OSError:
     doc = {}
-for block in ("sbatch", "srun", "vllm", "gym_eval_profile"):
+for block in ("sbatch", "srun", "vllm", "vllm_router", "gym_eval_profile"):
     for key, value in (doc.get(block) or {}).items():
         print(f"{key}={value}")
 PY_SBATCH
@@ -102,11 +114,26 @@ mkdir -p "$LOG_DIR"
 # Empty disables the sandbox sidecar, which is correct for the no-judge and judge lanes.
 SANDBOX_CONTAINER=${SANDBOX_CONTAINER:-}
 SANDBOX_PORT=${SANDBOX_PORT:-6000}
-# One worker per core starves the driver, which shares the node. 32 was measured; raise it when the
-# sandbox gets a node to itself.
-SANDBOX_WORKERS=${SANDBOX_WORKERS:-32}
+# Workers per sandbox node, and the real concurrency number. The image sets STATEFUL_SANDBOX=1,
+# which pins UWSGI_PROCESSES to 1 so each worker serves exactly one execution at a time -- passing
+# UWSGI_PROCESSES is a no-op, NUM_WORKERS is the knob. 32 on one node meant 32 concurrent
+# executions against a driver concurrency of 4,096 in job 6706202, which is where the 1,168
+# session timeouts came from.
+SANDBOX_WORKERS=${SANDBOX_WORKERS:-64}
+# How many of the job's nodes run a sandbox. Sandboxes ride along on the vLLM nodes with --overlap
+# and --gpus=0: they are CPU work, and a GB200 node has 144 cores that the engines do not use.
+# Total sandbox concurrency is SANDBOX_NODES x SANDBOX_WORKERS. Defaults to every node in the job.
+SANDBOX_NODES=${SANDBOX_NODES:-$((NUM_PREFILL_NODES + NUM_DECODE_NODES))}
+# Port the balancer listens on. Only used when SANDBOX_NODES > 1; with a single sandbox the driver
+# talks to it directly and there is no balancer process.
+SANDBOX_LB_PORT=${SANDBOX_LB_PORT:-6001}
 if [[ -n "$SANDBOX_CONTAINER" && ! -f "$SANDBOX_CONTAINER" ]]; then
     echo "ERROR: SANDBOX_CONTAINER=$SANDBOX_CONTAINER does not exist." >&2
+    exit 2
+fi
+if (( SANDBOX_NODES > NUM_PREFILL_NODES + NUM_DECODE_NODES )); then
+    echo "ERROR: SANDBOX_NODES=$SANDBOX_NODES exceeds the job's $((NUM_PREFILL_NODES + NUM_DECODE_NODES)) nodes." >&2
+    echo "       Sandboxes ride along on the vLLM nodes; they do not add any." >&2
     exit 2
 fi
 
@@ -261,7 +288,46 @@ DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
 ROUTER_SERVER_PORT=8000
 WORKER_SERVER_PORT=8001
 
+# ---- vllm-router ----------------------------------------------------------------
+# One process fronts every engine, so every Gym server's traffic crosses it. Job 6706202 logged
+# ~483,000 ClientOSErrors here against 25,494 completed rollouts while the engines idled at 4.5%
+# KV cache -- read the "Hit N global" counter in env_start.log, not the line count, because Gym
+# prints one line per 100 errors.
+#
+# The router health-checks each engine every 60 s with a 5 s timeout and ejects it after 3 misses.
+# A busy engine misses that easily, and an ejection drops its in-flight connections, so the
+# defaults turn load into apparent failure. These are deliberately generous: a slow /health means
+# the engine is working.
+ROUTER_HEALTH_TIMEOUT_S=${ROUTER_HEALTH_TIMEOUT_S:-60}
+ROUTER_HEALTH_INTERVAL_S=${ROUTER_HEALTH_INTERVAL_S:-120}
+ROUTER_HEALTH_FAILURES=${ROUTER_HEALTH_FAILURES:-10}
+# Finite, and shorter than the job. The previous 86400 meant "never" inside a 4 h walltime, so a
+# wedged request held a driver concurrency slot until the job died -- observed elapsed_s reached
+# 7,995 s. A request that has not returned in an hour is not coming back.
+ROUTER_REQUEST_TIMEOUT_S=${ROUTER_REQUEST_TIMEOUT_S:-3600}
+# Admission control. The router's own default queue is 100 deep, which overflows to 429 the moment
+# a burst exceeds it, so size the queue to the driver's concurrency instead.
+ROUTER_MAX_CONCURRENT=${ROUTER_MAX_CONCURRENT:-32768}
+ROUTER_QUEUE_SIZE=${ROUTER_QUEUE_SIZE:-$NUM_SAMPLES_IN_PARALLEL}
+ROUTER_QUEUE_TIMEOUT_S=${ROUTER_QUEUE_TIMEOUT_S:-600}
+# 1 keeps the router's circuit breaker, 0 disables it. Off by default: the engines are a fixed
+# fleet inside one job, so there is nowhere to fail over to, and opening the breaker only turns a
+# slow engine into a dead one.
+ROUTER_CIRCUIT_BREAKER=${ROUTER_CIRCUIT_BREAKER:-0}
+# `error` hid every worker-health transition in 6706202, which is exactly what explains a stall.
+ROUTER_LOG_LEVEL=${ROUTER_LOG_LEVEL:-info}
+
 eval_command=$(cat <<EOF
+# The 63 Gym servers hold a socket per in-flight request to the router, so the default soft
+# limit is the wrong order of magnitude at NUM_SAMPLES_IN_PARALLEL=4096. Only the vLLM shell
+# raised this before, which left the client side -- the side that reported the ClientOSErrors in
+# 6706202 -- on the default.
+if [[ \$(ulimit -Hn) == "unlimited" ]] || [[ 65535 -lt \$(ulimit -Hn) ]]; then
+  ulimit -Sn 65535
+else
+  ulimit -Sn "\$(ulimit -Hn)"
+fi
+
 # Activate the container's Gym venv. SWEEP_DIR holds the artifacts 01_materialize.sh wrote.
 source /opt/Gym_venv/bin/activate
 cd /opt/Gym
@@ -395,9 +461,18 @@ if (( SLURM_PROCID == 0 )); then
         --host \$this_node_hostname \
         --port $ROUTER_SERVER_PORT \
         --intra-node-data-parallel-size 1 \
-        --request-timeout-secs 86400 \
-        --log-level error
+        --request-timeout-secs $ROUTER_REQUEST_TIMEOUT_S \
+        --health-check-timeout-secs $ROUTER_HEALTH_TIMEOUT_S \
+        --health-check-interval-secs $ROUTER_HEALTH_INTERVAL_S \
+        --health-failure-threshold $ROUTER_HEALTH_FAILURES \
+        --max-concurrent-requests $ROUTER_MAX_CONCURRENT \
+        --queue-size $ROUTER_QUEUE_SIZE \
+        --queue-timeout-secs $ROUTER_QUEUE_TIMEOUT_S \
+        --log-level $ROUTER_LOG_LEVEL
     )
+    if (( $ROUTER_CIRCUIT_BREAKER == 0 )); then
+        router_args+=(--disable-circuit-breaker)
+    fi
 
     for (( i = 0; i < $NUM_PREFILL_NODES; i++ )); do
         router_args+=(--prefill "http://\${nodes[i]}:$WORKER_SERVER_PORT")
@@ -474,41 +549,129 @@ trap cleanup_server EXIT INT TERM
         EVAL_NODE=\${nodes[0]}
     fi
 
-    # Sandbox sidecar on the eval node, so ns_tools reaches it over loopback. Started before the
-    # driver and waited on: if the driver starts first it burns rollouts against a dead port.
+    # Sandbox tier. One sandbox per node for the first SANDBOX_NODES nodes, fronted by an nginx
+    # balancer when there is more than one. Started before the driver and waited on: if the driver
+    # starts first it burns rollouts against a dead port.
+    #
+    # Each sandbox is nginx over NUM_WORKERS single-process uWSGI workers, consistent-hashing
+    # X-Session-ID so a stateful IPython session pins to one worker. The balancer hashes the same
+    # header the same way, so the two tiers compose: session -> node -> worker, deterministically.
+    # Round-robin here would break sessions, which is why this is not a plain proxy.
     if [[ -n "$SANDBOX_CONTAINER" ]]; then
-        echo "starting sandbox on \$EVAL_NODE (${SANDBOX_WORKERS} workers, port ${SANDBOX_PORT})"
-        srun --overlap --nodes=1 --ntasks=1 --nodelist="\$EVAL_NODE" --gpus=0 \
-            --cpus-per-task=${SANDBOX_WORKERS} \
-            --container-image=$SANDBOX_CONTAINER \
-            --container-mounts=$MOUNTS \
-            --no-container-mount-home \
-            bash -lc 'export UWSGI_PROCESSES=${SANDBOX_WORKERS} NUM_WORKERS=${SANDBOX_WORKERS} \
-                      LISTEN_PORT=${SANDBOX_PORT} NGINX_PORT=${SANDBOX_PORT}; exec /start-with-nginx.sh' \
-            > "$LOG_DIR/\${SLURM_JOB_ID}-sandbox.log" 2>&1 &
-        sandbox_step=\$!
+        sandbox_nodes=()
+        for (( i = 0; i < $SANDBOX_NODES; i++ )); do
+            sandbox_nodes+=("\${nodes[i]}")
+        done
+        echo "starting $SANDBOX_NODES sandbox(es), ${SANDBOX_WORKERS} workers each, on \${sandbox_nodes[*]}"
 
-        SANDBOX_IP=\$(getent hosts "\$EVAL_NODE" | awk 'NR==1 {print \$1}')
-        echo "waiting for sandbox at \$SANDBOX_IP:${SANDBOX_PORT}/health ..."
-        for _i in \$(seq 1 60); do
-            if curl -sf -m 3 "http://\$SANDBOX_IP:${SANDBOX_PORT}/health" >/dev/null 2>&1; then
-                echo "sandbox healthy after \${_i}0s"; break
-            fi
-            if ! kill -0 "\$sandbox_step" 2>/dev/null; then
-                echo "ERROR: sandbox exited during startup; see $LOG_DIR/\${SLURM_JOB_ID}-sandbox.log" >&2
+        sandbox_steps=()
+        for _sb_node in "\${sandbox_nodes[@]}"; do
+            srun --overlap --nodes=1 --ntasks=1 --nodelist="\$_sb_node" --gpus=0 \
+                --cpus-per-task=${SANDBOX_WORKERS} \
+                --container-image=$SANDBOX_CONTAINER \
+                --container-mounts=$MOUNTS \
+                --no-container-mount-home \
+                bash -lc 'export NUM_WORKERS=${SANDBOX_WORKERS} \
+                          LISTEN_PORT=${SANDBOX_PORT} NGINX_PORT=${SANDBOX_PORT}; exec /start-with-nginx.sh' \
+                > "$LOG_DIR/\${SLURM_JOB_ID}-sandbox-\${_sb_node}.log" 2>&1 &
+            sandbox_steps+=(\$!)
+        done
+
+        # Wait for every sandbox. A missing one is fatal rather than degraded: the balancer hashes
+        # over a fixed server list, so a dead member silently black-holes its share of sessions.
+        for _idx in "\${!sandbox_nodes[@]}"; do
+            _sb_node="\${sandbox_nodes[_idx]}"
+            _sb_pid="\${sandbox_steps[_idx]}"
+            _sb_ip=\$(getent hosts "\$_sb_node" | awk 'NR==1 {print \$1}')
+            echo "waiting for sandbox at \$_sb_ip:${SANDBOX_PORT}/health ..."
+            for _i in \$(seq 1 60); do
+                if curl -sf -m 3 "http://\$_sb_ip:${SANDBOX_PORT}/health" >/dev/null 2>&1; then
+                    echo "sandbox on \$_sb_node healthy after \${_i}0s"; break
+                fi
+                if ! kill -0 "\$_sb_pid" 2>/dev/null; then
+                    echo "ERROR: sandbox on \$_sb_node exited during startup; see $LOG_DIR/\${SLURM_JOB_ID}-sandbox-\${_sb_node}.log" >&2
+                    exit 1
+                fi
+                sleep 10
+            done
+            if ! curl -sf -m 3 "http://\$_sb_ip:${SANDBOX_PORT}/health" >/dev/null 2>&1; then
+                echo "ERROR: sandbox on \$_sb_node never became healthy; see $LOG_DIR/\${SLURM_JOB_ID}-sandbox-\${_sb_node}.log" >&2
                 exit 1
             fi
-            sleep 10
         done
-        if ! curl -sf -m 3 "http://\$SANDBOX_IP:${SANDBOX_PORT}/health" >/dev/null 2>&1; then
-            echo "ERROR: sandbox never became healthy; see $LOG_DIR/\${SLURM_JOB_ID}-sandbox.log" >&2
-            exit 1
+
+        EVAL_NODE_IP=\$(getent hosts "\$EVAL_NODE" | awk 'NR==1 {print \$1}')
+        if (( $SANDBOX_NODES == 1 )); then
+            # Single sandbox: talk to it directly, no balancer hop.
+            SANDBOX_ENDPOINT_IP=\$(getent hosts "\${sandbox_nodes[0]}" | awk 'NR==1 {print \$1}')
+            SANDBOX_ENDPOINT_PORT=${SANDBOX_PORT}
+        else
+            # Balancer on the eval node, so the driver reaches it over loopback.
+            _lb_conf="$SWEEP_DIR/sandbox-lb.conf"
+            {
+                echo "events { worker_connections 16384; }"
+                echo "http {"
+                # Empty header means no session -- fall back to the per-request id so those
+                # requests spread rather than all piling onto one node.
+                echo "    map \\\$http_x_session_id \\\$hash_key { \"\"  \\\$request_id; default \\\$http_x_session_id; }"
+                echo "    upstream sandbox_nodes {"
+                echo "        hash \\\$hash_key consistent;"
+                for _sb_node in "\${sandbox_nodes[@]}"; do
+                    _sb_ip=\$(getent hosts "\$_sb_node" | awk 'NR==1 {print \$1}')
+                    echo "        server \$_sb_ip:${SANDBOX_PORT} max_fails=0;"
+                done
+                echo "    }"
+                echo "    server {"
+                echo "        listen ${SANDBOX_LB_PORT};"
+                echo "        client_max_body_size 10M;"
+                echo "        location / {"
+                echo "            proxy_pass http://sandbox_nodes;"
+                echo "            proxy_set_header X-Session-ID \\\$http_x_session_id;"
+                # Match the per-node nginx: long code executions, no buffering, and never retry
+                # elsewhere -- a retry on another node would land on a different IPython session.
+                echo "            proxy_connect_timeout 1200s;"
+                echo "            proxy_send_timeout 1200s;"
+                echo "            proxy_read_timeout 1200s;"
+                echo "            proxy_buffering off;"
+                echo "            proxy_next_upstream off;"
+                echo "        }"
+                echo "    }"
+                echo "}"
+            } > "\$_lb_conf"
+
+            echo "starting sandbox balancer on \$EVAL_NODE:${SANDBOX_LB_PORT} over $SANDBOX_NODES nodes"
+            srun --overlap --nodes=1 --ntasks=1 --nodelist="\$EVAL_NODE" --gpus=0 \
+                --container-image=$SANDBOX_CONTAINER \
+                --container-mounts=$MOUNTS \
+                --no-container-mount-home \
+                bash -lc "exec nginx -c '\$_lb_conf' -g 'daemon off;'" \
+                > "$LOG_DIR/\${SLURM_JOB_ID}-sandbox-lb.log" 2>&1 &
+            sandbox_lb_step=\$!
+
+            echo "waiting for sandbox balancer at \$EVAL_NODE_IP:${SANDBOX_LB_PORT}/health ..."
+            for _i in \$(seq 1 30); do
+                if curl -sf -m 3 "http://\$EVAL_NODE_IP:${SANDBOX_LB_PORT}/health" >/dev/null 2>&1; then
+                    echo "sandbox balancer healthy after \${_i}0s"; break
+                fi
+                if ! kill -0 "\$sandbox_lb_step" 2>/dev/null; then
+                    echo "ERROR: sandbox balancer exited during startup; see $LOG_DIR/\${SLURM_JOB_ID}-sandbox-lb.log" >&2
+                    exit 1
+                fi
+                sleep 10
+            done
+            if ! curl -sf -m 3 "http://\$EVAL_NODE_IP:${SANDBOX_LB_PORT}/health" >/dev/null 2>&1; then
+                echo "ERROR: sandbox balancer never became healthy; see $LOG_DIR/\${SLURM_JOB_ID}-sandbox-lb.log" >&2
+                exit 1
+            fi
+            SANDBOX_ENDPOINT_IP="\$EVAL_NODE_IP"
+            SANDBOX_ENDPOINT_PORT=${SANDBOX_LB_PORT}
         fi
+
         # Exported, not prefixed onto srun: bash decides which words are assignments at parse
         # time, so an expanded "VAR=value" would become the command name instead. srun propagates
         # the environment into the container, which is how ROUTER_NODE already reaches it.
-        export NEMO_SKILLS_SANDBOX_HOST="\$SANDBOX_IP"
-        export NEMO_SKILLS_SANDBOX_PORT="${SANDBOX_PORT}"
+        export NEMO_SKILLS_SANDBOX_HOST="\$SANDBOX_ENDPOINT_IP"
+        export NEMO_SKILLS_SANDBOX_PORT="\$SANDBOX_ENDPOINT_PORT"
     fi
 
     # @bxyu-nvidia: We need --cpus-per-task=SLURM_CPUS_ON_NODE, otherwise we run into a lot of ServerDisconnectedError and ConnectionResetByPeer errors from Gym servers and vLLM. Not sure what the correlation is

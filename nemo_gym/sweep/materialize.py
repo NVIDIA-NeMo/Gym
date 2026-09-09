@@ -101,6 +101,7 @@ class MaterializeReport:
     srun: Dict[str, str] = field(default_factory=dict)
     # MODEL / VLLM_CONFIG, applied the same way.
     vllm: Dict[str, str] = field(default_factory=dict)
+    vllm_router: Dict[str, str] = field(default_factory=dict)
     # ALLOW_PARTIAL_ROLLOUTS / PROFILE_JOBS, plus any ++ the profiler takes.
     gym_eval_profile: Dict[str, Any] = field(default_factory=dict)
 
@@ -128,6 +129,7 @@ class MaterializeReport:
             "sbatch": self.sbatch,
             "srun": self.srun,
             "vllm": self.vllm,
+            "vllm_router": self.vllm_router,
             "gym_eval_profile": self.gym_eval_profile,
             "total_source_rows": self.total_source_rows,
             "total_materialized_rows": self.total_materialized_rows,
@@ -367,6 +369,7 @@ def materialize(
         sbatch=manifest.sbatch.env(),
         srun=manifest.srun.env(),
         vllm=manifest.vllm.env(),
+        vllm_router=manifest.vllm_router.env(),
         gym_eval_profile={**manifest.gym_eval_profile.env(), **manifest.gym_eval_profile.overrides()},
         rows_per_entry=rows_per_entry,
         materialized_per_entry=materialized_per_entry,

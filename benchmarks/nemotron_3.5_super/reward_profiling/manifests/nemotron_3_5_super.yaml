@@ -31,6 +31,26 @@ vllm:
   prefill_nodes: 1
   decode_nodes: 2
 
+# The P/D front end, i.e. `vllm-router`. One process carries every Gym server's traffic, and its
+# stock defaults turn load into apparent failure: job 6706202 logged ~483,000 ClientOSErrors here
+# while the engines sat at 4.5% KV cache. The health check is the culprit -- 5 s timeout, eject
+# after 3 misses -- because a busy engine misses easily and each ejection drops its in-flight
+# connections. See RATES.md, "What is actually starving the GPUs".
+vllm_router:
+  # A slow /health means the engine is working, not dead.
+  health_timeout_s: 60
+  health_interval_s: 120
+  health_failures: 10
+  # Finite and shorter than the walltime. The old 86400 meant "never" inside a 4 h job, so a
+  # wedged request held a driver concurrency slot until the job died.
+  request_timeout_s: 3600
+  # The router's own default queue is 100 deep and returns 429 past it; size it to the driver.
+  queue_size: 4096
+  queue_timeout_s: 600
+  # Nowhere to fail over to inside one job, so opening the breaker only kills a slow engine.
+  circuit_breaker: false
+  log_level: info
+
 # Which rows enter the sweep, read by `01_materialize.sh`.
 # Unset limits mean every row of every dataset, which is what a real profiling run wants.
 # Uncomment to commit a subset -- LIMIT_PER_ENTRY is for smoke runs and only lowers these.
@@ -52,6 +72,17 @@ srun:
   # Only one arm64 build of the sandbox exists; ns_tools and math_formal_lean need it, and without
   # it they fall back to 127.0.0.1:6000 and fail with a bare 500 per rollout.
   sandbox_container: /lustre/fsw/portfolios/llmservice/users/igitman/images/nemo-skills-sandbox-0.7.1-arm64.sqsh
+  # Sandbox concurrency is sandbox_nodes x sandbox_workers, and it is a separate axis from GPU
+  # count. The image forces one uWSGI process per worker, so the worker count *is* the number of
+  # simultaneous executions: 32 on a single node against a driver concurrency of 4,096 produced
+  # 1,168 session timeouts in job 6706202 and left ns_tools and lean with zero rollouts.
+  # Sandboxes ride along on the vLLM nodes (--overlap, --gpus=0) and are fronted by an nginx
+  # balancer that consistent-hashes X-Session-ID, so they cost no extra nodes.
+  #
+  # sandbox_nodes is deliberately left unset: the launcher then uses every node in the job, so the
+  # tier tracks prefill_nodes + decode_nodes instead of capping at whatever this file happened to
+  # say when the shape was smaller. Set it only to hold the sandbox below the job size.
+  sandbox_workers: 64
   # Built by ../../build_eval_container.sh from configs/container_config.yaml, which is generated
   # from this manifest -- so the image has exactly these entries' servers baked in. Rebuild and
   # update this when an entry pulls in a new server; running against an image built for a different
