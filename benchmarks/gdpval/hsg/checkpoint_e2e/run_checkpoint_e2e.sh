@@ -31,6 +31,8 @@ JUDGE_PORTS_SH="$SCRIPT_DIR/judge_ports.sh"
 JUDGE_PROGRESS_SH="$SCRIPT_DIR/judge_progress.sh"
 ROLLOUT_LIFECYCLE_SH="$SCRIPT_DIR/rollout_lifecycle.sh"
 ROLLOUT_SHARD_COVERAGE_PY="$SCRIPT_DIR/rollout_shard_coverage.py"
+ROLLOUT_RUNTIME_PY="$SCRIPT_DIR/rollout_runtime.py"
+ROLLOUT_SERVING_PY="$SCRIPT_DIR/rollout_serving.py"
 PYTHON_BIN="${CHECKPOINT_E2E_PYTHON:-python3}"
 
 [[ -r $SLURM_RECEIPTS_SH ]] || {
@@ -236,7 +238,7 @@ acquire_launcher_lock() {
 }
 
 prepare_campaign() {
-    local checkpoint=$1 model_name runner_sha rollout_sha serve_sha judge_sha overlay_sha parser_sha
+    local checkpoint=$1 model_name rollout_sha serve_sha judge_sha overlay_sha parser_sha
     local gym_revision rollout_gym_revision
     local family="${CHECKPOINT_E2E_MODEL_FAMILY:-super35-nemotron}"
     [[ $family == super35-nemotron ]] \
@@ -252,15 +254,22 @@ prepare_campaign() {
         "$TRANSPORT_ASSIGNMENT" "$SLURM_RECEIPTS_SH" "$MARS_PACKAGE_ID_FILE" \
         "$MARS_NODE_LOCAL_SH" "$GYM_ENTRYPOINT_PY" "$JUDGE_SESSION_PY" \
         "$JUDGE_PORTS_SH" "$JUDGE_PROGRESS_SH" \
-        "$ROLLOUT_LIFECYCLE_SH" "$ROLLOUT_SHARD_COVERAGE_PY" \
+        "$ROLLOUT_LIFECYCLE_SH" "$ROLLOUT_SHARD_COVERAGE_PY" "$ROLLOUT_RUNTIME_PY" "$ROLLOUT_SERVING_PY" \
         "$DATASET" "$ROLLOUT_SBATCH" "$SERVE_SCRIPT" \
         "$JUDGE_SBATCH" "$REFERENCE_OVERLAY" "$PARSER_PLUGIN" "$VLLM_CONTAINER" "$GDPVAL_SIF" \
         "$AGENT_SIF" "$APPTAINER_BIN/apptainer"; do
         [[ -r $path ]] || fail "required path is unreadable: $path"
     done
     [[ -x $GYM_ROOT/.venv/bin/gym ]] || fail "Gym CLI is missing: $GYM_ROOT/.venv/bin/gym"
-    [[ -x $ROLLOUT_GYM_ROOT/.venv/bin/gym ]] \
-        || fail "rollout Gym CLI is missing: $ROLLOUT_GYM_ROOT/.venv/bin/gym"
+    for path in .python-version pyproject.toml uv.lock \
+        responses_api_models/vllm_model/pyproject.toml \
+        responses_api_models/openai_model/requirements.txt \
+        resources_servers/gdpval/requirements.txt \
+        responses_api_agents/stirrup_agent/requirements.txt \
+        responses_api_agents/stirrup_agent/overrides.txt; do
+        [[ -f $ROLLOUT_GYM_ROOT/$path && ! -L $ROLLOUT_GYM_ROOT/$path ]] \
+            || fail "rollout dependency input is missing: $ROLLOUT_GYM_ROOT/$path"
+    done
     if [[ $EXPECTED_GYM_REVISION == unversioned ]]; then
         gym_revision=unversioned
     else
@@ -301,7 +310,6 @@ prepare_campaign() {
     fi
 
     model_name="$(safe_model_name "$checkpoint")"
-    runner_sha="$(sha256_file "$ROLLOUT_GYM_ROOT/benchmarks/gdpval/run_gdpval_rollouts.sh")"
     rollout_sha="$(sha256_file "$ROLLOUT_SBATCH")"
     serve_sha="$(sha256_file "$SERVE_SCRIPT")"
     judge_sha="$(sha256_file "$JUDGE_SBATCH")"
@@ -327,8 +335,7 @@ prepare_campaign() {
         "VLLM_EXTRA_ARGS=--enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser-plugin /parsers/ultra_v3_reasoning_parser.py --reasoning-parser ultra_v3" \
         "USES_REASONING_PARSER=true" \
         "USES_INTERLEAVED_REASONING=true" \
-        "NEMO_GYM_REASONING_FIELD=reasoning" \
-        "EXPECTED_RUNNER_SHA=${runner_sha:0:16}"
+        "NEMO_GYM_REASONING_FIELD=reasoning"
 
     publish_runtime_pins "$RUN_DIR/runtime_sources.sha256" \
         "$SCRIPT_DIR/VERSION" \
@@ -368,11 +375,19 @@ prepare_campaign() {
         "$TRANSPORT_ASSIGNMENT" \
         "$ROLLOUT_LIFECYCLE_SH" \
         "$ROLLOUT_SHARD_COVERAGE_PY" \
+        "$ROLLOUT_RUNTIME_PY" \
+        "$ROLLOUT_SERVING_PY" \
         "$JUDGE_SBATCH" \
-        "$ROLLOUT_GYM_ROOT/.venv/bin/gym" \
+        "$ROLLOUT_GYM_ROOT/.python-version" \
+        "$ROLLOUT_GYM_ROOT/pyproject.toml" \
+        "$ROLLOUT_GYM_ROOT/uv.lock" \
+        "$ROLLOUT_GYM_ROOT/responses_api_models/vllm_model/pyproject.toml" \
+        "$ROLLOUT_GYM_ROOT/responses_api_models/openai_model/requirements.txt" \
+        "$ROLLOUT_GYM_ROOT/resources_servers/gdpval/requirements.txt" \
+        "$ROLLOUT_GYM_ROOT/responses_api_agents/stirrup_agent/requirements.txt" \
+        "$ROLLOUT_GYM_ROOT/responses_api_agents/stirrup_agent/overrides.txt" \
         "$ROLLOUT_GYM_ROOT/benchmarks/gdpval/config.yaml" \
         "$ROLLOUT_GYM_ROOT/benchmarks/gdpval/prepare.py" \
-        "$ROLLOUT_GYM_ROOT/benchmarks/gdpval/run_gdpval_rollouts.sh" \
         "$ROLLOUT_GYM_ROOT/nemo_gym/rollout_collection.py" \
         "$ROLLOUT_GYM_ROOT/nemo_gym/rollout_reverification.py" \
         "$ROLLOUT_GYM_ROOT/resources_servers/gdpval/app.py" \
@@ -447,7 +462,6 @@ prepare_campaign() {
         "JUDGE_WALL=$JUDGE_WALL" \
         "EXPECTED_TASKS=$EXPECTED_TASKS" \
         "SHARD_COUNT=$SHARD_COUNT" \
-        "RUNNER_SHA256=$runner_sha" \
         "ROLLOUT_SBATCH_SHA256=$rollout_sha" \
         "SERVE_SCRIPT_SHA256=$serve_sha" \
         "JUDGE_SBATCH_SHA256=$judge_sha" \
@@ -515,7 +529,6 @@ compute_preflight() {
         [[ $(git -C "$ROLLOUT_GYM_ROOT" rev-parse HEAD 2>/dev/null) == "$ROLLOUT_GYM_REVISION" ]] \
             || fail "rollout Gym revision changed after prepare"
     fi
-    assert_sha "$ROLLOUT_GYM_ROOT/benchmarks/gdpval/run_gdpval_rollouts.sh" "$RUNNER_SHA256" runner
     assert_sha "$ROLLOUT_SBATCH" "$ROLLOUT_SBATCH_SHA256" rollout
     assert_sha "$SERVE_SCRIPT" "$SERVE_SCRIPT_SHA256" serve
     assert_sha "$JUDGE_SBATCH" "$JUDGE_SBATCH_SHA256" judge
@@ -569,8 +582,8 @@ compute_preflight() {
     [[ -r $ENV_FILE ]] || fail "protected environment file is unreadable on compute node"
     local receipt="$RUN_DIR/PREFLIGHT_PASS"
     local temporary="${receipt}.tmp.$$"
-    printf 'campaign=%s\ncheckpoint=%s\nrunner_sha256=%s\n' \
-        "$RUN_ID" "$CHECKPOINT" "$RUNNER_SHA256" > "$temporary"
+    printf 'campaign=%s\ncheckpoint=%s\nrollout_gym_revision=%s\n' \
+        "$RUN_ID" "$CHECKPOINT" "$ROLLOUT_GYM_REVISION" > "$temporary"
     chmod 0400 "$temporary"
     mv -f "$temporary" "$receipt"
     echo "PREFLIGHT_PASS run_id=$RUN_ID"
@@ -611,7 +624,7 @@ submit_rollout_shard() {
     [[ -n $dependency ]] && args+=(--dependency="$dependency")
     mkdir -p "$run_dir/logs"
     slurm_submit_or_adopt "$run_dir/JOBID" "$role" "$job_name" "${args[@]}" \
-        --export=ALL,RUN_DIR="$run_dir",DATASET="$shard_path",PROFILE="$PROFILE",PERSIST_DELIVERABLES_DIR="$DELIVERABLES",CONCURRENCY="$concurrency",AGENT_MAX_TURNS=250,STIRRUP_PER_TASK_TIMEOUT_S=10200,MAX_ROTATIONS=3,TREE="$ROLLOUT_GYM_ROOT",ENV_FILE="$ENV_FILE",EXPECTED_RUNNER_SHA="${RUNNER_SHA256:0:16}",AGENT_SIF="$AGENT_SIF",APPTAINER_BIN="$APPTAINER_BIN",ROLLOUT_PACKAGE_DIR="$SCRIPT_DIR" \
+        --export=ALL,RUN_DIR="$run_dir",DATASET="$shard_path",PROFILE="$PROFILE",PERSIST_DELIVERABLES_DIR="$DELIVERABLES",CONCURRENCY="$concurrency",AGENT_MAX_TURNS=250,STIRRUP_PER_TASK_TIMEOUT_S=10200,MAX_ROTATIONS=3,TREE="$ROLLOUT_GYM_ROOT",ROLLOUT_GYM_REVISION="$ROLLOUT_GYM_REVISION",ENV_FILE="$ENV_FILE",AGENT_SIF="$AGENT_SIF",APPTAINER_BIN="$APPTAINER_BIN",ROLLOUT_PACKAGE_DIR="$SCRIPT_DIR" \
         "$ROLLOUT_SBATCH" || fail "could not submit or adopt rollout role=$role"
 }
 

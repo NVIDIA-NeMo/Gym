@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -64,9 +65,16 @@ def _fixture(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     apptainer = _write(tmp_path / "apptainer" / "apptainer", "#!/bin/sh\n", executable=True)
     _write(gym / ".venv" / "bin" / "gym", "#!/bin/sh\n", executable=True)
     for relative in (
+        ".python-version",
+        "pyproject.toml",
+        "uv.lock",
+        "responses_api_models/vllm_model/pyproject.toml",
+        "responses_api_models/openai_model/requirements.txt",
+        "resources_servers/gdpval/requirements.txt",
+        "responses_api_agents/stirrup_agent/requirements.txt",
+        "responses_api_agents/stirrup_agent/overrides.txt",
         "benchmarks/gdpval/config.yaml",
         "benchmarks/gdpval/prepare.py",
-        "benchmarks/gdpval/run_gdpval_rollouts.sh",
         "nemo_gym/deliverables.py",
         "nemo_gym/rollout_collection.py",
         "nemo_gym/rollout_reverification.py",
@@ -335,6 +343,7 @@ def test_prepare_is_checkpoint_only_idempotent_and_status_is_read_only(tmp_path:
         "judge_session.py",
         "judge_ports.sh",
         "judge_progress.sh",
+        "rollout_runtime.py",
     ):
         assert f"  {PACKAGE / name}\n" in runtime_pins
 
@@ -349,6 +358,39 @@ def test_prepare_is_checkpoint_only_idempotent_and_status_is_read_only(tmp_path:
     assert "STATE=PREPARED" in status_result.stdout
     assert "ROLLOUT=0/220" in status_result.stdout
     assert before == after
+
+
+def test_prepare_pins_rollout_dependency_sources_without_a_shared_venv(tmp_path: Path) -> None:
+    checkpoint, environment = _fixture(tmp_path)
+    rollout_root = tmp_path / "rollout-source"
+    shutil.copytree(
+        environment["CHECKPOINT_E2E_ROLLOUT_GYM_ROOT"], rollout_root, ignore=shutil.ignore_patterns(".venv")
+    )
+    environment["CHECKPOINT_E2E_ROLLOUT_GYM_ROOT"] = str(rollout_root)
+
+    prepared = _run("prepare", checkpoint, environment)
+
+    assert prepared.returncode == 0, prepared.stderr
+    assert not (rollout_root / ".venv").exists()
+    run_dir = Path(next(line.split("=", 1)[1] for line in prepared.stdout.splitlines() if line.startswith("RUN_DIR=")))
+    pins = (run_dir / "runtime_sources.sha256").read_text()
+    for relative in (
+        ".python-version",
+        "pyproject.toml",
+        "uv.lock",
+        "responses_api_models/vllm_model/pyproject.toml",
+        "responses_api_models/openai_model/requirements.txt",
+        "resources_servers/gdpval/requirements.txt",
+        "responses_api_agents/stirrup_agent/requirements.txt",
+        "responses_api_agents/stirrup_agent/overrides.txt",
+    ):
+        assert f"  {rollout_root / relative}\n" in pins
+    assert str(rollout_root / ".venv/bin/gym") not in pins
+
+    (rollout_root / "uv.lock").write_text("changed dependency resolution\n")
+    drift = _run("prepare", checkpoint, environment)
+    assert drift.returncode != 0
+    assert "drift" in drift.stderr.lower()
 
 
 def test_compute_preflight_runs_under_nounset_and_publishes_receipt(tmp_path: Path) -> None:
@@ -512,6 +554,8 @@ def test_full_launcher_requires_and_pins_node_local_execution_package() -> None:
         "JUDGE_SESSION_PY": "judge_session.py",
         "JUDGE_PORTS_SH": "judge_ports.sh",
         "JUDGE_PROGRESS_SH": "judge_progress.sh",
+        "ROLLOUT_RUNTIME_PY": "rollout_runtime.py",
+        "ROLLOUT_SERVING_PY": "rollout_serving.py",
     }
     for variable, name in expected.items():
         assert f'{variable}="$SCRIPT_DIR/{name}"' in launcher

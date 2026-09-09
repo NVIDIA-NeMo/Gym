@@ -5,7 +5,7 @@
 
 [[ -n ${BASH_VERSION:-} ]] || { echo "MARS_STAGE_FAIL: bash is required" >&2; return 64 2>/dev/null || exit 64; }
 
-MARS_PACKAGE_ID_EXPECTED=checkpoint-e2e-1.4.13-mars-local-r9-20260905
+MARS_PACKAGE_ID_EXPECTED=checkpoint-e2e-1.4.13-mars-local-r10-20260908
 MARS_GYM_REVISION_EXPECTED=d3f146d386c7dfe07d4fabce32c4c8b14c7917d2
 
 mars_fail() { echo "MARS_STAGE_FAIL: $*" >&2; return 64; }
@@ -228,6 +228,100 @@ mars_stage_uv() {
     MARS_UV_DIR=$destination
     MARS_UV=$destination/uv
     export MARS_UV_DIR MARS_UV
+}
+
+mars_stage_rollout_gym() {
+    local source=$1 revision=$2 python_version
+    mars_validate_source_dir "$source" || mars_fail "unsafe rollout Gym source: $source" || return
+    [[ $revision =~ ^[0-9a-f]{40}$ && $(git -C "$source" rev-parse HEAD) == "$revision" ]] \
+        || mars_fail "rollout Gym source revision mismatch" || return
+    git -C "$source" diff --quiet "$revision" -- .python-version pyproject.toml uv.lock nemo_gym \
+        resources_servers/gdpval responses_api_agents/stirrup_agent \
+        responses_api_models/openai_model responses_api_models/vllm_model benchmarks/gdpval \
+        || mars_fail "rollout runtime sources differ from the pinned commit" || return
+    MARS_GYM=$MARS_JOB_ROOT/source/gym
+    [[ ! -e $MARS_GYM && ! -L $MARS_GYM ]] \
+        || mars_fail "refusing stale rollout source: $MARS_GYM" || return
+    install -d -m 0700 "$MARS_GYM" || return
+    # Archive the pinned commit; ignored component venvs and local modifications
+    # in the source checkout must never enter the executed source tree.
+    git -C "$source" archive "$revision" | tar -x -C "$MARS_GYM" || return
+    [[ -f $MARS_GYM/uv.lock && -f $MARS_GYM/pyproject.toml && -f $MARS_GYM/.python-version ]] \
+        || mars_fail "pinned rollout dependency inputs are missing" || return
+    python_version=$(<"$MARS_GYM/.python-version")
+    [[ $python_version =~ ^3\.[0-9]+(\.[0-9]+)?$ ]] \
+        || mars_fail "unsupported pinned rollout Python version: $python_version" || return
+    unset PYTHONHOME PYTHONPATH NEMO_GYM_EXTRA_ROOTS VIRTUAL_ENV UV_PROJECT_ENVIRONMENT
+    export UV_PYTHON_INSTALL_DIR=$MARS_JOB_ROOT/python
+    export UV_PYTHON_BIN_DIR=$MARS_JOB_ROOT/bin
+    export UV_LINK_MODE=copy
+    install -d -m 0700 "$UV_PYTHON_INSTALL_DIR" "$UV_PYTHON_BIN_DIR" || return
+    # Let the repository's lockfile build a fresh environment inside Slurm.
+    # No environment from a login node is copied, activated, or repaired.
+    (
+        cd "$MARS_GYM"
+        UV_PROJECT_ENVIRONMENT=$MARS_GYM/.venv \
+            "$MARS_UV" sync --frozen --no-dev --managed-python --python "$python_version"
+    ) || return
+    MARS_PYTHON=$MARS_GYM/.venv/bin/python
+    [[ -x $MARS_PYTHON && $(readlink -f -- "$MARS_PYTHON") == "$UV_PYTHON_INSTALL_DIR"/* ]] \
+        || mars_fail "rollout Python does not resolve to the local managed installation" || return
+    printf '%s\n' "$revision" > "$MARS_GYM/.checkpoint_e2e_revision" || return
+    export MARS_GYM MARS_PYTHON
+    export PYTHONPATH=$MARS_GYM
+}
+
+mars_prepare_rollout_runtime() {
+    local sif_signature apptainer_signature
+    # Profiles may carry old cache paths. Reassert locality before any Python
+    # or dependency setup, including worker reference and framework caches.
+    export TMPDIR=$MARS_JOB_ROOT/tmp UV_CACHE_DIR=$MARS_JOB_ROOT/cache/uv
+    export RAY_TMPDIR=/raid/scratch/$MARS_USER/r/$SLURM_JOB_ID
+    export XDG_CACHE_HOME=$MARS_JOB_ROOT/cache/xdg
+    export APPTAINER_TMPDIR=$MARS_JOB_ROOT/tmp/apptainer APPTAINER_CACHEDIR=$MARS_JOB_ROOT/cache/apptainer
+    export PYTHONPYCACHEPREFIX=$MARS_JOB_ROOT/cache/pycache
+    export HF_HOME=$MARS_JOB_ROOT/cache/huggingface
+    export HF_DATASETS_CACHE=$HF_HOME/datasets
+    export GDPVAL_REF_FILES_DIR=$MARS_JOB_ROOT/tmp/reference_files
+    export PYTHONNOUSERSITE=1
+    unset NEMO_GYM_VENV_BIN UV_PYTHON UV_CONFIG_FILE UV_CONSTRAINT UV_OVERRIDE
+    unset HF_HUB_CACHE HUGGINGFACE_HUB_CACHE TRANSFORMERS_CACHE
+    install -d -m 0700 "$HF_HOME" "$HF_DATASETS_CACHE" "$GDPVAL_REF_FILES_DIR" || return
+    export PATH=$MARS_UV_DIR:/cm/local/apps/slurm/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    mars_stage_rollout_gym "$TREE" "$ROLLOUT_GYM_REVISION" || return
+    TREE=$MARS_GYM
+    sif_signature=$("$MARS_PYTHON" -c 'import os,sys; s=os.stat(sys.argv[1]); print(f"{s.st_size}:{s.st_mtime_ns}")' "$AGENT_SIF") || return
+    apptainer_signature=$("$MARS_PYTHON" -c 'import os,sys; s=os.stat(sys.argv[1]); print(f"{s.st_size}:{s.st_mtime_ns}")' "$APPTAINER_BIN/apptainer") || return
+    mars_stage_container "$AGENT_SIF" "$sif_signature" || return
+    mars_stage_apptainer "$APPTAINER_BIN" "$apptainer_signature" || return
+    AGENT_SIF=$MARS_GDPVAL_SIF
+    export APPTAINER_BIN=$MARS_APPTAINER_BIN GDPVAL_CONTAINER_PATH=$AGENT_SIF
+    export PATH=$MARS_UV_DIR:$APPTAINER_BIN:$TREE/.venv/bin:$PATH
+    mars_stage_file "$POLICY_SERVE_SCRIPT" "$MARS_JOB_ROOT/serve.sh" || return
+    POLICY_SERVE_SCRIPT=$MARS_JOB_ROOT/serve.sh
+    "$MARS_PYTHON" "$MARS_PACKAGE/rollout_serving.py" stage \
+        --root "$MARS_JOB_ROOT/serving" --image "$CONTAINER_IMAGE" --model "$MODEL_PATH" \
+        --runtime-root "$MARS_JOB_ROOT" --extra-mounts "${EXTRA_MOUNTS:-}" || return
+    # shellcheck disable=SC1090
+    source "$MARS_JOB_ROOT/serving/environment.sh" || return
+    LOCAL_COMPONENT_VENVS=$MARS_JOB_ROOT/component_venvs
+    install -d -m 0700 "$LOCAL_COMPONENT_VENVS" "$MARS_JOB_ROOT/input" || return
+    WORKING_DATASET=$MARS_JOB_ROOT/input/dataset.jsonl
+    # Keep canonical reference URLs: durable materialized rollout inputs are
+    # reused on resume and must not retain a previous node's scratch paths.
+    # The agent copies reference data into its local sandbox when a task runs.
+    mars_stage_file "$RUN_DIR/input/dataset.jsonl" "$WORKING_DATASET" || return
+    (
+        cd "$TREE"
+        "$MARS_PYTHON" "$MARS_PACKAGE/rollout_runtime.py" verify \
+            --gym-root "$TREE" --component-venvs "$LOCAL_COMPONENT_VENVS" --module nemo_gym --module nemo_gym.cli.main \
+            || exit
+        "$MARS_PYTHON" "$MARS_PACKAGE/rollout_runtime.py" prepare-components \
+            --gym-root "$TREE" --component-venvs "$LOCAL_COMPONENT_VENVS" || exit
+        "$MARS_PYTHON" "$MARS_PACKAGE/rollout_serving.py" verify --root "$MARS_JOB_ROOT/serving"
+    ) || return
+    cp -- "$MARS_JOB_ROOT/serving/manifest.json" \
+        "$RUN_DIR/logs/serving_${SLURM_JOB_ID}_${ROTATION}.json"
 }
 
 mars_stage_container() {

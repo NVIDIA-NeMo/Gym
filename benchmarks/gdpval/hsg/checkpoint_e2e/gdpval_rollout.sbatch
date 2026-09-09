@@ -19,6 +19,9 @@
 set -euo pipefail
 umask 077
 export PYTHONUNBUFFERED=1
+export PYTHONNOUSERSITE=1
+export PATH=/cm/local/apps/slurm/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+unset PYTHONHOME PYTHONPATH NEMO_GYM_EXTRA_ROOTS VIRTUAL_ENV BASH_ENV
 
 # Slurm executes a staged copy of this script from its spool directory, so
 # BASH_SOURCE cannot locate package-owned helpers on compute nodes. The
@@ -33,23 +36,16 @@ SCRIPT_DIR="$(cd -P -- "$ROLLOUT_PACKAGE_DIR" 2>/dev/null && pwd -P)" || {
     echo "FATAL: rollout package directory is inaccessible: $ROLLOUT_PACKAGE_DIR" >&2
     exit 64
 }
-ROLLOUT_LIFECYCLE_SH="$SCRIPT_DIR/rollout_lifecycle.sh"
-ROLLOUT_SHARD_COVERAGE_PY="$SCRIPT_DIR/rollout_shard_coverage.py"
-
 : "${RUN_DIR:?set RUN_DIR}"
 : "${DATASET:?set DATASET}"
 : "${PROFILE:?set PROFILE to a serving profile env file}"
-[[ -r $ROLLOUT_LIFECYCLE_SH ]] || { echo "FATAL: rollout lifecycle helper is unreadable" >&2; exit 64; }
-[[ -r $ROLLOUT_SHARD_COVERAGE_PY ]] || { echo "FATAL: shard coverage helper is unreadable" >&2; exit 64; }
-# shellcheck disable=SC1090
-source "$ROLLOUT_LIFECYCLE_SH"
+: "${ROLLOUT_GYM_REVISION:?set ROLLOUT_GYM_REVISION to the pinned rollout source commit}"
 
 CONCURRENCY=${CONCURRENCY:-8}
 AGENT_MAX_TURNS=${AGENT_MAX_TURNS:-250}
 NUM_REPEATS=${NUM_REPEATS:-1}
 ROTATION=${SLURM_RESTART_COUNT:-0}
 
-U=${U:-/lustre/fsw/portfolios/llmservice/users/spanev/gdpval_colo/unified}
 TREE=${TREE:-/lustre/fsw/portfolios/llmservice/users/spanev/gdpval_integ}
 AGENT_SIF=${AGENT_SIF:-/lustre/fsw/portfolios/llmservice/users/agronskiy/images/apptainer/python-3.13.gdpval.gym-32083a.sif}
 APPTAINER_BIN=${APPTAINER_BIN:-/lustre/fsw/portfolios/llmservice/users/spanev/gdpval_colo/apptainer-1.5.1-bigsession/bin}
@@ -61,6 +57,35 @@ OUTPUT_JSONL=$RUN_DIR/rollouts.jsonl
 
 fail() { echo "FATAL: $*" >&2; exit 64; }
 [[ $ROTATION =~ ^[0-9]+$ ]] || fail "SLURM_RESTART_COUNT must be a nonnegative integer"
+
+# Slurm's spool script may read the shared package only to bootstrap a local
+# copy. All package helpers and Python execute from the allocation's scratch.
+JOB_USER=${SLURM_JOB_USER:-${USER:-}}
+[[ $JOB_USER =~ ^[A-Za-z0-9._-]+$ && ${SLURM_JOB_ID:-} =~ ^[1-9][0-9]*$ ]] \
+    || fail "valid Slurm job and user identities are required"
+BOOTSTRAP_ROOT=/raid/scratch/$JOB_USER/gdpval-e2e-bootstrap-${SLURM_JOB_ID}-rollout-${ROTATION}
+install -d -m 0700 "$BOOTSTRAP_ROOT"
+[[ $(readlink -f -- "$BOOTSTRAP_ROOT") == /raid/scratch/* \
+    && $(stat -f -c '%T' "$BOOTSTRAP_ROOT") != lustre ]] || fail "bootstrap root is not node-local"
+cp -- "$SCRIPT_DIR/mars_node_local.sh" "$BOOTSTRAP_ROOT/mars_node_local.sh"
+chmod 0500 "$BOOTSTRAP_ROOT/mars_node_local.sh"
+# shellcheck disable=SC1090
+source "$BOOTSTRAP_ROOT/mars_node_local.sh"
+mars_init "rollout-${SLURM_JOB_ID}" "rollout-${ROTATION}" "$RUN_DIR"
+mars_stage_package "$SCRIPT_DIR"
+SCRIPT_DIR=$MARS_PACKAGE
+ROLLOUT_LIFECYCLE_SH=$SCRIPT_DIR/rollout_lifecycle.sh
+ROLLOUT_SHARD_COVERAGE_PY=$SCRIPT_DIR/rollout_shard_coverage.py
+# shellcheck disable=SC1090
+source "$ROLLOUT_LIFECYCLE_SH"
+mars_stage_uv "${CHECKPOINT_E2E_UV_SOURCE:-/home/$JOB_USER/.local/bin/uv}"
+export PATH=$MARS_UV_DIR:$PATH
+mars_stage_file "$PROFILE" "$MARS_JOB_ROOT/profile.env"
+PROFILE=$MARS_JOB_ROOT/profile.env
+if [[ -n ${ENV_FILE:-} ]]; then
+    mars_stage_file "$ENV_FILE" "$MARS_JOB_ROOT/runtime.env"
+    ENV_FILE=$MARS_JOB_ROOT/runtime.env
+fi
 
 # Source secrets from inside the job. Only fill values the submit environment
 # did not already provide.
@@ -83,16 +108,7 @@ set +a
 NODES_PER_REPLICA=${NODES_PER_REPLICA:-1}
 
 echo "=== assertions ==="
-RUNNER_SHA=$(sha256sum "$TREE/benchmarks/gdpval/run_gdpval_rollouts.sh" | cut -c1-16)
-echo "  runner sha256        $RUNNER_SHA"
-if [[ -n ${EXPECTED_RUNNER_SHA:-} ]]; then
-    [[ $RUNNER_SHA == "$EXPECTED_RUNNER_SHA" ]] \
-        || fail "runner sha changed: $RUNNER_SHA != $EXPECTED_RUNNER_SHA"
-    echo "  runner sha           pinned OK"
-else
-    echo "  runner sha           NOT pinned (set EXPECTED_RUNNER_SHA to enforce)"
-fi
-[[ -x $TREE/.venv/bin/gym ]] || fail "no gym CLI in $TREE"
+echo "  rollout source       $ROLLOUT_GYM_REVISION"
 [[ -f $DATASET ]] || fail "dataset missing: $DATASET"
 rows=$(awk 'NF {n++} END {print n+0}' "$DATASET")
 (( rows > 0 )) || fail "dataset has no rows: $DATASET"
@@ -100,24 +116,17 @@ if [[ ${REQUIRE_LOCAL_REFERENCES:-true} == true ]]; then
     http=$(grep -c '"https\?://' "$DATASET" || true)
     [[ $http == 0 ]] || fail "$http rows still carry remote reference urls"
 fi
-WORKING_DATASET="$RUN_DIR/input/dataset.jsonl"
-gdpval_rollout_materialize_dataset "$DATASET" "$WORKING_DATASET" \
+gdpval_rollout_materialize_dataset "$DATASET" "$RUN_DIR/input/dataset.jsonl" \
     || fail "could not materialize the immutable shard dataset into $RUN_DIR"
 [[ -n ${TAVILY_API_KEY:-} ]] || fail "TAVILY_API_KEY unset"
 [[ -f $AGENT_SIF ]] || fail "agent sandbox missing: $AGENT_SIF"
 [[ -x $APPTAINER_BIN/apptainer ]] || fail "apptainer missing: $APPTAINER_BIN"
 [[ -r $POLICY_SERVE_SCRIPT ]] || fail "POLICY_SERVE_SCRIPT unreadable: $POLICY_SERVE_SCRIPT"
 
-# This tree's activation script can point at another checkout. Call the wrapper
-# directly and prove it execs this tree's interpreter. Match on the tree name
-# because fs1/fsw aliases can differ.
-TREE_NAME=$(basename "$TREE")
-grep -q "$TREE_NAME/.venv/bin/python" "$TREE/.venv/bin/gym" \
-    || fail "gym wrapper does not exec $TREE_NAME's python: $(sed -n 2p "$TREE/.venv/bin/gym")"
-echo "  gym binary           $TREE/.venv/bin/gym (verified)"
-
 mapfile -t nodes < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
 N_NODES=${#nodes[@]}
+(( N_NODES == 1 && NODES_PER_REPLICA == 1 )) \
+    || fail "node-local rollout currently requires exactly one node per job"
 (( N_NODES % NODES_PER_REPLICA == 0 )) \
     || fail "$N_NODES nodes is not a multiple of NODES_PER_REPLICA=$NODES_PER_REPLICA"
 N_REPLICAS=$((N_NODES / NODES_PER_REPLICA))
@@ -125,10 +134,9 @@ echo "  dataset              $rows rows"
 echo "  profile              $(basename "$PROFILE") -> $MODEL_NAME"
 echo "  topology             $N_NODES node(s) = $N_REPLICAS replica(s) x $NODES_PER_REPLICA, conc=$CONCURRENCY, turns=$AGENT_MAX_TURNS"
 
-export PATH=$HOME/.local/bin:$PATH
-export UV_CACHE_DIR=${UV_CACHE_DIR:-$U/uv-cache}
-mkdir -p "$UV_CACHE_DIR"
-command -v uv >/dev/null || fail "uv not on PATH (needed to start component servers)"
+# Each allocation builds a fresh locked Gym environment, stages its inputs,
+# and uses Gym's own dependency setup before verifying component locality.
+mars_prepare_rollout_runtime
 echo "=== assertions passed ==="
 
 gym_pid=
@@ -158,7 +166,7 @@ MAX_ROTATIONS=${MAX_ROTATIONS:-8}
 on_walltime() {
     trap - TERM
     echo "=== walltime TERM at rotation ${ROTATION} ==="
-    python3 "$ROLLOUT_SHARD_COVERAGE_PY" \
+    "$MARS_PYTHON" "$ROLLOUT_SHARD_COVERAGE_PY" \
         --dataset "$DATASET" --deliverables "${PERSIST_DELIVERABLES_DIR:-$RUN_DIR/deliverables}" || true
     gdpval_rollout_cleanup
     if (( ROTATION + 1 >= MAX_ROTATIONS )); then
@@ -204,7 +212,7 @@ done
 }
 
 served=$(curl -sf "${policy_urls[0]}/models" \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])')
+    | "$MARS_PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])')
 [[ $served == "$MODEL_NAME" ]] || {
     echo "FATAL: served model is $served, expected $MODEL_NAME" >&2
     exit 1
@@ -224,17 +232,15 @@ export GDPVAL_CONTAINER_PATH=$AGENT_SIF
 # Residue runs use a private RUN_DIR for task-index caches while sharing the
 # task-ID-keyed deliverables root with the initial shards.
 export PERSIST_DELIVERABLES_DIR=${PERSIST_DELIVERABLES_DIR:-$RUN_DIR/deliverables}
-export TMPDIR=$RUN_DIR/tmp
-export RAY_TMPDIR=/tmp/gdpval_ray_${SLURM_JOB_ID}_${ROTATION}
 mkdir -p "$RAY_TMPDIR"
 export EXECUTE_ONLY=true JUDGE_ONLY=false RERUN_INCOMPLETE=true
 export NEMO_GYM_MAX_ROLLOUT_ATTEMPTS=3 STIRRUP_PER_TASK_TIMEOUT_S=${STIRRUP_PER_TASK_TIMEOUT_S:-12600}
 export NEMO_GYM_REASONING_FIELD=${NEMO_GYM_REASONING_FIELD:-both}
 
 cd "$TREE"
-GYM=$TREE/.venv/bin/gym
+GYM_ENTRYPOINT=$SCRIPT_DIR/gym_entrypoint.py
 
-DATASET_OVERLAY=$RUN_DIR/dataset_overlay.yaml
+DATASET_OVERLAY=$MARS_JOB_ROOT/input/dataset_overlay.yaml
 cat > "$DATASET_OVERLAY" <<EOF
 gdpval_stirrup_agent:
   responses_api_agents:
@@ -255,7 +261,7 @@ declare -a policy_overrides=()
     && policy_overrides+=("++policy_model.responses_api_models.vllm_model.uses_interleaved_reasoning=$USES_INTERLEAVED_REASONING")
 
 set +e
-setsid "$GYM" eval run \
+setsid "$MARS_PYTHON" "$GYM_ENTRYPOINT" eval run \
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \
     --config benchmarks/gdpval/config.yaml \
     --config "$DATASET_OVERLAY" \
@@ -265,6 +271,10 @@ setsid "$GYM" eval run \
     --max-output-tokens "${MAX_OUTPUT_TOKENS:-262144}" --resume \
     ++overwrite_metrics_conflicts=true \
     ++skip_venv_if_present=true \
+    ++uv_venv_dir="$LOCAL_COMPONENT_VENVS" \
+    ++uv_cache_dir="$UV_CACHE_DIR" \
+    ++python_version="$MARS_PYTHON" \
+    ++uv_pip_set_python=true \
     "++policy_model.responses_api_models.vllm_model.base_url=${urls_omega}" \
     ++policy_model.responses_api_models.vllm_model.model="$MODEL_NAME" \
     "${policy_overrides[@]}" \
@@ -282,7 +292,7 @@ set -e
 
 echo "=== gym rc=$gym_rc ==="
 coverage_rc=0
-python3 "$ROLLOUT_SHARD_COVERAGE_PY" \
+"$MARS_PYTHON" "$ROLLOUT_SHARD_COVERAGE_PY" \
     --dataset "$DATASET" --deliverables "$PERSIST_DELIVERABLES_DIR" || coverage_rc=$?
 if (( gym_rc != 0 )); then
     exit "$gym_rc"
