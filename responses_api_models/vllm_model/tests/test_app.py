@@ -27,6 +27,11 @@ from yarl import URL
 
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
+from nemo_gym.global_config import (
+    ROLLOUT_INDEX_KEY_NAME,
+    TARGET_WEIGHT_VERSION_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.openai_utils import (
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     NeMoGymAsyncOpenAI,
@@ -3865,7 +3870,17 @@ class TestVLLMConverter:
                     content="hello",
                 )
             ],
-            metadata={"extra_body": json.dumps({"min_tokens": 20, "new_param": "value"})},
+            metadata={
+                "extra_body": json.dumps(
+                    {
+                        "min_tokens": 20,
+                        "new_param": "value",
+                        TASK_INDEX_KEY_NAME: 12,
+                        ROLLOUT_INDEX_KEY_NAME: 3,
+                        TARGET_WEIGHT_VERSION_KEY_NAME: 19,
+                    }
+                )
+            },
         )
 
         client = TestClient(app)
@@ -3878,6 +3893,9 @@ class TestVLLMConverter:
         assert captured_kwargs["guided_json"] == '{"type": "object"}'
         assert captured_kwargs["min_tokens"] == 20
         assert captured_kwargs["new_param"] == "value"
+        assert captured_kwargs[TASK_INDEX_KEY_NAME] == 12
+        assert captured_kwargs[ROLLOUT_INDEX_KEY_NAME] == 3
+        assert captured_kwargs[TARGET_WEIGHT_VERSION_KEY_NAME] == 19
 
 
 # ──────────────────────────────────────────────────────────────────────────────
