@@ -44,6 +44,30 @@ _MARKER = "__GYM_JOB:"
 # its delimiter or anything the shell would act on.
 _VALID_BENCHMARK_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
+# Real `sbatch --parsable` output is a bare "<id>" or a federated "<id>;<cluster>".
+# stderr is merged onto the same line (see `_sbatch_command`), and a *successful*
+# sbatch can still print a warning (job_submit plugin notices, QOS/ntasks
+# adjustments are routine on production Slurm) — so only the payload's last
+# whitespace-delimited token is checked against this, not the whole line.
+_JOB_ID_RE = re.compile(r"^\d+(;\S+)?$")
+
+
+def _validate_benchmark_names(benchmarks: list[str]) -> None:
+    """Fail before anything is staged or copied.
+
+    `_sbatch_command` raises this same check, but only once submission is
+    already underway — after staging, connecting, mount validation and the
+    rsync. Checking here first means a bad name fails before any of that, and
+    fails on `--dry-run` too, instead of the dry run printing a clean script
+    listing for a benchmark that could never actually be submitted.
+    """
+    bad = [name for name in benchmarks if not _VALID_BENCHMARK_NAME.match(name)]
+    if bad:
+        raise ValueError(
+            f"Invalid benchmark name(s) {', '.join(map(repr, bad))}: names must match "
+            f"{_VALID_BENCHMARK_NAME.pattern} so they can be reported back from the submit script."
+        )
+
 
 def _sbatch_command(benchmark: str, script: Path) -> str:
     """One `sbatch` that reports its own benchmark, exit status and output.
@@ -74,8 +98,17 @@ def _parse_sbatch_results(output: str) -> dict[str, tuple[str | None, str | None
         status, _, payload = rest.partition(":")
         payload = payload.strip()
         if status == "0":
-            # A federated sbatch answers "jobid;cluster"; the ledger wants the id.
-            results[benchmark] = (payload.split(";")[0], None)
+            tokens = payload.split()
+            candidate = tokens[-1] if tokens else ""
+            if _JOB_ID_RE.match(candidate):
+                # A federated sbatch answers "jobid;cluster"; the ledger wants the id.
+                results[benchmark] = (candidate.split(";")[0], None)
+            else:
+                # Exit 0 but the last token isn't an id: no output at all, or a
+                # warning with nothing that looks like a job id after it. Either
+                # way there is no id to trust, so this is a failure, not a
+                # success with garbage (or an empty string) in job_id.
+                results[benchmark] = (None, payload or "sbatch exited 0 with no output")
         else:
             results[benchmark] = (None, payload or f"sbatch exited {status}")
     return results
@@ -120,6 +153,8 @@ class SlurmExecutor(BaseExecutor):
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
         compute = next(iter(config.compute.values()))
         cluster = next(iter(config.compute))
+        benchmark_names = list(config.driver.benchmarks)
+        _validate_benchmark_names(benchmark_names)
         now = _utc_now()
         gym_job_id = new_gym_job_id(now)
         remote_run_dir = Path(config.job.output_path) / gym_job_id
@@ -128,7 +163,6 @@ class SlurmExecutor(BaseExecutor):
             self._dry_run(config, compute, remote_run_dir)
             return None
 
-        benchmark_names = list(config.driver.benchmarks)
         with tempfile.TemporaryDirectory(prefix="gym-submit-") as staging_str:
             staging = self._stage(config, compute, remote_run_dir, Path(staging_str))
             with get_connection(compute.hostname) as conn:
@@ -137,9 +171,11 @@ class SlurmExecutor(BaseExecutor):
                 output = conn.run(
                     [_sbatch_command(name, remote_run_dir / name / "job.sh") for name in benchmark_names]
                 )
-                record = self._build_record(
-                    config, cluster, compute, gym_job_id, now, remote_run_dir, benchmark_names, output
-                )
+                record = self._build_record(cluster, compute, gym_job_id, now, remote_run_dir, benchmark_names, output)
+                # Best-effort local copy first: it cannot itself fail the submit,
+                # and if the manifest write below fails, this is what preserves a
+                # parseable record for the by-hand recovery that error asks for.
+                write_local_index(record)
                 # Inside the connection: the manifest is the durable copy, and a
                 # run directory without one is the state this all exists to remove.
                 # The jobs are already queued by now, so the error has to name them
@@ -154,12 +190,10 @@ class SlurmExecutor(BaseExecutor):
                         f"Already queued: {queued or 'nothing'}. Record these by hand before collecting."
                     ) from error
 
-        write_local_index(record)
         return record
 
     def _build_record(
         self,
-        config: SubmitConfig,
         cluster: str,
         compute: SlurmComputeConfig,
         gym_job_id: str,

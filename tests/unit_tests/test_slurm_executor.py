@@ -70,6 +70,30 @@ def test_parse_sbatch_results_falls_back_to_the_exit_code_when_sbatch_said_nothi
     assert _parse_sbatch_results("__GYM_JOB:gsm8k:1: ") == {"gsm8k": (None, "sbatch exited 1")}
 
 
+def test_parse_sbatch_results_treats_a_silent_success_as_a_failure():
+    # Exit 0 with no output at all is not a job id; recording it as a "success"
+    # with job_id="" would slip past `SubmissionRecord.failed` (which only
+    # checks `job_id is None`).
+    job_id, error = _parse_sbatch_results("__GYM_JOB:gsm8k:0: ")["gsm8k"]
+    assert job_id is None
+    assert error is not None
+
+
+def test_parse_sbatch_results_treats_a_non_numeric_success_payload_as_a_failure():
+    # A warning on a successful sbatch (job_submit plugin notices, QOS/ntasks
+    # adjustments) merges onto the same line via 2>&1. If it doesn't end in
+    # something that looks like a job id, there is no id to trust.
+    output = "__GYM_JOB:gsm8k:0:sbatch: Warning: blah "
+    assert _parse_sbatch_results(output) == {"gsm8k": (None, "sbatch: Warning: blah")}
+
+
+def test_parse_sbatch_results_takes_the_trailing_id_off_a_warning_line():
+    # The actual C1 regression: a successful sbatch that also warns must not
+    # let the warning text end up in job_id.
+    output = "__GYM_JOB:gsm8k:0:sbatch: Warning: can't honor --ntasks-per-node 12345 "
+    assert _parse_sbatch_results(output) == {"gsm8k": ("12345", None)}
+
+
 def test_a_failure_mid_list_does_not_shift_the_benchmarks_after_it():
     # The regression test for the positional-zip bug: bench_b fails, and bench_c
     # must still get its own job id rather than inheriting the next one along.
@@ -248,6 +272,57 @@ def test_submitting_locally_records_a_failing_sbatch(tmp_path, monkeypatch):
 
     assert record.benchmarks[0].job_id is None
     assert "Invalid account" in record.benchmarks[0].error
+
+
+def test_submitting_locally_does_not_let_a_warning_become_the_job_id(tmp_path, monkeypatch):
+    # The end-to-end regression test for C1: a real bash pipeline, not a mocked
+    # `conn.run`, proves the generated command's own `2>&1` merge can't leak a
+    # warning on a successful sbatch into job_id.
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    sbatch = fake_bin / "sbatch"
+    sbatch.write_text('#!/bin/bash\necho "sbatch: Warning: can\'t honor --ntasks-per-node" >&2\necho 12345\n')
+    sbatch.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(slurm_module, "_validate_mounts", lambda config, connection: None)
+
+    record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]))
+
+    assert record.benchmarks[0].job_id == "12345"
+    assert record.benchmarks[0].error is None
+
+
+def test_submitting_locally_keeps_a_multiline_error_on_one_marker_line(tmp_path, monkeypatch):
+    # Real-bash coverage for the `tr` flattening: a two-line sbatch error must
+    # still arrive whole in `error`, not truncated to whichever line survives.
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    sbatch = fake_bin / "sbatch"
+    sbatch.write_text(
+        "#!/bin/bash\n"
+        "echo 'sbatch: error: Invalid account' >&2\n"
+        "echo 'sbatch: error: try again with a valid account' >&2\n"
+        "exit 1\n"
+    )
+    sbatch.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(slurm_module, "_validate_mounts", lambda config, connection: None)
+
+    record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]))
+
+    assert record.benchmarks[0].job_id is None
+    assert "Invalid account" in record.benchmarks[0].error
+    assert "try again with a valid account" in record.benchmarks[0].error
+
+
+def test_dry_run_rejects_a_benchmark_name_that_would_break_the_marker(tmp_path):
+    # Bad names must fail before staging/copying even happens, and a dry run
+    # must not silently print a script listing for a benchmark that could
+    # never actually be submitted.
+    with pytest.raises(ValueError, match="benchmark name"):
+        SlurmExecutor().run(_submit_config(tmp_path, ["bad name"]), dry_run=True)
 
 
 def test_dry_run_returns_no_record(tmp_path, monkeypatch, capsys):
