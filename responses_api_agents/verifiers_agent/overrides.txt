@@ -1,0 +1,6 @@
+# AutomationBench (automation-bench) requires verifiers>=0.2.0, while
+# requirements.txt pins the v0.1.14 tag. uv resolves the pin last and
+# downgrades, leaving an env where AutomationBench cannot construct state
+# ("verifiers returned no state during benchmark setup").
+# This override lifts the ceiling for the verifiers_agent venv.
+verifiers>=0.2.0

@@ -3,8 +3,11 @@ name = "automationbench-zapier-env"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-    "automation-bench @ git+https://github.com/zapier/AutomationBench.git@v1.0.6",
+    "automation-bench @ git+https://github.com/zapier/AutomationBench.git@4a8e106",
 ]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [build-system]
 requires = ["hatchling"]
