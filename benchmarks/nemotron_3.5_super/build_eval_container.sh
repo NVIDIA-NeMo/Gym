@@ -51,9 +51,6 @@ apt-get install -y --no-install-recommends \
 rm -rf /var/lib/apt/lists/*
 
 cd /opt
-# TODO @bxyu-nvidia: This is just for testing the direct sqsh
-rm -rf Gym_venv
-rm -rf Gym
 # Python 3.13.14 is Gym main's Python version.
 uv venv --python 3.13.14 Gym_venv
 source Gym_venv/bin/activate
