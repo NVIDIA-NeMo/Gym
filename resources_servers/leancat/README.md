@@ -1,10 +1,10 @@
 # LeanCat
 
-[LeanCat](https://github.com/sciencraft/LeanCat) ([arXiv:2512.24796](https://arxiv.org/abs/2512.24796)) is 100
+[LeanCat](https://github.com/sciencraft/LeanCat) ([arXiv:2512.24796v2](https://arxiv.org/abs/2512.24796v2)) is 100
 statement-level problems in formal 1-category theory, written in Lean 4 against Mathlib v4.19.0. It is deliberately
 not a search benchmark: the problems are curated from Riehl, Mac Lane, and Adámek et al., and solving them takes
 navigating Mathlib's `CategoryTheory` interfaces rather than grinding out arithmetic. The published result is that
-models are close to helpless at it — the best scored 12.0% pass@4, and 0.0% on the High tier.
+models are close to helpless at it — the best static result is 12.0% pass@4, and 0.0% on the High tier.
 
 Part I covers 1-categories; the authors flag higher categories as future work.
 
@@ -78,70 +78,76 @@ visible without opening rollouts.
 
 ## Reproducing the paper
 
-Table 1, pass@1 / pass@4:
+**Read v2 ([arXiv:2512.24796v2](https://arxiv.org/abs/2512.24796v2), 25 Feb 2026), not v1.** v2 revised the Table 1
+numbers, relabelled the models, added two tables, and — importantly for us — moved to the same difficulty
+denominators and the same pass@1 estimator this server uses. Figures below are v2's.
 
-Row labels are the identifiers as Table 1 spells them, which for four of the five are API aliases rather than
-pinned checkpoints.
+### Table 1 — static pass@1 / pass@4 (the protocol this server implements)
 
-| Model (Table 1 label) | Easy | Medium | High | All | Open weights |
+| Model | Easy (20) | Medium (40) | High (40) | Overall (100) | Open weights |
 |---|---|---|---|---|---|
-| `claude-opus-4-5` | 32.50 / 50.00 | 4.17 / 4.76 | 0.00 / 0.00 | 8.25 / 12.00 | no |
-| `gpt-5.2` | 27.50 / 30.00 | 0.00 / 0.00 | 0.00 / 0.00 | 5.50 / 7.00 | no |
-| `deepseek-reasoner` | 18.75 / 40.00 | 0.60 / 2.38 | 0.00 / 0.00 | 4.00 / 9.00 | ambiguous, see below |
-| `gemini-3-pro` | 11.25 / 25.00 | 2.38 / 7.14 | 0.00 / 0.00 | 3.25 / 8.00 | no |
-| `kimi-k2-0905` | 10.00 / 20.00 | 0.00 / 0.00 | 0.00 / 0.00 | 2.00 / 4.00 | **yes, pinned** |
+| Claude-Opus-4.5 | 40.00 / 55.00 | 0.63 / 2.50 | 0.00 / 0.00 | 8.25 / 12.00 | no |
+| GPT-5.2 | 27.50 / 35.00 | 0.00 / 0.00 | 0.00 / 0.00 | 5.50 / 7.00 | no |
+| DeepSeek-V3.2 | 20.00 / 40.00 | 0.00 / 0.00 | 0.00 / 0.00 | 4.00 / 8.00 | **yes** |
+| Gemini-3-Pro | 13.75 / 30.00 | 1.25 / 5.00 | 0.00 / 0.00 | 3.25 / 8.00 | no |
+| Kimi-K2 | 10.00 / 20.00 | 0.00 / 0.00 | 0.00 / 0.00 | 2.00 / 4.00 | **yes** |
 
-**`kimi-k2-0905` is the only row that names an exact open-weight release**, which makes it the one reproduction
-target with no version ambiguity — worth more than its being second-cheapest rather than cheapest.
+### Table 3 — specialized provers, **pass@32** (not pass@4)
 
-**`deepseek-reasoner` is not a checkpoint.** It is DeepSeek's API alias, and the paper's own prose disagrees with its
-table: §3.1 names "DeepSeek-V3.2-Thinking and DeepSeek V3.2 Speciale" — two models — for what Table 1 reports as one
-row. The alias resolved to DeepSeek-V3.2 in thinking mode around the paper's date, so `deepseek-ai/DeepSeek-V3.2`
-with thinking enabled is the best available guess, but it is a guess. Do not treat a mismatch against this row as
-evidence of a bug in this server.
+Every one is open-weight and exactly pinned, which makes this the most reproducible table in the paper. Note the
+8× sampling budget: comparing these against Table 1 numbers is comparing pass@32 against pass@4.
 
-LeanBridge — upstream's retrieve/generate/verify agent — roughly doubles the best number, to about 24%. It is not
-implemented here; this server covers the static pass@k protocol only.
+| Model | Easy | Medium | High | Avg |
+|---|---|---|---|---|
+| DeepSeek-Prover-V2-671B | 45.0 | 0.0 | 0.0 | 9.0 |
+| Goedel-Prover-V2-32B | 20.0 | 2.5 | 0.0 | 5.0 |
+| StepFun-Prover-32B | 20.0 | 2.5 | 0.0 | 5.0 |
+| Kimina-72B | 10.0 | 0.0 | 0.0 | 2.0 |
 
-### Settings
+Table 2 (not reproduced here) covers LeanBridge, the retrieve-generate-verify agent, at up to 4 refinement
+iterations — Claude-Opus-4.5 reaches 16.0/21.0 overall. This server implements the static protocol only.
 
-The paper gives only the token budget and the verification timeout, but `scripts/passk.py` and
-`eval_common.add_common_args` at the pinned commit fix the rest. Use these:
+### Hyperparameters (Appendix D.3, Table 5)
 
-| Setting | Upstream default |
+| Parameter | Value |
 |---|---|
-| `temperature` | **1.0** |
-| `top_p` | not sent |
-| `max_tokens` | 50000 |
-| `k` | 4 |
-| Lean timeout | 300s (`compilation_timeout`) |
-| messages | one `user` message, no system prompt |
+| temperature | 1.0 |
+| max tokens | 50,000 (generalist models; model-specific for provers) |
+| top_p | not specified in the paper; `eval_common.chat_completion` sends none |
+| k | 4 (generalist), 32 (specialized provers) |
+| Lean version / timeout | v4.19.0 / 300s per attempt |
+| messages | one message, no separate system role in the reference code |
 
-### Prompt fidelity
+### What lines up, and what does not
 
-The prompt is byte-identical to what the reference harness sends, verified for all 100 problems against an
-independent reimplementation of `passk.py`'s call chain (`load_prompt` → `load_problem` → `render_prompt`).
-sha256 of the 100 concatenated rendered prompts: `e04d1313b51489083fe8153764e37a79…`.
+Three things that were caveats against v1 are **not** problems against v2:
 
-This is why `prepare_leancat.py` reads `CAT_statement/S_<id>.lean` rather than taking `formal_statement` from
-`leancat_records.jsonl`. Upstream's `load_problem` does `read_text()` with no `strip()`, and 60 of the 100 `.lean`
-files end in a newline the JSONL has stripped — a newline that lands inside the prompt's code fence. Content is
-identical between the two sources; the script fails loudly if that ever stops being true.
+- **Difficulty denominators match.** v2 uses Easy 20 / Medium 40 / High 40 — exactly the pinned dataset revision.
+  (v1 used 42/38.) Every tier is directly comparable.
+- **pass@1 estimator matches.** v2 states pass@1 is "estimated using the unbiased estimator from Chen (2021)",
+  which is what `compute_pass_majority_metrics` computes. Collect 4 rollouts and read `pass@1/accuracy` and
+  `pass@4/accuracy` directly.
+- **Sampling settings are published**, in Appendix D.3 rather than the body.
 
-### Caveats
+Two real divergences remain:
 
-1. **The difficulty split has moved.** The paper's denominators are Easy 20 / Medium 42 / High 38; the pinned dataset
-   revision labels 20 / 40 / 40. The pooled `All` column is unaffected, but the per-tier columns are not directly
-   comparable. Reproduce `All` first.
-2. **This server's statement guard is stricter than the scorer that produced the paper's numbers.** Upstream's
-   `verify_lean` is `has_invalid_tokens(code)` then compile — it never compares the submission against the reference
-   statement, despite `EVALUATION.md` listing preservation as a validity criterion. So a run here can score *below*
-   the paper if models were weakening statements. Set `require_statement_preserved: false` to reproduce upstream's
-   scoring exactly; the `statement_preserved` metric then tells you how much the difference is worth. Running both
-   is the informative thing to do.
-3. **pass@k must be read at k = number of rollouts.** Upstream's is plain "solved if any of 4 attempts passed"; Gym's
-   `compute_pass_majority_metrics` uses the unbiased combinatorial estimator. The two agree exactly when
-   n = k = 4, and diverge if you collect more rollouts and read `pass@4` off them.
+1. **The paper's Appendix D.1 prompt is not the repo's `prompts/static_passk.md`.** Both open identically, but the
+   fourth line differs:
+
+   | Source | Fourth line |
+   |---|---|
+   | repo (what our rows use) | "You may introduce auxiliary definitions, instances, and lemmas before the target statement if needed. The target statement and all auxiliary code must contain no `sorry`, `admit`, `axiom`, or `unsafe` declarations." |
+   | paper D.1 | "Please solve the statement step by step and provide your complete Lean4 code between ```` ```lean4 ```` and ```` ``` ```` after careful reasoning." |
+
+   We match the repo byte-for-byte, because `passk.py` reads that file and the repo is the executable artifact. But
+   it is genuinely unclear which produced the published numbers — the repo is a release mirror synced from a private
+   development repo, so its prompt may post-date the paper. Treat this as the largest single source of
+   irreducible uncertainty in any reproduction here.
+
+2. **This server's statement guard is stricter than upstream's scorer.** `verify_lean` is `has_invalid_tokens(code)`
+   then compile; it never compares against the reference statement, even though `configs/evaluation_protocol.json`
+   sets `"statement_changes_allowed": false`. Set `require_statement_preserved: false` to match upstream exactly;
+   `statement_preserved` reports the difference either way. Running both is the informative thing to do.
 
 ## Data
 
