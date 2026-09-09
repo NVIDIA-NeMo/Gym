@@ -57,11 +57,13 @@ from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PRO
 
 
 class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
-    # Search/browse backend. "tavily" (default) or "exa". The chosen provider's
-    # key must be present (validated below). exclude_domains are honored by both.
+    # Search/browse backend. The chosen provider's key must be present (validated below).
+    # exclude_domains are honored by all providers.
     search_provider: str = "tavily"
     tavily_api_key: str | List[str] | None = None
     exa_api_key: str | List[str] | None = None
+    parallel_api_key: str | List[str] | None = None
+    parallel_search_mode: str = "advanced"
     exclude_domains_file_path: str
     use_judge: bool = True  # If False, use regex matching instead of LLM judge
     judge_model_server: Optional[ModelServerRef] = None
@@ -76,7 +78,7 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
     bash_timeout_s: float = 60.0  # match the reference harness's _BASH_MAX_DURATION_S
     bash_max_concurrency: int = 64
     max_page_bytes: int = 2_000_000  # cap per-page bytes written to disk
-    # Results returned per search query (both providers). The reference Exa
+    # Results returned per search query (all providers). The reference Exa
     # reference uses 10; its Tavily path (and this harness historically) uses 5.
     max_results: int = 5
 
@@ -86,8 +88,20 @@ class TavilySearchResourcesServerConfig(BaseResourcesServerConfig):
             raise ValueError("tavily_api_key is required when search_provider='tavily'")
         if self.search_provider == "exa" and not self.exa_api_key:
             raise ValueError("exa_api_key is required when search_provider='exa'")
-        if self.search_provider not in ("tavily", "exa"):
-            raise ValueError(f"search_provider must be 'tavily' or 'exa', got {self.search_provider!r}")
+        if self.search_provider == "parallel" and not self.parallel_api_key:
+            raise ValueError("parallel_api_key is required when search_provider='parallel'")
+        if self.search_provider not in ("tavily", "exa", "parallel"):
+            raise ValueError(f"search_provider must be 'tavily', 'exa', or 'parallel', got {self.search_provider!r}")
+        if self.search_provider == "parallel" and self.parallel_search_mode not in (
+            "turbo",
+            "fast",
+            "basic",
+            "advanced",
+        ):
+            raise ValueError(
+                "parallel_search_mode must be 'turbo', 'fast', 'basic', or 'advanced', "
+                f"got {self.parallel_search_mode!r}"
+            )
         return self
 
 
@@ -186,7 +200,7 @@ class JudgeEvaluation(BaseModel):
 
 class TavilySearchSingleAsyncTavilyMetrics(BaseModel):
     function: str  # "search" | "browse"
-    provider: str = "tavily"  # "tavily" | "exa"
+    provider: str = "tavily"  # "tavily" | "exa" | "parallel"
     status: str
     start_time: float
     end_time: float
@@ -396,6 +410,92 @@ class ExaAIOHTTPClient(BaseModel):
     async def get_contents(self, urls: List[str], max_characters: int) -> Dict[str, Any]:
         body = {"urls": list(urls), "text": {"maxCharacters": max_characters}}
         return await self._post("/contents", body)
+
+
+_PARALLEL_SEARCH_MAX_CHARS_PER_RESULT = 2000
+
+
+class ParallelAIOHTTPClient(BaseModel):
+    """Async Parallel Search and Extract client using NeMo Gym's global aiohttp client."""
+
+    headers: Dict[str, str]
+    base_url: str = "https://api.parallel.ai"
+    debug: bool = False
+
+    async def _post(self, endpoint: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        request_kwargs = {
+            "method": "POST",
+            "headers": self.headers,
+            "url": f"{self.base_url}{endpoint}",
+            "data": json.dumps(body),
+        }
+
+        MAX_NUM_TRIES = 3  # mirror the Tavily and Exa clients
+        max_num_tries = MAX_NUM_TRIES
+        tries = 0
+        while tries < max_num_tries:
+            tries += 1
+            response = await request(**request_kwargs)
+
+            if response.status in (401, 403):
+                _abort_on_invalid_api_key("parallel", response.status, (await response.content.read()).decode())
+
+            if response.status in RETRY_ERROR_CODES:
+                rate_limited = response.status in RATE_LIMIT_ERROR_CODES
+                if rate_limited:
+                    max_num_tries += 1
+                _count_provider_retry(response.status)
+                content = (await response.content.read()).decode()
+                tag = "parallel_rate_limit" if rate_limited else "parallel_retry"
+                print(
+                    f"[browsecomp][tool_fail][{tag}] endpoint={endpoint} status={response.status} "
+                    f"try={tries} body={content[:300]}",
+                    flush=True,
+                )
+                await sleep(0.5)
+                continue
+
+            data = await response.json()
+            if self.debug:
+                print(f"Received the following Parallel response: status={response.status}")
+            return data
+
+        await raise_for_status(response)
+
+    async def search(
+        self,
+        query: str,
+        num_results: int,
+        mode: str = "advanced",
+        max_chars_per_result: int = _PARALLEL_SEARCH_MAX_CHARS_PER_RESULT,
+        exclude_domains: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        advanced_settings: Dict[str, Any] = {
+            "max_results": num_results,
+            "excerpt_settings": {"max_chars_per_result": max_chars_per_result},
+        }
+        if exclude_domains:
+            advanced_settings["source_policy"] = {"exclude_domains": list(exclude_domains)}
+        body = {
+            "search_queries": [query],
+            "mode": mode,
+            "advanced_settings": advanced_settings,
+        }
+        return await self._post("/v1/search", body)
+
+    async def extract(
+        self,
+        urls: List[str],
+        max_characters: int,
+        objective: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        body: Dict[str, Any] = {
+            "urls": list(urls),
+            "advanced_settings": {"full_content": {"max_chars_per_result": max_characters}},
+        }
+        if objective:
+            body["objective"] = objective
+        return await self._post("/v1/extract", body)
 
 
 # ---------------------------------------------------------------------------
@@ -748,6 +848,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)
     _exa_clients: Optional[List[ExaAIOHTTPClient]] = PrivateAttr(default=None)
+    _parallel_clients: Optional[List[ParallelAIOHTTPClient]] = PrivateAttr(default=None)
     _num_requests: int = 0
     _session_id_to_metrics: Optional[Dict[str, TavilySearchMetrics]] = PrivateAttr(default=None)
     _session_workspaces: Dict[str, "_PageWriter"] = PrivateAttr(default_factory=dict)
@@ -790,6 +891,24 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 for k in exa_api_keys
             ]
             print(f"Search provider: exa ({len(self._exa_clients)} key(s))")
+
+        # Parallel clients (built only when a Parallel key is configured). One client
+        # per key; round-robined like Tavily and Exa. Native aiohttp REST, no SDK dependency.
+        parallel_api_keys = self.config.parallel_api_key
+        if isinstance(parallel_api_keys, str):
+            parallel_api_keys = [parallel_api_keys]
+        if parallel_api_keys:
+            self._parallel_clients = [
+                ParallelAIOHTTPClient(
+                    headers={"x-api-key": k, "Content-Type": "application/json"},
+                    debug=self.config.debug,
+                )
+                for k in parallel_api_keys
+            ]
+            print(
+                f"Search provider: parallel (mode={self.config.parallel_search_mode}, "
+                f"{len(self._parallel_clients)} key(s))"
+            )
 
         self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
 
@@ -927,6 +1046,11 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         self._num_requests += 1
         return client
 
+    def _select_parallel_client(self) -> ParallelAIOHTTPClient:
+        client = self._parallel_clients[self._num_requests % len(self._parallel_clients)]
+        self._num_requests += 1
+        return client
+
     def _record_call(
         self, metrics: "TavilySearchMetrics", function: str, provider: str, status: str, start: float
     ) -> None:
@@ -971,6 +1095,40 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             url = result.get("url", "") or ""
             highlights = result.get("highlights") or []
             snippet = " ... ".join(h for h in highlights if h)
+            entry = f"[Title]: {title}\n[URL]: {url}\n[Snippet]: {snippet}\n"
+            if running_len + len(entry) > max_length:
+                break
+            blocks.append(entry)
+            running_len += len(entry)
+        return "\n".join(blocks)
+
+    async def _parallel_search_one(self, query: str, max_length: int, metrics: "TavilySearchMetrics") -> str:
+        """Parallel search: return result excerpts inline using the Exa-compatible format."""
+        if len(query) > 400:
+            return "Query is too long"
+
+        client = self._select_parallel_client()
+        call_start = time()
+        try:
+            results = await client.search(
+                query,
+                num_results=self.config.max_results,
+                mode=self.config.parallel_search_mode,
+                exclude_domains=self._exclude_domains,
+            )
+        except Exception as e:
+            self._record_call(metrics, "search", "parallel", "error", call_start)
+            print(f"[browsecomp][tool_fail][parallel_search] query={query[:200]!r} error={e}", flush=True)
+            return f"Search failed: {e}"
+        self._record_call(metrics, "search", "parallel", "success", call_start)
+
+        blocks = [f"[Search Query]: {query}"]
+        running_len = len(blocks[0])
+        for result in results.get("results", []):
+            title = result.get("title", "") or ""
+            url = result.get("url", "") or ""
+            excerpts = result.get("excerpts") or []
+            snippet = " ... ".join(excerpt for excerpt in excerpts if excerpt)
             entry = f"[Title]: {title}\n[URL]: {url}\n[Snippet]: {snippet}\n"
             if running_len + len(entry) > max_length:
                 break
@@ -1067,7 +1225,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             return TavilySearchResponse(results_string="Query is none or empty")
 
         max_per_query_length = body.max_total_length // len(body.queries)
-        if self.config.search_provider == "exa":
+        if self.config.search_provider == "parallel":
+            # Parallel returns excerpts inline, including when terminal mode is enabled.
+            results = await asyncio.gather(
+                *[self._parallel_search_one(q, max_per_query_length, metrics) for q in body.queries]
+            )
+        elif self.config.search_provider == "exa":
             # Exa: highlights-only, always inline (no disk pages, even in terminal mode).
             results = await asyncio.gather(
                 *[self._exa_search_one(q, max_per_query_length, metrics) for q in body.queries]
@@ -1105,7 +1268,31 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         # fetch full page content (provider-specific); normalize to a list of
         # {url, raw_content} so the shared disk/inline formatting below is provider-agnostic.
         start_time = time()
-        if self.config.search_provider == "exa":
+        if self.config.search_provider == "parallel":
+            parallel_client = self._select_parallel_client()
+            print(
+                f"[parallel_call_begin function=extract n_urls={len(urls)} goal={(body.goal or '')[:80]!r}]",
+                flush=True,
+            )
+            try:
+                raw = await parallel_client.extract(
+                    urls=urls,
+                    max_characters=max_per_url_length,
+                    objective=body.goal,
+                )
+            except Exception as e:
+                self._record_call(metrics, "browse", "parallel", "error", start_time)
+                print(f"[browsecomp][tool_fail][parallel_extract] urls={urls} error={e}", flush=True)
+                return BrowseResponse(results_string=f"Failed to extract content: {e}")
+            self._record_call(metrics, "browse", "parallel", "success", start_time)
+            result_list = [
+                {
+                    "url": result.get("url", "") or "",
+                    "raw_content": result.get("full_content") or " ... ".join(result.get("excerpts") or []) or "",
+                }
+                for result in raw.get("results", [])
+            ]
+        elif self.config.search_provider == "exa":
             exa_client = self._select_exa_client()
             print(f"[exa_call_begin function=browse n_urls={len(urls)} goal={(body.goal or '')[:80]!r}]", flush=True)
             try:

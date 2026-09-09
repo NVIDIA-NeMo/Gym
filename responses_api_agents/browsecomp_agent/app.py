@@ -140,7 +140,8 @@ _ANSWER_COMMIT_RE = re.compile(
 class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
-    max_steps: int = 400
+    # Optional safety limit on model turns. None leaves the number of tool-call turns uncapped.
+    max_steps: Optional[int] = None
     keep_rounds: int = 9999
     nudge_steps: bool = True
     max_context_tokens: int = 196608
@@ -570,7 +571,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                             f"status={api_response.status} body={tool_output[:300]}",
                             flush=True,
                         )
-                if self.config.nudge_steps:
+                if self.config.nudge_steps and self.config.max_steps is not None:
                     turns_left = self.config.max_steps - step
                     tool_output += "\n\n[%d turns remaining out of %d]" % (turns_left, self.config.max_steps)
 
@@ -593,7 +594,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     full_trajectory[-1] = new_outputs[-1]
 
             # --- Nudge the model at milestone steps ---
-            if self.config.nudge_steps and all_fn_calls:
+            if self.config.nudge_steps and self.config.max_steps is not None and all_fn_calls:
                 quarter = self.config.max_steps // 4
                 half = self.config.max_steps // 2
                 near_end = int(self.config.max_steps * 0.875)

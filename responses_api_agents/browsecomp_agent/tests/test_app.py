@@ -120,7 +120,7 @@ class TestApp:
 
     def test_config_defaults(self) -> None:
         config = _make_config()
-        assert config.max_steps == 400
+        assert config.max_steps is None
         assert config.keep_rounds == 9999
         assert config.nudge_steps is True
         assert config.max_context_tokens == 196608
@@ -277,6 +277,8 @@ class TestApp:
 
         assert agent.server_client.post.call_count == 3  # model + tool + model
         assert result.output[-1].content[0].text == "Final Answer: Paris"
+        second_model_body = agent.server_client.post.call_args_list[-1].kwargs["json"]
+        assert "turns remaining" not in second_model_body.input[-1].output
 
     async def test_responses_respects_max_steps(self) -> None:
         """Agent should stop after max_steps even if no final answer is given."""

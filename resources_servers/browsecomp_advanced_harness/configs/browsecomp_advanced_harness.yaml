@@ -5,7 +5,12 @@ browsecomp_advanced_harness_resources_server:
       entrypoint: app.py
       domain: agent
       debug: false
-      tavily_api_key: ${tavily_api_key}
+      search_provider: ${oc.select:search_provider,tavily}
+      tavily_api_key: ${oc.select:tavily_api_key,null}
+      exa_api_key: ${oc.select:exa_api_key,null}
+      parallel_api_key: ${oc.select:parallel_api_key,null}
+      parallel_search_mode: ${oc.select:parallel_search_mode,advanced}
+      max_results: ${oc.select:max_results,5}
       exclude_domains_file_path: ${exclude_domains_file_path}
       use_judge: true
       judge_model_server:

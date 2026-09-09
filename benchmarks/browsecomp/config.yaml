@@ -18,13 +18,15 @@ browsecomp_benchmark_resources_server:
       domain: agent
       debug: false
       # Search/browse backend. Override per-run with
-      # ++...browsecomp_advanced_harness.search_provider=tavily (+ tavily_api_key=[...]).
-      search_provider: exa
+      # search_provider=parallel (plus parallel_api_key=[...] and optional parallel_search_mode).
+      search_provider: ${oc.select:search_provider,exa}
       # Results per query. 10 is the Exa reference value; the Tavily path uses 5.
       max_results: 10
       # Supplied per-run as a sharded key list so concurrent runs do not collide
       # on provider rate limits. Null here; the launcher injects the real shard.
       exa_api_key: ${oc.select:exa_api_key,null}
+      parallel_api_key: ${oc.select:parallel_api_key,null}
+      parallel_search_mode: ${oc.select:parallel_search_mode,advanced}
       # terminal mode: search/browse write pages to a per-session disk workspace
       # and the read-only bash_command tool is exposed for the model to grep/read them.
       workspace: per_session
@@ -40,7 +42,8 @@ browsecomp_benchmark_agent:
   responses_api_agents:
     browsecomp_agent:
       entrypoint: app.py
-      max_steps: 400
+      # Leave tool-call turns uncapped; context resets bound prompt growth independently.
+      max_steps: null
       nudge_steps: true
       max_context_tokens: 196608
       # token-based reset (50k standard)
