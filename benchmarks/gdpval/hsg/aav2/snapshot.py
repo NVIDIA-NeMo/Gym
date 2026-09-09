@@ -38,7 +38,6 @@ FILES = (
     "media.py",
     "preconvert.py",
     "source_copy.py",
-    "true3_transport.yaml",
 )
 BYTE_LIMITS_MIB = {
     "FILE_BYTES": 250,

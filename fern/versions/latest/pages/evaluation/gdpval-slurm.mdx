@@ -57,8 +57,11 @@ write `SERVER_URL=.../v1` to `$OUTPUT_DIR/server_info/*.env`.
 
 `JUDGE_CONFIG` is a self-contained YAML overlay with absolute reference paths
 and calibrated ELOs. Reference trees must contain one completed repeat per task.
-The normal three-provider configuration is packaged with the launcher; it can
-be overridden in this overlay. Do not reference additional local YAML files.
+Judging inherits the panel, media settings, and trial-validation behavior from
+`benchmarks/gdpval/config.yaml` and the resources server defaults. The launcher
+enables recursive reference-file loading; completion still checks valid vote
+counts. The overlay can override benchmark settings. Do not reference additional
+local YAML files.
 
 ```yaml
 gdpval_resources_server:

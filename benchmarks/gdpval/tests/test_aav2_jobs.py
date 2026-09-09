@@ -279,7 +279,11 @@ def test_judge_modes_use_native_resume_and_prepared_views(job, mode, trials, con
     prefix = "gdpval_resources_server.resources_servers.gdpval."
     assert values[prefix + "num_comparison_trials"] == str(trials)
     assert values[prefix + "preconvert_office_to_pdf"] == "false"
-    assert values[prefix + "strict_comparison_trials"] == "true"
+    assert prefix + "strict_comparison_trials" not in values
+    assert values[prefix + "judge_reference_files_recursive"] == "true"
+    assert "benchmarks/gdpval/config.yaml" in values["config_paths"]
+    assert "true3_transport" not in values["config_paths"]
+    assert not any(key.startswith(prefix + "judge_panel") or key == prefix + "judge_media_mode" for key in values)
     assert values["output_jsonl_fpath"] == str(job.run / f"judge_{mode}/rollouts.jsonl")
     assert values["gdpval_stirrup_agent.responses_api_agents.stirrup_agent.persist_deliverables_dir"] == str(
         job.run / "prepared/candidate"

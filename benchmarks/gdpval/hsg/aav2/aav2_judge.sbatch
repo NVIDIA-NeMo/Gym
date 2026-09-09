@@ -31,8 +31,8 @@ gdpval_prepare judge
 "$GYM_PYTHON" "$LOCAL_PACKAGE/preconvert.py" "$RUN_DIR"
 export EXECUTE_ONLY=false JUDGE_ONLY=true RERUN_INCOMPLETE=true
 export PERSIST_DELIVERABLES_DIR=$RUN_DIR/prepared/candidate
-gdpval_run_gym --config "$LOCAL_PACKAGE/true3_transport.yaml" \
-    --config "$JOB_ROOT/judge.yaml" --config "$RUN_DIR/prepared/judge.yaml" --config "$JOB_ROOT/dataset.yaml" \
+gdpval_run_gym --config "$JOB_ROOT/judge.yaml" \
+    --config "$RUN_DIR/prepared/judge.yaml" --config "$JOB_ROOT/dataset.yaml" \
     --model-url http://127.0.0.1:9/v1 --model-api-key dummy --model judge-only \
     ++model_endpoint_readiness_timeout_seconds=0 \
     ++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.execute_only=false \
@@ -40,7 +40,7 @@ gdpval_run_gym --config "$LOCAL_PACKAGE/true3_transport.yaml" \
     ++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.gdpval_container_path=null \
     "++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.persist_deliverables_dir=$PERSIST_DELIVERABLES_DIR" \
     ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
-    ++gdpval_resources_server.resources_servers.gdpval.strict_comparison_trials=true \
+    ++gdpval_resources_server.resources_servers.gdpval.judge_reference_files_recursive=true \
     "++gdpval_resources_server.resources_servers.gdpval.num_comparison_trials=$NUM_COMPARISON_TRIALS" \
     ++gdpval_resources_server.resources_servers.gdpval.preconvert_office_to_pdf=false \
     ++multistage.enabled=true "++multistage.stages=$STAGES" "++multistage.dataset_path=$DATASET" ++multistage.seed=42
