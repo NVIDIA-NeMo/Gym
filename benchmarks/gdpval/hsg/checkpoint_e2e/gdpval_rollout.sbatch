@@ -21,7 +21,7 @@ umask 077
 export PYTHONUNBUFFERED=1
 export PYTHONNOUSERSITE=1
 export PATH=/cm/local/apps/slurm/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-unset PYTHONHOME PYTHONPATH NEMO_GYM_EXTRA_ROOTS VIRTUAL_ENV BASH_ENV
+unset PYTHONHOME PYTHONPATH NEMO_GYM_EXTRA_ROOTS NEMO_GYM_CONFIG_DICT NEMO_GYM_CONFIG_PATH VIRTUAL_ENV BASH_ENV
 
 # Slurm executes a staged copy of this script from its spool directory, so
 # BASH_SOURCE cannot locate package-owned helpers on compute nodes. The
@@ -134,8 +134,8 @@ echo "  dataset              $rows rows"
 echo "  profile              $(basename "$PROFILE") -> $MODEL_NAME"
 echo "  topology             $N_NODES node(s) = $N_REPLICAS replica(s) x $NODES_PER_REPLICA, conc=$CONCURRENCY, turns=$AGENT_MAX_TURNS"
 
-# Each allocation builds a fresh locked Gym environment, stages its inputs,
-# and uses Gym's own dependency setup before verifying component locality.
+# Build the locked root environment and stage runtime inputs. Gym creates
+# component environments during eval startup using the local paths below.
 mars_prepare_rollout_runtime
 echo "=== assertions passed ==="
 
@@ -270,10 +270,9 @@ setsid "$MARS_PYTHON" "$GYM_ENTRYPOINT" eval run \
     --concurrency "$CONCURRENCY" --num-repeats "$NUM_REPEATS" \
     --max-output-tokens "${MAX_OUTPUT_TOKENS:-262144}" --resume \
     ++overwrite_metrics_conflicts=true \
-    ++skip_venv_if_present=true \
+    ++skip_venv_if_present=false \
     ++uv_venv_dir="$LOCAL_COMPONENT_VENVS" \
     ++uv_cache_dir="$UV_CACHE_DIR" \
-    ++python_version="$MARS_PYTHON" \
     ++uv_pip_set_python=true \
     "++policy_model.responses_api_models.vllm_model.base_url=${urls_omega}" \
     ++policy_model.responses_api_models.vllm_model.model="$MODEL_NAME" \

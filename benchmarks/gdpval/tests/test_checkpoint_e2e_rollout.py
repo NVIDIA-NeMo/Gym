@@ -223,7 +223,8 @@ def test_rollout_wrapper_launches_verified_local_runtime_before_serving() -> Non
     assert 'setsid "$MARS_PYTHON" "$GYM_ENTRYPOINT" eval run' in script
     assert '++uv_venv_dir="$LOCAL_COMPONENT_VENVS"' in script
     assert '++uv_cache_dir="$UV_CACHE_DIR"' in script
-    assert '++python_version="$MARS_PYTHON"' in script
+    assert "++skip_venv_if_present=false" in script
+    assert "++uv_pip_set_python=true" in script
     assert '"${MAX_OUTPUT_TOKENS:-262144}" --resume' in script
     assert "++reuse_existing_data_preparation=" not in script
     assert 'python3 "$ROLLOUT_SHARD_COVERAGE_PY"' not in script
@@ -346,6 +347,7 @@ git() {
 uv_stub() {
     [[ ! -e $UV_PROJECT_ENVIRONMENT ]] || return 88
     [[ -z ${PYTHONHOME+x} && -z ${PYTHONPATH+x} && -z ${NEMO_GYM_EXTRA_ROOTS+x} && -z ${VIRTUAL_ENV+x} ]] || return 89
+    [[ $UV_MANAGED_PYTHON == true && -z ${UV_NO_MANAGED_PYTHON+x} ]] || return 90
     printf '%s\n' "$PWD" "$UV_PROJECT_ENVIRONMENT" "$*" > "$EVENTS"
     mkdir -p "$UV_PROJECT_ENVIRONMENT/bin" "$UV_PYTHON_INSTALL_DIR"
     [[ $TEST_OUTCOME != sync-failure ]] || { touch "$UV_PROJECT_ENVIRONMENT/partial"; return 29; }
@@ -373,6 +375,7 @@ printf 'first=%s second=%s\n' "$first" "$second"
             "PYTHONPATH": "/lustre/stale-modules",
             "NEMO_GYM_EXTRA_ROOTS": "/lustre/stale-components",
             "VIRTUAL_ENV": "/lustre/stale-environment",
+            "UV_NO_MANAGED_PYTHON": "true",
         },
         text=True,
         capture_output=True,

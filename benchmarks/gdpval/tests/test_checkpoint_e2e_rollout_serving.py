@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import subprocess
 import tempfile
@@ -58,7 +59,7 @@ def _stage(inputs: SimpleNamespace, mounts: str | None = None) -> dict:
 def test_serving_stage_copies_code_image_and_tokenizer_preserving_weight_links_and_mount_targets(inputs) -> None:
     source_bytes = {path: path.read_bytes() for path in inputs.model.rglob("*") if path.is_file()}
     manifest = _stage(inputs)
-    assert serving.verify(inputs.root, local_root=inputs.local) == manifest
+    assert json.loads((inputs.root / "manifest.json").read_text()) == manifest
     assert (inputs.root / "vllm.sqsh").read_bytes() == inputs.image.read_bytes()
     assert (inputs.root / "mount_0/reasoning.py").read_bytes() == inputs.parser.read_bytes()
     for source, content in source_bytes.items():
@@ -92,52 +93,13 @@ def test_serving_stage_copies_code_image_and_tokenizer_preserving_weight_links_a
 
 
 @pytest.mark.parametrize(
-    "asset", ["vllm.sqsh", "model/config.json", "model/modeling_example.py", "mount_0/reasoning.py"]
+    "suffix",
+    [":/model:ro", ":/lustre:ro", ":relative:ro", ":/parsers", ":/parsers:rw", ":/parsers:ro,other:/extra:ro"],
 )
-def test_verify_rejects_modified_local_assets(inputs, asset: str) -> None:
-    _stage(inputs)
-    path = inputs.root / asset
-    path.chmod(0o600)
-    path.write_text("changed\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="local serving asset changed"):
-        serving.verify(inputs.root, local_root=inputs.local)
-
-
-@pytest.mark.parametrize("source_name", ["image", "parser", "weight"])
-def test_verify_rejects_changed_source_identity(inputs, source_name: str) -> None:
-    _stage(inputs)
-    path = getattr(inputs, source_name)
-    path.write_text("changed\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="source changed after staging"):
-        serving.verify(inputs.root, local_root=inputs.local)
-
-
-def test_verify_rejects_new_source_files_and_wrong_weight_link(inputs) -> None:
-    _stage(inputs)
-    link = inputs.root / "model" / inputs.weight.name
-    link.unlink()
-    link.symlink_to(inputs.parser)
-    with pytest.raises(ValueError, match="weight link changed"):
-        serving.verify(inputs.root, local_root=inputs.local)
-    link.unlink()
-    link.symlink_to(inputs.weight)
-    _write(inputs.model / "new_model_code.py", "changed = True\n")
-    with pytest.raises(ValueError, match="source changed after staging"):
-        serving.verify(inputs.root, local_root=inputs.local)
-
-
-@pytest.mark.parametrize("target", ["/model", "/model/plugin", "/lustre", "/", "relative", "/parsers/../model"])
-def test_stage_rejects_unsafe_or_shadowing_mount_targets(inputs, target: str) -> None:
-    with pytest.raises(ValueError, match="mount target"):
-        _stage(inputs, f"{inputs.parser.parent}:{target}:ro")
-    assert not inputs.root.exists()
-
-
-def test_stage_rejects_writable_and_overlapping_parser_mounts(inputs) -> None:
+def test_stage_only_accepts_the_readonly_parser_mount_contract(inputs, suffix: str) -> None:
     with pytest.raises(ValueError, match="unsupported parser mount"):
-        _stage(inputs, f"{inputs.parser.parent}:/parsers:rw")
-    with pytest.raises(ValueError, match="overlapping parser mount"):
-        _stage(inputs, f"{inputs.parser.parent}:/parsers:ro,{inputs.parser.parent}:/parsers/nested:ro")
+        _stage(inputs, f"{inputs.parser.parent}{suffix}")
+    assert not inputs.root.exists()
 
 
 def test_stage_rejects_symlinked_code_and_existing_destination(inputs) -> None:
@@ -149,35 +111,75 @@ def test_stage_rejects_symlinked_code_and_existing_destination(inputs) -> None:
         _stage(inputs)
 
 
-def test_stage_rejects_image_drift_during_staging(inputs, monkeypatch: pytest.MonkeyPatch) -> None:
-    original = serving._copy_file
+def test_stage_reads_image_once_and_never_reopens_the_destination_for_hashing(inputs, monkeypatch) -> None:
+    original_open = Path.open
+    reads = []
 
-    def copy_then_change(source, destination, signature):
-        digest = original(source, destination, signature)
-        if source == inputs.image:
-            source.write_text("changed image\n", encoding="utf-8")
-        return digest
+    def counted_open(path, mode="r", *args, **kwargs):
+        if path == inputs.image and mode == "rb":
+            reads.append(path)
+        if path == inputs.root / "vllm.sqsh" and "r" in mode:
+            raise AssertionError("staging reread the copied image")
+        return original_open(path, mode, *args, **kwargs)
 
-    monkeypatch.setattr(serving, "_copy_file", copy_then_change)
-    with pytest.raises(ValueError, match="source changed after staging"):
-        _stage(inputs)
-
-
-def test_verify_rejects_added_shared_code_and_missing_environment(inputs) -> None:
+    monkeypatch.setattr(Path, "open", counted_open)
     _stage(inputs)
-    extra = inputs.root / "shared_code.py"
-    extra.symlink_to(inputs.parser)
-    with pytest.raises(ValueError, match="unexpected serving asset"):
-        serving.verify(inputs.root, local_root=inputs.local)
-    extra.unlink()
-    (inputs.root / "environment.sh").unlink()
-    with pytest.raises(ValueError, match="environment differs"):
-        serving.verify(inputs.root, local_root=inputs.local)
+    assert reads == [inputs.image]
+
+
+@pytest.mark.parametrize("asset", ["image", "parser"])
+def test_stage_rejects_source_changes_during_copy(inputs, monkeypatch, asset) -> None:
+    source = getattr(inputs, asset)
+    original_open = Path.open
+
+    class ChangingReader:
+        def __enter__(self):
+            self.stream = original_open(source, "rb")
+            return self
+
+        def __exit__(self, *_):
+            self.stream.close()
+
+        def read(self, size):
+            chunk = self.stream.read(size)
+            if chunk:
+                with original_open(source, "ab") as output:
+                    output.write(b"changed while copying\n")
+                # Return one original chunk, then EOF, while the real file has
+                # grown. The production source stat must catch that change.
+                self.read = lambda _: b""
+            return chunk
+
+    def changing_open(path, mode="r", *args, **kwargs):
+        if path == source and mode == "rb":
+            return ChangingReader()
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", changing_open)
+    with pytest.raises(ValueError, match="source changed while copying"):
+        _stage(inputs)
+    assert not (inputs.root / "manifest.json").exists()
+    assert not (inputs.root / "environment.sh").exists()
+
+
+def test_stage_rejects_a_short_image_copy_without_rehashing(inputs, monkeypatch) -> None:
+    original_open = Path.open
+    truncated = inputs.image.read_bytes()[:-1]
+
+    def truncated_open(path, mode="r", *args, **kwargs):
+        if path == inputs.image and mode == "rb":
+            return io.BytesIO(truncated)
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", truncated_open)
+    with pytest.raises(ValueError, match="serving copy differs from source"):
+        _stage(inputs)
+    assert not (inputs.root / "manifest.json").exists()
 
 
 def test_stage_rejects_a_destination_inside_a_mount_source(inputs) -> None:
     with pytest.raises(ValueError, match="destination is inside its source"):
-        _stage(inputs, f"{inputs.local}:/recursive:ro")
+        _stage(inputs, f"{inputs.local}:/parsers:ro")
     assert not inputs.root.exists()
 
 
@@ -225,7 +227,6 @@ def test_long_runtime_uses_short_tmp_forwarded_through_ray_mount(inputs, monkeyp
             monkeypatch.setenv(name, str(path))
         root = job / "serving"
         manifest = serving.stage(root, inputs.image, inputs.model, runtime_root=job, local_root=local)
-        assert serving.verify(root, local_root=local) == manifest
         assert len(str(job / "tmp" / ("a" * 36)).encode()) > 107
         assert len(str(paths["TMPDIR"] / ("a" * 36)).encode()) <= 107
         assert manifest["container_environment"]["TMPDIR"] == str(paths["TMPDIR"])
@@ -248,17 +249,3 @@ def test_stage_rejects_external_tmp_outside_ray_subdirectory(inputs, monkeypatch
     with pytest.raises(ValueError, match="outside the mounted runtime: TMPDIR"):
         _stage(inputs)
     assert not inputs.root.exists()
-
-
-def test_verify_rejects_environment_drift_before_serving(inputs, monkeypatch) -> None:
-    _stage(inputs)
-    monkeypatch.setenv("HF_HOME", str(inputs.model))
-    with pytest.raises(ValueError, match="container environment changed"):
-        serving.verify(inputs.root, local_root=inputs.local)
-
-
-@pytest.mark.parametrize("target", ["runtime", "ray", "ancestor"])
-def test_stage_rejects_parser_mounts_shadowing_runtime_paths(inputs, target: str) -> None:
-    destination = {"runtime": inputs.root.parent, "ray": inputs.local / "ray", "ancestor": inputs.local}[target]
-    with pytest.raises(ValueError, match="overlaps the node-local runtime"):
-        _stage(inputs, f"{inputs.parser.parent}:{destination}:ro")

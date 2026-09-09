@@ -5,7 +5,7 @@
 
 [[ -n ${BASH_VERSION:-} ]] || { echo "MARS_STAGE_FAIL: bash is required" >&2; return 64 2>/dev/null || exit 64; }
 
-MARS_PACKAGE_ID_EXPECTED=checkpoint-e2e-1.4.13-mars-local-r13-20260908
+MARS_PACKAGE_ID_EXPECTED=checkpoint-e2e-1.4.13-mars-local-r14-20260908
 MARS_GYM_REVISION_EXPECTED=d3f146d386c7dfe07d4fabce32c4c8b14c7917d2
 
 mars_fail() { echo "MARS_STAGE_FAIL: $*" >&2; return 64; }
@@ -251,9 +251,12 @@ mars_stage_rollout_gym() {
     python_version=$(<"$MARS_GYM/.python-version")
     [[ $python_version =~ ^3\.[0-9]+(\.[0-9]+)?$ ]] \
         || mars_fail "unsupported pinned rollout Python version: $python_version" || return
-    unset PYTHONHOME PYTHONPATH NEMO_GYM_EXTRA_ROOTS VIRTUAL_ENV UV_PROJECT_ENVIRONMENT
+    unset PYTHONHOME PYTHONPATH NEMO_GYM_EXTRA_ROOTS VIRTUAL_ENV UV_PROJECT_ENVIRONMENT UV_NO_MANAGED_PYTHON
     export UV_PYTHON_INSTALL_DIR=$MARS_JOB_ROOT/python
     export UV_PYTHON_BIN_DIR=$MARS_JOB_ROOT/bin
+    # Gym selects the parent's Python version when it creates components.
+    # Require that version from this allocation's managed installation.
+    export UV_MANAGED_PYTHON=true
     export UV_LINK_MODE=copy
     install -d -m 0700 "$UV_PYTHON_INSTALL_DIR" "$UV_PYTHON_BIN_DIR" || return
     # Let the repository's lockfile build a fresh environment inside Slurm.
@@ -316,11 +319,7 @@ mars_prepare_rollout_runtime() {
     (
         cd "$TREE"
         "$MARS_PYTHON" "$MARS_PACKAGE/rollout_runtime.py" verify \
-            --gym-root "$TREE" --component-venvs "$LOCAL_COMPONENT_VENVS" --module nemo_gym --module nemo_gym.cli.main \
-            || exit
-        "$MARS_PYTHON" "$MARS_PACKAGE/rollout_runtime.py" prepare-components \
-            --gym-root "$TREE" --component-venvs "$LOCAL_COMPONENT_VENVS" || exit
-        "$MARS_PYTHON" "$MARS_PACKAGE/rollout_serving.py" verify --root "$MARS_JOB_ROOT/serving"
+            --gym-root "$TREE" --component-venvs "$LOCAL_COMPONENT_VENVS" --module nemo_gym --module nemo_gym.cli.main
     ) || return
     cp -- "$MARS_JOB_ROOT/serving/manifest.json" \
         "$RUN_DIR/logs/serving_${SLURM_JOB_ID}_${ROTATION}.json"
