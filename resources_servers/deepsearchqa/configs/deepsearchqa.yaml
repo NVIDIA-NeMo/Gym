@@ -14,3 +14,17 @@ deepsearchqa:
         max_output_tokens: 32768
         temperature: 0.0
         top_p: 1.0
+deepsearchqa_example_agent:
+  responses_api_agents:
+    harness_exa_search:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: deepsearchqa
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/deepsearchqa/data/example.jsonl

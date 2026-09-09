@@ -15,7 +15,8 @@ and writes approximately 900 tasks to `data/deepsearchqa_benchmark.jsonl`.
 gym eval prepare --benchmark deepsearchqa
 ```
 
-Five prepared tasks and their example rollouts are checked in under `data/`.
+Five prepared tasks and their example rollouts are checked in under the
+[`deepsearchqa` resources server](../../resources_servers/deepsearchqa/data/).
 
 ## Run
 

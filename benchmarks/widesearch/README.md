@@ -18,8 +18,8 @@ writes `data/widesearch_benchmark.jsonl`.
 gym eval prepare --benchmark widesearch
 ```
 
-Five prepared tasks are checked in at `data/example.jsonl`. Their diagnostic
-rollouts are in `data/example_rollouts.jsonl`.
+Five prepared tasks and their diagnostic rollouts are checked in under the
+[`widesearch` resources server](../../resources_servers/widesearch/data/).
 
 ## Run
 
