@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from resources_servers.leancat.lean_verifier import (
+from resources_servers.leancat.proof_utils import (
     check_statement_preserved,
     extract_lean_code,
     find_banned_tokens,

@@ -28,11 +28,12 @@ because many LeanCat problems set up their own structures and instances before t
 statement, and a reassembly step would have to guess where the model's additions belong.
 Handing the model the whole file removes the guess.
 
-That freedom is why ``lean_verifier.check_statement_preserved`` exists: a model that owns
+That freedom is why ``proof_utils.check_statement_preserved`` exists: a model that owns
 the whole file can also weaken the theorem it was asked to prove, and the weakened
-version compiles. See ``lean_verifier`` for what is enforced.
+version compiles. See ``proof_utils`` for what is enforced.
 """
 
+import re
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
@@ -49,7 +50,7 @@ from nemo_gym.reward_profile import (
     compute_subset_metrics,
     highest_k_metrics,
 )
-from resources_servers.leancat.lean_verifier import (
+from resources_servers.leancat.proof_utils import (
     check_statement_preserved,
     extract_lean_code,
     find_banned_tokens,
@@ -57,16 +58,58 @@ from resources_servers.leancat.lean_verifier import (
 from resources_servers.leancat.sandbox_client import Lean4SandboxClient
 
 
-# Terminal status values on the verify response. Everything except COMPILED scores 0.0;
-# they are kept distinct because "the model cheated" and "the sandbox was down" need very
-# different responses from whoever reads the run.
-STATUS_COMPILED = "compiled"
-STATUS_NO_CODE = "no_code"
+# Terminal values of `proof_status`. Everything except COMPLETED scores 0.0; they are kept
+# distinct because "the model cheated" and "the sandbox was down" need very different
+# responses from whoever reads the run.
+#
+# "completed", "empty_generation" and "timeout" are spelled as math_formal_lean spells them,
+# so a reader moving between the two servers reads the same word for the same outcome. The
+# rest have no counterpart there: that server reassembles the file itself, so it has nothing
+# to catch a tampered statement and folds every non-timeout compiler failure into the raw
+# process status.
+STATUS_COMPLETED = "completed"
+STATUS_EMPTY_GENERATION = "empty_generation"
 STATUS_BANNED_TOKENS = "banned_tokens"
 STATUS_STATEMENT_MODIFIED = "statement_modified"
 STATUS_COMPILE_ERROR = "compile_error"
 STATUS_TIMEOUT = "timeout"
 STATUS_SANDBOX_ERROR = "sandbox_error"
+
+
+def determine_proof_status(compiler_output: Dict[str, Any]) -> tuple[str, Optional[str]]:
+    """Map a sandbox result onto a proof status and, when it failed, a one-line reason.
+
+    Takes the raw sandbox dict rather than the parsed model, as math_formal_lean's function
+    of the same name does, so the two read the same and neither depends on the other's types.
+
+    ``process_status == "completed"`` means the sandbox got a zero exit code, but that is
+    checked *and* the output is scanned for ``error:``/``sorry``: a warning-only build that
+    declared a sorry still exits zero, and that must not score as a proof.
+    """
+    process_status = compiler_output.get("process_status", "unknown")
+
+    if process_status == "timeout":
+        return STATUS_TIMEOUT, "Lean compilation timed out."
+    if process_status != "completed":
+        return STATUS_SANDBOX_ERROR, f"Sandbox reported status {process_status!r}."
+
+    stdout = compiler_output.get("stdout", "")
+    stderr = compiler_output.get("stderr", "")
+    combined = f"{stdout}\n{stderr}".lower()
+    if "error:" in combined:
+        return STATUS_COMPILE_ERROR, "Lean reported compilation errors."
+    if re.search(r"\bsorry\b", combined) is not None:
+        return STATUS_COMPILE_ERROR, "Lean reported a declaration that uses 'sorry'."
+
+    return STATUS_COMPLETED, None
+
+
+def score_leancat_rollout(rollout: Dict[str, Any]) -> Dict[str, float]:
+    """Named scores for aggregate metrics (see ``LeanCatResourcesServer.compute_metrics``)."""
+    return {
+        "accuracy": rollout["reward"],
+        "statement_preserved": float(bool(rollout.get("statement_preserved", False))),
+    }
 
 
 class LeanCatResourcesServerConfig(BaseResourcesServerConfig):
@@ -109,8 +152,8 @@ class LeanCatVerifyResponse(LeanCatVerifyRequest, BaseVerifyResponse):
     # Inherits the request fields so `level` survives onto the rollout dict that
     # `compute_subset_metrics` groups by; a response that only carried the reward would
     # make the per-difficulty breakdown impossible to compute.
-    status: str
-    submitted_code: str
+    proof_status: str
+    predicted_proof: str
     statement_preserved: bool
     compiler_output: Optional[CompilerOutput] = None
 
@@ -140,8 +183,8 @@ class LeanCatResourcesServer(SimpleResourcesServer):
             return LeanCatVerifyResponse(
                 **body_dict,
                 reward=0.0,
-                status=STATUS_NO_CODE,
-                submitted_code="",
+                proof_status=STATUS_EMPTY_GENERATION,
+                predicted_proof="",
                 statement_preserved=False,
                 failure_reason="No Lean code found in the response.",
             )
@@ -152,8 +195,8 @@ class LeanCatResourcesServer(SimpleResourcesServer):
                 return LeanCatVerifyResponse(
                     **body_dict,
                     reward=0.0,
-                    status=STATUS_BANNED_TOKENS,
-                    submitted_code=code,
+                    proof_status=STATUS_BANNED_TOKENS,
+                    predicted_proof=code,
                     statement_preserved=False,
                     failure_reason=f"Submission uses banned declarations: {', '.join(banned)}.",
                 )
@@ -163,8 +206,8 @@ class LeanCatResourcesServer(SimpleResourcesServer):
             return LeanCatVerifyResponse(
                 **body_dict,
                 reward=0.0,
-                status=STATUS_STATEMENT_MODIFIED,
-                submitted_code=code,
+                proof_status=STATUS_STATEMENT_MODIFIED,
+                predicted_proof=code,
                 statement_preserved=False,
                 failure_reason=reason,
             )
@@ -173,18 +216,18 @@ class LeanCatResourcesServer(SimpleResourcesServer):
             code=code,
             timeout=self.config.compilation_timeout,
         )
+        proof_status, failure_reason = determine_proof_status(raw_output)
         compiler_output = CompilerOutput(
             process_status=raw_output.get("process_status", "unknown"),
             stdout=raw_output.get("stdout", ""),
             stderr=raw_output.get("stderr", ""),
         )
-        status, failure_reason = _classify_compiler_output(compiler_output)
 
         return LeanCatVerifyResponse(
             **body_dict,
-            reward=1.0 if status == STATUS_COMPILED else 0.0,
-            status=status,
-            submitted_code=code,
+            reward=1.0 if proof_status == STATUS_COMPLETED else 0.0,
+            proof_status=proof_status,
+            predicted_proof=code,
             statement_preserved=preserved,
             compiler_output=compiler_output,
             failure_reason=failure_reason,
@@ -205,8 +248,8 @@ class LeanCatResourcesServer(SimpleResourcesServer):
         if not tasks:
             return {}
 
-        metrics = compute_pass_majority_metrics(tasks, score_fn=_score_fn)[0]
-        metrics.update(compute_subset_metrics(tasks, subset_key="level", score_fn=_score_fn))
+        metrics = compute_pass_majority_metrics(tasks, score_fn=score_leancat_rollout)[0]
+        metrics.update(compute_subset_metrics(tasks, subset_key="level", score_fn=score_leancat_rollout))
         return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -221,35 +264,6 @@ class LeanCatResourcesServer(SimpleResourcesServer):
         key.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=["accuracy"]))
 
         return key
-
-
-def _score_fn(rollout: Dict[str, Any]) -> Dict[str, float]:
-    return {
-        "accuracy": rollout["reward"],
-        "statement_preserved": float(bool(rollout.get("statement_preserved", False))),
-    }
-
-
-def _classify_compiler_output(output: CompilerOutput) -> tuple[str, Optional[str]]:
-    """Map a sandbox result onto a status and, when it failed, a one-line reason.
-
-    ``process_status == "completed"`` means the sandbox got a zero exit code, but that is
-    checked *and* the output is scanned for ``error:``/``sorry``: a warning-only build
-    that declared a sorry still exits zero, and that must not score as a proof.
-    """
-    if output.process_status == "timeout":
-        return STATUS_TIMEOUT, "Lean compilation timed out."
-    if output.process_status != "completed":
-        return STATUS_SANDBOX_ERROR, f"Sandbox reported status {output.process_status!r}."
-
-    combined = f"{output.stdout}\n{output.stderr}"
-    lowered = combined.lower()
-    if "error:" in lowered:
-        return STATUS_COMPILE_ERROR, "Lean reported compilation errors."
-    if "sorry" in lowered:
-        return STATUS_COMPILE_ERROR, "Lean reported a declaration that uses 'sorry'."
-
-    return STATUS_COMPILED, None
 
 
 if __name__ == "__main__":

@@ -13,7 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Static (non-compiling) half of the LeanCat validity check.
+"""Utilities for LeanCat proof processing and evaluation.
+
+The counterpart of ``math_formal_lean/proof_utils.py``, and deliberately laid out the same
+way: code extraction, then the checks ``app.py`` runs before it compiles anything.
 
 LeanCat calls a submission valid only when all five of these hold (``EVALUATION.md``
 upstream): it compiles under the pinned toolchain, it preserves the statement,
@@ -25,9 +28,10 @@ criteria that are mechanically checkable from text alone -- shortcut declaration
 statement preservation -- because a proof that compiles only because the model deleted
 a hypothesis is worse than no proof at all: it scores as a success.
 
-Code extraction and the banned-token regex mirror ``scripts/eval_common.py`` upstream so
-a rollout scored here and a rollout scored by the reference harness agree on the same
-generation.
+``extract_lean_code`` is this server's ``clean_formal_generation``. It keeps the upstream
+name and the upstream regex rather than math_formal_lean's, because agreeing with
+LeanCat's own ``scripts/eval_common.py`` on which block of a generation gets scored
+matters more here than matching a sibling server's spelling.
 """
 
 import re
