@@ -294,6 +294,7 @@ if (( should_run_eval )); then
             --parsable \
             --dependency=afterany:"$main_job_id" \
             --partition=cpu \
+            --qos=cpu-normal \
             --gres=none \
             --gpus-per-node=0 \
             --nodes=1 \
