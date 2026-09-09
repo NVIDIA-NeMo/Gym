@@ -159,6 +159,15 @@ When applying labels, add only missing labels. Remove an existing label only
 when it directly conflicts with the selected family and the user requested
 normalization; otherwise report the conflict for maintainer judgment.
 
+If `gh pr edit --add-label` fails while querying deprecated Projects Classic
+fields, use the REST issue-label endpoint and then verify the PR:
+
+```bash
+gh api -X POST repos/NVIDIA-NeMo/Gym/issues/<PR>/labels \
+  -f 'labels[]=LABEL'
+gh pr view <PR> --repo NVIDIA-NeMo/Gym --json labels --jq '.labels[].name'
+```
+
 ## Handoff
 
 Report:
