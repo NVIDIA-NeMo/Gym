@@ -13,18 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import getpass
 import re
 import shlex
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-
-import rich
 
 from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import Connection, LocalConnection, get_connection
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+from nemo_gym.orchestration.jobs import (
+    MANIFEST_NAME,
+    BenchmarkJob,
+    SubmissionRecord,
+    dumps,
+    gym_version,
+    new_gym_job_id,
+    utc_timestamp,
+    write_local_index,
+)
 
 
 # Each sbatch reports its own result on a line that names its benchmark, so a
@@ -94,6 +103,12 @@ def _validate_mounts(config: SubmitConfig, conn: Connection) -> None:
         raise ValueError(f"Mount src paths do not exist:\n{details}")
 
 
+def _utc_now() -> datetime:
+    """A seam: tests freeze this to prove two submits in the same second still
+    get distinct run directories."""
+    return datetime.now(timezone.utc)
+
+
 class SlurmExecutor(BaseExecutor):
     """Slurm executor for Pyxis-enabled clusters (https://github.com/NVIDIA/pyxis).
 
@@ -102,33 +117,83 @@ class SlurmExecutor(BaseExecutor):
     bash inside the sbatch script (no container needed — they just poll HTTP).
     """
 
-    def run(self, config: SubmitConfig, *, dry_run: bool = False) -> None:
+    def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
         compute = next(iter(config.compute.values()))
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        remote_run_dir = Path(config.job.output_path) / f"gym-job-{timestamp}"
+        cluster = next(iter(config.compute))
+        now = _utc_now()
+        gym_job_id = new_gym_job_id(now)
+        remote_run_dir = Path(config.job.output_path) / gym_job_id
 
         if dry_run:
             self._dry_run(config, compute, remote_run_dir)
-            return
+            return None
 
+        benchmark_names = list(config.driver.benchmarks)
         with tempfile.TemporaryDirectory(prefix="gym-submit-") as staging_str:
             staging = self._stage(config, compute, remote_run_dir, Path(staging_str))
             with get_connection(compute.hostname) as conn:
                 _validate_mounts(config, conn)
                 conn.copy(staging, remote_run_dir)
                 output = conn.run(
-                    [
-                        f"sbatch {shlex.quote(str(remote_run_dir / name / 'job.sh'))}"
-                        for name in config.driver.benchmarks
-                    ]
+                    [_sbatch_command(name, remote_run_dir / name / "job.sh") for name in benchmark_names]
                 )
+                record = self._build_record(
+                    config, cluster, compute, gym_job_id, now, remote_run_dir, benchmark_names, output
+                )
+                # Inside the connection: the manifest is the durable copy, and a
+                # run directory without one is the state this all exists to remove.
+                # The jobs are already queued by now, so the error has to name them
+                # or they are stranded with no record anywhere.
+                try:
+                    conn.write_text(remote_run_dir / MANIFEST_NAME, dumps(record))
+                except Exception as error:
+                    queued = ", ".join(f"{b.benchmark}={b.job_id}" for b in record.benchmarks if b.job_id)
+                    raise RuntimeError(
+                        f"Submitted jobs but could not write the manifest to "
+                        f"{remote_run_dir / MANIFEST_NAME}: {error}. "
+                        f"Already queued: {queued or 'nothing'}. Record these by hand before collecting."
+                    ) from error
 
-        benchmark_names = list(config.driver.benchmarks)
-        job_ids = _SBATCH_JOB_ID_RE.findall(output)
-        for name, job_id in zip(benchmark_names, job_ids):
-            rich.print(f"[green]submitted[/green] {name} → Slurm job [bold]{job_id}[/bold]")
-        for name in benchmark_names[len(job_ids) :]:
-            rich.print(f"[green]submitted[/green] {name} (job ID unavailable)")
+        write_local_index(record)
+        return record
+
+    def _build_record(
+        self,
+        config: SubmitConfig,
+        cluster: str,
+        compute: SlurmComputeConfig,
+        gym_job_id: str,
+        now: datetime,
+        remote_run_dir: Path,
+        benchmark_names: list[str],
+        output: str,
+    ) -> SubmissionRecord:
+        results = _parse_sbatch_results(output)
+        benchmarks = []
+        for name in benchmark_names:
+            # A benchmark absent from the output produced no marker line at all —
+            # the shell died before reaching it, or the transport truncated. That
+            # is a failure, not a success with a missing id.
+            job_id, error = results.get(name, (None, "sbatch produced no result for this benchmark"))
+            benchmarks.append(
+                BenchmarkJob(
+                    benchmark=name,
+                    job_dir=str(remote_run_dir / name),
+                    job_id=job_id,
+                    error=error,
+                )
+            )
+        return SubmissionRecord(
+            gym_job_id=gym_job_id,
+            gym_version=gym_version(),
+            submitted_at=utc_timestamp(now),
+            run_dir=str(remote_run_dir),
+            cluster=cluster,
+            executor="slurm",
+            hostname=compute.hostname,
+            submitted_by=getpass.getuser(),
+            benchmarks=benchmarks,
+        )
 
     def _dry_run(self, config: SubmitConfig, compute: SlurmComputeConfig, remote_run_dir: Path) -> None:
         print(f"[dry-run] remote run dir: {remote_run_dir}")

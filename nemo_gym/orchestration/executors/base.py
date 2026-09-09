@@ -16,8 +16,9 @@
 from abc import ABC, abstractmethod
 
 from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.jobs import SubmissionRecord
 
 
 class BaseExecutor(ABC):
     @abstractmethod
-    def run(self, config: SubmitConfig, *, dry_run: bool = False) -> None: ...
+    def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None: ...

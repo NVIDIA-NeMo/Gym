@@ -13,11 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.executors.slurm import _parse_sbatch_results, _sbatch_command
+from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.executors import slurm as slurm_module
+from nemo_gym.orchestration.executors.connection import LocalConnection
+from nemo_gym.orchestration.executors.slurm import SlurmExecutor, _parse_sbatch_results, _sbatch_command
+from nemo_gym.orchestration.jobs import MANIFEST_NAME, load_record
 
 
 def test_sbatch_command_captures_the_status_of_sbatch_not_the_pipeline():
@@ -79,3 +86,172 @@ def test_a_failure_mid_list_does_not_shift_the_benchmarks_after_it():
     assert results["bench_a"] == ("111", None)
     assert results["bench_b"][0] is None
     assert results["bench_c"] == ("333", None)
+
+
+def _submit_config(tmp_path, benchmarks):
+    return SubmitConfig.model_validate(
+        {
+            "services": {},
+            "compute": {"hsg": {"type": "slurm", "account": "my-account", "hostname": None}},
+            "driver": {"container": "gym:latest", "benchmarks": {name: {} for name in benchmarks}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+
+
+class _FakeConnection(LocalConnection):
+    """A local connection whose `run` answers as a scheduler would."""
+
+    def __init__(self, replies):
+        self._replies = replies
+        self.commands = []
+
+    def run(self, commands):
+        self.commands.append(commands)
+        return self._replies.pop(0)
+
+
+def _install(monkeypatch, conn):
+    monkeypatch.setattr(slurm_module, "get_connection", lambda hostname: conn)
+    monkeypatch.setattr(slurm_module, "_validate_mounts", lambda config, connection: None)
+
+
+def test_run_returns_a_record_naming_every_benchmark(tmp_path, monkeypatch):
+    conn = _FakeConnection(["__GYM_JOB:bench_a:0:111 \n__GYM_JOB:bench_b:0:222 "])
+    _install(monkeypatch, conn)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a", "bench_b"]))
+
+    assert record is not None
+    assert [(b.benchmark, b.job_id) for b in record.benchmarks] == [("bench_a", "111"), ("bench_b", "222")]
+    assert record.cluster == "hsg"
+    assert record.executor == "slurm"
+    assert record.hostname is None
+    assert record.run_dir.endswith(record.gym_job_id)
+    assert record.benchmarks[0].job_dir == f"{record.run_dir}/bench_a"
+
+
+def test_run_writes_the_manifest_into_the_run_dir(tmp_path, monkeypatch):
+    conn = _FakeConnection(["__GYM_JOB:bench_a:0:111 "])
+    _install(monkeypatch, conn)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]))
+
+    manifest = Path(record.run_dir) / MANIFEST_NAME
+    assert load_record(json.loads(manifest.read_text())) == record
+
+
+def test_run_writes_the_local_index(tmp_path, monkeypatch):
+    conn = _FakeConnection(["__GYM_JOB:bench_a:0:111 "])
+    _install(monkeypatch, conn)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]))
+
+    index = tmp_path / "cache" / "nemo-gym" / "jobs" / f"{record.gym_job_id}.json"
+    assert load_record(json.loads(index.read_text())) == record
+
+
+def test_run_records_a_failed_benchmark_without_disturbing_the_others(tmp_path, monkeypatch):
+    conn = _FakeConnection(
+        ["__GYM_JOB:bench_a:0:111 \n__GYM_JOB:bench_b:1:sbatch: error: bad account \n__GYM_JOB:bench_c:0:333 "]
+    )
+    _install(monkeypatch, conn)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a", "bench_b", "bench_c"]))
+
+    by_name = {b.benchmark: b for b in record.benchmarks}
+    assert by_name["bench_a"].job_id == "111"
+    assert by_name["bench_b"].job_id is None
+    assert "bad account" in by_name["bench_b"].error
+    assert by_name["bench_c"].job_id == "333"
+    assert [b.benchmark for b in record.failed] == ["bench_b"]
+
+
+def test_run_records_a_benchmark_the_scheduler_never_answered_for(tmp_path, monkeypatch):
+    conn = _FakeConnection(["__GYM_JOB:bench_a:0:111 "])
+    _install(monkeypatch, conn)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a", "bench_b"]))
+
+    by_name = {b.benchmark: b for b in record.benchmarks}
+    assert by_name["bench_b"].job_id is None
+    assert "no result" in by_name["bench_b"].error
+
+
+def test_two_runs_in_the_same_second_get_different_run_dirs(tmp_path, monkeypatch):
+    frozen = datetime(2026, 9, 9, 10, 2, 3, tzinfo=timezone.utc)
+    monkeypatch.setattr(slurm_module, "_utc_now", lambda: frozen)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    run_dirs = []
+    for _ in range(2):
+        conn = _FakeConnection(["__GYM_JOB:bench_a:0:111 "])
+        _install(monkeypatch, conn)
+        run_dirs.append(SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"])).run_dir)
+
+    assert run_dirs[0] != run_dirs[1]
+
+
+def test_a_failed_manifest_write_fails_the_submit_and_names_queued_jobs(tmp_path, monkeypatch):
+    class _NoWrite(_FakeConnection):
+        def write_text(self, remote, content):
+            raise RuntimeError("permission denied")
+
+    conn = _NoWrite(["__GYM_JOB:bench_a:0:111 \n__GYM_JOB:bench_b:0:222 "])
+    _install(monkeypatch, conn)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+
+    with pytest.raises(RuntimeError) as error:
+        SlurmExecutor().run(_submit_config(tmp_path, ["bench_a", "bench_b"]))
+
+    # The jobs are already queued; an error that does not say so strands them.
+    message = str(error.value)
+    assert "111" in message and "222" in message
+    assert "permission denied" in message
+
+
+def test_submitting_locally_runs_the_real_sbatch_command(tmp_path, monkeypatch):
+    # The one test that exercises the generated bash end to end, over a real
+    # LocalConnection. A command string that only a mocked `run` accepts would
+    # pass every other test in this file and still break every local submit.
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    sbatch = fake_bin / "sbatch"
+    sbatch.write_text("#!/bin/bash\necho 4242\n")
+    sbatch.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(slurm_module, "_validate_mounts", lambda config, connection: None)
+
+    record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]))
+
+    assert record.benchmarks[0].job_id == "4242"
+    assert (Path(record.run_dir) / MANIFEST_NAME).exists()
+
+
+def test_submitting_locally_records_a_failing_sbatch(tmp_path, monkeypatch):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    sbatch = fake_bin / "sbatch"
+    sbatch.write_text("#!/bin/bash\necho 'sbatch: error: Invalid account' >&2\nexit 1\n")
+    sbatch.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(slurm_module, "_validate_mounts", lambda config, connection: None)
+
+    record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]))
+
+    assert record.benchmarks[0].job_id is None
+    assert "Invalid account" in record.benchmarks[0].error
+
+
+def test_dry_run_returns_no_record(tmp_path, monkeypatch, capsys):
+    record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]), dry_run=True)
+
+    assert record is None
+    assert "[dry-run]" in capsys.readouterr().out
