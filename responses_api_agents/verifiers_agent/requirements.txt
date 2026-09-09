@@ -2,9 +2,5 @@
 verifiers @ git+https://github.com/PrimeIntellect-ai/verifiers.git@v0.1.14
 --extra-index-url https://hub.primeintellect.ai/primeintellect/simple/
 acereason-math
-
-# AutomationBench environments (ab_aa, ab_zapier). Paths are relative to this
-# file so the agent's isolated venv gets them too; installing them only in the
-# repo root venv leaves the agent server with ModuleNotFoundError.
 -e ../../environments/ab_aa
 -e ../../environments/ab_zapier
