@@ -20,6 +20,10 @@ ab_aa:
       temperature: 1.0
       top_p: 1.0
       datasets:
+        - name: example
+          type: example
+          jsonl_fpath: environments/ab_aa/data/example.jsonl
+          license: MIT
         - name: validation
           type: validation
           jsonl_fpath: environments/ab_aa/data/automationbench-600.jsonl

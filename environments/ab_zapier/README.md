@@ -1,6 +1,4 @@
-# ab_zapier
-
-AutomationBench
+# AutomationBench
 
 - Source: https://github.com/zapier/AutomationBench (verifiers 0.2.0)
 - Toolset: `api` (matches upstream's CLI default)
