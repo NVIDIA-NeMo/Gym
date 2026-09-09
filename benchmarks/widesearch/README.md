@@ -4,10 +4,9 @@
 research: collecting many facts and returning them in a structured Markdown
 table. The public dataset contains 200 tasks in English and Chinese.
 
-This integration runs a Gym harness in OpenSandbox with Exa MCP search. The
+This integration runs a Gym harness in a sandbox with Exa MCP search. The
 [`widesearch`](../../resources_servers/widesearch/README.md) resources server
-parses and grades the resulting table. Claude Code is the only harness tested
-so far.
+parses and grades the resulting table.
 
 ## Prepare the data
 
@@ -16,22 +15,15 @@ Preparation downloads the task metadata and per-task gold CSV files from
 writes `data/widesearch_benchmark.jsonl`.
 
 ```bash
-ng_prepare_benchmark \
-  "+config_paths=[benchmarks/widesearch/config.yaml]"
+gym eval prepare --benchmark widesearch
 ```
+
+Five prepared tasks are checked in at `data/example.jsonl`. Their diagnostic
+rollouts are in `data/example_rollouts.jsonl`.
 
 ## Run
 
-```bash
-export WIDESEARCH_IMAGE=<sandbox-image>
-export EXA_API_KEY=<exa-api-key>
-export NVIDIA_API_KEY=<nvidia-api-key>
-```
-
-The Claude Code config defaults to `nvidia/qwen/qwen3.8-27b`. Start the
-NVIDIA-hosted model server and OpenSandbox provider with
-`benchmarks/widesearch/config.yaml`, then collect from
-`benchmarks/widesearch/data/widesearch_benchmark.jsonl`. Use `--limit 1` for
+The Claude Code config defaults to `nvidia/qwen/qwen3.8-27b`. Use `--limit 1` for
 an end-to-end check before running all 200 tasks.
 
 ## Verification
