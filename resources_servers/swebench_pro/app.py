@@ -107,8 +107,11 @@ class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     inconclusive_verification_retries: int = 2
     # Ceiling on ONE verification attempt, covering sandbox creation as well as
     # the verification run. `evaluation_timeout` bounds only the test command
-    # inside the sandbox, so creation is otherwise unbounded here.
-    verification_attempt_timeout: float | None = 1800.0
+    # inside the sandbox, so creation is otherwise unbounded here. 1200s is
+    # ~2.6x the p99 of observed per-rollout verification (461s) and above the
+    # healthy maximum (735s), while still cutting the multi-attempt pile-ups
+    # that leave dozens of verifications in flight at a job's wall clock.
+    verification_attempt_timeout: float | None = 1200.0
     # Ceiling on ALL attempts for one rollout. Without it the worst case is
     # `1 + inconclusive_verification_retries` times the per-attempt ceiling,
     # which can exceed what remains of the job's wall clock -- and a rollout

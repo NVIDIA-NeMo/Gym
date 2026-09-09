@@ -12,7 +12,7 @@ swebench_pro_resources_server:
       # Bound the surrounding work too: one attempt (creation + verification)
       # and the whole retry sequence for a rollout. Healthy attempts finish far
       # inside these, and a rollout that never returns holds the entire run open.
-      verification_attempt_timeout: 1800
+      verification_attempt_timeout: 1200
       verification_total_timeout: 2700
       image_repository: docker.io/jefzda/sweap-images
       apply_anti_cheating: true
