@@ -13,7 +13,7 @@
 # limitations under the License.
 """Generate the AutomationBench index dataset.
 
-ab_aa, ab_zapier and ab_verified all score the same 600-task set
+ab_aa and ab_zapier both score the same 600-task set
 (6 domains x 100 tasks) and differ only in scoring, so this script is
 identical across the three and produces byte-identical output.
 
