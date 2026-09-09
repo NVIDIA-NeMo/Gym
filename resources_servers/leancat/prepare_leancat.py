@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -34,10 +34,12 @@ Usage:
 """
 
 import argparse
+import io
 import json
+import tarfile
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 
 # Pinned upstream revision (commit dated 2026-06-19). Bump deliberately, not
@@ -48,6 +50,7 @@ RAW_BASE = f"https://raw.githubusercontent.com/sciencraft/LeanCat/{LEANCAT_COMMI
 
 RECORDS_URL = f"{RAW_BASE}/data/leancat_records.jsonl"
 PROMPT_URL = f"{RAW_BASE}/prompts/static_passk.md"
+TARBALL_URL = f"https://codeload.github.com/sciencraft/LeanCat/tar.gz/{LEANCAT_COMMIT}"
 
 # From configs/evaluation_protocol.json at the same commit. Recorded in each row so
 # a rollout carries the toolchain it is only meaningful under.
@@ -81,15 +84,53 @@ def render_prompt(template: str, formal_statement: str) -> str:
     return template.format(formal_statement=formal_statement)
 
 
-def to_gym_row(record: Dict[str, Any], template: str) -> Dict[str, Any]:
+def load_statement_files(tar_bytes: bytes) -> Dict[str, str]:
+    """Read ``CAT_statement/S_<id>.lean`` out of the pinned tarball, bytes untouched.
+
+    This, not the JSONL, is what upstream prompts from: ``eval_common.load_problem`` does
+    ``lean_path.read_text()`` with no ``strip()``. The two sources agree on content but not
+    on trailing whitespace -- 60 of the 100 ``.lean`` files end in a newline that
+    ``leancat_records.jsonl`` has stripped -- and that newline lands inside the prompt's
+    code fence. Sourcing from the file is what makes the rendered prompt byte-identical to
+    the reference harness's.
+
+    One tarball rather than 100 raw fetches: same pin, no rate-limit exposure.
+    """
+    statements: Dict[str, str] = {}
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
+        for member in tar.getmembers():
+            name = Path(member.name).name
+            if not member.isfile() or "/CAT_statement/" not in member.name or not name.endswith(".lean"):
+                continue
+            handle = tar.extractfile(member)
+            if handle is None:
+                continue
+            statements[name.removeprefix("S_").removesuffix(".lean")] = handle.read().decode("utf-8")
+    if len(statements) != EXPECTED_RECORDS:
+        raise ValueError(f"Expected {EXPECTED_RECORDS} CAT_statement files, got {len(statements)}")
+    return statements
+
+
+def to_gym_row(record: Dict[str, Any], template: str, statements: Optional[Dict[str, str]]) -> Dict[str, Any]:
+    problem_id = record["problem_id"]
     formal_statement = record["formal_statement"]
+
+    if statements is not None:
+        from_file = statements[problem_id]
+        # Content drift between the two upstream sources would silently change what is
+        # asked and what is checked, so it fails the run rather than getting normalised away.
+        if from_file.strip() != formal_statement.strip():
+            raise ValueError(
+                f"Problem {problem_id}: CAT_statement/S_{problem_id}.lean disagrees with the JSONL record"
+            )
+        formal_statement = from_file
 
     return {
         "responses_create_params": {
             "input": [{"role": "user", "content": render_prompt(template, formal_statement)}],
         },
         "verifier_metadata": {
-            "problem_id": record["problem_id"],
+            "problem_id": problem_id,
             "level": record["level"],
             "tag": record["tag"],
             "domain": record["domain"],
@@ -126,6 +167,15 @@ def main() -> None:
         help=f"Local copy of the static pass@k prompt. Defaults to fetching {PROMPT_URL}",
     )
     parser.add_argument(
+        "--no-statement-files",
+        action="store_true",
+        help=(
+            "Render prompts from the JSONL's formal_statement instead of the CAT_statement/*.lean "
+            "files. Faster and offline-friendly, but 60 of the 100 prompts then differ from the "
+            "reference harness's by the file's trailing newline."
+        ),
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path(__file__).absolute().parent / "data",
@@ -139,7 +189,15 @@ def main() -> None:
 
     raw_records = args.records.read_text(encoding="utf-8") if args.records else fetch_text(RECORDS_URL)
     records = load_records(raw_records)
-    rows = [to_gym_row(record, template) for record in records]
+
+    statements = None
+    if not args.no_statement_files:
+        print(f"Fetching {TARBALL_URL}")
+        with urllib.request.urlopen(TARBALL_URL) as response:
+            statements = load_statement_files(response.read())
+        print(f"Read {len(statements)} CAT_statement/*.lean files")
+
+    rows = [to_gym_row(record, template, statements) for record in records]
 
     # Keep a copy of the exact prompt we rendered with, so a reviewer can diff it
     # against upstream without re-running the fetch.

@@ -43,6 +43,7 @@ from resources_servers.leancat.proof_utils import check_statement_preserved
 
 
 DATA_DIR = Path(__file__).absolute().parent.parent / "data"
+PROMPTS_DIR = Path(__file__).absolute().parent.parent / "prompts"
 
 REFERENCE = """import Mathlib
 
@@ -334,3 +335,27 @@ class TestDataset:
         for row in _load_rows("example.jsonl"):
             prompt = row["responses_create_params"]["input"][0]["content"]
             assert row["verifier_metadata"]["formal_statement"] in prompt
+
+    @pytest.mark.parametrize("filename", [pytest.param("train.jsonl", marks=needs_full_dataset), "example.jsonl"])
+    def test_prompt_is_rendered_exactly_as_upstream_renders_it(self, filename):
+        """Lock the prompt to upstream's ``template.format(formal_statement=...)``.
+
+        The offline half of the fidelity check: it pins the committed template and the
+        rendering, so a change to either shows up as a test failure rather than as a
+        benchmark number that quietly stops being comparable to the paper's. The half that
+        needs the network -- that our formal_statement is the ``CAT_statement/*.lean`` bytes
+        verbatim, trailing newline included -- is enforced in prepare_leancat.py, which
+        fails if the .lean file and the JSONL record disagree.
+        """
+        template = (PROMPTS_DIR / "static-passk.md").read_text(encoding="utf-8").strip()
+        for row in _load_rows(filename):
+            expected = template.format(formal_statement=row["verifier_metadata"]["formal_statement"])
+            assert row["responses_create_params"]["input"][0]["content"] == expected
+
+    @pytest.mark.parametrize("filename", [pytest.param("train.jsonl", marks=needs_full_dataset), "example.jsonl"])
+    def test_rows_carry_a_single_user_message(self, filename):
+        # Upstream's chat_completion posts exactly [{"role": "user", ...}] with no system
+        # prompt; a system message here would make our numbers incomparable to the paper's.
+        for row in _load_rows(filename):
+            messages = row["responses_create_params"]["input"]
+            assert [m["role"] for m in messages] == ["user"]
