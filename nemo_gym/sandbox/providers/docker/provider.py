@@ -385,6 +385,46 @@ class DockerProvider:
                 return "bash"
         return "sh"
 
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
+        """Descriptor another process sharing this docker daemon can reconnect from."""
+        raw = handle.raw
+        return {
+            "sandbox_id": handle.sandbox_id,
+            "image": raw.image,
+            "shell": raw.shell,
+            "env": dict(raw.env),
+            "published_ports": list(raw.published_ports),
+        }
+
+    async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        """Rebuild a live handle from a descriptor (a bare ``sandbox_id`` suffices).
+
+        Containers on a shared local daemon are reachable by name from any
+        process, so reconnecting only needs the container to still be running.
+        """
+        name = str(descriptor["sandbox_id"])
+        code, out, err = await self._run(
+            [self._binary, "inspect", "-f", "{{.State.Status}}", name],
+            timeout_s=self._exec_config.default_timeout_s,
+        )
+        if code != 0:
+            raise DockerCreateError(f"cannot connect to container {name!r}: {err.strip()}")
+        status = _to_sandbox_status(out.strip())
+        if status is not SandboxStatus.RUNNING:
+            raise DockerCreateError(f"container {name!r} is not running (state={out.strip()!r})")
+        handle = SandboxHandle(
+            sandbox_id=name,
+            provider_name=self.name,
+            raw=_DockerContainer(
+                name=name,
+                image=str(descriptor.get("image") or ""),
+                env=dict(descriptor.get("env") or {}),
+                published_ports=tuple(descriptor.get("published_ports") or ()),
+            ),
+        )
+        handle.raw.shell = str(descriptor.get("shell") or await self._resolve_shell(name))
+        return handle
+
     async def _force_remove(self, name: str) -> None:
         with contextlib.suppress(Exception):
             await self._run([self._binary, "rm", "-f", name], timeout_s=self._exec_config.default_timeout_s)
