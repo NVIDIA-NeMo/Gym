@@ -1520,7 +1520,7 @@ def test_downconverting_an_unsupported_type_names_it_and_the_way_out():
         ("background", True),
         ("context_management", []),
         ("conversation", "conv_1"),
-        ("include", ["reasoning.encrypted_content"]),
+        ("include", ["file_search_call.results"]),
         ("max_tool_calls", 2),
         ("previous_response_id", "resp_1"),
         ("prompt", {"id": "pmpt_1"}),
@@ -1554,6 +1554,27 @@ def test_downconverting_null_responses_only_fields_treats_them_as_absent(convert
     assert converted.messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
 
 
+def test_downconverting_encrypted_reasoning_include_treats_unavailable_payload_as_absent(
+    converter: ResponsesConverter,
+):
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", include=["reasoning.encrypted_content"])
+
+    converted = converter.responses_to_chat_completion_create_params(params)
+
+    assert converted.messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
+
+
+def test_downconverting_reasoning_summary_hint_preserves_effort(converter: ResponsesConverter):
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input="hi",
+        reasoning={"effort": "medium", "summary": "auto"},
+    )
+
+    converted = converter.responses_to_chat_completion_create_params(params)
+
+    assert converted.reasoning_effort == "medium"
+
+
 def test_downconverting_text_format_fails_explicitly(converter: ResponsesConverter):
     params = NeMoGymResponseCreateParamsNonStreaming(input="hi", text={"format": {"type": "json_object"}})
 
@@ -1561,7 +1582,7 @@ def test_downconverting_text_format_fails_explicitly(converter: ResponsesConvert
         converter.responses_to_chat_completion_create_params(params)
 
 
-@pytest.mark.parametrize("field", ["context", "generate_summary", "summary"])
+@pytest.mark.parametrize("field", ["context", "generate_summary"])
 def test_downconverting_responses_only_reasoning_fields_fails_explicitly(converter: ResponsesConverter, field: str):
     params = NeMoGymResponseCreateParamsNonStreaming(input="hi", reasoning={field: "auto"})
 

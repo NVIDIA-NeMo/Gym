@@ -165,6 +165,13 @@ class ResponsesConverter(BaseModel):
     ) -> NeMoGymChatCompletionCreateParamsNonStreaming:
         responses_create_params = responses_create_params.model_dump(exclude_none=True, exclude_unset=True)
 
+        # Stateless Responses clients such as Codex request encrypted reasoning so they can
+        # replay it on a later turn. A Chat Completions backend cannot produce that optional
+        # payload, so the faithful downconversion is to return no encrypted reasoning. Keep
+        # rejecting every other include value because those may represent observable output.
+        if responses_create_params.get("include") == ["reasoning.encrypted_content"]:
+            responses_create_params.pop("include")
+
         unsupported_fields = sorted(
             {
                 "background",
@@ -262,8 +269,11 @@ class ResponsesConverter(BaseModel):
 
         reasoning = responses_create_params.pop("reasoning", None)
         if reasoning is not None:
+            # Chat Completions has no request-side reasoning-summary preference. It may
+            # still return reasoning content parsed below, so ignore the hint while
+            # preserving reasoning effort.
             unsupported_reasoning_fields = sorted(
-                field for field, value in reasoning.items() if field != "effort" and value is not None
+                field for field, value in reasoning.items() if field not in {"effort", "summary"} and value is not None
             )
             if unsupported_reasoning_fields:
                 raise NotImplementedError(
