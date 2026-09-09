@@ -196,6 +196,15 @@ class TestLeanCatApp:
         assert result.proof_status == STATUS_TIMEOUT
 
     @pytest.mark.asyncio
+    async def test_verify_lean_rejected_is_a_compile_error_not_a_sandbox_error(self, server):
+        # The NeMo-Skills sandbox says "failed" for any non-zero lake exit; that is the
+        # normal way a wrong proof looks, and must not be reported as infrastructure trouble.
+        self._stub_sandbox(server, process_status="failed")
+        result = await server.verify(self._create_request(f"```lean4\n{SOLVED}\n```"))
+        assert result.reward == 0.0
+        assert result.proof_status == STATUS_COMPILE_ERROR
+
+    @pytest.mark.asyncio
     async def test_verify_sandbox_failure(self, server):
         self._stub_sandbox(server, process_status="error", stderr="connection refused")
         result = await server.verify(self._create_request(f"```lean4\n{SOLVED}\n```"))
