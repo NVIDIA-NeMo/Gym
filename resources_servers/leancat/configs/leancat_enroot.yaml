@@ -13,19 +13,24 @@ leancat:
           create:
             mount_point: /sandbox
             start_timeout_s: 600
+            # The NeMo-Skills image keeps elan under /root, which is 0700.
+            remap_root: true
+            # The provider's bypass path passes `--rc /dev/null`, which enroot rejects here
+            # ("No such file or directory: /dev/null"). With rw the entrypoint is harmless.
+            bypass_entrypoint: false
             rw: true
           exec:
             concurrency: 8
             default_timeout_s: 330
       sandbox_spec:
-        image: <PATH_TO_ANY_BASE_SQSH>
+        image: /lustre/fsw/portfolios/convai/projects/convai_convaird_nemo-speech/users/lgrigoryan/reasoning_science/benchmarks/containers/nemo-skills-sandbox-latest.mathlib2.19.sqsh
         provider_options:
           mounts:
           - <LEAN_PREFIX>:/lean4:none:ro,rbind
         env:
           PATH: /lean4/elan/bin:/usr/local/bin:/usr/bin:/bin
           ELAN_HOME: /lean4/elan
-      lean_project_dir: /lean4/my_project
+      lean_project_dir: /lean4/leancat_project
       verified: false
 leancat_enroot_simple_agent:
   responses_api_agents:

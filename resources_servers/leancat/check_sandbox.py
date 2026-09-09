@@ -137,16 +137,34 @@ class LocalLeanClient:
 
 def build_client(args: argparse.Namespace):
     if args.enroot_image:
-        if not args.lean_prefix:
-            raise SystemExit("--enroot-image also needs --lean-prefix (Lean comes from the mount).")
-        return GymSandboxLean4Client(
-            provider={"enroot": {"exec": {"concurrency": args.concurrency, "default_timeout_s": args.timeout + 30}}},
-            spec={
-                "image": args.enroot_image,
-                "provider_options": {"mounts": [f"{Path(args.lean_prefix).absolute()}:/lean4:none:ro,rbind"]},
-                "env": {"PATH": "/lean4/elan/bin:/usr/local/bin:/usr/bin:/bin", "ELAN_HOME": "/lean4/elan"},
+        # remap_root because the NeMo-Skills image ships elan under /root, which is 0700.
+        # bypass_entrypoint (the provider default) keeps the image's uwsgi/nginx entrypoint
+        # from hijacking the exec.
+        spec: Dict[str, Any] = {
+            "image": args.enroot_image,
+            "env": {
+                "ELAN_HOME": "/root/.elan",
+                "PATH": "/root/.elan/bin:/usr/local/bin:/usr/bin:/bin",
             },
-            lean_project_dir="/lean4/my_project",
+        }
+        if args.lean_prefix:
+            # Lean lives on the host and is mounted in; otherwise it is baked into the image.
+            prefix = Path(args.lean_prefix).absolute()
+            spec["provider_options"] = {"mounts": [f"{prefix}:/lean4:none:ro,rbind"]}
+            spec["env"]["ELAN_HOME"] = "/lean4/elan"
+            spec["env"]["PATH"] = "/lean4/elan/bin:/usr/local/bin:/usr/bin:/bin"
+        return GymSandboxLean4Client(
+            provider={
+                "enroot": {
+                    # bypass_entrypoint=False avoids the provider's `--rc /dev/null`, which
+                    # this enroot rejects ("No such file or directory: /dev/null"). With
+                    # --rw the image's entrypoint does not block the exec anyway.
+                    "create": {"remap_root": True, "bypass_entrypoint": False},
+                    "exec": {"concurrency": args.concurrency, "default_timeout_s": args.timeout + 30},
+                }
+            },
+            spec=spec,
+            lean_project_dir=args.lean_project_dir,
         )
     if args.lean_prefix:
         return LocalLeanClient(Path(args.lean_prefix).absolute())
@@ -161,7 +179,14 @@ async def main() -> int:
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--lean-prefix", help="Directory produced by setup_lean.sh; runs lake directly.")
-    parser.add_argument("--enroot-image", help="Base image to mount --lean-prefix into, via nemo_gym.sandbox.")
+    parser.add_argument(
+        "--enroot-image", help="Image to run in via nemo_gym.sandbox. Lean may be baked in or mounted."
+    )
+    parser.add_argument(
+        "--lean-project-dir",
+        default="/lean4/my_project",
+        help="Lean project inside the sandbox (the dir holding lean-toolchain).",
+    )
     args = parser.parse_args()
 
     client = build_client(args)
