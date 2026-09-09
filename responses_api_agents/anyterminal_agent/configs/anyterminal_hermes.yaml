@@ -11,7 +11,6 @@ anyterminal_hermes:
       agent_config_class: HermesAgentConfig
       agent_kwargs:
         max_turns: 90
-        timeout: 1800
         terminal_backend: local
         terminal_timeout: 180
         compression_enabled: true
@@ -19,7 +18,7 @@ anyterminal_hermes:
 
       container_formatter: "docker://{docker_image}"
 
-      concurrency: 1
+      concurrency: 6
 
       model_server:
         name: policy_model
