@@ -46,6 +46,19 @@ case "$RESUME_EVAL_ON_REQUEUE" in
         ;;
 esac
 
+# Environment controls are defaults; explicit Hydra overrides belong to Gym.
+# Avoid adding a duplicate setting that could overwrite the caller's value.
+for eval_arg in "$@"; do
+    case "$eval_arg" in
+        num_samples_in_parallel=* | +num_samples_in_parallel=* | ++num_samples_in_parallel=*)
+            NUM_SAMPLES_IN_PARALLEL_ARG=""
+            ;;
+        resume_from_cache=* | +resume_from_cache=* | ++resume_from_cache=*)
+            RESUME_FROM_CACHE_ARG=""
+            ;;
+    esac
+done
+
 case "$VLLM_PD_DEPLOYMENT_MODE" in
     independent | coupled)
         ;;
@@ -189,14 +202,18 @@ if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         local role=\$1
         local url=\$2
         local local_pid=\${3:-}
+        local local_role=\${4:-\$role}
 
-        until curl -fs "\$url" >/dev/null; do
+        while true; do
             if [[ -n "\$local_pid" ]] && ! kill -0 "\$local_pid" 2>/dev/null; then
                 local status=0
                 wait "\$local_pid" || status=\$?
                 (( status != 0 )) || status=1
-                echo "ERROR: \$role vLLM process exited before becoming healthy (status=\$status)." >&2
+                echo "ERROR: \$local_role vLLM process exited while waiting for \$role health (status=\$status)." >&2
                 return "\$status"
+            fi
+            if curl -fs "\$url" >/dev/null; then
+                return 0
             fi
             sleep 5
         done
@@ -219,9 +236,9 @@ if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
 
         wait_for_vllm_health "prefill" "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT/health" "\$prefill_pid"
-        # The decode API is owned by another Slurm rank. The enclosing srun's
-        # --kill-on-bad-exit handles an early decode-process failure.
-        wait_for_vllm_health "decode" "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health"
+        # Keep watching the local prefill process while the remote decode API
+        # starts. The enclosing srun handles failures on the decode ranks.
+        wait_for_vllm_health "decode" "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health" "\$prefill_pid" "prefill"
 
         vllm-router \
             --prefill-policy cache_aware \
