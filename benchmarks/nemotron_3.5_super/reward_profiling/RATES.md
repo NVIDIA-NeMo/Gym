@@ -71,7 +71,7 @@ Summing the lanes instead gives 23,178-24,409 GPU-hours, and the gap is the poin
 together: a judge rollout blocked on the gateway and a sandbox rollout blocked on uWSGI hold no GPU
 while they wait, so they fill time the GPU-bound environments would leave idle.
 
-Disk, one-time per (manifest, checkpoint): `01_materialize.sh` writes **271.5 GB** in ~25 min
+Disk, one-time per (manifest, checkpoint): `01_materialize.sh` writes **271.5 GB** in ~27.5 min
 (5,808,968 rows from 726,121 source rows, 36 workers). **Peak during the run is ~541 GB, roughly
 2x the final size**, because `_parts/` is not removed until concatenation finishes — budget for the
 peak, not the result. Sharding copies the file again, so a sharded run peaks near 815 GB.
@@ -79,33 +79,86 @@ peak, not the result. Sharding copies the file again, so a sharded run peaks nea
 ## P2D8 on full data (job 6706202, 2026-08-29)
 
 First run of the whole 5,808,968-rollout input at a production shape: 2 prefill + 8 decode = 10
-nodes, 40 GPUs, `nemotron_n4_post` on the `normal` queue.
+nodes, 40 GPUs (TP=4 per node), `nemotron_n4_post` on the `normal` queue, 4 h walltime. The job hit
+the walltime; it did not fail.
+
+### Where the four hours went
+
+| phase | wall | notes |
+|---|---|---|
+| `01_materialize.sh` | 27.5 min | 726,121 source rows -> 5,808,968 rollouts, 271.5 GiB |
+| queue wait | ~1 h | `normal` qos behind ~33k pending node-requests |
+| vLLM + 63 Gym servers up | 2.5 min | from job start to `All 63 / 63 servers ready!` |
+| driver preflight | ~20 min | scans the whole 271.5 GiB input before the first dispatch |
+| collecting | 3 h 26 min | 25,494 rollouts |
+
+**The ~20 min preflight is per job, not per sweep** — every resubmission pays it again. It is a
+linear scan of the input, so it scales with the file the job is given: a 1/16 shard is ~17 GiB and
+pays about a minute. This is a concrete argument for sharding beyond parallelism.
+
+### Throughput
 
 | | |
 |---|---|
-| steady-state | **7,013 rollouts/hr**, i.e. **175 per GPU-hr** |
+| collection window | 3.43 h (01:15:11 -> 04:41:01 UTC) |
+| rollouts | 25,494 of 5,808,968 (**0.44%**) |
+| average | **7,431 rollouts/hr** = **186 per GPU-hr** |
+| first hour | 9,429/hr |
+| remaining 2.4 h | 6,614/hr |
 | driver concurrency | 4,096 (512 x 8 decode nodes) |
-| actually in flight at vLLM | ~33 per engine, so ~264 |
+| in flight at vLLM | ~33 per engine, so ~264 |
 | GPU KV cache usage | **4.5%**, `Waiting: 0 reqs` |
 
-**More decode nodes will not make this faster.** The GPUs are starved: 4.5% KV cache with nothing
-queued means vLLM is never the constraint. About 93% of the concurrency window is blocked upstream
-of it — on the judge gateway and on the single sandbox node, which was already serving 26 active
-sessions on one of its 32 workers.
+Throughput decays as fast tasks drain, the same tail effect the whole-manifest runs show.
 
-Per GPU this is *worse* than the 16-GPU mixed run (175 vs 351/GPU-hr), which is the same fact from
-the other side: 2.5x the GPUs bought 1.25x the throughput. Sizing the fleet from GPU count
-overstates what you get.
+### Only 6 of 36 environments were reached
 
-Sizing at this shape, for reference rather than recommendation:
+At 0.44% complete the run touched six environments. Everything else has **zero** rollouts, so it is
+unmeasured, not slow:
+
+| environment | rollouts | rollouts/hr | of its target | KB/rollout |
+|---|---|---|---|---|
+| tau_pivot | 8,996 | 2,622 | 0.66% | 30 |
+| swe_pivot | 4,479 | 1,306 | 0.84% | 117 |
+| structured_outputs_v2 | 4,363 | 1,272 | 1.94% | 26 |
+| nvarc_transductive | 4,253 | 1,240 | 5.32% | 111 |
+| math_tir | 2,481 | 723 | 7.95% | 128 |
+| inverse_if | 922 | 269 | 11.53% | 43 |
+
+These are shares of one contended fleet, not independent capacities, and each environment's
+completed tasks sit in a narrow contiguous band of the input rather than spread across its range.
+**Do not treat this table as per-domain rates for the blend** — six of thirty-six, at half a
+percent, is not a sample worth sizing from. The 12-GPU lane table above is still the better basis.
+
+### What is actually starving the GPUs
+
+4.5% KV cache with `Waiting: 0` means vLLM is never the constraint. The log says where the other
+~93% of the concurrency window went:
+
+- **The `vllm-router` is a single process on one node** (`nodes[0]`, port 8000). It absorbed
+  **12,495 `ClientOSError` retries**, and individual requests reached **`retry=954`** — a request
+  retrying ~950 times holds a concurrency slot indefinitely without ever reaching a GPU.
+- **The sandbox is one node** serving all 63 Gym servers: 1,168 IPython session timeouts, 190x502,
+  137x504. Its two consumers, `ns_tools` and `lean`, returned **zero** rollouts.
+- **Agentic rollouts are mostly not on the GPU.** `tau_pivot` and `swe_pivot` spend their wall time
+  in tool calls, env stepping and sandbox execution. Low KV usage is the expected shape for this
+  blend, not purely a defect.
+
+**The judge is not the bottleneck.** Correcting the earlier reading of this run: the judge is the
+hosted endpoint (`https://inference-api.nvidia.com/v1`) and it took **4 retries in the whole run**,
+against 12,495 to the local router. Note the judge-heavy environments produced no rollouts, so the
+judge is untested at load here rather than proven healthy.
+
+### Sizing at this shape
 
 ```
-5,808,968 / 7,013 per hr = 828 h on 40 GPUs = 33,133 GPU-hours
+5,808,968 / 6,614 per hr (steady) = 878 h on 40 GPUs = 35,132 GPU-hours   -> 36.6 days on one P2D8
+                                                                          -> 2.3 days on 16 shards
 ```
 
-That is twice the 16,540 estimated from the 16-GPU run, and the gap is starvation, not work.
-**Grow the sandbox tier and judge throughput before adding GPUs**; until those move, extra decode
-nodes are idle capacity.
+That is roughly twice the 16,540 GPU-hours estimated from the 16-GPU run (186 vs 351 per GPU-hr):
+2.5x the GPUs bought about 1.25x the throughput. **Fix the router and the sandbox tier before
+adding decode nodes**; until those move, extra decode nodes are idle capacity.
 
 ## Caveats
 
