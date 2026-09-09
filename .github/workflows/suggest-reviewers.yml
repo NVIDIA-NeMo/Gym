@@ -23,9 +23,9 @@ permissions:
 jobs:
   suggest-reviewers:
     # TODO: pin to a released tag once NVIDIA-NeMo/FW-CI-templates#556 merges.
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_suggest_reviewers.yml@bbf3a5361149032a502fc0a5eee0b5750fed7d60
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_suggest_reviewers.yml@be35284c8d2bb6c2e3e9101db0cd31bb288a98df
     with:
-      workflow_ref: bbf3a5361149032a502fc0a5eee0b5750fed7d60
+      workflow_ref: be35284c8d2bb6c2e3e9101db0cd31bb288a98df
     secrets:
       NVIDIA_MANAGEMENT_ORG_PAT: ${{ secrets.NVIDIA_MANAGEMENT_ORG_PAT }}
       SLACK_TEAM_CHANNEL_WEBHOOK: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
