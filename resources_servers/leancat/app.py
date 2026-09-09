@@ -36,7 +36,7 @@ version compiles. See ``proof_utils`` for what is enforced.
 import re
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -146,6 +146,8 @@ class LeanCatResourcesServerConfig(BaseResourcesServerConfig):
 
 class LeanCatRunRequest(BaseRunRequest):
     # Fields arrive from each row's `verifier_metadata` (see prepare_leancat.py).
+    verifier_metadata: Optional[Dict[str, Any]] = None
+
     formal_statement: str
     problem_id: Optional[str] = None
     level: Optional[str] = None
@@ -154,6 +156,22 @@ class LeanCatRunRequest(BaseRunRequest):
     natural_language_statement: Optional[str] = None
     lean_toolchain: Optional[str] = None
     mathlib_version: Optional[str] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _lift_verifier_metadata(cls, data: Any) -> Any:
+        """Accept the row's fields nested under `verifier_metadata` or at the top level.
+
+        Gym posts each row to /verify with `verifier_metadata` still nested -- it is not
+        spliced onto the body, which is why math_formal_lean can declare its fields flat
+        (its rows carry no wrapper at all) while ours cannot. Lifting here keeps the typed
+        fields and lets `level` reach the response, which compute_subset_metrics needs.
+
+        Top-level keys win, so an explicit override is never clobbered by the metadata.
+        """
+        if isinstance(data, dict) and isinstance(data.get("verifier_metadata"), dict):
+            return {**data["verifier_metadata"], **data}
+        return data
 
 
 class LeanCatVerifyRequest(LeanCatRunRequest, BaseVerifyRequest):

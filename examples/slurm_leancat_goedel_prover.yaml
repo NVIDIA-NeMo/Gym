@@ -4,25 +4,21 @@
 #
 #   gym eval submit --config examples/slurm_leancat_goedel_prover.yaml --dry-run
 #
-# READ THIS FIRST -- the Lean sandbox is not started by this file.
+# The Lean sandbox needs no separate launch: leancat_enroot.yaml routes verification through
+# nemo_gym.sandbox's enroot provider, so the resources server starts its own sandbox from the
+# Mathlib v4.19.0 image. Verified with check_sandbox.py at 100/100.
 #
-# `services:` accepts only `type: vllm` and `type: ray`; there is no generic container
-# service, so the NeMo-Skills Lean 4 sandbox cannot be declared here. It must already be
-# reachable at NEMO_SKILLS_SANDBOX_HOST:PORT when the driver runs, and it must be built on
-# Mathlib v4.19.0 -- a sandbox on any other Mathlib fails LeanCat tasks for reasons that
-# have nothing to do with the model, and the failures look like ordinary compile errors.
-# See resources_servers/leancat/README.md for how to build it.
-#
-# Until that exists, this config is dry-runnable but not runnable.
+# NOTE before upstreaming: leancat_enroot.yaml hardcodes a personal Lustre image path. That
+# wants parameterising (oc.env) before this goes anywhere near a PR.
 
 compute:
   cluster:
     type: slurm
-    account: <ACCOUNT>
-    walltime: "04:00:00"
+    account: nemotron_n4_post
+    walltime: "08:00:00"
     node_pools:
       compute:
-        partition: <PARTITION>
+        partition: batch
         nodes: 1
         ntasks_per_node: 1
         gpus_per_node: 8
@@ -47,20 +43,22 @@ driver:
   policy_model: vllm_model
   container: /lustre/fsw/portfolios/convai/projects/convai_convaird_nemo-speech/users/lgrigoryan/reasoning_science/containers/nvidia+eval-factory+nemo-gym:26.05.sqsh
   env:
-    # Point these at the sandbox once it exists. 127.0.0.1 only works if the sandbox is
-    # launched into this same allocation with `srun --overlap`.
-    NEMO_SKILLS_SANDBOX_HOST: <SANDBOX_HOST>
-    NEMO_SKILLS_SANDBOX_PORT: "6000"
     # Ray's AF_UNIX socket paths blow past the 107-byte limit under long Lustre paths.
     RAY_TMPDIR: /tmp
+    # Node-local scratch for the enroot rootfs; Lustre would be far too slow here.
+    ENROOT_DATA_PATH: /tmp/leancat-enroot/data
+    ENROOT_RUNTIME_PATH: /tmp/leancat-enroot/rt
+    ENROOT_CACHE_PATH: /tmp/leancat-enroot/cache
   benchmarks:
     leancat:
       prepare:
         config_paths:
+          - resources_servers/leancat/configs/leancat_enroot.yaml
           - benchmarks/leancat/config.yaml
       run:
         split: benchmark
         config_paths:
+          - resources_servers/leancat/configs/leancat_enroot.yaml
           - benchmarks/leancat/config.yaml
         responses_create_params:
           # Appendix D.3, Table 5. top_p is deliberately unset: eval_common.chat_completion
@@ -69,4 +67,4 @@ driver:
           max_output_tokens: 50000
 
 job:
-  output_path: <OUTPUT_PATH>
+  output_path: /lustre/fsw/portfolios/convai/projects/convai_convaird_nemo-speech/users/lgrigoryan/reasoning_science/leancat_results
