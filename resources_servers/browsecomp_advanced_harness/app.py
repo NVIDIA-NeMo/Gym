@@ -298,9 +298,40 @@ def _count_provider_retry(status: int) -> None:
 # shows up later as an unearned score on the very benchmark being measured.
 #
 # Substring, case-insensitive. "browsecomp" already subsumes the org-prefixed
-# forms (openai/browsecomp), and "simple-eval" subsumes "simple-evals"; the two
-# additions are the spellings a bare "browsecomp" genuinely misses.
-CONTAMINATION_PATTERNS = ["browsecomp", "browse_comp", "simple-eval"]
+# forms (openai/browsecomp), and "simple-eval" subsumes "simple-evals"; the other
+# entries are spellings a bare "browsecomp" genuinely misses.
+#
+# WIDENED 2026-09-09 after an audit that measured the
+# original three against five full 400-sample runs. That list caught 2,023 of 2,594
+# mirror-URL result blocks and MISSED 571 (22%) across 34 URLs -- dominated by
+# huggingface.co/datasets/Nithish2410/benchmark-bcplus, a mirror whose name never contains
+# "browsecomp" and which serves test.jsonl directly. The base model queried that one repo
+# 146 times on sample 10 and read the stored answer out of it. Cost of "bcplus": ~7 false
+# positives (a Go package CmdrVasquess/bcplus, a courier firm) against 571 true hits.
+#
+# NOT added, because the same audit measured them and said no: "deep-research"/"deepresearch"
+# (legitimate subject matter, +4..+12 samples/arm) and "GAIA"/"HLE" (false positives dominate,
+# +17..+33 samples/arm). Keep this list narrow and evidence-backed.
+CONTAMINATION_PATTERNS = [
+    "browsecomp",
+    "browse_comp",
+    "browse-comp",
+    "simple-eval",
+    "bcplus",
+    "bc-plus",
+    "bc_plus",
+]
+
+# Checked against the result's `url` FIELD ONLY -- never the page text. A dataset-viewer page
+# is never a legitimate primary source for a BrowseComp question, and HuggingFace hosts 2,163
+# of the leaked blocks: every long-tail mirror that matches no name pattern (RUC-AIBOX/Evo-Bench,
+# Halcyon-Zhang/BrowseComp-V3, Forival/LiveBrowseComp, OpenResearcher/web-bench, ...).
+# Folding these into CONTAMINATION_PATTERNS instead would drop any page that merely LINKS to a
+# HuggingFace dataset, which is a much larger blast radius than intended. (User call 2026-09-09.)
+CONTAMINATED_URL_SUBSTRINGS = [
+    "huggingface.co/datasets",
+    "datasets-server.huggingface.co",
+]
 
 # Returned only when EVERY result in a response was contaminated. The normal case
 # is per-ITEM dropping: one poisoned hit out of five should cost that hit, not the
@@ -314,15 +345,33 @@ def _is_contaminated(*texts: Optional[str]) -> bool:
     return any(p in hay for p in CONTAMINATION_PATTERNS)
 
 
+def _is_contaminated_url(url: Optional[str]) -> bool:
+    """True if the URL points at a dataset host that only ever mirrors the benchmark.
+
+    Field-scoped on purpose: see the CONTAMINATED_URL_SUBSTRINGS comment.
+    """
+    if not url:
+        return False
+    u = url.lower()
+    return any(s in u for s in CONTAMINATED_URL_SUBSTRINGS)
+
+
 def _drop_contaminated(result_list: List[dict]) -> tuple[List[dict], int]:
     """Split a provider result list into (kept, n_dropped).
 
-    Scans the WHOLE serialized result, not a field whitelist: exa carries its text
-    in a `highlights` LIST, so a title/url/content check would miss it entirely.
-    The cost is one lower() over the raw page text per result -- a few ms against
-    a ~17s generation call, and it buys not having to enumerate provider schemas.
+    Two independent tests, either of which drops the item:
+      1. TEXT   -- scans the WHOLE serialized result, not a field whitelist, because exa
+                   carries its text in a `highlights` LIST that a title/url/content check
+                   would miss entirely.
+      2. URL    -- the `url` field only, against CONTAMINATED_URL_SUBSTRINGS.
+    The cost is one lower() over the raw page text per result -- a few ms against a ~17s
+    generation call, and it buys not having to enumerate provider schemas.
     """
-    kept = [r for r in result_list if not _is_contaminated(json.dumps(r, default=str))]
+    kept = [
+        r
+        for r in result_list
+        if not (_is_contaminated(json.dumps(r, default=str)) or _is_contaminated_url(r.get("url")))
+    ]
     return kept, len(result_list) - len(kept)
 
 

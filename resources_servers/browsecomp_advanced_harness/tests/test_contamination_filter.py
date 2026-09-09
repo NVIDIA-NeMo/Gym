@@ -48,6 +48,7 @@ from pytest import fixture
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.browsecomp_advanced_harness.app import (
     CONTAMINATED_MESSAGE,
+    CONTAMINATED_URL_SUBSTRINGS,
     CONTAMINATION_PATTERNS,
     BrowseRequest,
     TavilySearchRequest,
@@ -55,6 +56,7 @@ from resources_servers.browsecomp_advanced_harness.app import (
     TavilySearchResourcesServerConfig,
     _drop_contaminated,
     _is_contaminated,
+    _is_contaminated_url,
 )
 
 
@@ -107,8 +109,31 @@ def _server(provider: str, workspace_root: str = None) -> TavilySearchResourcesS
 
 
 class TestPatterns:
-    def test_the_three_agreed_patterns(self) -> None:
-        assert set(CONTAMINATION_PATTERNS) == {"browsecomp", "browse_comp", "simple-eval"}
+    def test_the_agreed_patterns(self) -> None:
+        # Widened 2026-09-09 after an internal contamination audit. Pinned so a
+        # future edit has to be deliberate -- this list is evidence-backed, not a guess.
+        assert set(CONTAMINATION_PATTERNS) == {
+            "browsecomp",
+            "browse_comp",
+            "browse-comp",
+            "simple-eval",
+            "bcplus",
+            "bc-plus",
+            "bc_plus",
+        }
+
+    def test_measured_rejects_are_absent_from_the_pattern_list(self) -> None:
+        """The audit measured these against five 400-sample runs and said DO NOT ADOPT:
+        deep-research is legitimate subject matter, GAIA/HLE are swamped by false
+        positives. Assert they never creep in."""
+        for rejected in ("deep-research", "deepresearch", "gaia", "hle"):
+            assert rejected not in CONTAMINATION_PATTERNS
+
+    def test_url_substrings_are_the_two_dataset_hosts(self) -> None:
+        assert set(CONTAMINATED_URL_SUBSTRINGS) == {
+            "huggingface.co/datasets",
+            "datasets-server.huggingface.co",
+        }
 
     @pytest.mark.parametrize(
         "text",
@@ -302,3 +327,140 @@ class TestBrowseFilters:
         resp = await server.browse(_req(), BrowseRequest(urls=["https://b.example/2"]))
 
         assert resp.results_string == CONTAMINATED_MESSAGE
+
+
+class TestWidenedPatterns:
+    """An internal audit measured the original three patterns
+    against five full 400-sample runs: they caught 2,023 of 2,594 mirror-URL blocks and
+    MISSED 571 (22%) across 34 URLs. Every string below is from that evader table."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "huggingface.co/datasets/Nithish2410/benchmark-bcplus",  # 359 blocks, serves test.jsonl
+            "Nithish2410/benchmark-bcplus_agent",  # 60 blocks
+            "metatext.io/datasets/nithish2410/benchmark-bcplus",  # 59 blocks
+            "Yuqi-Zhou/BC-Plus-Eval-Results",  # 14 blocks, hyphen form
+            "ZhuofengLi/bcplus-eval-100",  # 9 blocks
+            "Yuqi-Zhou/BC-Plus-Leaderboard",  # 8 blocks, an HF *space* not a dataset
+            "BC_Plus_results",  # underscore form
+            "browse-comp",  # hyphen spelling of the benchmark itself
+        ],
+    )
+    def test_evading_spellings_are_now_caught(self, text: str) -> None:
+        assert _is_contaminated(text)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # The audit measured these and said DO NOT ADOPT. They must stay unflagged,
+            # or the guard starts eating legitimate subject matter.
+            "a deep-research agent for the web",
+            "deepresearch pipeline",
+            "GAIA benchmark results",
+            "HLE score",
+            "simple evaluation of the method",
+        ],
+    )
+    def test_rejected_patterns_stay_unflagged(self, text: str) -> None:
+        assert not _is_contaminated(text)
+
+
+class TestUrlDomainBlock:
+    """HuggingFace hosts 2,163 of the leaked blocks -- every long-tail mirror that matches
+    no name pattern. A dataset-viewer page is never a legitimate primary source for a
+    BrowseComp question. Scoped to the `url` FIELD, never the page text."""
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://huggingface.co/datasets/RUC-AIBOX/Evo-Bench",
+            "https://huggingface.co/datasets/Halcyon-Zhang/BrowseComp-V3",
+            "https://huggingface.co/datasets/Forival/LiveBrowseComp",
+            "https://datasets-server.huggingface.co/rows?dataset=foo&config=default",
+            "https://HuggingFace.co/DATASETS/Some/Mirror",  # case-insensitive
+        ],
+    )
+    def test_dataset_hosts_are_dropped(self, url: str) -> None:
+        assert _is_contaminated_url(url)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://huggingface.co/blog/some-post",  # HF, but not a dataset page
+            "https://huggingface.co/models/bert-base",
+            "https://en.wikipedia.org/wiki/Mosquito",
+            None,
+            "",
+        ],
+    )
+    def test_other_urls_are_kept(self, url) -> None:
+        assert not _is_contaminated_url(url)
+
+    def test_url_block_is_field_scoped_not_text_scoped(self) -> None:
+        """A page that merely MENTIONS a HF dataset URL in its body must survive --
+        folding the domains into the text patterns would drop it, which is a far larger
+        blast radius than intended."""
+        r = {
+            "title": "A blog about ML datasets",
+            "url": "https://example.com/post",
+            "content": "see https://huggingface.co/datasets/squad for the data",
+        }
+
+        kept, dropped = _drop_contaminated([r])
+
+        assert dropped == 0 and kept == [r]
+
+    def test_dataset_url_drops_even_with_innocuous_text(self) -> None:
+        r = {"title": "rows", "url": "https://huggingface.co/datasets/x/y", "content": "nothing notable"}
+
+        kept, dropped = _drop_contaminated([r])
+
+        assert dropped == 1 and kept == []
+
+
+class TestWidenedGuardStillFiltersEveryExit:
+    """The widened predicate must reach all four exits, not just the helpers."""
+
+    async def test_disk_search_never_writes_a_bcplus_page(self, tmp_path) -> None:
+        server = _server("tavily", str(tmp_path))
+        mock = MagicMock()
+        mock.search = AsyncMock(
+            return_value={
+                "results": [
+                    {"title": "clean", "url": "https://a.example/1", "content": "x", "raw_content": "clean body"},
+                    {
+                        "title": "rows",
+                        "url": "https://huggingface.co/datasets/Nithish2410/benchmark-bcplus",
+                        "content": "y",
+                        "raw_content": "row 865 answer Vera Nunning",
+                    },
+                ]
+            }
+        )
+        server._async_tavily_clients = [mock]
+
+        await server.search(_req(), TavilySearchRequest(queries=["q"]))
+
+        pages = sorted((Path(tmp_path) / "test_session_id" / "pages").iterdir())
+        assert len(pages) == 1
+        on_disk = pages[0].read_text()
+        assert "Vera Nunning" not in on_disk and "bcplus" not in on_disk.lower()
+
+    async def test_browse_drops_a_dataset_viewer_page(self) -> None:
+        server = _server("tavily")
+        mock = MagicMock()
+        mock.extract = AsyncMock(
+            return_value={
+                "results": [
+                    {"url": "https://a.example/1", "raw_content": "clean body"},
+                    {"url": "https://datasets-server.huggingface.co/rows?dataset=z", "raw_content": "answer key"},
+                ]
+            }
+        )
+        server._async_tavily_clients = [mock]
+
+        resp = await server.browse(_req(), BrowseRequest(urls=["https://a.example/1", "https://x/2"]))
+
+        assert "clean body" in resp.results_string
+        assert "answer key" not in resp.results_string
