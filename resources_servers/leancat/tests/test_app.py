@@ -507,3 +507,44 @@ class TestGymSandboxBackend:
         result = await client.execute_lean4("theorem t : True := trivial")
         assert result["process_status"] == "error"
         assert "Sandbox start failed" in result["stderr"]
+
+
+class TestVerifierMetadataLifting:
+    """Gym posts rows with `verifier_metadata` still nested; the request must accept that."""
+
+    def test_nested_verifier_metadata_is_lifted(self):
+        request = LeanCatVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=TestLeanCatApp()._create_response(""),
+            verifier_metadata={
+                "formal_statement": REFERENCE,
+                "problem_id": "0044",
+                "level": "Easy",
+                "tag": ["Limit"],
+                "domain": ["Category"],
+            },
+        )
+        assert request.formal_statement == REFERENCE
+        assert request.problem_id == "0044"
+        assert request.level == "Easy"
+
+    def test_top_level_fields_still_work(self):
+        request = LeanCatVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=TestLeanCatApp()._create_response(""),
+            formal_statement=REFERENCE,
+            level="High",
+        )
+        assert request.formal_statement == REFERENCE
+        assert request.level == "High"
+
+    def test_top_level_wins_over_metadata(self):
+        request = LeanCatVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=TestLeanCatApp()._create_response(""),
+            formal_statement=REFERENCE,
+            level="High",
+            verifier_metadata={"formal_statement": "other", "level": "Easy"},
+        )
+        assert request.formal_statement == REFERENCE
+        assert request.level == "High"
