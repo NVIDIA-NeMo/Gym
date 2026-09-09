@@ -190,6 +190,8 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     ) -> NOOAAgentVerifyResponse:
         try:
             return await self._execute_rollout_without_error_classification(request, body, record)
+        # Preserve the terminal episode timeout: the generic classifier treats its
+        # TimeoutError base class as transient.
         except _EpisodeTimeoutExceeded:
             raise
         except Exception as error:
