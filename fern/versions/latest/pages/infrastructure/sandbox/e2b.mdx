@@ -21,9 +21,35 @@ For a package install, use:
 pip install "nemo-gym[sandbox]"
 ```
 
-The provider requires `e2b>=2.36.0,<3.0.0`. Set `E2B_API_KEY` for the hosted service. For a
-compatible gateway, also set `E2B_API_URL` and `E2B_SANDBOX_URL` to the endpoints supplied by
-the gateway operator.
+The provider requires `e2b>=2.36.0,<3.0.0`.
+
+### Get service access
+
+For **hosted E2B**, follow the [E2B account and API-key quickstart](https://docs.e2b.dev/quickstart)
+and obtain a key from the [E2B console](https://console.e2b.dev/?tab=keys). For a shared
+deployment, ask your account administrator which account/team owns the workload and its
+templates before creating a key. Confirm that the key can use the required templates and
+create and stop sandboxes; template provisioning also needs permission to build templates.
+Review your account's usage and billing in the console and the current
+[plan limits](https://e2b.dev/pricing), including concurrency and maximum sandbox lifetime,
+before choosing rollout concurrency. Template builds and rollouts consume provider resources.
+
+Set `E2B_API_KEY` in the host process environment through your approved secret-management
+mechanism. This is a sandbox-service credential, not a model API key or registry credential.
+Leave `E2B_API_URL` and `E2B_SANDBOX_URL` unset for the hosted service unless E2B instructs
+otherwise; stale gateway overrides can send requests to the wrong deployment.
+
+For an **E2B-compatible gateway**, request its access procedure, credentials, API endpoint,
+sandbox endpoint, network/VPN requirements, template permissions, and quota from the gateway
+operator. A hosted E2B key does not automatically grant access to a separate gateway. Set
+`E2B_API_URL` and `E2B_SANDBOX_URL` to the operator-provided endpoints and use the authentication
+they specify; deployments can require `connection.api_headers` in addition to or instead of
+an E2B key. Keep secret header values out of checked-in YAML.
+
+Before allocating a sandbox, confirm account/template access and quota with the console or
+operator. For authentication failures, check key expiry and the selected endpoint/account;
+for permission or quota failures, contact the account administrator or gateway operator.
+Do not include keys or authorization headers in support logs.
 
 ## Provider Config
 

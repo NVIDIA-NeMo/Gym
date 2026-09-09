@@ -1,0 +1,51 @@
+---
+title: "Daytona Access"
+description: "Obtain hosted Daytona credentials and check permissions and quota before running Gym workloads."
+position: 6
+---
+
+# Daytona Access
+
+Daytona credentials authenticate to the sandbox service. They are separate from the
+model-provider key and any private image-registry credentials. Gym does not issue them.
+
+## Hosted service
+
+1. Sign in to the [Daytona dashboard](https://app.daytona.io/dashboard/keys) and select the
+   organization approved for your workload. Ask its administrator for membership and
+   key-creation access if needed.
+2. Follow Daytona's [API-key creation instructions](https://www.daytona.io/docs/en/api-keys/).
+   Set an expiry and permissions appropriate to the workload. Creating and cleaning up
+   sandboxes requires `write:sandboxes` and `delete:sandboxes`; preparing snapshots requires
+   additional snapshot permissions. Check the linked scope reference with your administrator
+   for any provisioning operations the selected task performs.
+3. Check the organization's [Limits dashboard](https://app.daytona.io/dashboard/limits) and
+   [limits guide](https://www.daytona.io/docs/en/limits/) for available compute, storage and
+   request limits, and confirm the approved spending budget. Choose concurrency that fits
+   the task's resources; the number of input rows is not a quota check.
+4. Supply `DAYTONA_API_KEY` to the host process through your approved secret-management
+   mechanism. Do not commit it or paste it into support logs.
+
+<Warning>
+Daytona's organization is the sandbox runtime trust boundary. API-key resource scopes do
+not isolate access to running sandboxes within that organization; see the provider's
+[permissions guidance](https://www.daytona.io/docs/en/api-keys/).
+</Warning>
+
+## Operator-managed deployments
+
+A key from the hosted service does not automatically authorize another deployment. Obtain
+the supported endpoint, credentials, region, network requirements and quota from its
+operator. Follow the selected integration's supported endpoint configuration; do not assume
+that changing a Gym Sandbox API config changes Harbor's separate Daytona environment.
+
+## Before the first run
+
+Confirm the correct organization, key permissions, image/snapshot access and quota in the
+dashboard before creating resources. These account checks do not prove a rollout works.
+If authentication fails, check expiry and the endpoint; if permissions are denied, check
+organization membership and scopes with the administrator. Resolve quota failures before
+retrying a batch. Starting sandboxes or building snapshots can incur charges.
+
+For Harbor-specific configuration and rollout commands, see the
+[Harbor agent Daytona recipe](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/harbor_agent#daytona-execution-path).
