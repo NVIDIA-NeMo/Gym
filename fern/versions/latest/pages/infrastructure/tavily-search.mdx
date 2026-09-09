@@ -1,0 +1,98 @@
+---
+title: "Tavily Search Access and Setup"
+description: "Obtain the required search policy, service credentials, and datasets before starting Tavily search."
+position: 5
+---
+
+# Tavily Search Access and Setup
+
+The [Tavily search resources server](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/tavily_search) needs a Tavily service key and a local domain-exclusion policy before it can start. Its judge-enabled configurations also require model access. The GitLab dataset recipe below has separate registry access requirements.
+
+## Supported audience and access requests
+
+The existing internal recipe is for NVIDIA users with approved access to all three dependencies: the Tavily service, the domain-exclusion policy, and the GitLab dataset registry. NVIDIA users should start with **@rgala**, the access contact already identified by this environment's README. Ask that contact to confirm the current service owner and route policy or dataset requests to the appropriate owner; a Tavily key alone does not grant either artifact access or dataset access.
+
+Request the following through approved internal channels:
+
+- The Tavily key-delivery procedure, permitted use, and approved request rate/quota. Keep this key separate from model and GitLab credentials.
+- The approved policy artifact's download or copy location, version/date, SHA-256 checksum, permitted storage locations, and refresh requirements. Confirm whether redistribution is permitted.
+- The GitLab project's MLflow-compatible registry URI, project/artifact read access, and approved token-issuance procedure. Also confirm the dataset version and artifact names before downloading.
+- Separate policy-model and judge-model endpoints and credentials. The server host must be able to reach these endpoints, Tavily, and the approved GitLab registry, using the network access required by each operator.
+
+<Warning>
+The repository does not document a public distribution route for the approved exclusion policy or the internal GitLab datasets. External users should [ask the Gym maintainers](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose) whether an authorized route is available. Public Tavily account access does not establish permission to use or redistribute NVIDIA's policy or datasets. Until those requirements are resolved, this internal recipe is not a supported public first-run path. Do not post keys, policy contents, or private access instructions in a public issue.
+</Warning>
+
+## Obtain and pin the exclusion policy
+
+Legal policy requires excluding certain domains. Obtain the approved JSON artifact from the location supplied by its owner, and copy it to a permitted absolute path readable by the **resources-server process**. It need not be a particular cluster's Lustre path. If that process runs in a container or on another host, make the file available there and use that process's path.
+
+Keep the version/date in the local filename and record the owner-provided source, version, and expected SHA-256 alongside your private run records. Verify the checksum against the value received through the approved channel before use:
+
+```bash
+# Set this to your approved, versioned local artifact; do not download a test policy.
+export TAVILY_EXCLUDE_DOMAINS_FILE=/absolute/approved/path/policy-VERSION.json
+test -s "$TAVILY_EXCLUDE_DOMAINS_FILE" && test -r "$TAVILY_EXCLUDE_DOMAINS_FILE"
+shasum -a 256 "$TAVILY_EXCLUDE_DOMAINS_FILE"
+```
+
+Compare the output to the **owner-provided** checksum, not a checksum calculated from the same unverified download. If it differs, stop and contact the owner. Retain the exact approved artifact for reproducibility, subject to retention policy, and obtain a refreshed version when required. Gym does not automatically download, version, or authenticate this policy; a matching checksum identifies bytes, not legal approval or freshness.
+
+The [parser](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/tavily_search/app.py) expects a JSON object with a `notices` list, each notice's `properties` list, and domain entries identified by `type: "domain"` with a `value`. It reads this file at resources-server startup. Missing/unreadable files, invalid JSON, or missing required keys can prevent startup. An arbitrary JSON file or empty policy is not an acceptable replacement, even if it parses. Do not edit the policy to work around startup errors; ask its owner for the compatible approved artifact.
+
+## Configure the local environment
+
+Use the repository-root, gitignored `env.yaml`. The following top-level keys match the interpolations in the [shipped vLLM-judge config](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/tavily_search/configs/tavily_search_judge_vllm_model.yaml):
+
+```yaml
+tavily_api_key: ${oc.env:TAVILY_API_KEY}
+exclude_domains_file_path: ${oc.env:TAVILY_EXCLUDE_DOMAINS_FILE}
+search_judge_model_base_url: ${oc.env:SEARCH_JUDGE_MODEL_BASE_URL}
+search_judge_model_api_key: ${oc.env:SEARCH_JUDGE_MODEL_API_KEY}
+search_judge_model_name: Qwen/Qwen3-235B-A22B-Instruct-2507
+```
+
+Populate those environment variables using your approved credential workflow. The judge-model name is the existing recipe's recommendation; the endpoint must actually serve that model under that name. Set `SEARCH_JUDGE_MODEL_API_KEY` to an empty value only when the endpoint operator explicitly confirms unauthenticated access. Configure the separate policy model following the [vLLM model guide](/main/model-server/vllm); the judge configuration does not configure policy-model access for you. Do not put keys in shell command arguments, source control, or shared config dumps.
+
+## GitLab datasets
+
+After the registry owner approves access, add these **separate** registry settings to `env.yaml`:
+
+```yaml
+mlflow_tracking_uri: ${oc.env:GYM_GITLAB_REGISTRY_URI}
+mlflow_tracking_token: ${oc.env:GYM_GITLAB_REGISTRY_TOKEN}
+```
+
+Set the variables to the owner-issued URI and token. The URI is the project's MLflow-compatible registry endpoint, not merely a GitLab homepage URL. Gym's GitLab download client requires both settings. The [configuration reference](/main/reference/configuration#mlflow) explains these shared keys, and the [dataset CLI reference](/main/reference/cli-commands#gym-dataset-download) documents the download options. Registry configuration alone does not enable MLflow evaluation export.
+
+These commands mirror the `train` and `validation` registry identifiers and local paths in the shipped vLLM-judge config. Run from the repository root **after the owner confirms that version `0.0.1` and these artifacts are available to you**:
+
+```bash
+gym dataset download --storage gitlab \
+    --name tavily_search \
+    --revision 0.0.1 \
+    --artifact train.jsonl \
+    --output resources_servers/tavily_search/sft_samples/train.jsonl
+
+gym dataset download --storage gitlab \
+    --name tavily_search \
+    --revision 0.0.1 \
+    --artifact validation.jsonl \
+    --output resources_servers/tavily_search/sft_samples/validation.jsonl
+```
+
+The previous README used different `sft_samples_*` artifact names and a different local directory. Do not assume those names are interchangeable. If the registry has different artifacts, obtain the intended version/name mapping from its owner and explicitly align your local dataset configuration. Do not silently substitute another dataset or claim the same benchmark coverage. Record the dataset version and downloaded-file checksums with your run records.
+
+An authentication/authorization error requires checking token validity, project read permissions, and registry/network access with the owner. An artifact-not-found error requires checking the dataset/version/name mapping. A public dataset license does not grant access to a private registry. The committed example dataset can exercise a small example once service and policy access are approved, but does not replace the training/validation splits.
+
+## Start only after prerequisites are satisfied
+
+From the repository root, with Gym installed and the policy model configured:
+
+```bash
+gym env start \
+    --resources-server tavily_search/tavily_search_judge_vllm_model \
+    --model-type vllm_model
+```
+
+Starting the servers is not an end-to-end validation. Before scaling up, run a bounded evaluation using the [evaluation guide](/main/evaluation/benchmarks) and inspect an actual search-tool response and judge/verifier result. Respect the approved service quota and confirm policy exclusions are applied. A file/checksum preflight alone does not validate live credentials, service reachability, model behavior, or evaluation correctness.

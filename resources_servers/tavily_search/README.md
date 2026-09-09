@@ -1,48 +1,11 @@
 # Description
 RL enviroment which allows access to web search (Search Provider: Tavily)
 
-## Key config parameters
-- You will need to create a Tavily key. Please reach out to @rgala to get access.
-- Legal requires us to exclude some domains which we are not allowed to search. Please pass the file below (on DFW, LAX) before using the environment
-- This environment uses LLM-as-judge to gauge the correctness of answers. Recommended judge model is Qwen3-235B-A22B-Instruct-2507.
+## Prerequisites and setup
 
+Follow [Tavily search access and setup](https://docs.nvidia.com/nemo/gym/main/infrastructure/tavily-search) before starting this environment. It covers the required domain-exclusion policy, portable local configuration, separate Tavily/model/GitLab credentials, and dataset paths.
 
-Required to add env.yaml / your config
-```
-
-search_judge_model_base_url: <YOUR_JUDGE_MODEL_URL>
-search_judge_model_api_key: ""
-search_judge_model_name: Qwen/Qwen3-235B-A22B-Instruct-2507
-
-tavily_search_resources_server:
-  resources_servers:
-    tavily_search:
-      tavily_api_key: <YOUR_KEY>
-      exclude_domains_file_path: /lustre/fsw/portfolios/llmservice/users/rgala/frozen/2025_12_15_nv_tdm_opt_out_registry.json
-```
-
-
-
-
-
-Commands to Run
-```
-gym dataset download --storage gitlab \
-    --name tavily_search \
-    --revision 0.0.1 \
-    --artifact sft_samples_train.jsonl \
-    --output resources_servers/tavily_search/data/sft_samples/sft_samples_train.jsonl
-
-gym dataset download --storage gitlab \
-    --name tavily_search \
-    --revision 0.0.1 \
-    --artifact sft_samples_validation.jsonl \
-    --output resources_servers/tavily_search/data/sft_samples/sft_samples_validation.jsonl
-
-gym env start \
-    --resources-server tavily_search/tavily_search_judge_vllm_model \
-    --model-type vllm_model
-```
+The documented internal workflow requires approved NVIDIA service, policy-artifact, and dataset access. NVIDIA users can start with the existing access contact, @rgala. The repository does not document a public distribution route for the approved exclusion policy; external users must confirm an authorized route with the maintainers before running this recipe. Do not omit or replace the required policy with an empty/test file to make startup succeed.
 
 
 ### Performance Metrics
@@ -57,4 +20,3 @@ Data: Apache 2.0
 
 Dependencies
 - nemo_gym: Apache 2.0
-
