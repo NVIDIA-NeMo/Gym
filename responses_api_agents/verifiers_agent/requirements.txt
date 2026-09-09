@@ -1,5 +1,5 @@
 -e nemo-gym[dev] @ ../../
-verifiers @ git+https://github.com/PrimeIntellect-ai/verifiers.git@v0.1.14
+verifiers @ git+https://github.com/PrimeIntellect-ai/verifiers.git@v0.3.1
 --extra-index-url https://hub.primeintellect.ai/primeintellect/simple/
 acereason-math
 -e ../../environments/ab_aa
