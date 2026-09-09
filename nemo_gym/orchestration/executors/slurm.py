@@ -22,7 +22,7 @@ from pathlib import Path
 
 from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
-from nemo_gym.orchestration.executors.connection import Connection, LocalConnection, get_connection
+from nemo_gym.orchestration.executors.connection import Connection, get_connection
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
     MANIFEST_NAME,
@@ -122,13 +122,12 @@ def _validate_mounts(config: SubmitConfig, conn: Connection) -> None:
     if not srcs_by_label:
         return
 
-    if isinstance(conn, LocalConnection):
-        missing = {src for _, src in srcs_by_label if not Path(src).exists()}
-    else:
-        # SSHConnection.run() pipes commands as a bash script, so || works fine.
-        checks = [f'test -e {shlex.quote(src)} || echo "__GYM_MISSING:{src}"' for _, src in srcs_by_label]
-        output = conn.run(checks)
-        missing = {line[len("__GYM_MISSING:") :] for line in output.splitlines() if line.startswith("__GYM_MISSING:")}
+    # Both connections pipe commands to bash, so one shell program checks the
+    # mounts wherever the submit is going -- and the local path exercises the
+    # same code the SSH path runs.
+    checks = [f'test -e {shlex.quote(src)} || echo "__GYM_MISSING:{src}"' for _, src in srcs_by_label]
+    output = conn.run(checks)
+    missing = {line[len("__GYM_MISSING:") :] for line in output.splitlines() if line.startswith("__GYM_MISSING:")}
 
     if missing:
         bad = [(label, src) for label, src in srcs_by_label if src in missing]

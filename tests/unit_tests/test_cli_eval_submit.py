@@ -14,6 +14,7 @@
 # limitations under the License.
 import argparse
 import json
+import sys
 
 import pytest
 import yaml
@@ -22,7 +23,8 @@ from pydantic import ValidationError
 from pytest import MonkeyPatch
 
 import nemo_gym.orchestration.submit as submit_module
-from nemo_gym.cli.main import _eval_submit
+from nemo_gym.cli.main import _eval_submit, main
+from nemo_gym.orchestration.api import SlurmComputeConfig
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
 
 
@@ -321,3 +323,71 @@ class TestEvalSubmitOutput:
         _eval_submit(_args(_config_file(tmp_path), dry_run=True, json_output=True), overrides=[])
 
         assert capsys.readouterr().out == ""
+
+
+class TestEvalSubmitThroughTheRealCli:
+    """Drive `gym eval submit` the way a caller does: `main()` with argv, and
+    nothing between it and the code under test but a fake executor.
+
+    Every other test in this file monkeypatches `submit_module.submit`, which
+    replaces the function the `@experimental` decorator wraps -- so the
+    decorator never runs, and anything it writes to stdout is invisible. That
+    is how a warning printed in front of the JSON shipped: EFB does
+    `json.loads(result.stdout)` on the whole stream and gets a JSONDecodeError,
+    so no run is ever recorded. These tests parse the *entire* stdout.
+    """
+
+    def _fake_executor(self, monkeypatch, record):
+        class _FakeExecutor:
+            def run(self, config, *, dry_run: bool = False):
+                return record
+
+        monkeypatch.setattr(submit_module, "_EXECUTORS", {SlurmComputeConfig: _FakeExecutor})
+
+    def _argv(self, monkeypatch, config_path, *extra):
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", "submit", "--config", str(config_path), *extra])
+
+    def test_json_stdout_parses_whole(self, tmp_path, monkeypatch, capsys):
+        record = _record()
+        self._fake_executor(monkeypatch, record)
+        self._argv(monkeypatch, _config_file(tmp_path), "--json")
+
+        main()
+
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == json.loads(record.model_dump_json())
+
+    def test_the_experimental_warning_goes_to_stderr(self, tmp_path, monkeypatch, capsys):
+        self._fake_executor(monkeypatch, _record())
+        self._argv(monkeypatch, _config_file(tmp_path), "--json")
+
+        main()
+
+        captured = capsys.readouterr()
+        assert "experimental" in captured.err
+        assert "experimental" not in captured.out
+
+    def test_json_stdout_parses_whole_when_a_benchmark_failed(self, tmp_path, monkeypatch, capsys):
+        # The partial-failure path still has to hand EFB a parseable record:
+        # that is what keeps the siblings that did queue from being stranded.
+        self._fake_executor(monkeypatch, _record(failed=True))
+        self._argv(monkeypatch, _config_file(tmp_path), "--json")
+
+        with pytest.raises(SystemExit) as exit_info:
+            main()
+
+        assert exit_info.value.code == 1
+        assert json.loads(capsys.readouterr().out)["benchmarks"][0]["job_id"] is None
+
+    def test_human_output_survives_an_error_containing_markup(self, tmp_path, monkeypatch, capsys):
+        # An sbatch message with square brackets is markup to rich: without
+        # escaping it is either eaten or raises MarkupError mid-report.
+        record = _record(failed=True)
+        record.benchmarks[0].error = "sbatch: error: Invalid account [dev] for user"
+        self._fake_executor(monkeypatch, record)
+        self._argv(monkeypatch, _config_file(tmp_path))
+
+        with pytest.raises(SystemExit):
+            main()
+
+        assert "[dev]" in capsys.readouterr().out

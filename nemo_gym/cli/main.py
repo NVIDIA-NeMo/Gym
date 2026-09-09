@@ -571,6 +571,7 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     from hydra import compose, initialize_config_dir
     from hydra.core.global_hydra import GlobalHydra
     from omegaconf import OmegaConf
+    from rich.markup import escape
 
     from nemo_gym.orchestration.api import SubmitConfig
     from nemo_gym.orchestration.submit import submit
@@ -598,7 +599,10 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
         rich.print(f"Run directory: [bold]{record.run_dir}[/bold]")
         for benchmark in record.benchmarks:
             if benchmark.job_id is None:
-                rich.print(f"[red]failed[/red] {benchmark.benchmark}: {benchmark.error}")
+                # sbatch's message is not ours to format: `escape` disables markup
+                # for it, so an error carrying square brackets is printed as
+                # written instead of being swallowed or raising MarkupError.
+                rich.print(f"[red]failed[/red] {benchmark.benchmark}: {escape(benchmark.error or '')}")
             else:
                 rich.print(
                     f"[green]submitted[/green] {benchmark.benchmark} → Slurm job [bold]{benchmark.job_id}[/bold]"

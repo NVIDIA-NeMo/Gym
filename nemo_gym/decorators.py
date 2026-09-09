@@ -15,15 +15,23 @@
 
 import functools
 
-import rich
+from rich.console import Console
+
+
+# The warning is a diagnostic about the command, not part of its answer, so it
+# belongs on stderr. On stdout it would sit in front of a machine-readable
+# payload -- `gym eval submit --json` is parsed by its callers -- and make the
+# whole stream unparseable. Console resolves `sys.stderr` per write, so
+# redirection in tests and in pipelines still applies.
+_stderr = Console(stderr=True)
 
 
 def experimental(fn):
-    """Decorator that prints an experimental warning before the function runs."""
+    """Decorator that warns on stderr that a function is experimental, then runs it."""
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        rich.print(
+        _stderr.print(
             f"[yellow]Warning:[/yellow] [bold]{fn.__name__}[/bold] is experimental and may change or be removed without notice."
         )
         return fn(*args, **kwargs)

@@ -141,7 +141,12 @@ class SSHConnection(Connection):
     def write_text(self, remote: Path, content: str) -> None:
         # A quoted heredoc delimiter: the payload reaches the file byte for byte,
         # with no parameter or command substitution applied to it on the way.
-        script = f"cat > {shlex.quote(str(remote))} <<'GYM_EOF'\n{content}\nGYM_EOF\n"
+        # The heredoc supplies the newline before the delimiter, so a payload
+        # that already ends in one (jobs.dumps does) must shed it -- otherwise
+        # the remote manifest gains a blank line the local index does not have,
+        # and the two stores stop being byte-identical.
+        payload = content.removesuffix("\n")
+        script = f"cat > {shlex.quote(str(remote))} <<'GYM_EOF'\n{payload}\nGYM_EOF\n"
         _checked(
             ["ssh", *self._ssh_opts(), self._hostname, "bash", "-s"],
             input=script,

@@ -23,7 +23,12 @@ import pytest
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors import slurm as slurm_module
 from nemo_gym.orchestration.executors.connection import LocalConnection
-from nemo_gym.orchestration.executors.slurm import SlurmExecutor, _parse_sbatch_results, _sbatch_command
+from nemo_gym.orchestration.executors.slurm import (
+    SlurmExecutor,
+    _parse_sbatch_results,
+    _sbatch_command,
+    _validate_mounts,
+)
 from nemo_gym.orchestration.jobs import MANIFEST_NAME, load_record
 
 
@@ -330,3 +335,43 @@ def test_dry_run_returns_no_record(tmp_path, monkeypatch, capsys):
 
     assert record is None
     assert "[dry-run]" in capsys.readouterr().out
+
+
+def _config_with_driver_mounts(tmp_path, mounts):
+    return SubmitConfig.model_validate(
+        {
+            "services": {},
+            "compute": {"hsg": {"type": "slurm", "account": "my-account", "hostname": None}},
+            "driver": {"container": "gym:latest", "benchmarks": {"bench_a": {}}, "mounts": mounts},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+
+
+class TestValidateMounts:
+    """Both connections pipe commands to bash, so mount validation runs one
+    shell program either way. These go through a real `LocalConnection`: with
+    the old `isinstance` branch the local path never touched the shell, so the
+    check that actually runs in production was untested."""
+
+    def test_a_present_mount_src_passes(self, tmp_path):
+        src = tmp_path / "data"
+        src.mkdir()
+
+        _validate_mounts(_config_with_driver_mounts(tmp_path, [f"{src}:/data"]), LocalConnection())
+
+    def test_a_missing_mount_src_is_named(self, tmp_path):
+        src = tmp_path / "absent"
+
+        with pytest.raises(ValueError) as error:
+            _validate_mounts(_config_with_driver_mounts(tmp_path, [f"{src}:/data"]), LocalConnection())
+
+        assert str(src) in str(error.value)
+        assert "driver" in str(error.value)
+
+    def test_no_mounts_asks_the_connection_nothing(self, tmp_path):
+        class _Explodes(LocalConnection):
+            def run(self, commands):
+                raise AssertionError("no mounts, so there is nothing to check")
+
+        _validate_mounts(_config_with_driver_mounts(tmp_path, []), _Explodes())
