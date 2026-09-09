@@ -44,6 +44,11 @@ def build_row(repo: Path, tasks_dir: Path, image: str, level: int, problem_id: i
         + "\n"
     )
     prompt += "\nUse the terminal as needed and save the final code to /workspace/solution.py.\n"
+    resolved_task_dir = task_dir.resolve()
+    try:
+        task_path = resolved_task_dir.relative_to(ROOT)
+    except ValueError:
+        task_path = resolved_task_dir
     return {
         "responses_create_params": {
             "input": [{"role": "user", "content": prompt}],
@@ -51,7 +56,7 @@ def build_row(repo: Path, tasks_dir: Path, image: str, level: int, problem_id: i
                 "instance_id": f"kernelbench::level{level}::{problem_id}",
                 "task_name": f"level{level}_{problem_id}",
                 "instruction": prompt,
-                "task_dir": str(task_dir.resolve()),
+                "task_dir": str(task_path),
                 "docker_image": image,
                 "workdir": "/workspace",
                 "agent_timeout_sec": "1200",
