@@ -407,8 +407,15 @@ async def test_complete_partial_rollout_checkpoint_cycle(tmp_path, monkeypatch) 
         assert retired_resources.json()["retired"] is True
 
         commit_body = {**prepare_body, "checkpoint_dir": str(checkpoint_dir)}
-        model_commit = await _post(model, f"{MODEL_CHECKPOINT_URL_PREFIX}/commit", commit_body)
         agent_commit = await _post(agent, f"{AGENT_CHECKPOINT_URL_PREFIX}/commit", commit_body)
+        model_commit = await _post(
+            model,
+            f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
+            {
+                **commit_body,
+                "continuation_indexes": [agent_commit.json()["continuation_index"]],
+            },
+        )
         resources_commit = await _post(resources, f"{RESOURCES_CHECKPOINT_URL_PREFIX}/commit", commit_body)
         assert model_commit.json()["excluded_tombstoned"] == 1
         assert agent_commit.json()["records"] == 1

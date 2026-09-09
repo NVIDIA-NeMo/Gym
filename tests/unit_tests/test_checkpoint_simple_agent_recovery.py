@@ -395,13 +395,27 @@ async def test_simple_agent_restores_next_turn_without_repeating_resource_mutati
         assert source_resources.checkpoint_participant().revision_for(ROLLOUT_ID, 0) == 2
 
         commit_body = {**prepare_body, "checkpoint_dir": str(checkpoint_dir)}
-        for client, path in (
-            (source_clients["policy.test"], f"{MODEL_CHECKPOINT_URL_PREFIX}/commit"),
-            (source_clients["agent.test"], f"{AGENT_CHECKPOINT_URL_PREFIX}/commit"),
-            (source_clients["resources.test"], f"{RESOURCES_CHECKPOINT_URL_PREFIX}/commit"),
-        ):
-            committed = await _post_control(client, path, commit_body)
-            assert committed.status_code == 200, committed.text
+        agent_commit = await _post_control(
+            source_clients["agent.test"],
+            f"{AGENT_CHECKPOINT_URL_PREFIX}/commit",
+            commit_body,
+        )
+        assert agent_commit.status_code == 200, agent_commit.text
+        model_commit = await _post_control(
+            source_clients["policy.test"],
+            f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
+            {
+                **commit_body,
+                "continuation_indexes": [agent_commit.json()["continuation_index"]],
+            },
+        )
+        assert model_commit.status_code == 200, model_commit.text
+        resources_commit = await _post_control(
+            source_clients["resources.test"],
+            f"{RESOURCES_CHECKPOINT_URL_PREFIX}/commit",
+            commit_body,
+        )
+        assert resources_commit.status_code == 200, resources_commit.text
 
         partial_run.cancel()
         with pytest.raises(asyncio.CancelledError):

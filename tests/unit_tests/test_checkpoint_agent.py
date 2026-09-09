@@ -424,12 +424,13 @@ async def test_commit_route_snapshots_agent_records_on_event_loop(monkeypatch, t
 
     assert prepared.status_code == 200
     assert committed.status_code == 200
-    assert "continuation_index" not in committed.json()
+    reference = CheckpointArtifactReference.model_validate(committed.json()["continuation_index"])
+    assert reference.records == 0
     assert record_snapshot_threads == [event_loop_thread]
 
 
 @pytest.mark.asyncio
-async def test_commit_route_returns_continuation_index_only_when_requested(tmp_path) -> None:
+async def test_commit_route_rejects_obsolete_continuation_index_opt_in(tmp_path) -> None:
     participant = AgentCheckpointParticipant()
     fence = ControlFence()
     app = FastAPI()
@@ -462,10 +463,7 @@ async def test_commit_route_returns_continuation_index_only_when_requested(tmp_p
         )
 
     assert prepared.status_code == 200
-    assert committed.status_code == 200
-    reference = CheckpointArtifactReference.model_validate(committed.json()["continuation_index"])
-    assert reference.records == 0
-    assert read_jsonl_artifact(tmp_path, reference, AgentContinuationRoot) == []
+    assert committed.status_code == 422
 
 
 @pytest.mark.asyncio
