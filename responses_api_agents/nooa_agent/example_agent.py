@@ -16,15 +16,15 @@
 from nooa import Agent, CodeActStrategy, strategy
 
 
-class WeatherAgent(Agent):
-    """Answer weather questions using Gym resource methods attached to the agent."""
+class GymResourceAgent(Agent):
+    """Solve tasks using resource methods supplied by Gym at runtime."""
 
     @strategy(CodeActStrategy())
-    async def answer(self, question: str) -> str:
-        """Answer `question`.
+    async def answer(self, task: str) -> str:
+        """Solve `task`.
 
-        Extract the requested city, call `self.get_weather(city=...)`, and
-        return a concise answer grounded in the tool result.
+        Inspect and call the available resource methods when needed, then
+        return a concise answer grounded in their results.
         """
 
         ...
