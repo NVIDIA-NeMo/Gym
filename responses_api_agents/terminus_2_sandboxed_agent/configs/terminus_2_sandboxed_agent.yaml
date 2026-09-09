@@ -34,5 +34,9 @@ terminus_2_sandboxed_agent:
         metadata:
           harness: terminus-2
       remote_tmux_binary_path: null
+      # Identity for the Terminus 2 tmux session and every agent command (account name or uid).
+      # null = image default. Set e.g. `agent` for root-default images that ship an `agent` account;
+      # a row-level `agent_user` echoed by the resources server's /seed_session overrides this value.
+      agent_user: null
 
       datasets: []

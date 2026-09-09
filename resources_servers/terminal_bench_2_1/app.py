@@ -4,15 +4,16 @@
 from contextlib import contextmanager
 from copy import deepcopy
 from glob import glob
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from shlex import quote as shlex_quote
 from sys import stderr
 from tempfile import NamedTemporaryFile
 from time import time
 from traceback import format_exc
-from typing import Any, ClassVar, Dict, List, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
 
 from fastapi import Request
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import (
@@ -43,14 +44,77 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
     debug: bool = False
 
 
+AgentUser = Union[str, int, None]
+
+
+def normalize_agent_user(value: Any) -> Any:
+    """Normalize an ``agent_user`` value. Kept semantically identical, by hand, to the Terminus 2 agent's
+    ``_normalize_agent_user`` (the two packages run in separate venvs, so neither imports the other).
+
+    A ``str`` agent_user is an account NAME (the sandbox provider hands it to ``su``); an ``int`` is a uid.
+    Digit-only strings become ints (``"1000"`` -> ``1000``; GNU ``id`` happens to accept ``"1000"`` as a name
+    lookup, which would hide the misconfiguration). ``isdecimal`` rather than ``isdigit``, so ``"²"`` stays a
+    string instead of making ``int()`` raise. Booleans are rejected because pydantic's lax mode would otherwise
+    coerce ``true`` to uid 1. Empty and option-like names (``""``, ``"-m"``) are rejected because ``su`` would
+    parse them as options (``shlex.quote`` leaves ``"-m"`` unquoted).
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("agent_user must be an account name, a uid, or null")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        if value.isdecimal():
+            return int(value)
+        if value == "" or value.startswith("-"):
+            raise ValueError("agent_user must be an account name, a uid, or null")
+        return value
+    return value
+
+
+def is_non_root_agent_user(agent_user: AgentUser) -> bool:
+    """``None``, ``"root"`` and ``0`` all resolve to the image default / uid 0 and need no special handling."""
+    return agent_user is not None and agent_user != "root" and agent_user != 0
+
+
+def uploaded_subdirectories(target_dirpath: str, remote_paths: List[str]) -> List[str]:
+    """Directories strictly below ``target_dirpath`` that hold ``remote_paths`` (deduplicated, parents first).
+
+    ``remote_paths`` must come from ``_upload_folder(..., target_dirpath)``, i.e. each is ``f"{target_dirpath}/<rel>"``;
+    the directories are the ones its ``mkdir -p`` created or used for nested files, never the upload root itself.
+    """
+    prefix = f"{target_dirpath}/"
+    root = target_dirpath.rstrip("/")
+    directories: Dict[str, None] = {}
+    for remote_path in remote_paths:
+        assert remote_path.startswith(prefix), (remote_path, target_dirpath)
+        relative_dir = PurePosixPath(remote_path[len(prefix) :]).parent
+        for depth in range(1, len(relative_dir.parts) + 1):
+            directories.setdefault(f"{root}/{'/'.join(relative_dir.parts[:depth])}", None)
+    return list(directories)
+
+
 class TerminalBench21SeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str  # @bxyu-nvidia: Just a plain string URI for now for OpenSandbox backend.
+    # Echo of the row's agent_user: the resources server is the authority the agent harness reads it from.
+    agent_user: AgentUser = None
 
 
 class TerminalBench21SeedSessionRequest(BaseModel):
     task_name: str
     docker_image: str
     task_folder: str
+    # Identity the agent harness runs as inside the task sandbox (mirrors Harbor `task.toml` `[agent] user`).
+    # `None` keeps the image default. The verifier always runs as the image default (root on the supported
+    # images), so a non-root `agent_user` requires a root-default image on which that account exists.
+    # A row value of "root" (or 0) is the explicit per-row image default and beats any lane-level setting.
+    agent_user: AgentUser = None
+
+    @field_validator("agent_user", mode="before")
+    @classmethod
+    def _normalize_agent_user(cls, value: Any) -> Any:
+        return normalize_agent_user(value)
 
 
 class TerminalBench21VerifyRequest(TerminalBench21SeedSessionRequest, BaseVerifyRequest):
@@ -66,6 +130,9 @@ class TerminalBench21VerifyResponse(BaseVerifyResponse):
     task_name: str
     test_output: str
     golden_patch_output: Optional[str]
+    # Identity the agent ran as (the base response chain drops undeclared request fields, so declare it here
+    # to record it in rollouts).
+    agent_user: AgentUser = None
 
 
 GOLDEN_PATCH_SOLVE_SH_PATCHES = {
@@ -197,7 +264,9 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         eval_sandbox = await self._create_sandbox(body)
         self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
 
-        return TerminalBench21SeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
+        return TerminalBench21SeedSessionResponse(
+            sandbox_handle=eval_sandbox._handle.sandbox_id, agent_user=body.agent_user
+        )
 
     @contextmanager
     def _patch_golden_patch_solve_sh(
@@ -224,10 +293,12 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         target_dirpath: str,
         patches: Dict[str, List[Tuple[str, str]]],
         task_name: Optional[str] = None,
-    ) -> None:
+    ) -> List[str]:
+        """Upload every file under ``local_dirpath`` to ``target_dirpath``; returns the remote paths written."""
         if not local_dirpath.is_absolute():
             local_dirpath = PARENT_DIR / local_dirpath
 
+        remote_paths: List[str] = []
         for file in glob("**", root_dir=str(local_dirpath), recursive=True):
             local_fpath = local_dirpath / file
             if not local_fpath.is_file():
@@ -239,6 +310,9 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
             with self._patch_golden_patch_solve_sh(task_name, local_fpath, patches) as new_local_fpath:
                 await sandbox.upload(local_path=new_local_fpath, remote_path=target_fpath)
+            remote_paths.append(target_fpath)
+
+        return remote_paths
 
     async def verify(self, request: Request, body: TerminalBench21VerifyRequest) -> TerminalBench21VerifyResponse:
         task_folder = Path(body.task_folder)
@@ -248,15 +322,26 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 print(f"Creating eval sandbox for {body.task_name}", file=stderr)
             eval_sandbox = await self._create_sandbox(body)
             cwd = (await eval_sandbox.exec("pwd")).stdout.strip()
-            await self._upload_folder(
+            solution_paths = await self._upload_folder(
                 eval_sandbox, task_folder / "solution", cwd, GOLDEN_PATCH_SOLVE_SH_PATCHES, task_name=body.task_name
             )
+            # The reference solution stands in for the agent, so it runs under the agent identity. Uploads (and the
+            # directories `_upload_folder` created for nested files) land owned by the image default; hand them to a
+            # non-root agent_user first (mirrors Harbor's agents/installed/base.py chown after upload) so solve.sh
+            # can read and modify its own files. One non-recursive chown, parents first, never the upload root.
+            if is_non_root_agent_user(body.agent_user) and solution_paths:
+                chown_targets = uploaded_subdirectories(cwd, solution_paths) + solution_paths
+                quoted_paths = " ".join(shlex_quote(path) for path in chown_targets)
+                chown_result = await eval_sandbox.exec(f"chown {shlex_quote(str(body.agent_user))} {quoted_paths}")
+                if chown_result.return_code != 0:
+                    print(f"Failed to chown solution files to {body.agent_user!r}: {chown_result}", file=stderr)
 
             if self.config.debug:
                 print(f"Running golden patch for {body.task_name}", file=stderr)
             golden_patch_result = await eval_sandbox.exec(
                 f"bash {cwd}/solve.sh",
                 timeout_s=self.config.evaluation_timeout,
+                user=body.agent_user,
             )
             golden_patch_output = (golden_patch_result.stderr or "") + (golden_patch_result.stdout or "")
             if self.config.debug:
@@ -270,6 +355,9 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             print(f"Running tests for {body.task_name}", file=stderr)
         start_time = time()
         try:
+            # The verifier execs below (the /tests mkdir + upload and `bash /tests/test.sh`) intentionally carry
+            # no user override: they run as the image default (root on the supported images) regardless of
+            # `agent_user`, which is why a non-root agent_user requires a root-default image.
             await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
             eval_result = await eval_sandbox.exec(
                 "bash /tests/test.sh",
