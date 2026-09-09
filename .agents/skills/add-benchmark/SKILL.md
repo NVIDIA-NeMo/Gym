@@ -1,10 +1,10 @@
 ---
 name: add-benchmark
 description: >
-  Add or integrate a fixed evaluation benchmark in NeMo Gym using the current
-  manifest-backed workload flow. Use when creating a benchmark catalog entry,
-  reusing or adding a scorer, preparing a benchmark dataset, or porting an
-  upstream benchmark. Do not use for a training-only environment or a
+  Add, integrate, or review a fixed evaluation benchmark in NeMo Gym using the
+  current manifest-backed workload flow. Use when creating or reviewing a benchmark
+  catalog entry, reusing or adding a scorer, preparing a benchmark dataset, or
+  porting an upstream benchmark. Do not use for a training-only environment or a
   component-only resources server.
 ---
 
@@ -26,6 +26,10 @@ Treat the current CLI, Pydantic schemas, and generated scaffold as authoritative
 Read [references/patterns.md](references/patterns.md) when implementation needs a concrete current example of
 manifest/config ownership, raw-row and `TaskData` design, a verifier fixture, scorer reuse, or a non-default integration
 profile. The reference illustrates relationships; regenerate the scaffold and inspect the cited code before copying it.
+
+For benchmark or eval code review, read [references/review-checklist.md](references/review-checklist.md). Use it to
+trace scoring-relevant fields from preparation through prompt/agent routing, verification, and aggregation, then report
+confirmed findings in severity order.
 
 ## Preserve the upstream contract
 
@@ -93,6 +97,10 @@ gym env test <name> --kind benchmark
 
 Add focused tests for conversion, scoring boundaries, malformed model output, failure handling, and state isolation.
 Coverage must remain at least 96%, and tests must assert observable behavior.
+
+For grouped, weighted, or partially overlapping tests, exercise selector-to-test membership, per-rollout reward, and
+aggregate metrics independently. A correct `verify()` result does not prove that `compute_metrics()` groups, caps, or
+deduplicates scores correctly.
 
 For behavior-changing environment or agent work, run representative real smoke rollouts and inspect both agent and
 verifier behavior. All benchmarks additionally require the reward profiling, rollout inspection, and variance

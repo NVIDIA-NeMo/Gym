@@ -17,6 +17,20 @@ gym env init --help
 gym env init --benchmark sample_benchmark --profile custom-gym-verifier
 ```
 
+Repository examples are evidence for one contract, not complete templates. Many predate manifests, so inspect the
+current scaffold and schemas before borrowing their structure:
+
+| Contract to inspect | Repository examples |
+| --- | --- |
+| raw fields rendered by `prompt_config` | `benchmarks/aime26/`, `benchmarks/gpqa/` |
+| translation data plus evaluator-specific overrides | `benchmarks/wmt24pp/`, `benchmarks/flores200/` |
+| official code runner reused by several datasets | `resources_servers/evalplus/`, `benchmarks/human_eval/`, `benchmarks/mbpp/` |
+| grouped tests, selectors, score caps, and cross-rollout metrics | `benchmarks/ioi/`, `resources_servers/competitive_coding_challenges/` |
+| upstream rubric, prompt, and tool-schema drift guards | `benchmarks/finance_agent_v2/` |
+| materialized multimodal requests | `benchmarks/hle/config_vision.yaml` |
+| custom or external agent loops | `benchmarks/scicode/`, `benchmarks/legal_agent_bench/`, `benchmarks/osworld/` |
+| heterogeneous eval-suite composition | `benchmarks/nemotron_3.5_super/eval_container_config.yaml` |
+
 ## Manifest and config have different authority
 
 The manifest owns catalog identity and behavioral declarations. The Gym config owns runtime composition. The manifest
@@ -124,6 +138,11 @@ def prepare(source: Path = SOURCE_PATH, output: Path = OUTPUT_PATH) -> Path:
 
 Adapt this to the upstream source rather than adding network downloads, caches, or credentials unless the benchmark
 actually requires them. Preserve the upstream revision and license in the workload metadata and README.
+
+When preparation emits metadata, graders, NeMo Skills data, or another consumer-specific artifact, validate that every
+consumer resolves it through its public name, registry, or search path. A generated directory existing on disk does not
+prove downstream discovery works. Test that side artifacts and the primary JSONL agree on task IDs, selectors, and
+scoring metadata.
 
 ## `TaskData` describes task-owned fields
 
@@ -243,6 +262,29 @@ def test_verifier_fixture() -> None:
 
 Add focused tests beyond the fixture for meaningful scoring boundaries, extraction behavior, tool/subprocess failures,
 timeouts, state isolation, and any workload-specific `grading_mode` override.
+
+## Grouped selectors and aggregate metrics are separate contracts
+
+For subtasks, test groups, weighted rubrics, or partially overlapping tests, define the evaluation unit before writing
+rows: one problem, subtask, group, episode, or full benchmark. A selector affects correctness when it chooses tests,
+labels results, caps credit, or changes aggregation; do not treat it as incidental metadata.
+
+Prove all three layers independently:
+
+1. every prepared selector resolves to canonical verifier metadata and runs exactly the intended tests;
+2. per-rollout verification cannot award more than the selector's declared cap and fails closed for unknown or empty
+   selections; and
+3. aggregate metrics group stable task/repeat identities correctly and apply the official weights, caps,
+   deduplication, and best-of/pass@k policy.
+
+Include fixtures with overlapping test membership, partial results, unknown selectors, unequal weights, duplicate
+outputs, and multiple repeats when those cases exist. Similar aggregate scores are not parity evidence: compare
+per-example verdicts when adapting an upstream evaluator.
+
+`resources_servers/competitive_coding_challenges/tests/test_app.py` demonstrates separate reward and metric tests.
+Benchmark preparation still needs its own test proving that emitted selectors match the metadata loaded by that
+server. `benchmarks/finance_agent_v2/tests/test_prepare.py` demonstrates drift guards for scoring-relevant rubrics and
+modifiers.
 
 ## Reuse a scorer without copying it
 
