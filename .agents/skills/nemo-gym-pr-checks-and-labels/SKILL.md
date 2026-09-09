@@ -57,21 +57,29 @@ Apply the title and body contract from `AGENTS.md` before declaring a PR ready:
 
 ## Select Checks
 
-Run `pre-commit run --all-files` before handoff. Hooks can modify files; review
-the resulting diff, stage only intended changes, and rerun until clean.
+For change or PR-preparation requests, run `pre-commit run --all-files` before
+handoff. Hooks can modify files; review the resulting diff, stage only intended
+changes, and rerun until clean. For read-only readiness assessments, inspect
+recorded validation and CI instead. If fresh execution is necessary, use an
+isolated temporary worktree or ask before running hooks in the user's worktree.
 
 Then classify the complete PR diff using the same precedence as CI:
 
 | Diff classification | Paths | CI test scope | Local evidence |
 |---|---|---|---|
-| Docs-only | Only `**.md`, `fern/**`, `LICENSE`, or `benchmarks/**` | Unit tests are skipped | For Fern changes, follow `fern/README.md`; otherwise run relevant docs/link checks |
-| Server-only | One or more files in `resources_servers/**`, `responses_api_agents/**`, or `responses_api_models/**`, with no uncategorized files | Core and sandbox coverage tests plus tests for changed servers | Run `gym env test --resources-server <name>` for each changed server and targeted core tests when shared behavior is exercised |
+| CI docs-classified | Only `**.md`, `fern/**`, `LICENSE`, or `benchmarks/**` | Unit tests are skipped | For Fern changes, follow `fern/README.md`; for non-doc files under `benchmarks/**`, run targeted preparation/tests; otherwise run relevant docs/link checks |
+| Server-only | One or more files in `resources_servers/**`, `responses_api_agents/**`, or `responses_api_models/**`, with no uncategorized files | Core and sandbox coverage tests plus tests for changed servers | Run `gym env test +entrypoint=<component>/<name>` for each changed component and targeted core tests when shared behavior is exercised |
 | Full | Any uncategorized file, including core code, CI, scripts, test infrastructure, or native skill-discovery links | Core and sandbox coverage tests plus the eight-shard server suite | Run targeted tests for the changed contract; use `gym dev test` and `gym env test --all` when the change warrants the full local cost |
 
-The precedence is full over server-only over docs-only. A Markdown file does
-not make a mixed PR docs-only. A canonical `SKILL.md`-only edit matches the
-Markdown rule, while adding a `.claude/skills` or `.codex/skills` symlink makes
-the diff full-scope under the current classifier.
+The precedence is full over server-only over CI docs-classified. A Markdown
+file does not make a mixed PR CI docs-classified. A canonical `SKILL.md`-only
+edit matches the Markdown rule, while adding a `.claude/skills` or
+`.codex/skills` symlink makes the diff full-scope under the current classifier.
+
+For server-only changes, replace `<component>` with `resources_servers`,
+`responses_api_agents`, or `responses_api_models`. The
+`gym env test --resources-server <name>` form is shorthand for resources
+servers only.
 
 Additional evidence is required by behavior, not just path:
 
@@ -128,9 +136,10 @@ non-draft PR, prefer one label from each applicable family:
   merely the file extension. For example, model-server docs are `area:model`,
   while generic contributor docs are `area:docs`.
 - **State:** `needs-review` when a non-draft PR is ready for review;
-  `ready-to-merge` only after approval and required checks; or `blocked`,
-  `waiting-on-customer`, or `waiting-on-maintainers` when that state is
-  supported by current evidence. Draft PRs normally have no state label.
+  `ready-to-merge` after approval once the branch is current, while waiting for
+  final CI or merge; or `blocked`, `waiting-on-customer`, or
+  `waiting-on-maintainers` when that state is supported by current evidence.
+  Draft PRs normally have no state label.
 
 Use the dominant changed behavior for area selection:
 
