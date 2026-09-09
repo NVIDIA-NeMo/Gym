@@ -27,6 +27,17 @@ directly comparable to the AA leaderboard column.
 - Scoring code: `automationbench_aa_gated_env/` (imports upstream
   `automationbench`; vendors nothing)
 
+## Install
+
+The env package is not on PyPI; install it into the agent's venv:
+
+```bash
+uv pip install -e environments/ab_aa
+```
+
+This pulls `automation-bench` from the upstream repo. Note upstream declares
+`requires-python >=3.13`.
+
 ## Data
 
 ```bash

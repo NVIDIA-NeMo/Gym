@@ -11,6 +11,7 @@ ab_aa:
       model_server:
         type: responses_api_models
         name: policy_model
+      model_name: ""
       vf_env_id: automationbench_aa_gated_env
       vf_env_args:
         max_turns: 50
