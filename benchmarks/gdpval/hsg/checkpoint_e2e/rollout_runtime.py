@@ -48,6 +48,43 @@ def assert_node_local(path: Path, *, local_root: Path = LOCAL_ROOT) -> Path:
     return resolved
 
 
+def _editable_path_placeholders(*, local_root: Path) -> set[str]:
+    """Audit registered setuptools finders before accepting their synthetic paths."""
+    placeholders = set()
+    for name, module in tuple(sys.modules.items()):
+        if module is None or not name.startswith("__editable__") or not name.endswith("_finder"):
+            continue
+        namespace = vars(module)
+        finder = namespace.get("_EditableFinder")
+        if not isinstance(finder, type) or finder.__module__ != name or finder not in sys.meta_path:
+            continue
+        assert_node_local(Path(namespace["__file__"]), local_root=local_root)
+        mapping, namespaces = namespace.get("MAPPING"), namespace.get("NAMESPACES")
+        if not isinstance(mapping, dict) or not isinstance(namespaces, dict):
+            raise ValueError(f"invalid editable finder mappings: {name}")
+        for path in mapping.values():
+            assert_node_local(Path(path), local_root=local_root)
+        for paths in namespaces.values():
+            if not isinstance(paths, (list, tuple)):
+                raise ValueError(f"invalid editable namespace paths: {name}")
+            for path in paths:
+                assert_node_local(Path(path), local_root=local_root)
+
+        namespace_finder = namespace.get("_EditableNamespaceFinder")
+        if not isinstance(namespace_finder, type) or namespace_finder.__module__ != name:
+            continue
+        hook = vars(namespace_finder).get("_path_hook")
+        if not isinstance(hook, classmethod) or hook.__get__(None, namespace_finder) not in sys.path_hooks:
+            continue
+        placeholder = namespace.get("PATH_PLACEHOLDER")
+        if not isinstance(placeholder, str) or not re.fullmatch(
+            r"__editable__\.[A-Za-z0-9_.-]+\.finder\.__path_hook__", placeholder
+        ):
+            raise ValueError(f"invalid editable path placeholder: {name}")
+        placeholders.add(placeholder)
+    return placeholders
+
+
 def verify_runtime(gym_root: Path, component_venvs: Path, *, local_root: Path = LOCAL_ROOT) -> dict:
     """Check real interpreter/import paths, including copied-venv escape routes."""
     paths = {
@@ -66,7 +103,10 @@ def verify_runtime(gym_root: Path, component_venvs: Path, *, local_root: Path = 
     paths["uv_on_path"] = Path(shutil.which("uv") or "/missing-uv")
     if paths["uv_on_path"].resolve() != paths["MARS_UV"].resolve():
         raise ValueError("uv on PATH differs from the staged executable")
+    editable_placeholders = _editable_path_placeholders(local_root=local_root)
     for index, entry in enumerate(sys.path):
+        if entry in editable_placeholders:
+            continue
         path = Path(entry or os.getcwd())
         # CPython lists its optional stdlib zip even when that archive is absent.
         if not path.exists() and path.suffix == ".zip":
@@ -84,7 +124,8 @@ def verify_runtime(gym_root: Path, component_venvs: Path, *, local_root: Path = 
         if origin and not origin.startswith("<"):
             assert_node_local(Path(origin), local_root=local_root)
         for entry in namespace.get("__path__", ()):
-            assert_node_local(Path(entry), local_root=local_root)
+            if entry not in editable_placeholders:
+                assert_node_local(Path(entry), local_root=local_root)
     for path in component_venvs.rglob(".venv"):
         assert_node_local(path, local_root=local_root)
         assert_node_local(path / "bin/python", local_root=local_root)

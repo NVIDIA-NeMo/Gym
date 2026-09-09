@@ -8,7 +8,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -79,6 +79,8 @@ def local_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleName
         prefix=str(gym / ".venv"),
         base_prefix=str(python.parent.parent),
         path=[str(gym), str(stdlib), str(stdlib / "python313.zip")],
+        meta_path=[],
+        path_hooks=[],
         modules={"nemo_gym": module, "builtins": SimpleNamespace(), "frozen": SimpleNamespace(__file__="<frozen>")},
     )
     monkeypatch.setattr(runtime, "sys", interpreter)
@@ -130,6 +132,105 @@ def test_runtime_audit_does_not_trigger_lazy_module_imports(local_runtime: Simpl
     local_runtime.interpreter.modules["pending_import"] = None
 
     _verify(local_runtime)
+
+
+@pytest.fixture
+def editable_finder(local_runtime: SimpleNamespace) -> ModuleType:
+    name = "__editable___nemo_gym_0_7_0rc0_finder"
+    finder = ModuleType(name)
+    finder.__file__ = str(_write(local_runtime.gym / ".venv/lib/site-packages" / f"{name}.py"))
+    finder.MAPPING = {"nemo_gym": str(local_runtime.gym / "nemo_gym")}
+    finder.NAMESPACES = {"fixture_namespace": [str(local_runtime.gym)], "virtual_namespace": []}
+    finder.PATH_PLACEHOLDER = "__editable__.nemo_gym-0.7.0rc0.finder.__path_hook__"
+    # The registered classmethod and its module-level tables are setuptools'
+    # protocol. No placeholder is a real directory or an importable module.
+    exec(
+        "class _EditableFinder: pass\n"
+        "class _EditableNamespaceFinder:\n"
+        "    @classmethod\n"
+        "    def _path_hook(cls, path):\n"
+        "        if path == PATH_PLACEHOLDER: return cls\n"
+        "        raise ImportError(path)\n",
+        vars(finder),
+    )
+    interpreter = local_runtime.interpreter
+    interpreter.modules[name] = finder
+    interpreter.meta_path.append(finder._EditableFinder)
+    interpreter.path_hooks.append(finder._EditableNamespaceFinder._path_hook)
+    interpreter.path.append(finder.PATH_PLACEHOLDER)
+    interpreter.modules["fixture_namespace"] = SimpleNamespace(
+        __path__=[str(local_runtime.gym), finder.PATH_PLACEHOLDER]
+    )
+    return finder
+
+
+def test_runtime_accepts_registered_editable_namespace_placeholders(
+    local_runtime: SimpleNamespace, editable_finder: ModuleType
+) -> None:
+    assert not Path(editable_finder.PATH_PLACEHOLDER).exists()
+    _verify(local_runtime)
+
+
+@pytest.mark.parametrize("registration", ["module", "meta_path", "path_hooks"])
+def test_runtime_rejects_unregistered_editable_lookalikes(
+    local_runtime: SimpleNamespace, editable_finder: ModuleType, registration: str
+) -> None:
+    if registration == "module":
+        del local_runtime.interpreter.modules[editable_finder.__name__]
+    else:
+        getattr(local_runtime.interpreter, registration).clear()
+
+    with pytest.raises(FileNotFoundError):
+        _verify(local_runtime)
+
+
+@pytest.mark.parametrize("location", ["sys.path", "namespace"])
+def test_runtime_does_not_ignore_unrecognized_synthetic_paths(
+    local_runtime: SimpleNamespace, editable_finder: ModuleType, location: str
+) -> None:
+    unknown = editable_finder.PATH_PLACEHOLDER.replace("0.7.0rc0", "other-package")
+    if location == "sys.path":
+        local_runtime.interpreter.path.append(unknown)
+    else:
+        local_runtime.interpreter.modules["fixture_namespace"].__path__.append(unknown)
+
+    with pytest.raises(FileNotFoundError):
+        _verify(local_runtime)
+
+
+@pytest.mark.parametrize("location", ["finder_file", "mapping", "namespace", "mapping_symlink"])
+def test_runtime_rejects_editable_finder_shared_roots_even_before_the_module_is_imported(
+    local_runtime: SimpleNamespace, editable_finder: ModuleType, tmp_path: Path, location: str
+) -> None:
+    shared = _write(tmp_path / "shared" / "unimported" / "__init__.py")
+    if location == "finder_file":
+        local_finder = Path(editable_finder.__file__)
+        local_finder.unlink()
+        local_finder.symlink_to(shared)
+    elif location == "namespace":
+        editable_finder.NAMESPACES["unimported"] = [str(shared.parent)]
+    else:
+        source = shared.parent
+        if location == "mapping_symlink":
+            source = local_runtime.gym / "unimported"
+            source.symlink_to(shared.parent, target_is_directory=True)
+        editable_finder.MAPPING["unimported"] = str(source)
+
+    with pytest.raises(ValueError, match="outside node-local storage"):
+        _verify(local_runtime)
+
+
+def test_runtime_does_not_allow_a_finder_to_hide_a_real_shared_path(
+    local_runtime: SimpleNamespace, editable_finder: ModuleType, tmp_path: Path
+) -> None:
+    shared = _write(tmp_path / "shared" / "module.py")
+    old = editable_finder.PATH_PLACEHOLDER
+    editable_finder.PATH_PLACEHOLDER = str(shared.parent)
+    local_runtime.interpreter.path.remove(old)
+    local_runtime.interpreter.path.append(str(shared.parent))
+
+    with pytest.raises(ValueError, match="invalid editable path placeholder"):
+        _verify(local_runtime)
 
 
 @pytest.mark.parametrize("attribute", ["executable", "_base_executable", "prefix", "base_prefix"])
