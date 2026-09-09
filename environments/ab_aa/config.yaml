@@ -1,13 +1,10 @@
-# AutomationBench scored with the Artificial Analysis headline metric.
-# Score = 0 if any guardrail is violated, else the share of objectives completed.
-# Uses the api toolset, matching the AA harness.
 ab_aa:
   responses_api_agents:
     verifiers_agent:
       entrypoint: app.py
       domain: other
-      description: AutomationBench scored with the Artificial Analysis headline metric (guardrail-gated).
-      value: AA-leaderboard-comparable AutomationBench baseline.
+      description: AutomationBench scored with the Artificial Analysis headline metric, guardrail-gated partial credit.
+      value: Evaluate enterprise workflow automation capabilities
       model_server:
         type: responses_api_models
         name: policy_model
@@ -19,7 +16,7 @@ ab_aa:
       group_size: 1
       max_concurrent_generation: -1
       max_concurrent_scoring: -1
-      max_tokens: 16384
+      max_tokens: 131072
       temperature: 1.0
       top_p: 1.0
       datasets:

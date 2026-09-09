@@ -1,6 +1,6 @@
 # ab_zapier
 
-AutomationBench with the upstream Zapier scoring (`partial_credit`).
+AutomationBench
 
 - Source: https://github.com/zapier/AutomationBench (verifiers 0.2.0)
 - Toolset: `api` (matches upstream's CLI default)
@@ -8,7 +8,8 @@ AutomationBench with the upstream Zapier scoring (`partial_credit`).
 
 ## Install
 
-The env package is not on PyPI; install it into the agent's venv:
+The env package is not on PyPI, install it into the agent's venv
+for data prep (the env will create its own venv for rollout):
 
 ```bash
 uv pip install -e environments/ab_zapier

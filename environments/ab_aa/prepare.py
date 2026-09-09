@@ -11,16 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Build the AutomationBench dataset for ab_aa.
-
-AutomationBench ships its tasks as Python inside the `automation-bench`
-package rather than as data files, so this loads the environment and
-materializes each task's prompt into the row. Rows follow the same shape as
-`responses_api_agents/verifiers_agent/scripts/create_dataset.py`; writing an
-empty `input` makes the first model request fail with "Messages cannot be
-empty".
-
-Usage:
+"""
     python environments/ab_aa/prepare.py
     python environments/ab_aa/prepare.py --size 10 --domains sales
 """
@@ -64,7 +55,6 @@ def main() -> None:
         for i in range(n):
             row = dataset[i]
             prompt = row["prompt"]
-            # AutomationBench stores info as a JSON string; the agent needs a dict
             info = row.get("info", {})
             if isinstance(info, str):
                 info = json.loads(info) if info else {}
