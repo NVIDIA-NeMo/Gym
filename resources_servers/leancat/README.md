@@ -80,13 +80,25 @@ visible without opening rollouts.
 
 Table 1, pass@1 / pass@4:
 
-| Model | Easy | Medium | High | All |
-|---|---|---|---|---|
-| Claude Opus 4.5 | 32.50 / 50.00 | 4.17 / 4.76 | 0.00 / 0.00 | 8.25 / 12.00 |
-| GPT-5.2 | 27.50 / 30.00 | 0.00 / 0.00 | 0.00 / 0.00 | 5.50 / 7.00 |
-| DeepSeek Reasoner | 18.75 / 40.00 | 0.60 / 2.38 | 0.00 / 0.00 | 4.00 / 9.00 |
-| Gemini 3 Pro | 11.25 / 25.00 | 2.38 / 7.14 | 0.00 / 0.00 | 3.25 / 8.00 |
-| Kimi K2 | 10.00 / 20.00 | 0.00 / 0.00 | 0.00 / 0.00 | 2.00 / 4.00 |
+Row labels are the identifiers as Table 1 spells them, which for four of the five are API aliases rather than
+pinned checkpoints.
+
+| Model (Table 1 label) | Easy | Medium | High | All | Open weights |
+|---|---|---|---|---|---|
+| `claude-opus-4-5` | 32.50 / 50.00 | 4.17 / 4.76 | 0.00 / 0.00 | 8.25 / 12.00 | no |
+| `gpt-5.2` | 27.50 / 30.00 | 0.00 / 0.00 | 0.00 / 0.00 | 5.50 / 7.00 | no |
+| `deepseek-reasoner` | 18.75 / 40.00 | 0.60 / 2.38 | 0.00 / 0.00 | 4.00 / 9.00 | ambiguous, see below |
+| `gemini-3-pro` | 11.25 / 25.00 | 2.38 / 7.14 | 0.00 / 0.00 | 3.25 / 8.00 | no |
+| `kimi-k2-0905` | 10.00 / 20.00 | 0.00 / 0.00 | 0.00 / 0.00 | 2.00 / 4.00 | **yes, pinned** |
+
+**`kimi-k2-0905` is the only row that names an exact open-weight release**, which makes it the one reproduction
+target with no version ambiguity — worth more than its being second-cheapest rather than cheapest.
+
+**`deepseek-reasoner` is not a checkpoint.** It is DeepSeek's API alias, and the paper's own prose disagrees with its
+table: §3.1 names "DeepSeek-V3.2-Thinking and DeepSeek V3.2 Speciale" — two models — for what Table 1 reports as one
+row. The alias resolved to DeepSeek-V3.2 in thinking mode around the paper's date, so `deepseek-ai/DeepSeek-V3.2`
+with thinking enabled is the best available guess, but it is a guess. Do not treat a mismatch against this row as
+evidence of a bug in this server.
 
 LeanBridge — upstream's retrieve/generate/verify agent — roughly doubles the best number, to about 24%. It is not
 implemented here; this server covers the static pass@k protocol only.
