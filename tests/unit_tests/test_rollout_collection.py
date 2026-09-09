@@ -27,6 +27,7 @@ from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsReq
 from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TARGET_WEIGHT_VERSION_KEY_NAME,
     TASK_INDEX_KEY_NAME,
@@ -100,10 +101,12 @@ class TestRolloutCollection:
         assert row == {"responses_create_params": {"input": []}}
 
     @pytest.mark.parametrize("target_weight_version", [0, 19])
-    def test_propagates_rollout_fields_to_model_request(self, target_weight_version) -> None:
+    @pytest.mark.parametrize("attempt_index", [0, 2])
+    def test_propagates_rollout_fields_to_model_request(self, target_weight_version: int, attempt_index: int) -> None:
         row = {
             TASK_INDEX_KEY_NAME: 12,
             ROLLOUT_INDEX_KEY_NAME: 3,
+            ATTEMPT_INDEX_KEY_NAME: attempt_index,
             TARGET_WEIGHT_VERSION_KEY_NAME: target_weight_version,
             "responses_create_params": {
                 "input": [],
@@ -113,6 +116,7 @@ class TestRolloutCollection:
                             "min_tokens": 4,
                             TASK_INDEX_KEY_NAME: "stale",
                             ROLLOUT_INDEX_KEY_NAME: "stale",
+                            ATTEMPT_INDEX_KEY_NAME: "stale",
                             TARGET_WEIGHT_VERSION_KEY_NAME: "stale",
                         }
                     )
@@ -128,9 +132,30 @@ class TestRolloutCollection:
             "min_tokens": 4,
             TASK_INDEX_KEY_NAME: 12,
             ROLLOUT_INDEX_KEY_NAME: 3,
+            ATTEMPT_INDEX_KEY_NAME: attempt_index,
             TARGET_WEIGHT_VERSION_KEY_NAME: target_weight_version,
         }
         NeMoGymResponseCreateParamsNonStreaming.model_validate(responses_create_params)
+
+    def test_retry_updates_model_request_attempt_without_changing_other_identity(self) -> None:
+        row = {
+            TASK_INDEX_KEY_NAME: 12,
+            ROLLOUT_INDEX_KEY_NAME: 3,
+            TARGET_WEIGHT_VERSION_KEY_NAME: 19,
+            ATTEMPT_INDEX_KEY_NAME: 0,
+            "responses_create_params": {"input": []},
+        }
+        _propagate_rollout_fields_to_model_request(row)
+        initial = json.loads(row["responses_create_params"]["metadata"]["extra_body"])
+
+        row[ATTEMPT_INDEX_KEY_NAME] = 1
+        _propagate_rollout_fields_to_model_request(row)
+
+        assert json.loads(row["responses_create_params"]["metadata"]["extra_body"]) == {
+            **initial,
+            ATTEMPT_INDEX_KEY_NAME: 1,
+        }
+        assert row[ATTEMPT_INDEX_KEY_NAME] == 1
 
     def test_propagates_rollout_fields_when_metadata_is_none(self) -> None:
         row = {
