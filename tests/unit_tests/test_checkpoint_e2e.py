@@ -235,15 +235,17 @@ async def _record_lineage(
     request_items: list[dict],
     output_items: list[dict],
     parent_call_id: str | None = None,
+    parent_staging_chain: tuple[str, ...] = (),
 ) -> None:
     prev_len = 0 if parent_call_id is None else 3
+    staging_key = f"stage/{rollout_id}/{call_id}"
     await FileLineageStore(root).record(
         CaptureLedgerCommit(
             rollout_id=rollout_id,
             record=CallRecord(
                 model_call_id=call_id,
                 parent_call_id=parent_call_id,
-                staging_key=f"stage/{rollout_id}/{call_id}",
+                staging_key=staging_key,
                 weight_version=7,
                 prev_len=prev_len,
                 delta_len=3,
@@ -259,7 +261,7 @@ async def _record_lineage(
                 continuation_fingerprint=assistant_fingerprint(request_items + output_items) or None,
                 fingerprint_version=FINGERPRINT_VERSION,
             ),
-            staging_chain=(f"stage/{rollout_id}/{call_id}",),
+            staging_chain=(*parent_staging_chain, staging_key),
             request_items=request_items,
             response_items=output_items,
         )
@@ -520,6 +522,7 @@ async def test_complete_partial_rollout_checkpoint_cycle(tmp_path, monkeypatch) 
                     request_items=boundary_items,
                     output_items=first_payload["output"],
                     parent_call_id=PARENT_CALL_ID,
+                    parent_staging_chain=(f"stage/{ROLLOUT_ID}/{PARENT_CALL_ID}",),
                 )
                 second_input = boundary_items + first_payload["output"]
                 second = await server_client.post("policy", "/v1/responses", json={"input": second_input})

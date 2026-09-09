@@ -344,6 +344,9 @@ async def test_custom_store_without_explicit_lookup_fails_closed():
         async def record_failure(self, rollout_id, model_call_id, reason):
             await self.inner.record_failure(rollout_id, model_call_id, reason)
 
+        async def manifest(self, rollout_id):
+            return await self.inner.manifest(rollout_id)
+
     store = LegacyCustomStore()
     context = await _admit(
         store,

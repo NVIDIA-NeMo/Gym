@@ -56,6 +56,7 @@ from nemo_gym.rollout_correlation import (
 )
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.token_id_capture.lineage import FileLineageStore
+from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit
 from resources_servers.example_session_state_mgmt.app import (
     IncrementCounterRequest,
     IncrementCounterResponse,
@@ -228,31 +229,42 @@ def _model_app(
             ]
         call_id = f"{rollout_id}-a{attempt_index}-call-{len(requests) + 1}"
         requests.append({"body": body, "headers": dict(request.headers), "call_id": call_id})
+        capture_key = f"{rollout_id}{'' if attempt_index == 0 else f'-a{attempt_index}'}"
+        staging_key = f"stage/{rollout_id}/a{attempt_index}/{call_id}"
+        parent_call_id = request.headers.get(PARENT_MODEL_CALL_ID_HEADER)
+        parent_match = None
+        if parent_call_id is not None:
+            source_capture_key = request.headers[SOURCE_CAPTURE_KEY_HEADER]
+            parent_match = (await ledger.resolve_explicit(source_capture_key, parent_call_id, input_items)).match
+            assert parent_match is not None
+        prev_len = parent_match.prev_len if parent_match is not None else 0
+        staging_chain = (*parent_match.staging_chain, staging_key) if parent_match is not None else (staging_key,)
         await ledger.record(
-            f"{rollout_id}{'' if attempt_index == 0 else f'-a{attempt_index}'}",
-            call_id,
-            request_items=input_items,
-            response_items=output,
-            cumulative_token_ids=[],
-            digest="1" * 64,
-            parent_call_id=request.headers.get("x-nemo-gym-parent-model-call-id"),
-            staging_key=f"stage/{rollout_id}/a{attempt_index}/{call_id}",
-            weight_version=7,
-            prev_len=0,
-            delta_len=1,
-            cum_len=1,
-            staging_digest="2" * 64,
-            extras_digest="3" * 64,
-            mode="text",
-            logical_request_id=f"request-{rollout_id}",
-            admitted_at=1.0,
-            staging_chain=[f"stage/{rollout_id}/a{attempt_index}/{call_id}"],
-            chain_hash="4" * 64,
-            cumulative_hash="5" * 64,
-            response_id=f"response-{call_id}",
-            output_fingerprint="6" * 64,
-            continuation_fingerprint="7" * 64,
-            fingerprint_version=1,
+            CaptureLedgerCommit(
+                rollout_id=capture_key,
+                record=CallRecord(
+                    model_call_id=call_id,
+                    parent_call_id=parent_call_id,
+                    staging_key=staging_key,
+                    weight_version=7,
+                    prev_len=prev_len,
+                    delta_len=1,
+                    cum_len=prev_len + 1,
+                    digest="2" * 64,
+                    extras_digest="3" * 64,
+                    mode="text" if parent_call_id is None else "token_in",
+                    admitted_at=1.0,
+                    chain_hash="4" * 64,
+                    cumulative_hash="5" * 64,
+                    response_id=f"response-{call_id}",
+                    output_fingerprint="6" * 64,
+                    continuation_fingerprint="7" * 64,
+                    fingerprint_version=1,
+                ),
+                staging_chain=staging_chain,
+                request_items=input_items,
+                response_items=output,
+            )
         )
         if first_call_returned is not None and rollout_id == ROLLOUT_ID and not has_tool_result:
             first_call_returned.set()
