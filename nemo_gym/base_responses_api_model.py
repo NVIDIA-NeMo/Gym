@@ -73,7 +73,6 @@ from nemo_gym.responses_streaming import (
     validate_streaming_responses_params,
 )
 from nemo_gym.rollout_correlation import (
-    LOGICAL_REQUEST_HEADER,
     MODEL_CALL_ID_HEADER,
     PARENT_MODEL_CALL_ID_HEADER,
     SOURCE_CAPTURE_KEY_HEADER,
@@ -1427,7 +1426,6 @@ class _CaptureMiddleware:
                 lineage_store=self._capture_ledger if self._external_staging else self._lineage_store,
                 delta_records=self._delta_records,
                 external_staging=self._external_staging,
-                logical_request_id=_scope_header(scope, LOGICAL_REQUEST_HEADER),
                 source_capture_key=_scope_header(scope, SOURCE_CAPTURE_KEY_HEADER),
                 explicit_parent_call_id=_scope_header(scope, PARENT_MODEL_CALL_ID_HEADER),
                 admitted_at=time.time(),
