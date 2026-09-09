@@ -173,6 +173,33 @@ class TestApp:
         assert resp.judge_response == canned_result
 
     @pytest.mark.asyncio
+    async def test_verify_rubric_flags_a_failed_judgement(self) -> None:
+        """A scorer failure must surface on the response, not only in the helper.
+
+        Testing ``_is_invalid_judge_result`` alone leaves this call site free to
+        regress to ``judge_result is None`` with the suite still green, and the row
+        then lands in the mean looking like a genuine 0.0.
+        """
+        from resources_servers.gdpval.scoring import SCORING_ERROR_KEY
+
+        server = _server(reward_mode="rubric")
+        failed = {SCORING_ERROR_KEY: "no_valid_scores", "num_trials": 2}
+
+        async def fake_score_with_rubric(**_kwargs):
+            return 0.0, failed
+
+        body = _verify_request(rubric_json=[{"criterion": "clarity", "score": 1}])
+
+        with (
+            patch("resources_servers.gdpval.scoring.score_with_rubric", side_effect=fake_score_with_rubric),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+        ):
+            resp = await server.verify(body)
+
+        assert resp.reward == 0.0
+        assert resp.invalid_judge_response is True, "a failed judgement was reported as a valid score"
+
+    @pytest.mark.asyncio
     async def test_verify_rubric_passes_create_overrides_through(self) -> None:
         """``judge_responses_create_params_overrides`` must reach the scoring fn.
 
