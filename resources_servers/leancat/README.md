@@ -28,12 +28,18 @@ submission that has already lost does not cost a five-minute Mathlib compile.
 
 | # | Check | Status on failure |
 |---|---|---|
-| 1 | A Lean code block was produced (last fenced block wins, as upstream) | `no_code` |
+| 1 | A Lean code block was produced (last fenced block wins, as upstream) | `empty_generation` |
 | 2 | No `sorry` / `admit` / `axiom` / `unsafe`, ignoring comments and strings | `banned_tokens` |
 | 3 | The reference statement, assumptions and definitions are preserved | `statement_modified` |
 | 4 | The file compiles clean under Lean 4.19.0 / Mathlib v4.19.0 | `compile_error`, `timeout`, `sandbox_error` |
 
-`reward` is 1.0 only for `compiled`, and 0.0 otherwise.
+`reward` is 1.0 only for `completed`, and 0.0 otherwise.
+
+Layout, field names and status vocabulary follow `math_formal_lean`, the repo's other Lean server, so the two read as
+siblings: same module split (`app.py` / `proof_utils.py` / `sandbox_client.py` / `task_data.py`), same response fields
+(`proof_status`, `predicted_proof`, `compiler_output`), same words for the outcomes that exist in both (`completed`,
+`empty_generation`, `timeout`). `banned_tokens`, `statement_modified` and `compile_error` have no counterpart there —
+that server reassembles the file itself, so it has nothing to catch a tampered statement.
 
 The fifth upstream criterion, "maintained mathematical intent", is a human judgement and is not automated. Check 3 is
 the closest mechanical proxy: the reference file is split on `sorry`, and every remaining fragment must appear in the
