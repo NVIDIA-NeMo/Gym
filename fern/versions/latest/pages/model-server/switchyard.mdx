@@ -10,9 +10,9 @@ By default, Gym hosts Switchyard's server for you inside the model-server proces
 
 ## Quick start
 
-### 1. Write a deployment
+### 1. Write `routes.toml`
 
-A deployment is a Switchyard TOML file with three tables: `llm_clients` (how to reach a provider), `targets` (which models), and `routes` (how to choose between them). This one defines a fixed baseline and the stage router from the Switchyard README, which picks a tier per turn from the agent's tool activity:
+`routes.toml` is a Switchyard deployment file, the same TOML that `switchyard-server --config` reads. It has three layers: `llm_clients` (how to reach a provider), `targets` (one upstream model ID and the client that calls it), and `routes` (one client-visible model ID and the algorithm that picks between targets). This one defines a fixed baseline and the stage router from the Switchyard README, which picks a tier per turn from the agent's tool activity:
 
 ```toml
 schema_version = 1
@@ -59,7 +59,7 @@ gym eval run \
 `deployment` must be an absolute path. It can also come from the `SWITCHYARD_DEPLOYMENT` environment variable, in which case the override can be dropped. A bad deployment fails at startup with Switchyard's validation error rather than as a timeout mid-run. `gym env start` takes the same flags when you want persistent servers for `gym eval run --no-serve`.
 
 <Note>
-**`--model` names a route, not a model.** It must match a route's `id` in the deployment, or every call fails with `model_not_found`. Which model actually serves each call is Switchyard's decision. If the agent sets its own `model`, the server replaces it with the route, so the eval always measures routing.
+**`--model` names a route, not a model.** It must match a route's `id` in `routes.toml`, or every call fails with `model_not_found`. Which model actually serves each call is Switchyard's decision. If the agent sets its own `model`, the server replaces it with the route, so the eval always measures routing.
 </Note>
 
 ## Compare routing strategies
@@ -173,7 +173,7 @@ gym eval run \
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `deployment` | `str` | `$SWITCHYARD_DEPLOYMENT` | Absolute path of a Switchyard TOML deployment. Gym hosts a proxy when this is set. |
+| `deployment` | `str` | `$SWITCHYARD_DEPLOYMENT` | Absolute path of a Switchyard deployment file such as `routes.toml`. Gym hosts a proxy when this is set. |
 | `switchyard_base_url` | `str` | `$SWITCHYARD_BASE_URL` | Attach to a running proxy instead of hosting one. |
 | `switchyard_model` | `str` | `${policy_model_name}` | Route id to request. Set by `--model`. |
 | `switchyard_api_key` | `str` | `$SWITCHYARD_API_KEY`, else `dummy` | Bearer token sent to the proxy. |
