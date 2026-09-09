@@ -78,7 +78,7 @@ visible without opening rollouts.
 
 ## Reproducing the paper
 
-Table 1, pass@1 / pass@4, greedy-free sampling with a 50,000-token output budget and a 300s verification limit:
+Table 1, pass@1 / pass@4:
 
 | Model | Easy | Medium | High | All |
 |---|---|---|---|---|
@@ -91,14 +91,45 @@ Table 1, pass@1 / pass@4, greedy-free sampling with a 50,000-token output budget
 LeanBridge — upstream's retrieve/generate/verify agent — roughly doubles the best number, to about 24%. It is not
 implemented here; this server covers the static pass@k protocol only.
 
-Two caveats before comparing against these:
+### Settings
+
+The paper gives only the token budget and the verification timeout, but `scripts/passk.py` and
+`eval_common.add_common_args` at the pinned commit fix the rest. Use these:
+
+| Setting | Upstream default |
+|---|---|
+| `temperature` | **1.0** |
+| `top_p` | not sent |
+| `max_tokens` | 50000 |
+| `k` | 4 |
+| Lean timeout | 300s (`compilation_timeout`) |
+| messages | one `user` message, no system prompt |
+
+### Prompt fidelity
+
+The prompt is byte-identical to what the reference harness sends, verified for all 100 problems against an
+independent reimplementation of `passk.py`'s call chain (`load_prompt` → `load_problem` → `render_prompt`).
+sha256 of the 100 concatenated rendered prompts: `e04d1313b51489083fe8153764e37a79…`.
+
+This is why `prepare_leancat.py` reads `CAT_statement/S_<id>.lean` rather than taking `formal_statement` from
+`leancat_records.jsonl`. Upstream's `load_problem` does `read_text()` with no `strip()`, and 60 of the 100 `.lean`
+files end in a newline the JSONL has stripped — a newline that lands inside the prompt's code fence. Content is
+identical between the two sources; the script fails loudly if that ever stops being true.
+
+### Caveats
 
 1. **The difficulty split has moved.** The paper's denominators are Easy 20 / Medium 42 / High 38; the pinned dataset
    revision labels 20 / 40 / 40. The pooled `All` column is unaffected, but the per-tier columns are not directly
    comparable. Reproduce `All` first.
-2. **Sampling temperature and top-p are not published.** The paper gives the token budget and the verification
-   timeout but not the sampling settings, so per-tier agreement inside a point or two is the realistic target, not
-   an exact match.
+2. **This server's statement guard is stricter than the scorer that produced the paper's numbers.** Upstream's
+   `verify_lean` is `has_invalid_tokens(code)` then compile — it never compares the submission against the reference
+   statement, despite `EVALUATION.md` listing preservation as a validity criterion. So a run here can score *below*
+   the paper if models were weakening statements. Set `require_statement_preserved: false` to reproduce upstream's
+   scoring exactly; the `statement_preserved` metric then tells you how much the difference is worth. Running both
+   is the informative thing to do.
+3. **pass@k must be read at k = number of rollouts.** Upstream's is plain "solved if any of 4 attempts passed"; Gym's
+   `compute_pass_majority_metrics` uses the unbiased combinatorial estimator. The two agree exactly when
+   n = k = 4, and diverge if you collect more rollouts and read `pass@4` off them.
 
 ## Data
 
