@@ -248,18 +248,13 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
 
             LOG.info("Turn %d: Preparing correction turn with error feedback", turn_index)
 
-            # Create new input with the correction prompt (Nemotron single-turn style)
-            # Access Pydantic model attributes properly
-            params = body.responses_create_params
-            current_input = {
-                "input": [{"role": "user", "content": correction_prompt}],
-                "model": getattr(params, "model", None),
-            }
-            # Preserve any other params like temperature, max_tokens
-            for key in ["temperature", "max_tokens", "top_p"]:
-                value = getattr(params, key, None)
-                if value is not None:
-                    current_input[key] = value
+            # Create a new input with the correction prompt (Nemotron
+            # single-turn style), while preserving all request parameters.
+            # In particular, NeMo RL stores router-replay request identity in
+            # metadata.extra_body and every model call in a rollout must carry
+            # that same identity.
+            current_input = body.responses_create_params.model_copy(deep=True)
+            current_input.input = [NeMoGymEasyInputMessage(role="user", content=correction_prompt)]
 
             turn_index += 1
 

@@ -61,6 +61,7 @@ from nemo_gym.global_config import (
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
+    TARGET_WEIGHT_VERSION_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     allowed_agents_for,
@@ -155,6 +156,11 @@ NG_PERF_KEY = "ng_perf"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+_MODEL_REQUEST_ROLLOUT_KEYS = (
+    TASK_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TARGET_WEIGHT_VERSION_KEY_NAME,
+)
 
 
 @dataclass(frozen=True)
@@ -930,6 +936,33 @@ def _coverage_report(expected: int, scored: int, failure_counts: Counter, failur
     )
 
 
+def _propagate_rollout_fields_to_model_request(row: Dict[str, Any]) -> None:
+    """Mirror Gym rollout fields into vLLM's eventual Chat Completions body.
+
+    Responses request validation rejects arbitrary top-level fields. Gym's vLLM
+    model already treats ``metadata.extra_body`` as a JSON-encoded set of fields
+    to merge into the upstream Chat Completions request, so use that bridge while
+    retaining the canonical values at the top level of the rollout row.
+    """
+    rollout_fields = {key: row[key] for key in _MODEL_REQUEST_ROLLOUT_KEYS if key in row}
+    if not rollout_fields:
+        return
+
+    responses_create_params = row[RESPONSES_CREATE_PARAMS_KEY_NAME]
+    metadata = responses_create_params.get("metadata")
+    if metadata is None:
+        metadata = {}
+        responses_create_params["metadata"] = metadata
+    if not isinstance(metadata, dict):
+        raise TypeError("responses_create_params.metadata must be a dict or None")
+
+    extra_body = json.loads(metadata.get("extra_body") or "{}")
+    if not isinstance(extra_body, dict):
+        raise TypeError("responses_create_params.metadata.extra_body must encode a JSON object")
+    extra_body.update(rollout_fields)
+    metadata["extra_body"] = json.dumps(extra_body)
+
+
 class RolloutCollectionHelper(BaseModel):
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
@@ -1391,6 +1424,8 @@ class RolloutCollectionHelper(BaseModel):
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
+            if TARGET_WEIGHT_VERSION_KEY_NAME in row:
+                result[TARGET_WEIGHT_VERSION_KEY_NAME] = row[TARGET_WEIGHT_VERSION_KEY_NAME]
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
             if TASK_SOURCE_KEY_NAME in row:
                 result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
@@ -1914,6 +1949,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         async def _post_subroutine(row: Dict) -> _CompletedRollout:
             async with semaphore:
+                _propagate_rollout_fields_to_model_request(row)
                 started_at = time()
                 res = None
                 try:
