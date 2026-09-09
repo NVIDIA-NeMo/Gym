@@ -640,7 +640,7 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def normalize_output_items_for_replay(cls, value: Any) -> Any:
+    def normalize_response_fields_for_replay(cls, value: Any) -> Any:
         """Normalize OpenAI response fields before request validation."""
         if not isinstance(value, dict):
             return value
