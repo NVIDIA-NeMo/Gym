@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -16,6 +17,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 PACKAGE = ROOT / "benchmarks" / "gdpval" / "hsg" / "checkpoint_e2e"
 LAUNCHER = PACKAGE / "run_checkpoint_e2e.sh"
+DEFAULT_VLLM_EXTRA_ARGS = (
+    "--enable-auto-tool-choice --tool-call-parser qwen3_coder "
+    "--reasoning-parser-plugin /parsers/ultra_v3_reasoning_parser.py --reasoning-parser ultra_v3"
+)
 
 
 def _write(path: Path, data: str = "fixture\n", *, executable: bool = False) -> Path:
@@ -118,6 +123,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         "CHECKPOINT_E2E_AGENT_SIF": str(agent_sif),
         "CHECKPOINT_E2E_APPTAINER_BIN": str(apptainer.parent),
     }
+    environment.pop("CHECKPOINT_E2E_VLLM_EXTRA_ARGS", None)
     return checkpoint.resolve(), environment
 
 
@@ -130,6 +136,14 @@ def _run(action: str, checkpoint: Path, environment: dict[str, str]) -> subproce
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
+    )
+
+
+def _profile_arguments(profile: Path) -> str:
+    return subprocess.check_output(
+        ["bash", "-c", 'source "$1"; printf "%s" "$VLLM_EXTRA_ARGS"', "profile-test", str(profile)],
+        env={"PATH": os.defpath},
+        text=True,
     )
 
 
@@ -335,6 +349,7 @@ def test_prepare_is_checkpoint_only_idempotent_and_status_is_read_only(tmp_path:
     ]
     for path in (run_dir / "campaign.json", run_dir / "settings.env", run_dir / "model_profile.env"):
         assert stat.S_IMODE(path.stat().st_mode) == 0o400
+    assert _profile_arguments(run_dir / "model_profile.env") == DEFAULT_VLLM_EXTRA_ARGS
     runtime_pins = (run_dir / "runtime_sources.sha256").read_text(encoding="utf-8")
     for name in (
         "MARS_PACKAGE_ID",
@@ -358,6 +373,88 @@ def test_prepare_is_checkpoint_only_idempotent_and_status_is_read_only(tmp_path:
     assert "STATE=PREPARED" in status_result.stdout
     assert "ROLLOUT=0/220" in status_result.stdout
     assert before == after
+
+
+def test_custom_vllm_arguments_are_pinned_and_survive_profile_slurm_handoff(tmp_path: Path) -> None:
+    checkpoint, environment = _fixture(tmp_path)
+    speculative_config = '{"method":"mtp","num_speculative_tokens":1}'
+    arguments = f"{DEFAULT_VLLM_EXTRA_ARGS} --skip-mm-profiling --speculative-config '{speculative_config}'"
+    environment["CHECKPOINT_E2E_VLLM_EXTRA_ARGS"] = arguments
+    prepared = _run("prepare", checkpoint, environment)
+    assert prepared.returncode == 0, prepared.stderr
+    run_dir = Path(next(line.split("=", 1)[1] for line in prepared.stdout.splitlines() if line.startswith("RUN_DIR=")))
+    profile = run_dir / "model_profile.env"
+    assert _profile_arguments(profile) == arguments
+    original = profile.read_bytes()
+    original_mtime = profile.stat().st_mtime_ns
+    digest = hashlib.sha256(original).hexdigest()
+    assert f"PROFILE_SHA256={digest}\n" in (run_dir / "settings.env").read_text()
+
+    repeated = _run("prepare", checkpoint, environment)
+    assert repeated.returncode == 0, repeated.stderr
+    changed = _run(
+        "prepare", checkpoint, {**environment, "CHECKPOINT_E2E_VLLM_EXTRA_ARGS": arguments + " --enforce-eager"}
+    )
+    assert changed.returncode == 64
+    assert f"prepared file drift: {profile}" in changed.stderr
+    assert profile.read_bytes() == original and profile.stat().st_mtime_ns == original_mtime
+
+    fake_bin = tmp_path / "slurm-bin"
+    events = _write(tmp_path / "submissions.jsonl", "")
+    counter = _write(tmp_path / "job-counter", "800\n")
+    _write(fake_bin / "flock", "#!/bin/sh\nexit 0\n", executable=True)
+    _write(
+        fake_bin / "scontrol",
+        "#!/bin/sh\nprintf 'DependencyParameters = kill_invalid_depend\\n'\n",
+        executable=True,
+    )
+    _write(
+        fake_bin / "sbatch",
+        f"#!{sys.executable}\n"
+        + r"""import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+export = next(arg for arg in sys.argv[1:] if arg.startswith("--export="))
+values = dict(item.split("=", 1) for item in export.removeprefix("--export=ALL,").split(","))
+if "PROFILE" in values:
+    # Simulate the child sourcing its pinned profile without the submitter's
+    # environment. Commas and shell quotes must travel inside the profile file.
+    arguments = subprocess.check_output(
+        ["bash", "-c", 'source "$1"; printf "%s" "$VLLM_EXTRA_ARGS"', "rollout", values["PROFILE"]],
+        env={"PATH": os.defpath}, text=True,
+    )
+    with open(os.environ["FAKE_EVENT_LOG"], "a") as output:
+        output.write(json.dumps({"export": export, "profile": values["PROFILE"], "arguments": arguments}) + "\n")
+counter = Path(os.environ["FAKE_JOB_COUNTER"])
+job = int(counter.read_text()) + 1
+counter.write_text(str(job) + "\n")
+print(job)
+""",
+        executable=True,
+    )
+    submit_environment = {
+        **environment,
+        "PATH": f"{fake_bin}:{environment['PATH']}",
+        "FAKE_EVENT_LOG": str(events),
+        "FAKE_JOB_COUNTER": str(counter),
+        "VLLM_EXTRA_ARGS": "ambient arguments must not replace the prepared profile",
+    }
+    del submit_environment["CHECKPOINT_E2E_VLLM_EXTRA_ARGS"]
+    submitted = _run("submit", checkpoint, submit_environment)
+    assert submitted.returncode == 0, (submitted.stdout, submitted.stderr)
+    rows = [json.loads(line) for line in events.read_text().splitlines()]
+    assert len(rows) == 6
+    for row in rows:
+        assert row["profile"] == str(profile)
+        assert "VLLM_EXTRA_ARGS=" not in row["export"]
+        assert row["arguments"] == arguments
+        parsed = shlex.split(row["arguments"])
+        assert parsed[-3:] == ["--skip-mm-profiling", "--speculative-config", speculative_config]
+        assert json.loads(parsed[-1]) == {"method": "mtp", "num_speculative_tokens": 1}
+    assert profile.read_bytes() == original
 
 
 def test_prepare_pins_rollout_dependency_sources_without_a_shared_venv(tmp_path: Path) -> None:

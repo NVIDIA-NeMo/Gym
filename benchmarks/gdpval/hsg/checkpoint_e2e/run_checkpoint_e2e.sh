@@ -97,6 +97,8 @@ Usage: run_checkpoint_e2e.sh prepare|submit|all|resume|status|result CHECKPOINT
 Set CHECKPOINT_E2E_AUTHORIZE_PROVIDER_CALLS=true for submit/all/resume to allow
 the controller to start the three-provider judging phase. Secrets stay in the
 protected CHECKPOINT_E2E_ENV_FILE and are never written into campaign state.
+Set CHECKPOINT_E2E_VLLM_EXTRA_ARGS before prepare to replace the complete serving
+argument string. It is pinned in the immutable model profile.
 EOF
 }
 
@@ -239,7 +241,7 @@ acquire_launcher_lock() {
 
 prepare_campaign() {
     local checkpoint=$1 model_name rollout_sha serve_sha judge_sha overlay_sha parser_sha
-    local gym_revision rollout_gym_revision
+    local gym_revision rollout_gym_revision vllm_extra_args
     local family="${CHECKPOINT_E2E_MODEL_FAMILY:-super35-nemotron}"
     [[ $family == super35-nemotron ]] \
         || fail "unsupported default model family '$family'; provide a compatible launcher profile"
@@ -315,6 +317,8 @@ prepare_campaign() {
     judge_sha="$(sha256_file "$JUDGE_SBATCH")"
     overlay_sha="$(sha256_file "$REFERENCE_OVERLAY")"
     parser_sha="$(sha256_file "$PARSER_PLUGIN")"
+    vllm_extra_args="--enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser-plugin /parsers/ultra_v3_reasoning_parser.py --reasoning-parser ultra_v3"
+    vllm_extra_args="${CHECKPOINT_E2E_VLLM_EXTRA_ARGS-$vllm_extra_args}"
 
     publish_env_file "$RUN_DIR/model_profile.env" \
         "POLICY_SERVE_SCRIPT=$SERVE_SCRIPT" \
@@ -332,7 +336,7 @@ prepare_campaign() {
         "KV_CACHE_DTYPE=fp8" \
         "DTYPE=bfloat16" \
         "EXTRA_MOUNTS=$PARSER_ROOT:/parsers:ro" \
-        "VLLM_EXTRA_ARGS=--enable-auto-tool-choice --tool-call-parser qwen3_coder --reasoning-parser-plugin /parsers/ultra_v3_reasoning_parser.py --reasoning-parser ultra_v3" \
+        "VLLM_EXTRA_ARGS=$vllm_extra_args" \
         "USES_REASONING_PARSER=true" \
         "USES_INTERLEAVED_REASONING=true" \
         "NEMO_GYM_REASONING_FIELD=reasoning"
