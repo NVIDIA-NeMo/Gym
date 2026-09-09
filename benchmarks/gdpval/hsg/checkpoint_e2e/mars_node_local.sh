@@ -5,7 +5,7 @@
 
 [[ -n ${BASH_VERSION:-} ]] || { echo "MARS_STAGE_FAIL: bash is required" >&2; return 64 2>/dev/null || exit 64; }
 
-MARS_PACKAGE_ID_EXPECTED=checkpoint-e2e-1.4.13-mars-local-r14-20260908
+MARS_PACKAGE_ID_EXPECTED=checkpoint-e2e-1.4.13-mars-local-r15-20260909
 MARS_GYM_REVISION_EXPECTED=d3f146d386c7dfe07d4fabce32c4c8b14c7917d2
 
 mars_fail() { echo "MARS_STAGE_FAIL: $*" >&2; return 64; }
@@ -165,6 +165,7 @@ mars_stage_gym() {
     flock -u "$mars_gym_lock_fd"
     exec {mars_gym_lock_fd}>&-
     MARS_GYM=$destination
+    install -d -m 0700 "$MARS_GYM/cache" || return
     MARS_PYTHON=$destination/.venv/bin/python
     [[ -x $MARS_PYTHON ]] || mars_fail "staged Gym Python is unavailable" || return
     export MARS_GYM MARS_PYTHON

@@ -7,6 +7,7 @@ import hashlib
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -377,6 +378,72 @@ ln -s "$marker" "$marker.link"
         check=True,
     )
     assert '$(<"$marker" 2>/dev/null)' not in helper
+
+
+def test_staged_gym_has_build_cache_for_fresh_and_reused_assets(tmp_path: Path) -> None:
+    shared = tmp_path.resolve() / "lustre"
+    source = shared / "gym"
+    _write(source / "pyproject.toml", '[tool.distutils.egg_info]\negg_base = "cache"\n')
+    for relative in (
+        "README.md",
+        "LICENSE",
+        "nemo_gym/__init__.py",
+        "benchmarks/gdpval/__init__.py",
+        "resources_servers/gdpval/__init__.py",
+        "responses_api_agents/stirrup_agent/__init__.py",
+        "responses_api_models/openai_model/__init__.py",
+        "responses_api_models/vllm_model/__init__.py",
+    ):
+        _write(source / relative)
+    _write(source / ".venv/bin/python", "#!/bin/sh\nexit 0\n", executable=True)
+    _write(source / "cache/.gitignore", "*\n!.gitignore\n")
+    _write(source / "cache/stale-build-metadata", "source-only\n")
+    base = tmp_path / "node-local"
+    (base / "assets").mkdir(parents=True)
+    (base / "locks").mkdir()
+    # Keep the staging body intact. A fixed lock descriptor lets macOS Bash3
+    # execute this fixture; the production helper uses Bash4's allocated FD.
+    helper = _write(
+        tmp_path / "mars_node_local.sh",
+        MARS_HELPER.read_text().replace("/lustre/", f"{shared}/").replace("exec {mars_gym_lock_fd}", "exec 9"),
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            r"""
+set -euo pipefail
+source "$1"
+mars_gym_lock_fd=9
+flock() { :; }
+git() { printf '%s\n' "$MARS_GYM_REVISION_EXPECTED"; }
+mars_stage_gym "$SOURCE" "$MARS_GYM_REVISION_EXPECTED"
+[[ -d $MARS_GYM/cache && -w $MARS_GYM/cache ]]
+rmdir "$MARS_GYM/cache"
+printf 'reused asset\n' > "$MARS_GYM/asset-sentinel"
+# Simulate a staged asset from before the cache fix: matching marker, no cache.
+# Reuse must repair the directory without copying or rebuilding the asset.
+cp() { echo "unexpected copy while reusing Gym" >&2; return 91; }
+mars_stage_gym "$SOURCE" "$MARS_GYM_REVISION_EXPECTED"
+[[ -d $MARS_GYM/cache && -w $MARS_GYM/cache ]]
+printf '%s\n' "$MARS_GYM"
+""",
+            "stage-gym-cache-test",
+            str(helper),
+        ],
+        env={**os.environ, "SOURCE": str(source), "MARS_BASE": str(base), "SLURM_JOB_ID": "7020522"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    staged = Path(result.stdout.strip())
+    assert staged.is_relative_to(base)
+    assert stat.S_IMODE((staged / "cache").stat().st_mode) == 0o700
+    assert list((staged / "cache").iterdir()) == []
+    assert (staged / "asset-sentinel").read_text() == "reused asset\n"
+    assert (staged / "pyproject.toml").read_bytes() == (source / "pyproject.toml").read_bytes()
+    assert (source / "cache/stale-build-metadata").read_text() == "source-only\n"
 
 
 def test_affected_shell_entrypoints_parse() -> None:
