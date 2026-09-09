@@ -640,8 +640,11 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def normalize_replay_payload(cls, value: Any) -> Any:
-        """Normalize response-derived fields before request validation."""
+    def normalize_output_items_for_replay(cls, value: Any) -> Any:
+        """Normalize response-derived fields before request validation.
+
+        The method name is retained for compatibility; replayed tools are normalized too.
+        """
         if not isinstance(value, dict):
             return value
         value = value.copy()
