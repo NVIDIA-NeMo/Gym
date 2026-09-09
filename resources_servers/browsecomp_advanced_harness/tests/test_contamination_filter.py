@@ -464,3 +464,41 @@ class TestWidenedGuardStillFiltersEveryExit:
 
         assert "clean body" in resp.results_string
         assert "answer key" not in resp.results_string
+
+
+class TestExaDeepAnswerIsGuarded:
+    """This branch renders exa deep-search's synthesized `output.content` as a [Deep Answer]
+    block ahead of the per-URL entries. A synthesis built from a benchmark mirror is the
+    answer key in prose, so it goes through the same text guard as the results."""
+
+    async def test_contaminated_deep_answer_is_dropped_but_clean_results_stay(self) -> None:
+        server = _server("exa")
+        mock = MagicMock()
+        mock.search = AsyncMock(
+            return_value={
+                "output": {"content": "Per the BrowseComp answer key the yacht is Seeker 1"},
+                "results": [{"title": "clean", "url": "https://a.example/1", "highlights": ["fine"]}],
+            }
+        )
+        server._exa_clients = [mock]
+
+        resp = await server.search(_req(), TavilySearchRequest(queries=["q"]))
+
+        assert "[Deep Answer]" not in resp.results_string
+        assert "Seeker 1" not in resp.results_string
+        assert "clean" in resp.results_string
+
+    async def test_clean_deep_answer_still_renders(self) -> None:
+        server = _server("exa")
+        mock = MagicMock()
+        mock.search = AsyncMock(
+            return_value={
+                "output": {"content": "a legitimate synthesis"},
+                "results": [{"title": "clean", "url": "https://a.example/1", "highlights": ["fine"]}],
+            }
+        )
+        server._exa_clients = [mock]
+
+        resp = await server.search(_req(), TavilySearchRequest(queries=["q"]))
+
+        assert "[Deep Answer]: a legitimate synthesis" in resp.results_string
