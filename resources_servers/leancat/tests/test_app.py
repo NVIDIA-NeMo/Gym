@@ -75,6 +75,17 @@ needs_full_dataset = pytest.mark.skipif(
     not (DATA_DIR / "train.jsonl").exists(),
     reason="run prepare_leancat.py to generate data/train.jsonl",
 )
+needs_paper_d1_dataset = pytest.mark.skipif(
+    not (DATA_DIR / "paper_d1_train.jsonl").exists(),
+    reason="run prepare_leancat.py --prompt-variant paper-d1 to generate data/paper_d1_train.jsonl",
+)
+
+# (dataset file, template file) for each shipped prompt variant. Both are rendered from the
+# same 100 problems; only the template differs.
+PROMPT_VARIANTS = [
+    ("example.jsonl", "static-passk.md"),
+    ("paper_d1_example.jsonl", "paper-d1.md"),
+]
 
 
 class TestLeanCatApp:
@@ -336,8 +347,8 @@ class TestDataset:
             prompt = row["responses_create_params"]["input"][0]["content"]
             assert row["verifier_metadata"]["formal_statement"] in prompt
 
-    @pytest.mark.parametrize("filename", [pytest.param("train.jsonl", marks=needs_full_dataset), "example.jsonl"])
-    def test_prompt_is_rendered_exactly_as_upstream_renders_it(self, filename):
+    @pytest.mark.parametrize("dataset,template", PROMPT_VARIANTS)
+    def test_prompt_is_rendered_exactly_as_upstream_renders_it(self, dataset, template):
         """Lock the prompt to upstream's ``template.format(formal_statement=...)``.
 
         The offline half of the fidelity check: it pins the committed template and the
@@ -347,15 +358,57 @@ class TestDataset:
         verbatim, trailing newline included -- is enforced in prepare_leancat.py, which
         fails if the .lean file and the JSONL record disagree.
         """
-        template = (PROMPTS_DIR / "static-passk.md").read_text(encoding="utf-8").strip()
-        for row in _load_rows(filename):
-            expected = template.format(formal_statement=row["verifier_metadata"]["formal_statement"])
+        rendered = (PROMPTS_DIR / template).read_text(encoding="utf-8").strip()
+        for row in _load_rows(dataset):
+            expected = rendered.format(formal_statement=row["verifier_metadata"]["formal_statement"])
             assert row["responses_create_params"]["input"][0]["content"] == expected
 
-    @pytest.mark.parametrize("filename", [pytest.param("train.jsonl", marks=needs_full_dataset), "example.jsonl"])
+    @pytest.mark.parametrize("filename", ["example.jsonl", "paper_d1_example.jsonl"])
     def test_rows_carry_a_single_user_message(self, filename):
         # Upstream's chat_completion posts exactly [{"role": "user", ...}] with no system
         # prompt; a system message here would make our numbers incomparable to the paper's.
         for row in _load_rows(filename):
             messages = row["responses_create_params"]["input"]
             assert [m["role"] for m in messages] == ["user"]
+
+
+class TestPromptVariants:
+    """The two shipped templates must stay distinct, and both must stay renderable.
+
+    The repo template is byte-exact against upstream; the paper one is a transcription of a
+    typeset listing, so it cannot be. These tests pin what *is* checkable: that the pair has
+    not silently collapsed into one, and that both still carry the placeholder.
+    """
+
+    def test_both_templates_carry_the_placeholder(self):
+        for _, template in PROMPT_VARIANTS:
+            assert "{formal_statement}" in (PROMPTS_DIR / template).read_text(encoding="utf-8")
+
+    def test_the_two_templates_really_differ(self):
+        repo = (PROMPTS_DIR / "static-passk.md").read_text(encoding="utf-8")
+        paper = (PROMPTS_DIR / "paper-d1.md").read_text(encoding="utf-8")
+        assert repo != paper
+        # The substantive divergence: the repo permits auxiliary declarations and names the
+        # banned tokens; the paper asks for step-by-step reasoning instead.
+        assert "auxiliary definitions" in repo and "auxiliary definitions" not in paper
+        assert "step by step" in paper and "step by step" not in repo
+
+    def test_upstream_template_is_unmodified(self):
+        """prepare_leancat.py must never write a --prompt file over the pinned upstream copy."""
+        import hashlib
+
+        digest = hashlib.sha256((PROMPTS_DIR / "static-passk.md").read_bytes()).hexdigest()
+        assert digest.startswith("7948825d3c4373b6")
+
+    @needs_paper_d1_dataset
+    def test_variants_cover_the_same_problems(self):
+        repo_ids = [r["verifier_metadata"]["problem_id"] for r in _load_rows("train.jsonl")]
+        paper_ids = [r["verifier_metadata"]["problem_id"] for r in _load_rows("paper_d1_train.jsonl")]
+        assert repo_ids == paper_ids
+        assert len(repo_ids) == 100
+
+    @needs_paper_d1_dataset
+    def test_variants_differ_only_in_the_prompt(self):
+        for a, b in zip(_load_rows("train.jsonl"), _load_rows("paper_d1_train.jsonl")):
+            assert a["verifier_metadata"] == b["verifier_metadata"]
+            assert a["responses_create_params"] != b["responses_create_params"]
