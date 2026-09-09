@@ -20,10 +20,14 @@ Covers per-call sampling kwargs (``temperature``, ``top_p``,
 
 from __future__ import annotations
 
+import json
+from copy import deepcopy
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from stirrup.core.models import AssistantMessage, SystemMessage, TokenUsage, ToolCall, ToolMessage, UserMessage
+from pydantic import BaseModel
+from stirrup.core.exceptions import ContextOverflowError
+from stirrup.core.models import AssistantMessage, SystemMessage, TokenUsage, Tool, ToolCall, ToolMessage, UserMessage
 
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoUserMessage
 from responses_api_agents.stirrup_agent.nemo_client import (
@@ -80,6 +84,7 @@ async def test_generate_forwards_configured_sampling_kwargs() -> None:
     assert sent["temperature"] == pytest.approx(0.42)
     assert sent["top_p"] == pytest.approx(0.7)
     assert sent["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+    assert "truncate_history_thinking" not in sent["extra_body"]["chat_template_kwargs"]
     assert sent["max_completion_tokens"] <= 2048
 
 
@@ -209,7 +214,394 @@ def test_defaults_match_pre_lift_behaviour() -> None:
     assert client._top_p == 0.95
     assert client._enable_thinking is True
     assert client._max_completion_tokens_cap == 64000
+    assert client._min_completion_tokens == 1024
+    assert client._prompt_estimator_truncate_history_thinking is None
     assert client._truncation_recovery is True
+
+
+def _long_thinking_history(*, closed: bool = True) -> list:
+    messages = [UserMessage(content="do the task")]
+    for _ in range(4):
+        reasoning = "r" * 195_000
+        content = f"<think>{reasoning}</think>visible" if closed else f"<think>{reasoning}"
+        messages.extend(
+            [
+                AssistantMessage(content=content, token_usage=TokenUsage(input=1, answer=1, reasoning=0)),
+                UserMessage(content="Please continue the task"),
+            ]
+        )
+    return messages
+
+
+@pytest.mark.asyncio
+async def test_fallback_ignores_closed_historical_thinking_when_template_truncates_it() -> None:
+    """Regression: raw 64k thinking turns must not collapse later calls to the floor.
+
+    Nemotron's chat template removes each completed reasoning block once a later
+    user message exists. The tokenizer-free fallback must estimate that rendered
+    prompt, not the much larger forensic history retained by Stirrup.
+    """
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=262_144,
+        base_url="http://test",
+        api_key="k",
+        min_completion_tokens=8192,
+        max_completion_tokens_cap=64_000,
+        prompt_estimator_truncate_history_thinking=True,
+    )
+    fake_create = AsyncMock(return_value=_make_response())
+    client._client = MagicMock()
+    client._client.chat.completions.create = fake_create
+
+    history = _long_thinking_history()
+    original_content = history[1].content
+    await client.generate(history, tools={})
+
+    sent = fake_create.await_args.kwargs
+    assert sent["max_completion_tokens"] == 64_000
+    assert "truncate_history_thinking" not in sent["extra_body"]["chat_template_kwargs"]
+    assert sent["messages"][1]["content"][0]["text"] == original_content
+    assert history[1].content == original_content
+
+
+def test_tokenizer_receives_estimator_history_truncation_setting() -> None:
+    class RecordingTokenizer:
+        def __init__(self) -> None:
+            self.template_kwargs = None
+
+        def apply_chat_template(self, messages, **kwargs):
+            self.template_kwargs = kwargs
+            return "rendered"
+
+        def __call__(self, text, **kwargs):
+            return {"input_ids": [1, 2, 3]}
+
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=262_144,
+        base_url="http://test",
+        api_key="k",
+        prompt_estimator_truncate_history_thinking=True,
+    )
+    tokenizer = RecordingTokenizer()
+    client._tokenizer = tokenizer
+
+    assert client._count_input_tokens(to_provider_openai_messages([UserMessage(content="hi")]), tools={}) == 3
+    assert tokenizer.template_kwargs["truncate_history_thinking"] is True
+
+
+def test_token_count_is_exact_only_when_the_complete_prompt_renders() -> None:
+    class MessagesOnlyTokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            if "tools" in kwargs:
+                raise TypeError("template does not accept tools")
+            return "rendered messages"
+
+        def __call__(self, text, **kwargs):
+            return {"input_ids": [1, 2, 3]}
+
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=262_144,
+        base_url="http://test",
+        api_key="k",
+    )
+    client._tokenizer = MessagesOnlyTokenizer()
+    messages = to_provider_openai_messages([UserMessage(content="hi")])
+
+    count_without_tools, exact_without_tools = client._count_input_tokens_with_confidence(messages, tools={})
+    count_with_tools, exact_with_tools = client._count_input_tokens_with_confidence(
+        messages,
+        tools={"code_exec": _code_exec_tool()},
+    )
+
+    assert count_without_tools == 3
+    assert exact_without_tools is True
+    assert count_with_tools > 3
+    assert exact_with_tools is False
+
+
+def test_nemotron_estimator_decodes_tool_arguments_for_exact_template_render() -> None:
+    class MappingArgumentsTokenizer:
+        def __init__(self) -> None:
+            self.rendered_messages = None
+
+        def apply_chat_template(self, messages, **kwargs):
+            arguments = messages[1]["tool_calls"][0]["function"]["arguments"]
+            if not isinstance(arguments, dict):
+                raise TypeError("tool arguments must be a mapping")
+            self.rendered_messages = messages
+            return "complete rendered prompt"
+
+        def __call__(self, text, **kwargs):
+            return {"input_ids": [1, 2, 3, 4]}
+
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=262_144,
+        base_url="http://test",
+        api_key="k",
+        prompt_estimator_truncate_history_thinking=True,
+    )
+    tokenizer = MappingArgumentsTokenizer()
+    client._tokenizer = tokenizer
+    messages = _serialized_history_with_prior_assistant("<think>old</think>visible", with_tool_call=True)
+    original = deepcopy(messages)
+
+    count, exact = client._count_input_tokens_with_confidence(
+        messages,
+        tools={"code_exec": _code_exec_tool()},
+    )
+
+    assert (count, exact) == (4, True)
+    assert tokenizer.rendered_messages[1]["tool_calls"][0]["function"]["arguments"] == {"cmd": "echo hello"}
+    assert messages == original
+
+
+def test_nemotron_estimator_does_not_claim_exact_render_for_invalid_tool_arguments() -> None:
+    class MappingArgumentsTokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            arguments = messages[1]["tool_calls"][0]["function"]["arguments"]
+            if not isinstance(arguments, dict):
+                raise TypeError("tool arguments must be a mapping")
+            return "complete rendered prompt"
+
+        def __call__(self, text, **kwargs):
+            return {"input_ids": [1, 2, 3]}
+
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=262_144,
+        base_url="http://test",
+        api_key="k",
+        prompt_estimator_truncate_history_thinking=True,
+    )
+    client._tokenizer = MappingArgumentsTokenizer()
+    messages = _serialized_history_with_prior_assistant("visible", with_tool_call=True)
+    messages[1]["tool_calls"][0]["function"]["arguments"] = "not-json"
+
+    _, exact = client._count_input_tokens_with_confidence(
+        messages,
+        tools={"code_exec": _code_exec_tool()},
+    )
+
+    assert exact is False
+
+
+def _serialized_history_with_prior_assistant(content: str, *, with_tool_call: bool) -> list:
+    tool_calls = (
+        [ToolCall(tool_call_id="call_1", name="code_exec", arguments='{"cmd":"echo hello"}')] if with_tool_call else []
+    )
+    return to_provider_openai_messages(
+        [
+            UserMessage(content="start"),
+            AssistantMessage(
+                content=content,
+                tool_calls=tool_calls,
+                token_usage=TokenUsage(input=1, answer=1, reasoning=0),
+            ),
+            UserMessage(content="continue"),
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("content", "with_tool_call", "expected"),
+    [
+        ("<think>old</think>visible", False, "<think></think>visible"),
+        ("<think>unfinished", False, "<think>unfinished"),
+        ("prefix<think>old</think>visible", True, "<think></think>visible"),
+        ("prefix<think>unfinished", True, "<think></think>prefix"),
+    ],
+    ids=("closed-no-tool", "unclosed-no-tool", "closed-tool", "unclosed-tool"),
+)
+def test_estimator_mirrors_nemotron_prior_assistant_semantics(
+    content: str,
+    with_tool_call: bool,
+    expected: str,
+) -> None:
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=262_144,
+        base_url="http://test",
+        api_key="k",
+        prompt_estimator_truncate_history_thinking=True,
+    )
+    serialized = _serialized_history_with_prior_assistant(content, with_tool_call=with_tool_call)
+    original = deepcopy(serialized)
+
+    estimated = client._messages_for_estimator_count(serialized)
+
+    assert estimated[1]["content"][0]["text"] == expected
+    assert estimated[1].get("tool_calls") == serialized[1].get("tool_calls")
+    assert serialized == original
+
+
+def test_estimator_uses_content_after_last_closed_think_block() -> None:
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=262_144,
+        base_url="http://test",
+        api_key="k",
+        prompt_estimator_truncate_history_thinking=True,
+    )
+    serialized = _serialized_history_with_prior_assistant(
+        "<think>first</think>middle<think>second</think>tail",
+        with_tool_call=False,
+    )
+
+    estimated = client._messages_for_estimator_count(serialized)
+
+    assert estimated[1]["content"][0]["text"] == "<think></think>tail"
+
+
+def test_character_fallback_counts_complete_serialized_messages() -> None:
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=262_144,
+        base_url="http://test",
+        api_key="k",
+    )
+    serialized = _serialized_history_with_prior_assistant("same content", with_tool_call=True)
+    expected = len(json.dumps(serialized, ensure_ascii=False)) // 3
+
+    count = client._count_input_tokens(serialized, tools={})
+
+    assert count == expected
+    long_arguments = deepcopy(serialized)
+    long_arguments[1]["tool_calls"][0]["function"]["arguments"] = "x" * 3000
+    assert client._count_input_tokens(long_arguments, tools={}) >= count + 990
+
+
+@pytest.mark.asyncio
+async def test_completion_budget_is_bounded_by_positive_estimated_remaining_context() -> None:
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=10_000,
+        base_url="http://test",
+        api_key="k",
+        completion_token_buffer=1000,
+        min_completion_tokens=8192,
+        max_completion_tokens_cap=64_000,
+    )
+    client._count_input_tokens_with_confidence = MagicMock(return_value=(9500, True))
+    client._tokenizer = object()
+    fake_create = AsyncMock(return_value=_make_response())
+    client._client = MagicMock()
+    client._client.chat.completions.create = fake_create
+
+    await client.generate([UserMessage(content="hi")], tools={})
+
+    assert fake_create.await_args.kwargs["max_completion_tokens"] == 500
+
+
+@pytest.mark.asyncio
+async def test_no_estimated_context_remaining_raises_before_dispatch() -> None:
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=10_000,
+        base_url="http://test",
+        api_key="k",
+        min_completion_tokens=8192,
+    )
+    client._count_input_tokens_with_confidence = MagicMock(return_value=(10_000, True))
+    client._tokenizer = object()
+    fake_create = AsyncMock(return_value=_make_response())
+    client._client = MagicMock()
+    client._client.chat.completions.create = fake_create
+
+    with pytest.raises(ContextOverflowError, match="leaves no room"):
+        await client.generate([UserMessage(content="hi")], tools={})
+
+    fake_create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_output_cap_smaller_than_prompt_does_not_shrink_context_window() -> None:
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=262_144,
+        base_url="http://test",
+        api_key="k",
+        min_completion_tokens=8192,
+        max_completion_tokens_cap=8192,
+    )
+    client._count_input_tokens_with_confidence = MagicMock(return_value=(10_000, True))
+    client._tokenizer = object()
+    fake_create = AsyncMock(return_value=_make_response())
+    client._client = MagicMock()
+    client._client.chat.completions.create = fake_create
+
+    await client.generate([UserMessage(content="hi")], tools={})
+
+    assert fake_create.await_args.kwargs["max_completion_tokens"] == 8192
+
+
+@pytest.mark.asyncio
+async def test_fallback_overestimate_still_dispatches_configured_floor() -> None:
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=10_000,
+        base_url="http://test",
+        api_key="k",
+        min_completion_tokens=8192,
+        max_completion_tokens_cap=64_000,
+    )
+    client._count_input_tokens_with_confidence = MagicMock(return_value=(20_000, False))
+    fake_create = AsyncMock(return_value=_make_response())
+    client._client = MagicMock()
+    client._client.chat.completions.create = fake_create
+
+    await client.generate([UserMessage(content="hi")], tools={})
+
+    assert client._tokenizer is None
+    assert fake_create.await_args.kwargs["max_completion_tokens"] == 8192
+
+
+@pytest.mark.asyncio
+async def test_loaded_tokenizer_approximation_does_not_impose_a_false_context_bound() -> None:
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=10_000,
+        base_url="http://test",
+        api_key="k",
+        min_completion_tokens=8192,
+        max_completion_tokens_cap=64_000,
+    )
+    client._tokenizer = object()
+    client._count_input_tokens_with_confidence = MagicMock(return_value=(20_000, False))
+    fake_create = AsyncMock(return_value=_make_response())
+    client._client = MagicMock()
+    client._client.chat.completions.create = fake_create
+
+    await client.generate([UserMessage(content="hi")], tools={})
+
+    assert fake_create.await_args.kwargs["max_completion_tokens"] == 8192
+
+
+@pytest.mark.asyncio
+async def test_minimum_completion_floor_never_consumes_more_than_remaining_context() -> None:
+    client = DynamicMaxTokensChatCompletionsClient(
+        model="m",
+        max_tokens=10_000,
+        base_url="http://test",
+        api_key="k",
+        completion_token_buffer=1000,
+        min_completion_tokens=8192,
+        max_completion_tokens_cap=64_000,
+    )
+    client._count_input_tokens_with_confidence = MagicMock(return_value=(1500, True))
+    client._tokenizer = object()
+    fake_create = AsyncMock(return_value=_make_response())
+    client._client = MagicMock()
+    client._client.chat.completions.create = fake_create
+
+    await client.generate([UserMessage(content="hi")], tools={})
+
+    # 8,500 raw tokens remain. The floor may reclaim part of the 1,000-token
+    # safety buffer, but it may not exceed the actual estimated remainder.
+    assert fake_create.await_args.kwargs["max_completion_tokens"] == 8192
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +639,19 @@ def _tool_call_response(finish_reason: str = "stop"):
     tool_call.function.arguments = '{"cmd":"true"}'
     response.choices[0].message.tool_calls = [tool_call]
     return response
+
+
+class _CodeExecParams(BaseModel):
+    cmd: str
+
+
+def _code_exec_tool() -> Tool:
+    return Tool(
+        name="code_exec",
+        description="Run a command.",
+        parameters=_CodeExecParams,
+        executor=lambda _: None,
+    )
 
 
 @pytest.mark.asyncio
@@ -323,6 +728,21 @@ async def test_truncated_call_that_still_made_a_tool_call_is_left_alone() -> Non
     second = fake_create.await_args_list[1].kwargs
     assert second["extra_body"]["chat_template_kwargs"]["enable_thinking"] is True
     assert len(second["messages"]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arguments", ["", "{}", '{"wrong":"field"}'])
+async def test_truncated_schema_invalid_tool_call_arms_recovery(arguments: str) -> None:
+    """A parser-emitted call with unusable arguments made no task progress."""
+    client = _make_client()
+    response = _tool_call_response(finish_reason="length")
+    response.choices[0].message.tool_calls[0].function.arguments = arguments
+    client._client.chat.completions.create = AsyncMock(return_value=response)
+
+    await client.generate([UserMessage(content="hi")], tools={"code_exec": _code_exec_tool()})
+
+    assert client._recover_from_truncation is True
+    assert client._truncation_overruns == 1
 
 
 @pytest.mark.asyncio
