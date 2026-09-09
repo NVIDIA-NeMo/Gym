@@ -23,14 +23,17 @@ import pytest
 from fastapi import FastAPI
 
 from nemo_gym._checkpoint import (
+    AGENT_CONTINUATION_INDEX_NAME,
     AGENT_MANIFEST_NAME,
     AGENT_STATE_SUBDIR,
     AgentBoundaryRecord,
     AgentCheckpointError,
     AgentCheckpointParticipant,
     AgentCompletedExecutionAcknowledgementError,
+    AgentContinuationRoot,
     AgentExecutionIdentity,
     AgentStaleAttemptError,
+    CheckpointArtifactReference,
     CheckpointPhase,
     ControlCapabilities,
     ControlFence,
@@ -39,6 +42,7 @@ from nemo_gym._checkpoint import (
     commit_agent_state,
     install_agent_checkpoint,
     install_control_plane,
+    read_jsonl_artifact,
     restore_agent_state,
 )
 
@@ -420,7 +424,48 @@ async def test_commit_route_snapshots_agent_records_on_event_loop(monkeypatch, t
 
     assert prepared.status_code == 200
     assert committed.status_code == 200
+    assert "continuation_index" not in committed.json()
     assert record_snapshot_threads == [event_loop_thread]
+
+
+@pytest.mark.asyncio
+async def test_commit_route_returns_continuation_index_only_when_requested(tmp_path) -> None:
+    participant = AgentCheckpointParticipant()
+    fence = ControlFence()
+    app = FastAPI()
+    install_control_plane(
+        app,
+        capabilities=ControlCapabilities(
+            component="responses_api_agents",
+            name="agent",
+            multi_process=MultiProcessCapability(mode="single_worker", num_workers=1),
+        ),
+        fence=fence,
+    )
+    install_agent_checkpoint(app, participant=participant, fence=fence, auth_token="secret")
+    headers = {"authorization": "Bearer secret"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        prepared = await client.post(
+            "/ng-control/v1/agent-checkpoint/prepare",
+            json={"checkpoint_id": "checkpoint-1", "deadline_ts": time.time() + 2},
+            headers=headers,
+        )
+        committed = await client.post(
+            "/ng-control/v1/agent-checkpoint/commit",
+            json={
+                "checkpoint_id": "checkpoint-1",
+                "deadline_ts": time.time() + 2,
+                "checkpoint_dir": str(tmp_path),
+                "include_continuation_index": True,
+            },
+            headers=headers,
+        )
+
+    assert prepared.status_code == 200
+    assert committed.status_code == 200
+    reference = CheckpointArtifactReference.model_validate(committed.json()["continuation_index"])
+    assert reference.records == 0
+    assert read_jsonl_artifact(tmp_path, reference, AgentContinuationRoot) == []
 
 
 @pytest.mark.asyncio
@@ -595,11 +640,29 @@ async def test_commit_restore_maps_source_attempt_to_replacement(tmp_path) -> No
 
     summary = commit_agent_state(participant, tmp_path, checkpoint_id="checkpoint-1")
     assert summary["records"] == 1
+    continuation_reference = summary["continuation_index"]
+    assert continuation_reference["relative_path"] == f"{AGENT_STATE_SUBDIR}/{AGENT_CONTINUATION_INDEX_NAME}"
+    assert [
+        item.model_dump(mode="json")
+        for item in read_jsonl_artifact(
+            tmp_path,
+            CheckpointArtifactReference.model_validate(continuation_reference),
+            AgentContinuationRoot,
+        )
+    ] == [
+        {
+            "schema_version": 1,
+            "rollout_id": "rollout-a",
+            "attempt_index": 2,
+            "capture_key": "rollout-a-a2",
+            "last_committed_model_call_id": "call-1",
+        }
+    ]
     restored = AgentCheckpointParticipant()
-    assert restore_agent_state(restored, tmp_path) == {
-        "records": 1,
-        "source_checkpoint_id": "checkpoint-1",
-    }
+    restore_summary = restore_agent_state(restored, tmp_path)
+    assert restore_summary["records"] == 1
+    assert restore_summary["source_checkpoint_id"] == "checkpoint-1"
+    assert restore_summary["continuation_index"] == continuation_reference
     await restored.resume()
     replacement = await restored.begin("rollout-a", 3, task=None)
     continuation = restored.continuation(replacement)
@@ -641,3 +704,25 @@ def test_restore_rejects_corrupted_boundary_before_activation(tmp_path) -> None:
     with pytest.raises(AgentCheckpointError):
         restore_agent_state(participant, tmp_path)
     assert participant.resolve("rollout-a", 1) is None
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_corrupted_continuation_index_before_activation(tmp_path) -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+    await asyncio.sleep(0)
+    park = asyncio.create_task(participant.commit_boundary(execution, _boundary()))
+    await prepare
+    summary = commit_agent_state(participant, tmp_path, checkpoint_id="checkpoint-1")
+    continuation_path = tmp_path / summary["continuation_index"]["relative_path"]
+    continuation_path.write_text("corrupt\n")
+
+    restored = AgentCheckpointParticipant()
+    with pytest.raises(AgentCheckpointError, match="continuation index"):
+        restore_agent_state(restored, tmp_path)
+    assert restored.resolve("rollout-a", 1) is None
+
+    await participant.resume()
+    await park
+    await participant.finish(execution, outcome="completed")

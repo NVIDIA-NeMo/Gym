@@ -38,6 +38,7 @@ from nemo_gym._checkpoint.admission import (
 from nemo_gym._checkpoint.agent import (
     AGENT_CHECKPOINT_SCHEMA_VERSION,
     AGENT_CHECKPOINT_URL_PREFIX,
+    AGENT_CONTINUATION_INDEX_NAME,
     AGENT_EXECUTION_GENERATION_HEADER,
     AGENT_MANIFEST_NAME,
     AGENT_STATE_SUBDIR,
@@ -57,6 +58,16 @@ from nemo_gym._checkpoint.agent import (
     commit_agent_state,
     install_agent_checkpoint,
     restore_agent_state,
+)
+from nemo_gym._checkpoint.artifacts import (
+    AGENT_CONTINUATION_INDEX_FEATURE,
+    CHECKPOINT_ARTIFACT_SCHEMA_VERSION,
+    EXTERNAL_STORAGE_REFERENCE_INDEX_FEATURE,
+    AgentContinuationRoot,
+    CheckpointArtifactError,
+    CheckpointArtifactReference,
+    ExternalStorageReference,
+    read_jsonl_artifact,
 )
 from nemo_gym._checkpoint.control import (
     CHECKPOINT_CONTROL_TOKEN_ENV,
@@ -132,10 +143,13 @@ from nemo_gym._checkpoint.resources import (
 __all__ = [
     "AGENT_CHECKPOINT_SCHEMA_VERSION",
     "AGENT_CHECKPOINT_URL_PREFIX",
+    "AGENT_CONTINUATION_INDEX_NAME",
+    "AGENT_CONTINUATION_INDEX_FEATURE",
     "AGENT_EXECUTION_GENERATION_HEADER",
     "AGENT_MANIFEST_NAME",
     "AGENT_STATE_SUBDIR",
     "COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE",
+    "CHECKPOINT_ARTIFACT_SCHEMA_VERSION",
     "CONTROL_SCHEMA_VERSION",
     "CONTROL_URL_PREFIX",
     "CHECKPOINT_CONTROL_TOKEN_ENV",
@@ -157,6 +171,7 @@ __all__ = [
     "AdmissionState",
     "AdmissionTicket",
     "AgentAdmissionClosedError",
+    "AgentContinuationRoot",
     "AgentBoundaryRecord",
     "AgentCheckpointError",
     "AgentCheckpointParticipant",
@@ -177,6 +192,8 @@ __all__ = [
     "commit_resources_state",
     "checkpoint_control_auth_token",
     "CheckpointConflictError",
+    "CheckpointArtifactError",
+    "CheckpointArtifactReference",
     "CheckpointControlRequest",
     "CheckpointPhase",
     "ControlCapabilities",
@@ -184,6 +201,8 @@ __all__ = [
     "ControlFence",
     "Deadline",
     "DuplicateExecutionError",
+    "ExternalStorageReference",
+    "EXTERNAL_STORAGE_REFERENCE_INDEX_FEATURE",
     "AttemptIdentity",
     "CaptureLedgerCommitResult",
     "CaptureLedgerCheckpointer",
@@ -215,4 +234,5 @@ __all__ = [
     "load_resources_state",
     "multi_process_capability_from_num_workers",
     "restore_agent_state",
+    "read_jsonl_artifact",
 ]
