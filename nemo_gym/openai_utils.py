@@ -976,6 +976,9 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
     tool_calls: Optional[NeMoGymChatCompletionMessageToolCallsParam] = None
+    # Reasoning models echo this back on the assistant turn; without it the
+    # message fails validation with extra_forbidden on the next request.
+    reasoning_content: Optional[str] = None
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(
