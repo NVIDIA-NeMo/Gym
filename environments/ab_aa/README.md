@@ -1,7 +1,6 @@
 # ab_aa
 
-AutomationBench scored with the Artificial Analysis headline metric, so results
-are comparable to the public AA leaderboard.
+AutomationBench scored with the Artificial Analysis headline metric.
 
 ## Metric
 
@@ -29,7 +28,8 @@ directly comparable to the AA leaderboard column.
 
 ## Install
 
-The env package is not on PyPI; install it into the agent's venv:
+The env package is not on PyPI, install it into the agent's venv for data prep.
+Running environment will create its own venv.
 
 ```bash
 uv pip install -e environments/ab_aa
@@ -44,11 +44,10 @@ This pulls `automation-bench` from the upstream repo. Note upstream declares
 python environments/ab_aa/prepare.py
 ```
 
-Pulls the real taskset from the installed `automation-bench` package and sizes
-itself from it (600 tasks: 6 domains x 100). `ab_zapier` indexes the identical set.
+Pulls the public taskset from the installed `automation-bench` package (600 tasks: 6 domains x 100). 
 
 ## Note on comparability
 
-AA evaluates 657 tasks with 22,822 objectives (~34.7 per task); this env uses
+AA evaluates 657 tasks with 22,822 objectives (~34.7 per task), this env uses
 the public 600-task set at roughly 9.5 objectives per rollout. The metric is the
 same, the split is not, so absolute numbers will not match the leaderboard.
