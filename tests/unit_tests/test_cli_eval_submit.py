@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import argparse
+import json
 
 import pytest
 import yaml
@@ -22,6 +23,7 @@ from pytest import MonkeyPatch
 
 import nemo_gym.orchestration.submit as submit_module
 from nemo_gym.cli.main import _eval_submit
+from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
 
 
 COMPUTE = {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}}
@@ -30,8 +32,8 @@ DRIVER = {"container": "gym:latest", "benchmarks": {"gsm8k": {}}}
 JOB = {"output_path": "/tmp/gym-jobs"}
 
 
-def _args(config_path, *, dry_run: bool = False) -> argparse.Namespace:
-    return argparse.Namespace(config=str(config_path), dry_run=dry_run)
+def _args(config_path, *, dry_run: bool = False, json_output: bool = False) -> argparse.Namespace:
+    return argparse.Namespace(config=str(config_path), dry_run=dry_run, json=json_output)
 
 
 def _capture_submit(monkeypatch: MonkeyPatch) -> dict:
@@ -246,3 +248,76 @@ class TestEvalSubmitConfigGroupComposition:
         _eval_submit(_args(config_path), overrides=[])
 
         assert captured["config"].job.output_path == "/tmp/gym-jobs"
+
+
+def _record(*, failed: bool = False) -> SubmissionRecord:
+    return SubmissionRecord(
+        gym_job_id="gym-job-20260909T100203Z-abc123",
+        gym_version="0.6.0",
+        submitted_at="2026-09-09T10:02:03Z",
+        run_dir="/jobs/gym-job-20260909T100203Z-abc123",
+        cluster="hsg",
+        executor="slurm",
+        submitted_by="wprazuch",
+        hostname="login-01",
+        benchmarks=[
+            BenchmarkJob(
+                benchmark="gsm8k",
+                job_dir="/jobs/gym-job-20260909T100203Z-abc123/gsm8k",
+                job_id=None if failed else "12345",
+                error="sbatch: error: bad account" if failed else None,
+            )
+        ],
+    )
+
+
+def _returning(monkeypatch: MonkeyPatch, record):
+    monkeypatch.setattr(submit_module, "submit", lambda config, *, dry_run=False: record)
+
+
+def _config_file(tmp_path):
+    path = tmp_path / "submit.yaml"
+    path.write_text(yaml.dump({"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": DRIVER, "job": JOB}))
+    return path
+
+
+class TestEvalSubmitOutput:
+    def test_human_output_names_each_benchmark_and_job(self, tmp_path, monkeypatch, capsys):
+        _returning(monkeypatch, _record())
+
+        _eval_submit(_args(_config_file(tmp_path)), overrides=[])
+
+        out = capsys.readouterr().out
+        assert "gsm8k" in out and "12345" in out
+        assert "/jobs/gym-job-20260909T100203Z-abc123" in out
+
+    def test_json_output_is_the_record_and_nothing_else(self, tmp_path, monkeypatch, capsys):
+        record = _record()
+        _returning(monkeypatch, record)
+
+        _eval_submit(_args(_config_file(tmp_path), json_output=True), overrides=[])
+
+        assert json.loads(capsys.readouterr().out) == json.loads(record.model_dump_json())
+
+    def test_a_failed_benchmark_exits_non_zero(self, tmp_path, monkeypatch):
+        _returning(monkeypatch, _record(failed=True))
+
+        with pytest.raises(SystemExit) as exit_info:
+            _eval_submit(_args(_config_file(tmp_path)), overrides=[])
+
+        assert exit_info.value.code == 1
+
+    def test_a_failed_benchmark_still_emits_json(self, tmp_path, monkeypatch, capsys):
+        _returning(monkeypatch, _record(failed=True))
+
+        with pytest.raises(SystemExit):
+            _eval_submit(_args(_config_file(tmp_path), json_output=True), overrides=[])
+
+        assert json.loads(capsys.readouterr().out)["benchmarks"][0]["job_id"] is None
+
+    def test_dry_run_prints_nothing_extra_and_does_not_exit(self, tmp_path, monkeypatch, capsys):
+        _returning(monkeypatch, None)
+
+        _eval_submit(_args(_config_file(tmp_path), dry_run=True, json_output=True), overrides=[])
+
+        assert capsys.readouterr().out == ""

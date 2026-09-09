@@ -567,6 +567,7 @@ def _reject_scratch_namespace_additions(overrides: list[str]) -> None:
 def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     from pathlib import Path
 
+    import rich
     from hydra import compose, initialize_config_dir
     from hydra.core.global_hydra import GlobalHydra
     from omegaconf import OmegaConf
@@ -585,7 +586,28 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
     resolved = OmegaConf.to_container(composed, resolve=True)
     scratch_keys = {key for key in resolved if key.startswith("_")}
     config = SubmitConfig.model_validate({key: value for key, value in resolved.items() if key not in scratch_keys})
-    submit(config, dry_run=args.dry_run)
+
+    record = submit(config, dry_run=args.dry_run)
+    if record is None:
+        return
+
+    if args.json:
+        # The record alone, so the output parses.
+        print(record.model_dump_json(indent=2))
+    else:
+        rich.print(f"Run directory: [bold]{record.run_dir}[/bold]")
+        for benchmark in record.benchmarks:
+            if benchmark.job_id is None:
+                rich.print(f"[red]failed[/red] {benchmark.benchmark}: {benchmark.error}")
+            else:
+                rich.print(
+                    f"[green]submitted[/green] {benchmark.benchmark} → Slurm job [bold]{benchmark.job_id}[/bold]"
+                )
+
+    if record.failed:
+        names = ", ".join(b.benchmark for b in record.failed)
+        print(f"Error: {len(record.failed)} benchmark(s) failed to submit: {names}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
@@ -1111,6 +1133,11 @@ COMMANDS = {
             Flag(
                 register=lambda p: p.add_argument(
                     "--dry-run", action="store_true", help="Print generated job scripts without submitting."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--json", action="store_true", help="Emit the submission record as JSON."
                 ),
             ),
         ),
