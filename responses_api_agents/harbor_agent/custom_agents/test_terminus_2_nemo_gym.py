@@ -15,7 +15,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from nemo_gym.agents.terminus_2_llm import NemoGymLLM
+from responses_api_agents.harbor_agent.custom_agents.llms.nemo_gym_llm import NemoGymLLM
 from responses_api_agents.harbor_agent.custom_agents.terminus_2_nemo_gym import Terminus2NemoGym
 
 
