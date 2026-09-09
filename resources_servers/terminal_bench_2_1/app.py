@@ -10,7 +10,7 @@ from sys import stderr
 from tempfile import NamedTemporaryFile
 from time import time
 from traceback import format_exc
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 from fastapi import Request
 from pydantic import BaseModel, field_validator
@@ -26,6 +26,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
+from nemo_gym.sandbox.agent_user import AgentUser, is_root_agent_user, normalize_agent_user
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -42,40 +43,6 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_config: Dict[str, Any]
 
     debug: bool = False
-
-
-AgentUser = Union[str, int, None]
-
-
-def normalize_agent_user(value: Any) -> Any:
-    """Normalize an ``agent_user`` value. Kept semantically identical, by hand, to the Terminus 2 agent's
-    ``_normalize_agent_user`` (the two packages run in separate venvs, so neither imports the other).
-
-    A ``str`` agent_user is an account NAME (the sandbox provider hands it to ``su``); an ``int`` is a uid.
-    Digit-only strings become ints (``"1000"`` -> ``1000``; GNU ``id`` happens to accept ``"1000"`` as a name
-    lookup, which would hide the misconfiguration). ``isdecimal`` rather than ``isdigit``, so ``"²"`` stays a
-    string instead of making ``int()`` raise. Booleans are rejected because pydantic's lax mode would otherwise
-    coerce ``true`` to uid 1. Empty and option-like names (``""``, ``"-m"``) are rejected because ``su`` would
-    parse them as options (``shlex.quote`` leaves ``"-m"`` unquoted).
-    """
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise ValueError("agent_user must be an account name, a uid, or null")
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        if value.isdecimal():
-            return int(value)
-        if value == "" or value.startswith("-"):
-            raise ValueError("agent_user must be an account name, a uid, or null")
-        return value
-    return value
-
-
-def is_non_root_agent_user(agent_user: AgentUser) -> bool:
-    """``None``, ``"root"`` and ``0`` all resolve to the image default / uid 0 and need no special handling."""
-    return agent_user is not None and agent_user != "root" and agent_user != 0
 
 
 def uploaded_subdirectories(target_dirpath: str, remote_paths: List[str]) -> List[str]:
@@ -329,7 +296,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             # directories `_upload_folder` created for nested files) land owned by the image default; hand them to a
             # non-root agent_user first (mirrors Harbor's agents/installed/base.py chown after upload) so solve.sh
             # can read and modify its own files. One non-recursive chown, parents first, never the upload root.
-            if is_non_root_agent_user(body.agent_user) and solution_paths:
+            if not is_root_agent_user(body.agent_user) and solution_paths:
                 chown_targets = uploaded_subdirectories(cwd, solution_paths) + solution_paths
                 quoted_paths = " ".join(shlex_quote(path) for path in chown_targets)
                 chown_result = await eval_sandbox.exec(f"chown {shlex_quote(str(body.agent_user))} {quoted_paths}")

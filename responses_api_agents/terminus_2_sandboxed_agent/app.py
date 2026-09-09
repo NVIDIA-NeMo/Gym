@@ -39,6 +39,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.sandbox import AsyncSandbox, create_provider
+from nemo_gym.sandbox.agent_user import check_agent_user, is_root_agent_user, normalize_agent_user
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
@@ -47,36 +48,6 @@ from nemo_gym.server_utils import (
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
-
-
-def _normalize_agent_user(value: Any) -> Any:
-    """Normalize an `agent_user` value. Kept semantically identical, by hand, to the resources server's
-    `normalize_agent_user` (the two packages run in separate venvs, so neither imports the other).
-
-    A `str` is an account NAME for `su`; an `int` is a uid. Digit-only strings become ints ("1000" -> 1000, so the
-    provider uses the execd uid path instead of `su 1000`; GNU `id` would accept "1000" as a name and hide the
-    misconfiguration). `isdecimal` rather than `isdigit`, so "²" stays a string instead of making `int()` raise.
-    Booleans are rejected because pydantic's lax mode would otherwise coerce `true` to uid 1. Empty and option-like
-    names ("", "-m") are rejected because `su` would parse them as options (shlex.quote leaves "-m" unquoted).
-    """
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise ValueError("agent_user must be an account name, a uid, or null")
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        if value.isdecimal():
-            return int(value)
-        if value == "" or value.startswith("-"):
-            raise ValueError("agent_user must be an account name, a uid, or null")
-        return value
-    return value
-
-
-def _is_root_agent_user(agent_user: str | int | None) -> bool:
-    """None, "root" and 0 all mean "run as the image default (root on the supported images)": no identity check."""
-    return agent_user is None or agent_user == "root" or agent_user == 0
 
 
 class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
@@ -100,13 +71,14 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
 
     # Lane-level default identity for Terminus 2's tmux session and every agent-driven command (account name for
     # `su`, or uid). None = image default (unchanged behavior). A row-level `agent_user` echoed by the resources
-    # server's /seed_session overrides it; a non-root value requires a root-default image (see _check_agent_user).
+    # server's /seed_session overrides it; a non-root value requires a root-default image (the fail-closed
+    # `nemo_gym.sandbox.agent_user.check_agent_user` gate runs before Harbor setup).
     agent_user: str | int | None = None
 
     @field_validator("agent_user", mode="before")
     @classmethod
     def _validate_agent_user(cls, value: Any) -> Any:
-        return _normalize_agent_user(value)
+        return normalize_agent_user(value)
 
 
 class Terminus2AgentRunRequest(BaseRunRequest):
@@ -166,38 +138,6 @@ class NeMoGymSandboxEnvironment:
         user = user if user is not None else self.default_user
         result = await self._sandbox.exec(f"test -d {json.dumps(path)}", user=user)
         return result.return_code == 0
-
-
-async def _check_agent_user(environment: NeMoGymSandboxEnvironment, agent_user: str | int) -> None:
-    """Fail-closed, outcome-based identity check run before any Harbor setup.
-
-    `agent_user` is a containment setting: the image default must be root (so the verifier can run as the image
-    default) and commands issued as `agent_user` must actually land on a non-root uid/gid. Running as root when
-    `agent` was requested must never happen silently, so any violation raises with a fleet-diagnosable message.
-    """
-
-    def fail(condition: str, result: Any) -> None:
-        raise RuntimeError(
-            f"agent_user={agent_user!r} identity check failed: {condition}. "
-            f"Observed return_code={result.return_code} stdout={result.stdout!r} stderr={result.stderr!r}"
-        )
-
-    root_result = await environment.exec("id -u", user="root")
-    if root_result.return_code != 0 or root_result.stdout.strip() != "0":
-        fail("the image default user must be root (uid 0), otherwise the verifier cannot run as root", root_result)
-
-    # The SAME user kwarg tmux will use, so this exercises the provider's su/uid path.
-    agent_result = await environment.exec("id -u && id -g", user=agent_user)
-    lines = agent_result.stdout.strip().splitlines()
-    if agent_result.return_code != 0 or len(lines) != 2:
-        fail(f"could not run a command as {agent_user!r} (does the account exist in the image?)", agent_result)
-    uid, gid = lines[0].strip(), lines[1].strip()
-    if uid == "0":
-        fail(f"commands run as {agent_user!r} still resolve to uid 0", agent_result)
-    if gid == "0":
-        fail(f"commands run as {agent_user!r} resolve to gid 0", agent_result)
-    if isinstance(agent_user, int) and uid != str(agent_user):
-        fail(f"commands run as uid {agent_user} resolved to uid {uid}", agent_result)
 
 
 def _instruction(input_value: Any) -> str:
@@ -412,7 +352,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             )
 
             await environment.exec("mkdir -p /logs/agent", user="root")
-            if not _is_root_agent_user(agent_user):
+            if not is_root_agent_user(agent_user):
                 # Harbor does this for its agent dir: the su'd tmux `pipe-pane 'cat > /logs/agent/terminus_2.pane'`
                 # otherwise fails silently. Never touch /logs/verifier.
                 await environment.exec("chmod 777 /logs/agent", user="root")
@@ -432,8 +372,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                     "Downloading and installing tmux in the sandbox. Please consider mounting or uploading the appropriate tmux binary instead!",
                     file=sys.stderr,
                 )
-            if not _is_root_agent_user(agent_user):
-                await _check_agent_user(environment, agent_user)
+            if not is_root_agent_user(agent_user):
+                await check_agent_user(environment, agent_user)
             await agent.setup(environment)
 
             try:
@@ -515,7 +455,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             # The resources server is the authority for the per-row identity (mirrors Harbor task.toml `[agent] user`);
             # a row value (including the explicit "root" / 0 image-default escape hatch) wins over the lane config.
             # Normalized inside the cleanup wrapper so a malformed echo (e.g. `true`) also stops the sandbox.
-            row_agent_user = _normalize_agent_user(seed_session_result.get("agent_user"))
+            row_agent_user = normalize_agent_user(seed_session_result.get("agent_user"))
             agent_user = row_agent_user if row_agent_user is not None else self.config.agent_user
             self._session_agent_users[session_key] = agent_user
 
@@ -531,7 +471,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             )
             await raise_for_status(verification)
         except BaseException:
-            # Fail-closed paths (e.g. _check_agent_user) must not leak the sandbox until its TTL. The resources
+            # Fail-closed paths (e.g. check_agent_user) must not leak the sandbox until its TTL. The resources
             # server's `_session_id_to_sandbox` entry is left behind by design (pre-existing; not this change).
             self._session_sandboxes.pop(session_key, None)
             self._session_agent_users.pop(session_key, None)

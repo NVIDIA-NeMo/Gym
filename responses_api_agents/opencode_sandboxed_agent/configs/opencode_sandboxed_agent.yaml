@@ -21,6 +21,11 @@ opencode_sandboxed_agent:
       remote_opencode_binary_path: null
       remote_opencode_musl_binary_path: null
 
+      # Identity for the in-sandbox opencode process and every tool call the model makes (account
+      # name for `su`, or a uid). null = image default. A row-level `agent_user` echoed by
+      # /seed_session wins. A non-root value requires a root-default image with that account.
+      agent_user: null
+
       # Taken from https://github.com/sdevare-nv/nv-opencode/blob/f261004b4e4269a6e193fd242e5ec8ced9a7aec0/packages/opencode/src/bench/cli.ts#L198-L325
       opencode_config:
         permission:

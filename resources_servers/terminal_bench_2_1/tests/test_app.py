@@ -21,7 +21,6 @@ from resources_servers.terminal_bench_2_1.app import (
     TerminalBench21ResourcesServerConfig,
     TerminalBench21SeedSessionRequest,
     TerminalBench21VerifyRequest,
-    normalize_agent_user,
     uploaded_subdirectories,
 )
 
@@ -150,17 +149,7 @@ class TestApp:
 
 
 class TestAgentUserNormalization:
-    @pytest.mark.parametrize(("raw", "expected"), NORMALIZED_AGENT_USERS)
-    def test_normalize_agent_user_accepts_names_uids_and_null(self, raw, expected) -> None:
-        normalized = normalize_agent_user(raw)
-        assert normalized == expected
-        assert type(normalized) is type(expected)
-
-    @pytest.mark.parametrize("raw", REJECTED_AGENT_USERS)
-    def test_normalize_agent_user_rejects_bools_and_option_like_names(self, raw) -> None:
-        with pytest.raises(ValueError, match=AGENT_USER_ERROR):
-            normalize_agent_user(raw)
-
+    # The normalizer's own table lives in tests/unit_tests/test_sandbox_agent_user.py; these cover the schema wiring.
     @pytest.mark.parametrize(("raw", "expected"), NORMALIZED_AGENT_USERS)
     def test_request_normalizes_agent_user(self, raw, expected) -> None:
         body = TerminalBench21SeedSessionRequest(

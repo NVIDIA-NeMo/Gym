@@ -25,8 +25,8 @@ provider runs the agent's commands through `su`), an `int` is a uid. Digit-only 
   when present, otherwise the lane default. A row value of `"root"` (or `0`) is the explicit per-row
   image default: it beats a lane default such as `agent` and skips the agent's identity check. For mixed
   pools, leave the lane default at `null` and set `agent_user` per row.
-- Today only `terminus_2_sandboxed_agent` honors `agent_user`; other allowed agents (for example
-  `opencode_sandboxed_agent`) run as the image default regardless of the row.
+- `terminus_2_sandboxed_agent` and `opencode_sandboxed_agent` honor `agent_user`; other allowed agents run
+  as the image default regardless of the row.
 - The verifier (`mkdir -p /tests`, the `tests/` upload and `bash /tests/test.sh`) always runs as the
   image default (root on the supported images), regardless of `agent_user`. A non-root `agent_user`
   therefore requires a root-default image on which that account exists (the `<task_hash>-userroot`

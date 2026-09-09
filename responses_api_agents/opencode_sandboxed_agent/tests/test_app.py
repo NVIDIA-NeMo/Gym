@@ -22,7 +22,8 @@ from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
 
-from pytest import MonkeyPatch, fixture, mark
+from pydantic import ValidationError
+from pytest import MonkeyPatch, fixture, mark, raises
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
@@ -49,10 +50,18 @@ from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_agents.opencode_sandboxed_agent import app as app_module
 from responses_api_agents.opencode_sandboxed_agent.app import (
+    _AGENT_HOME_RESET,
     OpenCodeSandboxedAgent,
     OpenCodeSandboxedAgentConfig,
     OpenCodeSandboxedAgentRunRequest,
+    _agent_home_prefix,
 )
+
+
+# The exact `session list` and `export` commands issued with no identity (image default); the identity-bearing
+# variants must be these strings with `_AGENT_HOME_RESET` prepended and nothing else changed.
+SESSION_LIST_COMMAND = "export PATH=$HOME/.opencode/bin:$PATH && opencode session list --format json"
+EXPORT_COMMAND = "export PATH=$HOME/.opencode/bin:$PATH && opencode export session-id > /tmp/opencode_export.json"
 
 
 class TestOpenCodeSandboxedAgent:
@@ -572,3 +581,490 @@ class TestOpenCodeSandboxedAgent:
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert server._sandbox_id_to_run_result == {}
         assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
+
+
+class RecordingSandbox:
+    """Fake AsyncSandbox that records every ``exec(command, **kwargs)`` and serves scripted results in order.
+
+    ``script`` maps a command marker to the result returned when the recorded command contains that marker; the
+    identity check commands are served from ``check_results`` so a test can script a violation.
+    """
+
+    def __init__(self, *, root_uid: str = "0", agent_output: str = "1000\n1000", agent_return_code: int = 0):
+        self.calls: list[tuple[str, Any]] = []
+        self.kwargs: list[dict[str, Any]] = []
+        self.download = AsyncMock()
+        self.stop = AsyncMock()
+        self._handle = SandboxHandle(sandbox_id="connected-sandbox", provider_name="opensandbox", raw=None)
+        self._root_uid = root_uid
+        self._agent_output = agent_output
+        self._agent_return_code = agent_return_code
+
+    async def exec(self, command: str, **kwargs: Any) -> SimpleNamespace:
+        self.calls.append((command, kwargs.get("user")))
+        self.kwargs.append(kwargs)
+        if command == "id -u":
+            return SimpleNamespace(stdout=self._root_uid, stderr="", return_code=0, error_type=None)
+        if command == "id -u && id -g":
+            return SimpleNamespace(
+                stdout=self._agent_output, stderr="", return_code=self._agent_return_code, error_type=None
+            )
+        if "opencode run" in command:
+            return SimpleNamespace(
+                stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
+            )
+        if "opencode session list" in command:
+            return SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None)
+        return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+
+
+def _marker(command: str) -> str:
+    """Reduce a recorded exec command to the marker the assertions compare against."""
+    if command in ("id -u", "id -u && id -g"):
+        return command
+    if "opencode run" in command:
+        return "install+run"
+    if "opencode session list" in command:
+        return "session list"
+    if "opencode export" in command:
+        return "export"
+    if command.startswith("python3 -c "):
+        return "snapshot"
+    return command
+
+
+class TestOpenCodeSandboxedAgentUser:
+    @fixture
+    def opencode_export_test_data(self) -> Dict[str, Any]:
+        return json.loads((Path(__file__).parent / "opencode_export_test_data.json").read_text())
+
+    def _create_config(self, **overrides: Any) -> OpenCodeSandboxedAgentConfig:
+        return OpenCodeSandboxedAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            resources_server=ResourcesServerRef(type="resources_servers", name=""),
+            model_server=ModelServerRef(type="responses_api_models", name=""),
+            opencode_version="",
+            sandbox_provider="",
+            sandbox_config=dict(),
+            sandbox_timeout=0,
+            opencode_max_context_window=0,
+            token_id_capture=True,
+            **overrides,
+        )
+
+    @mark.parametrize(
+        ("value", "expected"),
+        [(None, None), ("agent", "agent"), ("1000", 1000), (1000, 1000), ("root", "root"), (0, 0)],
+    )
+    def test_config_normalizes_agent_user(self, value: Any, expected: Any) -> None:
+        config = self._create_config(agent_user=value)
+        assert config.agent_user == expected
+        assert type(config.agent_user) is type(expected)
+
+    def test_config_defaults_agent_user_to_none(self) -> None:
+        assert self._create_config().agent_user is None
+
+    @mark.parametrize("value", [True, False, "", "-m", 1.5])
+    def test_config_rejects_malformed_agent_user(self, value: Any) -> None:
+        with raises(ValidationError):
+            self._create_config(agent_user=value)
+
+    @mark.parametrize(
+        ("agent_user", "expected"),
+        [(None, ""), ("root", ""), (0, ""), ("agent", _AGENT_HOME_RESET), (1000, _AGENT_HOME_RESET)],
+        ids=("none", "root", "uid-0", "name", "uid"),
+    )
+    def test_agent_home_prefix(self, agent_user: Any, expected: str) -> None:
+        assert _agent_home_prefix(agent_user) == expected
+        # POSIX sh, not bash: the provider's `su -s /bin/sh -c` and execd's uid path both run plain `sh`.
+        assert "getent passwd" in _AGENT_HOME_RESET and _AGENT_HOME_RESET.endswith(" && ")
+        assert "${ng_home:-$HOME}" in _AGENT_HOME_RESET, "an empty getent result must fall back to the current HOME"
+
+    def _patch_responses_io(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, opencode_export_test_data: Dict[str, Any]
+    ) -> None:
+        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.__file__", str(tmp_path / "app.py"))
+        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.Path.exists", lambda self: True)
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.Path.read_text",
+            lambda self: json.dumps(opencode_export_test_data),
+        )
+        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", MagicMock(return_value=MagicMock(hex="")))
+
+    def _request(self, *, observations: bool) -> MagicMock:
+        state = SimpleNamespace(_ng_observation_invocation_id="rollout-1") if observations else SimpleNamespace()
+        return MagicMock(
+            session={SESSION_ID_KEY: "my session"},
+            cookies={"sandbox_id": "session-key"},
+            path_params={"rollout_id": "direct-call"},
+            state=state,
+        )
+
+    @mark.parametrize("observations", [False, True], ids=("no-observations", "observations"))
+    async def test_responses_runs_check_first_then_every_exec_as_agent_user(
+        self,
+        tmp_path: Path,
+        opencode_export_test_data: Dict[str, Any],
+        monkeypatch: MonkeyPatch,
+        observations: bool,
+    ) -> None:
+        self._patch_responses_io(monkeypatch, tmp_path, opencode_export_test_data)
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+        server._create_opencode_config = AsyncMock(return_value={})
+        sandbox = RecordingSandbox()
+        server._sandbox_id_to_sandbox["session-key"] = sandbox
+        server._sandbox_id_to_agent_user["session-key"] = "agent"
+
+        response = await server.responses(
+            request=self._request(observations=observations),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+        )
+
+        expected = [
+            ("id -u", "root"),
+            ("id -u && id -g", "agent"),
+            ("install+run", "agent"),
+            ("session list", "agent"),
+            ("export", "agent"),
+        ]
+        if observations:
+            expected.append(("snapshot", "agent"))
+        assert [(_marker(command), user) for command, user in sandbox.calls] == expected
+        # The check ran before anything model-controlled: the install+run exec is strictly after both id probes.
+        assert _marker(sandbox.calls[2][0]) == "install+run"
+        assert "opencode run" in sandbox.calls[2][0] and "$HOME/.opencode/bin" in sandbox.calls[2][0]
+        assert sandbox.kwargs[2]["timeout_s"] == server.config.sandbox_timeout
+        # Under a non-root identity the three opencode commands pin $HOME first (the uid path skips `su`, so it
+        # would otherwise inherit /root); the snapshot addresses the store by absolute path and needs no reset.
+        assert sandbox.calls[2][0].startswith(_AGENT_HOME_RESET)
+        assert sandbox.calls[3][0] == _AGENT_HOME_RESET + SESSION_LIST_COMMAND
+        assert sandbox.calls[4][0] == _AGENT_HOME_RESET + EXPORT_COMMAND
+        if observations:
+            assert "getent" not in sandbox.calls[5][0]
+        assert isinstance(response, NeMoGymResponse)
+        assert server._sandbox_id_to_run_result["session-key"]["opencode_finished"] is True
+
+    @mark.parametrize("observations", [False, True], ids=("no-observations", "observations"))
+    async def test_responses_without_identity_runs_no_check_and_every_exec_as_image_default(
+        self,
+        tmp_path: Path,
+        opencode_export_test_data: Dict[str, Any],
+        monkeypatch: MonkeyPatch,
+        observations: bool,
+    ) -> None:
+        self._patch_responses_io(monkeypatch, tmp_path, opencode_export_test_data)
+        server = OpenCodeSandboxedAgent(
+            config=self._create_config(agent_user=None), server_client=MagicMock(spec=ServerClient)
+        )
+        server._create_opencode_config = AsyncMock(return_value={})
+        sandbox = RecordingSandbox()
+        server._sandbox_id_to_sandbox["session-key"] = sandbox
+        # No per-session entry and a lane default of None: the lookup must fall back to "image default", not KeyError.
+
+        await server.responses(
+            request=self._request(observations=observations),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+        )
+
+        expected = [("install+run", None), ("session list", None), ("export", None)]
+        if observations:
+            expected.append(("snapshot", None))
+        assert [(_marker(command), user) for command, user in sandbox.calls] == expected
+        assert all(kwargs["user"] is None for kwargs in sandbox.kwargs)
+        # Byte-for-byte the pre-`agent_user` commands: no HOME reset anywhere without an identity.
+        assert sandbox.calls[0][0].startswith('\n        echo "Shell: $SHELL"')
+        assert sandbox.calls[1][0] == SESSION_LIST_COMMAND
+        assert sandbox.calls[2][0] == EXPORT_COMMAND
+        assert not any("getent" in command for command, _ in sandbox.calls)
+
+    @mark.parametrize("observations", [False, True], ids=("no-observations", "observations"))
+    @mark.parametrize("agent_user", ["agent", 1000], ids=("name", "uid"))
+    async def test_responses_identity_only_prepends_home_reset_to_opencode_commands(
+        self,
+        tmp_path: Path,
+        opencode_export_test_data: Dict[str, Any],
+        monkeypatch: MonkeyPatch,
+        observations: bool,
+        agent_user: Any,
+    ) -> None:
+        """The identity-bearing commands are exactly the image-default commands with the HOME reset prepended."""
+        self._patch_responses_io(monkeypatch, tmp_path, opencode_export_test_data)
+        # Pin the per-rollout XDG_DATA_HOME so the two runs compose the same install+run command.
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.uuid4", MagicMock(return_value=MagicMock(hex="fixed"))
+        )
+        commands: dict[Any, list[str]] = {}
+        for identity in (None, agent_user):
+            server = OpenCodeSandboxedAgent(
+                config=self._create_config(agent_user=None), server_client=MagicMock(spec=ServerClient)
+            )
+            server._create_opencode_config = AsyncMock(return_value={})
+            sandbox = RecordingSandbox()
+            server._sandbox_id_to_sandbox["session-key"] = sandbox
+            server._sandbox_id_to_agent_user["session-key"] = identity
+            await server.responses(
+                request=self._request(observations=observations),
+                body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+            )
+            # Drop the two identity-check probes so both lists line up as install+run, session list, export[, snapshot].
+            commands[identity] = [command for command, _ in sandbox.calls if not command.startswith("id -u")]
+
+        baseline, with_identity = commands[None], commands[agent_user]
+        assert len(baseline) == len(with_identity) == (4 if observations else 3)
+        assert with_identity[0] == _AGENT_HOME_RESET + baseline[0]
+        assert with_identity[1] == _AGENT_HOME_RESET + baseline[1]
+        assert with_identity[2] == _AGENT_HOME_RESET + baseline[2]
+        if observations:
+            assert with_identity[3] == baseline[3]
+
+    async def test_responses_without_session_entry_falls_back_to_lane_agent_user(
+        self, tmp_path: Path, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch
+    ) -> None:
+        self._patch_responses_io(monkeypatch, tmp_path, opencode_export_test_data)
+        # No per-session entry (responses() reached without run()), lane default "agent": the lane default must
+        # not be lost, so the check runs and every exec carries "agent".
+        server = OpenCodeSandboxedAgent(
+            config=self._create_config(agent_user="agent"), server_client=MagicMock(spec=ServerClient)
+        )
+        server._create_opencode_config = AsyncMock(return_value={})
+        sandbox = RecordingSandbox()
+        server._sandbox_id_to_sandbox["session-key"] = sandbox
+        assert "session-key" not in server._sandbox_id_to_agent_user
+
+        await server.responses(
+            request=self._request(observations=False),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+        )
+
+        assert [(_marker(command), user) for command, user in sandbox.calls] == [
+            ("id -u", "root"),
+            ("id -u && id -g", "agent"),
+            ("install+run", "agent"),
+            ("session list", "agent"),
+            ("export", "agent"),
+        ]
+        assert sandbox.calls[3][0] == _AGENT_HOME_RESET + SESSION_LIST_COMMAND
+
+    async def test_responses_row_root_skips_check_and_passes_root_through(
+        self, tmp_path: Path, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch
+    ) -> None:
+        self._patch_responses_io(monkeypatch, tmp_path, opencode_export_test_data)
+        # Lane says "agent"; the per-session (row) identity says "root": the escape hatch wins and no check runs.
+        server = OpenCodeSandboxedAgent(
+            config=self._create_config(agent_user="agent"), server_client=MagicMock(spec=ServerClient)
+        )
+        server._create_opencode_config = AsyncMock(return_value={})
+        sandbox = RecordingSandbox()
+        server._sandbox_id_to_sandbox["session-key"] = sandbox
+        server._sandbox_id_to_agent_user["session-key"] = "root"
+
+        await server.responses(
+            request=self._request(observations=False),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+        )
+
+        assert [(_marker(command), user) for command, user in sandbox.calls] == [
+            ("install+run", "root"),
+            ("session list", "root"),
+            ("export", "root"),
+        ]
+
+    @mark.parametrize(
+        ("sandbox_kwargs", "condition"),
+        [
+            ({"agent_output": "0\n0"}, "still resolve to uid 0"),
+            ({"agent_output": "", "agent_return_code": 1}, "could not run a command as 'agent'"),
+            ({"root_uid": "1000"}, "image default user must be root"),
+        ],
+        ids=("agent-uid-0", "agent-exec-rc-1", "image-default-not-root"),
+    )
+    async def test_responses_fails_closed_before_install(
+        self,
+        tmp_path: Path,
+        opencode_export_test_data: Dict[str, Any],
+        monkeypatch: MonkeyPatch,
+        sandbox_kwargs: Dict[str, Any],
+        condition: str,
+    ) -> None:
+        self._patch_responses_io(monkeypatch, tmp_path, opencode_export_test_data)
+        # The failing check must stop everything before the install command is built or run.
+        server = OpenCodeSandboxedAgent(
+            config=self._create_config(),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        server._create_opencode_config = AsyncMock(return_value={})
+        sandbox = RecordingSandbox(**sandbox_kwargs)
+        server._sandbox_id_to_sandbox["session-key"] = sandbox
+        server._sandbox_id_to_agent_user["session-key"] = "agent"
+
+        with raises(RuntimeError, match=condition) as excinfo:
+            await server.responses(
+                request=self._request(observations=False),
+                body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+            )
+
+        assert "agent_user='agent'" in str(excinfo.value)
+        markers = [_marker(command) for command, _ in sandbox.calls]
+        assert "install+run" not in markers and "session list" not in markers and "export" not in markers
+        assert markers == (["id -u"] if "root_uid" in sandbox_kwargs else ["id -u", "id -u && id -g"])
+        server._create_opencode_config.assert_not_awaited()
+        assert "session-key" not in server._sandbox_id_to_run_result
+
+    def _run_harness(
+        self, monkeypatch: MonkeyPatch, *, lane_agent_user: Any, seed_payload: Dict[str, Any]
+    ) -> tuple[Any, ...]:
+        """Wire a server whose ``responses`` records the identity it sees and whose ``/verify`` post is captured."""
+
+        class Response:
+            ok = True
+
+            def __init__(self, payload: dict[str, Any]):
+                self.payload = payload
+                self.cookies: dict[str, str] = {}
+
+            async def json(self) -> dict[str, Any]:
+                return self.payload
+
+            async def read(self) -> bytes:
+                return json.dumps(self.payload).encode()
+
+        class RunRequest:
+            def __init__(self) -> None:
+                self._cookies: dict[str, str] = {}
+                self.session = {SESSION_ID_KEY: "session-1"}
+                self.state = SimpleNamespace()
+
+            @property
+            def cookies(self) -> dict[str, str]:
+                return self._cookies
+
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {
+            "observability_enabled": False,
+            "token_id_capture": {"enabled": False, "all_agents": False},
+        }
+        server = OpenCodeSandboxedAgent(
+            config=self._create_config(agent_user=lane_agent_user), server_client=server_client
+        )
+        sandbox = RecordingSandbox()
+        server._start_sandbox = AsyncMock(return_value=sandbox)
+        seen: dict[str, Any] = {}
+        posted: dict[str, Any] = {}
+
+        async def fake_responses(agent: OpenCodeSandboxedAgent, request: Any, body: Any) -> NeMoGymResponse:
+            assert agent is server
+            session_key = request.cookies["sandbox_id"]
+            seen["agent_user"] = server._sandbox_id_to_agent_user[session_key]
+            seen["sandbox"] = server._sandbox_id_to_sandbox[session_key]
+            server._sandbox_id_to_run_result[session_key] = {
+                "opencode_results_fpath": "",
+                "opencode_run_stdout": "",
+                "opencode_run_stderr": "",
+                "opencode_export_found": False,
+                "opencode_finished": True,
+            }
+            return NeMoGymResponse(
+                id="resp_x",
+                created_at=0,
+                model="",
+                object="response",
+                output=[],
+                parallel_tool_calls=True,
+                tool_choice="auto",
+                tools=[],
+            )
+
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", fake_responses)
+
+        async def post(server_name, url_path, json=None, cookies=None):
+            if url_path == "/seed_session":
+                return Response(seed_payload)
+            assert url_path == "/verify"
+            posted.update(json)
+            return Response(json | {"reward": 1.0})
+
+        server_client.post = AsyncMock(side_effect=post)
+        body = OpenCodeSandboxedAgentRunRequest.model_validate(
+            {"responses_create_params": {"input": [{"role": "user", "content": "solve"}]}}
+        )
+        return server, sandbox, RunRequest(), body, seen, posted
+
+    @mark.parametrize(
+        ("lane_agent_user", "seed_payload", "expected"),
+        [
+            (None, {"sandbox_handle": "seed-sandbox", "agent_user": "agent"}, "agent"),
+            (None, {"sandbox_handle": "seed-sandbox", "agent_user": "1000"}, 1000),
+            ("agent", {"sandbox_handle": "seed-sandbox"}, "agent"),
+            ("agent", {"sandbox_handle": "seed-sandbox", "agent_user": None}, "agent"),
+            ("agent", {"sandbox_handle": "seed-sandbox", "agent_user": "root"}, "root"),
+            ("agent", {"sandbox_handle": "seed-sandbox", "agent_user": 0}, 0),
+            (None, {"sandbox_handle": "seed-sandbox"}, None),
+        ],
+        ids=(
+            "row-wins",
+            "row-digit-string-normalized",
+            "lane-fallback",
+            "row-null-lane",
+            "row-root-beats-lane",
+            "row-0-beats-lane",
+            "neither",
+        ),
+    )
+    async def test_run_precedence_and_verify_payload(
+        self, monkeypatch: MonkeyPatch, lane_agent_user: Any, seed_payload: Dict[str, Any], expected: Any
+    ) -> None:
+        server, sandbox, request, body, seen, posted = self._run_harness(
+            monkeypatch, lane_agent_user=lane_agent_user, seed_payload=seed_payload
+        )
+
+        result = await server.run(request, body)
+
+        assert seen["agent_user"] == expected
+        assert type(seen["agent_user"]) is type(expected)
+        assert seen["sandbox"] is sandbox
+        assert "agent_user" in posted and posted["agent_user"] == expected
+        assert posted["response"]["id"] == "resp_x"
+        assert result.reward == 1.0
+        sandbox.stop.assert_awaited_once()
+        assert server._sandbox_id_to_sandbox == {}
+        assert server._sandbox_id_to_agent_user == {}
+        assert server._sandbox_id_to_run_result == {}
+
+    async def test_run_rejects_malformed_row_echo_and_stops_sandbox(self, monkeypatch: MonkeyPatch) -> None:
+        server, sandbox, request, body, seen, posted = self._run_harness(
+            monkeypatch, lane_agent_user=None, seed_payload={"sandbox_handle": "seed-sandbox", "agent_user": True}
+        )
+
+        with raises(ValueError, match="agent_user must be an account name"):
+            await server.run(request, body)
+
+        assert seen == {} and posted == {}
+        sandbox.stop.assert_awaited_once()
+        assert server._sandbox_id_to_sandbox == {}
+        assert server._sandbox_id_to_agent_user == {}
+
+    @mark.parametrize("stop_raises", [False, True], ids=("stop-ok", "stop-raises"))
+    async def test_run_cleans_up_when_responses_raises(self, monkeypatch: MonkeyPatch, stop_raises: bool) -> None:
+        server, sandbox, request, body, seen, posted = self._run_harness(
+            monkeypatch, lane_agent_user="agent", seed_payload={"sandbox_handle": "seed-sandbox"}
+        )
+        if stop_raises:
+            sandbox.stop = AsyncMock(side_effect=ConnectionError("provider gone"))
+
+        async def failing_responses(agent: OpenCodeSandboxedAgent, request: Any, body: Any) -> NeMoGymResponse:
+            raise RuntimeError("agent_user='agent' identity check failed")
+
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", failing_responses)
+
+        with raises(RuntimeError, match="identity check failed"):
+            await server.run(request, body)
+
+        sandbox.stop.assert_awaited_once()
+        assert server._sandbox_id_to_sandbox == {}
+        assert server._sandbox_id_to_agent_user == {}
+        assert server._sandbox_id_to_run_result == {}
+        assert posted == {}, "/verify must not be posted when the agent phase failed"
+        assert not hasattr(request.state, "_ng_observation_invocation_id")

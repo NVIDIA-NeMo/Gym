@@ -19,6 +19,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.sandbox.agent_user import check_agent_user
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.terminus_2_sandboxed_agent import app as app_module
 from responses_api_agents.terminus_2_sandboxed_agent.app import (
@@ -27,9 +28,7 @@ from responses_api_agents.terminus_2_sandboxed_agent.app import (
     Terminus2Agent,
     Terminus2AgentConfig,
     Terminus2AgentRunRequest,
-    _check_agent_user,
     _instruction,
-    _normalize_agent_user,
 )
 
 
@@ -430,47 +429,16 @@ async def test_execute_fails_closed_when_identity_check_fails(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("agent_user", "root_result", "agent_result", "message"),
-    [
-        ("agent", ("1000\n", 0), ("1000\n1000\n", 0), "image default user must be root"),
-        ("agent", ("", 1), ("1000\n1000\n", 0), "image default user must be root"),
-        ("agent", ("0\n", 0), ("", 1), "could not run a command as 'agent'"),
-        ("agent", ("0\n", 0), ("1000\n", 0), "could not run a command as 'agent'"),
-        ("agent", ("0\n", 0), ("0\n0\n", 0), "still resolve to uid 0"),
-        ("agent", ("0\n", 0), ("1000\n0\n", 0), "resolve to gid 0"),
-        (1000, ("0\n", 0), ("1001\n1001\n", 0), "run as uid 1000 resolved to uid 1001"),
-    ],
-)
-async def test_check_agent_user_rejects_each_violation(agent_user, root_result, agent_result, message):
-    sandbox_calls = []
-
-    async def sandbox_exec(command, **kwargs):
-        sandbox_calls.append((command, kwargs["user"]))
-        stdout, return_code = root_result if command == "id -u" else agent_result
-        return SimpleNamespace(stdout=stdout, stderr="err", return_code=return_code)
-
-    environment = NeMoGymSandboxEnvironment(
-        SimpleNamespace(exec=sandbox_exec), logs_dir=SimpleNamespace(), session_id="s", default_user=agent_user
-    )
-    with pytest.raises(RuntimeError, match=message) as excinfo:
-        await _check_agent_user(environment, agent_user)
-
-    assert f"agent_user={agent_user!r}" in str(excinfo.value)
-    assert "stderr='err'" in str(excinfo.value)
-    assert sandbox_calls[0] == ("id -u", "root")
-    assert sandbox_calls[1:] in ([], [("id -u && id -g", agent_user)])
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("agent_user", ["agent", 1000])
-async def test_check_agent_user_accepts_non_root_identity(agent_user):
+async def test_sandbox_environment_serves_as_check_agent_user_executor(agent_user):
+    # The helper-level tables live in tests/unit_tests/test_sandbox_agent_user.py; this covers the adapter side:
+    # the shared check drives NeMoGymSandboxEnvironment.exec with the exact user kwargs the sandbox receives.
     sandbox_calls = []
     environment = NeMoGymSandboxEnvironment(
         SimpleNamespace(exec=_identity_sandbox_exec(sandbox_calls)), logs_dir=SimpleNamespace(), session_id="s"
     )
 
-    await _check_agent_user(environment, agent_user)
+    await check_agent_user(environment, agent_user)
 
     assert sandbox_calls == [("id -u", ROOT_EXEC_KWARGS), ("id -u && id -g", _exec_kwargs(agent_user))]
 
@@ -494,19 +462,6 @@ NORMALIZED_AGENT_USERS = [
 # as options; shlex.quote leaves "-m" unquoted).
 REJECTED_AGENT_USERS = [True, False, "", "-m", "--login", "-"]
 AGENT_USER_ERROR = "agent_user must be an account name, a uid, or null"
-
-
-@pytest.mark.parametrize(("value", "expected"), NORMALIZED_AGENT_USERS)
-def test_normalize_agent_user_accepts_names_uids_and_null(value, expected):
-    normalized = _normalize_agent_user(value)
-    assert normalized == expected
-    assert type(normalized) is type(expected)
-
-
-@pytest.mark.parametrize("value", REJECTED_AGENT_USERS)
-def test_normalize_agent_user_rejects_bools_and_option_like_names(value):
-    with pytest.raises(ValueError, match=AGENT_USER_ERROR):
-        _normalize_agent_user(value)
 
 
 @pytest.mark.parametrize(("value", "expected"), NORMALIZED_AGENT_USERS)

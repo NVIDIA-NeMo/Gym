@@ -62,8 +62,8 @@ silently running as root. When `agent_user` is non-root the agent also runs `chm
 
 Scope and residual risk:
 
-- `agent_user` is honored only by `terminus_2_sandboxed_agent` today; other allowed agents
-  (for example `opencode_sandboxed_agent`) run as the image default.
+- `agent_user` is honored by `terminus_2_sandboxed_agent` and `opencode_sandboxed_agent`; other
+  allowed agents run as the image default.
 - The verifier always runs as the image default (root on the supported images), regardless of
   `agent_user`.
 - Agent processes are not terminated before verification (service tasks need them alive while
