@@ -14,9 +14,13 @@ from automationbench.rubric import create_rubric
 from automationbench.runner import AutomationBenchEnv
 
 
-def load_environment(domains=None, max_turns: int = 50, toolset: str = "api",
-                     search_top_k=None, **kwargs):
+def load_environment(domains=None, max_turns: int = 50, toolset: str = "api", search_top_k=None, **kwargs):
     dataset = get_combined_dataset(list(domains) if domains else list(DEFAULT_DOMAINS))
-    return AutomationBenchEnv(dataset=dataset, rubric=create_rubric(),
-                              max_turns=max_turns, toolset=toolset,
-                              search_top_k=search_top_k, **kwargs)
+    return AutomationBenchEnv(
+        dataset=dataset,
+        rubric=create_rubric(),
+        max_turns=max_turns,
+        toolset=toolset,
+        search_top_k=search_top_k,
+        **kwargs,
+    )

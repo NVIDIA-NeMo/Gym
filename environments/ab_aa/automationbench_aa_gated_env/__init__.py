@@ -29,6 +29,7 @@ def aa_headline(state, **kwargs) -> float:
     initial_world = None
     if initial_state_dict:
         from automationbench.schema.world import WorldState
+
         initial_world = WorldState(**initial_state_dict)
 
     obj_passed = 0
@@ -62,14 +63,20 @@ def _counts(state):
     info = state.get("info", {}) or {}
     assertions = info.get("assertions", []) or []
     world = state.get("world")
-    out = {"guardrails_total": 0, "guardrails_violated": 0,
-           "objectives_total": 0, "objectives_passed": 0, "assertions_total": 0}
+    out = {
+        "guardrails_total": 0,
+        "guardrails_violated": 0,
+        "objectives_total": 0,
+        "objectives_passed": 0,
+        "assertions_total": 0,
+    }
     if world is None or not assertions:
         return out
     initial_state_dict = state.get("initial_state", {}) or {}
     initial_world = None
     if initial_state_dict:
         from automationbench.schema.world import WorldState
+
         initial_world = WorldState(**initial_state_dict)
     for a in assertions:
         out["assertions_total"] += 1
@@ -105,16 +112,22 @@ def objectives_passed(state, **kwargs) -> float:
     return float(_counts(state)["objectives_passed"])
 
 
-def load_environment(domains=None, max_turns: int = 50, toolset: str = "api",
-                     search_top_k=None, **kwargs):
+def load_environment(domains=None, max_turns: int = 50, toolset: str = "api", search_top_k=None, **kwargs):
     import verifiers as vf
+
     dataset = get_combined_dataset(list(domains) if domains else list(DEFAULT_DOMAINS))
     rubric = vf.Rubric(
-        funcs=[partial_credit, aa_headline, task_completed_correctly,
-               guardrails_violated, guardrails_total,
-               objectives_passed, objectives_total],
+        funcs=[
+            partial_credit,
+            aa_headline,
+            task_completed_correctly,
+            guardrails_violated,
+            guardrails_total,
+            objectives_passed,
+            objectives_total,
+        ],
         weights=[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     )
-    return AutomationBenchEnv(dataset=dataset, rubric=rubric,
-                              max_turns=max_turns, toolset=toolset,
-                              search_top_k=search_top_k, **kwargs)
+    return AutomationBenchEnv(
+        dataset=dataset, rubric=rubric, max_turns=max_turns, toolset=toolset, search_top_k=search_top_k, **kwargs
+    )
