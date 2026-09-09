@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -210,6 +211,43 @@ def test_stage_rejects_shared_cache_and_local_cache_outside_self_mount(inputs, t
     monkeypatch.setenv("HF_HOME", str(path))
     with pytest.raises(ValueError, match="outside the mounted runtime"):
         _stage(inputs)
+
+
+def test_long_runtime_uses_short_tmp_forwarded_through_ray_mount(inputs, monkeypatch) -> None:
+    with tempfile.TemporaryDirectory(prefix="gdpval-", dir="/tmp") as temporary:
+        local = Path(temporary).resolve()
+        job = local / ("job-" + "x" * 100)
+        ray = local / "r" / "1"
+        paths = {name: job / name.lower() for name in serving.CONTAINER_ENV}
+        paths.update(RAY_TMPDIR=ray, TMPDIR=ray / "tmp")
+        for name, path in paths.items():
+            path.mkdir(parents=True, exist_ok=True)
+            monkeypatch.setenv(name, str(path))
+        root = job / "serving"
+        manifest = serving.stage(root, inputs.image, inputs.model, runtime_root=job, local_root=local)
+        assert serving.verify(root, local_root=local) == manifest
+        assert len(str(job / "tmp" / ("a" * 36)).encode()) > 107
+        assert len(str(paths["TMPDIR"] / ("a" * 36)).encode()) <= 107
+        assert manifest["container_environment"]["TMPDIR"] == str(paths["TMPDIR"])
+        assert "TMPDIR" in manifest["environment"]["PYXIS_CONTAINER_ENV"].split(",")
+        assert manifest["runtime_mounts"] == [str(job), str(ray)]
+        assert manifest["environment"]["EXTRA_MOUNTS"] == f"{job}:{job},{ray}:{ray}"
+
+
+@pytest.mark.parametrize("location", ["outside", "ray-root", "symlink-escape"])
+def test_stage_rejects_external_tmp_outside_ray_subdirectory(inputs, monkeypatch, location) -> None:
+    outside = inputs.local / "ray-other"
+    outside.mkdir()
+    ray = inputs.local / "ray"
+    if location == "symlink-escape":
+        path = ray / "tmp"
+        path.symlink_to(outside, target_is_directory=True)
+    else:
+        path = ray if location == "ray-root" else outside
+    monkeypatch.setenv("TMPDIR", str(path))
+    with pytest.raises(ValueError, match="outside the mounted runtime: TMPDIR"):
+        _stage(inputs)
+    assert not inputs.root.exists()
 
 
 def test_verify_rejects_environment_drift_before_serving(inputs, monkeypatch) -> None:

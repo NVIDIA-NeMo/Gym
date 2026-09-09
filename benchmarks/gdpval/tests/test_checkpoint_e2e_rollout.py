@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import socket
 import subprocess
 import sys
 import tempfile
@@ -402,6 +403,8 @@ printf 'first=%s second=%s\n' "$first" "$second"
 
 def test_rollout_runtime_resets_inherited_reference_caches_before_starting_python(tmp_path: Path) -> None:
     job = tmp_path / "local-job"
+    helper = tmp_path / "mars_node_local.sh"
+    helper.write_text(MARS_HELPER.read_text().replace("/raid/scratch/", f"{tmp_path}/"))
     result = subprocess.run(
         [
             "bash",
@@ -410,14 +413,14 @@ def test_rollout_runtime_resets_inherited_reference_caches_before_starting_pytho
 set -euo pipefail
 source "$1"
 mars_stage_rollout_gym() {
-    [[ -d $HF_HOME && -d $HF_DATASETS_CACHE && -d $GDPVAL_REF_FILES_DIR ]] || return 68
-    printf '%s\n' "$HF_HOME" "$HF_DATASETS_CACHE" "$GDPVAL_REF_FILES_DIR"
+    [[ -d $HF_HOME && -d $HF_DATASETS_CACHE && -d $GDPVAL_REF_FILES_DIR && -d $TMPDIR ]] || return 68
+    printf '%s\n' "$HF_HOME" "$HF_DATASETS_CACHE" "$GDPVAL_REF_FILES_DIR" "$TMPDIR" "$RAY_TMPDIR"
     return 67
 }
 if mars_prepare_rollout_runtime; then exit 1; else [[ $? == 67 ]]; fi
 """,
             "cache-reset-test",
-            str(MARS_HELPER),
+            str(helper),
         ],
         env={
             **os.environ,
@@ -430,6 +433,8 @@ if mars_prepare_rollout_runtime; then exit 1; else [[ $? == 67 ]]; fi
             "HF_HOME": "/lustre/shared/huggingface",
             "HF_DATASETS_CACHE": "/lustre/shared/datasets",
             "GDPVAL_REF_FILES_DIR": "/lustre/shared/references",
+            "TMPDIR": "/lustre/shared/tmp",
+            "RAY_TMPDIR": "/lustre/shared/ray",
         },
         text=True,
         capture_output=True,
@@ -441,4 +446,54 @@ if mars_prepare_rollout_runtime; then exit 1; else [[ $? == 67 ]]; fi
         str(job / "cache/huggingface"),
         str(job / "cache/huggingface/datasets"),
         str(job / "tmp/reference_files"),
+        str(tmp_path / "test/r/123/tmp"),
+        str(tmp_path / "test/r/123"),
     ]
+
+
+def test_rollout_temporary_directory_fits_vllm_uuid_sockets_with_the_failed_job_prefix() -> None:
+    production_root = Path("/raid/scratch")
+    failed_job = Path("spanev/gdpval-e2e-smoke-abf65224f/jobs/7014398-rollout-0")
+    socket_name = "e30c3a9e-58f0-4793-818a-64e8e52ae5cc"
+    assert len(os.fsencode(production_root / failed_job / "tmp" / socket_name)) > 107
+
+    # Exercise the real shell reset using the failed production suffix. Only
+    # relocate the node mount; a short test prefix also permits a real bind on
+    # macOS, whose Unix socket address limit is slightly lower than Linux's.
+    with tempfile.TemporaryDirectory(prefix="rt-", dir="/tmp") as name:
+        local_root = Path(name)
+        helper = local_root / "mars_node_local.sh"
+        helper.write_text(MARS_HELPER.read_text().replace("/raid/scratch/", f"{local_root}/"))
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                r"""
+set -euo pipefail
+source "$1"
+mars_stage_rollout_gym() { [[ -d $TMPDIR ]] || return 68; printf '%s\n' "$TMPDIR"; return 67; }
+if mars_prepare_rollout_runtime; then exit 1; else [[ $? == 67 ]]; fi
+""",
+                "socket-bound-test",
+                str(helper),
+            ],
+            env={
+                **os.environ,
+                "MARS_JOB_ROOT": str(local_root / failed_job),
+                "MARS_USER": "spanev",
+                "MARS_UV_DIR": str(local_root / "bin"),
+                "SLURM_JOB_ID": "7014398",
+                "TREE": "/lustre/source",
+                "ROLLOUT_GYM_REVISION": "a" * 40,
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        temporary = Path(result.stdout.strip())
+        production_tmp = production_root / temporary.relative_to(local_root)
+        assert production_tmp == Path("/raid/scratch/spanev/r/7014398/tmp")
+        assert len(os.fsencode(production_tmp / socket_name)) <= 107
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(temporary / socket_name))

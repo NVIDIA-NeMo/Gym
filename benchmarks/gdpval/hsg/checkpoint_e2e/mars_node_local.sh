@@ -5,7 +5,7 @@
 
 [[ -n ${BASH_VERSION:-} ]] || { echo "MARS_STAGE_FAIL: bash is required" >&2; return 64 2>/dev/null || exit 64; }
 
-MARS_PACKAGE_ID_EXPECTED=checkpoint-e2e-1.4.13-mars-local-r11-20260908
+MARS_PACKAGE_ID_EXPECTED=checkpoint-e2e-1.4.13-mars-local-r12-20260908
 MARS_GYM_REVISION_EXPECTED=d3f146d386c7dfe07d4fabce32c4c8b14c7917d2
 
 mars_fail() { echo "MARS_STAGE_FAIL: $*" >&2; return 64; }
@@ -275,8 +275,10 @@ mars_prepare_rollout_runtime() {
     local sif_signature apptainer_signature
     # Profiles may carry old cache paths. Reassert locality before any Python
     # or dependency setup, including worker reference and framework caches.
-    export TMPDIR=$MARS_JOB_ROOT/tmp UV_CACHE_DIR=$MARS_JOB_ROOT/cache/uv
     export RAY_TMPDIR=/raid/scratch/$MARS_USER/r/$SLURM_JOB_ID
+    # vLLM also appends UUIDs to Unix socket paths under TMPDIR. Reuse Ray's
+    # bounded prefix so long campaign/job names cannot exceed Linux's limit.
+    export TMPDIR=$RAY_TMPDIR/tmp UV_CACHE_DIR=$MARS_JOB_ROOT/cache/uv
     export XDG_CACHE_HOME=$MARS_JOB_ROOT/cache/xdg
     export APPTAINER_TMPDIR=$MARS_JOB_ROOT/tmp/apptainer APPTAINER_CACHEDIR=$MARS_JOB_ROOT/cache/apptainer
     export PYTHONPYCACHEPREFIX=$MARS_JOB_ROOT/cache/pycache
@@ -286,7 +288,7 @@ mars_prepare_rollout_runtime() {
     export PYTHONNOUSERSITE=1
     unset NEMO_GYM_VENV_BIN UV_PYTHON UV_CONFIG_FILE UV_CONSTRAINT UV_OVERRIDE
     unset HF_HUB_CACHE HUGGINGFACE_HUB_CACHE TRANSFORMERS_CACHE
-    install -d -m 0700 "$HF_HOME" "$HF_DATASETS_CACHE" "$GDPVAL_REF_FILES_DIR" || return
+    install -d -m 0700 "$TMPDIR" "$HF_HOME" "$HF_DATASETS_CACHE" "$GDPVAL_REF_FILES_DIR" || return
     export PATH=$MARS_UV_DIR:/cm/local/apps/slurm/current/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     mars_stage_rollout_gym "$TREE" "$ROLLOUT_GYM_REVISION" || return
     TREE=$MARS_GYM

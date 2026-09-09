@@ -100,6 +100,7 @@ def stage(
     if not root.resolve().is_relative_to(runtime_root) or root.resolve() == runtime_root:
         raise ValueError("serving root must be below the node-local runtime root")
     container_environment = {}
+    cache_paths = {}
     runtime_mounts = [str(runtime_root)]
     for name in CONTAINER_ENV:
         if not os.environ.get(name):
@@ -109,11 +110,18 @@ def stage(
             raise ValueError(f"serving cache must be a directory: {name}={path}")
         if any(character in str(path) for character in ":,\n\r"):
             raise ValueError(f"unsupported serving cache mount path: {path}")
-        if not path.is_relative_to(runtime_root):
-            if name != "RAY_TMPDIR":
-                raise ValueError(f"serving cache is outside the mounted runtime: {name}={path}")
-            runtime_mounts.append(str(path))
+        cache_paths[name] = path
         container_environment[name] = os.environ[name]
+    for name, path in cache_paths.items():
+        if path.is_relative_to(runtime_root):
+            continue
+        if name == "RAY_TMPDIR":
+            runtime_mounts.append(str(path))
+        elif name == "TMPDIR" and path != cache_paths["RAY_TMPDIR"] and path.is_relative_to(cache_paths["RAY_TMPDIR"]):
+            # Ray's self-mount also exposes vLLM's short Unix socket directory.
+            continue
+        else:
+            raise ValueError(f"serving cache is outside the mounted runtime: {name}={path}")
     if root.exists() or root.is_symlink():
         raise ValueError(f"refusing an existing serving stage: {root}")
     image, model = _source(image), _source(model)
