@@ -31,19 +31,19 @@ deepsearchqa_claude_code_benchmark:
       harness_class: ClaudeCodeAgent
       harness_config_class: ClaudeCodeAgentConfig
       harness_kwargs:
-        model: ${oc.env:DEEPSEARCHQA_MODEL,nvidia/qwen/qwen3.8-27b}
+        model: nvidia/qwen/qwen3.8-27b
         max_turns: 30
         timeout: 900
         bare: true
         system_prompt: You must call an Exa MCP search tool before answering. Use Exa to research the question on the web, do not substitute local file searches for web research.
-        claude_code_version: ${oc.env:CLAUDE_CODE_VERSION,null}
-      image: ${oc.env:DEEPSEARCHQA_IMAGE}
-      setup_command: ${oc.env:DEEPSEARCHQA_SETUP_COMMAND,null}
+        claude_code_version: null
+      image: nikolaik/python-nodejs:python3.13-nodejs22-slim
+      setup_command: python3 -m pip install -q nemo-gym==0.6.0
       sandbox_provider: sandbox
       sandbox_spec:
         ttl_s: 1800
       sandbox_model_base_url: null
-      exa_api_key: ${oc.env:EXA_API_KEY,null}
+      exa_api_key: null
       token_id_capture: false
       datasets:
         - name: deepsearchqa
