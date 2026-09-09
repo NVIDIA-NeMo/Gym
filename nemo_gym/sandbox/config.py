@@ -166,3 +166,5 @@ def resolve_provider_metadata(
             f"Sandbox '{SANDBOX_BLOCK_DEFAULT_METADATA_KEY}' from {source} must be a mapping, got: {metadata!r}"
         )
     return dict(metadata)
+
+# no-op: touched to test suggest-reviewers workflow (nemo_gym/sandbox/ -> team suggestion)
