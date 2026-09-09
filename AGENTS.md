@@ -134,11 +134,13 @@ gym env resolve --config ...
 
 ## Code Style
 
+- `pyproject.toml` is authoritative for Python, Ruff, formatter, and coverage settings;
+  `.pre-commit-config.yaml` is authoritative for the hooks that enforce them.
 - Line length: 119
 - Python 3.13.14+, async-first
 - Ruff for linting and formatting (double quotes, isort)
-- Test coverage must be >= 96%
-- All commits require DCO sign-off (`-s`). Cryptographic signing (`-S`) is optional and not enforced by CI.
+- CI reads the coverage threshold from `[tool.coverage.report].fail_under` via `scripts/ci/cov_fail_under.py`; do not
+  hard-code a second threshold in contributor guidance.
 
 ## Pre-commit Hooks
 
