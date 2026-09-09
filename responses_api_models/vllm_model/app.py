@@ -178,7 +178,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     return_token_id_information: bool
     # Request inline prompt and generation token IDs from compatible vLLM endpoints.
     request_prompt_and_generation_token_ids: bool = False
-    propagate_context_overflow_errors: bool = True
+    propagate_context_overflow_errors: bool = False
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True

@@ -762,7 +762,7 @@ PARAMETERIZE_DATA = [
 
 
 class TestApp:
-    def _setup_server(self, monkeypatch: MonkeyPatch, *, propagate_context_overflow_errors: bool = True):
+    def _setup_server(self, monkeypatch: MonkeyPatch, *, propagate_context_overflow_errors: bool = False):
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
@@ -783,7 +783,7 @@ class TestApp:
         return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
-        assert self._setup_server(monkeypatch).config.propagate_context_overflow_errors
+        assert not self._setup_server(monkeypatch).config.propagate_context_overflow_errors
 
     @mark.parametrize("propagate", [False, True])
     def test_context_overflow_propagation_flag(self, monkeypatch: MonkeyPatch, propagate: bool) -> None:
