@@ -27,7 +27,49 @@ from nemo_gym.orchestration.executors.connection import Connection, LocalConnect
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 
 
-_SBATCH_JOB_ID_RE = re.compile(r"Submitted batch job (\d+)")
+# Each sbatch reports its own result on a line that names its benchmark, so a
+# failure cannot shift the benchmarks after it onto the wrong job ids.
+_MARKER = "__GYM_JOB:"
+
+# Benchmark names are interpolated into the marker line, so they must not carry
+# its delimiter or anything the shell would act on.
+_VALID_BENCHMARK_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _sbatch_command(benchmark: str, script: Path) -> str:
+    """One `sbatch` that reports its own benchmark, exit status and output.
+
+    `rc` is captured immediately: `$?` after the `tr` pipeline would be *tr's*
+    status, which is zero however badly sbatch failed. `tr` flattens sbatch's
+    multi-line error messages so the whole result stays on one marker line.
+    """
+    if not _VALID_BENCHMARK_NAME.match(benchmark):
+        raise ValueError(
+            f"Invalid benchmark name {benchmark!r}: names must match {_VALID_BENCHMARK_NAME.pattern} "
+            "so they can be reported back from the submit script."
+        )
+    return (
+        f"out=$(sbatch --parsable {shlex.quote(str(script))} 2>&1); rc=$?; "
+        "out=$(echo \"$out\" | tr '\\n' ' '); "
+        f'echo "{_MARKER}{benchmark}:$rc:$out"'
+    )
+
+
+def _parse_sbatch_results(output: str) -> dict[str, tuple[str | None, str | None]]:
+    """Benchmark name to `(job_id, error)`, exactly one of which is set."""
+    results: dict[str, tuple[str | None, str | None]] = {}
+    for line in output.splitlines():
+        if not line.startswith(_MARKER):
+            continue
+        benchmark, _, rest = line[len(_MARKER) :].partition(":")
+        status, _, payload = rest.partition(":")
+        payload = payload.strip()
+        if status == "0":
+            # A federated sbatch answers "jobid;cluster"; the ledger wants the id.
+            results[benchmark] = (payload.split(";")[0], None)
+        else:
+            results[benchmark] = (None, payload or f"sbatch exited {status}")
+    return results
 
 
 def _validate_mounts(config: SubmitConfig, conn: Connection) -> None:
