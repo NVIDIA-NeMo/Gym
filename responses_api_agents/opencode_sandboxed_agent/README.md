@@ -1,4 +1,12 @@
 # OpenCode Sandboxed Agent
+
+## Prerequisites
+
+Complete [OpenSandbox access and setup](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/opensandbox#setup)
+before launching: obtain a service-operator-issued key (or deploy your own server),
+configure a reachable endpoint, and confirm network access and resource limits.
+The sandbox-service key is separate from model and image-registry credentials.
+
 ```bash
 # In terminal 1
 gym env start \

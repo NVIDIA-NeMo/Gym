@@ -6,6 +6,11 @@ SWE-bench Multilingual, and R2E-Gym.
 
 ## Run
 
+First complete [OpenSandbox access and setup](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/opensandbox#setup)
+to obtain service credentials or deploy your own server, configure a reachable
+endpoint, and confirm network access and resource limits. Sandbox-service,
+model, and image-registry credentials are separate.
+
 Create `env.yaml` for the policy model:
 
 ```yaml
