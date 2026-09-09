@@ -66,6 +66,10 @@ def main() -> None:
         for i in range(n):
             row = dataset[i]
             prompt = row["prompt"]
+            # AutomationBench stores info as a JSON string; the agent needs a dict
+            info = row.get("info", {})
+            if isinstance(info, str):
+                info = json.loads(info) if info else {}
             output_row = {
                 "task_idx": i,
                 "vf_env_id": VF_ENV_ID,
@@ -77,7 +81,7 @@ def main() -> None:
                 "question": prompt[-1]["content"] if prompt else "",
                 "answer": row.get("answer", ""),
                 "example_id": row["example_id"],
-                "info": row.get("info", {}),
+                "info": info,
             }
             f.write(json.dumps(output_row) + "\n")
 
