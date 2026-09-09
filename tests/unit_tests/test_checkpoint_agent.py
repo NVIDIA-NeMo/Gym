@@ -706,6 +706,19 @@ def test_restore_rejects_corrupted_boundary_before_activation(tmp_path) -> None:
     assert participant.resolve("rollout-a", 1) is None
 
 
+def test_restore_rejects_manifest_without_continuation_index(tmp_path) -> None:
+    directory = tmp_path / AGENT_STATE_SUBDIR
+    directory.mkdir()
+    (directory / AGENT_MANIFEST_NAME).write_text(
+        '{"schema_version": 1, "checkpoint_id": "checkpoint-1", "instance_name": null, "files": {}}'
+    )
+
+    participant = AgentCheckpointParticipant()
+    with pytest.raises(AgentCheckpointError, match="missing its continuation index"):
+        restore_agent_state(participant, tmp_path)
+    assert participant.resolve("rollout-a", 1) is None
+
+
 @pytest.mark.asyncio
 async def test_restore_rejects_corrupted_continuation_index_before_activation(tmp_path) -> None:
     participant = AgentCheckpointParticipant()

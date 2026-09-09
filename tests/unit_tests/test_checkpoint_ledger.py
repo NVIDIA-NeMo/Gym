@@ -151,6 +151,26 @@ def test_restore_rejects_corrupt_storage_reference_index_before_install(tmp_path
     assert not restored.exists()
 
 
+def test_restore_rejects_manifest_without_storage_reference_index(tmp_path) -> None:
+    source = tmp_path / "source"
+    _write_custody(source, "rollout-a")
+    checkpoint = tmp_path / "checkpoint"
+    CaptureLedgerCheckpointer(source).commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+    )
+    manifest_path = checkpoint / MODEL_LEDGER_SUBDIR / LEDGER_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["storage_reference_index"]
+    manifest_path.write_text(json.dumps(manifest))
+
+    restored = tmp_path / "restored"
+    with pytest.raises(LedgerMismatchError, match="missing its storage-reference index"):
+        CaptureLedgerCheckpointer(restored).restore(checkpoint)
+    assert not restored.exists()
+
+
 def test_continuation_scope_rejects_duplicate_and_retired_roots(tmp_path) -> None:
     source = tmp_path / "source"
     _write_custody(source, "rollout-a")
