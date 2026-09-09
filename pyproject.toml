@@ -611,6 +611,16 @@ ng_reinstall = "nemo_gym.cli.legacy:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = [
+    "benchmarks",
+    "benchmarks.*",
+    "resources_servers",
+    "resources_servers.*",
+    "responses_api_agents",
+    "responses_api_agents.*",
+    "responses_api_models",
+    "responses_api_models.*",
+    "environments",
+    "environments.*",
     "nemo_gym",
     "nemo_gym.*",
 ]
