@@ -28,13 +28,19 @@ tasks for reasons that have nothing to do with the model.
 """
 
 import asyncio
+import base64
 import json
 import logging
-from typing import Any, Dict
+import uuid
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import aiohttp
 
 from nemo_gym.server_utils import request
+
+
+if TYPE_CHECKING:
+    from nemo_gym.sandbox import SandboxSpec
 
 
 LOG = logging.getLogger(__name__)
@@ -109,4 +115,124 @@ class Lean4SandboxClient:
             )
             return response.status == 200
         except (aiohttp.ClientError, asyncio.TimeoutError):
+            return False
+
+
+class GymSandboxLean4Client:
+    """Compile Lean 4 inside a Gym-managed sandbox instead of an HTTP sandbox server.
+
+    Same ``execute_lean4`` contract as :class:`Lean4SandboxClient`, so ``app.py`` picks one
+    or the other and nothing else changes.
+
+    This backend exists because the HTTP route needs a sandbox process that somebody else
+    started and kept alive at a known host:port -- which on Slurm means a second
+    ``srun --overlap`` outside Gym's control, since ``ServiceConfig`` models only ``vllm``
+    and ``ray``. Going through ``nemo_gym.sandbox`` instead lets the resources server own
+    its own sandbox, the way ``swebench``/``deepswe``/``litmus_agent`` already do, and makes
+    the enroot provider (the HPC-native one) usable without any extra launch step.
+
+    It also runs the same command upstream does -- ``lake env lean <file>`` -- rather than
+    NeMo-Skills' Flask wrapper around it.
+
+    One sandbox is created lazily and shared: verification is stateless, and the provider's
+    own ``exec.concurrency`` bounds parallel compiles.
+    """
+
+    def __init__(
+        self,
+        provider: Dict[str, Any],
+        spec: Dict[str, Any],
+        lean_project_dir: str = "/lean4/my_project",
+        max_output_characters: int = 4000,
+    ):
+        self.provider = provider
+        self.spec = spec
+        self.lean_project_dir = lean_project_dir
+        self.max_output_characters = max_output_characters
+        self._sandbox: Any = None
+        self._lock: Optional[asyncio.Lock] = None
+
+    def _build_spec(self) -> "SandboxSpec":
+        from nemo_gym.sandbox import SandboxResources, SandboxSpec
+
+        spec = dict(self.spec)
+        known = SandboxSpec(
+            image=spec.pop("image", None),
+            ttl_s=spec.pop("ttl_s", None),
+            ready_timeout_s=spec.pop("ready_timeout_s", None),
+            workdir=spec.pop("workdir", None),
+            env=dict(spec.pop("env", {})),
+            files=dict(spec.pop("files", {})),
+            metadata=dict(spec.pop("metadata", {})),
+            resources=SandboxResources.from_mapping(spec.pop("resources", {})),
+            entrypoint=spec.pop("entrypoint", None),
+            provider_options=dict(spec.pop("provider_options", {})),
+        )
+        if spec:
+            raise ValueError(f"Unknown sandbox_spec keys: {', '.join(sorted(spec))}")
+        return known
+
+    async def _ensure_sandbox(self) -> Any:
+        from nemo_gym.sandbox import AsyncSandbox
+
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            if self._sandbox is None:
+                LOG.info("Starting Lean sandbox via nemo_gym.sandbox provider")
+                self._sandbox = await AsyncSandbox(self.provider, self._build_spec()).start()
+        return self._sandbox
+
+    async def execute_lean4(self, code: str, timeout: float = 300.0) -> Dict[str, Any]:
+        """Compile ``code`` with ``lake env lean`` and report what the compiler said.
+
+        The file is shipped in base64 and decoded inside the sandbox rather than
+        interpolated into the shell command. Lean sources are full of quotes, backslashes
+        and unicode, and a heredoc delimiter can appear inside a proof -- base64 removes
+        every quoting question at once.
+        """
+        try:
+            sandbox = await self._ensure_sandbox()
+        except Exception as exc:  # pragma: no cover - provider-specific failures
+            LOG.error("Could not start Lean sandbox: %s", exc)
+            return {"process_status": "error", "stdout": "", "stderr": f"Sandbox start failed: {exc}"}
+
+        encoded = base64.b64encode(code.encode("utf-8")).decode("ascii")
+        path = f"/tmp/leancat_{uuid.uuid4().hex}.lean"
+        command = (
+            f"printf %s {encoded} | base64 -d > {path} && "
+            f"cd {self.lean_project_dir} && lake env lean {path}; "
+            # Preserve lean's status across the cleanup so a failed compile is not masked.
+            f"status=$?; rm -f {path}; exit $status"
+        )
+
+        try:
+            result = await sandbox.exec(command, timeout_s=timeout)
+        except Exception as exc:  # pragma: no cover - provider-specific failures
+            LOG.error("Lean sandbox exec failed: %s", exc)
+            return {"process_status": "error", "stdout": "", "stderr": f"Sandbox exec failed: {exc}"}
+
+        stdout = (result.stdout or "")[: self.max_output_characters]
+        stderr = (result.stderr or "")[: self.max_output_characters]
+
+        if getattr(result, "error_type", None) == "timeout":
+            return {"process_status": "timeout", "stdout": stdout, "stderr": stderr, "return_code": None}
+        if getattr(result, "error_type", None):
+            return {"process_status": "error", "stdout": stdout, "stderr": stderr, "return_code": None}
+
+        # `completed` means the command ran, not that Lean accepted the file; `return_code`
+        # carries that, and determine_proof_status treats non-zero as a compile error.
+        return {
+            "process_status": "completed",
+            "stdout": stdout,
+            "stderr": stderr,
+            "return_code": result.return_code,
+        }
+
+    async def health_check(self, timeout: float = 5.0) -> bool:
+        try:
+            sandbox = await self._ensure_sandbox()
+            result = await sandbox.exec("lake --version", timeout_s=timeout)
+            return result.return_code == 0
+        except Exception:
             return False

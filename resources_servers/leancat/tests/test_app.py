@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 import json
 import re
 from pathlib import Path
@@ -40,6 +41,7 @@ from resources_servers.leancat.app import (
     LeanCatVerifyRequest,
 )
 from resources_servers.leancat.proof_utils import check_statement_preserved
+from resources_servers.leancat.sandbox_client import GymSandboxLean4Client, Lean4SandboxClient
 
 
 DATA_DIR = Path(__file__).absolute().parent.parent / "data"
@@ -412,3 +414,96 @@ class TestPromptVariants:
         for a, b in zip(_load_rows("train.jsonl"), _load_rows("paper_d1_train.jsonl")):
             assert a["verifier_metadata"] == b["verifier_metadata"]
             assert a["responses_create_params"] != b["responses_create_params"]
+
+
+class TestGymSandboxBackend:
+    """Selecting and driving `nemo_gym.sandbox` instead of the HTTP sandbox server."""
+
+    def _config(self, **overrides) -> LeanCatResourcesServerConfig:
+        base = dict(host="0.0.0.0", port=8080, entrypoint="", name="leancat", compilation_timeout=300.0)
+        return LeanCatResourcesServerConfig(**{**base, **overrides})
+
+    def _server(self, config) -> LeanCatResourcesServer:
+        return LeanCatResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def test_http_client_is_the_default(self):
+        server = self._server(self._config())
+        assert isinstance(server._sandbox_client, Lean4SandboxClient)
+
+    def test_sandbox_provider_selects_the_gym_backend(self):
+        server = self._server(
+            self._config(
+                sandbox_provider={"enroot": {}},
+                sandbox_spec={"image": "base.sqsh"},
+                lean_project_dir="/lean4/my_project",
+            )
+        )
+        assert isinstance(server._sandbox_client, GymSandboxLean4Client)
+        assert server._sandbox_client.lean_project_dir == "/lean4/my_project"
+
+    def test_unknown_sandbox_spec_key_fails_loudly(self):
+        client = GymSandboxLean4Client(provider={"enroot": {}}, spec={"image": "x.sqsh", "bogus": 1})
+        with pytest.raises(ValueError, match="Unknown sandbox_spec keys: bogus"):
+            client._build_spec()
+
+    @pytest.mark.asyncio
+    async def test_exec_ships_the_file_as_base64_and_runs_lake_env_lean(self):
+        captured = {}
+
+        class _Result:
+            stdout, stderr, return_code, error_type = "", "", 0, None
+
+        class _Sandbox:
+            async def exec(self, command, timeout_s=None):
+                captured["command"] = command
+                return _Result()
+
+        client = GymSandboxLean4Client(provider={"enroot": {}}, spec={}, lean_project_dir="/lean4/proj")
+        client._sandbox = _Sandbox()
+
+        # Quotes, backslashes and unicode are all routine in Lean; none may reach the shell.
+        code = 'theorem t : True := by\n  have h : "a\\"b" = "a\\"b" := rfl\n  trivial  -- 𝟭 ≫ α'
+        result = await client.execute_lean4(code, timeout=42.0)
+
+        assert result["process_status"] == "completed"
+        assert result["return_code"] == 0
+        command = captured["command"]
+        assert "lake env lean" in command and "cd /lean4/proj" in command
+        # The source must appear only as base64, never inline.
+        assert base64.b64encode(code.encode()).decode() in command
+        assert "theorem t" not in command
+        # A failed compile must not be masked by the cleanup's exit status.
+        assert "status=$?" in command and "exit $status" in command
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_scores_zero_even_with_no_error_text(self):
+        """`lake env lean` can fail without the word "error:" in captured output.
+
+        String-matching alone would call that a proof, so the exit status has to win.
+        """
+        server = self._server(self._config(sandbox_provider={"enroot": {}}, sandbox_spec={}))
+        server._sandbox_client.execute_lean4 = AsyncMock(
+            return_value={"process_status": "completed", "stdout": "", "stderr": "", "return_code": 1}
+        )
+        app = TestLeanCatApp()
+        result = await server.verify(app._create_request(f"```lean4\n{SOLVED}\n```"))
+        assert result.reward == 0.0
+        assert result.proof_status == STATUS_COMPILE_ERROR
+
+    @pytest.mark.asyncio
+    async def test_zero_exit_scores_one(self):
+        server = self._server(self._config(sandbox_provider={"enroot": {}}, sandbox_spec={}))
+        server._sandbox_client.execute_lean4 = AsyncMock(
+            return_value={"process_status": "completed", "stdout": "", "stderr": "", "return_code": 0}
+        )
+        app = TestLeanCatApp()
+        result = await server.verify(app._create_request(f"```lean4\n{SOLVED}\n```"))
+        assert result.reward == 1.0
+        assert result.proof_status == STATUS_COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_sandbox_start_failure_is_a_diagnosable_zero_not_a_crash(self):
+        client = GymSandboxLean4Client(provider={"nonexistent_provider": {}}, spec={})
+        result = await client.execute_lean4("theorem t : True := trivial")
+        assert result["process_status"] == "error"
+        assert "Sandbox start failed" in result["stderr"]
