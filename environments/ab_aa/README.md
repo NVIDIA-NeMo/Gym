@@ -1,4 +1,4 @@
-# ab_aa
+# AutomationBench-AA
 
 AutomationBench scored with the Artificial Analysis headline metric.
 
