@@ -7,20 +7,38 @@ before launching: obtain a service-operator-issued key (or deploy your own serve
 configure a reachable endpoint, and confirm network access and resource limits.
 The sandbox-service key is separate from model and image-registry credentials.
 
+## First evaluation
+
+From the repository root, with Gym installed and model/sandbox access configured, use the
+canonical SWE-bench Verified recipe. See the [first-run guide](https://docs.nvidia.com/nemo/gym/main/agent-server/opencode-first-run)
+for prerequisites, the resolved server binding, artifact inspection and cleanup.
+
 ```bash
+# Prepare the input before starting servers (downloads SWE-bench Verified).
+gym eval prepare --config benchmarks/swebench/verified/opencode.yaml
+
 # In terminal 1
 gym env start \
-    --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+    --model-type vllm_model \
     --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
-    --config responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml \
-    --config resources_servers/swebench/configs/swebench.yaml
+    --config benchmarks/swebench/verified/opencode.yaml \
+    ++swebench_verified_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.sandbox_timeout=900 \
+    ++swebench_verified_opencode_resources_server.resources_servers.swebench.evaluation_timeout=600
 
-# In terminal 2
-python responses_api_agents/opencode_sandboxed_agent/client.py \
-    +benchmark_jsonl=benchmarks/swebench/data/swebench_verified_benchmark.jsonl
+# In terminal 2, with the same Gym environment activated
+gym eval run --no-serve \
+    --agent swebench_verified_opencode_sandboxed_agent \
+    --input benchmarks/swebench/data/swebench_verified_benchmark.jsonl \
+    --output results/opencode_smoke/rollouts.jsonl \
+    --limit 1 \
+    --num-repeats 1 \
+    --concurrency 1
 ```
 
-For E2E functional testing, run as above and remove the actual opencode run command from the exec.
+Keep the OpenCode execution command intact: the agent's `/run` calls the SWE-bench verifier.
+Removing the execution command is only a plumbing test, not an agent evaluation. This smoke
+run can consume model tokens and billable sandbox resources; its short execution/test timeouts
+are not benchmark-quality budgets. A successful HTTP request alone is not validation.
 
 ## OpenCode binary: online or pre-staged
 
@@ -67,7 +85,7 @@ must be set; supplying only one still selects the online-download branch.
    OpenSandbox accepts operator-supplied `volumes` through
    [`SandboxSpec.provider_options`](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/opensandbox#sandboxspec-provider-options).
    For this SWE-bench recipe, sandbox creation options belong to
-   `swebench_resources_server.resources_servers.swebench.sandbox_config.provider_options`,
+   `swebench_verified_opencode_resources_server.resources_servers.swebench.sandbox_config.provider_options`,
    not just the agent's fallback sandbox config. The mount definition and
    backing-storage access are deployment-specific; obtain them from the operator.
 
@@ -97,7 +115,7 @@ must be set; supplying only one still selects the online-download branch.
    server-start command:
 
    ```yaml
-   opencode_sandboxed_agent:
+   swebench_verified_opencode_sandboxed_agent:
      responses_api_agents:
        opencode_sandboxed_agent:
          opencode_version: 1.17.11

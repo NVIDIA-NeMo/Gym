@@ -1,0 +1,104 @@
+---
+title: "First OpenCode Evaluation"
+description: "Prepare and inspect a bounded OpenCode agent and SWE-bench verifier smoke run."
+position: 5
+---
+
+# First OpenCode Evaluation
+
+Use the commands in the [sandboxed OpenCode README](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/opencode_sandboxed_agent/README.md#first-evaluation)
+for a one-task SWE-bench Verified smoke run. This guide explains the prerequisites,
+configuration and evidence needed to judge that run. It is not a recorded successful
+rollout or a benchmark/model validation claim.
+
+## Before running
+
+Complete [installation](/main/get-started/installation), configure a compatible model
+endpoint using [Configure Models](/main/model-server), and obtain
+[OpenSandbox access](/main/infrastructure/sandbox/opensandbox).
+The example uses the `vllm_model` adapter; set `policy_base_url`, `policy_api_key` and
+`policy_model_name` in your local, uncommitted `env.yaml`. Sandbox-service and model
+credentials are separate. Match `opencode_max_context_window` to your model's supported
+context window before running; its shipped value is not appropriate for every model.
+
+Preparation downloads the `princeton-nlp/SWE-bench_Verified` test split from Hugging Face.
+The host must reach that dataset, and the sandbox deployment must be able to pull the
+task images selected by SWE-bench. The sandbox also needs access to the model proxy and
+the required OpenCode binaries; consult the README's binary-staging instructions if
+direct downloads are unavailable. Stop and resolve missing access rather than removing
+the agent command or bypassing verification.
+
+<Warning>
+The README runs one task, once, at concurrency one. It limits OpenCode execution to
+900 seconds and verifier tests to 600 seconds. These limits do not include all image
+pull, startup, retry and export time; they are not a total wall-clock or spending cap.
+Agree service quota and model usage limits with the operators first. A task may time
+out under these intentionally small smoke-test budgets.
+</Warning>
+
+## Configuration and execution
+
+Run `gym eval prepare` before server startup; it writes
+`benchmarks/swebench/data/swebench_verified_benchmark.jsonl`. Both preparation and
+startup use `benchmarks/swebench/verified/opencode.yaml`.
+
+That recipe inherits the generic components and binds these instances:
+
+| Role | Resolved instance |
+| --- | --- |
+| Agent passed to `--agent` | `swebench_verified_opencode_sandboxed_agent` |
+| Agent's `resources_server.name` | `swebench_verified_opencode_resources_server` |
+| Agent's `model_server.name` | `policy_model` |
+
+The generic agent YAML intentionally leaves `resources_server.name: ???`; the benchmark
+recipe supplies it. Do not substitute the standalone `client.py` here: it hard-codes the
+generic agent instance rather than the benchmark-specific one.
+
+Start servers in one terminal, then run `gym eval run --no-serve` in another terminal
+from the same repository and activated environment. The explicit `--num-repeats 1`
+overrides the recipe's three-repeat benchmark setting. The agent's `/run` performs
+OpenCode execution and then calls the bound resources server's `/verify`, which tests
+the resulting patch in a verification sandbox. No separate golden-patch command is
+needed for this agent smoke run.
+
+## Inspect the evidence
+
+Keep `results/opencode_smoke/rollouts.jsonl`, the sibling materialized-input and aggregate
+metric files, and the relevant server logs. Use a new output location for later runs so
+you do not confuse existing results with fresh evidence. Inspect the single rollout:
+
+- Confirm `instance_id` matches the materialized task input.
+- Inspect `response.output` for the actual model/tool trajectory, not merely an HTTP
+  success or a server-health check.
+- Check `opencode_finished`, `opencode_export_found`, `opencode_run_stdout` and
+  `opencode_run_stderr`. Inspect the exported session at `opencode_results_fpath` on
+  the agent-server host when present. A missing export or incomplete agent execution
+  requires investigation even if a verifier response exists.
+- Check `evaluation_completed`, `test_output`, `model_patch`, `resolved` and `reward`.
+  `evaluation_completed: true` means the evaluation completed; it does not mean the
+  task was solved. A completed unresolved task can legitimately have `reward: 0`.
+  An infrastructure failure or timeout is not evidence that the model failed the task.
+- Review the generated rollout-health report and server logs for errors. A missing
+  `response` or verifier fields must not be accepted as a successful smoke test.
+
+SWE-bench clears its raw verification debug directory by default, so `log_dir` may be
+empty even though `test_output` is included in the response. For an approved diagnostic
+run, set the recipe resources server's `clear_swebench_debug_logs=false` at startup and
+collect the resulting directory from that server host. Treat traces and logs as
+potentially sensitive; redact credentials and private task content before sharing.
+
+## Cleanup and recording a result
+
+After collection finishes, press Ctrl-C in the server terminal to stop the local Gym
+processes. Normal agent/verifier paths attempt to stop their sandboxes, but interrupted
+or failed requests can leave resources behind. Confirm that both this run's execution
+and verification sandboxes are gone using your provider's run-specific IDs and operator
+cleanup procedure. Local process shutdown is not proof of remote cleanup. The shipped
+sandbox TTL is five hours; treat expiry as a fallback, not prompt cleanup. Never delete
+another user's sandbox or perform a broad provider-wide cleanup.
+
+Record the Gym commit, harness version, model/provider configuration without secrets,
+task ID, run limits, observed agent/verifier outcome, artifact locations and confirmed
+cleanup. If access or capacity prevented execution, record **not run** and the blocker.
+A modified harness that skips OpenCode may help diagnose plumbing, but cannot satisfy
+this smoke test or establish evaluation readiness.
