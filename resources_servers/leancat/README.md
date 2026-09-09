@@ -198,3 +198,42 @@ python prepare_leancat.py --records local.jsonl --prompt prompts/static-passk.md
 
 - Code: Apache-2.0
 - LeanCat dataset: CC BY 4.0 — upstream evaluation code is MIT
+
+## Running it
+
+### 1. Build the sandbox (do this first — it is the long pole)
+
+**The stock NeMo-Skills sandbox will not work.** It pins Lean/Mathlib **v4.12.0**; LeanCat needs **v4.19.0**. On
+the wrong Mathlib the `CategoryTheory` statements fail with ordinary-looking "unknown identifier" errors, so a full
+eval returns a plausible near-zero score that looks like a model result and is not one.
+
+```bash
+./build_sandbox.sh /path/to/containers     # repins to v4.19.0, builds, exports a .sqsh
+```
+
+Hours, not minutes: `lake exe cache get` only hits when the Mathlib tag matches, otherwise it compiles from source.
+
+### 2. Verify the sandbox before spending anything on inference
+
+```bash
+python check_sandbox.py --host <node> --port 6000
+```
+
+Compiles all 100 reference statements **unmodified**. Each still contains its `sorry`, so each must come back with a
+"declaration uses 'sorry'" warning and no errors. No model, no GPU. If this fails, nothing downstream is meaningful.
+
+### 3. Prepare and run
+
+```bash
+gym eval prepare --benchmark leancat            # or leancat-paper-d1
+gym eval submit --config examples/slurm_leancat_goedel_prover.yaml --dry-run
+gym eval submit --config examples/slurm_leancat_goedel_prover.yaml
+```
+
+`benchmarks/leancat/` and `benchmarks/leancat-paper-d1/` are registered, so `gym list benchmarks` shows both and
+either works with `--benchmark`. `num_repeats: 4` matches the paper's generalist budget; raise it to 32 to compare
+against Table 3's specialized provers.
+
+The submit config cannot start the sandbox — `services:` accepts only `type: vllm` and `type: ray`, so the sandbox
+must already be reachable at `NEMO_SKILLS_SANDBOX_HOST:PORT`, launched into the same allocation with
+`srun --overlap`.

@@ -1,0 +1,23 @@
+# Chain to the existing resources server + agent config.
+config_paths:
+  - resources_servers/leancat/configs/leancat_paper_d1.yaml
+
+# `_inherit_from` keeps this benchmark config isolated from the generic one above.
+leancat_paper_d1_leancat_resources_server:
+  _inherit_from: leancat
+
+leancat_paper_d1_leancat_simple_agent:
+  _inherit_from: leancat_paper_d1_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: leancat_paper_d1_leancat_resources_server
+      datasets:
+      - name: leancat_paper_d1
+        type: benchmark
+        jsonl_fpath: benchmarks/leancat-paper-d1/data/leancat_paper_d1_benchmark.jsonl
+        prepare_script: benchmarks/leancat-paper-d1/prepare.py
+        license: CC-BY-4.0
+        # k=4 is the paper's static pass@k budget for generalist models (Appendix D.3).
+        # Specialized provers (Table 3) were run at 32; raise this to reproduce those.
+        num_repeats: 4

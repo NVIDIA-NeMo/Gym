@@ -1,0 +1,72 @@
+# LeanCat on Slurm with Goedel-Prover-V2-32B.
+#
+# Fill in the four <PLACEHOLDER> values before submitting. Dry-run first:
+#
+#   gym eval submit --config examples/slurm_leancat_goedel_prover.yaml --dry-run
+#
+# READ THIS FIRST -- the Lean sandbox is not started by this file.
+#
+# `services:` accepts only `type: vllm` and `type: ray`; there is no generic container
+# service, so the NeMo-Skills Lean 4 sandbox cannot be declared here. It must already be
+# reachable at NEMO_SKILLS_SANDBOX_HOST:PORT when the driver runs, and it must be built on
+# Mathlib v4.19.0 -- a sandbox on any other Mathlib fails LeanCat tasks for reasons that
+# have nothing to do with the model, and the failures look like ordinary compile errors.
+# See resources_servers/leancat/README.md for how to build it.
+#
+# Until that exists, this config is dry-runnable but not runnable.
+
+compute:
+  cluster:
+    type: slurm
+    account: <ACCOUNT>
+    walltime: "04:00:00"
+    node_pools:
+      compute:
+        partition: <PARTITION>
+        nodes: 1
+        ntasks_per_node: 1
+        gpus_per_node: 8
+
+services:
+  vllm_model:
+    type: vllm
+    # Local sqsh; swap for a registry ref if you would rather pull.
+    container: /lustre/fsw/portfolios/convai/projects/convai_convaird_nemo-speech/users/lgrigoryan/reasoning_science/containers/vllm+vllm-openai+v0.19.1-cu130.sqsh
+    model: Goedel-LM/Goedel-Prover-V2-32B
+    tensor_parallel_size: 8
+    port: 8000
+    health_check:
+      # A 32B model over a cold NFS/Lustre read is slow to load; do not tighten this.
+      timeout_seconds: 2400
+    mounts:
+      - /lustre/fsw/portfolios/convai/projects/convai_convaird_nemo-speech/users/lgrigoryan/huggingface_home:/hf
+    env:
+      HF_HOME: /hf
+
+driver:
+  policy_model: vllm_model
+  container: /lustre/fsw/portfolios/convai/projects/convai_convaird_nemo-speech/users/lgrigoryan/reasoning_science/containers/nvidia+eval-factory+nemo-gym:26.05.sqsh
+  env:
+    # Point these at the sandbox once it exists. 127.0.0.1 only works if the sandbox is
+    # launched into this same allocation with `srun --overlap`.
+    NEMO_SKILLS_SANDBOX_HOST: <SANDBOX_HOST>
+    NEMO_SKILLS_SANDBOX_PORT: "6000"
+    # Ray's AF_UNIX socket paths blow past the 107-byte limit under long Lustre paths.
+    RAY_TMPDIR: /tmp
+  benchmarks:
+    leancat:
+      prepare:
+        config_paths:
+          - benchmarks/leancat/config.yaml
+      run:
+        split: benchmark
+        config_paths:
+          - benchmarks/leancat/config.yaml
+        responses_create_params:
+          # Appendix D.3, Table 5. top_p is deliberately unset: eval_common.chat_completion
+          # sends none, so sending one would be a deviation from the reference harness.
+          temperature: 1.0
+          max_output_tokens: 50000
+
+job:
+  output_path: <OUTPUT_PATH>
