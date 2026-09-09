@@ -600,8 +600,8 @@ NeMoGymResponseInputItem = Annotated[
 NeMoGymResponseInput: TypeAlias = List[NeMoGymResponseInputItem]
 
 
-def _normalize_response_item_for_input(item: Any) -> Any:
-    """Convert a provider output item to the request input schema."""
+def _normalize_output_item_for_replay(item: Any) -> Any:
+    """Convert a provider output item for request replay."""
     if isinstance(item, BaseModel):
         item = item.model_dump(exclude_unset=True)
     if not isinstance(item, dict):
@@ -617,8 +617,8 @@ def _normalize_response_item_for_input(item: Any) -> Any:
     return item
 
 
-def _normalize_response_tool_for_input(tool: Any) -> Any:
-    """Convert a provider response tool to the request tool schema."""
+def _normalize_tool_for_replay(tool: Any) -> Any:
+    """Convert a provider response tool for request replay."""
     if isinstance(tool, BaseModel):
         tool = tool.model_dump()
     if not isinstance(tool, dict) or "defer_loading" not in tool or tool["defer_loading"] is not None:
@@ -640,15 +640,15 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def normalize_response_fields_for_replay(cls, value: Any) -> Any:
-        """Normalize OpenAI response fields before request validation."""
+    def normalize_replay_payload(cls, value: Any) -> Any:
+        """Normalize response-derived fields before request validation."""
         if not isinstance(value, dict):
             return value
         value = value.copy()
         if isinstance(value.get("input"), list):
-            value["input"] = [_normalize_response_item_for_input(item) for item in value["input"]]
+            value["input"] = [_normalize_output_item_for_replay(item) for item in value["input"]]
         if isinstance(value.get("tools"), list):
-            value["tools"] = [_normalize_response_tool_for_input(tool) for tool in value["tools"]]
+            value["tools"] = [_normalize_tool_for_replay(tool) for tool in value["tools"]]
         return value
 
     background: Optional[bool] = None
