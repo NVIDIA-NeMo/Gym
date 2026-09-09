@@ -90,6 +90,12 @@ def determine_proof_status(compiler_output: Dict[str, Any]) -> tuple[str, Option
 
     if process_status == "timeout":
         return STATUS_TIMEOUT, "Lean compilation timed out."
+    if process_status == "failed":
+        # NeMo-Skills' sandbox reports "failed" for any non-zero `lake env lean` exit
+        # (local_sandbox_server.py: completed iff returncode == 0). That is an ordinary
+        # compile error, not an infrastructure problem -- calling it sandbox_error made 59%
+        # of a real run look like the sandbox was broken.
+        return STATUS_COMPILE_ERROR, "Lean rejected the proof."
     if process_status != "completed":
         return STATUS_SANDBOX_ERROR, f"Sandbox reported status {process_status!r}."
 
