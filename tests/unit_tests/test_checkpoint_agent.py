@@ -15,6 +15,7 @@
 """Whitebox agent executions park and restore at typed turn boundaries."""
 
 import asyncio
+import threading
 import time
 
 import httpx
@@ -203,6 +204,7 @@ async def test_retire_tombstones_attempt_without_execution() -> None:
     participant = AgentCheckpointParticipant()
 
     assert await participant.retire("rollout-a", 7) == {"retired": False, "tombstoned": True}
+    assert ("rollout-a", 7) not in participant._generations
     with pytest.raises(AgentStaleAttemptError):
         await participant.begin("rollout-a", 7, task=None)
 
@@ -352,6 +354,52 @@ async def test_completed_result_acknowledgment_is_receipt_bound_and_idempotent()
 
 
 @pytest.mark.asyncio
+async def test_commit_route_snapshots_agent_records_on_event_loop(monkeypatch, tmp_path) -> None:
+    participant = AgentCheckpointParticipant()
+    fence = ControlFence()
+    app = FastAPI()
+    install_control_plane(
+        app,
+        capabilities=ControlCapabilities(
+            component="responses_api_agents",
+            name="agent",
+            multi_process=MultiProcessCapability(mode="single_worker", num_workers=1),
+        ),
+        fence=fence,
+    )
+    install_agent_checkpoint(app, participant=participant, fence=fence, auth_token="secret")
+    headers = {"authorization": "Bearer secret"}
+    event_loop_thread = threading.get_ident()
+    record_snapshot_threads: list[int] = []
+    original_records_for_commit = participant.records_for_commit
+
+    def record_snapshot_thread() -> list[AgentBoundaryRecord]:
+        record_snapshot_threads.append(threading.get_ident())
+        return original_records_for_commit()
+
+    monkeypatch.setattr(participant, "records_for_commit", record_snapshot_thread)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        prepared = await client.post(
+            "/ng-control/v1/agent-checkpoint/prepare",
+            json={"checkpoint_id": "checkpoint-1", "deadline_ts": time.time() + 2},
+            headers=headers,
+        )
+        committed = await client.post(
+            "/ng-control/v1/agent-checkpoint/commit",
+            json={
+                "checkpoint_id": "checkpoint-1",
+                "deadline_ts": time.time() + 2,
+                "checkpoint_dir": str(tmp_path),
+            },
+            headers=headers,
+        )
+
+    assert prepared.status_code == 200
+    assert committed.status_code == 200
+    assert record_snapshot_threads == [event_loop_thread]
+
+
+@pytest.mark.asyncio
 async def test_prepare_distinguishes_parked_execution_without_boundary() -> None:
     participant = AgentCheckpointParticipant()
     outer = asyncio.create_task(asyncio.Event().wait())
@@ -402,6 +450,7 @@ async def test_failed_execution_is_tombstoned_and_released() -> None:
     await participant.finish(execution, outcome="failed")
 
     assert participant.resolve("rollout-a", 0) is None
+    assert ("rollout-a", 0) not in participant._generations
     assert execution.boundary is None
     with pytest.raises(AgentStaleAttemptError):
         await participant.commit_boundary(execution, _boundary(boundary_index=2))
@@ -438,6 +487,8 @@ async def test_cancelled_parked_run_keeps_boundary_until_commit(tmp_path) -> Non
 
     assert commit_agent_state(participant, tmp_path, checkpoint_id="checkpoint-1")["records"] == 1
     assert (await participant.resume())["state"] == "accepting"
+    assert participant.resolve("rollout-a", 0) is None
+    assert ("rollout-a", 0) not in participant._generations
 
 
 @pytest.mark.asyncio
