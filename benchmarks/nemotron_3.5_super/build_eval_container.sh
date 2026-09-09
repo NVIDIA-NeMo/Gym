@@ -52,7 +52,7 @@ rm -rf /var/lib/apt/lists/*
 
 cd /opt
 # Python 3.13.14 is Gym main's Python version.
-uv venv --python 3.13.14 Gym_venv
+uv venv --python 3.13.14 Gym_venv --clear
 source Gym_venv/bin/activate
 
 # We use this flow to support use cases where env.yaml, etc config files are mounted
