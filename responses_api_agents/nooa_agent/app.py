@@ -47,10 +47,6 @@ NOOA_TERMINATION_REASON_KEY = "nooa_termination_reason"
 NOOA_TERMINATION_ERROR_KEY = "nooa_termination_error"
 
 
-class _TransientInfrastructureError(RuntimeError):
-    """Marks a retryable failure from a downstream service."""
-
-
 class _EpisodeTimeoutExceeded(TimeoutError):
     """Marks expiration of the configured NOOA episode budget."""
 
@@ -156,14 +152,9 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         record = body.model_dump()
         try:
             async with self.sem:
-                result = await self._execute_rollout_with_error_classification(request, body, record)
-        except _TransientInfrastructureError as error:
-            cause = error.__cause__ or error
-            result = self._failure_response(
-                record,
-                f"{type(cause).__name__}: {cause}",
-                failure_class="transient",
-            )
+                result = await self._execute_rollout(request, body, record)
+        # Preserve the terminal episode timeout: the generic classifier treats its
+        # TimeoutError base class as transient.
         except _EpisodeTimeoutExceeded:
             result = self._failure_response(
                 record,
@@ -172,34 +163,18 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 terminal=True,
             )
         except Exception as error:  # noqa: BLE001 -- isolate one rollout from the batch
+            failure_class = "transient" if _is_transient_infrastructure_error(error) else "legitimate"
             result = self._failure_response(
                 record,
                 f"{type(error).__name__}: {error}",
-                failure_class="legitimate",
+                failure_class=failure_class,
             )
 
         for name, value in (result.model_extra or {}).pop("_response_cookies", {}).items():
             response.set_cookie(name, value)
         return result
 
-    async def _execute_rollout_with_error_classification(
-        self,
-        request: Request,
-        body: NOOAAgentRunRequest,
-        record: dict[str, Any],
-    ) -> NOOAAgentVerifyResponse:
-        try:
-            return await self._execute_rollout_without_error_classification(request, body, record)
-        # Preserve the terminal episode timeout: the generic classifier treats its
-        # TimeoutError base class as transient.
-        except _EpisodeTimeoutExceeded:
-            raise
-        except Exception as error:
-            if _is_transient_infrastructure_error(error):
-                raise _TransientInfrastructureError(str(error)) from error
-            raise
-
-    async def _execute_rollout_without_error_classification(
+    async def _execute_rollout(
         self,
         request: Request,
         body: NOOAAgentRunRequest,
