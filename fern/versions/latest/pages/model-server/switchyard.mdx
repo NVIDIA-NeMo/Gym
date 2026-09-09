@@ -8,6 +8,17 @@ position: 9
 
 By default, Gym hosts Switchyard's server for you inside the model-server process. There is nothing to install: `nemo-switchyard` is a dependency of this server, not of Gym itself. Switchyard also runs as a NeMo Relay plugin, a LiteLLM plugin, and an embeddable library; the [Switchyard README](https://github.com/NVIDIA-NeMo/Switchyard#readme) covers those. This page covers the Gym integration.
 
+```mermaid
+flowchart LR
+    subgraph G["NeMo Gym model server (switchyard_model)"]
+        P["Switchyard"]
+    end
+    P --> E["Efficient model"]
+    P --> C["Capable model"]
+    A["Gym agent"] -->|"request"| P
+    style P fill:#76B900,stroke:#5A8F00,color:#000
+```
+
 ## Quick start
 
 ### 1. Write `routes.toml`
