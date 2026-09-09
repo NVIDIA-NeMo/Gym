@@ -271,24 +271,27 @@ async def test_cross_attempt_admission_uses_explicit_verified_parent(store):
     tokens_2 = TOKENS_1 + [901, 902]
     chain_hash_2 = compute_chain_hash(CHAIN_HASH_1, [901, 902])
     await store.record(
-        "r1-a1",
-        "c2",
-        [USER_1, ASSISTANT_1, USER_2],
-        [ASSISTANT_2],
-        [],
-        hash_token_ids(tokens_2),
-        parent_call_id="c1",
-        staging_key="r1-a1/c2",
-        weight_version=17,
-        prev_len=len(TOKENS_1),
-        delta_len=2,
-        cum_len=len(tokens_2),
-        staging_digest=STAGING_DIGEST,
-        extras_digest=EMPTY_EXTRAS_DIGEST,
-        mode="token_in",
-        staging_chain=["r1/c1", "r1-a1/c2"],
-        chain_hash=chain_hash_2,
-        cumulative_hash=hash_token_ids(tokens_2),
+        _commit(
+            CallRecord(
+                model_call_id="c2",
+                parent_call_id="c1",
+                staging_key="r1-a1/c2",
+                weight_version=17,
+                prev_len=len(TOKENS_1),
+                delta_len=2,
+                cum_len=len(tokens_2),
+                digest=STAGING_DIGEST,
+                extras_digest=EMPTY_EXTRAS_DIGEST,
+                mode="token_in",
+                chain_hash=chain_hash_2,
+                cumulative_hash=hash_token_ids(tokens_2),
+                response_id="chatcmpl-c2",
+            ),
+            [USER_1, ASSISTANT_1, USER_2],
+            [ASSISTANT_2],
+            rollout_id="r1-a1",
+            staging_chain=("r1/c1", "r1-a1/c2"),
+        )
     )
     next_context = await _admit(
         store,
@@ -328,11 +331,23 @@ async def test_custom_store_without_explicit_lookup_fails_closed():
         async def resolve(self, rollout_id, request_items):
             return await self.inner.resolve(rollout_id, request_items)
 
+        def is_process_shared(self):
+            return self.inner.is_process_shared()
+
+        async def close(self):
+            await self.inner.close()
+
+        async def record(self, commit):
+            await self.inner.record(commit)
+
         async def has_rows(self, rollout_id):
             return await self.inner.has_rows(rollout_id)
 
         async def record_failure(self, rollout_id, model_call_id, reason):
             await self.inner.record_failure(rollout_id, model_call_id, reason)
+
+        async def manifest(self, rollout_id):
+            return await self.inner.manifest(rollout_id)
 
     store = LegacyCustomStore()
     context = await _admit(

@@ -62,6 +62,7 @@ from nemo_gym.rollout_correlation import (
 )
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.token_id_capture.lineage import FileLineageStore
+from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit
 
 
 AUTH_TOKEN = "checkpoint-token"
@@ -232,33 +233,36 @@ async def _record_lineage(
     request_items: list[dict],
     output_items: list[dict],
     parent_call_id: str | None = None,
+    parent_staging_chain: tuple[str, ...] = (),
 ) -> None:
     prev_len = 0 if parent_call_id is None else 3
+    staging_key = f"stage/{rollout_id}/{call_id}"
     await FileLineageStore(root).record(
-        rollout_id,
-        call_id,
-        request_items=request_items,
-        response_items=output_items,
-        cumulative_token_ids=[],
-        digest="1" * 64,
-        parent_call_id=parent_call_id,
-        staging_key=f"stage/{rollout_id}/{call_id}",
-        weight_version=7,
-        prev_len=prev_len,
-        delta_len=3,
-        cum_len=prev_len + 3,
-        staging_digest="2" * 64,
-        extras_digest="3" * 64,
-        mode="text" if parent_call_id is None else "token_in",
-        logical_request_id=f"request-{rollout_id}",
-        admitted_at=1.0,
-        staging_chain=[f"stage/{rollout_id}/{call_id}"],
-        chain_hash="4" * 64,
-        cumulative_hash="5" * 64,
-        response_id=f"response-{rollout_id}",
-        output_fingerprint="6" * 64,
-        continuation_fingerprint="7" * 64,
-        fingerprint_version=1,
+        CaptureLedgerCommit(
+            rollout_id=rollout_id,
+            record=CallRecord(
+                model_call_id=call_id,
+                parent_call_id=parent_call_id,
+                staging_key=staging_key,
+                weight_version=7,
+                prev_len=prev_len,
+                delta_len=3,
+                cum_len=prev_len + 3,
+                digest="2" * 64,
+                extras_digest="3" * 64,
+                mode="text" if parent_call_id is None else "token_in",
+                admitted_at=1.0,
+                chain_hash="4" * 64,
+                cumulative_hash="5" * 64,
+                response_id=f"response-{rollout_id}",
+                output_fingerprint="6" * 64,
+                continuation_fingerprint="7" * 64,
+                fingerprint_version=1,
+            ),
+            staging_chain=(*parent_staging_chain, staging_key),
+            request_items=request_items,
+            response_items=output_items,
+        )
     )
 
 
@@ -520,6 +524,7 @@ async def test_complete_partial_rollout_checkpoint_cycle(tmp_path, monkeypatch) 
                     request_items=boundary_items,
                     output_items=first_payload["output"],
                     parent_call_id=PARENT_CALL_ID,
+                    parent_staging_chain=(f"stage/{ROLLOUT_ID}/{PARENT_CALL_ID}",),
                 )
                 second_input = boundary_items + first_payload["output"]
                 second = await server_client.post("policy", "/v1/responses", json={"input": second_input})
