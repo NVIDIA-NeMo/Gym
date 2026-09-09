@@ -362,9 +362,6 @@ class CaptureLedgerCheckpointer:
         directory = Path(checkpoint_dir) / MODEL_LEDGER_SUBDIR
         return directory / self.server_name if self.server_name is not None else directory
 
-    def _rollout_ids(self) -> list[str]:
-        return sorted(path.name[: -len(_LEDGER_SUFFIX)] for path in self.store_root.glob(f"*{_LEDGER_SUFFIX}"))
-
     def commit(
         self,
         checkpoint_dir: Path,
@@ -397,33 +394,30 @@ class CaptureLedgerCheckpointer:
             # failed its final directory fsync. Retry that durability barrier.
             _fsync_dir(ledger_dir)
             return result
-        ledger_dir.mkdir(parents=True, exist_ok=True)
         fenced = {capture_key_for(rollout_id, attempt_index) for rollout_id, attempt_index in tombstones}
-
-        rollouts: dict[str, dict[str, Any]] = {}
-        excluded = 0
-        excluded_inactive = 0
-        total_rows = 0
-        external_references: dict[str, ExternalStorageReference] = {}
-        available_rollout_ids = self._rollout_ids()
-        missing_roots = sorted(set(normalized_roots) - set(available_rollout_ids))
-        if missing_roots:
-            raise LedgerMismatchError(f"continuation roots have no model lineage: capture_keys={missing_roots!r}")
         fenced_roots = sorted(set(normalized_roots) & fenced)
         if fenced_roots:
             raise LedgerMismatchError(
                 f"continuation roots refer to retired model attempts: capture_keys={fenced_roots!r}"
             )
-        for capture_key in available_rollout_ids:
-            if capture_key in fenced:
-                excluded += 1
-                continue
-            root = normalized_roots.get(capture_key)
-            if root is None:
-                excluded_inactive += 1
-                continue
+        sources = {capture_key: self.store_root / f"{capture_key}{_LEDGER_SUFFIX}" for capture_key in normalized_roots}
+        missing_roots = sorted(capture_key for capture_key, source in sources.items() if not source.is_file())
+        if missing_roots:
+            raise LedgerMismatchError(f"continuation roots have no model lineage: capture_keys={missing_roots!r}")
+
+        ledger_dir.mkdir(parents=True, exist_ok=True)
+
+        rollouts: dict[str, dict[str, Any]] = {}
+        excluded = len(tombstones)
+        source_capture_keys = {
+            capture_key_for(rollout_id, attempt_index) for rollout_id, attempt_index in source_attempts or []
+        }
+        excluded_inactive = len(source_capture_keys - set(normalized_roots) - fenced)
+        total_rows = 0
+        external_references: dict[str, ExternalStorageReference] = {}
+        for capture_key, root in sorted(normalized_roots.items()):
             files: dict[str, str] = {}
-            source = self.store_root / f"{capture_key}{_LEDGER_SUFFIX}"
+            source = sources[capture_key]
             target = ledger_dir / source.name
             file_digest, byte_count, records = _copy_lineage_fsynced(source, target)
             files[source.name] = file_digest
