@@ -55,9 +55,12 @@ Run this environment with **two configs**: this environment config
 (`responses_api_models/openai_model/configs/openai_model.yaml`, or
 `vllm_model.yaml` for a self-hosted endpoint).
 
-Endpoints and tool API keys all go in `env.yaml` at the repo root, which is
-gitignored. Only the policy endpoint is required: a tool key left unset simply
-registers its tool as unavailable instead of failing startup.
+Set endpoints and credential references in `env.yaml` at the repo root, which is
+gitignored. For a minimal configuration/startup check, the three external-tool
+keys may be omitted: their tools are registered as unavailable. Model access is
+separate: the policy configuration must resolve, live agent and retrieval calls
+need access to the policy endpoint, and scoring through `/verify` needs access to
+the configured judge endpoint.
 
 ```yaml
 # env.yaml
@@ -71,24 +74,38 @@ search_judge_model_base_url: https://api.openai.com/v1
 search_judge_model_api_key: ${oc.env:OPENAI_API_KEY}
 search_judge_model_name: gpt-5-mini
 
-sec_api_key: ${oc.env:SEC_API_KEY}                 # edgar_search (sec-api.io)
-tavily_api_key: ${oc.env:TAVILY_API_KEY}           # web_search (Tavily)
-pricing_data_api_key: ${oc.env:TIINGO_API_KEY}     # price_history (Tiingo)
+# Optional for startup; all three are needed for full-tool benchmark coverage.
+sec_api_key: ${oc.env:SEC_API_KEY,null}                 # edgar_search (sec-api.io)
+tavily_api_key: ${oc.env:TAVILY_API_KEY,null}           # web_search (Tavily)
+pricing_data_api_key: ${oc.env:TIINGO_API_KEY,null}     # price_history (Tiingo)
 
 # Persistent, shared cache root (survives across jobs; served on cache hits):
 finance_agent_v2_cache_dir: /shared/cache/finance_agent_v2
 ```
 
-`${oc.env:VAR}` reads the value at resolve time, so no secret is written to disk;
-replace it with a literal if you prefer. Every key above except the `policy_*` ones
-resolves as config key → environment variable → null-safe default, so exporting
-`SEC_API_KEY`, `TAVILY_API_KEY`, `TIINGO_API_KEY` or `FINANCE_AGENT_V2_CACHE_DIR`
-works without naming them here — useful in CI and batch jobs where secrets already
-arrive in the environment. The `policy_*` keys have no default and must come from
-`env.yaml` or a CLI override.
+`${oc.env:VAR,null}` resolves an absent variable to YAML `null`, preserving the
+shipped config's optional-tool behavior. `${oc.env:VAR}` without a default requires
+the variable: this example requires `OPENAI_API_KEY` for both hosted model
+connections, even if all three tool keys are absent. Policy and judge credentials
+can be configured independently; sharing a key here does not make judge access
+optional. The shipped judge-key fallback is only an `unset` sentinel for dry
+configuration checks, not a usable credential.
 
-Grading works without network egress, but the tools do not: they call Tavily,
-sec-api.io and Tiingo at rollout time.
+The shipped tool-key and cache settings use config key → environment variable →
+null-safe default. You can omit those four entries from `env.yaml` and instead
+export `SEC_API_KEY`, `TAVILY_API_KEY`, `TIINGO_API_KEY` and
+`FINANCE_AGENT_V2_CACHE_DIR`. An explicit config entry takes precedence, including
+the cache path in the example. The `policy_*` keys have no default and must come
+from `env.yaml` or a CLI override. Environment references avoid storing literal
+secrets in this file, but resolved configs may contain credentials: do not publish
+or log them.
+
+A full-tool benchmark run needs valid credentials for all three tool services,
+working policy/retrieval and judge model connections, and network access to those
+endpoints and fetched web pages. Missing tool credentials give reduced tool
+coverage, not an equivalent benchmark run; record that limitation with results.
+Grading needs connectivity to the judge endpoint (including internet egress for
+the hosted endpoint shown above), even when no tool calls are being replayed.
 
 ## Run
 
