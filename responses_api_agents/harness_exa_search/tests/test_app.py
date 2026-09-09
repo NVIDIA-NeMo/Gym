@@ -16,7 +16,7 @@ from responses_api_agents.harness_exa_search.app import HarnessExaSearchAgent, H
 
 @mark.parametrize("task_index", [0, 1])
 async def test_smoke_rollout_runs_harness_through_sandbox_api(monkeypatch, task_index: int) -> None:
-    lines = (Path(__file__).parents[3] / "benchmarks/deepsearchqa/data/example.jsonl").read_text().splitlines()
+    lines = (Path(__file__).parents[3] / "resources_servers/deepsearchqa/data/example.jsonl").read_text().splitlines()
     task = json.loads(lines[task_index])
     monkeypatch.setenv("MOCK_EXA_SEARCH_RESULT", task["answer"])
     client = MagicMock(spec=ServerClient)
