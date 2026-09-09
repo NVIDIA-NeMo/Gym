@@ -18,6 +18,8 @@ leancat_paper_d1_leancat_simple_agent:
         jsonl_fpath: benchmarks/leancat-paper-d1/data/leancat_paper_d1_benchmark.jsonl
         prepare_script: benchmarks/leancat-paper-d1/prepare.py
         license: CC-BY-4.0
-        # k=4 is the paper's static pass@k budget for generalist models (Appendix D.3).
-        # Specialized provers (Table 3) were run at 32; raise this to reproduce those.
-        num_repeats: 4
+        # Paper v2: k=4 for generalist models, k=32 for the specialized provers of Table 3.
+        # Goedel-Prover-V2-32B is in Table 3, so 32 is the comparable budget.
+        # NOTE: applied at preprocessing. The runner must not also pass --num-repeats or the
+        # two multiply (4 x 32 = 128 samples/problem).
+        num_repeats: 32
