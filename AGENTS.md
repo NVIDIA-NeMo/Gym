@@ -18,6 +18,19 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - Docs live under `fern/versions/latest/pages/`. Bleeding-edge nav is `fern/versions/main.yml`. See `fern/README.md` and the `nemo-gym-docs` skill.
 - Do not introduce licenses incompatible with Apache-2.0. New source files need the standard NVIDIA SPDX header.
 
+## Pull Requests
+
+- For normal authored PRs, use a Conventional Commit-style title: `type(optional-scope): imperative summary`.
+  Common types are `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`, and `chore`; use `design` for a
+  design-only proposal. The scope is optional but should name the affected component, such as `agent`, `eval`,
+  `sandbox`, or a specific environment. Automated release and cherry-pick PRs may keep their generated title format.
+- Do not copy Megatron Bridge's `[area]` title prefix into Gym. Use the repository's `area:*` label taxonomy instead.
+- The PR body must explain what changed and why, link the relevant issue or state why one is unnecessary, list the
+  exact validation performed, and include rollout evidence or an explicit `N/A` with justification. Call out user-facing
+  compatibility, migration, or benchmark-result impact when applicable.
+- Keep incomplete work as a draft. Mark it ready for review only after reviewing the final diff and recording the
+  applicable local checks. Use the `nemo-gym-pr-checks-and-labels` skill for CI routing and label selection.
+
 ## What This Is
 
 NeMo Gym is a library for evaluating and improving models and agents using environments. It provides infrastructure to develop environments, scalably run evaluation and training, and a collection of popular benchmarks and training environments. All components are composable and modular — bring your own agent, model, or environment and integrate with Gym where you need it.
@@ -139,6 +152,20 @@ gym env resolve --config ...
 - Line length: 119
 - Python 3.13.14+, async-first
 - Ruff for linting and formatting (double quotes, isort)
+- Add parameter and return annotations to new or changed public functions and methods, and explicit types to public
+  dataclass and Pydantic fields. Avoid `Any` at public boundaries when a concrete model, protocol, `TypedDict`, or
+  `object` plus narrowing expresses the contract. Match surrounding annotation style and do not perform unrelated
+  `Optional`/`List` syntax migrations.
+- Mypy is available as a development dependency but is not a repository-wide strict CI gate. Run it on a focused area
+  when that area is already type-checkable; do not claim repo-wide `mypy --strict` compliance.
+- Public APIs and objects included in generated reference docs need useful docstrings. Comments should explain intent,
+  invariants, or tradeoffs rather than narrating the code.
+- Use keyword-only arguments for new public parameters that are easy to swap or misread, especially repeated same-type
+  values and boolean controls.
+- Use module loggers for library and server diagnostics. Direct console output is acceptable in CLI/user-facing paths;
+  do not impose a blanket ban on `print()` copied from another repository.
+- Raise specific exceptions with actionable context. Broad exception handling is appropriate only at a deliberate
+  request, task, or process boundary where the error is logged, translated, or preserved for the caller.
 - CI reads the coverage threshold from `[tool.coverage.report].fail_under` via `scripts/ci/cov_fail_under.py`; do not
   hard-code a second threshold in contributor guidance.
 

@@ -40,6 +40,21 @@ authoritative:
 When those files disagree with this skill, follow the repository files and
 report the drift.
 
+## Check PR Metadata
+
+Apply the title and body contract from `AGENTS.md` before declaring a PR ready:
+
+- Normal authored PR titles use `type(optional-scope): imperative summary`.
+  Do not add Megatron Bridge's `[area]` prefix; Gym expresses that information
+  with an `area:*` label. Preserve generated release and cherry-pick titles.
+- The body explains what changed and why, links the relevant issue or explains
+  why none is needed, lists exact validation, and provides rollout evidence or
+  an explicit justified `N/A`.
+- User-visible compatibility, migration, configuration, and benchmark-result
+  effects are stated when applicable.
+- Missing final validation is acceptable while the PR is a draft, but report it
+  before changing the PR to ready for review.
+
 ## Select Checks
 
 Run `pre-commit run --all-files` before handoff. Hooks can modify files; review
