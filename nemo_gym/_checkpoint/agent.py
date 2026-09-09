@@ -23,7 +23,7 @@ import time
 from contextvars import ContextVar, Token
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Sequence
 
 from fastapi import FastAPI, Header, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -188,6 +188,9 @@ class AgentCheckpointParticipant:
         self._executions: dict[tuple[str, int], AgentExecution] = {}
         self._generations: dict[tuple[str, int], int] = {}
         self._restored: dict[tuple[str, int], AgentBoundaryRecord] = {}
+        # These exact process-lifetime fences make delayed retries deterministic.
+        # They cannot be bounded safely until the wire protocol supplies a
+        # coordinated epoch/high-watermark after which old identities cannot recur.
         self._tombstones: set[tuple[str, int]] = set()
         self._acknowledged: set[tuple[str, int]] = set()
         self._accepting = True
@@ -271,7 +274,7 @@ class AgentCheckpointParticipant:
             else:
                 execution.state = AgentExecutionState.RETIRED
                 key = (execution.rollout_id, execution.attempt_index)
-                self._tombstones.add(key)
+                self._remember_tombstone(key)
                 execution.resume_event.set()
                 if execution.parked_task is not None and execution.parked_task is not asyncio.current_task():
                     execution.parked_task.cancel()
@@ -360,16 +363,18 @@ class AgentCheckpointParticipant:
     async def resume(self) -> dict[str, Any]:
         self._accepting = True
         released = 0
-        for execution in self._executions.values():
+        for execution in list(self._executions.values()):
             if execution.state == AgentExecutionState.PARK_REQUESTED:
                 execution.state = AgentExecutionState.RUNNING
             elif execution.state == AgentExecutionState.PARKED:
                 if execution.outer_task is None:
                     execution.state = AgentExecutionState.RETIRED
-                    self._tombstones.add((execution.rollout_id, execution.attempt_index))
+                    key = (execution.rollout_id, execution.attempt_index)
+                    self._remember_tombstone(key)
                     execution.resume_event.set()
                     if execution.parked_task is not None:
                         execution.parked_task.cancel()
+                    self._executions.pop(key, None)
                 else:
                     execution.resume_event.set()
                     released += 1
@@ -385,7 +390,7 @@ class AgentCheckpointParticipant:
                 "tombstoned": False,
                 "completed_unacknowledged": True,
             }
-        self._tombstones.add(key)
+        self._remember_tombstone(key)
         self._restored.pop(key, None)
         execution = self._executions.pop(key, None)
         if execution is None:
@@ -432,6 +437,7 @@ class AgentCheckpointParticipant:
             execution.state = AgentExecutionState.RETIRED
             execution.terminal_result = None
             self._acknowledged.add(key)
+            self._generations.pop(key, None)
         await self._notify()
         return identities
 
@@ -488,9 +494,13 @@ class AgentCheckpointParticipant:
 
     def install_restored(self, records: list[AgentBoundaryRecord]) -> None:
         for record in records:
-            self._tombstones.add((record.rollout_id, record.attempt_index))
+            self._remember_tombstone((record.rollout_id, record.attempt_index))
             self._restored[(record.rollout_id, record.attempt_index + 1)] = record
         self._accepting = False
+
+    def _remember_tombstone(self, key: tuple[str, int]) -> None:
+        self._tombstones.add(key)
+        self._generations.pop(key, None)
 
     def _owns(self, execution: AgentExecution) -> bool:
         return self._executions.get((execution.rollout_id, execution.attempt_index)) is execution
@@ -552,18 +562,34 @@ def commit_agent_state(
     *,
     checkpoint_id: str,
 ) -> dict[str, Any]:
-    directory = _agent_checkpoint_directory(checkpoint_dir, participant.instance_name)
+    """Synchronously snapshot and commit one agent participant."""
+    return _commit_agent_records(
+        tuple(participant.records_for_commit()),
+        checkpoint_dir,
+        checkpoint_id=checkpoint_id,
+        instance_name=participant.instance_name,
+    )
+
+
+def _commit_agent_records(
+    records: Sequence[AgentBoundaryRecord],
+    checkpoint_dir: Path,
+    *,
+    checkpoint_id: str,
+    instance_name: Optional[str] = None,
+) -> dict[str, Any]:
+    directory = _agent_checkpoint_directory(checkpoint_dir, instance_name)
     directory.mkdir(parents=True, exist_ok=True)
     manifest_path = directory / AGENT_MANIFEST_NAME
     if manifest_path.exists():
         return _validate_agent_manifest(
             directory,
             checkpoint_id=checkpoint_id,
-            instance_name=participant.instance_name,
+            instance_name=instance_name,
         )
 
     files: dict[str, str] = {}
-    for record in participant.records_for_commit():
+    for record in records:
         name = f"{record.rollout_id}.a{record.attempt_index}.json"
         target = directory / name
         payload = record.model_dump_json(indent=2).encode()
@@ -579,7 +605,7 @@ def commit_agent_state(
     manifest = {
         "schema_version": AGENT_CHECKPOINT_SCHEMA_VERSION,
         "checkpoint_id": checkpoint_id,
-        "instance_name": participant.instance_name,
+        "instance_name": instance_name,
         "files": files,
     }
     payload = json.dumps(manifest, sort_keys=True, indent=2).encode()
@@ -719,11 +745,15 @@ def install_agent_checkpoint(
         require_control_auth(authorization, auth_token)
 
         async def run() -> dict[str, Any]:
+            # The participant belongs to this event loop. Materialize its state
+            # here so the worker thread performs file I/O only.
+            records = tuple(participant.records_for_commit())
             return await asyncio.to_thread(
-                commit_agent_state,
-                participant,
+                _commit_agent_records,
+                records,
                 Path(body.checkpoint_dir),
                 checkpoint_id=body.checkpoint_id,
+                instance_name=participant.instance_name,
             )
 
         return await fence.run_operation(
