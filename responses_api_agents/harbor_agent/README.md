@@ -394,7 +394,7 @@ For an environment-only smoke that does not require a model provider key, run th
 Terminal-Bench 2.0 `fix-git` task through Harbor's Oracle agent on Daytona:
 
 ```bash
-export DAYTONA_API_KEY=<your-daytona-api-key>
+export DAYTONA_API_KEY="<your-daytona-api-key>"
 
 harbor run --dataset terminal-bench@2.0 \
   --task-name fix-git \
