@@ -5,6 +5,16 @@ config_paths:
 # `_inherit_from` keeps this benchmark config isolated from the generic one above.
 leancat_leancat_resources_server:
   _inherit_from: leancat
+  resources_servers:
+    leancat:
+      # Off for reproduction: upstream's verify_lean is has_invalid_tokens + compile, with no
+      # statement check. Ours rejected 236 of 1799 rollouts (15%) whose theorem signature was
+      # byte-identical and whose imports were present -- upstream compiles all of those, so
+      # leaving it on guarantees a number below the paper's for a reason that is not the model.
+      # `statement_preserved` is still reported as a second score, so the cost stays visible.
+      # The environment default in resources_servers/leancat stays true: it is the better
+      # verifier, just not the one the published numbers were produced with.
+      require_statement_preserved: false
 
 leancat_leancat_simple_agent:
   _inherit_from: leancat_simple_agent
