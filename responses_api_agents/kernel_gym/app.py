@@ -24,6 +24,14 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_me
 from nemo_gym.server_utils import apply_rollout_prefix
 
 
+ROOT = Path(__file__).parent
+
+
+def _task_dir(path: str) -> Path:
+    task_dir = Path(path)
+    return task_dir if task_dir.is_absolute() else ROOT / task_dir
+
+
 def _format_container(container_formatter: str | list[str], task_name: str, docker_image: str) -> str:
     fmt = container_formatter[0] if isinstance(container_formatter, list) else container_formatter
     fmt = fmt or "docker://{docker_image}"
@@ -202,7 +210,7 @@ class KernelGymAgent(SimpleResponsesAPIAgent):
             if result.return_code != 0:
                 raise RuntimeError(result.stderr or "failed to create sandbox directories")
 
-            task_dir = Path(cfg.problem_info["task_dir"])
+            task_dir = _task_dir(cfg.problem_info["task_dir"])
             for local, remote in (
                 (cfg.persistent_dir / "instruction.txt", "/trajectories_mount/instruction.txt"),
                 (cfg.persistent_dir / "agent_runner.py", "/trajectories_mount/agent_runner.py"),
@@ -396,7 +404,7 @@ class KernelGymAgent(SimpleResponsesAPIAgent):
         problem_info = dict(body.metadata or {})
         task_name = problem_info.get("task_name", problem_info.get("instance_id", "unknown"))
 
-        task_dir = Path(problem_info["task_dir"])
+        task_dir = _task_dir(problem_info["task_dir"])
         if not all(k in problem_info for k in ("workdir", "agent_timeout_sec", "verifier_timeout_sec")):
             problem_info.update({k: v for k, v in _read_task_meta(task_dir).items() if k not in problem_info})
 
