@@ -65,10 +65,10 @@ def config(**overrides: object) -> NOOAAgentConfig:
         "resources_server": {"type": "resources_servers", "name": "resources"},
         "model_server": {"type": "responses_api_models", "name": "policy"},
         "nooa": {
-            "agent_class": "responses_api_agents.nooa_agent.example_agent:WeatherAgent",
+            "agent_class": "responses_api_agents.nooa_agent.example_agent:GymResourceAgent",
             "entrypoint": "answer",
             "arguments": {
-                "question": {
+                "task": {
                     "source": "responses_create_params.input",
                     "transform": "latest_user_text",
                 }
