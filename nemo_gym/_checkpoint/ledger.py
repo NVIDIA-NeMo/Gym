@@ -121,7 +121,7 @@ class CaptureLedgerCommitResult(BaseModel):
     excluded_tombstoned: int = Field(ge=0)
     excluded_inactive: int = Field(default=0, ge=0)
     manifest_digest: str
-    storage_reference_index: Optional[CheckpointArtifactReference] = None
+    storage_reference_index: CheckpointArtifactReference
 
 
 class CaptureLedgerRestoreResult(BaseModel):
@@ -132,7 +132,7 @@ class CaptureLedgerRestoreResult(BaseModel):
     checkpoint_id: Optional[str] = None
     tombstones: list[AttemptIdentity] = Field(default_factory=list)
     source_attempts: list[AttemptIdentity] = Field(default_factory=list)
-    storage_reference_index: Optional[CheckpointArtifactReference] = None
+    storage_reference_index: CheckpointArtifactReference
 
 
 @runtime_checkable
@@ -336,12 +336,10 @@ def load_continuation_roots(
 def _validate_storage_reference_index(
     checkpoint_root: Path,
     manifest: dict[str, Any],
-) -> Optional[CheckpointArtifactReference]:
+) -> CheckpointArtifactReference:
     raw_reference = manifest.get("storage_reference_index")
     if raw_reference is None:
-        if int(manifest.get("schema_version", 0)) >= 2:
-            raise LedgerMismatchError("ledger manifest is missing its storage-reference index")
-        return None
+        raise LedgerMismatchError("ledger manifest is missing its storage-reference index")
     try:
         reference = CheckpointArtifactReference.model_validate(raw_reference)
     except (CheckpointArtifactError, ValueError) as error:
@@ -541,9 +539,7 @@ class CaptureLedgerCheckpointer:
             "excluded_tombstoned": len(manifest.get("tombstones", [])),
             "excluded_inactive": int(manifest.get("excluded_inactive", 0)),
             "manifest_digest": hashlib.sha256(payload).hexdigest(),
-            "storage_reference_index": (
-                storage_reference_index.model_dump(mode="json") if storage_reference_index is not None else None
-            ),
+            "storage_reference_index": storage_reference_index.model_dump(mode="json"),
         }
 
     def restore(self, checkpoint_dir: Path) -> dict[str, Any]:
@@ -601,8 +597,7 @@ class CaptureLedgerCheckpointer:
             "tombstones": list(manifest.get("tombstones", ())),
             "source_attempts": list(manifest.get("source_attempts", ())),
         }
-        if storage_reference_index is not None:
-            result["storage_reference_index"] = storage_reference_index.model_dump(mode="json")
+        result["storage_reference_index"] = storage_reference_index.model_dump(mode="json")
         return result
 
 
@@ -683,23 +678,17 @@ def install_model_checkpoint(
                     commit_kwargs["continuation_roots"] = tuple(continuation_roots)
                 commit_result = await ledger.checkpoint_capture_ledger(participant_dir, **commit_kwargs)
                 validated = CaptureLedgerCommitResult.model_validate(commit_result)
-                if continuation_roots is not None and validated.storage_reference_index is None:
-                    raise LedgerMismatchError(
-                        "checkpointable capture ledger did not publish a storage-reference index"
-                    )
-                if validated.storage_reference_index is not None:
-                    _validate_storage_reference_artifact(
-                        checkpoint_dir,
-                        validated.storage_reference_index,
-                    )
+                _validate_storage_reference_artifact(
+                    checkpoint_dir,
+                    validated.storage_reference_index,
+                )
                 return validated.model_dump(mode="json")
             restore_result = await ledger.restore_capture_ledger(participant_dir, server_name=server_name)
             validated_restore = CaptureLedgerRestoreResult.model_validate(restore_result)
-            if validated_restore.storage_reference_index is not None:
-                _validate_storage_reference_artifact(
-                    checkpoint_dir,
-                    validated_restore.storage_reference_index,
-                )
+            _validate_storage_reference_artifact(
+                checkpoint_dir,
+                validated_restore.storage_reference_index,
+            )
             return validated_restore.model_dump(mode="json")
 
         file_root = file_ledger_root_provider()

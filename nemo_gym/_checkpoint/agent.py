@@ -682,8 +682,7 @@ def _validate_agent_manifest(
         "records": len(manifest.get("files", {})),
         "manifest_digest": hashlib.sha256(payload).hexdigest(),
     }
-    if continuation_index is not None:
-        result["continuation_index"] = continuation_index.model_dump(mode="json")
+    result["continuation_index"] = continuation_index.model_dump(mode="json")
     return result
 
 
@@ -710,8 +709,7 @@ def restore_agent_state(participant: AgentCheckpointParticipant, checkpoint_dir:
         "records": len(records),
         "source_checkpoint_id": manifest["checkpoint_id"],
     }
-    if continuation_index is not None:
-        result["continuation_index"] = continuation_index.model_dump(mode="json")
+    result["continuation_index"] = continuation_index.model_dump(mode="json")
     return result
 
 
@@ -719,11 +717,10 @@ def _validate_continuation_index(
     checkpoint_root: Path,
     manifest: dict[str, Any],
     records: Sequence[AgentBoundaryRecord],
-) -> Optional[CheckpointArtifactReference]:
+) -> CheckpointArtifactReference:
     raw_reference = manifest.get("continuation_index")
     if raw_reference is None:
-        # Older checkpoints did not publish a continuation index.
-        return None
+        raise AgentCheckpointError("agent checkpoint manifest is missing its continuation index")
     try:
         reference = CheckpointArtifactReference.model_validate(raw_reference)
         roots = read_jsonl_artifact(checkpoint_root, reference, AgentContinuationRoot)
