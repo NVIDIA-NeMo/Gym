@@ -129,7 +129,7 @@ class CaptureLedgerCommitResult(BaseModel):
     manifest_digest: str
     generation_cut_receipt: GenerationCutReceipt | None = None
     generation_cut_proof: GenerationCutCoordinatorProof | None = None
-    storage_reference_index: Optional[CheckpointArtifactReference] = None
+    storage_reference_index: CheckpointArtifactReference
 
 
 class CaptureLedgerRestoreResult(BaseModel):
@@ -142,7 +142,7 @@ class CaptureLedgerRestoreResult(BaseModel):
     source_attempts: list[AttemptIdentity] = Field(default_factory=list)
     generation_cut_receipt: GenerationCutReceipt | None = None
     generation_cut_proof: GenerationCutCoordinatorProof | None = None
-    storage_reference_index: Optional[CheckpointArtifactReference] = None
+    storage_reference_index: CheckpointArtifactReference
 
 
 @runtime_checkable
@@ -372,12 +372,10 @@ def load_continuation_roots(
 def _validate_storage_reference_index(
     checkpoint_root: Path,
     manifest: dict[str, Any],
-) -> Optional[CheckpointArtifactReference]:
+) -> CheckpointArtifactReference:
     raw_reference = manifest.get("storage_reference_index")
     if raw_reference is None:
-        if int(manifest.get("schema_version", 0)) >= 2:
-            raise LedgerMismatchError("ledger manifest is missing its storage-reference index")
-        return None
+        raise LedgerMismatchError("ledger manifest is missing its storage-reference index")
     try:
         reference = CheckpointArtifactReference.model_validate(raw_reference)
     except (CheckpointArtifactError, ValueError) as error:
@@ -607,9 +605,7 @@ class CaptureLedgerCheckpointer:
             "excluded_tombstoned": len(manifest.get("tombstones", [])),
             "excluded_inactive": int(manifest.get("excluded_inactive", 0)),
             "manifest_digest": hashlib.sha256(payload).hexdigest(),
-            "storage_reference_index": (
-                storage_reference_index.model_dump(mode="json") if storage_reference_index is not None else None
-            ),
+            "storage_reference_index": storage_reference_index.model_dump(mode="json"),
         }
         if manifest.get("generation_cut_receipt") is not None:
             result["generation_cut_receipt"] = manifest["generation_cut_receipt"]
@@ -674,8 +670,7 @@ class CaptureLedgerCheckpointer:
         if manifest.get("generation_cut_proof") is not None:
             proof = GenerationCutCoordinatorProof.model_validate(manifest["generation_cut_proof"])
             result["generation_cut_proof"] = proof.model_dump(mode="json")
-        if storage_reference_index is not None:
-            result["storage_reference_index"] = storage_reference_index.model_dump(mode="json")
+        result["storage_reference_index"] = storage_reference_index.model_dump(mode="json")
         return result
 
 
@@ -824,15 +819,10 @@ def install_model_checkpoint(
                     commit_kwargs["continuation_roots"] = tuple(continuation_roots)
                 commit_result = await ledger.checkpoint_capture_ledger(participant_dir, **commit_kwargs)
                 validated = CaptureLedgerCommitResult.model_validate(commit_result)
-                if continuation_roots is not None and validated.storage_reference_index is None:
-                    raise LedgerMismatchError(
-                        "checkpointable capture ledger did not publish a storage-reference index"
-                    )
-                if validated.storage_reference_index is not None:
-                    _validate_storage_reference_artifact(
-                        checkpoint_dir,
-                        validated.storage_reference_index,
-                    )
+                _validate_storage_reference_artifact(
+                    checkpoint_dir,
+                    validated.storage_reference_index,
+                )
                 if (
                     validated.generation_cut_proof is not None
                     and validated.generation_cut_proof != generation_cut_proof
