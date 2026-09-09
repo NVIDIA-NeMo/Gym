@@ -662,6 +662,21 @@ def test_native_agent_input_uses_upstream_prompt_and_canonical_tools(monkeypatch
     assert '"id": "1"' not in system
     assert [tool["name"] for tool in result.tools] == ["bash", "read", "write", "write_docx", "edit", "glob", "grep"]
     assert all(tool["type"] == "function" and tool["strict"] is False for tool in result.tools)
+    assert result.parallel_tool_calls is True
+
+
+def test_native_agent_input_preserves_explicitly_disabled_parallel_tool_calls(monkeypatch, tmp_path) -> None:
+    _root, task = _task_tree(tmp_path)
+    skills = _skills(tmp_path)
+    monkeypatch.setattr(app, "validate_harness_skills", lambda path: Path(path))
+
+    result = app.compose_agent_input(
+        task,
+        skills,
+        NeMoGymResponseCreateParamsNonStreaming(input=[], parallel_tool_calls=False),
+        native=True,
+    )
+
     assert result.parallel_tool_calls is False
 
 

@@ -867,7 +867,6 @@ def compose_agent_input(
             {
                 "tools": native_tool_definitions(),
                 "tool_choice": "auto",
-                "parallel_tool_calls": False,
             }
         )
     payload = params.model_dump(mode="json")

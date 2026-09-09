@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
@@ -60,10 +60,16 @@ def _model_response(output: list[dict], *, response_id: str = "response", usage:
     return payload
 
 
-def _function_call(name: str = "glob", arguments: str = '{"pattern":"**/*"}') -> dict:
+def _function_call(
+    name: str = "glob",
+    arguments: str = '{"pattern":"**/*"}',
+    *,
+    item_id: str = "fc-1",
+    call_id: str = "call-1",
+) -> dict:
     return {
-        "id": "fc-1",
-        "call_id": "call-1",
+        "id": item_id,
+        "call_id": call_id,
         "name": name,
         "arguments": arguments,
         "type": "function_call",
@@ -129,6 +135,49 @@ async def test_tool_loop_returns_full_responses_trajectory_and_usage(monkeypatch
     second_input = agent.server_client.post.await_args_list[1].kwargs["json"].input
     assert isinstance(second_input[-1], NeMoGymFunctionCallOutput)
     assert second_input[-1].output == "contract.docx"
+
+
+async def test_tool_loop_executes_multiple_calls_from_one_model_turn_in_order(monkeypatch) -> None:
+    agent = _agent()
+    agent.server_client.post = AsyncMock(
+        side_effect=[
+            _raw_response(
+                _model_response(
+                    [
+                        _function_call(item_id="fc-1", call_id="call-1"),
+                        _function_call(
+                            name="read",
+                            arguments='{"file_path":"contract.docx"}',
+                            item_id="fc-2",
+                            call_id="call-2",
+                        ),
+                    ],
+                    response_id="tool-turn",
+                )
+            ),
+            _raw_response(_model_response([_assistant_message()], response_id="final-turn")),
+        ]
+    )
+    execute = AsyncMock(side_effect=["contract.docx", "contract text"])
+    monkeypatch.setattr(app.LabToolExecutor, "execute", execute)
+
+    result = await agent.responses(
+        SimpleNamespace(path_params={}),
+        NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Do the task"}]),
+    )
+
+    assert result.status == "completed"
+    assert agent.server_client.post.await_count == 2
+    assert execute.await_args_list == [
+        call("glob", '{"pattern":"**/*"}'),
+        call("read", '{"file_path":"contract.docx"}'),
+    ]
+    assert [item.call_id for item in result.output if hasattr(item, "call_id")] == [
+        "call-1",
+        "call-2",
+        "call-1",
+        "call-2",
+    ]
 
 
 async def test_model_failure_preserves_partial_trajectory(monkeypatch) -> None:
