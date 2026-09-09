@@ -62,6 +62,15 @@ gdpval_resources_server:
       reward_mode: comparison
       # Reference models the anchored Bradley-Terry MLE ELO is fit against. The
       # multi-stage driver picks the `num_models` nearest anchors per stage.
+      #
+      # ANCHOR VINTAGE: Artificial Analysis GDPval-AA v2 live board, read
+      # 2026-09-09. Anchors are held FIXED in the fit, so a stale anchor shifts
+      # every candidate score by roughly the anchor error — the previous set was
+      # 30-76 points above the current board and inflated results accordingly.
+      # deepseek_v4_pro is the plain "DeepSeek V4 Pro (Reasoning, Max Effort)"
+      # row (1223), NOT "DeepSeek V4 Pro 0813" (1493): the deliverables in this
+      # reference set were collected 2026-07-04, before the 0813 release. Check
+      # the variant, not just the family name, when refreshing.
       # This is the ultra-v3 "9-ref no-gold" set (human_gold and gptoss_20b are
       # DELIBERATELY excluded — incomplete/missing deliverables inflate the fit).
       # Each deliverables_dir resolves to $GDPVAL_REFS_ROOT/<id>, defaulting to
@@ -84,31 +93,31 @@ gdpval_resources_server:
       reference_models:
         deepseek_v4_pro:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/deepseek_v4_pro
-          elo: 1299
+          elo: 1223
         glm51_fp8:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/glm51_fp8
-          elo: 1250
+          elo: 1181
         kimi_k26:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/kimi_k26
-          elo: 1191
+          elo: 1115
         nemotron3_ultra:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/nemotron3_ultra
-          elo: 1160
+          elo: 1091
         qwen36_35b:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/qwen36_35b
-          elo: 1045
+          elo: 992
         qwen35_397b:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/qwen35_397b
-          elo: 960
+          elo: 905
         gptoss_120b:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/gptoss_120b
-          elo: 795
+          elo: 745
         gemma4_26b:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/gemma4_26b
-          elo: 752
+          elo: 713
         qwen3_30b_thinking:
           deliverables_dir: ${oc.env:GDPVAL_REFS_ROOT,/gdpval/refs}/qwen3_30b_thinking
-          elo: 267
+          elo: 274
       # Pairwise trials per (task x reference x repeat). 4 debiases position with
       # swap/no-swap; lower to 2 for a faster smoke test.
       num_comparison_trials: 4
