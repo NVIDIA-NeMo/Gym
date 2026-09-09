@@ -5,6 +5,10 @@ the NeMo Gym resources server. It adapts the small Harbor environment interface
 that Terminus uses (`exec` and `is_dir`) to `AsyncSandbox`; task state therefore
 remains owned by the resources server.
 
+Before launching, complete [OpenSandbox access and setup](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/opensandbox#setup)
+for service credentials, a reachable endpoint, network requirements, and resource
+limits. Sandbox-service, model, and image-registry credentials are separate.
+
 ```bash
 gym env start \
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \

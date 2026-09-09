@@ -361,7 +361,11 @@ uv sync --extra dev --extra sandbox
   current working directory, so from the repo root it points above the repo and
   fails with `... does not appear to be a Python project`.
 
-- Access to an OpenSandbox deployment reachable from the server process.
+- Access to an OpenSandbox deployment reachable from the server process. Follow
+  [OpenSandbox access and setup](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/opensandbox#setup)
+  for service-operator-issued credentials or self-hosting, endpoint/network
+  requirements, and resource limits. This key is separate from model and
+  image-registry credentials.
 - A policy model endpoint compatible with `responses_api_models/vllm_model`.
 - SWE-bench task images available to OpenSandbox. The committed smoke rows are
   `subset: verified`, so they resolve to

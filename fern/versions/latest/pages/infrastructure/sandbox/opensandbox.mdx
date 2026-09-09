@@ -13,6 +13,39 @@ for resource requests vs limits, timeout and retry guidance, and the failure sig
 
 ## Setup
 
+### Obtain service access
+
+Installing Gym does not provision an OpenSandbox server or issue a key.
+`OPENSANDBOX_API_KEY` authenticates to **your OpenSandbox deployment**; it is not
+an OpenCode login, a model-provider key, or a container-registry credential.
+
+Choose an access route before running an agent:
+
+- **An existing organization-managed deployment:** request access from the team
+  operating that OpenSandbox service, using its approved internal access runbook.
+  Ask for the client endpoint (including scheme and port), credential delivery
+  and rotation procedure, required network/VPN access, permitted task images,
+  and approved concurrency, CPU/memory, sandbox lifetime, and usage/cost limits.
+  These are deployment-specific; this repository does not supply shared service
+  credentials or grant access to NVIDIA infrastructure. Keep private runbook
+  links and access requests in your organization's approved channels.
+- **Your own deployment:** follow the upstream
+  [OpenSandbox server deployment guide](https://github.com/opensandbox-group/OpenSandbox/blob/main/docs/components/server.md)
+  and [server configuration reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md).
+  The operator configures a non-empty `api_key` under the server's `[server]`
+  section and securely supplies that value to clients as `OPENSANDBOX_API_KEY`.
+  Deploy and secure the server before using Gym; installing the SDK alone is not
+  sufficient. Upstream provides Docker and Kubernetes deployment paths, but
+  benchmark images, volumes, networking, and resource requirements must still be
+  validated for your chosen deployment.
+
+If you do not have an organization-managed service, use the self-hosted route;
+the in-cluster default below is not a public hosted endpoint. For public Gym
+configuration help, [open a Gym issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose)
+with sanitized details, never credentials or private infrastructure information.
+
+### Configure the client
+
 Install the sandbox extra in the runtime image or virtual environment that creates sandboxes:
 
 ```bash
@@ -29,8 +62,39 @@ Set connection values through the provider config. The shipped config reads thes
 
 | Variable | Purpose |
 | --- | --- |
-| `OPENSANDBOX_DOMAIN` | OpenSandbox server domain, optionally with its scheme (`https://host` sets `connection.protocol`). Defaults to the in-cluster service name in the shipped config. |
-| `OPENSANDBOX_API_KEY` | API key passed to the OpenSandbox SDK connection config. |
+| `OPENSANDBOX_DOMAIN` | Reachable server host and optional port, optionally with its scheme (`https://host` sets `connection.protocol`). Override the shipped in-cluster default unless your process can reach that service. |
+| `OPENSANDBOX_API_KEY` | Required by the shipped config; obtain it from the service operator or configure it on your own server as described above. Inject it through your approved secret manager or protected runtime environment. |
+
+Keep model-endpoint credentials in the model configuration and private-image
+credentials in the registry configuration (`image_auth`, when needed). Do not
+reuse either as the sandbox-service key. Do not commit keys to YAML, paste them
+into issues, or print fully resolved configurations containing secrets.
+
+### Check access before allocating sandboxes
+
+From the machine or container running the Gym server, check these prerequisites:
+
+1. Confirm the key is injected without printing its value. Confirm the approved
+   endpoint resolves and is reachable from this process; a `.svc.cluster.local`
+   name normally requires the cluster's DNS and network access. Use the
+   operator's TLS/CA configuration, rather than disabling certificate checks.
+2. Use the deployment's documented health check to check reachability, then its
+   approved read-only authenticated check to verify credentials. Upstream's
+   `/health` route is public: success there alone does **not** prove key validity
+   or permission to create a sandbox. These checks should not create resources.
+3. Confirm image pulls and required binary/data downloads are allowed. Check the
+   model endpoint is reachable from the component making model requests; a
+   sandbox's `localhost` is not the Gym host. Server-proxy mode does not grant
+   sandbox egress or image-registry access.
+4. Agree a small first-run concurrency and lifetime within the deployment's
+   limits, and a cleanup procedure before running the agent's evaluation recipe.
+
+For DNS/timeouts, check network placement and the endpoint with the operator.
+For authentication errors, check the key's deployment, expiry/rotation, and
+permissions; do not substitute a model key. For quota or image-pull failures,
+confirm capacity and registry access before retrying at higher concurrency.
+Access checks are prerequisites, not evidence of a successful agent rollout or
+verifier run.
 
 ## Provider Config
 
