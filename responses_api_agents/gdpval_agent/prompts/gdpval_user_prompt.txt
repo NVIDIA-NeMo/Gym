@@ -23,6 +23,9 @@ else: no scripts, no logs, no intermediate working files. Write real documents i
 the task asks for rather than describing them in your reply, because your reply is not
 submitted.
 
+Build and install somewhere else. Package managers write hundreds of dependency files, and if
+they land in the output directory they are submitted as your work and crowd out the deliverable.
+
 If you genuinely cannot complete the task because a required input is missing or a hard
 dependency is unavailable, write a short plain-text file to that directory explaining why.
 

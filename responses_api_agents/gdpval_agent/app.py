@@ -50,7 +50,23 @@ _PROMPT_PATH = Path(__file__).parent / "prompts" / "gdpval_user_prompt.txt"
 _SCRATCH_SUFFIXES = frozenset({".pyc", ".pyo", ".log"})
 # Directories a build leaves behind. One task shipped 1497 node_modules files, which flattened
 # into the target and exceeded the judge's context limit.
-_EXCLUDED_DIRS = frozenset({"node_modules", ".git", "__pycache__", ".venv", "venv", ".cache"})
+_EXCLUDED_DIRS = frozenset(
+    {
+        "node_modules",
+        ".git",
+        "__pycache__",
+        ".venv",
+        "venv",
+        ".cache",
+        "lib",
+        "out",
+        "target",
+        "dist",
+        "build",
+        "vendor",
+        "site-packages",
+    }
+)
 _MAX_DELIVERABLES = 100
 _DELIVERABLE_SUFFIXES = frozenset(
     {
@@ -316,14 +332,19 @@ class GDPValAgent(SimpleResponsesAPIAgent):
         shutil.rmtree(target, ignore_errors=True)
         target.mkdir(parents=True, exist_ok=True)
         collected = 0
-        for remote in await self._list_deliverables(box):
+        candidates = [
+            remote
+            for remote in await self._list_deliverables(box)
+            if is_deliverable(Path(remote).name) and not _EXCLUDED_DIRS.intersection(Path(remote).parts)
+        ]
+        if len(candidates) > _MAX_DELIVERABLES:
+            print(
+                f"[gdpval_agent] {len(candidates)} deliverables found, keeping {_MAX_DELIVERABLES}",
+                flush=True,
+            )
+        for remote in candidates:
             name = Path(remote).name
-            if not is_deliverable(name):
-                continue
-            if _EXCLUDED_DIRS.intersection(Path(remote).parts):
-                continue
             if collected >= _MAX_DELIVERABLES:
-                print(f"[gdpval_agent] stopping at {_MAX_DELIVERABLES} deliverables", flush=True)
                 break
             # The scorer lists this directory non-recursively, so everything lands flat.
             dest = target / name
