@@ -175,8 +175,8 @@ def _file(
             raise FileExistsError(target)
         extra = _video(source, target)
     elif extension in PCM_EXTENSIONS:
-        probe = _probe(source)
-        if any(s.get("codec_name") in PCM_CODECS for s in probe["streams"]):
+        streams = _probe(source)["streams"]
+        if len(streams) == 1 and streams[0].get("codec_name") in PCM_CODECS:
             with tempfile.TemporaryDirectory(prefix="gdpval-audio-") as temporary:
                 workspace = Path(temporary)
                 before = _audio_identity(source, workspace)

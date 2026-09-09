@@ -148,6 +148,29 @@ def test_real_pcm_conversion_and_float_passthrough(tmp_path, codec, extension):
     assert audio.read_bytes() == original
 
 
+def test_audio_with_extra_streams_is_preserved_loose_and_inside_zip(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    payload = b"PCM audio with embedded artwork"
+    (source / "sound.wav").write_bytes(payload)
+    with zipfile.ZipFile(source / "assets.zip", "w") as archive:
+        archive.writestr("footage/sound.wav", payload)
+    monkeypatch.setattr(
+        media,
+        "_probe",
+        lambda _: {
+            "streams": [
+                {"codec_type": "audio", "codec_name": "pcm_s24le"},
+                {"codec_type": "video", "codec_name": "mjpeg", "disposition": {"attached_pic": 1}},
+            ]
+        },
+    )
+    output = tmp_path / "output"
+    media.build(source, output)
+    assert (output / "sound.wav").read_bytes() == payload
+    assert (output / "assets.zip").read_bytes() == (source / "assets.zip").read_bytes()
+
+
 @requires_ffmpeg
 def test_real_zip_video_proxy_keeps_every_member_and_source_bytes(tmp_path, monkeypatch):
     monkeypatch.setattr(media, "MIN_VIDEO_BYTES", 0)
