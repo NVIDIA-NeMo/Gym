@@ -13,14 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import socket
+
 import pytest
 
 from nemo_gym.orchestration.ray_serve_gateway import (
-    RoundRobinRouter,
     build_instance_command,
-    instance_port,
-    node_for_instance,
-    nodes_per_instance,
+    free_local_port,
+    max_replicas_per_node,
     parse_args,
 )
 
@@ -67,19 +67,56 @@ def test_parse_args_missing_required_raises():
         parse_args(["--port", "8000"])
 
 
+def test_parse_args_accepts_gpus_per_node_for_caller_compatibility():
+    # Unused by this module's own scheduling logic (Ray Serve's max_replicas_per_node plus vLLM's
+    # own Ray executor handle node placement without needing it) - just needs to not error, since
+    # _build_vllm_ray_serve_command passes it unconditionally.
+    args = parse_args(["--model", "org/model", "--port", "8000", "--gpus-per-node", "8"])
+    assert args.gpus_per_node == 8
+
+
 # ---------------------------------------------------------------------------
-# instance_port
+# free_local_port
 # ---------------------------------------------------------------------------
 
 
-def test_instance_port_offsets_above_gateway_port():
-    assert instance_port(8000, 0) == 8001
-    assert instance_port(8000, 3) == 8004
+def test_free_local_port_returns_a_usable_port():
+    port = free_local_port()
+    assert 0 < port < 65536
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("", port))
 
 
-def test_instance_port_never_collides_with_gateway_port():
-    for i in range(8):
-        assert instance_port(8000, i) != 8000
+def test_free_local_port_returns_distinct_ports_across_calls():
+    # Not a strict guarantee (the OS could theoretically reuse one right away), but with both
+    # sockets closed before the next bind, collisions are practically never observed - this is
+    # what protects colocated replicas (see max_replicas_per_node) from binding the same port.
+    ports = {free_local_port() for _ in range(20)}
+    assert len(ports) == 20
+
+
+# ---------------------------------------------------------------------------
+# max_replicas_per_node
+# ---------------------------------------------------------------------------
+
+
+def test_max_replicas_per_node_none_without_gpus_per_node_info():
+    assert max_replicas_per_node(tensor_parallel_size=1, pipeline_parallel_size=1, gpus_per_node=None) is None
+
+
+def test_max_replicas_per_node_allows_multiple_instances_to_share_a_node():
+    # TP2 instances comfortably share one 8-GPU node - up to 4 of them.
+    assert max_replicas_per_node(tensor_parallel_size=2, pipeline_parallel_size=1, gpus_per_node=8) == 4
+
+
+def test_max_replicas_per_node_one_when_footprint_exactly_fills_a_node():
+    # TP8 fills the whole 8-GPU node - no room for a second instance's driver there.
+    assert max_replicas_per_node(tensor_parallel_size=8, pipeline_parallel_size=1, gpus_per_node=8) == 1
+
+
+def test_max_replicas_per_node_one_when_footprint_exceeds_a_node():
+    # TP8 x PP2 = 16 GPUs/instance, spans 2 nodes - no other instance's driver may share either node.
+    assert max_replicas_per_node(tensor_parallel_size=8, pipeline_parallel_size=2, gpus_per_node=8) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -88,8 +125,9 @@ def test_instance_port_never_collides_with_gateway_port():
 
 
 def test_build_instance_command_basic():
-    args = parse_args(["--model", "org/model", "--port", "8000"])
-    cmd = build_instance_command(args, 0)
+    cmd = build_instance_command(
+        model="org/model", tensor_parallel_size=1, pipeline_parallel_size=1, trust_remote_code=False, port=8001
+    )
     assert cmd[:3] == ["vllm", "serve", "org/model"]
     assert "--port" in cmd and cmd[cmd.index("--port") + 1] == "8001"
     assert "--tensor-parallel-size" in cmd
@@ -97,100 +135,35 @@ def test_build_instance_command_basic():
     assert cmd[cmd.index("--distributed-executor-backend") + 1] == "ray"
 
 
-def test_build_instance_command_per_instance_port():
-    args = parse_args(["--model", "org/model", "--port", "8000"])
-    cmd0 = build_instance_command(args, 0)
-    cmd1 = build_instance_command(args, 1)
-    assert cmd0[cmd0.index("--port") + 1] == "8001"
-    assert cmd1[cmd1.index("--port") + 1] == "8002"
+def test_build_instance_command_uses_given_port():
+    cmd = build_instance_command(
+        model="org/model", tensor_parallel_size=1, pipeline_parallel_size=1, trust_remote_code=False, port=9001
+    )
+    assert cmd[cmd.index("--port") + 1] == "9001"
 
 
 def test_build_instance_command_pipeline_parallel_flag_only_when_gt_1():
-    args = parse_args(["--model", "org/model", "--port", "8000"])
-    cmd = build_instance_command(args, 0)
+    cmd = build_instance_command(
+        model="org/model", tensor_parallel_size=1, pipeline_parallel_size=1, trust_remote_code=False, port=8001
+    )
     assert "--pipeline-parallel-size" not in cmd
 
-    args2 = parse_args(["--model", "org/model", "--port", "8000", "--pipeline-parallel-size", "2"])
-    cmd2 = build_instance_command(args2, 0)
+    cmd2 = build_instance_command(
+        model="org/model", tensor_parallel_size=1, pipeline_parallel_size=2, trust_remote_code=False, port=8001
+    )
     assert "--pipeline-parallel-size" in cmd2
     assert cmd2[cmd2.index("--pipeline-parallel-size") + 1] == "2"
 
 
 def test_build_instance_command_trust_remote_code():
-    args = parse_args(["--model", "org/model", "--port", "8000", "--trust-remote-code"])
-    cmd = build_instance_command(args, 0)
+    cmd = build_instance_command(
+        model="org/model", tensor_parallel_size=1, pipeline_parallel_size=1, trust_remote_code=True, port=8001
+    )
     assert "--trust-remote-code" in cmd
 
 
 def test_build_instance_command_no_trust_remote_code_by_default():
-    args = parse_args(["--model", "org/model", "--port", "8000"])
-    cmd = build_instance_command(args, 0)
+    cmd = build_instance_command(
+        model="org/model", tensor_parallel_size=1, pipeline_parallel_size=1, trust_remote_code=False, port=8001
+    )
     assert "--trust-remote-code" not in cmd
-
-
-# ---------------------------------------------------------------------------
-# nodes_per_instance
-# ---------------------------------------------------------------------------
-
-
-def test_nodes_per_instance_no_gpus_per_node_defaults_to_one():
-    assert nodes_per_instance(tensor_parallel_size=8, pipeline_parallel_size=2, gpus_per_node=None) == 1
-
-
-def test_nodes_per_instance_fits_in_one_node():
-    assert nodes_per_instance(tensor_parallel_size=8, pipeline_parallel_size=1, gpus_per_node=8) == 1
-
-
-def test_nodes_per_instance_spans_two_nodes():
-    assert nodes_per_instance(tensor_parallel_size=8, pipeline_parallel_size=2, gpus_per_node=8) == 2
-
-
-def test_nodes_per_instance_rounds_up():
-    assert nodes_per_instance(tensor_parallel_size=5, pipeline_parallel_size=1, gpus_per_node=4) == 2
-
-
-# ---------------------------------------------------------------------------
-# node_for_instance
-# ---------------------------------------------------------------------------
-
-
-def test_node_for_instance_single_node_per_instance_round_robins():
-    nodes = ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"]
-    assert [node_for_instance(i, 1, nodes) for i in range(4)] == nodes
-
-
-def test_node_for_instance_wraps_around_when_more_instances_than_nodes():
-    nodes = ["10.0.0.1", "10.0.0.2"]
-    assert [node_for_instance(i, 1, nodes) for i in range(4)] == nodes + nodes
-
-
-def test_node_for_instance_multi_node_per_instance_uses_distinct_slices():
-    # 4 nodes, 2 nodes/instance -> instance 0 anchors to node 0, instance 1 to node 2.
-    nodes = ["10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"]
-    assert node_for_instance(0, 2, nodes) == "10.0.0.1"
-    assert node_for_instance(1, 2, nodes) == "10.0.0.3"
-
-
-def test_node_for_instance_empty_nodes_raises():
-    with pytest.raises(RuntimeError):
-        node_for_instance(0, 1, [])
-
-
-# ---------------------------------------------------------------------------
-# RoundRobinRouter
-# ---------------------------------------------------------------------------
-
-
-def test_round_robin_router_cycles_in_order():
-    router = RoundRobinRouter(["a", "b", "c"])
-    assert [router.next_url() for _ in range(6)] == ["a", "b", "c", "a", "b", "c"]
-
-
-def test_round_robin_router_single_url():
-    router = RoundRobinRouter(["only"])
-    assert [router.next_url() for _ in range(3)] == ["only", "only", "only"]
-
-
-def test_round_robin_router_empty_raises():
-    with pytest.raises(ValueError):
-        RoundRobinRouter([])
