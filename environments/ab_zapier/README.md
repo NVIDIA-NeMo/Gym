@@ -23,4 +23,4 @@ This pulls `automation-bench` from the upstream repo. Note upstream declares
 python environments/ab_zapier/prepare.py
 ```
 
-600 tasks, 6 domains x 100. `ab_aa` and `ab_verified` score the same task set.
+600 tasks, 6 domains x 100 - the same set `ab_aa` scores.
