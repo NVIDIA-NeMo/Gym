@@ -9,7 +9,7 @@ GDP.pdf contains 100 test-only professional tasks over 4,592 PDF pages in ten do
 - LiteParse extracts every page with OCR enabled where required.
 - Every policy receives the complete extracted text of every page.
 - Vision policies receive ordered page images at 150 DPI by default.
-- Endpoint-limit fallbacks are explicit agent settings: reduce to no lower than 72 DPI, compose 2 then 4 labeled pages per image, then limit image coverage to leading pages while retaining all extracted text.
+- Context/payload rejections automatically reduce image DPI, down to 72. Endpoint image-count caps select 2- or 4-page labeled composites and, only if necessary, leading-page image coverage; all extracted text is retained.
 - The policy gets one turn with no tools or browsing.
 - GPT-5.6 Luna with medium reasoning judges every rubric criterion independently and never receives the PDF or contestant identity.
 - All-pass is the headline metric; Mean Pass is the task-macro criterion pass rate.
@@ -44,7 +44,7 @@ For a one-rollout smoke test or routine RL iteration, override only:
 
 Set `judge_base_url`, `judge_api_key`, and, if necessary, `judge_model_name` for the GPT-5.6 Luna endpoint. Policy model configuration uses the normal Gym `--model-type` and model arguments.
 
-For provider limits, override the `gdp_pdf_agent` instance fields (`image_dpi`, `pages_per_image`, `max_images`, or `image_format`). Any non-default delivery profile must be retained with the resolved run config because it affects comparability.
+Delivery starts at 150 DPI for every task and adapts to explicit endpoint rejections. Optionally set the agent's `max_images` to a known endpoint image-count cap. Results retain the selected delivery profile and rejection history. See [agent delivery details](../../responses_api_agents/gdp_pdf_agent/README.md) for the retry schedule and terminal-failure behavior.
 
 ## RL use
 

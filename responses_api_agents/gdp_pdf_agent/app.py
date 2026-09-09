@@ -10,15 +10,20 @@ import base64
 import io
 import json
 import math
+import re
 from copy import deepcopy
 from pathlib import Path
+from time import time
 from typing import Any, Literal, Optional
 
+from aiohttp import ClientResponseError
 from fastapi import Request
 from PIL import Image, ImageDraw
-from pydantic import Field, model_validator
+from pydantic import Field
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.simple_agent.app import (
     SimpleAgent,
     SimpleAgentConfig,
@@ -32,23 +37,102 @@ _DOCUMENT_REDACTION_MARKER = "[GDP.pdf document payload redacted]"
 
 
 class GdpPdfAgentConfig(SimpleAgentConfig):
+    max_steps: Literal[1] = 1
     documents_base_dir: str = Field(
         description="Base directory for document manifests referenced by verifier_metadata.document_manifest."
     )
     include_page_images: bool = True
-    source_dpi: int = Field(default=150, ge=72, le=150)
-    image_dpi: int = Field(default=150, ge=72, le=150)
-    pages_per_image: Literal[1, 2, 4] = 1
+    source_dpi: Literal[150] = 150
     max_images: Optional[int] = Field(default=None, ge=1)
     image_format: Literal["png", "jpeg"] = "png"
     jpeg_quality: int = Field(default=90, ge=1, le=100)
     strip_document_payloads_from_output: Literal[True] = True
 
-    @model_validator(mode="after")
-    def validate_dpi(self) -> "GdpPdfAgentConfig":
-        if self.image_dpi > self.source_dpi:
-            raise ValueError("image_dpi cannot exceed the prepared source_dpi")
-        return self
+
+class DocumentDelivery:
+    """Per-request state; never mutate the shared agent config."""
+
+    def __init__(self, max_images: Optional[int] = None):
+        self.image_dpi = 150
+        self.max_images = max_images
+        self.pages_per_image = 1
+        self.page_count = 0
+        self.image_count = 0
+        self.image_pages = 0
+        self.attempts: list[dict[str, Any]] = []
+
+    def record(self, limit: Optional[str] = None) -> dict[str, Any]:
+        return {
+            "image_dpi": self.image_dpi,
+            "pages_per_image": self.pages_per_image,
+            "image_count": self.image_count,
+            "image_pages": self.image_pages,
+            "page_count": self.page_count,
+            "limit": limit,
+        }
+
+    def adapt(self, limit: str, image_cap: Optional[int]) -> bool:
+        self.attempts.append(self.record(limit))
+        if limit == "image_count":
+            # A numeric endpoint limit avoids probing the same rejected image count.
+            cap = image_cap if image_cap is not None else self.image_count - 1
+            if cap < 1 or cap >= self.image_count:
+                return False
+            self.max_images = min(self.max_images or cap, cap)
+            return True
+        if self.image_dpi == 72 or not self.image_count:
+            return False
+        # AA publishes the endpoints (150 and 72), not a decrement schedule.
+        # Reduce by 20% per rejected request, always trying the 72 DPI floor.
+        self.image_dpi = max(72, math.floor(self.image_dpi * 0.8))
+        return True
+
+
+def _input_limit(error: ClientResponseError) -> tuple[Optional[str], Optional[int]]:
+    """Recognize explicit input-limit errors, including Gym's wrapped upstream errors."""
+    text = getattr(error, "response_content", b"")
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
+    text = str(text).lower()
+    if error.status in (401, 403, 429) or any(
+        marker in text for marker in ("ratelimiterror", "rate_limit_exceeded", "authenticationerror")
+    ):
+        return None, None
+    for pattern in (
+        r"(?:at most|maximum of|up to|more than)\s+(\d+)\s+images?",
+        r"(?:maximum|max)\s+(?:number of )?images?[^\d]{0,20}(\d+)",
+    ):
+        match = re.search(pattern, text)
+        if match:
+            return "image_count", int(match[1])
+    if "too many images" in text:
+        return "image_count", None
+    if error.status == 413 or any(
+        marker in text
+        for marker in (
+            "request entity too large",
+            "payload too large",
+            "request body too large",
+            "request_too_large",
+            "image too large",
+            "image dimensions exceed",
+        )
+    ):
+        return "payload", None
+    if any(
+        marker in text
+        for marker in (
+            "context_length_exceeded",
+            "maximum context length",
+            "exceeds maximum input length",
+            "input is too long",
+            "prompt is too long",
+            "exceeds the model's maximum context",
+            "longer than the maximum model length",
+        )
+    ):
+        return "context", None
+    return None, None
 
 
 def _resolve_under(base_dir: Path, relative_path: str) -> Path:
@@ -118,6 +202,7 @@ def _document_content(
     task_prompt: str,
     manifest_path: Path,
     config: GdpPdfAgentConfig,
+    delivery: DocumentDelivery,
 ) -> list[dict[str, Any]]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     raw_pages = manifest.get("pages")
@@ -143,20 +228,25 @@ def _document_content(
     if [number for number, _, _ in pages] != list(range(1, len(pages) + 1)):
         raise ValueError(f"document manifest has invalid page numbering: {manifest_path}")
 
-    image_pages = pages
-    if config.max_images is not None:
-        image_pages = image_pages[: config.max_images * config.pages_per_image]
+    delivery.page_count = len(pages)
+    delivery.pages_per_image = 1
+    if delivery.max_images is not None:
+        while delivery.pages_per_image < 4 and math.ceil(len(pages) / delivery.pages_per_image) > delivery.max_images:
+            delivery.pages_per_image *= 2
+    image_pages = pages if config.include_page_images else []
+    if delivery.max_images is not None:
+        image_pages = image_pages[: delivery.max_images * delivery.pages_per_image]
     image_batches = [
-        image_pages[index : index + config.pages_per_image]
-        for index in range(0, len(image_pages), config.pages_per_image)
+        image_pages[index : index + delivery.pages_per_image]
+        for index in range(0, len(image_pages), delivery.pages_per_image)
     ]
+    delivery.image_pages = len(image_pages)
+    delivery.image_count = len(image_batches)
 
     image_description = "No page images are included; use the complete extracted text."
     if config.include_page_images:
         shown = len(image_pages)
-        image_description = (
-            f"Ordered page images are included at {config.image_dpi} DPI, {config.pages_per_image} page(s) per image."
-        )
+        image_description = f"Ordered page images are included at {delivery.image_dpi} DPI, {delivery.pages_per_image} page(s) per image."
         if shown < len(pages):
             image_description += f" Images cover only pages 1-{shown}; extracted text covers all {len(pages)} pages."
         else:
@@ -180,7 +270,7 @@ def _document_content(
                 _compose_pages(
                     page_images,
                     source_dpi=config.source_dpi,
-                    image_dpi=config.image_dpi,
+                    image_dpi=delivery.image_dpi,
                     image_format=config.image_format,
                     jpeg_quality=config.jpeg_quality,
                 )
@@ -191,8 +281,11 @@ def _document_content(
     return content
 
 
-def materialize_document(row: dict[str, Any], base_dir: Path, config: GdpPdfAgentConfig) -> dict[str, Any]:
-    """Inject complete extracted text and the configured page-image profile."""
+def materialize_document(
+    row: dict[str, Any], base_dir: Path, config: GdpPdfAgentConfig, delivery: Optional[DocumentDelivery] = None
+) -> dict[str, Any]:
+    """Inject full text and the current delivery profile for a policy request only."""
+    delivery = delivery or DocumentDelivery(config.max_images)
     metadata = row.get("verifier_metadata") or {}
     relative_manifest = metadata.get("document_manifest")
     if not relative_manifest:
@@ -210,7 +303,9 @@ def materialize_document(row: dict[str, Any], base_dir: Path, config: GdpPdfAgen
     params["input"] = [
         {
             "role": "user",
-            "content": _document_content(task_prompt=task_prompt, manifest_path=manifest_path, config=config),
+            "content": _document_content(
+                task_prompt=task_prompt, manifest_path=manifest_path, config=config, delivery=delivery
+            ),
         }
     ]
     params["tools"] = []
@@ -264,9 +359,70 @@ class GdpPdfAgent(SimpleAgent):
             base_dir = PARENT_DIR / base_dir
 
         row = body.model_dump(exclude_unset=True)
-        enriched = await asyncio.to_thread(materialize_document, row, base_dir, self.config)
-        result = await super().run(request, SimpleAgentRunRequest.model_validate(enriched))
-        return _strip_document_payloads(result) if self.config.strip_document_payloads_from_output else result
+        seed = await self.server_client.post(
+            server_name=self.config.resources_server.name, url_path="/seed_session", json=row, cookies=request.cookies
+        )
+        await raise_for_status(seed)
+        cookies = seed.cookies
+        delivery = DocumentDelivery(self.config.max_images)
+        trajectory = None
+        terminal_limit = None
+        while True:
+            enriched = await asyncio.to_thread(materialize_document, row, base_dir, self.config, delivery)
+            params = SimpleAgentRunRequest.model_validate(enriched).responses_create_params
+            try:
+                model_response, trajectory, _, cookies = await self._create_episode(
+                    params,
+                    model_url_path=self.url_path_for_run("/v1/responses", body),
+                    resources_server_cookies=cookies,
+                    task_id=str(row.get("_ng_task_index", "unknown")),
+                    rollout_id=self.rollout_id_from_run(body) or "unscoped",
+                    collect_trajectory=self._model_call_capture_enabled(),
+                )
+                break
+            except ClientResponseError as error:
+                limit, image_cap = _input_limit(error)
+                if limit is None:
+                    raise
+                if delivery.adapt(limit, image_cap):
+                    continue
+                terminal_limit = limit
+                # AA scores terminal input failures as zero. An empty answer goes
+                # through the normal verifier without making any rubric judge calls.
+                model_response = NeMoGymResponse(
+                    id="gdp-pdf-input-failure",
+                    created_at=time(),
+                    model=self.config.model_server.name,
+                    object="response",
+                    status="failed",
+                    output=[],
+                    tools=[],
+                    tool_choice="none",
+                    parallel_tool_calls=False,
+                )
+                break
+
+        result = row | {"response": model_response.model_dump(mode="json")}
+        if self.config.skip_verification:
+            result.update(
+                reward=0.0 if terminal_limit else float(self.config.skip_verification_reward),
+                verification_skipped=True,
+            )
+        else:
+            verified = await self.server_client.post(
+                server_name=self.config.resources_server.name, url_path="/verify", json=result, cookies=cookies
+            )
+            await raise_for_status(verified)
+            result = await get_response_json(verified)
+        result["document_delivery"] = delivery.record(terminal_limit) | {
+            "image_format": self.config.image_format,
+            "rejected_attempts": delivery.attempts,
+        }
+        if terminal_limit:
+            result["failure_reason"] = f"GDP.pdf terminal input limit: {terminal_limit}"
+        if trajectory is not None:
+            result["ng_trajectory"] = trajectory.model_dump(mode="json")
+        return _strip_document_payloads(SimpleAgentVerifyResponse.model_validate(result))
 
 
 if __name__ == "__main__":

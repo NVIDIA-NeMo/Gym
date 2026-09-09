@@ -32,8 +32,6 @@ gdp_pdf_agent:
       documents_base_dir: benchmarks/gdp_pdf/data
       include_page_images: true
       source_dpi: 150
-      image_dpi: 150
-      pages_per_image: 1
       max_images: null
       image_format: jpeg
       jpeg_quality: 90
