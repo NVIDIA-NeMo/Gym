@@ -44,6 +44,12 @@ For a one-rollout smoke test or routine RL iteration, override only:
 
 Set `judge_base_url`, `judge_api_key`, and, if necessary, `judge_model_name` for the GPT-5.6 Luna endpoint. Policy model configuration uses the normal Gym `--model-type` and model arguments.
 
+Set `--max-output-tokens` and sampling parameters explicitly for the evaluated model. AA uses 16,384 output tokens for non-reasoning models (subject to model limits), and the model creator's maximum output allowance for reasoning models. Temperature is 0 for non-reasoning and 0.6 for reasoning unless the model creator recommends otherwise. The output allowance must fit alongside the full input in the configured context window; it is preserved across DPI retries.
+
+For a local vLLM endpoint, use `--model-type inference_provider`, set `policy_base_url`, `policy_api_key`, and `policy_model_name`, and enable `++policy_model.responses_api_models.inference_provider.uses_reasoning_parser=true`. This existing Gym adapter preserves input-limit errors. The `vllm_model` adapter used for token-ID training converts some context errors into empty responses; automatic overflow fitting is not supported through that path. An incomplete response without token usage fails visibly rather than triggering a potentially invalid second generation.
+
+The benchmark fixes the denominator to 100 tasks and the requested `--num-repeats` (five by default), including missing attempts as zero. `rollouts/scored` and `rollouts/expected` expose completion separately. For partial runs, override `expected_task_count` and `expected_domain_task_counts` on `gdp_pdf_benchmark_resources_server.resources_servers.gdp_pdf` to the selected subset; otherwise the score is a lower bound against the full benchmark. Preserve and inspect Gym's failures sidecar before reporting any score.
+
 Delivery starts at 150 DPI for every task and adapts to explicit endpoint rejections. Optionally set the agent's `max_images` to a known endpoint image-count cap. Results retain the selected delivery profile and rejection history. See [agent delivery details](../../responses_api_agents/gdp_pdf_agent/README.md) for the retry schedule and terminal-failure behavior.
 
 ## RL use

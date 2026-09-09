@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import base64
 import io
 import json
@@ -14,6 +15,7 @@ from PIL import Image
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.responses_converter import ResponsesConverter
 from responses_api_agents.gdp_pdf_agent.app import (
     _DOCUMENT_REDACTION_MARKER,
     DocumentDelivery,
@@ -25,6 +27,7 @@ from responses_api_agents.gdp_pdf_agent.app import (
     materialize_document,
 )
 from responses_api_agents.simple_agent.app import SimpleAgentRunRequest, SimpleAgentVerifyResponse
+from responses_api_models.inference_provider.app import InferenceProvider, InferenceProviderConfig
 
 
 def _config(**overrides) -> GdpPdfAgentConfig:
@@ -82,6 +85,7 @@ def test_selects_composites_only_for_image_cap(tmp_path: Path, page_count, cap, 
     assert delivery.pages_per_image == per_image
     assert delivery.image_pages == shown
     assert "150 DPI" in content[0]["text"]
+    assert ("composite images" in content[0]["text"]) == (per_image > 1)
     if shown < page_count:
         assert f"Images cover only pages 1-{shown}" in content[0]["text"]
     assert all(f"<page {number}>\ntext {number}" in content[-1]["text"] for number in range(1, page_count + 1))
@@ -359,3 +363,124 @@ def test_resizing_changes_pixels_without_composition(tmp_path: Path) -> None:
         with Image.open(io.BytesIO(base64.b64decode(item["image_url"].split(",", 1)[1]))) as resized:
             assert resized.size == (80, 96)
     assert "text 3" in content[-1]["text"]
+
+
+def test_single_page_remainder_is_labeled(tmp_path: Path) -> None:
+    _write_document(tmp_path, 3)
+    row = {
+        "responses_create_params": {"input": "seed"},
+        "verifier_metadata": {"task_prompt": "Analyze.", "document_manifest": "document/manifest.json"},
+    }
+    with patch("responses_api_agents.gdp_pdf_agent.app.ImageDraw.Draw") as draw:
+        materialize_document(row, tmp_path, _config(max_images=2))
+    assert [call.args[1] for call in draw.return_value.text.call_args_list] == ["Page 1", "Page 2", "Page 3"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_usage", [False, True])
+async def test_incomplete_response_is_never_resampled(tmp_path: Path, has_usage) -> None:
+    _write_document(tmp_path)
+    agent = GdpPdfAgent.model_construct(config=_config(documents_base_dir=str(tmp_path), skip_verification=True))
+    agent.server_client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(cookies={})))
+    body = SimpleAgentRunRequest.model_validate(
+        {
+            "responses_create_params": {"input": "seed", "max_output_tokens": 100},
+            "verifier_metadata": {"task_prompt": "Analyze.", "document_manifest": "document/manifest.json"},
+        }
+    )
+    response = _response().model_copy(update={"status": "incomplete", "output": []})
+    if has_usage:
+        response = NeMoGymResponse.model_validate(
+            response.model_dump()
+            | {
+                "usage": {
+                    "input_tokens": 50,
+                    "output_tokens": 100,
+                    "total_tokens": 150,
+                    "input_tokens_details": {"cached_tokens": None},
+                    "output_tokens_details": {"reasoning_tokens": 100},
+                }
+            }
+        )
+    with (
+        patch.object(GdpPdfAgent, "_create_episode", new=AsyncMock(return_value=(response, None, {}, {}))) as call,
+        patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
+        patch("responses_api_agents.gdp_pdf_agent.app.raise_for_status", new=AsyncMock()),
+    ):
+        if has_usage:
+            result = await agent.run(SimpleNamespace(cookies={}), body)
+            assert result.response.usage.output_tokens == 100
+            assert result.document_delivery["rejected_attempts"] == []
+        else:
+            with pytest.raises(ValueError, match="cannot classify"):
+                await agent.run(SimpleNamespace(cookies={}), body)
+    assert call.await_count == 1
+    assert call.call_args.args[0].max_output_tokens == 100
+
+
+@pytest.mark.asyncio
+async def test_provider_adapter_preserves_overflow_and_reasoning(tmp_path: Path) -> None:
+    _write_document(tmp_path)
+    provider = InferenceProvider.model_construct(
+        config=InferenceProviderConfig(
+            host="localhost",
+            port=1234,
+            name="policy",
+            entrypoint="",
+            base_url="http://localhost:1234/v1",
+            api_key="unused",
+            model="test",
+            uses_reasoning_parser=True,
+        )
+    )
+    provider._converter = ResponsesConverter(return_token_id_information=False, uses_reasoning_parser=True)
+    provider._semaphore = asyncio.Semaphore(1)
+    provider._client = SimpleNamespace(
+        create_chat_completion=AsyncMock(
+            side_effect=[
+                _error("maximum context length exceeded", 400),
+                {
+                    "id": "chat-1",
+                    "created": 0,
+                    "model": "test",
+                    "object": "chat.completion",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "reasoning_content": "Private reasoning",
+                                "content": "Final answer",
+                            },
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+                },
+            ]
+        )
+    )
+    agent = GdpPdfAgent.model_construct(config=_config(documents_base_dir=str(tmp_path), skip_verification=True))
+    agent.server_client = SimpleNamespace(post=AsyncMock(return_value=SimpleNamespace(cookies={})))
+    body = SimpleAgentRunRequest.model_validate(
+        {
+            "responses_create_params": {"input": "seed", "max_output_tokens": 16384},
+            "verifier_metadata": {"task_prompt": "Analyze.", "document_manifest": "document/manifest.json"},
+        }
+    )
+
+    async def episode(params, **kwargs):
+        return await provider.responses(SimpleNamespace(), params), None, {}, {}
+
+    with (
+        patch.object(GdpPdfAgent, "_create_episode", side_effect=episode),
+        patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
+        patch("responses_api_agents.gdp_pdf_agent.app.raise_for_status", new=AsyncMock()),
+    ):
+        result = await agent.run(SimpleNamespace(cookies={}), body)
+    assert result.document_delivery["image_dpi"] == 120
+    assert len(result.document_delivery["rejected_attempts"]) == 1
+    assert [item.type for item in result.response.output] == ["reasoning", "message"]
+    assert result.response.output[-1].content[0].text == "Final answer"
+    assert provider._client.create_chat_completion.await_count == 2
+    assert all(call.kwargs["max_tokens"] == 16384 for call in provider._client.create_chat_completion.call_args_list)

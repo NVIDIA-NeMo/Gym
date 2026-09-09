@@ -20,6 +20,7 @@ from resources_servers.gdp_pdf.app import (
     GdpPdfResourcesServer,
     GdpPdfResourcesServerConfig,
     GdpPdfVerifyRequest,
+    extract_response_text,
     parse_judge_verdict,
 )
 
@@ -67,6 +68,13 @@ def _http_response(text: str) -> AsyncMock:
 
 
 class TestJudgeVerdict:
+    def test_reasoning_is_not_an_answer(self) -> None:
+        response = NeMoGymResponse.model_validate(
+            _empty_response().model_dump()
+            | {"output": [{"type": "reasoning", "id": "r", "summary": [{"type": "summary_text", "text": "PASS"}]}]}
+        )
+        assert extract_response_text(response) == ""
+
     def test_exact_pass(self) -> None:
         assert parse_judge_verdict("PASS") == (True, True)
 
@@ -78,6 +86,59 @@ class TestJudgeVerdict:
 
 
 class TestGdpPdfResourcesServer:
+    def test_missing_trailing_repeats_remain_in_denominator(self, server) -> None:
+        resource, _ = server
+        resource.config.expected_num_repeats = 5
+        metrics = resource.compute_metrics(
+            [
+                [
+                    {
+                        "_ng_rollout_index": 0,
+                        "all_pass": 1.0,
+                        "mean_pass": 1.0,
+                        "verifier_metadata": {"domain": "Finance"},
+                    }
+                ]
+            ]
+        )
+        assert metrics["pass@1[avg-of-5]/all_pass"] == approx(10.0)
+        assert metrics["rollouts/expected"] == 10
+        assert metrics["rollouts/scored"] == 1
+        assert metrics["domain/legal/pass@1[avg-of-5]/mean_pass"] == 0
+        empty = resource.compute_metrics([])
+        assert empty["pass@1[avg-of-5]/all_pass"] == 0
+        assert empty["rollouts/scored"] == 0
+
+    def test_explicit_k1_and_subset_denominator(self, server) -> None:
+        resource, _ = server
+        resource.config.expected_num_repeats = 1
+        resource.config.expected_task_count = 1
+        resource.config.expected_domain_task_counts = {"Finance": 1}
+        metrics = resource.compute_metrics(
+            [
+                [
+                    {
+                        "_ng_rollout_index": 0,
+                        "all_pass": 1.0,
+                        "mean_pass": 1.0,
+                        "verifier_metadata": {"domain": "Finance"},
+                    }
+                ]
+            ]
+        )
+        assert metrics["pass@1[avg-of-1]/all_pass"] == 100
+        assert metrics["rollouts/expected"] == 1
+
+    async def test_truncated_judge_verdict_is_retried(self, server) -> None:
+        resource, client = server
+        truncated = _response("PASS").model_copy(update={"status": "incomplete"})
+        first = AsyncMock()
+        first.read = AsyncMock(return_value=orjson.dumps(truncated.model_dump()))
+        client.post = AsyncMock(side_effect=[first, _http_response("FAIL")])
+        result = await resource._judge_criterion("Task", "Answer", {"id": "c1", "criterion": "Correct."})
+        assert result.passed is False
+        assert client.post.await_count == 2
+
     @fixture
     def server(self) -> tuple[GdpPdfResourcesServer, MagicMock]:
         config = GdpPdfResourcesServerConfig(

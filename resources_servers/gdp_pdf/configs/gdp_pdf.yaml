@@ -12,7 +12,7 @@ gdp_pdf_resources_server:
         name: gdp_pdf_judge_model
       judge_responses_create_params:
         input: []
-        max_output_tokens: 1024
+        max_output_tokens: 16384
         reasoning:
           effort: medium
       judge_max_parse_attempts: 5

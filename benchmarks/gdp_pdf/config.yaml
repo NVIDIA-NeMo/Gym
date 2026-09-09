@@ -6,6 +6,7 @@ gdp_pdf_benchmark_resources_server:
   resources_servers:
     gdp_pdf:
       expected_task_count: 100
+      expected_num_repeats: ${oc.select:num_repeats,5}
       expected_domain_task_counts:
         Construction: 10
         Engineering: 10

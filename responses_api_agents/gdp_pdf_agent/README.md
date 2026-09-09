@@ -14,3 +14,5 @@ Only explicit input-limit errors trigger adaptation. Authentication, rate-limit,
 Each result records `document_delivery`: DPI, pages per image, image count, page coverage, and rejected profiles with their limit category. The endpoint is the authority on whether the complete request (including its output allowance and model-specific image processing) fits; no approximate tokenizer is used.
 
 The policy gets one user turn with no tools. Seed and verifier requests retain the original lightweight inputs. Full text and page images are materialized only for the policy call and redacted from returned trajectory artifacts.
+
+For local evaluation, use Gym's `inference_provider` adapter against the vLLM endpoint with `uses_reasoning_parser=true`. Unlike `vllm_model`, it preserves context-limit exceptions. Incomplete responses without usage are ambiguous and fail visibly; generated answers, including reasoning-only truncations with usage, are never resampled by this agent. The judge receives only final-answer text, not reasoning items.

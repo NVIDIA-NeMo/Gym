@@ -59,3 +59,13 @@ class TaskData(BaseModel):
         description="Pinned Hugging Face dataset revision.",
         json_schema_extra={"consumed_by": ["provenance"], "legacy_location": "verifier_metadata"},
     )
+    worker_id: Optional[str] = Field(
+        default=None,
+        description="Source worker identifier, retained for provenance only.",
+        json_schema_extra={"consumed_by": ["provenance"], "legacy_location": "verifier_metadata"},
+    )
+    task_response_id: Optional[str] = Field(
+        default=None,
+        description="Source response identifier, retained for provenance only.",
+        json_schema_extra={"consumed_by": ["provenance"], "legacy_location": "verifier_metadata"},
+    )

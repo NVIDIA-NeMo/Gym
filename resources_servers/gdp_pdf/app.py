@@ -78,6 +78,7 @@ class GdpPdfResourcesServerConfig(BaseResourcesServerConfig):
     # The benchmark config uses this to retain the fixed 100-task denominator
     # when every rollout of a policy task fails before verification.
     expected_task_count: Optional[int] = Field(default=None, ge=1)
+    expected_num_repeats: Optional[int] = Field(default=None, ge=1)
     expected_domain_task_counts: dict[str, int] = Field(default_factory=dict)
 
 
@@ -159,7 +160,7 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
 
             judge_output = extract_response_text(response)
             passed, parsed = parse_judge_verdict(judge_output)
-            if parsed:
+            if parsed and response.status != "incomplete":
                 return CriterionEvaluation(
                     criterion_id=criterion_id,
                     criterion=criterion_text,
@@ -244,13 +245,23 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
         return 100.0 * sum(task_means) / denominator
 
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
-        if not tasks:
+        if not tasks and self.config.expected_task_count is None:
             return {}
 
-        max_k = max(max(self._rollout_indexed(task), default=-1) + 1 for task in tasks)
+        observed_k = max((max(self._rollout_indexed(task), default=-1) + 1 for task in tasks), default=0)
+        max_k = self.config.expected_num_repeats or observed_k
+        if observed_k > max_k:
+            raise ValueError("observed rollout index exceeds expected_num_repeats")
+        expected_tasks = self.config.expected_task_count or len(tasks)
+        if len(tasks) > expected_tasks:
+            raise ValueError("observed task count exceeds expected_task_count")
         metrics: dict[str, Any] = {
             "tasks/observed": len(tasks),
-            "tasks/expected": self.config.expected_task_count or len(tasks),
+            "tasks/expected": expected_tasks,
+            "rollouts/expected": expected_tasks * max_k,
+            "rollouts/scored": sum(
+                "all_pass" in rollout and "mean_pass" in rollout for task in tasks for rollout in task
+            ),
         }
 
         for k in range(1, max_k + 1):
@@ -270,7 +281,8 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
             domain = str(metadata.get("domain", "unknown"))
             by_domain.setdefault(domain, []).append(rollouts)
 
-        for domain, domain_tasks in sorted(by_domain.items()):
+        for domain in sorted(by_domain.keys() | self.config.expected_domain_task_counts.keys()):
+            domain_tasks = by_domain.get(domain, [])
             slug = re.sub(r"[^a-z0-9]+", "_", domain.lower()).strip("_")
             expected = self.config.expected_domain_task_counts.get(domain)
             for k in range(1, max_k + 1):

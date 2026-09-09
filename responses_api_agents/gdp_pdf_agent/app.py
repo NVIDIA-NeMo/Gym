@@ -171,13 +171,14 @@ def _compose_pages(
     image_dpi: int,
     image_format: str,
     jpeg_quality: int,
+    composite: bool = False,
 ) -> dict[str, Any]:
     images = [
         (page_number, _open_page_image(path, source_dpi=source_dpi, image_dpi=image_dpi))
         for page_number, path in pages
     ]
 
-    if len(images) == 1:
+    if len(images) == 1 and not composite:
         composed = images[0][1]
     else:
         columns = 2
@@ -247,6 +248,8 @@ def _document_content(
     if config.include_page_images:
         shown = len(image_pages)
         image_description = f"Ordered page images are included at {delivery.image_dpi} DPI, {delivery.pages_per_image} page(s) per image."
+        if delivery.pages_per_image > 1:
+            image_description += " These are composite images; each cell is labeled with its page number."
         if shown < len(pages):
             image_description += f" Images cover only pages 1-{shown}; extracted text covers all {len(pages)} pages."
         else:
@@ -273,6 +276,7 @@ def _document_content(
                     image_dpi=delivery.image_dpi,
                     image_format=config.image_format,
                     jpeg_quality=config.jpeg_quality,
+                    composite=delivery.pages_per_image > 1,
                 )
             )
 
@@ -379,6 +383,14 @@ class GdpPdfAgent(SimpleAgent):
                     rollout_id=self.rollout_id_from_run(body) or "unscoped",
                     collect_trajectory=self._model_call_capture_enabled(),
                 )
+                if model_response.status == "incomplete" and model_response.usage is None:
+                    # Some adapters erase upstream overflow errors. Do not guess
+                    # whether an answer was generated and risk resampling it.
+                    raise ValueError(
+                        "GDP.pdf cannot classify an incomplete response without token usage. "
+                        "For evaluation, use inference_provider with uses_reasoning_parser=true "
+                        "so input-limit errors are preserved."
+                    )
                 break
             except ClientResponseError as error:
                 limit, image_cap = _input_limit(error)
