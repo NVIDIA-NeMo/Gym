@@ -105,6 +105,22 @@ def render_gym_cmd(subcommand: str, var_name: str, args: list[str]) -> str:
     return f"{var_name}=(\n    " + "\n    ".join(entries) + "\n)"
 
 
+def render_repo_checkout(repo: str, ref: str) -> str:
+    """Render an &&-chained command that installs git if missing, then does
+    `git clone {repo} && cd {name} && git checkout {ref}`, leaving the shell's cwd at the repo
+    root. Shared by the driver entrypoint (which additionally pip-installs the whole package) and
+    the Ray Serve gateway command (which just needs the raw ray_serve_gateway.py file - see
+    _build_vllm_ray_serve_command). The git-install guard lives here rather than per call site
+    because every caller needs git first, regardless of container image - e.g. vllm/vllm-openai
+    doesn't bundle it, and neither does every driver image."""
+    repo_name = repo.rstrip("/").split("/")[-1].removesuffix(".git")
+    ensure_git = "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git)"
+    return (
+        f"({ensure_git})"
+        f" && git clone {shlex.quote(repo)} && cd {shlex.quote(repo_name)} && git checkout {shlex.quote(ref)}"
+    )
+
+
 def render_driver_entrypoint(
     repo: str | None,
     ref: str | None,
@@ -118,13 +134,10 @@ def render_driver_entrypoint(
     preamble: list[str] = []
 
     if repo and ref:
-        repo_name = repo.rstrip("/").split("/")[-1].removesuffix(".git")
         preamble += [
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
             'source "$HOME/.local/bin/env"',
-            f"git clone {shlex.quote(repo)}",
-            f"cd {shlex.quote(repo_name)}",
-            f"git checkout {shlex.quote(ref)}",
+            render_repo_checkout(repo, ref),
             "uv pip install -e . --system",
         ]
 

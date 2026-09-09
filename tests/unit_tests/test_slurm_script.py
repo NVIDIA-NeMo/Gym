@@ -13,15 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.api import SubmitConfig
-from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint, render_gym_cmd
+from nemo_gym.orchestration.api import GymInstallConfig, SubmitConfig
+from nemo_gym.orchestration.executors.script_templates import (
+    render_driver_entrypoint,
+    render_gym_cmd,
+    render_repo_checkout,
+)
 from nemo_gym.orchestration.executors.slurm_script import (
+    _build_service_command,
     _build_vllm_command,
     _build_vllm_ray_command,
+    _build_vllm_ray_serve_command,
     _node_totals,
     _render_directives,
     _render_pool_directives,
@@ -266,6 +273,182 @@ def test_build_vllm_ray_command_dp_head_and_worker_branches():
 
 
 # ---------------------------------------------------------------------------
+# _build_vllm_ray_serve_command / Ray Serve gateway selection
+# ---------------------------------------------------------------------------
+
+
+_GYM_INSTALL = GymInstallConfig(repo="https://github.com/NVIDIA-NeMo/gym", ref="main")
+
+
+def test_build_vllm_ray_serve_command_single_node_no_ray_bootstrap(vllm_service):
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gym_install=_GYM_INSTALL, gpus_per_node_values=[])
+    assert "nemo_gym/orchestration/ray_serve_gateway.py" in cmd
+    assert "git clone" in cmd
+    assert "git checkout main" in cmd
+    assert "ray symmetric-run" not in cmd
+    assert "vllm serve" not in cmd  # the gateway itself launches vllm serve, not this bash command
+
+
+def test_build_vllm_ray_serve_command_installs_git_if_missing(vllm_service):
+    # Model-serving images (e.g. vllm/vllm-openai) don't always bundle git.
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gym_install=_GYM_INSTALL, gpus_per_node_values=[])
+    assert "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git)" in cmd
+    # The git-install guard must come before the clone it's guarding.
+    assert cmd.index("command -v git") < cmd.index("git clone")
+
+
+def test_build_vllm_ray_serve_command_single_node_model_with_space_survives_quoting():
+    # Regression test for a real bug: shlex.quote() wraps a model name needing escaping (e.g.
+    # containing a space) in literal single quotes. Naively embedding that inside a Python-level
+    # single-quoted `bash -lc '...'` wrapper would let those literal `'` characters terminate the
+    # wrapper early, corrupting the command - everything from the space onward silently vanishes
+    # into inert extra positional args of the outer `bash -c` invocation instead of reaching the
+    # gateway. Runs the *actual* generated bash through a stand-in gateway to prove the model name
+    # survives intact, the same way test_..._multi_node_chain_survives_symmetric_run_entrypoint
+    # does for the multi-node path's `&&`-chain hazard.
+    service = VllmServiceConfig(type="vllm", container="vllm:latest", model="org/my model")
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=1, gym_install=_GYM_INSTALL, gpus_per_node_values=[])
+
+    checkout = render_repo_checkout(_GYM_INSTALL.repo, _GYM_INSTALL.ref)
+    inner = (
+        cmd.replace(checkout, "true")
+        .replace("pip install --quiet aiohttp", "true")
+        .replace("python3 nemo_gym/orchestration/ray_serve_gateway.py", "fake_gateway")
+    )
+    # fake_gateway is defined and exported *before* the generated `bash -lc "..."` command, not
+    # spliced inline into it - inline injection of "$@" would itself get corrupted by the outer
+    # double-quoting the fix introduces (the same class of bug this test guards against).
+    script = 'fake_gateway() { for a in "$@"; do echo "ARG:$a"; done; }\nexport -f fake_gateway\n' + inner + "\n"
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+
+    assert result.returncode == 0, result.stderr
+    args = [line.removeprefix("ARG:") for line in result.stdout.splitlines()]
+    assert "--model" in args, f"corrupted command, got args: {args}"
+    assert args[args.index("--model") + 1] == "org/my model"
+
+
+def test_build_vllm_ray_serve_command_multi_node_wraps_in_symmetric_run(vllm_service):
+    cmd = _build_vllm_ray_serve_command(
+        vllm_service, total_nodes=2, gym_install=_GYM_INSTALL, gpus_per_node_values=[8]
+    )
+    assert "ray symmetric-run" in cmd
+    assert "--min-nodes 2" in cmd
+    assert "nemo_gym/orchestration/ray_serve_gateway.py" in cmd
+    assert "git clone" in cmd
+
+
+def test_build_vllm_ray_serve_command_multi_node_chain_survives_symmetric_run_entrypoint(vllm_service):
+    # Regression test: `ray symmetric-run`'s entrypoint (everything after `--`) must be the whole
+    # git-clone-then-install-then-launch chain as ONE unit, not split by the outer bash -lc on the
+    # chain's own `&&` operators - a naive unquoted embedding lets that outer shell live-parse
+    # those operators, so `ray symmetric-run`'s entrypoint becomes just `git clone ...`, which
+    # succeeds and exits immediately, tearing the whole Ray cluster down before the gateway ever
+    # launches. Runs the *actual* generated bash through a stand-in `ray symmetric-run` to prove
+    # the whole chain lands as a single argv token, the same way it would for the real command.
+    cmd = _build_vllm_ray_serve_command(
+        vllm_service, total_nodes=2, gym_install=_GYM_INSTALL, gpus_per_node_values=[8]
+    )
+
+    script = cmd.replace(
+        "ray symmetric-run",
+        'fake_symmetric_run() { for a in "$@"; do echo "ARG:$a"; done; }; fake_symmetric_run',
+    ).replace("if ray symmetric-run --help", "if true")
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+
+    assert result.returncode == 0, result.stderr
+    args = [line.removeprefix("ARG:") for line in result.stdout.splitlines()]
+    assert args[-3:-1] == ["bash", "-c"]
+    chain = args[-1]
+    assert "git clone" in chain
+    assert "&&" in chain
+    assert "python3 nemo_gym/orchestration/ray_serve_gateway.py" in chain
+
+
+def test_build_vllm_ray_serve_command_passes_gpus_per_node():
+    cmd = _build_vllm_ray_serve_command(
+        VllmServiceConfig(type="vllm", container="vllm:latest", model="org/model"),
+        total_nodes=2,
+        gym_install=_GYM_INSTALL,
+        gpus_per_node_values=[8],
+    )
+    assert "--gpus-per-node 8" in cmd
+
+
+def test_build_vllm_ray_serve_command_omits_gpus_per_node_when_unknown(vllm_service):
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gym_install=_GYM_INSTALL, gpus_per_node_values=[])
+    assert "--gpus-per-node" not in cmd
+
+
+def test_build_vllm_ray_serve_command_passes_flags():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        port=9000,
+        tensor_parallel_size=8,
+        pipeline_parallel_size=2,
+        number_of_instances=2,
+        trust_remote_code=True,
+    )
+    cmd = _build_vllm_ray_serve_command(service, total_nodes=4, gym_install=_GYM_INSTALL, gpus_per_node_values=[8])
+    assert "--model org/model" in cmd
+    assert "--port 9000" in cmd
+    assert "--tensor-parallel-size 8" in cmd
+    assert "--pipeline-parallel-size 2" in cmd
+    assert "--number-of-instances 2" in cmd
+    assert "--trust-remote-code" in cmd
+
+
+def test_build_service_command_uses_ray_serve_when_opted_in(vllm_service):
+    vllm_service.use_ray_serve = True
+    cmd = _build_service_command(vllm_service, total_nodes=1, gpus_per_node_values=[8], gym_install=_GYM_INSTALL)
+    assert "nemo_gym/orchestration/ray_serve_gateway.py" in cmd
+
+
+def test_build_service_command_missing_gym_install_raises(vllm_service):
+    vllm_service.use_ray_serve = True
+    with pytest.raises(ValueError, match="gym_install"):
+        _build_service_command(vllm_service, total_nodes=1, gpus_per_node_values=[8], gym_install=None)
+
+
+def test_build_service_command_default_ignores_ray_serve_single_node(vllm_service):
+    cmd = _build_service_command(vllm_service, total_nodes=1, gpus_per_node_values=[8], gym_install=None)
+    assert "ray_serve_gateway" not in cmd
+    assert "vllm serve" in cmd
+
+
+def test_build_service_command_mandatory_ray_serve_when_instance_spans_nodes():
+    # TP*PP=16 > 8 GPUs/node with 2 instances on a 4-node/8-gpu allocation: an instance's own
+    # footprint must span nodes, which vLLM's own multi-node DP can't express - Ray Serve is
+    # forced on automatically, with no use_ray_serve set.
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        tensor_parallel_size=8,
+        pipeline_parallel_size=2,
+        number_of_instances=2,
+    )
+    cmd = _build_service_command(service, total_nodes=4, gpus_per_node_values=[8], gym_install=_GYM_INSTALL)
+    assert "nemo_gym/orchestration/ray_serve_gateway.py" in cmd
+
+
+def test_build_service_command_default_multi_instance_multi_node_unchanged():
+    # tp_pp=8 fits within 8 gpus/node - stays on the existing (non-Ray) multi-node DP path even
+    # though it's multi-node and multi-instance.
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        tensor_parallel_size=8,
+        number_of_instances=4,
+    )
+    cmd = _build_service_command(service, total_nodes=2, gpus_per_node_values=[8], gym_install=None)
+    assert "ray_serve_gateway" not in cmd
+    assert "--headless" in cmd
+
+
+# ---------------------------------------------------------------------------
 # render_gym_cmd
 # ---------------------------------------------------------------------------
 
@@ -300,6 +483,14 @@ def test_render_driver_entrypoint_with_gym_install():
     assert "uv pip install -e . --system" in out
     assert 'exec "$@"' in out
     assert '"${GYM_CMD[@]}"' in out
+
+
+def test_render_driver_entrypoint_installs_git_if_missing():
+    # The driver container (e.g. a minimal python image) may not bundle git any more than
+    # vllm/vllm-openai does - render_repo_checkout's guard protects both callers.
+    out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
+    assert "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git)" in out
+    assert out.index("command -v git") < out.index("git clone")
 
 
 def test_render_driver_entrypoint_with_prepare():

@@ -19,11 +19,14 @@ from pathlib import Path
 
 from nemo_gym.orchestration.api import (
     BenchmarkRunConfig,
+    GymInstallConfig,
     NodePool,
     RayServiceConfig,
     SlurmComputeConfig,
     SubmitConfig,
     VllmServiceConfig,  # used in _BUILDERS dispatch table
+    effective_ray_serve,
+    gym_install_required_message,
 )
 from nemo_gym.orchestration.executors.script_templates import (
     bash_var,
@@ -31,6 +34,7 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_gym_cmd,
     render_health_check,
     render_ray_prelude,
+    render_repo_checkout,
     render_vllm_ray_symmetric_run,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args
@@ -201,6 +205,73 @@ def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int) -> str
     return _build_vllm_single_instance_multi_node_command(service, total_nodes)
 
 
+def _escape_for_double_quoted_bash(text: str) -> str:
+    """Escape text for safe embedding inside a double-quoted bash string ("..."). Needed instead
+    of shlex.quote (which produces single-quote-wrapped output) whenever the text is substituted
+    inside an already-open single-quoted bash region - a literal `'` from shlex.quote would
+    terminate that outer quoting early and corrupt the command."""
+    return text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+
+
+def _build_vllm_ray_serve_command(
+    service: VllmServiceConfig, total_nodes: int, gym_install: GymInstallConfig, gpus_per_node_values: list[int]
+) -> str:
+    # Ray Serve (nemo_gym/orchestration/ray_serve_gateway.py) launches all number_of_instances
+    # `vllm serve` processes itself and routes requests across them. Ray's own placement-group
+    # scheduler only decides where each instance's *worker* ranks land - not where the `vllm serve`
+    # driver process itself runs - so the gateway needs gpus_per_node to compute how many nodes
+    # each instance's own footprint needs, to explicitly pin different instances' drivers to
+    # different nodes. This is the only place NeMo Gym uses the `ray.serve` library, as opposed to
+    # vLLM's own Ray core executor (see _build_vllm_single_instance_multi_node_command).
+    gateway_args = (
+        f"--model {shlex.quote(service.model)}"
+        f" --port {service.port}"
+        f" --tensor-parallel-size {service.tensor_parallel_size}"
+        f" --pipeline-parallel-size {service.pipeline_parallel_size}"
+        f" --number-of-instances {service.number_of_instances}"
+    )
+    if gpus_per_node_values:
+        gateway_args += f" --gpus-per-node {max(gpus_per_node_values)}"
+    if service.trust_remote_code:
+        gateway_args += " --trust-remote-code"
+
+    # ray_serve_gateway.py has no internal nemo_gym imports (stdlib + ray/fastapi/aiohttp only), so
+    # it's fetched and run as a standalone script rather than `pip install -e .`-ing the whole
+    # nemo_gym package - the vLLM service's own container (e.g. vllm/vllm-openai) never has
+    # nemo_gym installed, and a full package install there risks nemo_gym's own pinned deps (torch,
+    # ray, ...) clobbering vLLM's already-working install. Reuses driver.gym_install (the same
+    # repo/ref the driver itself checks out) instead of a separate per-service field, so the two
+    # can't drift out of sync.
+    fetch_and_run = (
+        f"{render_repo_checkout(gym_install.repo, gym_install.ref)}"
+        " && pip install --quiet aiohttp"
+        f" && python3 nemo_gym/orchestration/ray_serve_gateway.py {gateway_args}"
+    )
+    if total_nodes <= 1:
+        # No multi-node Ray cluster to join - the gateway starts its own local Ray instance and
+        # launches all instances on this one node. Still needs double-quote escaping: fetch_and_run
+        # contains shlex.quote(service.model), which wraps its output in literal single quotes
+        # whenever the model name needs escaping (e.g. contains a space) - those would otherwise
+        # terminate this bash -lc '...' wrapper early and corrupt the command.
+        return f'bash -lc "{_escape_for_double_quoted_bash(fetch_and_run)}"'
+    resource_flags = (
+        "--num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE}"
+    )
+    # render_vllm_ray_symmetric_run splices inner_cmd, unquoted, into a `ray symmetric-run ... --
+    # {inner_cmd}` statement that itself sits inside that template's own single-quoted `bash -lc
+    # '...'` wrapper. Without protection, fetch_and_run's `&&` chain gets live-parsed as bash
+    # operators once that outer bash -lc runs its script: `ray symmetric-run`'s entrypoint would
+    # become just the `git clone` (the first `&&`-segment), which succeeds and exits immediately,
+    # tearing down the whole Ray cluster it just stood up before the repo checkout/install/gateway
+    # launch ever run. Wrapping in `bash -c "<escaped>"` makes the whole chain one opaque token
+    # immune to that live-parsing - double quotes, not shlex.quote's single-quote style, because
+    # this text is substituted inside that template's own single-quoted region: a literal `'`
+    # (which shlex.quote would introduce) would terminate that outer quoting early.
+    return render_vllm_ray_symmetric_run(
+        f'bash -c "{_escape_for_double_quoted_bash(fetch_and_run)}"', total_nodes, resource_flags
+    )
+
+
 def _build_ray_command(_service: RayServiceConfig) -> str:
     return "ray start --head"
 
@@ -218,7 +289,16 @@ def _vllm_spans_multiple_nodes(service: VllmServiceConfig | RayServiceConfig, to
     return isinstance(service, VllmServiceConfig) and total_nodes > 1
 
 
-def _build_service_command(service: VllmServiceConfig | RayServiceConfig, total_nodes: int) -> str:
+def _build_service_command(
+    service: VllmServiceConfig | RayServiceConfig,
+    total_nodes: int,
+    gpus_per_node_values: list[int],
+    gym_install: GymInstallConfig | None,
+) -> str:
+    if isinstance(service, VllmServiceConfig) and effective_ray_serve(service, total_nodes, gpus_per_node_values):
+        if gym_install is None:
+            raise ValueError(gym_install_required_message())
+        return _build_vllm_ray_serve_command(service, total_nodes, gym_install, gpus_per_node_values)
     if _vllm_spans_multiple_nodes(service, total_nodes):
         return _build_vllm_ray_command(service, total_nodes)
     return _BUILDERS[type(service)](service)
@@ -241,6 +321,9 @@ def build_sbatch_script(
 
     total_nodes, total_ntasks = _node_totals(compute)
     is_multi_node = total_nodes > 1
+    gpus_per_node_values = [
+        pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node is not None
+    ]
 
     ray_prelude = (
         render_ray_prelude()
@@ -252,7 +335,7 @@ def build_sbatch_script(
         _render_service_command(
             name,
             service.container,
-            _build_service_command(service, total_nodes),
+            _build_service_command(service, total_nodes, gpus_per_node_values, config.driver.gym_install),
             service.env or None,
             service.mounts or None,
             # Only services that actually span multiple nodes need the whole allocation's --nodes/
