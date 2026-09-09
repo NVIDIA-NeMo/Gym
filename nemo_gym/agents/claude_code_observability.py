@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Read Claude Code's per-run transcripts into Gym observability records."""
-
 from __future__ import annotations
 
 import json
@@ -54,9 +52,9 @@ _COMPACTION_SUFFIX_RE = re.compile(
     r"(?:\n\nRecent messages are preserved verbatim\.)?"
     r"(?:\n\nYour REPL VM state has been cleared as part of this compaction\. "
     r"Variables defined in REPL calls before this point are no longer accessible "
-    r"— redefine any you still need\.)?"
+    r"\u2014 redefine any you still need\.)?"
     r"(?:\n\nContinue the conversation from where it left off without asking the user "
-    r"any further questions\. Resume directly — do not acknowledge the summary, do not recap "
+    r"any further questions\. Resume directly \u2014 do not acknowledge the summary, do not recap "
     r'what was happening, do not preface with "I\'ll continue" or similar\. '
     r"Pick up the last task as if the break never happened\.)?"
     r"$"
@@ -147,8 +145,6 @@ def _status(block: dict[str, Any], result: Any) -> str:
         value = result.get("status")
         if value in {"completed", "failed", "timeout", "cancelled", "incomplete"}:
             return value
-    # A tool_result block is an explicit terminal observation even when Claude Code
-    # does not attach a separate status object.
     return "completed"
 
 
@@ -273,9 +269,7 @@ def _read_events(config_dir: Path, gaps: list[ObservationGap]) -> list[tuple[int
         return []
 
     try:
-        # Claude Code stores session and subagent transcripts below ``projects``.
-        # Other JSONL files in CLAUDE_CONFIG_DIR may belong to staged skills or
-        # unrelated CLI state and must not be interpreted as rollout evidence.
+        # Only project transcripts are rollout evidence. Other JSONL files may be staged skills or CLI state.
         paths = sorted(transcript_dir.rglob("*.jsonl"))
     except OSError:
         gaps.append(_gap("transcript_dir_unreadable"))
@@ -330,12 +324,6 @@ def extract_claude_code_observations(
     root_error_type: str | None = None,
     compaction_attempts: list[dict[str, str]] | None = None,
 ) -> AgentObservationBundle:
-    """Extract exact relationships available in one ``CLAUDE_CONFIG_DIR``.
-
-    Transcript IDs and timestamps are used directly. Missing or ambiguous evidence
-    is reported as a gap; the extractor never joins calls by text or proximity.
-    """
-
     gaps: list[ObservationGap] = []
     raw_events = _read_events(Path(config_dir), gaps)
     attempts = [
@@ -667,7 +655,6 @@ def associate_claude_code_compaction_calls(
     bundle: AgentObservationBundle,
     calls: list[ModelCallRecord],
 ) -> AgentObservationBundle:
-    """Associate hidden summary calls only when Claude's persisted summary matches exactly."""
     if bundle.source != SOURCE:
         return bundle
 

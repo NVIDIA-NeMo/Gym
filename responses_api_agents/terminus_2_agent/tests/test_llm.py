@@ -13,16 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
 from harbor.llms.base import (
     ContextLengthExceededError,
     OutputLengthExceededError,
 )
 
-from responses_api_agents.terminus_2_agent.llm import NemoGymLLM
+from nemo_gym.agents.terminus_2_llm import NemoGymLLM
 
 
 def _make_llm(**kwargs) -> NemoGymLLM:
@@ -209,18 +208,9 @@ async def test_context_length_error_propagates():
 @pytest.mark.asyncio
 async def test_context_length_error_from_http_400():
     llm = _make_llm()
-    mock_client = AsyncMock()
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-    mock_client.post = AsyncMock(
-        return_value=httpx.Response(
-            status_code=400,
-            text="maximum context length exceeded",
-            request=httpx.Request("POST", "http://localhost:8000/v1/chat/completions"),
-        )
-    )
-
-    with patch("httpx.AsyncClient", return_value=mock_client):
+    response = MagicMock(status=400, cookies={})
+    response.text = AsyncMock(return_value="maximum context length exceeded")
+    with patch("nemo_gym.agents.terminus_2_llm.request", new=AsyncMock(return_value=response)):
         with pytest.raises(ContextLengthExceededError):
             await llm.call(prompt="hello")
 
@@ -289,6 +279,17 @@ async def test_extra_chat_params_forwarded():
     assert payload["top_p"] == 0.9
 
 
+@pytest.mark.asyncio
+async def test_request_model_cannot_override_harness_model():
+    llm = _make_llm(
+        model_name="config-model",
+        responses_create_params={"model": "request-model", "input": []},
+    )
+    _, mock_post = await _call(llm, _mock_response(), prompt="hello")
+
+    assert mock_post.call_args.args[0]["model"] == "config-model"
+
+
 def test_context_limit_from_max_input_tokens():
     assert _make_llm(model_info={"max_input_tokens": 32000}).get_model_context_limit() == 32000
 
@@ -318,3 +319,35 @@ def test_output_limit_none_when_missing():
 )
 def test_chat_completions_endpoint(api_base, expected):
     assert _make_llm(api_base=api_base)._chat_completions_endpoint() == expected
+
+
+@pytest.mark.asyncio
+async def test_api_key_is_sent_as_bearer_token():
+    llm = _make_llm(api_key="secret")  # pragma: allowlist secret
+    response = MagicMock(status=200, cookies={})
+    response.json = AsyncMock(return_value={})
+
+    with patch("nemo_gym.agents.terminus_2_llm.request", new=AsyncMock(return_value=response)) as post:
+        await llm._post_chat_completions({})
+
+    assert post.await_args.kwargs["headers"] == {"Authorization": "Bearer secret"}
+    assert post.await_args.kwargs["timeout"].total == 600.0
+
+
+@pytest.mark.asyncio
+async def test_session_cookie_is_forwarded_between_turns():
+    llm = _make_llm()
+    first = MagicMock(status=200, cookies={"route": MagicMock(value="engine-1")})
+    first.json = AsyncMock(return_value={})
+    second = MagicMock(status=200, cookies={})
+    second.json = AsyncMock(return_value={})
+
+    with patch(
+        "nemo_gym.agents.terminus_2_llm.request",
+        new=AsyncMock(side_effect=[first, second]),
+    ) as post:
+        await llm._post_chat_completions({})
+        await llm._post_chat_completions({})
+
+    assert post.await_args_list[0].kwargs["cookies"] == {}
+    assert post.await_args_list[1].kwargs["cookies"] == {"route": "engine-1"}

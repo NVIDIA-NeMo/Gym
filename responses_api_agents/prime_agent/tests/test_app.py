@@ -23,7 +23,13 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import pytest
 import yaml
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.agents.prime import (
+    _extract_instruction,
+    _kill_prime_processes,
+    _process_groups_with_env,
+    parse_prime_agent_events,
+)
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -36,11 +42,6 @@ from nemo_gym.server_utils import ServerClient
 from responses_api_agents.prime_agent.app import (
     PrimeAgent,
     PrimeAgentConfig,
-    ResourcesServerRef,
-    _extract_instruction,
-    _kill_prime_processes,
-    _process_groups_with_env,
-    parse_prime_agent_events,
 )
 from responses_api_agents.prime_agent.setup_prime_agent import ensure_prime_agent
 
@@ -57,9 +58,8 @@ def _config(**kwargs) -> PrimeAgentConfig:
 
 
 def _make_agent(**kwargs) -> PrimeAgent:
-    with patch("responses_api_agents.prime_agent.app.PrimeAgent.model_post_init"):
+    with patch("responses_api_agents.prime_agent.app.ensure_prime_agent"):
         agent = PrimeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
     return agent
 
 
@@ -190,7 +190,7 @@ class TestResponses:
         request = MagicMock()
         request.path_params = {}
         result = ([], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}, "test-model", False)
-        with patch.object(PrimeAgent, "_run_prime_agent", new=AsyncMock(return_value=result)):
+        with patch.object(agent._harness, "_run_prime_agent", new=AsyncMock(return_value=result)):
             response = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
         assert len(response.output) == 1
@@ -211,7 +211,7 @@ class TestResponses:
         ]
         usage = {"input_tokens": 7, "output_tokens": 3, "cached_tokens": 2}
         result = (output, usage, "test-model", True)
-        with patch.object(PrimeAgent, "_run_prime_agent", new=AsyncMock(return_value=result)):
+        with patch.object(agent._harness, "_run_prime_agent", new=AsyncMock(return_value=result)):
             response = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
         assert response.output == output
@@ -231,17 +231,17 @@ class TestRunPrimeAgent:
             process_dir.mkdir()
             (process_dir / "environ").write_bytes(environ)
 
-        with patch("responses_api_agents.prime_agent.app.os.getpgid", return_value=117):
+        with patch("nemo_gym.agents.prime.os.getpgid", return_value=117):
             groups = _process_groups_with_env("PRIME_AGENT_CODING_AGENT_DIR", "/tmp/agent", tmp_path)
 
         assert groups == [117]
 
     def test_kill_prime_processes_includes_daemonized_processes(self) -> None:
         with (
-            patch("responses_api_agents.prime_agent.app._descendant_pids", return_value=[298, 117]),
-            patch("responses_api_agents.prime_agent.app.os.getpgid", side_effect={298: 117, 117: 117}.get),
-            patch("responses_api_agents.prime_agent.app._process_groups_with_env", return_value=[117, 412]),
-            patch("responses_api_agents.prime_agent.app.os.killpg") as killpg,
+            patch("nemo_gym.agents.prime._descendant_pids", return_value=[298, 117]),
+            patch("nemo_gym.agents.prime.os.getpgid", side_effect={298: 117, 117: 117}.get),
+            patch("nemo_gym.agents.prime._process_groups_with_env", return_value=[117, 412]),
+            patch("nemo_gym.agents.prime.os.killpg") as killpg,
         ):
             _kill_prime_processes(99, Path("/tmp/agent"))
 
@@ -252,7 +252,7 @@ class TestRunPrimeAgent:
         ]
 
     async def test_timeout_does_not_cancel_stdout_collection(self, tmp_path: Path) -> None:
-        agent = _make_agent(timeout=0)
+        agent = _make_agent(timeout=1)
         release = asyncio.Event()
         state = {"cancelled": False}
         stdout = _message_end(
@@ -280,16 +280,16 @@ class TestRunPrimeAgent:
         proc.wait = AsyncMock(side_effect=wait)
 
         with (
-            patch.object(agent, "_workspace_root", return_value=tmp_path / "work"),
+            patch.object(agent._harness, "_workspace_root", return_value=tmp_path / "work"),
             patch(
-                "responses_api_agents.prime_agent.app._kill_prime_processes",
+                "nemo_gym.agents.prime._kill_prime_processes",
                 side_effect=lambda *_: release.set(),
             ) as kill_processes,
             patch(
-                "responses_api_agents.prime_agent.app.asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)
+                "nemo_gym.agents.prime.asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)
             ) as create_subprocess,
         ):
-            output, usage, model, timed_out = await agent._run_prime_agent("solve it", None, None)
+            output, usage, model, timed_out = await agent._harness._run_prime_agent("solve it", None)
 
         assert state["cancelled"] is False
         assert proc.communicate.await_count == 1
@@ -324,16 +324,14 @@ class TestRunPrimeAgent:
         proc.wait = AsyncMock(side_effect=wait)
 
         with (
-            patch.object(agent, "_workspace_root", return_value=tmp_path / "work"),
+            patch.object(agent._harness, "_workspace_root", return_value=tmp_path / "work"),
             patch(
-                "responses_api_agents.prime_agent.app._kill_prime_processes",
+                "nemo_gym.agents.prime._kill_prime_processes",
                 side_effect=lambda *_: release.set(),
             ) as kill_processes,
-            patch(
-                "responses_api_agents.prime_agent.app.asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)
-            ),
+            patch("nemo_gym.agents.prime.asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)),
         ):
-            output, _, _, timed_out = await agent._run_prime_agent("solve it", None, None)
+            output, _, _, timed_out = await agent._harness._run_prime_agent("solve it", None)
 
         kill_processes.assert_called_once_with(proc.pid, tmp_path / "work/.prime-home/.prime/agent")
         assert output[0].content[0].text == "complete answer"
@@ -365,16 +363,16 @@ class TestRunPrimeAgent:
         proc.wait = AsyncMock(side_effect=wait)
 
         with (
-            patch.object(agent, "_workspace_root", return_value=tmp_path / "work"),
+            patch.object(agent._harness, "_workspace_root", return_value=tmp_path / "work"),
             patch(
-                "responses_api_agents.prime_agent.app._kill_prime_processes",
+                "nemo_gym.agents.prime._kill_prime_processes",
                 side_effect=lambda *_: release.set(),
             ) as kill_processes,
             patch(
-                "responses_api_agents.prime_agent.app.asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)
+                "nemo_gym.agents.prime.asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)
             ) as create_subprocess,
         ):
-            task = asyncio.create_task(agent._run_prime_agent("solve it", None, None))
+            task = asyncio.create_task(agent._harness._run_prime_agent("solve it", None))
             await started.wait()
             task.cancel()
             try:
@@ -395,7 +393,7 @@ class TestEnvironmentAndCommand:
         kernel_venv = tmp_path / "kernel"
         agent = _make_agent(kernel_venv=str(kernel_venv), env={"NVIDIA_API_KEY": "k", "EMPTY": ""})
         home = tmp_path / "home"
-        env = agent._env(home)
+        env = agent._harness._env(home)
         assert env["HOME"] == str(home)
         assert env["PRIME_AGENT_CODING_AGENT_DIR"] == str(home / ".prime" / "agent")
         assert env["PRIME_AGENT_KERNEL_VENV"] == str(kernel_venv)
@@ -411,7 +409,7 @@ class TestEnvironmentAndCommand:
             extra_args=["--no-skills"],
         )
         socket = tmp_path / "daemon.sock"
-        command = agent._build_command("solve it", "be exact", socket)
+        command = agent._harness._build_command("solve it", "be exact", socket)
         assert command[:6] == ["prime-agent", "--print", "--mode", "json", "--no-session", "--daemon-socket"]
         assert command[-3:] == ["be exact", "--no-skills", "solve it"]
         assert command[command.index("--daemon-socket") + 1] == str(socket)
@@ -420,7 +418,7 @@ class TestEnvironmentAndCommand:
 
     def test_command_accepts_unqualified_model(self) -> None:
         agent = _make_agent(model="test-model")
-        command = agent._build_command("solve it", None)
+        command = agent._harness._build_command("solve it", None)
         assert "--provider" not in command
         assert command[command.index("--model") + 1] == "test-model"
 
@@ -431,11 +429,10 @@ class TestModelServer:
             model="Qwen3.6-35B-A3B",
             model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
         )
-        with patch.object(PrimeAgent, "resolve_model_base_url", return_value="http://model/v1"):
-            config = agent._build_models_config()
+        config = agent._harness._build_models_config("http://model/v1")
 
         provider = config["providers"]["nemo"]
-        assert agent._effective_model() == "nemo/Qwen3.6-35B-A3B"
+        assert agent._harness._effective_model() == "nemo/Qwen3.6-35B-A3B"
         assert provider["baseUrl"] == "http://model/v1"
         assert provider["compat"]["supportsReasoningEffort"] is True
         assert provider["models"][0]["id"] == "Qwen3.6-35B-A3B"
@@ -444,8 +441,8 @@ class TestModelServer:
     def test_preserves_explicit_provider_without_model_server(self) -> None:
         config = {"providers": {"custom": {"baseUrl": "https://example.test"}}}
         agent = _make_agent(models_config=config)
-        assert agent._effective_model() == agent.config.model
-        assert agent._build_models_config() == config
+        assert agent._harness._effective_model() == agent.config.model
+        assert agent._harness._build_models_config() == config
 
 
 class TestSetup:

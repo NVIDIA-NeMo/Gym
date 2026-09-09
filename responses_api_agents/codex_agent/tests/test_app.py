@@ -25,6 +25,12 @@ import yaml
 from fastapi import Request
 from pydantic import ValidationError
 
+from nemo_gym.agents.codex import (
+    CodexHarness,
+    _extract_instruction,
+    parse_exec_jsonl,
+    toml_dumps,
+)
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -40,9 +46,6 @@ from responses_api_agents.codex_agent.app import (
     CodexAgentRunRequest,
     ModelServerRef,
     ResourcesServerRef,
-    _extract_instruction,
-    parse_exec_jsonl,
-    toml_dumps,
 )
 
 
@@ -71,6 +74,10 @@ def _make_agent(**kwargs) -> CodexAgent:
     # model_post_init still runs — it initializes the semaphore.
     with patch("responses_api_agents.codex_agent.app.ensure_codex"):
         return CodexAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
+
+
+def _make_harness(**kwargs) -> CodexHarness:
+    return _make_agent(**kwargs)._harness
 
 
 def _event(type_: str, **kwargs) -> str:
@@ -142,7 +149,7 @@ class TestTomlDumps:
 
 class TestBuildCommand:
     def test_command_shape(self) -> None:
-        agent = _make_agent()
+        agent = _make_harness()
         cmd = agent._build_command("do the thing", "/work/dir")
         assert cmd[:5] == ["codex", "exec", "--json", "--ephemeral", "--skip-git-repo-check"]
         assert cmd[cmd.index("--cd") + 1] == "/work/dir"
@@ -152,7 +159,7 @@ class TestBuildCommand:
 
 class TestBuildConfig:
     def test_base_config_isolated_and_pinned_to_gym_provider(self) -> None:
-        agent = _make_agent(timeout=30)
+        agent = _make_harness(timeout=30)
         config = agent._build_config("http://model:9000/v1")
         assert config["model_provider"] == "gym"
         assert config["approval_policy"] == "never"
@@ -168,11 +175,12 @@ class TestBuildConfig:
         assert provider["wire_api"] == "responses"
         # idle budget defaults to the whole-run timeout (Gym servers stream only at completion)
         assert provider["stream_idle_timeout_ms"] == 30_000
+        assert isinstance(provider["stream_idle_timeout_ms"], int)
         assert "model" not in config
         assert "developer_instructions" not in config
 
     def test_optional_knobs_threaded_through(self) -> None:
-        agent = _make_agent(model="gpt-5-codex", reasoning_effort="high", stream_idle_timeout_ms=42)
+        agent = _make_harness(model="gpt-5-codex", reasoning_effort="high", stream_idle_timeout_ms=42)
         config = agent._build_config("http://x/v1", developer_instructions="be terse")
         assert config["model"] == "gpt-5-codex"
         assert config["model_reasoning_effort"] == "high"
@@ -182,20 +190,20 @@ class TestBuildConfig:
     def test_model_server_without_model_pins_placeholder(self) -> None:
         # With a model server and no explicit model, config pins a placeholder to avoid Codex's
         # model-family code-mode gating, and the effective name is reported consistently.
-        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+        agent = _make_harness(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
         config = agent._build_config("http://x/v1")
         assert config["model"] == "gym-policy-model"
         assert agent._effective_model() == "gym-policy-model"
 
     def test_direct_endpoint_without_model_omits_model(self) -> None:
         # A direct endpoint with no model lets Codex pick its own default: no model key in config.
-        agent = _make_agent()
+        agent = _make_harness()
         config = agent._build_config("http://x/v1")
         assert "model" not in config
         assert agent._effective_model() is None
 
     def test_extra_config_deep_merged(self) -> None:
-        agent = _make_agent(
+        agent = _make_harness(
             extra_config={
                 "features": {"web_search": True},
                 "model_verbosity": "low",
@@ -209,20 +217,20 @@ class TestBuildConfig:
         assert config["mcp_servers"] == {"static": {"command": "server"}}
 
     def test_rollout_mcp_servers_win_name_collisions(self) -> None:
-        agent = _make_agent(extra_config={"mcp_servers": {"weather": {"command": "stale"}}})
+        agent = _make_harness(extra_config={"mcp_servers": {"weather": {"command": "stale"}}})
         config = agent._build_config("http://x/v1", mcp_servers={"weather": {"url": "http://h:1/mcp"}})
         assert config["mcp_servers"]["weather"] == {"url": "http://h:1/mcp"}
 
     def test_extra_config_not_mutated_across_calls(self) -> None:
-        agent = _make_agent(extra_config={"mcp_servers": {"static": {"command": "server"}}})
+        agent = _make_harness(extra_config={"mcp_servers": {"static": {"command": "server"}}})
         agent._build_config("http://x/v1", mcp_servers={"dynamic": {"url": "http://h:1/mcp"}})
-        assert agent.config.extra_config == {"mcp_servers": {"static": {"command": "server"}}}
+        assert agent.config.settings["extra_config"] == {"mcp_servers": {"static": {"command": "server"}}}
 
 
 class TestSetupCodexHome:
     def test_creates_home_with_config_toml(self, tmp_path: Path) -> None:
-        agent = _make_agent()
-        with patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path):
+        agent = _make_harness()
+        with patch("nemo_gym.agents.codex.Path.home", return_value=tmp_path):
             codex_home = agent._setup_codex_home(agent._build_config("http://x/v1"))
         try:
             parsed = tomllib.loads((codex_home / "config.toml").read_text())
@@ -237,8 +245,8 @@ class TestSetupCodexHome:
         skills_dir = _write_skill_dir(tmp_path)
         home = tmp_path / "home"
         home.mkdir()
-        agent = _make_agent()
-        with patch("responses_api_agents.codex_agent.app.Path.home", return_value=home):
+        agent = _make_harness()
+        with patch("nemo_gym.agents.codex.Path.home", return_value=home):
             codex_home = agent._setup_codex_home(agent._build_config("http://x/v1"), skills_path=str(skills_dir))
         try:
             assert (codex_home / "skills" / "cot_enhanced" / "SKILL.md").is_file()
@@ -304,9 +312,7 @@ class TestRunForwardsSkillsPath:
         agent.server_client.post = self._seed_and_verify_post()
         req = MagicMock()
         req.cookies = {}
-        # Stub the CLI invocation; _create_response still runs for real, so we exercise the full
-        # run() -> _create_response -> _run_codex argument threading.
-        with patch.object(CodexAgent, "_run_codex", run_codex):
+        with patch.object(agent._harness, "_run_codex", run_codex):
             return asyncio.run(agent.run(req, body))
 
     def test_skills_ref_path_forwarded(self) -> None:
@@ -335,7 +341,7 @@ class TestRunForwardsSkillsPath:
 
 class TestRunCodex:
     def test_wires_command_env_and_cleans_up(self, tmp_path: Path) -> None:
-        agent = _make_agent(openai_api_key="sk-test", system_prompt=None)  # pragma: allowlist secret
+        agent = _make_harness(openai_api_key="sk-test", system_prompt=None)  # pragma: allowlist secret
         captured: dict = {}
 
         class FakeProc:
@@ -362,8 +368,8 @@ class TestRunCodex:
             return FakeProc()
 
         with (
-            patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
-            patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
+            patch("nemo_gym.agents.codex.Path.home", return_value=tmp_path),
+            patch("nemo_gym.agents.codex.asyncio.create_subprocess_exec", fake_exec),
         ):
             stdout, model = asyncio.run(agent._run_codex("hello", system_prompt="be terse"))
 
@@ -384,7 +390,7 @@ class TestRunCodex:
     def test_explicit_cwd_is_used_and_kept(self, tmp_path: Path) -> None:
         workdir = tmp_path / "work"
         workdir.mkdir()
-        agent = _make_agent(cwd=str(workdir))
+        agent = _make_harness(cwd=str(workdir))
 
         class FakeProc:
             returncode = 0
@@ -399,8 +405,8 @@ class TestRunCodex:
             return FakeProc()
 
         with (
-            patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
-            patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
+            patch("nemo_gym.agents.codex.Path.home", return_value=tmp_path),
+            patch("nemo_gym.agents.codex.asyncio.create_subprocess_exec", fake_exec),
         ):
             asyncio.run(agent._run_codex("hello"))
 
@@ -412,9 +418,9 @@ class TestRunCodex:
         # still be cleaned up (setup happens inside the try whose finally rmtree's it).
         home = tmp_path / "home"
         home.mkdir()
-        agent = _make_agent()
+        agent = _make_harness()
 
-        with patch("responses_api_agents.codex_agent.app.Path.home", return_value=home):
+        with patch("nemo_gym.agents.codex.Path.home", return_value=home):
             with pytest.raises(ValueError):
                 asyncio.run(agent._run_codex("hello", skills_path=str(tmp_path / "does_not_exist")))
 
@@ -422,7 +428,7 @@ class TestRunCodex:
         assert not leaked.exists() or not any(leaked.iterdir())
 
     def test_timeout_returns_empty(self, tmp_path: Path) -> None:
-        agent = _make_agent(timeout=1)
+        agent = _make_harness(timeout=1)
         killed = {"called": False}
 
         class SlowProc:
@@ -442,15 +448,31 @@ class TestRunCodex:
             raise asyncio.TimeoutError
 
         with (
-            patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
-            patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
-            patch("responses_api_agents.codex_agent.app.asyncio.wait_for", fake_wait_for),
+            patch("nemo_gym.agents.codex.Path.home", return_value=tmp_path),
+            patch("nemo_gym.agents.codex.asyncio.create_subprocess_exec", fake_exec),
+            patch("nemo_gym.agents.codex.asyncio.wait_for", fake_wait_for),
         ):
             stdout, model = asyncio.run(agent._run_codex("hello"))
 
         assert stdout == ""
         assert killed["called"] is True
         assert model == "codex-default"
+
+    def test_cancellation_kills_group_drains_process_and_reraises(self, tmp_path: Path) -> None:
+        agent = _make_harness()
+        proc = MagicMock(pid=4242, returncode=None)
+        proc.communicate = AsyncMock(side_effect=[asyncio.CancelledError(), (b"", b"")])
+        with (
+            patch("nemo_gym.agents.codex.Path.home", return_value=tmp_path),
+            patch("nemo_gym.agents.codex.asyncio.create_subprocess_exec", return_value=proc),
+            patch("nemo_gym.agents.codex.os.killpg") as killpg,
+            patch("nemo_gym.agents.codex.os.getpgid", return_value=4242),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            asyncio.run(agent._run_codex("hello"))
+
+        killpg.assert_called_once_with(4242, 9)
+        assert proc.communicate.await_count == 2
 
 
 class TestRolloutMCPServers:
@@ -517,13 +539,13 @@ class TestRolloutMCPServers:
         async def fake_run_codex(instruction, system_prompt=None, mcp_servers=None, **kwargs):
             captured["instruction"] = instruction
             captured["mcp_servers"] = mcp_servers
-            captured["config"] = agent._build_config("http://x/v1", mcp_servers=mcp_servers)
+            captured["config"] = agent._harness._build_config("http://x/v1", mcp_servers=mcp_servers)
             return _item_completed(
                 {"id": "item_1", "type": "agent_message", "text": "The weather in Paris is sunny and 72 F."}
             ), "codex-default"
 
         agent.server_client.post.side_effect = fake_post
-        object.__setattr__(agent, "_run_codex", fake_run_codex)
+        object.__setattr__(agent._harness, "_run_codex", fake_run_codex)
         request = MagicMock(spec=Request)
         request.cookies = {}
         body = CodexAgentRunRequest(
@@ -566,7 +588,7 @@ class TestRolloutMCPServers:
             return _item_completed({"id": "item_1", "type": "agent_message", "text": "ok"}), "codex-default"
 
         agent.server_client.post.side_effect = fake_post
-        object.__setattr__(agent, "_run_codex", fake_run_codex)
+        object.__setattr__(agent._harness, "_run_codex", fake_run_codex)
         request = MagicMock(spec=Request)
         request.cookies = {}
         body = CodexAgentRunRequest(
@@ -607,11 +629,12 @@ class TestRolloutCorrelation:
             return f"http://model-server:9000{prefix}/v1"
 
         with (
-            patch("responses_api_agents.codex_agent.app.Path.home", return_value=tmp_path),
+            patch("nemo_gym.agents.codex.Path.home", return_value=tmp_path),
             patch.object(type(agent), "resolve_model_base_url", side_effect=fake_resolve),
-            patch("responses_api_agents.codex_agent.app.asyncio.create_subprocess_exec", fake_exec),
+            patch("nemo_gym.agents.codex.asyncio.create_subprocess_exec", fake_exec),
         ):
-            asyncio.run(agent._run_codex("hi", **run_kwargs))
+            base_url = agent._resolve_call_base_url(run_kwargs.pop("rollout_id", None))
+            asyncio.run(agent._harness._run_codex("hi", model_base_url=base_url, **run_kwargs))
         return captured["base_url"]
 
     def test_base_url_correlation(self, tmp_path: Path) -> None:

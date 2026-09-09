@@ -24,6 +24,7 @@ import yaml
 from fastapi import Request
 from omegaconf import OmegaConf
 
+from nemo_gym.agents.cline import _extract_instruction, parse_cline_events, quote_prompt
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -36,9 +37,6 @@ from nemo_gym.server_utils import ServerClient
 from responses_api_agents.cline_agent.app import (
     ClineAgent,
     ClineAgentConfig,
-    _extract_instruction,
-    parse_cline_events,
-    quote_prompt,
 )
 
 
@@ -54,9 +52,8 @@ def _config(**kwargs) -> ClineAgentConfig:
 
 
 def _make_agent(**kwargs) -> ClineAgent:
-    with patch("responses_api_agents.cline_agent.app.ClineAgent.model_post_init"):
+    with patch("responses_api_agents.cline_agent.app.ensure_cline"):
         agent = ClineAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
     return agent
 
 
@@ -382,7 +379,7 @@ class TestParseClineEvents:
 class TestBuildCommand:
     def test_command_shape(self) -> None:
         agent = _make_agent(model="some-model", timeout=600)
-        cmd = agent._build_command(Path("/tmp/proj"), Path("/tmp/data"), "solve it")
+        cmd = agent._harness._build_command(Path("/tmp/proj"), Path("/tmp/data"), "solve it")
         assert cmd[0] == "cline"
         assert "--json" in cmd
         assert cmd[cmd.index("--auto-approve") + 1] == "true"
@@ -398,12 +395,12 @@ class TestBuildCommand:
 
     def test_single_word_prompt_is_quoted(self) -> None:
         agent = _make_agent()
-        cmd = agent._build_command(Path("/tmp/proj"), Path("/tmp/data"), "hello")
+        cmd = agent._harness._build_command(Path("/tmp/proj"), Path("/tmp/data"), "hello")
         assert cmd[-1] == "hello "
 
     def test_model_omitted_when_unset(self) -> None:
         agent = _make_agent()
-        cmd = agent._build_command(Path("/tmp/proj"), Path("/tmp/data"), "hi there")
+        cmd = agent._harness._build_command(Path("/tmp/proj"), Path("/tmp/data"), "hi there")
         assert "-m" not in cmd
 
     def test_optional_flags_gated(self) -> None:
@@ -414,7 +411,7 @@ class TestBuildCommand:
             system_prompt_override="be terse",
             extra_args=["--verbose"],
         )
-        cmd = agent._build_command(Path("/tmp/proj"), Path("/tmp/data"), "hi there")
+        cmd = agent._harness._build_command(Path("/tmp/proj"), Path("/tmp/data"), "hi there")
         assert cmd[cmd.index("--thinking") + 1] == "high"
         assert cmd[cmd.index("--compaction") + 1] == "off"
         assert cmd[cmd.index("--retries") + 1] == "3"
@@ -423,19 +420,19 @@ class TestBuildCommand:
 
     def test_multiword_command_split(self) -> None:
         agent = _make_agent(command="npx cline")
-        cmd = agent._build_command(Path("/tmp/proj"), Path("/tmp/data"), "hi there")
+        cmd = agent._harness._build_command(Path("/tmp/proj"), Path("/tmp/data"), "hi there")
         assert cmd[:2] == ["npx", "cline"]
 
     def test_provider_used_without_model_server(self) -> None:
         agent = _make_agent(provider="anthropic")
-        cmd = agent._build_command(Path("/tmp/proj"), Path("/tmp/data"), "hi there")
+        cmd = agent._harness._build_command(Path("/tmp/proj"), Path("/tmp/data"), "hi there")
         assert cmd[cmd.index("-P") + 1] == "anthropic"
 
 
 class TestEnv:
     def test_env_passthrough_and_isolation(self, tmp_path) -> None:
         agent = _make_agent(openai_api_key="k", openai_base_url="https://x/v1", env={"FOO": "bar", "EMPTY": ""})
-        env = agent._env(tmp_path)
+        env = agent._harness._env(tmp_path)
         assert env["OPENAI_API_KEY"] == "k"
         assert env["OPENAI_BASE_URL"] == "https://x/v1"
         # Every state path is pinned inside the run dir: an ambient CLINE_DATA_DIR or
@@ -451,17 +448,17 @@ class TestEnv:
     def test_ambient_cline_env_is_overridden(self, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("CLINE_DATA_DIR", "/home/someone/.cline")
         monkeypatch.setenv("CLINE_PROVIDER_SETTINGS_PATH", "/home/someone/.cline/settings/providers.json")
-        env = _make_agent()._env(tmp_path)
+        env = _make_agent()._harness._env(tmp_path)
         assert env["CLINE_DATA_DIR"] == str(tmp_path)
         assert env["CLINE_PROVIDER_SETTINGS_PATH"] == str(tmp_path / "settings" / "providers.json")
 
     def test_command_permissions_serialized(self, tmp_path) -> None:
         agent = _make_agent(command_permissions={"allow": ["python3 *"], "deny": ["sudo *"]})
-        env = agent._env(tmp_path)
+        env = agent._harness._env(tmp_path)
         assert json.loads(env["CLINE_COMMAND_PERMISSIONS"]) == {"allow": ["python3 *"], "deny": ["sudo *"]}
 
     def test_command_permissions_absent_when_empty(self, tmp_path) -> None:
-        assert "CLINE_COMMAND_PERMISSIONS" not in _make_agent()._env(tmp_path)
+        assert "CLINE_COMMAND_PERMISSIONS" not in _make_agent()._harness._env(tmp_path)
 
 
 class TestModelServer:
@@ -469,35 +466,35 @@ class TestModelServer:
         # Cline reads provider/key/model/base URL from its settings file, not from run flags, so
         # the model-server path has to write that file first.
         agent = _make_model_server_agent(model="Qwen/Qwen3-8B")
-        cmd = agent._build_auth_command(tmp_path, agent._resolve_model_base_url())
+        cmd = agent._harness._build_auth_command(tmp_path, agent._resolve_model_base_url())
         assert cmd[:3] == ["cline", "auth", "openai-compatible"]
         assert cmd[cmd.index("--modelid") + 1] == "Qwen/Qwen3-8B"
         assert cmd[cmd.index("--baseurl") + 1] == "http://model-host:9000/v1"
         assert cmd[cmd.index("--data-dir") + 1] == str(tmp_path)
 
     def test_no_auth_command_without_model_server(self, tmp_path) -> None:
-        assert _make_agent()._build_auth_command(tmp_path, "") is None
+        assert _make_agent()._harness._build_auth_command(tmp_path, "") is None
 
     def test_auth_requires_model(self, tmp_path) -> None:
         agent = _make_model_server_agent()
-        agent.config.model = None
+        agent._harness.config.model.model = None
         with pytest.raises(ValueError, match="model"):
-            agent._build_auth_command(tmp_path, agent._resolve_model_base_url())
+            agent._harness._build_auth_command(tmp_path, agent._resolve_model_base_url())
 
     def test_rollout_prefix_applied_to_base_url(self, tmp_path) -> None:
         agent = _make_model_server_agent()
-        cmd = agent._build_auth_command(tmp_path, agent._resolve_model_base_url("task0-rollout1"))
+        cmd = agent._harness._build_auth_command(tmp_path, agent._resolve_model_base_url("task0-rollout1"))
         assert cmd[cmd.index("--baseurl") + 1].endswith("/ng-rollout/task0-rollout1/v1")
 
     def test_provider_forced_to_openai_compatible(self) -> None:
         # `cline auth` only accepts a base URL for the OpenAI/OpenAI-compatible providers, so a
         # config naming another one cannot be honoured on the model-server path.
         agent = _make_model_server_agent(provider="anthropic")
-        assert agent._effective_provider() == "openai-compatible"
+        assert agent._harness._effective_provider() == "openai-compatible"
 
     def test_env_prefers_model_server_over_openai_base_url(self, tmp_path) -> None:
         agent = _make_model_server_agent(openai_api_key="k", openai_base_url="https://api.openai.com/v1")
-        env = agent._env(tmp_path, agent._resolve_model_base_url("r1"))
+        env = agent._harness._env(tmp_path, agent._resolve_model_base_url("r1"))
         assert env["OPENAI_BASE_URL"] == "http://model-host:9000/ng-rollout/r1/v1"
         assert env["OPENAI_API_KEY"] == "EMPTY"  # pragma: allowlist secret
 
@@ -507,9 +504,9 @@ class TestModelServer:
         proc = MagicMock()
         proc.returncode = 0
         proc.communicate = AsyncMock(return_value=(b"", b""))
-        with patch("responses_api_agents.cline_agent.app.asyncio.create_subprocess_exec") as spawn:
+        with patch("nemo_gym.agents.cline.asyncio.create_subprocess_exec") as spawn:
             spawn.return_value = proc
-            asyncio.run(agent._run_cline("fix it", None, "task0-rollout1"))
+            asyncio.run(agent._harness._run_cline("fix it", None, agent._resolve_model_base_url("task0-rollout1")))
 
         expected = "http://model-host:9000/ng-rollout/task0-rollout1/v1"
         auth_argv, run_argv = [call.args for call in spawn.call_args_list]
@@ -523,9 +520,9 @@ class TestModelServer:
         proc = MagicMock()
         proc.returncode = 0
         proc.communicate = AsyncMock(return_value=(b"", b""))
-        with patch("responses_api_agents.cline_agent.app.asyncio.create_subprocess_exec") as spawn:
+        with patch("nemo_gym.agents.cline.asyncio.create_subprocess_exec") as spawn:
             spawn.return_value = proc
-            asyncio.run(agent._run_cline("fix it", None))
+            asyncio.run(agent._harness._run_cline("fix it", None))
         assert spawn.call_count == 1
         assert "auth" not in spawn.call_args.args
 
@@ -534,9 +531,9 @@ class TestModelServer:
         proc = MagicMock()
         proc.returncode = 0
         proc.communicate = AsyncMock(return_value=(b"", b""))
-        with patch("responses_api_agents.cline_agent.app.asyncio.create_subprocess_exec") as spawn:
+        with patch("nemo_gym.agents.cline.asyncio.create_subprocess_exec") as spawn:
             spawn.return_value = proc
-            asyncio.run(agent._run_cline("fix it", "be careful"))
+            asyncio.run(agent._harness._run_cline("fix it", "be careful"))
         assert spawn.call_args.args[-1] == "be careful\n\nfix it"
 
     def test_run_cline_cleans_up_workspace(self, tmp_path) -> None:
@@ -546,9 +543,9 @@ class TestModelServer:
         proc = MagicMock()
         proc.returncode = 0
         proc.communicate = AsyncMock(return_value=(b"", b""))
-        with patch("responses_api_agents.cline_agent.app.asyncio.create_subprocess_exec") as spawn:
+        with patch("nemo_gym.agents.cline.asyncio.create_subprocess_exec") as spawn:
             spawn.return_value = proc
-            asyncio.run(agent._run_cline("fix it", None))
+            asyncio.run(agent._harness._run_cline("fix it", None))
         assert list(workspace_root.iterdir()) == []
 
     def test_timeout_kills_group_and_flags_metadata(self, tmp_path) -> None:
@@ -558,12 +555,12 @@ class TestModelServer:
         proc.returncode = None
         proc.communicate = AsyncMock(side_effect=[asyncio.TimeoutError(), (b"", b"")])
         with (
-            patch("responses_api_agents.cline_agent.app.asyncio.create_subprocess_exec") as spawn,
-            patch("responses_api_agents.cline_agent.app.os.killpg") as killpg,
-            patch("responses_api_agents.cline_agent.app.os.getpgid", return_value=4242),
+            patch("nemo_gym.agents.cline.asyncio.create_subprocess_exec") as spawn,
+            patch("nemo_gym.agents.cline.os.killpg") as killpg,
+            patch("nemo_gym.agents.cline.os.getpgid", return_value=4242),
         ):
             spawn.return_value = proc
-            _, metadata, _ = asyncio.run(agent._run_cline("fix it", None))
+            _, metadata, _ = asyncio.run(agent._harness._run_cline("fix it", None))
         assert killpg.called
         assert metadata["timed_out"] is True
 
@@ -573,18 +570,18 @@ class TestModelServer:
         proc.pid = 4242
         proc.communicate = AsyncMock(side_effect=[asyncio.CancelledError(), (b"", b"")])
         with (
-            patch("responses_api_agents.cline_agent.app.asyncio.create_subprocess_exec", return_value=proc),
-            patch("responses_api_agents.cline_agent.app.os.killpg") as killpg,
-            patch("responses_api_agents.cline_agent.app.os.getpgid", return_value=4242),
+            patch("nemo_gym.agents.cline.asyncio.create_subprocess_exec", return_value=proc),
+            patch("nemo_gym.agents.cline.os.killpg") as killpg,
+            patch("nemo_gym.agents.cline.os.getpgid", return_value=4242),
             pytest.raises(asyncio.CancelledError),
         ):
-            asyncio.run(agent._spawn(["cline"], tmp_path, {}, 10))
+            asyncio.run(agent._harness._spawn(["cline"], tmp_path, {}, 10))
         killpg.assert_called_once_with(4242, 9)
         assert proc.communicate.await_count == 2
 
     def test_response_propagates_reasoning_token_details(self) -> None:
         agent = _make_agent()
-        agent._run_cline = AsyncMock(
+        agent._harness._run_cline = AsyncMock(
             return_value=([], {"input_tokens": 11, "output_tokens": 9, "reasoning_tokens": 6}, "model")
         )
         body = NeMoGymResponseCreateParamsNonStreaming(input="solve this", model="model")

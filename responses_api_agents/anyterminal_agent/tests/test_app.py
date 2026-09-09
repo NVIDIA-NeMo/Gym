@@ -30,6 +30,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from nemo_gym import PARENT_DIR
@@ -70,6 +71,12 @@ def _config(**overrides) -> AnyTerminalAgentConfig:
     )
     base.update(overrides)
     return AnyTerminalAgentConfig(**base)
+
+
+def test_hermes_config_uses_full_anyterminal_budget() -> None:
+    config_path = Path(__file__).parent.parent / "configs" / "anyterminal_hermes.yaml"
+    config = yaml.safe_load(config_path.read_text())["anyterminal_hermes"]["responses_api_agents"]["anyterminal_agent"]
+    assert config["agent_kwargs"]["timeout"] == 1800
 
 
 class TestRunnerTemplate:

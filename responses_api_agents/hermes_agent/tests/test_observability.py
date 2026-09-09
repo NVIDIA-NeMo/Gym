@@ -7,15 +7,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from nemo_gym.agents.hermes_observability import (
+    HermesAgentObserver,
+    normalize_hermes_messages,
+)
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     ContextCompactionObservation,
     ToolCallObservation,
-)
-from responses_api_agents.hermes_agent.observability import (
-    HermesAgentObserver,
-    normalize_hermes_messages,
 )
 
 
@@ -198,7 +198,7 @@ def test_model_response_id_is_joined_to_the_owning_invocation():
 
 
 def test_concurrent_tool_intervals_end_at_each_worker_not_completion_callback():
-    from run_agent import AIAgent
+    AIAgent = pytest.importorskip("run_agent").AIAgent
 
     agent = _FakeAgent()
     release = {"fast": threading.Event(), "slow": threading.Event()}

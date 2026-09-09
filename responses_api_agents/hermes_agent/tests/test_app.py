@@ -18,6 +18,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from nemo_gym.agents.hermes import _split_input_to_user_and_history, _trajectory_to_output_items
+from nemo_gym.agents.hermes_observability import HermesAgentObserver
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -34,10 +36,7 @@ from responses_api_agents.hermes_agent.app import (
     HermesAgentRunRequest,
     ModelServerRef,
     ResourcesServerRef,
-    _split_input_to_user_and_history,
-    _trajectory_to_output_items,
 )
-from responses_api_agents.hermes_agent.observability import HermesAgentObserver
 
 
 class _FakeResponse:
@@ -67,17 +66,19 @@ class TestSanity:
     def test_construct(self) -> None:
         HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
 
-    def test_concurrency_semaphore_initialized(self) -> None:
-        agent = HermesAgent(config=_config(concurrency=4), server_client=MagicMock(spec=ServerClient))
-        assert agent.sem._value == 4
+    def test_concurrency_is_one(self) -> None:
+        agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        assert agent.sem._value == 1
+        with pytest.raises(ValueError, match="less than or equal to 1"):
+            _config(concurrency=2)
 
     def test_model_defaults_to_server_name(self) -> None:
         agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
-        assert agent._model_name() == ""
+        assert agent._harness._model_name() == ""
 
     def test_configured_model_overrides_server_name(self) -> None:
         agent = HermesAgent(config=_config(model="Qwen3.6-35B-A3B"), server_client=MagicMock(spec=ServerClient))
-        assert agent._model_name() == "Qwen3.6-35B-A3B"
+        assert agent._harness._model_name() == "Qwen3.6-35B-A3B"
 
 
 class _FakeAgent:
@@ -101,8 +102,8 @@ class TestSigtermHandler:
 
     def test_active_agents_initialized_empty(self) -> None:
         agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
-        assert agent.active_agents == set()
-        assert agent.sigterm_installed is False
+        assert agent._harness.active_agents == set()
+        assert agent._harness.sigterm_installed is False
 
     def test_handler_installed_once_and_interrupts_all_in_flight(self) -> None:
         agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
@@ -112,19 +113,19 @@ class TestSigtermHandler:
         loop.add_signal_handler = lambda sig, cb, *a: registered.append(cb)  # type: ignore[method-assign]
         asyncio.set_event_loop(loop)
         try:
-            agent._ensure_sigterm_handler()
-            assert agent.sigterm_installed is True
+            agent._harness._ensure_sigterm_handler()
+            assert agent._harness.sigterm_installed is True
             assert len(registered) == 1  # exactly one dispatcher registered
 
             # Idempotent: a second concurrent call must NOT register another handler.
-            agent._ensure_sigterm_handler()
+            agent._harness._ensure_sigterm_handler()
             assert len(registered) == 1
 
             dispatch = registered[0]
 
             # Two concurrent in-flight agents: SIGTERM must interrupt BOTH (the old code lost one).
             a, b = _FakeAgent(), _FakeAgent()
-            agent.active_agents.update({a, b})
+            agent._harness.active_agents.update({a, b})
             dispatch()
             assert a.interrupt_reason == "timeout"
             assert b.interrupt_reason == "timeout"
@@ -132,15 +133,18 @@ class TestSigtermHandler:
             # Once an agent finishes (discarded), a later SIGTERM no longer touches it.
             a.interrupt_reason = None
             b.interrupt_reason = None
-            agent.active_agents.discard(a)
+            agent._harness.active_agents.discard(a)
             dispatch()
             assert a.interrupt_reason is None
             assert b.interrupt_reason == "timeout"
         finally:
+            agent._harness.active_agents.clear()
+            agent._harness.interrupted_agents.clear()
             asyncio.set_event_loop(None)
             loop.close()
 
-    def test_handler_install_survives_unsupported_platform(self) -> None:
+    @pytest.mark.parametrize("error", [NotImplementedError, RuntimeError])
+    def test_handler_install_survives_unsupported_platform(self, error) -> None:
         # On platforms where add_signal_handler raises (e.g. non-main thread), install is a no-op
         # rather than an error, and the agent stays usable.
         agent = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
@@ -148,13 +152,13 @@ class TestSigtermHandler:
         loop = asyncio.new_event_loop()
 
         def _raise(*_a, **_k):
-            raise NotImplementedError
+            raise error
 
         loop.add_signal_handler = _raise  # type: ignore[method-assign]
         asyncio.set_event_loop(loop)
         try:
-            agent._ensure_sigterm_handler()
-            assert agent.sigterm_installed is False
+            agent._harness._ensure_sigterm_handler()
+            assert agent._harness.sigterm_installed is False
         finally:
             asyncio.set_event_loop(None)
             loop.close()
@@ -168,23 +172,23 @@ class TestSigtermHandler:
         server_client.global_config_dict = {}
         server_client._build_server_base_url = lambda _cfg: "http://h:1"
         hermes = HermesAgent(config=_config(), server_client=server_client)
-        monkeypatch.setattr(hermes, "_ensure_sigterm_handler", lambda: None)
+        monkeypatch.setattr(hermes._harness, "_ensure_sigterm_handler", lambda: None)
 
         class _FailingInterruptedAIAgent:
             def __init__(self, **kwargs) -> None:
                 self._build_api_kwargs = lambda _messages: {}
 
             def run_conversation(self, *args, **kwargs) -> dict:
-                hermes.interrupted_agents.add(id(self))
+                hermes._harness.interrupted_agents.add(id(self))
                 raise RuntimeError("agent failed")
 
-        monkeypatch.setattr("run_agent.AIAgent", _FailingInterruptedAIAgent)
+        monkeypatch.setattr("nemo_gym.agents.hermes._load_ai_agent", lambda: _FailingInterruptedAIAgent)
 
         with pytest.raises(RuntimeError, match="agent failed"):
             asyncio.run(hermes.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
 
-        assert hermes.active_agents == set()
-        assert hermes.interrupted_agents == set()
+        assert hermes._harness.active_agents == set()
+        assert hermes._harness.interrupted_agents == set()
 
 
 class TestSplitInputToUserAndHistory:
@@ -328,7 +332,7 @@ class TestRolloutCorrelation:
         server_client.global_config_dict = {}
         server_client._build_server_base_url = lambda _cfg: "http://h:1"
         agent = HermesAgent(config=_config(), server_client=server_client)
-        monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
+        monkeypatch.setattr(agent._harness, "_ensure_sigterm_handler", lambda: None)
 
         seen: dict = {}
 
@@ -341,7 +345,7 @@ class TestRolloutCorrelation:
             def run_conversation(self, *args, **kwargs) -> dict:
                 return {"messages": [{"role": "assistant", "content": "ok"}]}
 
-        monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+        monkeypatch.setattr("nemo_gym.agents.hermes._load_ai_agent", lambda: _StubAIAgent)
         client = TestClient(agent.setup_webserver())
 
         assert client.post("/ng-rollout/rid/v1/responses", json={"input": "hi"}).status_code == 200
@@ -352,9 +356,10 @@ class TestRolloutCorrelation:
         assert "_ng_agent_observations" not in direct.model_dump(mode="json")
 
         episode = asyncio.run(
-            agent._create_episode(
+            agent._harness.run_episode(
                 body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
-                rollout_id="rid",
+                model_base_url=agent._model_base_url("rid"),
+                model_ref=agent.config.model_server,
             )
         )
         assert seen["base_url"] == "http://h:1/ng-rollout/rid/v1"
@@ -371,7 +376,7 @@ class TestMaxTokens:
         server_client.global_config_dict = {}
         server_client._build_server_base_url = lambda _cfg: "http://h:1"
         agent = HermesAgent(config=_config(**config_kwargs), server_client=server_client)
-        monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
+        monkeypatch.setattr(agent._harness, "_ensure_sigterm_handler", lambda: None)
 
         seen: dict = {}
 
@@ -384,7 +389,7 @@ class TestMaxTokens:
             def run_conversation(self, *args, **kwargs) -> dict:
                 return {"messages": [{"role": "assistant", "content": "ok"}]}
 
-        monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+        monkeypatch.setattr("nemo_gym.agents.hermes._load_ai_agent", lambda: _StubAIAgent)
         return agent, seen
 
     def test_max_tokens_passed_to_ai_agent(self, monkeypatch) -> None:
@@ -416,7 +421,7 @@ class TestObservability:
         server_client.global_config_dict = {}
         server_client._build_server_base_url = lambda _cfg: "http://h:1"
         agent = HermesAgent(config=_config(terminal_backend=terminal_backend), server_client=server_client)
-        monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
+        monkeypatch.setattr(agent._harness, "_ensure_sigterm_handler", lambda: None)
 
         class _StubAIAgent:
             def __init__(self, **kwargs) -> None:
@@ -431,7 +436,7 @@ class TestObservability:
                     ],
                 }
 
-        monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+        monkeypatch.setattr("nemo_gym.agents.hermes._load_ai_agent", lambda: _StubAIAgent)
         body = NeMoGymResponseCreateParamsNonStreaming(input="hi")
         baseline = asyncio.run(agent.responses(request=None, body=body))
 
@@ -439,7 +444,13 @@ class TestObservability:
             raise RuntimeError("observer failed")
 
         monkeypatch.setattr(HermesAgentObserver, "finish", fail_finish)
-        episode = asyncio.run(agent._create_episode(body=body, rollout_id="rid"))
+        episode = asyncio.run(
+            agent._harness.run_episode(
+                body=body,
+                model_base_url=agent._model_base_url("rid"),
+                model_ref=agent.config.model_server,
+            )
+        )
 
         assert episode.response.output == baseline.output
         assert episode.response.usage == baseline.usage
@@ -490,7 +501,10 @@ class TestObservability:
             }
         )
 
-        with patch.object(HermesAgent, "_create_episode", observed_response):
+        with (
+            patch.object(agent, "_model_base_url", return_value="http://model/v1"),
+            patch.object(agent._harness, "run_episode", observed_response),
+        ):
             result = asyncio.run(agent.run(request, body))
 
         assert result.ng_agent_observations is not None
@@ -508,7 +522,7 @@ class TestObservability:
         server_client.global_config_dict = {}
         server_client._build_server_base_url = lambda _cfg: "http://h:1"
         agent = HermesAgent(config=_config(), server_client=server_client)
-        monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
+        monkeypatch.setattr(agent._harness, "_ensure_sigterm_handler", lambda: None)
 
         class _FailingAIAgent:
             def __init__(self, **kwargs) -> None:
@@ -517,7 +531,7 @@ class TestObservability:
             def run_conversation(self, *args, **kwargs) -> dict:
                 raise ValueError("agent failed")
 
-        monkeypatch.setattr("run_agent.AIAgent", _FailingAIAgent)
+        monkeypatch.setattr("nemo_gym.agents.hermes._load_ai_agent", lambda: _FailingAIAgent)
         monkeypatch.setattr(
             HermesAgentObserver,
             "finish",
@@ -526,8 +540,9 @@ class TestObservability:
 
         with pytest.raises(ValueError, match="agent failed"):
             asyncio.run(
-                agent._create_episode(
+                agent._harness.run_episode(
                     body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
-                    rollout_id="rid",
+                    model_base_url=agent._model_base_url("rid"),
+                    model_ref=agent.config.model_server,
                 )
             )

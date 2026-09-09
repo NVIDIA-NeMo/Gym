@@ -1,21 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 import re
 from typing import Any, cast
 
-import httpx
+from aiohttp import ClientTimeout
 from harbor.llms.base import (
     BaseLLM,
     ContextLengthExceededError,
@@ -32,13 +20,13 @@ from tenacity import (
 )
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_utils import raise_for_status, request
 
 
 _RoutedExperts = list[list[list[int]]] | str
 _RolloutDetailsKey = tuple[tuple[int, ...], tuple[int, ...], tuple[float, ...] | None]
 
 
-# Phrases in vLLM / OpenAI error bodies that signal context-length overflow.
 _CONTEXT_LENGTH_ERROR_PHRASES = (
     "context length exceeded",
     "context_length_exceeded",
@@ -52,12 +40,11 @@ _THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
 
 class NemoGymLLM(BaseLLM):
-    """LLM backend that calls NeMo Gym model servers via chat completions."""
-
     def __init__(
         self,
         model_name: str,
         api_base: str,
+        api_key: str = "",
         collect_rollout_details: bool = False,
         model_info: dict[str, Any] | None = None,
         responses_create_params: dict[str, Any] | None = None,
@@ -67,24 +54,14 @@ class NemoGymLLM(BaseLLM):
         super().__init__(**kwargs)
         self._model_name = model_name
         self._api_base = api_base.rstrip("/")
+        self._api_key = api_key
         self._collect_rollout_details = collect_rollout_details
         self._model_info = model_info or {}
         self._timeout_sec = timeout_sec
 
-        # Persistent HTTP client, reused across every turn of the episode. The Gym
-        # vllm_model server pins a session to one vLLM engine via a cookie-based
-        # SessionMiddleware (responses_api_models/vllm_model/app.py); a fresh client
-        # per call drops that cookie, so the server mints a NEW session_id each turn
-        # and round-robins it to a (usually different) engine. With many DP engines
-        # that means the growing conversation prefix is almost never warm in the engine
-        # handling the next turn -> prefix-cache miss -> the full context is re-prefilled
-        # every turn. Reusing one client keeps the session cookie, so the whole episode
-        # lands on the same engine and prefix caching only prefills the new tokens each
-        # turn. Lazily created on first use.
-        self._http_client: httpx.AsyncClient | None = None
+        # Keep the routing cookie for vLLM prefix-cache locality.
+        self._cookies: dict[str, str] = {}
 
-        # Accumulated token IDs from the most recent turn, used for
-        # on-policy correction via _replace_prefix_tokens in vLLM.
         self._last_prompt_token_ids: list[int] | None = None
         self._last_completion_token_ids: list[int] | None = None
         self._last_logprobs: list[float] | None = None
@@ -92,11 +69,7 @@ class NemoGymLLM(BaseLLM):
         self._routed_experts_by_rollout_details: dict[_RolloutDetailsKey, _RoutedExperts] = {}
         self._ambiguous_routed_expert_keys: set[_RolloutDetailsKey] = set()
 
-        # Set when the model hits the context length limit.
         self.context_length_exceeded = False
-
-        # Pre-compute extra chat params from responses_create_params once,
-        # since they don't change between calls.
         self._extra_chat_params = self._build_extra_chat_params(responses_create_params or {})
 
     @retry(
@@ -123,9 +96,6 @@ class NemoGymLLM(BaseLLM):
             message_history = []
         messages = message_history + [{"role": "user", "content": prompt}]
 
-        # Attach token IDs from the previous turn to the last assistant
-        # message so vLLM can perform on-policy correction via
-        # _replace_prefix_tokens (see NeMoRLOpenAIChatRequestMixin).
         if self._last_prompt_token_ids is not None:
             for msg in reversed(messages):
                 if msg.get("role") == "assistant":
@@ -144,9 +114,6 @@ class NemoGymLLM(BaseLLM):
 
         response_dict = await self._post_chat_completions(payload)
 
-        # Detect silently-swallowed context-length errors from the Gym proxy.
-        # When vLLM returns 400 "maximum context length", the proxy catches it
-        # and returns a fake 200 with id="chtcmpl-123" and content=None.
         if response_dict.get("id") == "chtcmpl-123":
             self.context_length_exceeded = True
             raise ContextLengthExceededError(
@@ -161,20 +128,8 @@ class NemoGymLLM(BaseLLM):
             content = ""
         reasoning_content = message.get("reasoning_content") if isinstance(message, dict) else None
 
-        # Extract reasoning from the response content.  There are two cases:
-        #
-        # 1. Content has matched open+close tags (e.g. "<think>rc</think>text"):
-        #    vllm_model app.py wraps reasoning this way when uses_reasoning_parser is true.
-        #    We mirror vllm_model app.py's _parse_think_tags exactly: findall + sub to
-        #    strip all <think> blocks, but only keep the FIRST match as reasoning_content.
-        #    No .strip() — preserve whitespace so round-tripping is lossless.
-        #
-        # 2. Content has only a close tag (e.g. "rc</think>text"):
-        #    The open tag was in the generation prompt (e.g. nano-v3 appends
-        #    <think>\n to every prompt), so the model's output starts mid-think.
         if reasoning_content is None and isinstance(content, str):
             if _THINK_OPEN in content:
-                # Case 1: matched open+close tags.
                 matches = _THINK_PATTERN.findall(content)
                 remaining = _THINK_PATTERN.sub("", content)
                 if matches:
@@ -182,17 +137,9 @@ class NemoGymLLM(BaseLLM):
                         reasoning_content = matches[0]
                         content = remaining
                     else:
-                        # Entire output classified as reasoning — model didn't
-                        # generate the close tag.  Treat as content so the agent
-                        # can act on it; leave reasoning_content None so the
-                        # merge won't inject a close tag that was never generated
-                        # (which would break token contiguity).
                         content = matches[0]
                         reasoning_content = None
             elif _THINK_CLOSE in content:
-                # Case 2: unmatched close tag — open tag was in the generation
-                # prompt (e.g. nanov3 appends <think>\n), so the model's output
-                # starts mid-think.  Split on the first close tag.
                 parts = content.split(_THINK_CLOSE, 1)
                 reasoning_content = parts[0]
                 content = parts[1] if len(parts) > 1 else ""
@@ -212,7 +159,6 @@ class NemoGymLLM(BaseLLM):
             prompt_token_ids, completion_token_ids = self._extract_token_ids(response_dict)
             logprobs = self._extract_logprobs(response_dict)
             routed_experts = self._extract_routed_experts(response_dict)
-            # Store for on-policy correction on the next turn.
             self._last_prompt_token_ids = prompt_token_ids
             self._last_completion_token_ids = completion_token_ids
             self._last_logprobs = logprobs
@@ -276,31 +222,25 @@ class NemoGymLLM(BaseLLM):
     ) -> dict[str, Any]:
         endpoint = self._chat_completions_endpoint()
         timeout = timeout_sec if timeout_sec is not None else self._timeout_sec
-        # Reuse the persistent client so the session cookie (and thus the engine the
-        # session is pinned to) carries across turns. The timeout is applied per-request,
-        # so the optional per-call override is preserved regardless of the client's default.
-        if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=timeout)
-        response = await self._http_client.post(endpoint, json=payload, timeout=timeout)
+        headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else None
+        response = await request(
+            "POST",
+            endpoint,
+            json=payload,
+            headers=headers,
+            cookies=dict(self._cookies),
+            timeout=ClientTimeout(total=timeout),
+        )
+        self._cookies.update({name: cookie.value for name, cookie in response.cookies.items()})
 
-        if response.status_code >= 400:
-            error_text = response.text.lower()
-            if any(phrase in error_text for phrase in _CONTEXT_LENGTH_ERROR_PHRASES):
+        if response.status >= 400:
+            error_text = await response.text()
+            if any(phrase in error_text.lower() for phrase in _CONTEXT_LENGTH_ERROR_PHRASES):
                 self.context_length_exceeded = True
-                raise ContextLengthExceededError(f"Model {self._model_name} context length exceeded: {response.text}")
-            response.raise_for_status()
+                raise ContextLengthExceededError(f"Model {self._model_name} context length exceeded: {error_text}")
+            await raise_for_status(response)
 
-        return response.json()
-
-    async def aclose(self) -> None:
-        """Close the persistent HTTP client. Called at episode end; best-effort
-        (the per-trial process exits anyway, but this avoids leaked connections /
-        'client was not closed' warnings when many episodes run in one process)."""
-        if self._http_client is not None:
-            try:
-                await self._http_client.aclose()
-            finally:
-                self._http_client = None
+        return cast(dict[str, Any], await response.json())
 
     def _chat_completions_endpoint(self) -> str:
         if self._api_base.endswith("/v1"):
@@ -341,6 +281,7 @@ class NemoGymLLM(BaseLLM):
         )
 
         chat_params.pop("messages", None)
+        chat_params.pop("model", None)
         return chat_params
 
     def _extract_logprobs(self, response: dict[str, Any]) -> list[float] | None:

@@ -16,45 +16,32 @@ import asyncio
 import importlib
 import json
 import sys
-from pathlib import Path
-from unittest.mock import MagicMock
 
 
-WORK_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(WORK_DIR / "gym_mount"))
+sys.path.insert(0, "/gym_mount")
 
 import nemo_gym  # noqa: E402
 
 
-assert nemo_gym.__file__.startswith(str(WORK_DIR / "gym_mount")), f"wrong nemo_gym: {nemo_gym.__file__}"
+assert nemo_gym.__file__.startswith("/gym_mount"), f"wrong nemo_gym: {nemo_gym.__file__}"
 
-from omegaconf import OmegaConf  # noqa: E402
-
-from nemo_gym.config_types import BaseServerConfig  # noqa: E402
+from nemo_gym.agents.config import AgentHarnessConfig  # noqa: E402
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming  # noqa: E402
-from nemo_gym.server_utils import ServerClient  # noqa: E402
 
 
 def main() -> None:
-    rc = json.loads((WORK_DIR / "runner_config.json").read_text())
-    body = json.loads((WORK_DIR / "request.json").read_text())
-    model_url = (WORK_DIR / "model_url.txt").read_text().strip()
-    cfg_raw = (WORK_DIR / "agent_config.json").read_text().replace("__SANDBOX_MODEL_URL__", model_url)
+    rc = json.load(open("/work/runner_config.json"))
+    body = json.load(open("/work/request.json"))
+    model_url = open("/work/model_url.txt").read().strip()
+    cfg_raw = open("/work/harness_config.json").read().replace("__SANDBOX_MODEL_URL__", model_url)
 
-    module = importlib.import_module(rc["agent_module"])
-    agent_class = getattr(module, rc["agent_class"])
-    config_class = getattr(module, rc["agent_config_class"])
-
-    cfg = config_class(host="", port=0, entrypoint="", name="agent", **json.loads(cfg_raw))
-    sc = ServerClient(
-        head_server_config=BaseServerConfig(host="127.0.0.1", port=0),
-        global_config_dict=OmegaConf.create({}),
-    )
-    agent = agent_class(config=cfg, server_client=sc)
+    module = importlib.import_module(rc["harness_module"])
+    harness_class = getattr(module, rc["harness_class"])
+    harness = harness_class(AgentHarnessConfig.model_validate_json(cfg_raw))
 
     params = NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
-    resp = asyncio.run(agent.responses(MagicMock(), params))
-    (WORK_DIR / "response.json").write_text(resp.model_dump_json())
+    resp = asyncio.run(harness.run(params, model_base_url=harness.config.model.base_url))
+    open("/work/response.json", "w").write(resp.model_dump_json())
     print("RUNNER_DONE")
 
 
