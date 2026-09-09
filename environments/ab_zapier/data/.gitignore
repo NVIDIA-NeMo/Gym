@@ -1,6 +1,4 @@
-automationbench-*.jsonl
-*_metrics.json
-*_metrics_conflict.json
+automationbench-*
 *_prepare.jsonl
 *train.jsonl
 *validation.jsonl
