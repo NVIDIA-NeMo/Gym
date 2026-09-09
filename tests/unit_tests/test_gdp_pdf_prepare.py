@@ -7,8 +7,31 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as parquet
 import pytest
+from omegaconf import OmegaConf
 
 from benchmarks.gdp_pdf import prepare as prepare_module
+
+
+@pytest.mark.parametrize("override", [None, 1, 2])
+def test_repeats_are_applied_once(override) -> None:
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+    config = OmegaConf.load(prepare_module.BENCHMARK_DIR / "config.yaml")
+    if override is not None:
+        config.num_repeats = override
+    k = override or 5
+    dataset = config.gdp_pdf_benchmark_agent.responses_api_agents.gdp_pdf_agent.datasets[0]
+    assert dataset.num_repeats == 1
+    assert config.gdp_pdf_benchmark_resources_server.resources_servers.gdp_pdf.expected_num_repeats == k
+    rows = [
+        {"responses_create_params": {"input": f"task {i}"}, "agent_ref": {"name": "gdp_pdf_benchmark_agent"}}
+        for i in range(2)
+    ]
+    expanded = RolloutCollectionHelper().preprocess_examples(rows, num_repeats=config.num_repeats)
+    assert len(expanded) == 2 * k
+    assert {(r["_ng_task_index"], r["_ng_rollout_index"]) for r in expanded} == {
+        (task, repeat) for task in range(2) for repeat in range(k)
+    }
 
 
 def test_extract_rubric_criteria_preserves_metadata() -> None:

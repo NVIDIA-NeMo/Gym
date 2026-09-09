@@ -1,6 +1,9 @@
 config_paths:
   - resources_servers/gdp_pdf/configs/gdp_pdf.yaml
 
+# Repeat at rollout collection only, so --num-repeats overrides k exactly once.
+num_repeats: 5
+
 gdp_pdf_benchmark_resources_server:
   _inherit_from: gdp_pdf_resources_server
   resources_servers:
@@ -32,5 +35,5 @@ gdp_pdf_benchmark_agent:
         jsonl_fpath: benchmarks/gdp_pdf/data/gdp_pdf_benchmark.jsonl
         prompt_config: benchmarks/gdp_pdf/prompts/default.yaml
         prepare_script: benchmarks/gdp_pdf/prepare.py
-        num_repeats: 5
+        num_repeats: 1
         license: MIT
