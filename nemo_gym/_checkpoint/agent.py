@@ -172,12 +172,10 @@ class AgentPrepareRequest(CheckpointControlRequest):
 
 class AgentCommitRequest(CheckpointControlRequest):
     checkpoint_dir: str
-    include_continuation_index: bool = False
 
 
 class AgentRestoreRequest(CheckpointControlRequest):
     checkpoint_dir: str
-    include_continuation_index: bool = False
 
 
 class AgentResumeRequest(CheckpointControlRequest):
@@ -899,7 +897,7 @@ def install_agent_checkpoint(
                 instance_name=participant.instance_name,
             )
 
-        result = await fence.run_operation(
+        return await fence.run_operation(
             body.checkpoint_id,
             "agent-checkpoint/commit",
             allowed_phases=frozenset({CheckpointPhase.PREPARED}),
@@ -907,10 +905,6 @@ def install_agent_checkpoint(
             phase_after=CheckpointPhase.COMMITTED_PAUSED,
             run=run,
         )
-        if not body.include_continuation_index:
-            result = dict(result)
-            result.pop("continuation_index", None)
-        return result
 
     @app.post(f"{AGENT_CHECKPOINT_URL_PREFIX}/restore")
     async def restore(
@@ -922,7 +916,7 @@ def install_agent_checkpoint(
         async def run() -> dict[str, Any]:
             return await asyncio.to_thread(restore_agent_state, participant, Path(body.checkpoint_dir))
 
-        result = await fence.run_operation(
+        return await fence.run_operation(
             body.checkpoint_id,
             "agent-checkpoint/restore",
             allowed_phases=frozenset({CheckpointPhase.IDLE}),
@@ -930,10 +924,6 @@ def install_agent_checkpoint(
             phase_after=CheckpointPhase.RESTORED_PAUSED,
             run=run,
         )
-        if not body.include_continuation_index:
-            result = dict(result)
-            result.pop("continuation_index", None)
-        return result
 
     @app.post(f"{AGENT_CHECKPOINT_URL_PREFIX}/resume")
     async def resume(

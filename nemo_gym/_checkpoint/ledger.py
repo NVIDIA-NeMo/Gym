@@ -163,7 +163,7 @@ class CheckpointableCaptureLedger(CaptureLedger, Protocol):
         server_name: str,
         tombstones: tuple[tuple[str, int], ...],
         source_attempts: tuple[tuple[str, int], ...],
-        continuation_roots: Optional[tuple[AgentContinuationRoot, ...]] = None,
+        continuation_roots: tuple[AgentContinuationRoot, ...],
     ) -> CaptureLedgerCommitResult: ...
 
     async def restore_capture_ledger(
@@ -267,10 +267,8 @@ def _validate_ledger_schema(
 
 
 def _canonical_continuation_roots_digest(
-    continuation_roots: Optional[list[AgentContinuationRoot]],
-) -> Optional[str]:
-    if continuation_roots is None:
-        return None
+    continuation_roots: list[AgentContinuationRoot],
+) -> str:
     payload = json.dumps(
         [
             root.model_dump(mode="json")
@@ -286,10 +284,8 @@ def _canonical_continuation_roots_digest(
 
 
 def _normalize_continuation_roots(
-    continuation_roots: Optional[list[AgentContinuationRoot]],
-) -> Optional[dict[str, AgentContinuationRoot]]:
-    if continuation_roots is None:
-        return None
+    continuation_roots: list[AgentContinuationRoot],
+) -> dict[str, AgentContinuationRoot]:
     by_capture_key: dict[str, AgentContinuationRoot] = {}
     for root in continuation_roots:
         existing = by_capture_key.get(root.capture_key)
@@ -303,21 +299,18 @@ def _normalize_continuation_roots(
 def _external_references_for_rows(
     capture_key: str,
     records: list[dict[str, Any]],
-    boundary_model_call_id: Optional[str],
+    boundary_model_call_id: str,
 ) -> list[ExternalStorageReference]:
-    if boundary_model_call_id is None:
-        selected_records = records
-    else:
-        selected_records = [
-            record
-            for record in records
-            if record.get("model_call_id") == boundary_model_call_id and record.get("failure_reason") is None
-        ]
-        if len(selected_records) != 1:
-            raise LedgerMismatchError(
-                "continuation boundary is missing or ambiguous in model lineage: "
-                f"capture_key={capture_key!r}, model_call_id={boundary_model_call_id!r}"
-            )
+    selected_records = [
+        record
+        for record in records
+        if record.get("model_call_id") == boundary_model_call_id and record.get("failure_reason") is None
+    ]
+    if len(selected_records) != 1:
+        raise LedgerMismatchError(
+            "continuation boundary is missing or ambiguous in model lineage: "
+            f"capture_key={capture_key!r}, model_call_id={boundary_model_call_id!r}"
+        )
 
     references: list[ExternalStorageReference] = []
     seen_keys: set[str] = set()
@@ -344,7 +337,7 @@ def _external_references_for_rows(
             references.append(
                 ExternalStorageReference(
                     capture_key=capture_key,
-                    boundary_model_call_id=boundary_model_call_id or model_call_id,
+                    boundary_model_call_id=boundary_model_call_id,
                     key=key,
                 )
             )
@@ -353,11 +346,9 @@ def _external_references_for_rows(
 
 def load_continuation_roots(
     checkpoint_root: Path,
-    references: Optional[list[CheckpointArtifactReference]],
-) -> Optional[list[AgentContinuationRoot]]:
+    references: list[CheckpointArtifactReference],
+) -> list[AgentContinuationRoot]:
     """Load agent-owned continuation indexes supplied to the model participant."""
-    if references is None:
-        return None
     roots: list[AgentContinuationRoot] = []
     for reference in references:
         try:
@@ -365,7 +356,6 @@ def load_continuation_roots(
         except CheckpointArtifactError as error:
             raise LedgerMismatchError("agent continuation index is missing or corrupted") from error
     normalized = _normalize_continuation_roots(roots)
-    assert normalized is not None
     return list(normalized.values())
 
 
@@ -420,7 +410,7 @@ class CaptureLedgerCheckpointer:
         source_attempts: Optional[list[tuple[str, int]]] = None,
         generation_cut_receipt: GenerationCutReceipt | None = None,
         generation_cut_proof: GenerationCutCoordinatorProof | None = None,
-        continuation_roots: Optional[list[AgentContinuationRoot]] = None,
+        continuation_roots: list[AgentContinuationRoot],
     ) -> dict[str, Any]:
         """Copy the ledger into ``checkpoint_dir``; the caller has already drained.
 
@@ -464,21 +454,20 @@ class CaptureLedgerCheckpointer:
         total_rows = 0
         external_references: dict[str, ExternalStorageReference] = {}
         available_rollout_ids = self._rollout_ids()
-        if normalized_roots is not None:
-            missing_roots = sorted(set(normalized_roots) - set(available_rollout_ids))
-            if missing_roots:
-                raise LedgerMismatchError(f"continuation roots have no model lineage: capture_keys={missing_roots!r}")
-            fenced_roots = sorted(set(normalized_roots) & fenced)
-            if fenced_roots:
-                raise LedgerMismatchError(
-                    f"continuation roots refer to retired model attempts: capture_keys={fenced_roots!r}"
-                )
+        missing_roots = sorted(set(normalized_roots) - set(available_rollout_ids))
+        if missing_roots:
+            raise LedgerMismatchError(f"continuation roots have no model lineage: capture_keys={missing_roots!r}")
+        fenced_roots = sorted(set(normalized_roots) & fenced)
+        if fenced_roots:
+            raise LedgerMismatchError(
+                f"continuation roots refer to retired model attempts: capture_keys={fenced_roots!r}"
+            )
         for capture_key in available_rollout_ids:
             if capture_key in fenced:
                 excluded += 1
                 continue
-            root = normalized_roots.get(capture_key) if normalized_roots is not None else None
-            if normalized_roots is not None and root is None:
+            root = normalized_roots.get(capture_key)
+            if root is None:
                 excluded_inactive += 1
                 continue
             files: dict[str, str] = {}
@@ -489,7 +478,7 @@ class CaptureLedgerCheckpointer:
             references = _external_references_for_rows(
                 capture_key,
                 records,
-                root.last_committed_model_call_id if root is not None else None,
+                root.last_committed_model_call_id,
             )
             for reference in references:
                 external_references.setdefault(reference.key, reference)
@@ -512,7 +501,7 @@ class CaptureLedgerCheckpointer:
             "server_name": self.server_name,
             "rollouts": rollouts,
             "continuation_roots_sha256": roots_digest,
-            "continuation_roots": len(normalized_roots) if normalized_roots is not None else None,
+            "continuation_roots": len(normalized_roots),
             "excluded_inactive": excluded_inactive,
             "storage_reference_index": storage_reference_index.model_dump(mode="json"),
             "tombstones": [
@@ -565,7 +554,7 @@ class CaptureLedgerCheckpointer:
         source_attempts: list[tuple[str, int]],
         generation_cut_receipt: GenerationCutReceipt | None,
         generation_cut_proof: GenerationCutCoordinatorProof | None,
-        continuation_roots_digest: Optional[str],
+        continuation_roots_digest: str,
     ) -> dict[str, Any]:
         manifest_path = ledger_dir / LEDGER_MANIFEST_NAME
         payload = manifest_path.read_bytes()
@@ -676,12 +665,11 @@ class CaptureLedgerCheckpointer:
 
 class ModelCheckpointCommitRequest(CheckpointControlRequest):
     checkpoint_dir: str
-    continuation_indexes: Optional[list[CheckpointArtifactReference]] = None
+    continuation_indexes: list[CheckpointArtifactReference]
 
 
 class ModelCheckpointRestoreRequest(CheckpointControlRequest):
     checkpoint_dir: str
-    include_storage_reference_index: bool = False
 
 
 def _validate_server_name(server_name: str) -> str:
@@ -790,68 +778,39 @@ def install_model_checkpoint(
             )
         return None
 
-    async def _with_ledger(
+    async def _commit_ledger(
         checkpoint_dir: Path,
         *,
         checkpoint_id: str,
-        operation: Literal["commit", "restore"],
-        generation_cut_proof: GenerationCutCoordinatorProof | None = None,
-        continuation_roots: Optional[list[AgentContinuationRoot]] = None,
+        generation_cut_proof: GenerationCutCoordinatorProof | None,
+        continuation_roots: list[AgentContinuationRoot],
     ) -> dict[str, Any]:
         ledger = ledger_provider()
-        cut_backend = limiter.generation_cut_backend
         cut_receipt = None if generation_cut_proof is not None else limiter.generation_cut_receipt
         participant_dir = checkpoint_dir / MODEL_LEDGER_SUBDIR / server_name
-        if operation == "commit" and generation_cut_proof is not None:
+        if generation_cut_proof is not None:
             await _run_sync(lambda: _store_generation_cut_proof(participant_dir, generation_cut_proof))
         if isinstance(ledger, CheckpointableCaptureLedger):
-            if operation == "commit":
-                commit_kwargs: dict[str, Any] = {
-                    "checkpoint_id": checkpoint_id,
-                    "server_name": server_name,
-                    "tombstones": tuple(limiter.checkpoint_exclusions()),
-                    "source_attempts": tuple(limiter.seen_attempts()),
-                }
-                # Preserve compatibility with existing framework-owned ledgers.
-                # They only need the new argument after their coordinator opts
-                # into continuation-scoped packaging.
-                if continuation_roots is not None:
-                    commit_kwargs["continuation_roots"] = tuple(continuation_roots)
-                commit_result = await ledger.checkpoint_capture_ledger(participant_dir, **commit_kwargs)
-                validated = CaptureLedgerCommitResult.model_validate(commit_result)
-                _validate_storage_reference_artifact(
-                    checkpoint_dir,
-                    validated.storage_reference_index,
-                )
-                if (
-                    validated.generation_cut_proof is not None
-                    and validated.generation_cut_proof != generation_cut_proof
-                ):
-                    raise LedgerMismatchError("capture ledger and coordinator generation-cut proof disagree")
-                validated.generation_cut_proof = generation_cut_proof
-                if validated.generation_cut_receipt is not None and validated.generation_cut_receipt != cut_receipt:
-                    raise LedgerMismatchError("capture ledger and generation-cut receipt disagree")
-                validated.generation_cut_receipt = cut_receipt
-                return validated.model_dump(mode="json")
-            restore_result = await ledger.restore_capture_ledger(participant_dir, server_name=server_name)
-            validated_restore = CaptureLedgerRestoreResult.model_validate(restore_result)
-            if validated_restore.storage_reference_index is not None:
-                _validate_storage_reference_artifact(
-                    checkpoint_dir,
-                    validated_restore.storage_reference_index,
-                )
-            sidecar_proof = await _run_sync(lambda: _load_generation_cut_proof(participant_dir))
-            if validated_restore.generation_cut_proof is not None and sidecar_proof not in (
-                None,
-                validated_restore.generation_cut_proof,
-            ):
-                raise LedgerMismatchError("capture ledger and coordinator generation-cut proof disagree")
-            validated_restore.generation_cut_proof = validated_restore.generation_cut_proof or sidecar_proof
-            await _restore_generation_cut(
-                cut_backend,
-                validated_restore.generation_cut_receipt,
+            commit_result = await ledger.checkpoint_capture_ledger(
+                participant_dir,
+                checkpoint_id=checkpoint_id,
+                server_name=server_name,
+                tombstones=tuple(limiter.checkpoint_exclusions()),
+                source_attempts=tuple(limiter.seen_attempts()),
+                continuation_roots=tuple(continuation_roots),
             )
-            return validated_restore.model_dump(mode="json")
+            validated = CaptureLedgerCommitResult.model_validate(commit_result)
+            _validate_storage_reference_artifact(
+                checkpoint_dir,
+                validated.storage_reference_index,
+            )
+            if validated.generation_cut_proof is not None and validated.generation_cut_proof != generation_cut_proof:
+                raise LedgerMismatchError("capture ledger and coordinator generation-cut proof disagree")
+            validated.generation_cut_proof = generation_cut_proof
+            if validated.generation_cut_receipt is not None and validated.generation_cut_receipt != cut_receipt:
+                raise LedgerMismatchError("capture ledger and generation-cut receipt disagree")
+            validated.generation_cut_receipt = cut_receipt
+            return validated.model_dump(mode="json")
 
         file_root = file_ledger_root_provider()
         if file_root is None:
@@ -860,19 +819,46 @@ def install_model_checkpoint(
                 "Gym cannot infer how to snapshot a framework-owned backend"
             )
         checkpointer = CaptureLedgerCheckpointer(file_root, server_name=server_name)
-        if operation == "commit":
-            result = await _run_sync(
-                lambda: checkpointer.commit(
-                    checkpoint_dir,
-                    checkpoint_id=checkpoint_id,
-                    tombstones=limiter.checkpoint_exclusions(),
-                    source_attempts=limiter.seen_attempts(),
-                    generation_cut_receipt=cut_receipt,
-                    generation_cut_proof=generation_cut_proof,
-                    continuation_roots=continuation_roots,
-                )
+        return await _run_sync(
+            lambda: checkpointer.commit(
+                checkpoint_dir,
+                checkpoint_id=checkpoint_id,
+                tombstones=limiter.checkpoint_exclusions(),
+                source_attempts=limiter.seen_attempts(),
+                generation_cut_receipt=cut_receipt,
+                generation_cut_proof=generation_cut_proof,
+                continuation_roots=continuation_roots,
             )
-            return result
+        )
+
+    async def _restore_ledger(checkpoint_dir: Path) -> dict[str, Any]:
+        ledger = ledger_provider()
+        cut_backend = limiter.generation_cut_backend
+        participant_dir = checkpoint_dir / MODEL_LEDGER_SUBDIR / server_name
+        if isinstance(ledger, CheckpointableCaptureLedger):
+            restore_result = await ledger.restore_capture_ledger(participant_dir, server_name=server_name)
+            validated = CaptureLedgerRestoreResult.model_validate(restore_result)
+            _validate_storage_reference_artifact(
+                checkpoint_dir,
+                validated.storage_reference_index,
+            )
+            sidecar_proof = await _run_sync(lambda: _load_generation_cut_proof(participant_dir))
+            if validated.generation_cut_proof is not None and sidecar_proof not in (
+                None,
+                validated.generation_cut_proof,
+            ):
+                raise LedgerMismatchError("capture ledger and coordinator generation-cut proof disagree")
+            validated.generation_cut_proof = validated.generation_cut_proof or sidecar_proof
+            await _restore_generation_cut(cut_backend, validated.generation_cut_receipt)
+            return validated.model_dump(mode="json")
+
+        file_root = file_ledger_root_provider()
+        if file_root is None:
+            raise LedgerNotCheckpointableError(
+                "the configured CaptureLedger must implement CheckpointableCaptureLedger; "
+                "Gym cannot infer how to restore a framework-owned backend"
+            )
+        checkpointer = CaptureLedgerCheckpointer(file_root, server_name=server_name)
         result = await _run_sync(lambda: checkpointer.restore(checkpoint_dir))
         sidecar_proof = await _run_sync(lambda: _load_generation_cut_proof(participant_dir))
         manifest_proof = (
@@ -889,10 +875,7 @@ def install_model_checkpoint(
             if result.get("generation_cut_receipt") is not None
             else None
         )
-        await _restore_generation_cut(
-            cut_backend,
-            expected_receipt,
-        )
+        await _restore_generation_cut(cut_backend, expected_receipt)
         return result
 
     @app.post(f"{MODEL_CHECKPOINT_URL_PREFIX}/commit")
@@ -910,15 +893,14 @@ def install_model_checkpoint(
                 Path(body.checkpoint_dir),
                 body.continuation_indexes,
             )
-            return await _with_ledger(
+            return await _commit_ledger(
                 Path(body.checkpoint_dir),
                 checkpoint_id=body.checkpoint_id,
-                operation="commit",
                 generation_cut_proof=generation_cut_proof,
                 continuation_roots=continuation_roots,
             )
 
-        result = await fence.run_operation(
+        return await fence.run_operation(
             body.checkpoint_id,
             "model-checkpoint/commit",
             allowed_phases=frozenset({CheckpointPhase.PREPARED}),
@@ -926,11 +908,6 @@ def install_model_checkpoint(
             phase_after=CheckpointPhase.COMMITTED_PAUSED,
             run=run,
         )
-        if body.continuation_indexes is None:
-            result = dict(result)
-            result.pop("excluded_inactive", None)
-            result.pop("storage_reference_index", None)
-        return result
 
     @app.post(f"{MODEL_CHECKPOINT_URL_PREFIX}/restore")
     async def model_checkpoint_restore(
@@ -945,18 +922,14 @@ def install_model_checkpoint(
             # admitted until every component is restored and the coordinator
             # explicitly resumes.
             limiter.close()
-            result = await _with_ledger(
-                Path(body.checkpoint_dir),
-                checkpoint_id=body.checkpoint_id,
-                operation="restore",
-            )
+            result = await _restore_ledger(Path(body.checkpoint_dir))
             for tombstone in result["tombstones"]:
                 limiter.install_tombstone(tombstone["rollout_id"], tombstone["attempt_index"])
             for source_attempt in result.get("source_attempts", []):
                 limiter.install_tombstone(source_attempt["rollout_id"], source_attempt["attempt_index"])
             return result
 
-        result = await fence.run_operation(
+        return await fence.run_operation(
             body.checkpoint_id,
             "model-checkpoint/restore",
             allowed_phases=frozenset({CheckpointPhase.IDLE, CheckpointPhase.RESTORE_FAILED_PAUSED}),
@@ -965,10 +938,6 @@ def install_model_checkpoint(
             run=run,
             phase_on_failure=CheckpointPhase.RESTORE_FAILED_PAUSED,
         )
-        if not body.include_storage_reference_index:
-            result = dict(result)
-            result.pop("storage_reference_index", None)
-        return result
 
 
 async def _run_sync(operation: Callable[[], dict[str, Any]]) -> dict[str, Any]:
