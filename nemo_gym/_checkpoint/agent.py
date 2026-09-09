@@ -28,14 +28,22 @@ from typing import Any, Literal, Optional, Sequence
 from fastapi import FastAPI, Header, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from nemo_gym._checkpoint.artifacts import (
+    AgentContinuationRoot,
+    CheckpointArtifactError,
+    CheckpointArtifactReference,
+    read_jsonl_artifact,
+    write_jsonl_artifact,
+)
 from nemo_gym._checkpoint.control import CheckpointControlRequest, CheckpointPhase, ControlError, ControlFence
-from nemo_gym.rollout_correlation import ROLLOUT_ID_PATTERN
+from nemo_gym.rollout_correlation import ROLLOUT_ID_PATTERN, capture_key_for
 from nemo_gym.token_id_capture.control_routes import require_control_auth
 
 
 AGENT_CHECKPOINT_URL_PREFIX = "/ng-control/v1/agent-checkpoint"
 AGENT_STATE_SUBDIR = "agent"
 AGENT_MANIFEST_NAME = "manifest.json"
+AGENT_CONTINUATION_INDEX_NAME = "continuations.jsonl"
 AGENT_CHECKPOINT_SCHEMA_VERSION = 1
 AGENT_EXECUTION_GENERATION_HEADER = "x-nemo-gym-agent-execution-generation"
 COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE = "completed_result_acknowledgement"
@@ -159,10 +167,12 @@ class AgentPrepareRequest(CheckpointControlRequest):
 
 class AgentCommitRequest(CheckpointControlRequest):
     checkpoint_dir: str
+    include_continuation_index: bool = False
 
 
 class AgentRestoreRequest(CheckpointControlRequest):
     checkpoint_dir: str
+    include_continuation_index: bool = False
 
 
 class AgentResumeRequest(CheckpointControlRequest):
@@ -584,6 +594,7 @@ def _commit_agent_records(
     if manifest_path.exists():
         return _validate_agent_manifest(
             directory,
+            checkpoint_root=checkpoint_dir,
             checkpoint_id=checkpoint_id,
             instance_name=instance_name,
         )
@@ -600,6 +611,24 @@ def _commit_agent_records(
             os.fsync(handle.fileno())
         os.replace(temporary, target)
         files[name] = _digest(target)
+    continuation_roots = sorted(
+        (
+            AgentContinuationRoot(
+                rollout_id=record.rollout_id,
+                attempt_index=record.attempt_index,
+                capture_key=capture_key_for(record.rollout_id, record.attempt_index),
+                last_committed_model_call_id=record.last_committed_model_call_id,
+            )
+            for record in records
+            if record.last_committed_model_call_id is not None
+        ),
+        key=lambda root: (root.capture_key, root.last_committed_model_call_id),
+    )
+    continuation_index = write_jsonl_artifact(
+        checkpoint_dir,
+        directory.relative_to(checkpoint_dir) / AGENT_CONTINUATION_INDEX_NAME,
+        continuation_roots,
+    )
     _fsync_dir(directory)
 
     manifest = {
@@ -607,6 +636,7 @@ def _commit_agent_records(
         "checkpoint_id": checkpoint_id,
         "instance_name": instance_name,
         "files": files,
+        "continuation_index": continuation_index.model_dump(mode="json"),
     }
     payload = json.dumps(manifest, sort_keys=True, indent=2).encode()
     with tempfile.NamedTemporaryFile(dir=directory, prefix=".manifest-", delete=False) as handle:
@@ -616,12 +646,17 @@ def _commit_agent_records(
         os.fsync(handle.fileno())
     os.replace(temporary, manifest_path)
     _fsync_dir(directory)
-    return {"records": len(files), "manifest_digest": hashlib.sha256(payload).hexdigest()}
+    return {
+        "records": len(files),
+        "manifest_digest": hashlib.sha256(payload).hexdigest(),
+        "continuation_index": continuation_index.model_dump(mode="json"),
+    }
 
 
 def _validate_agent_manifest(
     directory: Path,
     *,
+    checkpoint_root: Path,
     checkpoint_id: str,
     instance_name: Optional[str] = None,
 ) -> dict[str, Any]:
@@ -636,14 +671,20 @@ def _validate_agent_manifest(
         raise AgentCheckpointError(
             f"agent checkpoint belongs to instance {manifest.get('instance_name')!r}, not {instance_name!r}"
         )
+    records: list[AgentBoundaryRecord] = []
     for name, digest in manifest.get("files", {}).items():
         path = directory / name
         if not path.exists() or _digest(path) != digest:
             raise AgentCheckpointError(f"agent checkpoint record {name!r} is missing or corrupted")
-    return {
+        records.append(AgentBoundaryRecord.model_validate_json(path.read_bytes()))
+    continuation_index = _validate_continuation_index(checkpoint_root, manifest, records)
+    result: dict[str, Any] = {
         "records": len(manifest.get("files", {})),
         "manifest_digest": hashlib.sha256(payload).hexdigest(),
     }
+    if continuation_index is not None:
+        result["continuation_index"] = continuation_index.model_dump(mode="json")
+    return result
 
 
 def restore_agent_state(participant: AgentCheckpointParticipant, checkpoint_dir: Path) -> dict[str, Any]:
@@ -663,8 +704,53 @@ def restore_agent_state(participant: AgentCheckpointParticipant, checkpoint_dir:
         if not path.exists() or _digest(path) != digest:
             raise AgentCheckpointError(f"agent checkpoint record {name!r} is missing or corrupted")
         records.append(AgentBoundaryRecord.model_validate_json(path.read_bytes()))
+    continuation_index = _validate_continuation_index(checkpoint_dir, manifest, records)
     participant.install_restored(records)
-    return {"records": len(records), "source_checkpoint_id": manifest["checkpoint_id"]}
+    result: dict[str, Any] = {
+        "records": len(records),
+        "source_checkpoint_id": manifest["checkpoint_id"],
+    }
+    if continuation_index is not None:
+        result["continuation_index"] = continuation_index.model_dump(mode="json")
+    return result
+
+
+def _validate_continuation_index(
+    checkpoint_root: Path,
+    manifest: dict[str, Any],
+    records: Sequence[AgentBoundaryRecord],
+) -> Optional[CheckpointArtifactReference]:
+    raw_reference = manifest.get("continuation_index")
+    if raw_reference is None:
+        # Older checkpoints did not publish a continuation index.
+        return None
+    try:
+        reference = CheckpointArtifactReference.model_validate(raw_reference)
+        roots = read_jsonl_artifact(checkpoint_root, reference, AgentContinuationRoot)
+    except (CheckpointArtifactError, ValueError) as error:
+        raise AgentCheckpointError("agent continuation index is missing or corrupted") from error
+    expected = {
+        (
+            record.rollout_id,
+            record.attempt_index,
+            capture_key_for(record.rollout_id, record.attempt_index),
+            record.last_committed_model_call_id,
+        )
+        for record in records
+        if record.last_committed_model_call_id is not None
+    }
+    actual = {
+        (
+            root.rollout_id,
+            root.attempt_index,
+            root.capture_key,
+            root.last_committed_model_call_id,
+        )
+        for root in roots
+    }
+    if len(actual) != len(roots) or actual != expected:
+        raise AgentCheckpointError("agent continuation index does not match committed boundary records")
+    return reference
 
 
 def _agent_checkpoint_directory(checkpoint_dir: Path, instance_name: Optional[str]) -> Path:
@@ -756,7 +842,7 @@ def install_agent_checkpoint(
                 instance_name=participant.instance_name,
             )
 
-        return await fence.run_operation(
+        result = await fence.run_operation(
             body.checkpoint_id,
             "agent-checkpoint/commit",
             allowed_phases=frozenset({CheckpointPhase.PREPARED}),
@@ -764,6 +850,10 @@ def install_agent_checkpoint(
             phase_after=CheckpointPhase.COMMITTED_PAUSED,
             run=run,
         )
+        if not body.include_continuation_index:
+            result = dict(result)
+            result.pop("continuation_index", None)
+        return result
 
     @app.post(f"{AGENT_CHECKPOINT_URL_PREFIX}/restore")
     async def restore(
@@ -775,7 +865,7 @@ def install_agent_checkpoint(
         async def run() -> dict[str, Any]:
             return await asyncio.to_thread(restore_agent_state, participant, Path(body.checkpoint_dir))
 
-        return await fence.run_operation(
+        result = await fence.run_operation(
             body.checkpoint_id,
             "agent-checkpoint/restore",
             allowed_phases=frozenset({CheckpointPhase.IDLE}),
@@ -783,6 +873,10 @@ def install_agent_checkpoint(
             phase_after=CheckpointPhase.RESTORED_PAUSED,
             run=run,
         )
+        if not body.include_continuation_index:
+            result = dict(result)
+            result.pop("continuation_index", None)
+        return result
 
     @app.post(f"{AGENT_CHECKPOINT_URL_PREFIX}/resume")
     async def resume(

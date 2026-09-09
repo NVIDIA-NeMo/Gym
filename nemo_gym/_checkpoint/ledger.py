@@ -50,6 +50,14 @@ from fastapi import FastAPI, Header
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym._checkpoint.admission import AdmissionLimiter
+from nemo_gym._checkpoint.artifacts import (
+    AgentContinuationRoot,
+    CheckpointArtifactError,
+    CheckpointArtifactReference,
+    ExternalStorageReference,
+    read_jsonl_artifact,
+    write_jsonl_artifact,
+)
 from nemo_gym._checkpoint.control import (
     CONTROL_URL_PREFIX,
     CheckpointControlRequest,
@@ -66,7 +74,8 @@ from nemo_gym.token_id_capture.protocols import CaptureLedger
 MODEL_CHECKPOINT_URL_PREFIX = f"{CONTROL_URL_PREFIX}/model-checkpoint"
 MODEL_LEDGER_SUBDIR = "model-ledger"
 LEDGER_MANIFEST_NAME = "manifest.json"
-LEDGER_SCHEMA_VERSION = 1
+STORAGE_REFERENCE_INDEX_NAME = "storage-references.jsonl"
+LEDGER_SCHEMA_VERSION = 2
 
 # FileLineageStore writes one token-free custody file per rollout.
 # Lock files and token-store files are not part of this participant.
@@ -110,7 +119,9 @@ class CaptureLedgerCommitResult(BaseModel):
     rollouts: int = Field(ge=0)
     rows: int = Field(ge=0)
     excluded_tombstoned: int = Field(ge=0)
+    excluded_inactive: int = Field(default=0, ge=0)
     manifest_digest: str
+    storage_reference_index: Optional[CheckpointArtifactReference] = None
 
 
 class CaptureLedgerRestoreResult(BaseModel):
@@ -121,6 +132,7 @@ class CaptureLedgerRestoreResult(BaseModel):
     checkpoint_id: Optional[str] = None
     tombstones: list[AttemptIdentity] = Field(default_factory=list)
     source_attempts: list[AttemptIdentity] = Field(default_factory=list)
+    storage_reference_index: Optional[CheckpointArtifactReference] = None
 
 
 @runtime_checkable
@@ -141,6 +153,7 @@ class CheckpointableCaptureLedger(CaptureLedger, Protocol):
         server_name: str,
         tombstones: tuple[tuple[str, int], ...],
         source_attempts: tuple[tuple[str, int], ...],
+        continuation_roots: Optional[tuple[AgentContinuationRoot, ...]] = None,
     ) -> CaptureLedgerCommitResult: ...
 
     async def restore_capture_ledger(
@@ -173,12 +186,181 @@ def _copy_fsynced(source: Path, target: Path) -> None:
     os.replace(temporary, target)
 
 
+def _copy_lineage_fsynced(source: Path, target: Path) -> tuple[str, int, list[dict[str, Any]]]:
+    """Copy, hash, count, and parse one quiescent lineage file in one source pass."""
+    digest = hashlib.sha256()
+    byte_count = 0
+    records: list[dict[str, Any]] = []
+    with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".ledger-", delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            with source.open("rb") as src:
+                for line_number, line in enumerate(src, start=1):
+                    handle.write(line)
+                    digest.update(line)
+                    byte_count += len(line)
+                    payload = line.strip()
+                    if not payload:
+                        continue
+                    try:
+                        record = json.loads(payload)
+                    except json.JSONDecodeError as error:
+                        raise LedgerMismatchError(
+                            f"invalid lineage JSON in {source.name!r} at line {line_number}"
+                        ) from error
+                    if not isinstance(record, dict):
+                        raise LedgerMismatchError(
+                            f"lineage row in {source.name!r} at line {line_number} is not an object"
+                        )
+                    records.append(record)
+            handle.flush()
+            os.fsync(handle.fileno())
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    os.replace(temporary, target)
+    return digest.hexdigest(), byte_count, records
+
+
 def _fsync_dir(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _canonical_continuation_roots_digest(
+    continuation_roots: Optional[list[AgentContinuationRoot]],
+) -> Optional[str]:
+    if continuation_roots is None:
+        return None
+    payload = json.dumps(
+        [
+            root.model_dump(mode="json")
+            for root in sorted(
+                continuation_roots,
+                key=lambda item: (item.capture_key, item.last_committed_model_call_id),
+            )
+        ],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _normalize_continuation_roots(
+    continuation_roots: Optional[list[AgentContinuationRoot]],
+) -> Optional[dict[str, AgentContinuationRoot]]:
+    if continuation_roots is None:
+        return None
+    by_capture_key: dict[str, AgentContinuationRoot] = {}
+    for root in continuation_roots:
+        existing = by_capture_key.get(root.capture_key)
+        if existing is not None:
+            qualifier = "conflicting" if existing != root else "duplicate"
+            raise LedgerMismatchError(f"{qualifier} continuation roots for capture key {root.capture_key!r}")
+        by_capture_key[root.capture_key] = root
+    return by_capture_key
+
+
+def _external_references_for_rows(
+    capture_key: str,
+    records: list[dict[str, Any]],
+    boundary_model_call_id: Optional[str],
+) -> list[ExternalStorageReference]:
+    if boundary_model_call_id is None:
+        selected_records = records
+    else:
+        selected_records = [
+            record
+            for record in records
+            if record.get("model_call_id") == boundary_model_call_id and record.get("failure_reason") is None
+        ]
+        if len(selected_records) != 1:
+            raise LedgerMismatchError(
+                "continuation boundary is missing or ambiguous in model lineage: "
+                f"capture_key={capture_key!r}, model_call_id={boundary_model_call_id!r}"
+            )
+
+    references: list[ExternalStorageReference] = []
+    seen_keys: set[str] = set()
+    for record in selected_records:
+        model_call_id = record.get("model_call_id")
+        if not isinstance(model_call_id, str) or not model_call_id:
+            raise LedgerMismatchError(f"lineage for {capture_key!r} contains an invalid model_call_id")
+        raw_chain = record.get("staging_chain") or []
+        if not isinstance(raw_chain, list):
+            raise LedgerMismatchError(
+                f"lineage for {capture_key!r} model call {model_call_id!r} has an invalid staging_chain"
+            )
+        raw_keys = [*raw_chain]
+        if record.get("staging_key") is not None:
+            raw_keys.append(record["staging_key"])
+        for key in raw_keys:
+            if not isinstance(key, str) or not key:
+                raise LedgerMismatchError(
+                    f"lineage for {capture_key!r} model call {model_call_id!r} has an invalid staging key"
+                )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            references.append(
+                ExternalStorageReference(
+                    capture_key=capture_key,
+                    boundary_model_call_id=boundary_model_call_id or model_call_id,
+                    key=key,
+                )
+            )
+    return references
+
+
+def load_continuation_roots(
+    checkpoint_root: Path,
+    references: Optional[list[CheckpointArtifactReference]],
+) -> Optional[list[AgentContinuationRoot]]:
+    """Load agent-owned continuation indexes supplied to the model participant."""
+    if references is None:
+        return None
+    roots: list[AgentContinuationRoot] = []
+    for reference in references:
+        try:
+            roots.extend(read_jsonl_artifact(checkpoint_root, reference, AgentContinuationRoot))
+        except CheckpointArtifactError as error:
+            raise LedgerMismatchError("agent continuation index is missing or corrupted") from error
+    normalized = _normalize_continuation_roots(roots)
+    assert normalized is not None
+    return list(normalized.values())
+
+
+def _validate_storage_reference_index(
+    checkpoint_root: Path,
+    manifest: dict[str, Any],
+) -> Optional[CheckpointArtifactReference]:
+    raw_reference = manifest.get("storage_reference_index")
+    if raw_reference is None:
+        if int(manifest.get("schema_version", 0)) >= 2:
+            raise LedgerMismatchError("ledger manifest is missing its storage-reference index")
+        return None
+    try:
+        reference = CheckpointArtifactReference.model_validate(raw_reference)
+    except (CheckpointArtifactError, ValueError) as error:
+        raise LedgerMismatchError("storage-reference index is missing or corrupted") from error
+    _validate_storage_reference_artifact(checkpoint_root, reference)
+    return reference
+
+
+def _validate_storage_reference_artifact(
+    checkpoint_root: Path,
+    reference: CheckpointArtifactReference,
+) -> None:
+    try:
+        records = read_jsonl_artifact(checkpoint_root, reference, ExternalStorageReference)
+    except (CheckpointArtifactError, ValueError) as error:
+        raise LedgerMismatchError("storage-reference index is missing or corrupted") from error
+    keys = [record.key for record in records]
+    if len(keys) != len(set(keys)):
+        raise LedgerMismatchError("storage-reference index contains duplicate keys")
 
 
 class CaptureLedgerCheckpointer:
@@ -202,20 +384,26 @@ class CaptureLedgerCheckpointer:
         checkpoint_id: str,
         tombstones: list[tuple[str, int]],
         source_attempts: Optional[list[tuple[str, int]]] = None,
+        continuation_roots: Optional[list[AgentContinuationRoot]] = None,
     ) -> dict[str, Any]:
         """Copy the ledger into ``checkpoint_dir``; the caller has already drained.
 
         The store must be quiescent (admission paused) when this runs: the
         copy takes no locks because nothing may be writing.
         """
+        checkpoint_dir = Path(checkpoint_dir)
         ledger_dir = self._ledger_dir(checkpoint_dir)
+        normalized_roots = _normalize_continuation_roots(continuation_roots)
+        roots_digest = _canonical_continuation_roots_digest(continuation_roots)
         if (ledger_dir / LEDGER_MANIFEST_NAME).exists():
             result = self._validate_committed(
                 ledger_dir,
+                checkpoint_root=checkpoint_dir,
                 checkpoint_id=checkpoint_id,
                 server_name=self.server_name,
                 tombstones=tombstones,
                 source_attempts=source_attempts or [],
+                continuation_roots_digest=roots_digest,
             )
             # A previous attempt may have renamed the manifest and then
             # failed its final directory fsync. Retry that durability barrier.
@@ -226,20 +414,50 @@ class CaptureLedgerCheckpointer:
 
         rollouts: dict[str, dict[str, Any]] = {}
         excluded = 0
+        excluded_inactive = 0
         total_rows = 0
-        for rollout_id in self._rollout_ids():
-            if rollout_id in fenced:
+        external_references: dict[str, ExternalStorageReference] = {}
+        available_rollout_ids = self._rollout_ids()
+        if normalized_roots is not None:
+            missing_roots = sorted(set(normalized_roots) - set(available_rollout_ids))
+            if missing_roots:
+                raise LedgerMismatchError(f"continuation roots have no model lineage: capture_keys={missing_roots!r}")
+            fenced_roots = sorted(set(normalized_roots) & fenced)
+            if fenced_roots:
+                raise LedgerMismatchError(
+                    f"continuation roots refer to retired model attempts: capture_keys={fenced_roots!r}"
+                )
+        for capture_key in available_rollout_ids:
+            if capture_key in fenced:
                 excluded += 1
                 continue
+            root = normalized_roots.get(capture_key) if normalized_roots is not None else None
+            if normalized_roots is not None and root is None:
+                excluded_inactive += 1
+                continue
             files: dict[str, str] = {}
-            rows = 0
-            source = self.store_root / f"{rollout_id}{_LEDGER_SUFFIX}"
+            source = self.store_root / f"{capture_key}{_LEDGER_SUFFIX}"
             target = ledger_dir / source.name
-            _copy_fsynced(source, target)
-            files[source.name] = _file_digest(target)
-            rows = sum(1 for line in target.read_bytes().splitlines() if line.strip())
-            rollouts[rollout_id] = {"files": files, "rows": rows}
-            total_rows += rows
+            file_digest, byte_count, records = _copy_lineage_fsynced(source, target)
+            files[source.name] = file_digest
+            references = _external_references_for_rows(
+                capture_key,
+                records,
+                root.last_committed_model_call_id if root is not None else None,
+            )
+            for reference in references:
+                external_references.setdefault(reference.key, reference)
+            rollouts[capture_key] = {
+                "files": files,
+                "rows": len(records),
+                "bytes": byte_count,
+            }
+            total_rows += len(records)
+        storage_reference_index = write_jsonl_artifact(
+            checkpoint_dir,
+            ledger_dir.relative_to(checkpoint_dir) / STORAGE_REFERENCE_INDEX_NAME,
+            (external_references[key] for key in sorted(external_references)),
+        )
         _fsync_dir(ledger_dir)
 
         manifest = {
@@ -247,6 +465,10 @@ class CaptureLedgerCheckpointer:
             "checkpoint_id": checkpoint_id,
             "server_name": self.server_name,
             "rollouts": rollouts,
+            "continuation_roots_sha256": roots_digest,
+            "continuation_roots": len(normalized_roots) if normalized_roots is not None else None,
+            "excluded_inactive": excluded_inactive,
+            "storage_reference_index": storage_reference_index.model_dump(mode="json"),
             "tombstones": [
                 {"rollout_id": rollout_id, "attempt_index": attempt} for rollout_id, attempt in sorted(tombstones)
             ],
@@ -272,17 +494,21 @@ class CaptureLedgerCheckpointer:
             "rollouts": len(rollouts),
             "rows": total_rows,
             "excluded_tombstoned": excluded,
+            "excluded_inactive": excluded_inactive,
             "manifest_digest": hashlib.sha256(payload).hexdigest(),
+            "storage_reference_index": storage_reference_index.model_dump(mode="json"),
         }
 
     @staticmethod
     def _validate_committed(
         ledger_dir: Path,
         *,
+        checkpoint_root: Path,
         checkpoint_id: str,
         server_name: Optional[str],
         tombstones: list[tuple[str, int]],
         source_attempts: list[tuple[str, int]],
+        continuation_roots_digest: Optional[str],
     ) -> dict[str, Any]:
         manifest_path = ledger_dir / LEDGER_MANIFEST_NAME
         payload = manifest_path.read_bytes()
@@ -299,6 +525,9 @@ class CaptureLedgerCheckpointer:
             raise LedgerMismatchError("committed ledger abort exclusions changed before commit retry")
         if manifest.get("source_attempts", []) != expected_source_attempts:
             raise LedgerMismatchError("committed ledger source attempts changed before commit retry")
+        if manifest.get("continuation_roots_sha256") != continuation_roots_digest:
+            raise LedgerMismatchError("committed ledger continuation roots changed before commit retry")
+        storage_reference_index = _validate_storage_reference_index(checkpoint_root, manifest)
         total_rows = 0
         for rollout_id, metadata in manifest.get("rollouts", {}).items():
             for name, digest in metadata.get("files", {}).items():
@@ -310,11 +539,16 @@ class CaptureLedgerCheckpointer:
             "rollouts": len(manifest.get("rollouts", {})),
             "rows": total_rows,
             "excluded_tombstoned": len(manifest.get("tombstones", [])),
+            "excluded_inactive": int(manifest.get("excluded_inactive", 0)),
             "manifest_digest": hashlib.sha256(payload).hexdigest(),
+            "storage_reference_index": (
+                storage_reference_index.model_dump(mode="json") if storage_reference_index is not None else None
+            ),
         }
 
     def restore(self, checkpoint_dir: Path) -> dict[str, Any]:
         """Install a committed ledger into this store root and verify it."""
+        checkpoint_dir = Path(checkpoint_dir)
         ledger_dir = self._ledger_dir(checkpoint_dir)
         manifest_path = ledger_dir / LEDGER_MANIFEST_NAME
         if not manifest_path.exists():
@@ -330,6 +564,7 @@ class CaptureLedgerCheckpointer:
             )
         if manifest.get("server_name") != self.server_name:
             raise LedgerMismatchError("ledger checkpoint belongs to a different model server")
+        storage_reference_index = _validate_storage_reference_index(checkpoint_dir, manifest)
 
         expected_names = {name for metadata in manifest["rollouts"].values() for name in metadata["files"]}
         existing_names = {path.name for path in self.store_root.glob(f"*{_LEDGER_SUFFIX}")}
@@ -359,21 +594,26 @@ class CaptureLedgerCheckpointer:
             _copy_fsynced(source, self.store_root / name)
         _fsync_dir(self.store_root)
 
-        return {
+        result: dict[str, Any] = {
             "rollouts": len(manifest["rollouts"]),
             "rows": total_rows,
             "checkpoint_id": manifest.get("checkpoint_id"),
             "tombstones": list(manifest.get("tombstones", ())),
             "source_attempts": list(manifest.get("source_attempts", ())),
         }
+        if storage_reference_index is not None:
+            result["storage_reference_index"] = storage_reference_index.model_dump(mode="json")
+        return result
 
 
 class ModelCheckpointCommitRequest(CheckpointControlRequest):
     checkpoint_dir: str
+    continuation_indexes: Optional[list[CheckpointArtifactReference]] = None
 
 
 class ModelCheckpointRestoreRequest(CheckpointControlRequest):
     checkpoint_dir: str
+    include_storage_reference_index: bool = False
 
 
 def _validate_server_name(server_name: str) -> str:
@@ -424,21 +664,43 @@ def install_model_checkpoint(
         *,
         checkpoint_id: str,
         operation: Literal["commit", "restore"],
+        continuation_roots: Optional[list[AgentContinuationRoot]] = None,
     ) -> dict[str, Any]:
         ledger = ledger_provider()
         if isinstance(ledger, CheckpointableCaptureLedger):
             participant_dir = checkpoint_dir / MODEL_LEDGER_SUBDIR / server_name
             if operation == "commit":
-                result = await ledger.checkpoint_capture_ledger(
-                    participant_dir,
-                    checkpoint_id=checkpoint_id,
-                    server_name=server_name,
-                    tombstones=tuple(limiter.checkpoint_exclusions()),
-                    source_attempts=tuple(limiter.seen_attempts()),
+                commit_kwargs: dict[str, Any] = {
+                    "checkpoint_id": checkpoint_id,
+                    "server_name": server_name,
+                    "tombstones": tuple(limiter.checkpoint_exclusions()),
+                    "source_attempts": tuple(limiter.seen_attempts()),
+                }
+                # Preserve compatibility with existing framework-owned ledgers.
+                # They only need the new argument after their coordinator opts
+                # into continuation-scoped packaging.
+                if continuation_roots is not None:
+                    commit_kwargs["continuation_roots"] = tuple(continuation_roots)
+                commit_result = await ledger.checkpoint_capture_ledger(participant_dir, **commit_kwargs)
+                validated = CaptureLedgerCommitResult.model_validate(commit_result)
+                if continuation_roots is not None and validated.storage_reference_index is None:
+                    raise LedgerMismatchError(
+                        "checkpointable capture ledger did not publish a storage-reference index"
+                    )
+                if validated.storage_reference_index is not None:
+                    _validate_storage_reference_artifact(
+                        checkpoint_dir,
+                        validated.storage_reference_index,
+                    )
+                return validated.model_dump(mode="json")
+            restore_result = await ledger.restore_capture_ledger(participant_dir, server_name=server_name)
+            validated_restore = CaptureLedgerRestoreResult.model_validate(restore_result)
+            if validated_restore.storage_reference_index is not None:
+                _validate_storage_reference_artifact(
+                    checkpoint_dir,
+                    validated_restore.storage_reference_index,
                 )
-                return CaptureLedgerCommitResult.model_validate(result).model_dump(mode="json")
-            result = await ledger.restore_capture_ledger(participant_dir, server_name=server_name)
-            return CaptureLedgerRestoreResult.model_validate(result).model_dump(mode="json")
+            return validated_restore.model_dump(mode="json")
 
         file_root = file_ledger_root_provider()
         if file_root is None:
@@ -454,6 +716,7 @@ def install_model_checkpoint(
                     checkpoint_id=checkpoint_id,
                     tombstones=limiter.checkpoint_exclusions(),
                     source_attempts=limiter.seen_attempts(),
+                    continuation_roots=continuation_roots,
                 )
             )
         return await _run_sync(lambda: checkpointer.restore(checkpoint_dir))
@@ -468,13 +731,19 @@ def install_model_checkpoint(
 
         async def run() -> dict[str, Any]:
             _require_quiescent()
+            continuation_roots = await asyncio.to_thread(
+                load_continuation_roots,
+                Path(body.checkpoint_dir),
+                body.continuation_indexes,
+            )
             return await _with_ledger(
                 Path(body.checkpoint_dir),
                 checkpoint_id=body.checkpoint_id,
                 operation="commit",
+                continuation_roots=continuation_roots,
             )
 
-        return await fence.run_operation(
+        result = await fence.run_operation(
             body.checkpoint_id,
             "model-checkpoint/commit",
             allowed_phases=frozenset({CheckpointPhase.PREPARED}),
@@ -482,6 +751,11 @@ def install_model_checkpoint(
             phase_after=CheckpointPhase.COMMITTED_PAUSED,
             run=run,
         )
+        if body.continuation_indexes is None:
+            result = dict(result)
+            result.pop("excluded_inactive", None)
+            result.pop("storage_reference_index", None)
+        return result
 
     @app.post(f"{MODEL_CHECKPOINT_URL_PREFIX}/restore")
     async def model_checkpoint_restore(
@@ -507,7 +781,7 @@ def install_model_checkpoint(
                 limiter.install_tombstone(source_attempt["rollout_id"], source_attempt["attempt_index"])
             return result
 
-        return await fence.run_operation(
+        result = await fence.run_operation(
             body.checkpoint_id,
             "model-checkpoint/restore",
             allowed_phases=frozenset({CheckpointPhase.IDLE, CheckpointPhase.RESTORE_FAILED_PAUSED}),
@@ -516,6 +790,10 @@ def install_model_checkpoint(
             run=run,
             phase_on_failure=CheckpointPhase.RESTORE_FAILED_PAUSED,
         )
+        if not body.include_storage_reference_index:
+            result = dict(result)
+            result.pop("storage_reference_index", None)
+        return result
 
 
 async def _run_sync(operation: Callable[[], dict[str, Any]]) -> dict[str, Any]:

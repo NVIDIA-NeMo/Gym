@@ -27,16 +27,21 @@ from nemo_gym._checkpoint import (
     MODEL_CHECKPOINT_URL_PREFIX,
     MODEL_LEDGER_SUBDIR,
     AdmissionLimiter,
+    AgentContinuationRoot,
     CaptureLedgerCheckpointer,
+    CheckpointArtifactReference,
     ControlCapabilities,
     ControlFence,
+    ExternalStorageReference,
     LedgerMismatchError,
     MultiProcessCapability,
     StaleAttemptError,
     install_control_plane,
     install_model_admission,
     install_model_checkpoint,
+    read_jsonl_artifact,
 )
+from nemo_gym._checkpoint.artifacts import write_jsonl_artifact
 from nemo_gym.token_id_capture.lineage import FileLineageStore
 
 
@@ -52,6 +57,7 @@ def _write_custody(root, rollout_id: str, call_count: int = 2) -> bytes:
             "staging_key": f"opaque-{rollout_id}-{index}",
             "staging_digest": f"digest-{index}",
             "parent_call_id": None if index == 0 else f"{rollout_id}-call-{index - 1}",
+            "staging_chain": [f"opaque-{rollout_id}-{parent}" for parent in range(index)],
         }
         for index in range(call_count)
     ]
@@ -74,7 +80,9 @@ def test_commit_restore_preserves_only_token_free_custody(tmp_path) -> None:
         "rollouts": 1,
         "rows": 2,
         "excluded_tombstoned": 1,
+        "excluded_inactive": 0,
         "manifest_digest": summary["manifest_digest"],
+        "storage_reference_index": summary["storage_reference_index"],
     }
 
     ledger_dir = tmp_path / "checkpoint" / MODEL_LEDGER_SUBDIR
@@ -86,6 +94,162 @@ def test_commit_restore_preserves_only_token_free_custody(tmp_path) -> None:
     result = CaptureLedgerCheckpointer(restored_root).restore(tmp_path / "checkpoint")
     assert result["tombstones"] == [{"rollout_id": "rollout-b", "attempt_index": 2}]
     assert (restored_root / "rollout-a.lineage.jsonl").read_bytes() == expected
+
+
+def test_commit_packages_only_active_continuations_and_indexes_storage_references(tmp_path) -> None:
+    source = tmp_path / "source"
+    expected = _write_custody(source, "rollout-a", call_count=3)
+    _write_custody(source, "rollout-b", call_count=2)
+    checkpoint = tmp_path / "checkpoint"
+    root = AgentContinuationRoot(
+        rollout_id="rollout-a",
+        attempt_index=0,
+        capture_key="rollout-a",
+        last_committed_model_call_id="rollout-a-call-1",
+    )
+
+    summary = CaptureLedgerCheckpointer(source).commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+        continuation_roots=[root],
+    )
+
+    assert summary["rollouts"] == 1
+    assert summary["rows"] == 3
+    assert summary["excluded_inactive"] == 1
+    ledger_dir = checkpoint / MODEL_LEDGER_SUBDIR
+    assert (ledger_dir / "rollout-a.lineage.jsonl").read_bytes() == expected
+    assert not (ledger_dir / "rollout-b.lineage.jsonl").exists()
+    references = read_jsonl_artifact(
+        checkpoint,
+        CheckpointArtifactReference.model_validate(summary["storage_reference_index"]),
+        ExternalStorageReference,
+    )
+    assert [reference.key for reference in references] == [
+        "opaque-rollout-a-0",
+        "opaque-rollout-a-1",
+    ]
+    assert {reference.boundary_model_call_id for reference in references} == {"rollout-a-call-1"}
+
+
+def test_restore_rejects_corrupt_storage_reference_index_before_install(tmp_path) -> None:
+    source = tmp_path / "source"
+    _write_custody(source, "rollout-a")
+    checkpoint = tmp_path / "checkpoint"
+    summary = CaptureLedgerCheckpointer(source).commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+    )
+    reference_path = checkpoint / summary["storage_reference_index"]["relative_path"]
+    reference_path.write_text("corrupt\n")
+
+    restored = tmp_path / "restored"
+    with pytest.raises(LedgerMismatchError, match="storage-reference index"):
+        CaptureLedgerCheckpointer(restored).restore(checkpoint)
+    assert not restored.exists()
+
+
+def test_continuation_scope_rejects_duplicate_and_retired_roots(tmp_path) -> None:
+    source = tmp_path / "source"
+    _write_custody(source, "rollout-a")
+    root = AgentContinuationRoot(
+        rollout_id="rollout-a",
+        attempt_index=0,
+        capture_key="rollout-a",
+        last_committed_model_call_id="rollout-a-call-1",
+    )
+
+    with pytest.raises(LedgerMismatchError, match="duplicate continuation roots"):
+        CaptureLedgerCheckpointer(source).commit(
+            tmp_path / "duplicate-checkpoint",
+            checkpoint_id="checkpoint-1",
+            tombstones=[],
+            continuation_roots=[root, root],
+        )
+    with pytest.raises(LedgerMismatchError, match="retired model attempts"):
+        CaptureLedgerCheckpointer(source).commit(
+            tmp_path / "retired-checkpoint",
+            checkpoint_id="checkpoint-1",
+            tombstones=[("rollout-a", 0)],
+            continuation_roots=[root],
+        )
+
+
+def test_commit_rejects_malformed_lineage_before_manifest_publication(tmp_path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "rollout-a.lineage.jsonl").write_text('{"model_call_id":"call-1"}\nnot-json\n')
+    checkpoint = tmp_path / "checkpoint"
+
+    with pytest.raises(LedgerMismatchError, match="invalid lineage JSON"):
+        CaptureLedgerCheckpointer(source).commit(
+            checkpoint,
+            checkpoint_id="checkpoint-1",
+            tombstones=[],
+        )
+    assert not (checkpoint / MODEL_LEDGER_SUBDIR / LEDGER_MANIFEST_NAME).exists()
+
+
+def test_model_commit_accepts_agent_continuation_index_and_returns_reference_index(tmp_path) -> None:
+    client, limiter = _participant(tmp_path / "ledger")
+    _write_custody(tmp_path / "ledger", "rollout-a")
+    checkpoint = tmp_path / "checkpoint"
+    continuation_index = write_jsonl_artifact(
+        checkpoint,
+        "agent/continuations.jsonl",
+        [
+            AgentContinuationRoot(
+                rollout_id="rollout-a",
+                attempt_index=0,
+                capture_key="rollout-a",
+                last_committed_model_call_id="rollout-a-call-1",
+            )
+        ],
+    )
+    limiter.release(limiter.admit(rollout_id="rollout-a", attempt_index=0))
+    control = {"checkpoint_id": "checkpoint-1", "deadline_ts": 4e9}
+    pause = client.post(
+        f"{MODEL_ADMISSION_URL_PREFIX}/pause",
+        json=control,
+        headers=AUTH_HEADERS,
+    )
+    assert pause.status_code == 200
+    commit = client.post(
+        f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
+        json={
+            **control,
+            "checkpoint_dir": str(checkpoint),
+            "continuation_indexes": [continuation_index.model_dump(mode="json")],
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert commit.status_code == 200
+    assert commit.json()["excluded_inactive"] == 0
+    references = read_jsonl_artifact(
+        checkpoint,
+        CheckpointArtifactReference.model_validate(commit.json()["storage_reference_index"]),
+        ExternalStorageReference,
+    )
+    assert {reference.key for reference in references} == {
+        "opaque-rollout-a-0",
+        "opaque-rollout-a-1",
+    }
+
+    restored_client, _ = _participant(tmp_path / "restored")
+    restored = restored_client.post(
+        f"{MODEL_CHECKPOINT_URL_PREFIX}/restore",
+        json={
+            "checkpoint_id": "restore-1",
+            "deadline_ts": 4e9,
+            "checkpoint_dir": str(checkpoint),
+            "include_storage_reference_index": True,
+        },
+        headers=AUTH_HEADERS,
+    )
+    assert restored.status_code == 200
+    assert restored.json()["storage_reference_index"] == commit.json()["storage_reference_index"]
 
 
 def test_restore_validates_all_files_before_installing_any(tmp_path) -> None:
@@ -188,6 +352,8 @@ def test_commit_requires_completed_drain_and_restore_stays_paused(tmp_path) -> N
         headers=AUTH_HEADERS,
     )
     assert commit.status_code == 200
+    assert "storage_reference_index" not in commit.json()
+    assert "excluded_inactive" not in commit.json()
     retry = source_client.post(
         f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
         json=commit_body,
@@ -213,6 +379,7 @@ def test_commit_requires_completed_drain_and_restore_stays_paused(tmp_path) -> N
         headers=AUTH_HEADERS,
     )
     assert restore.status_code == 200
+    assert "storage_reference_index" not in restore.json()
     assert restored_limiter.counts()["state"] == "paused"
     restored_status = restored_client.get(
         f"{MODEL_ADMISSION_URL_PREFIX}/status",

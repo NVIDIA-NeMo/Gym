@@ -32,6 +32,7 @@ from nemo_gym._checkpoint.agent import (
     AgentExecution,
     install_agent_checkpoint,
 )
+from nemo_gym._checkpoint.artifacts import AGENT_CONTINUATION_INDEX_FEATURE
 from nemo_gym._checkpoint.control import ControlCapabilities, checkpoint_control_auth_token
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -192,7 +193,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if self.checkpoint_control_auth_token() is not None and self.checkpoint_continuation_supported:
             capabilities.checkpoint_mode = "export_restore"
             capabilities.concurrency_contract = "serialized_per_session"
-            capabilities.features = [COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE]
+            capabilities.features = [
+                COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE,
+                AGENT_CONTINUATION_INDEX_FEATURE,
+            ]
         return capabilities
 
     def checkpoint_execution(self, request: Optional[Request] = None) -> Optional[AgentExecution]:

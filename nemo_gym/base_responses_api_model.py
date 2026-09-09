@@ -47,6 +47,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
 
 from nemo_gym._checkpoint.admission import GATED_MODEL_ROUTE_SUFFIXES, AdmissionLimiter, AdmissionMiddleware
+from nemo_gym._checkpoint.artifacts import EXTERNAL_STORAGE_REFERENCE_INDEX_FEATURE
 from nemo_gym._checkpoint.control import (
     AdmissionState,
     ControlCapabilities,
@@ -312,6 +313,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 AdmissionState.PAUSED,
             ]
             capabilities.checkpoint_mode = "export_restore"
+            capabilities.features = [EXTERNAL_STORAGE_REFERENCE_INDEX_FEATURE]
         return capabilities
 
     @abstractmethod

@@ -380,6 +380,7 @@ def test_policy_model_server_pause_drain_resume_cycle() -> None:
     capabilities = client.get(f"{CONTROL_URL_PREFIX}/capabilities").json()
     assert capabilities["instance_role"] == "policy"
     assert capabilities["admission_states"] == ["accepting", "draining", "paused"]
+    assert capabilities["features"] == ["external_storage_reference_index_v1"]
 
     # Generation works while accepting.
     assert client.post("/v1/responses", json={"input": "hi"}).status_code == 200
