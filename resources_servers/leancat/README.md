@@ -205,9 +205,28 @@ python prepare_leancat.py --records local.jsonl --prompt prompts/static-passk.md
 
 **You do not need a Lean-specific `.sqsh`.** There is no published image at Mathlib v4.19.0
 (`leanprovercommunity/mathlib` ships only `latest`/`gitpod`/`debian`), the NeMo-Skills sandbox pins **v4.12.0**
-— on which LeanCat's `CategoryTheory` statements fail with ordinary-looking "unknown identifier" errors, i.e. a
-plausible near-zero score that is not a model result — and building a correct image needs Docker, which HPC login
-nodes generally lack.
+(measured below), and building a correct image needs Docker, which HPC login nodes generally lack.
+
+#### Measured: what a v4.12.0 sandbox actually costs you
+
+Compiling all 100 **reference statements** (unmodified, `sorry` intact) inside NeMo-Skills'
+`nemo-skills-sandbox-latest` — Lean/Mathlib v4.12.0:
+
+| Tier | Compile | Hard error |
+|---|---:|---:|
+| Easy | 16 | 4 |
+| Medium | 29 | 11 |
+| High | 19 | 21 |
+| **Total** | **64** | **36** |
+
+So a v4.12.0 sandbox does not fail outright — it silently caps the score at 64/100 and skews it by difficulty, with
+High hit hardest. Those 36 problems return 0 no matter what the model writes. The failures are genuine Mathlib API
+drift (`invalid field 'carrier' … 'Grp.carrier'`, `invalid field 'IsRepresentable'`, `ambiguous, possible
+interpretations`, `function expected at`) and are indistinguishable at a glance from a model that simply could not
+prove the theorem.
+
+That makes it usable as a plumbing smoke test and useless for a number. `check_sandbox.py` is what tells the two
+apart, which is why it runs before anything else.
 
 `elan` installs entirely in user space, so none of that is required:
 
