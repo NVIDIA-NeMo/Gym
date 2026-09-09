@@ -189,6 +189,10 @@ class ControlCapabilities(BaseModel):
         "checkpoint; 'auxiliary' instances (judges, simulators) never pause so accepted "
         "operations can finish draining.",
     )
+    features: list[str] = Field(
+        default_factory=list,
+        description="Optional control-plane features implemented by this participant.",
+    )
 
 
 def multi_process_capability_from_num_workers(num_workers: Optional[int]) -> MultiProcessCapability:

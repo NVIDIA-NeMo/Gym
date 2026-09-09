@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, Header, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym._checkpoint.control import CheckpointControlRequest, CheckpointPhase, ControlError, ControlFence
 from nemo_gym.rollout_correlation import ROLLOUT_ID_PATTERN
@@ -38,6 +38,7 @@ AGENT_STATE_SUBDIR = "agent"
 AGENT_MANIFEST_NAME = "manifest.json"
 AGENT_CHECKPOINT_SCHEMA_VERSION = 1
 AGENT_EXECUTION_GENERATION_HEADER = "x-nemo-gym-agent-execution-generation"
+COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE = "completed_result_acknowledgement"
 
 _CURRENT_AGENT_EXECUTION: ContextVar[Optional["AgentExecution"]] = ContextVar(
     "nemo_gym_current_agent_execution",
@@ -71,6 +72,43 @@ class AgentStaleAttemptError(ControlError):
 
 class AgentPrepareIncompleteError(ControlError):
     code = "agent_prepare_incomplete"
+
+
+class AgentCompletedExecutionAcknowledgementError(ControlError):
+    code = "completed_execution_acknowledgement_error"
+
+
+class AgentExecutionIdentity(BaseModel):
+    """Stable identity of one physical agent execution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    rollout_id: str = Field(pattern=ROLLOUT_ID_PATTERN.pattern)
+    attempt_index: int = Field(ge=0)
+
+
+class AgentCompletedExecutionAcknowledgementRequest(BaseModel):
+    """Batch of completed results now owned durably by the caller."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[AGENT_CHECKPOINT_SCHEMA_VERSION] = AGENT_CHECKPOINT_SCHEMA_VERSION
+    executions: list[AgentExecutionIdentity] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_unique_executions(self) -> "AgentCompletedExecutionAcknowledgementRequest":
+        keys = [(execution.rollout_id, execution.attempt_index) for execution in self.executions]
+        if len(keys) != len(set(keys)):
+            raise ValueError("completed execution acknowledgements must be unique")
+        return self
+
+
+class AgentCompletedExecutionAcknowledgementResponse(BaseModel):
+    """Every requested execution whose cached terminal result is released."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    acknowledged: list[AgentExecutionIdentity]
 
 
 class AgentBoundaryRecord(BaseModel):
@@ -151,6 +189,7 @@ class AgentCheckpointParticipant:
         self._generations: dict[tuple[str, int], int] = {}
         self._restored: dict[tuple[str, int], AgentBoundaryRecord] = {}
         self._tombstones: set[tuple[str, int]] = set()
+        self._acknowledged: set[tuple[str, int]] = set()
         self._accepting = True
         self._changed = asyncio.Condition()
 
@@ -162,6 +201,10 @@ class AgentCheckpointParticipant:
         task: Optional[asyncio.Task],
     ) -> AgentExecution:
         key = (rollout_id, attempt_index)
+        if key in self._acknowledged:
+            raise AgentStaleAttemptError(
+                f"rollout {rollout_id!r} attempt {attempt_index} completed result was acknowledged"
+            )
         if key in self._tombstones:
             raise AgentStaleAttemptError(f"rollout {rollout_id!r} attempt {attempt_index} was retired by restore")
         existing = self._executions.get(key)
@@ -357,6 +400,40 @@ class AgentCheckpointParticipant:
                 task.cancel()
         await self._notify()
         return {"retired": True, "tombstoned": True}
+
+    async def acknowledge_completed(
+        self,
+        identities: list[AgentExecutionIdentity],
+    ) -> list[AgentExecutionIdentity]:
+        """Atomically release terminal results after the caller owns them durably."""
+        keys = [(identity.rollout_id, identity.attempt_index) for identity in identities]
+        if len(keys) != len(set(keys)):
+            raise AgentCompletedExecutionAcknowledgementError("completed execution acknowledgements must be unique")
+
+        # Validate the complete batch before releasing any result. A malformed
+        # batch must not leave only some executions acknowledged.
+        for key in keys:
+            if key in self._acknowledged:
+                continue
+            execution = self._executions.get(key)
+            if execution is None:
+                raise AgentCompletedExecutionAcknowledgementError(
+                    f"rollout {key[0]!r} attempt {key[1]} has no completed result to acknowledge"
+                )
+            if execution.state != AgentExecutionState.COMPLETED or execution.terminal_result is None:
+                raise AgentCompletedExecutionAcknowledgementError(
+                    f"rollout {key[0]!r} attempt {key[1]} is not completed with a retained result"
+                )
+
+        for key in keys:
+            if key in self._acknowledged:
+                continue
+            execution = self._executions.pop(key)
+            execution.state = AgentExecutionState.RETIRED
+            execution.terminal_result = None
+            self._acknowledged.add(key)
+        await self._notify()
+        return identities
 
     def status(self) -> dict[str, Any]:
         all_executions = list(self._executions.values())
@@ -580,7 +657,16 @@ def install_agent_checkpoint(
     fence: ControlFence,
     auth_token: str,
 ) -> None:
-    """Install bulk prepare, commit, restore, resume, and retire routes."""
+    """Install acknowledgement, prepare, commit, restore, resume, and retire routes."""
+
+    @app.post(f"{AGENT_CHECKPOINT_URL_PREFIX}/acknowledge-completed")
+    async def acknowledge_completed(
+        body: AgentCompletedExecutionAcknowledgementRequest,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        require_control_auth(authorization, auth_token)
+        acknowledged = await participant.acknowledge_completed(body.executions)
+        return AgentCompletedExecutionAcknowledgementResponse(acknowledged=acknowledged).model_dump()
 
     @app.post(f"{AGENT_CHECKPOINT_URL_PREFIX}/prepare")
     async def prepare(
