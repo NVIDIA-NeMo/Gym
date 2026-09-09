@@ -1,7 +1,7 @@
 # AutomationBench with upstream zapier scoring (partial credit).
 # Source: https://github.com/zapier/AutomationBench v1.0.6
-# Toolset is set explicitly: upstream's CLI defaults to "api" while its Python
-# signatures default to "zapier", so relying on the default is ambiguous.
+# Toolset is set explicitly to "api", matching upstream's CLI default
+# (upstream's Python signatures default to "zapier", so the default is ambiguous).
 ab_zapier:
   responses_api_agents:
     verifiers_agent:
@@ -16,7 +16,7 @@ ab_zapier:
       vf_env_id: automationbench_zapier_env
       vf_env_args:
         max_turns: 50
-        toolset: zapier
+        toolset: api
       group_size: 1
       max_concurrent_generation: -1
       max_concurrent_scoring: -1

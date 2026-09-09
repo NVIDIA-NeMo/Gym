@@ -3,7 +3,7 @@
 AutomationBench with the upstream Zapier scoring (`partial_credit`).
 
 - Source: https://github.com/zapier/AutomationBench (verifiers 0.2.0)
-- Toolset: `zapier` (meta-tool discovery layer)
+- Toolset: `api` (matches upstream's CLI default)
 - Scoring: partial credit; a broken guardrail counts as one failed assertion
 
 ## Install
@@ -23,4 +23,5 @@ This pulls `automation-bench` from the upstream repo. Note upstream declares
 python environments/ab_zapier/prepare.py
 ```
 
-600 tasks, 6 domains x 100 - the same set `ab_aa` scores.
+Pulls the real taskset from the installed `automation-bench` package and sizes
+itself from it (600 tasks: 6 domains x 100). `ab_aa` indexes the identical set.
