@@ -4,16 +4,16 @@ import csv
 import io
 import json
 import urllib.request
-import zipfile
 from pathlib import Path
 
 
-url = "https://www.kaggle.com/api/v1/datasets/download/deepmind/deepsearchqa"
-data = zipfile.ZipFile(io.BytesIO(urllib.request.urlopen(url).read())).read("DSQA-full.csv").decode()
-output = Path(__file__).parent / "data" / "example.jsonl"
+url = "https://huggingface.co/datasets/google/deepsearchqa/resolve/main/DSQA-full.csv"
+data = urllib.request.urlopen(url).read().decode()
+output = Path(__file__).parent / "data" / "deepsearchqa_benchmark.jsonl"
 output.parent.mkdir(exist_ok=True)
 with output.open("w") as file:
-    for row in list(csv.DictReader(io.StringIO(data)))[:5]:
+    for example_id, row in enumerate(csv.DictReader(io.StringIO(data))):
+        row["example_id"] = str(example_id)
         row["agent_ref"] = {"type": "responses_api_agents", "name": "deepsearchqa"}
         row["responses_create_params"] = {"input": [{"role": "user", "content": row["problem"]}]}
         file.write(json.dumps(row) + "\n")

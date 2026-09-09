@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-import base64
 import json
 import shlex
 import tempfile
@@ -22,22 +21,78 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_me
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
-JUDGE_PROMPT = """Evaluate whether the AI Response contains the correct answer(s).
-For a Single Answer, mark whether its expected answer is present. For a Set Answer, create one boolean entry for each
-expected item. Semantic equivalence is sufficient. List every asserted answer absent from the Correct Answer. Return
-only valid JSON with this shape:
-{{"Answer Correctness": {{"Explanation": "brief reason", "Correctness Details": {{"expected item": true}},
-"Excessive Answers": []}}}}
+JUDGE_PROMPT = """Your task is to evaluate whether a given "AI Response" for a specific "User Prompt" arrived at the correct answer.
 
-User Prompt:
+**Answer Correctness Task**
+
+* **Purpose:** Assess whether the AI response provides the correct answer(s) based on the provided "Correct Answer" and "Prompt Type".
+
+* **Process:**
+
+* Identify the "Prompt Type": "<prompt_type>".
+
+* Refer to the "Correct Answer": "<answer>".
+* Based on the "Prompt Type", determine if the "AI Response" contains the expected answer(s).
+
+* **’Single Answer’**: Check if the response provides the answer that addresses the user’s question. It does not have to match the exact wording of the provided answer.
+* **’Set Answer’**: Check if the response includes *each* item from the provided ground truth answers. The order might not matter unless specified otherwise. The response might include more answers than the list. Determine the correctness *only* based on the list first and then check if the response includes answers not in the list.
+
+* **Explanation:** Provide a brief explanation justifying your assessment of answer correctness, referencing specific parts of the AI response and the correct answer.
+* **Correctness Details:** Provide a dictionary, one key for each expected answer part, and value is a boolean indicating whether each expected answer part was found.
+
+* For ’Set Answer’, this will be a list of attributes, one for each item/part in the "Correct Answer". Each key will be a string indicating the expected answer part, and the value will be a boolean indicating whether that part was found in the response.
+* **Excessive Answers:** Provide a list of strings, each indicating an excessive answer part. If the response provides answers that are **not** in the "Correct Answer" list, add these answers as excessive answers. Return an empty list when there’s no excessive answers in the response.
+
+**Output Format:**
+Your evaluation *must* be structured as a nested JSON dictionary with the following top-level keys: ‘"Answer Correctness"‘. Please return NULL if any of "Prompt", "AI Response" or "Correct Answer" is empty.
+The value for ‘"Answer Correctness"‘ should be a dictionary containing ‘"Explanation"‘ (a string), ‘"Correctness Details"‘ (a dictionary where each key is the expected correct answer, and the value is a boolean indicating whether the response contains the correct answer), and ‘"Excessive Answers"‘ (a list of strings indicating the excessive answers).
+Make sure you return a valid JSON string. Pay special attention to quotes, commas and special characters in the JSON string. Make sure to escape all special characters and quotes in the JSON string.
+
+Grader Partial Output Example
+
+**Example (Partial):**
+
+```json
+{{
+  "Answer Correctness": {{
+    "Explanation": "The response correctly identified Belgium and France but also includes an excessive answer, Italy.",
+    "Correctness Details": {{
+      "Belgium": true,
+      "France": true
+    }},
+    "Excessive Answers": ["Italy"]
+  }}
+}}
+```
+
+**Now, proceed with the evaluation using the provided User Prompt, AI Response, and Correct Answer.**
+
+User Prompt (Wrapped in <prompt> and </prompt>):
+
+<prompt>
 {problem}
+</prompt>
+
+--------------------
+
+** Correct Answer (Wrapped in <answer> and </answer>):
 
 Prompt Type: {answer_type}
-Correct Answer:
-{answer}
 
-AI Response:
+<answer>
+{answer}
+</answer>
+
+--------------------
+
+AI assistant response (Wrapped in <response> and </response>):
+
+<response>
 {response}
+</response>
+--------------------
+
+Rating:
 """
 
 
@@ -56,7 +111,6 @@ class DeepSearchQAConfig(BaseResponsesAPIAgentConfig):
     sandbox_spec: dict[str, Any] = Field(default_factory=dict)
     sandbox_model_base_url: str | None = None
     exa_api_key: SecretStr | None = None
-    inference_api_key: SecretStr | None = None
 
 
 class DeepSearchQARunRequest(BaseRunRequest):
@@ -120,6 +174,7 @@ class DeepSearchQAAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         root = f"/tmp/nemo-gym-deepsearchqa-{uuid.uuid4().hex}"
         input_path, output_path = f"{root}/input.json", f"{root}/response.json"
+        runner_path, config_path = f"{root}/agent_runner.py", f"{root}/runner.json"
         values = dict(self.config.sandbox_spec)
         spec = SandboxSpec(
             image=self.config.image.removeprefix("docker://"),
@@ -127,10 +182,6 @@ class DeepSearchQAAgent(SimpleResponsesAPIAgent):
             ready_timeout_s=values.pop("ready_timeout_s", 1200),
             workdir=values.pop("workdir", root),
             env=values.pop("env", {}),
-            files={
-                input_path: body.model_dump_json(),
-                f"{root}/agent_runner.py": Path(__file__).with_name("agent_runner.py").read_text(),
-            },
             metadata={**self._metadata, **values.pop("metadata", {}), "nemo_gym_agent": "deepsearchqa"},
             resources=SandboxResources.from_mapping(values.pop("resources", {})),
             entrypoint=values.pop("entrypoint", None),
@@ -138,32 +189,35 @@ class DeepSearchQAAgent(SimpleResponsesAPIAgent):
         )
         if values:
             raise ValueError(f"unknown sandbox_spec keys: {sorted(values)}")
-        env = {
-            "NG_HARNESS_MODULE": self.config.harness_module,
-            "NG_HARNESS_CLASS": self.config.harness_class,
-            "NG_HARNESS_CONFIG_CLASS": self.config.harness_config_class,
-            "NG_HARNESS_KWARGS": base64.b64encode(json.dumps(self.config.harness_kwargs).encode()).decode(),
-            "NG_MODEL_URL": (self.config.sandbox_model_base_url or self._model_url).rstrip("/")
+        runner_config = {
+            "harness_module": self.config.harness_module,
+            "harness_class": self.config.harness_class,
+            "harness_config_class": self.config.harness_config_class,
+            "harness_kwargs": self.config.harness_kwargs,
+            "model_url": (self.config.sandbox_model_base_url or self._model_url).rstrip("/")
             + self.url_path_for_request("", request).rstrip("/"),
-            "NG_INPUT_PATH": input_path,
-            "NG_OUTPUT_PATH": output_path,
+            "input_path": input_path,
+            "output_path": output_path,
+            "exa_api_key": self.config.exa_api_key.get_secret_value() if self.config.exa_api_key else None,
         }
-        if self.config.exa_api_key:
-            env["EXA_API_KEY"] = self.config.exa_api_key.get_secret_value()
-        if self.config.inference_api_key:
-            env["NVIDIA_API_KEY"] = self.config.inference_api_key.get_secret_value()
         sandbox = AsyncSandbox(self._provider, spec)
         try:
             await sandbox.start()
-            command = f"{shlex.quote(self.config.python)} {root}/agent_runner.py"
-            if self.config.setup_command:
-                command = f"{self.config.setup_command} && {command}"
-            result = await sandbox.exec(command, env=env, timeout_s=None)
-            if result.return_code != 0:
-                raise RuntimeError(f"sandboxed harness failed: {(result.stderr or result.stdout or '')[-2000:]}")
-            with tempfile.NamedTemporaryFile() as output:
-                await sandbox.download(output_path, output.name)
-                return NeMoGymResponse.model_validate_json(Path(output.name).read_text())
+            with tempfile.TemporaryDirectory() as temporary:
+                local = Path(temporary)
+                (local / "input.json").write_text(body.model_dump_json())
+                (local / "runner.json").write_text(json.dumps(runner_config))
+                await sandbox.upload(Path(__file__).with_name("agent_runner.py"), runner_path)
+                await sandbox.upload(local / "input.json", input_path)
+                await sandbox.upload(local / "runner.json", config_path)
+                command = f"{shlex.quote(self.config.python)} {runner_path} {config_path}"
+                if self.config.setup_command:
+                    command = f"{self.config.setup_command} && {command}"
+                result = await sandbox.exec(command, timeout_s=None)
+                if result.return_code != 0:
+                    raise RuntimeError(f"sandboxed harness failed: {(result.stderr or result.stdout or '')[-2000:]}")
+                await sandbox.download(output_path, local / "response.json")
+                return NeMoGymResponse.model_validate_json((local / "response.json").read_text())
         finally:
             await sandbox.stop()
 

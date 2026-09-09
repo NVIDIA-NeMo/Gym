@@ -8,17 +8,16 @@ from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
 
 
-class FakeAgentConfig(BaseResponsesAPIAgentConfig):
+class SampleHarnessConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
 
 
-class FakeAgent:
+class SampleHarness:
     def __init__(self, config, server_client):
         self.config = config
         self.server_client = server_client
 
     async def responses(self, request, body):
-        assert os.environ["EXA_API_KEY"] == "temporary-test-key"
         return NeMoGymResponse(
             id="smoke",
             created_at=int(time.time()),
