@@ -47,7 +47,6 @@ from pytest import fixture
 
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.browsecomp_advanced_harness.app import (
-    CONTAMINATED_MESSAGE,
     CONTAMINATED_URL_SUBSTRINGS,
     CONTAMINATION_PATTERNS,
     BrowseRequest,
@@ -86,6 +85,17 @@ def _req() -> MagicMock:
     m = MagicMock()
     m.session = {SESSION_ID_KEY: "test_session_id"}
     return m
+
+
+_TELLTALES = ("withheld", "benchmark", "browsecomp", "contaminat", "answer key")
+
+
+def _assert_looks_like_an_ordinary_empty_search(s: str, query: str = "q") -> None:
+    """An all-dropped search must be indistinguishable from a provider that returned
+    nothing: the bare header, no entries, and no hint of WHY it is empty."""
+    assert s.startswith(f"[Search Query]: {query}")
+    assert "[Title]" not in s and "[URL]" not in s
+    assert not any(t in s.lower() for t in _TELLTALES), s
 
 
 def _server(provider: str, workspace_root: str = None) -> TavilySearchResourcesServer:
@@ -203,7 +213,7 @@ class TestInlineTavilySearchFilters:
 
         resp = await server.search(_req(), TavilySearchRequest(queries=["q"]))
 
-        assert resp.results_string == CONTAMINATED_MESSAGE
+        _assert_looks_like_an_ordinary_empty_search(resp.results_string)
 
 
 class TestExaSearchFilters:
@@ -239,7 +249,7 @@ class TestExaSearchFilters:
 
         resp = await server.search(_req(), TavilySearchRequest(queries=["q"]))
 
-        assert resp.results_string == CONTAMINATED_MESSAGE
+        _assert_looks_like_an_ordinary_empty_search(resp.results_string)
 
 
 class TestDiskSearchNeverWritesAContaminatedPage:
@@ -270,7 +280,7 @@ class TestDiskSearchNeverWritesAContaminatedPage:
         resp = await server.search(_req(), TavilySearchRequest(queries=["q"]))
 
         assert list((Path(tmp_path) / "test_session_id" / "pages").iterdir()) == []
-        assert resp.results_string == CONTAMINATED_MESSAGE
+        _assert_looks_like_an_ordinary_empty_search(resp.results_string)
 
 
 class TestBrowseFilters:
@@ -326,7 +336,9 @@ class TestBrowseFilters:
 
         resp = await server.browse(_req(), BrowseRequest(urls=["https://b.example/2"]))
 
-        assert resp.results_string == CONTAMINATED_MESSAGE
+        # Indistinguishable from a page the extractor simply could not read.
+        assert resp.results_string == "No content extracted."
+        assert "browsecomp" not in resp.results_string.lower()
 
 
 class TestWidenedPatterns:

@@ -333,10 +333,12 @@ CONTAMINATED_URL_SUBSTRINGS = [
     "datasets-server.huggingface.co",
 ]
 
-# Returned only when EVERY result in a response was contaminated. The normal case
-# is per-ITEM dropping: one poisoned hit out of five should cost that hit, not the
-# whole tool call, on a 60-turn rollout.
-CONTAMINATED_MESSAGE = "Search results withheld: every result referenced the benchmark itself."
+# Dropping is per ITEM: one poisoned hit out of five costs that hit, not the whole tool
+# call. When EVERY result was dropped the call is rendered exactly like a provider that
+# returned nothing (search: the bare "[Search Query]" header; browse: "No content
+# extracted."). There is deliberately NO dedicated message: telling the model that its
+# results "referenced the benchmark" tells it the answer key exists and is nearby.
+# (User call 2026-09-09, replacing the decontam arm's CONTAMINATED_MESSAGE.)
 
 
 def _is_contaminated(*texts: Optional[str]) -> bool:
@@ -1168,10 +1170,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         # routes, and every one of them formats here or in one of the three sites
         # below, so this is where all of them can be covered. Applied ABOVE the
         # pages/ write in the loop, so a contaminated page is never written to disk.
-        raw_results = results.get("results", []) or []
-        offered, _ = _filter_results(raw_results, "search", "exa")
-        if raw_results and not offered:
-            return CONTAMINATED_MESSAGE
+        offered, _ = _filter_results(results.get("results", []) or [], "search", "exa")
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
         returned = 0
@@ -1302,11 +1301,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         # filtering only the returned string would leave the contamination on disk
         # and fully readable. Filtering here, ABOVE the write loop, means the page is
         # never written at all.
-        result_list = results.get("results", [])
-        n_in = len(result_list)
-        result_list, _ = _filter_results(result_list, "search", "tavily")
-        if n_in and not result_list:
-            return CONTAMINATED_MESSAGE
+        result_list, _ = _filter_results(results.get("results", []), "search", "tavily")
 
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
@@ -1429,10 +1424,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         # Contamination guard for the browse/extract path, which has its own write
         # loop and does not route through any of the three search sites above.
         # Applied ABOVE the page writes, so a contaminated page never lands on disk.
-        n_in = len(result_list)
         result_list, _ = _filter_results(result_list, "browse", self.config.search_provider)
-        if n_in and not result_list:
-            return BrowseResponse(results_string=CONTAMINATED_MESSAGE)
+        if not result_list:
+            return BrowseResponse(results_string="No content extracted.")
 
         page_writer = self._get_page_writer(request.session[SESSION_ID_KEY])
         if page_writer is not None:
@@ -1511,11 +1505,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return any(hostname == domain or hostname.endswith("." + domain) for domain in self._exclude_domains)
 
     def _postprocess_search_results(self, query: str, results: dict, max_length: int) -> str:
-        result_list = results["results"]
-        n_in = len(result_list)
-        result_list, _ = _filter_results(result_list, "search", "tavily")
-        if n_in and not result_list:
-            return CONTAMINATED_MESSAGE
+        result_list, _ = _filter_results(results["results"], "search", "tavily")
 
         blocks = [f"[Search Query]: {query}"]
         running_len = len(blocks[0])
