@@ -14,7 +14,7 @@ output.parent.mkdir(exist_ok=True)
 with output.open("w") as file:
     for example_id, row in enumerate(csv.DictReader(io.StringIO(data))):
         row["example_id"] = str(example_id)
-        row["agent_ref"] = {"type": "responses_api_agents", "name": "harness_exa_search"}
+        row["agent_ref"] = {"type": "responses_api_agents", "name": "deepsearchqa_claude_code_benchmark"}
         row["responses_create_params"] = {"input": [{"role": "user", "content": row["problem"]}]}
         file.write(json.dumps(row) + "\n")
 print(f"wrote {sum(1 for _ in output.open())} tasks to {output}")

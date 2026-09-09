@@ -1,11 +1,11 @@
-deepsearchqa:
+widesearch:
   resources_servers:
-    deepsearchqa:
+    widesearch:
       entrypoint: app.py
       domain: knowledge
       verified: false
-      description: Grade DeepSearchQA single-answer and set-answer responses
-      value: Evaluate multi-step web research answers
+      description: Grade structured WideSearch Markdown tables
+      value: Evaluate broad web research coverage and accuracy
       judge_model_server:
         type: responses_api_models
         name: policy_model
@@ -14,31 +14,31 @@ deepsearchqa:
         max_output_tokens: 32768
         temperature: 0.0
         top_p: 1.0
-deepsearchqa_claude_code_benchmark:
+widesearch_claude_code_benchmark:
   responses_api_agents:
     harness_exa_search:
       entrypoint: app.py
       domain: agent
-      description: Run DeepSearchQA with any Gym harness in a sandbox
-      value: Evaluate agentic search performance
+      description: Run WideSearch with any Gym harness in a sandbox
+      value: Evaluate broad agentic web search
       model_server:
         type: responses_api_models
         name: policy_model
       resources_server:
         type: resources_servers
-        name: deepsearchqa
+        name: widesearch
       harness_module: responses_api_agents.claude_code_agent.app
       harness_class: ClaudeCodeAgent
       harness_config_class: ClaudeCodeAgentConfig
       harness_kwargs:
-        model: ${oc.env:DEEPSEARCHQA_MODEL,nvidia/qwen/qwen3.8-27b}
+        model: ${oc.env:WIDESEARCH_MODEL,nvidia/qwen/qwen3.8-27b}
         max_turns: 30
         timeout: 900
         bare: true
-        system_prompt: You must call an Exa MCP search tool before answering. Use Exa to research the question on the web, do not substitute local file searches for web research.
+        system_prompt: You must call an Exa MCP search tool before answering. Research the question on the web and return exactly the requested Markdown table.
         claude_code_version: ${oc.env:CLAUDE_CODE_VERSION,null}
-      image: ${oc.env:DEEPSEARCHQA_IMAGE}
-      setup_command: ${oc.env:DEEPSEARCHQA_SETUP_COMMAND,null}
+      image: ${oc.env:WIDESEARCH_IMAGE}
+      setup_command: ${oc.env:WIDESEARCH_SETUP_COMMAND,null}
       sandbox_provider: sandbox
       sandbox_spec:
         ttl_s: 1800
@@ -46,7 +46,8 @@ deepsearchqa_claude_code_benchmark:
       exa_api_key: ${oc.env:EXA_API_KEY,null}
       token_id_capture: false
       datasets:
-        - name: deepsearchqa
+        - name: widesearch
           type: benchmark
-          jsonl_fpath: benchmarks/deepsearchqa/data/deepsearchqa_benchmark.jsonl
-          prepare_script: benchmarks/deepsearchqa/prepare.py
+          jsonl_fpath: benchmarks/widesearch/data/widesearch_benchmark.jsonl
+          prepare_script: benchmarks/widesearch/prepare.py
+          license: MIT
