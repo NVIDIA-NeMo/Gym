@@ -377,7 +377,7 @@ uv sync --extra dev --extra sandbox
 Set the OpenSandbox API key:
 
 ```bash
-export OPENSANDBOX_API_KEY=<opensandbox-api-key>
+export OPENSANDBOX_API_KEY="<opensandbox-api-key>"
 ```
 
 Set the policy model endpoint in `env.yaml` or with equivalent CLI overrides:
