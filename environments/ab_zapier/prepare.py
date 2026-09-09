@@ -31,16 +31,15 @@ import argparse
 import json
 from pathlib import Path
 
+
 VF_ENV_ID = "automationbench_zapier_env"
 TOOLSET = "api"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--domains", nargs="*", default=None,
-                        help="subset of domains (default: all public domains)")
-    parser.add_argument("--size", type=int, default=-1,
-                        help="number of tasks (-1 for the full taskset)")
+    parser.add_argument("--domains", nargs="*", default=None, help="subset of domains (default: all public domains)")
+    parser.add_argument("--size", type=int, default=-1, help="number of tasks (-1 for the full taskset)")
     parser.add_argument("--max-turns", type=int, default=50)
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
@@ -54,8 +53,7 @@ def main() -> None:
             "    uv pip install -e environments/ab_zapier"
         ) from exc
 
-    env = load_environment(domains=args.domains, max_turns=args.max_turns,
-                           toolset=TOOLSET)
+    env = load_environment(domains=args.domains, max_turns=args.max_turns, toolset=TOOLSET)
     dataset = env.dataset
     n = len(dataset) if args.size < 0 else min(args.size, len(dataset))
 
