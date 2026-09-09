@@ -105,7 +105,7 @@ def objectives_passed(state, **kwargs) -> float:
     return float(_counts(state)["objectives_passed"])
 
 
-def load_environment(domains=None, max_turns: int = 50, toolset: str = "zapier",
+def load_environment(domains=None, max_turns: int = 50, toolset: str = "api",
                      search_top_k=None, **kwargs):
     import verifiers as vf
     dataset = get_combined_dataset(list(domains) if domains else list(DEFAULT_DOMAINS))

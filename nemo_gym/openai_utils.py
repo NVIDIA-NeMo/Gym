@@ -762,7 +762,7 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
     tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCallUnionParam]] = None
-    reasoning_content: Optional[Any] = None
+    reasoning_content: Optional[str] = None
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(
