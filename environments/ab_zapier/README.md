@@ -6,6 +6,17 @@ AutomationBench with the upstream Zapier scoring (`partial_credit`).
 - Toolset: `zapier` (meta-tool discovery layer)
 - Scoring: partial credit; a broken guardrail counts as one failed assertion
 
+## Install
+
+The env package is not on PyPI; install it into the agent's venv:
+
+```bash
+uv pip install -e environments/ab_zapier
+```
+
+This pulls `automation-bench` from the upstream repo. Note upstream declares
+`requires-python >=3.13`.
+
 ## Data
 
 ```bash

@@ -1,3 +1,8 @@
+# NOTE: NOT RUNNABLE ON main.
+# AutomationBench-Verified needs the v1 taskset support in verifiers_agent
+# (the `verifiers.taskset` config path). main's verifiers_agent only accepts
+# `vf_env_id` + `vf_env_args`, so this config will fail config validation until
+# the v1 agent lands. Kept here so the three AB variants stay together.
 # AutomationBench-Verified, api toolset, subprocess runtime.
 # Source: https://github.com/xeophon/AutomationBench-Verified @ 6173254  (verifiers 0.3.1)
 ab_verified:

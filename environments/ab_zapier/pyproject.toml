@@ -1,5 +1,5 @@
 [project]
-name = "automationbench-aa-gated-env"
+name = "automationbench-zapier-env"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
@@ -11,4 +11,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["automationbench_aa_gated_env"]
+packages = ["automationbench_zapier_env"]
