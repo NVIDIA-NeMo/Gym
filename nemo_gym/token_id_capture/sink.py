@@ -100,7 +100,6 @@ class CaptureContext:
     # store doubles as the rollout's capture ledger and admission is the
     # strict tri-state of the lineage result.
     external_staging: bool = False
-    logical_request_id: str | None = None
     source_capture_key: str | None = None
     explicit_parent_call_id: str | None = None
     # Stamped once when the middleware admits the call. The ledger row reuses
