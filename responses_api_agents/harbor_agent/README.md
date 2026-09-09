@@ -306,10 +306,17 @@ harbor_agent_kwargs:
     output_cost_per_token: 0.0
 ```
 
-Before running, export Daytona credentials:
+Before running, follow the [Daytona access prerequisites](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/daytona-access)
+to obtain an organization API key, confirm sandbox creation/cleanup permissions and check
+quota. The key comes from [Daytona's dashboard](https://www.daytona.io/docs/en/api-keys/),
+not Gym, and is separate from the policy-model key below. This example uses Harbor's
+Daytona environment, not Gym's Sandbox API provider config.
+
+Supply the key through your approved secret-management mechanism in the host environment
+(the following value is only a placeholder; never commit real credentials):
 
 ```bash
-export DAYTONA_API_KEY=<your-daytona-api-key>
+export DAYTONA_API_KEY="<your-daytona-api-key>"
 ```
 
 Then add the policy model server settings to repo-root `env.yaml`, using the
@@ -369,7 +376,7 @@ with five trials, zero errors, and mean reward `1.000`.
 To regenerate the Harbor-side smoke evidence:
 
 ```bash
-export DAYTONA_API_KEY=<your-daytona-api-key>
+export DAYTONA_API_KEY="<your-daytona-api-key>"
 
 harbor run --dataset terminal-bench@2.0 \
   --n-tasks 5 \
