@@ -149,6 +149,7 @@ async def test_extracts_routed_experts_reference_tag():
     routed_experts = {
         "schema": "nemo_rl.routed_experts_ref.v1",
         "store": "store-a",
+        "attempt_index": 2,
         "offset": 0,
         "length": 4,
     }
