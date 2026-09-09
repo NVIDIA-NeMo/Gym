@@ -48,6 +48,7 @@ from nemo_gym.global_config import (
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
+    TARGET_WEIGHT_VERSION_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     get_global_config_dict,
     get_wandb_run,
@@ -116,6 +117,11 @@ NG_TRAJECTORY_KEY = "ng_trajectory"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+_MODEL_REQUEST_ROLLOUT_KEYS = (
+    TASK_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TARGET_WEIGHT_VERSION_KEY_NAME,
+)
 
 
 def _nonnegative_int(value: Any) -> Optional[int]:
@@ -518,6 +524,33 @@ def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in summary.items() if v is not None}
 
 
+def _propagate_rollout_fields_to_model_request(row: Dict[str, Any]) -> None:
+    """Mirror Gym rollout fields into vLLM's eventual Chat Completions body.
+
+    Responses request validation rejects arbitrary top-level fields. Gym's vLLM
+    model already treats ``metadata.extra_body`` as a JSON-encoded set of fields
+    to merge into the upstream Chat Completions request, so use that bridge while
+    retaining the canonical values at the top level of the rollout row.
+    """
+    rollout_fields = {key: row[key] for key in _MODEL_REQUEST_ROLLOUT_KEYS if key in row}
+    if not rollout_fields:
+        return
+
+    responses_create_params = row[RESPONSES_CREATE_PARAMS_KEY_NAME]
+    metadata = responses_create_params.get("metadata")
+    if metadata is None:
+        metadata = {}
+        responses_create_params["metadata"] = metadata
+    if not isinstance(metadata, dict):
+        raise TypeError("responses_create_params.metadata must be a dict or None")
+
+    extra_body = json.loads(metadata.get("extra_body") or "{}")
+    if not isinstance(extra_body, dict):
+        raise TypeError("responses_create_params.metadata.extra_body must encode a JSON object")
+    extra_body.update(rollout_fields)
+    metadata["extra_body"] = json.dumps(extra_body)
+
+
 class RolloutCollectionHelper(BaseModel):
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
         range_iterator = repeat(0)
@@ -811,6 +844,8 @@ class RolloutCollectionHelper(BaseModel):
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
+            if TARGET_WEIGHT_VERSION_KEY_NAME in row:
+                result[TARGET_WEIGHT_VERSION_KEY_NAME] = row[TARGET_WEIGHT_VERSION_KEY_NAME]
             result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
             if SKILLS_REF_KEY_NAME in row:
                 result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
@@ -1035,6 +1070,7 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
 
         async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
             async with semaphore:
+                _propagate_rollout_fields_to_model_request(row)
                 res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                 try:
                     await raise_for_status(res)
