@@ -1,0 +1,31 @@
+harness_exa_search_claude_code:
+  responses_api_agents:
+    harness_exa_search:
+      entrypoint: app.py
+      domain: agent
+      description: Run a Gym harness with Exa search in a sandbox
+      value: Evaluate and train sandboxed search agents
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      resources_server:
+        type: resources_servers
+        name: ???
+      harness_module: responses_api_agents.claude_code_agent.app
+      harness_class: ClaudeCodeAgent
+      harness_config_class: ClaudeCodeAgentConfig
+      harness_kwargs:
+        model: ${oc.env:HARNESS_EXA_SEARCH_MODEL,nvidia/qwen/qwen3.8-27b}
+        max_turns: 30
+        timeout: 900
+        bare: true
+        system_prompt: You must call an Exa MCP search tool before answering. Use Exa to research the question on the web, do not substitute local file searches for web research.
+        claude_code_version: ${oc.env:CLAUDE_CODE_VERSION,null}
+      image: ${oc.env:HARNESS_EXA_SEARCH_IMAGE}
+      setup_command: ${oc.env:HARNESS_EXA_SEARCH_SETUP_COMMAND,null}
+      sandbox_provider: sandbox
+      sandbox_spec:
+        ttl_s: 1800
+      sandbox_model_base_url: null
+      exa_api_key: ${oc.env:EXA_API_KEY,null}
+      token_id_capture: false

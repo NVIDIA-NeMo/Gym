@@ -14,10 +14,10 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.deepsearchqa.app import (
-    DeepSearchQAAgent,
+from resources_servers.deepsearchqa.app import (
     DeepSearchQAConfig,
-    DeepSearchQARunRequest,
+    DeepSearchQAServer,
+    DeepSearchQAVerifyRequest,
     parse_judge,
 )
 
@@ -53,8 +53,6 @@ def test_parse_published_output_format() -> None:
 
 async def test_verify_set_f1() -> None:
     client = MagicMock(spec=ServerClient)
-    client.global_config_dict = {"policy": {"responses_api_models": {"model": {}}}}
-    client._build_server_base_url.return_value = "http://model"
     judged = response(
         '{"Answer Correctness":{"Explanation":"one missing, one extra",'
         '"Correctness Details":{"A":true,"B":false},"Excessive Answers":["C"]}}'
@@ -63,25 +61,19 @@ async def test_verify_set_f1() -> None:
     http_response.json = AsyncMock(return_value=judged.model_dump())
     http_response.read = AsyncMock(return_value=orjson.dumps(judged.model_dump()))
     client.post = AsyncMock(return_value=http_response)
-    server = DeepSearchQAAgent(
+    server = DeepSearchQAServer(
         config=DeepSearchQAConfig(
             host="0.0.0.0",
             port=0,
             entrypoint="app.py",
             name="deepsearchqa",
-            model_server=ModelServerRef(type="responses_api_models", name="policy"),
             judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
             judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
-            harness_module="unused",
-            harness_class="Unused",
-            harness_config_class="UnusedConfig",
-            image="unused",
-            sandbox_provider={"local": {}},
         ),
         server_client=client,
     )
     result = await server.verify(
-        DeepSearchQARunRequest(
+        DeepSearchQAVerifyRequest(
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
                 input=[NeMoGymEasyInputMessage(role="user", content="question")]
             ),
@@ -90,8 +82,8 @@ async def test_verify_set_f1() -> None:
             answer="A, B",
             answer_type="Set Answer",
             problem_category="test",
-        ),
-        response("A and C"),
+            response=response("A and C"),
+        )
     )
     assert result.precision == approx(0.5)
     assert result.recall == approx(0.5)
