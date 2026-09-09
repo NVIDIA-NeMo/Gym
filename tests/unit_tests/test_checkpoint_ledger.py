@@ -122,7 +122,7 @@ def test_commit_restore_preserves_only_token_free_custody(tmp_path) -> None:
     assert (restored_root / "rollout-a.lineage.jsonl").read_bytes() == expected
 
 
-def test_commit_packages_only_active_continuations_and_indexes_storage_references(tmp_path) -> None:
+def test_commit_packages_only_active_continuations_without_scanning_store(tmp_path, monkeypatch) -> None:
     source = tmp_path / "source"
     expected = _write_custody(source, "rollout-a", call_count=3)
     _write_custody(source, "rollout-b", call_count=2)
@@ -133,11 +133,20 @@ def test_commit_packages_only_active_continuations_and_indexes_storage_reference
         capture_key="rollout-a",
         last_committed_model_call_id="rollout-a-call-1",
     )
+    original_glob = Path.glob
+
+    def reject_store_glob(path: Path, pattern: str):
+        if path == source:
+            raise AssertionError(f"checkpoint commit must not scan the lineage store with {pattern!r}")
+        return original_glob(path, pattern)
+
+    monkeypatch.setattr(Path, "glob", reject_store_glob)
 
     summary = CaptureLedgerCheckpointer(source).commit(
         checkpoint,
         checkpoint_id="checkpoint-1",
         tombstones=[],
+        source_attempts=[("rollout-a", 0), ("rollout-b", 0)],
         continuation_roots=[root],
     )
 
@@ -157,6 +166,23 @@ def test_commit_packages_only_active_continuations_and_indexes_storage_reference
         "opaque-rollout-a-1",
     ]
     assert {reference.boundary_model_call_id for reference in references} == {"rollout-a-call-1"}
+
+
+def test_commit_rejects_a_requested_continuation_without_lineage(tmp_path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    checkpoint = tmp_path / "checkpoint"
+
+    with pytest.raises(LedgerMismatchError, match="continuation roots have no model lineage"):
+        CaptureLedgerCheckpointer(source).commit(
+            checkpoint,
+            checkpoint_id="checkpoint-1",
+            tombstones=[],
+            source_attempts=[("rollout-missing", 0)],
+            continuation_roots=[_continuation_root("rollout-missing")],
+        )
+
+    assert not (checkpoint / MODEL_LEDGER_SUBDIR / LEDGER_MANIFEST_NAME).exists()
 
 
 def test_restore_rejects_corrupt_storage_reference_index_before_install(tmp_path) -> None:
