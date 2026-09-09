@@ -118,9 +118,10 @@ def deterministic_metric(response: str, target: str, name: str, criterion: Any) 
         try:
             response_number = float(response.rstrip("%")) / (100 if "%" in response else 1)
             target_number = float(target.rstrip("%")) / (100 if "%" in target else 1)
-        except ValueError:
+            tolerance = float(criterion or 0)
+        except (TypeError, ValueError):
             return float(response == target)
-        return float(abs(response_number - target_number) <= abs(target_number) * float(criterion))
+        return float(abs(response_number - target_number) <= abs(target_number) * tolerance)
     if name == "date_near":
         try:
             response_date, target_date = dateparser.parse(response), dateparser.parse(target)

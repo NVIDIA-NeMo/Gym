@@ -45,13 +45,13 @@ def response(text: str) -> NeMoGymResponse:
 
 def test_parse_published_output_format() -> None:
     parsed = parse_judge(
-        '```json\n{"Answer Correctness":{"Explanation":"ok","Correctness Details":{"A":true},'
+        'Here is the evaluation:\n```\n{"Answer Correctness":{"Explanation":"ok","Correctness Details":{"A":true},'
         '"Excessive Answers":[]}}\n```'
     )
     assert parsed["Correctness Details"] == {"A": True}
 
 
-async def test_verify_set_f1() -> None:
+async def test_verify_scores_valid_output_and_handles_invalid_output() -> None:
     client = MagicMock(spec=ServerClient)
     judged = response(
         '{"Answer Correctness":{"Explanation":"one missing, one extra",'
@@ -72,20 +72,28 @@ async def test_verify_set_f1() -> None:
         ),
         server_client=client,
     )
-    result = await server.verify(
-        DeepSearchQAVerifyRequest(
-            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
-                input=[NeMoGymEasyInputMessage(role="user", content="question")]
-            ),
-            example_id="1",
-            problem="question",
-            answer="A, B",
-            answer_type="Set Answer",
-            problem_category="test",
-            response=response("A and C"),
-        )
+    request = DeepSearchQAVerifyRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+            input=[NeMoGymEasyInputMessage(role="user", content="question")]
+        ),
+        example_id="1",
+        problem="question",
+        answer="A, B",
+        answer_type="Set Answer",
+        problem_category="test",
+        response=response("A and C"),
     )
+    result = await server.verify(request)
     assert result.precision == approx(0.5)
     assert result.recall == approx(0.5)
     assert result.f1 == approx(0.5)
     assert result.reward == approx(0.5)
+
+    invalid = response("null")
+    http_response.json = AsyncMock(return_value=invalid.model_dump())
+    http_response.read = AsyncMock(return_value=orjson.dumps(invalid.model_dump()))
+    result = await server.verify(request)
+
+    assert result.reward == 0.0
+    assert result.fully_incorrect == 1.0
+    assert result.judge_output == {"error": "invalid judge output"}

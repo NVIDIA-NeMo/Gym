@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -57,8 +58,9 @@ def response_text(response: NeMoGymResponse) -> str:
 
 def parse_judge(text: str) -> dict[str, Any]:
     text = text.strip()
-    if text.startswith("```json"):
-        text = text[7:].removesuffix("```").strip()
+    fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if fenced:
+        text = fenced[-1]
     result = json.loads(text)["Answer Correctness"]
     details = result["Correctness Details"]
     excessive = result.get("Excessive Answers", [])
@@ -98,7 +100,21 @@ class DeepSearchQAServer(SimpleResourcesServer):
             json=params,
             response_model=NeMoGymResponse,
         )
-        judge_output = parse_judge(response_text(judged))
+        judge_text = response_text(judged)
+        try:
+            judge_output = parse_judge(judge_text)
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            return DeepSearchQAVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                precision=0.0,
+                recall=0.0,
+                f1=0.0,
+                fully_correct=0.0,
+                fully_incorrect=1.0,
+                correct_with_extraneous=0.0,
+                judge_output={"error": "invalid judge output"},
+            )
         matched = sum(judge_output["Correctness Details"].values())
         expected = len(judge_output["Correctness Details"])
         excessive = len(judge_output.get("Excessive Answers", []))

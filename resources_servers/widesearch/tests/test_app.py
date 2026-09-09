@@ -72,7 +72,7 @@ async def test_perfect_table_receives_official_strict_score() -> None:
                 "required": ["name", "rank"],
                 "eval_pipeline": {
                     "name": {"preprocess": ["norm_str"], "metric": ["exact_match"]},
-                    "rank": {"preprocess": ["extract_number"], "metric": ["number_near"], "criterion": 0},
+                    "rank": {"preprocess": ["extract_number"], "metric": ["number_near"]},
                 },
             },
             gold_answer=[{"Name": "Alpha", "Rank": "1"}],
