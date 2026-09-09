@@ -617,6 +617,18 @@ def _normalize_response_item_for_input(item: Any) -> Any:
     return item
 
 
+def _normalize_response_tool_for_input(tool: Any) -> Any:
+    """Convert a provider response tool to the request tool schema."""
+    if isinstance(tool, BaseModel):
+        tool = tool.model_dump()
+    if not isinstance(tool, dict) or "defer_loading" not in tool or tool["defer_loading"] is not None:
+        return tool
+
+    tool = tool.copy()
+    tool["defer_loading"] = False
+    return tool
+
+
 class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     """
     This class is a copy of openai.types.responses.response_create_params.ResponseCreateParamsNonStreaming
@@ -629,11 +641,14 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_output_items_for_replay(cls, value: Any) -> Any:
-        """Normalize fields whose OpenAI output and input schemas differ."""
-        if not isinstance(value, dict) or not isinstance(value.get("input"), list):
+        """Normalize OpenAI response fields before request validation."""
+        if not isinstance(value, dict):
             return value
         value = value.copy()
-        value["input"] = [_normalize_response_item_for_input(item) for item in value["input"]]
+        if isinstance(value.get("input"), list):
+            value["input"] = [_normalize_response_item_for_input(item) for item in value["input"]]
+        if isinstance(value.get("tools"), list):
+            value["tools"] = [_normalize_response_tool_for_input(tool) for tool in value["tools"]]
         return value
 
     background: Optional[bool] = None
