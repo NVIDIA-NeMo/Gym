@@ -24,6 +24,7 @@ from nemo_gym.orchestration.jobs import (
     SCHEMA_VERSION,
     BenchmarkJob,
     SubmissionRecord,
+    dumps,
     load_record,
     local_index_dir,
     new_gym_job_id,
@@ -112,3 +113,14 @@ def test_write_local_index_returns_none_when_it_cannot_write(tmp_path, monkeypat
 
     assert write_local_index(_record()) is None
     assert "read-only file system" in capsys.readouterr().err
+
+
+def test_write_local_index_writes_exactly_what_dumps_produces(tmp_path, monkeypatch: MonkeyPatch):
+    # The local index and the remote manifest must be byte-identical; both go
+    # through dumps(), and this is what holds that true.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    record = _record()
+
+    path = write_local_index(record)
+
+    assert path.read_text() == dumps(record)

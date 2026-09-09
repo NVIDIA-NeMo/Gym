@@ -101,6 +101,11 @@ def local_index_dir() -> Path:
     return Path(base) / "nemo-gym" / "jobs"
 
 
+def dumps(record: SubmissionRecord) -> str:
+    """The manifest's on-disk bytes; one spelling, so every store matches."""
+    return record.model_dump_json(indent=2) + "\n"
+
+
 def write_local_index(record: SubmissionRecord) -> Path | None:
     """Record the submission locally, or report why not and carry on.
 
@@ -111,7 +116,7 @@ def write_local_index(record: SubmissionRecord) -> Path | None:
     path = local_index_dir() / f"{record.gym_job_id}.json"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(record.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        path.write_text(dumps(record), encoding="utf-8")
     except OSError as error:
         print(f"Could not write the local job index at {path}: {error}", file=sys.stderr)
         return None
@@ -131,8 +136,3 @@ def load_record(payload: dict) -> SubmissionRecord:
             "Upgrade nemo-gym to read this record."
         )
     return SubmissionRecord.model_validate(payload)
-
-
-def dumps(record: SubmissionRecord) -> str:
-    """The manifest's on-disk bytes; one spelling, so every store matches."""
-    return record.model_dump_json(indent=2) + "\n"
