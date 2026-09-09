@@ -5,6 +5,10 @@ leancat:
       sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
       sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
       compilation_timeout: 300.0
+      # Verify is IO-bound (it awaits the sandbox), but one uvicorn worker still serialises
+      # JSON parsing and the statement guard across every concurrent rollout. Matches the
+      # pattern vibench uses.
+      num_workers: 8
       domain: math
       description: LeanCat -- formal 1-category-theory proofs in Lean 4 / Mathlib
         v4.19.0
