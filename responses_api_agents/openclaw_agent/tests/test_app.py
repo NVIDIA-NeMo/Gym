@@ -925,7 +925,7 @@ class TestConfigYaml:
         cfg_path = Path(__file__).resolve().parent.parent / "configs" / "openclaw_agent.yaml"
         data = yaml.safe_load(cfg_path.read_text())
         assert "openclaw_agent" in data
-        inner = data["openclaw_agent"]["responses_api_agents"]["openclaw_agent"]
+        inner = data["openclaw_agent"]["responses_api_agents"]["harness_agent"]
         assert inner["entrypoint"] == "app.py"
         assert inner["concurrency"] == 32
-        assert inner["command"] == "openclaw"
+        assert inner["harness_config"]["settings"]["command"] == "openclaw"

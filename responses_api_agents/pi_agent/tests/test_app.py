@@ -555,7 +555,7 @@ class TestConfigYaml:
         cfg_path = Path(__file__).resolve().parent.parent / "configs" / "pi_agent.yaml"
         data = yaml.safe_load(cfg_path.read_text())
         assert "pi_agent" in data
-        inner = data["pi_agent"]["responses_api_agents"]["pi_agent"]
+        inner = data["pi_agent"]["responses_api_agents"]["harness_agent"]
         assert inner["entrypoint"] == "app.py"
         assert inner["concurrency"] == 8
-        assert inner["command"] == "pi"
+        assert inner["harness_config"]["settings"]["command"] == "pi"

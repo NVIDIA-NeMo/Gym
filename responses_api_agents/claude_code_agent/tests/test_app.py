@@ -1046,8 +1046,7 @@ class TestConfigYaml:
         cfg_path = Path(__file__).resolve().parent.parent / "configs" / "claude_code_agent.yaml"
         data = yaml.safe_load(cfg_path.read_text())
         assert "claude_code_agent" in data
-        inner = data["claude_code_agent"]["responses_api_agents"]["claude_code_agent"]
+        inner = data["claude_code_agent"]["responses_api_agents"]["harness_agent"]
         assert inner["entrypoint"] == "app.py"
-        assert inner.get("token_id_capture", False) is False
         assert inner["concurrency"] == 32
-        assert inner["max_turns"] == 30
+        assert inner["harness_config"]["max_turns"] == 30
