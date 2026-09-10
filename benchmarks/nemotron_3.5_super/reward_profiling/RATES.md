@@ -162,8 +162,13 @@ adding decode nodes**; until those move, extra decode nodes are idle capacity.
 
 ## Caveats
 
-- **Every rate is a floor.** Each decode engine schedules up to `max_num_seqs=512`; 128 concurrency
-  against 2 decode nodes ran at ~12.5% of capacity. The client semaphore was the limit, not the GPUs.
+- **Every rate is a floor, but the client semaphore is no longer the reason.** Each decode engine
+  is configured for `--max-num-seqs 1024` (not 512, as this note previously said) and the launcher
+  requests 512 per decode node. Neither binds: engines actually ran p50 28-33 concurrent sequences,
+  p99 66-210, max 435 across jobs 7060112 and 6706202, because an agentic rollout spends most of
+  its wall time in tool calls, sandbox execution and judging rather than generating. The old 128
+  concurrency against 2 decode nodes did bind, at ~12.5% of capacity, which is why it was raised;
+  do not go back to it.
 - **Plan around the tail, not the aggregate.** A whole-manifest run went 151 -> 55 -> 18 -> 14 -> 12
   -> 6 -> 3 rollouts per 30 s window — ~18,000/hr instantaneous down to ~360, a 50x collapse. Fast
   environments drain immediately and the slow ones dominate the end. Expect a residue job.

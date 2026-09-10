@@ -147,11 +147,18 @@ else
     echo "WARNING: no env.yaml at $ENV_YAML; judge environments will fail to resolve their API key." >&2
 fi
 
-# Scale concurrency with decode capacity: each decode engine schedules up to max_num_seqs
-# sequences (512 in vllm_configs/nemotron_3.5_super.sh), so this saturates the engines instead of
-# leaving them idle. A measured run at 128 against D2 sat at 12.5% of capacity, with the client
-# semaphore rather than the GPUs as the limit. Stays under the 16k per-host aiohttp connector cap
-# set below until roughly D32. Lower it if the driver process becomes the bottleneck.
+# Scale concurrency with decode capacity. Note this is *half* the engines' own
+# --max-num-seqs 1024 in vllm_configs/nemotron_3.5_super.sh; the two do not have to match, and
+# measurement says neither is the binding constraint. Engines actually ran p50 28-33 concurrent
+# sequences, p99 66-210, max 435 (jobs 7060112 and 6706202), because an agentic rollout spends
+# most of its wall time in tool calls, sandbox execution and judging rather than generating.
+#
+# Do not lower this to 128: a run at 128 against D2 sat at 12.5% of capacity with the client
+# semaphore, not the GPUs, as the limit, and 128 would clip the p99 bursts that are the only
+# moments the driver has real work queued. Raising it to 1024 to match the engines is harmless
+# but unsupported -- P2D8 requested 4,096 and never had more than ~264 in flight.
+#
+# Stays under the 16k per-host aiohttp connector cap set below until roughly D32.
 MAX_NUM_SEQS_PER_DECODE_ENGINE=${MAX_NUM_SEQS_PER_DECODE_ENGINE:-512}
 # Settings layer, lowest to highest: manifest defaults -> these env vars -> anything you add on
 # the gym command line. Each is unset by default, so nothing here overrides what the manifest
