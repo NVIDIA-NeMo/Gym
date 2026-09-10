@@ -832,6 +832,86 @@ class TestLangSmithExporter:
         assert "outputs" not in example
         assert "id" in example
 
+    def test_log_rollouts_creates_new_and_updates_existing_dataset_examples(
+        self,
+        monkeypatch: MonkeyPatch,
+        langsmith_config: DictConfig,
+    ) -> None:
+        pytest.importorskip("langsmith")
+        import nemo_gym.exporters.langsmith as langsmith_module
+
+        client = MagicMock()
+        client.has_dataset.return_value = True
+        client.read_dataset.return_value.id = "dataset-1"
+        client.create_project.return_value.id = "experiment-1"
+
+        existing_example_id = langsmith_module._stable_uuid(
+            "dataset-1",
+            "example",
+            "math",
+            7,
+        )
+        existing_example = MagicMock()
+        existing_example.id = existing_example_id
+        client.list_examples.return_value = [existing_example]
+
+        monkeypatch.setattr(
+            langsmith_module,
+            "Client",
+            MagicMock(return_value=client),
+        )
+
+        exporter = langsmith_module.LangSmithExporter(langsmith_config)
+        exporter.setup()
+
+        rollouts = [
+            {
+                "responses_create_params": {
+                    "input": [{"role": "user", "content": "What is 2 + 2?"}],
+                },
+                "response": {"output_text": "4"},
+                "reward": 1.0,
+                "_ng_task_index": 7,
+                "_ng_rollout_index": 0,
+                "agent_ref": {"name": "deep-agent"},
+                "task_source": "math",
+            },
+            {
+                "responses_create_params": {
+                    "input": [{"role": "user", "content": "What is 3 + 3?"}],
+                },
+                "response": {"output_text": "6"},
+                "reward": 1.0,
+                "_ng_task_index": 8,
+                "_ng_rollout_index": 0,
+                "agent_ref": {"name": "deep-agent"},
+                "task_source": "math",
+            },
+        ]
+
+        exporter._log_rollouts(rollouts)
+
+        new_example_id = langsmith_module._stable_uuid(
+            "dataset-1",
+            "example",
+            "math",
+            8,
+        )
+        client.list_examples.assert_called_once_with(
+            dataset_id="dataset-1",
+            example_ids=[existing_example_id, new_example_id],
+        )
+
+        client.create_examples.assert_called_once()
+        create_kwargs = client.create_examples.call_args.kwargs
+        assert create_kwargs["dataset_id"] == "dataset-1"
+        assert [example["id"] for example in create_kwargs["examples"]] == [new_example_id]
+
+        client.update_examples.assert_called_once()
+        update_kwargs = client.update_examples.call_args.kwargs
+        assert update_kwargs["dataset_id"] == "dataset-1"
+        assert [example["id"] for example in update_kwargs["updates"]] == [existing_example_id]
+
     def test_log_rollouts_creates_completed_run_for_each_rollout(
         self,
         monkeypatch: MonkeyPatch,
@@ -898,7 +978,8 @@ class TestLangSmithExporter:
             assert kwargs["outputs"] == rollout["response"]
             assert kwargs["project_name"] == "gym-experiment"
             assert kwargs["reference_example_id"] == example_id
-            assert kwargs["trace_id"] == kwargs["id"]
+            assert "trace_id" not in kwargs
+            assert "dotted_order" not in kwargs
             assert kwargs["tags"] == ["nemo-gym"]
             assert kwargs["extra"]["metadata"]["_ng_rollout_index"] == rollout_index
             assert kwargs["start_time"] <= kwargs["end_time"]

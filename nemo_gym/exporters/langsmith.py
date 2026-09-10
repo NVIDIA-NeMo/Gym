@@ -172,10 +172,27 @@ class LangSmithExporter(BaseExporter):
             )
 
         if examples:
-            self.client.create_examples(
-                dataset_id=self.dataset_id,
-                examples=examples,
-            )
+            existing_example_ids = {
+                example.id
+                for example in self.client.list_examples(
+                    dataset_id=self.dataset_id,
+                    example_ids=[example["id"] for example in examples],
+                )
+            }
+            new_examples = [example for example in examples if example["id"] not in existing_example_ids]
+            existing_examples = [example for example in examples if example["id"] in existing_example_ids]
+
+            if new_examples:
+                self.client.create_examples(
+                    dataset_id=self.dataset_id,
+                    examples=new_examples,
+                )
+
+            if existing_examples:
+                self.client.update_examples(
+                    dataset_id=self.dataset_id,
+                    updates=existing_examples,
+                )
 
         for mapped in mapped_rollouts:
             task_source = mapped.metadata.get("task_source")
@@ -206,7 +223,6 @@ class LangSmithExporter(BaseExporter):
                 project_name=self.config.langsmith_experiment_name,
                 reference_example_id=example_ids[task_key],
                 id=run_id,
-                trace_id=run_id,
                 tags=["nemo-gym"],
                 extra={"metadata": mapped.metadata},
                 start_time=timestamp,
