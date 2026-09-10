@@ -269,6 +269,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 base_url=base_url,
                 api_key=self.config.api_key,
                 default_headers=self.config.default_headers,
+                internal=True,
             )
             for base_url in self.config.base_url
         ]
