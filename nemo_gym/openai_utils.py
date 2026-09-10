@@ -600,8 +600,8 @@ NeMoGymResponseInputItem = Annotated[
 NeMoGymResponseInput: TypeAlias = List[NeMoGymResponseInputItem]
 
 
-def _normalize_response_item_for_input(item: Any) -> Any:
-    """Convert a provider output item to the request input schema."""
+def _normalize_output_item_for_replay(item: Any) -> Any:
+    """Convert a provider output item for request replay."""
     if isinstance(item, BaseModel):
         item = item.model_dump(exclude_unset=True)
     if not isinstance(item, dict):
@@ -617,6 +617,18 @@ def _normalize_response_item_for_input(item: Any) -> Any:
     return item
 
 
+def _normalize_tool_for_replay(tool: Any) -> Any:
+    """Convert a provider response tool for request replay."""
+    if isinstance(tool, BaseModel):
+        tool = tool.model_dump()
+    if not isinstance(tool, dict) or "defer_loading" not in tool or tool["defer_loading"] is not None:
+        return tool
+
+    tool = tool.copy()
+    tool["defer_loading"] = False
+    return tool
+
+
 class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     """
     This class is a copy of openai.types.responses.response_create_params.ResponseCreateParamsNonStreaming
@@ -629,11 +641,17 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_output_items_for_replay(cls, value: Any) -> Any:
-        """Normalize fields whose OpenAI output and input schemas differ."""
-        if not isinstance(value, dict) or not isinstance(value.get("input"), list):
+        """Normalize response-derived fields before request validation.
+
+        The method name is retained for compatibility; replayed tools are normalized too.
+        """
+        if not isinstance(value, dict):
             return value
         value = value.copy()
-        value["input"] = [_normalize_response_item_for_input(item) for item in value["input"]]
+        if isinstance(value.get("input"), list):
+            value["input"] = [_normalize_output_item_for_replay(item) for item in value["input"]]
+        if isinstance(value.get("tools"), list):
+            value["tools"] = [_normalize_tool_for_replay(tool) for tool in value["tools"]]
         return value
 
     background: Optional[bool] = None
