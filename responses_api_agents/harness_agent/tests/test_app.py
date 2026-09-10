@@ -14,16 +14,23 @@
 # limitations under the License.
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.providers.local import LocalProvider
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.harness_agent.app import HarnessAgent, HarnessAgentConfig, stage_and_run_eval
+from responses_api_agents.harness_agent.app import (
+    _RUN_CONTEXT,
+    HarnessAgent,
+    HarnessAgentConfig,
+    HarnessAgentRunRequest,
+    stage_and_run_eval,
+)
 
 
 def _config(**kwargs) -> HarnessAgentConfig:
@@ -86,7 +93,9 @@ def test_runner_config_carries_agent_name():
     script, runner_config, cmd = agent._runner()
     assert runner_config["agent"] == "codex"
     assert "runner_config.json" in script
-    assert "model_base_url=harness.config.model.base_url" in script
+    assert '"model_base_url": harness.config.model.base_url' in script
+    assert 'rc["agent"] == "claude_code"' in script
+    assert 'rc["agent"] == "codex"' in script
     compile(script, "<agent_runner>", "exec")
     assert cmd == "/deps/bin/python3 runner.py"
 
@@ -103,6 +112,24 @@ async def test_local_provider_provisions_in_its_workspace(tmp_path):
         assert (handle.raw["workspace"] / "work" / "request.json").read_text() == "{}"
         await agent._close_box(handle)
         assert not handle.raw["workspace"].exists()
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_local_provider_stages_skills_in_its_workspace(tmp_path):
+    server = await asyncio.start_server(lambda *_: None, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    skills = tmp_path / "source-skills"
+    skills.mkdir()
+    (skills / "SKILL.md").write_text("skill")
+    agent = _make_agent()
+    agent._provider = LocalProvider(workspace_root=str(tmp_path / "sandboxes"))
+    agent._gym_tar = None
+    try:
+        handle = await agent._provision_box("", {}, f"http://127.0.0.1:{port}", str(skills))
+        assert (handle.raw["workspace"] / "work" / "skills" / "SKILL.md").read_text() == "skill"
+        await agent._close_box(handle)
     finally:
         server.close()
         await server.wait_closed()
@@ -157,6 +184,86 @@ def test_sandbox_model_url_uses_direct_harness_endpoint_without_model_server():
     assert agent._sandbox_model_url(MagicMock()) == "https://provider.example"
 
 
+def test_sandbox_model_url_preserves_training_rollout_prefix():
+    agent = _make_agent()
+    agent.server_client.global_config_dict = MagicMock()
+    request = SimpleNamespace(path_params={}, url=SimpleNamespace(path="/run"))
+    token = _RUN_CONTEXT.set({"url_prefix": "/ng-rollout/rollout-1/training-token-capture"})
+    try:
+        with patch(
+            "responses_api_agents.harness_agent.app.get_first_server_config_dict",
+            return_value={"base_url": "http://model:8000/v1"},
+        ):
+            url = agent._sandbox_model_url(request)
+    finally:
+        _RUN_CONTEXT.reset(token)
+    assert url == "http://model:8000/ng-rollout/rollout-1/training-token-capture"
+
+
+async def test_run_forwards_mcp_skills_rollout_and_verifier_fields(tmp_path):
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(side_effect=[MagicMock(cookies={}), MagicMock(cookies={})])
+    agent.server_client._build_server_base_url = MagicMock(return_value="http://resources:8001")
+    agent.server_client.global_config_dict = {}
+    body = HarnessAgentRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+        _ng_rollout_id="rollout-1",
+        skills_ref={"path": str(tmp_path)},
+    )
+    response = {
+        "id": "response-1",
+        "created_at": 0,
+        "model": "model",
+        "object": "response",
+        "output": [],
+        "parallel_tool_calls": False,
+        "tool_choice": "none",
+        "tools": [],
+    }
+    verify = body.model_dump() | {"response": response, "reward": 1.0, "custom_metric": 7}
+    seen = {}
+
+    async def responses(_, __, ___):
+        seen.update(_RUN_CONTEXT.get())
+        return NeMoGymResponse.model_validate(response)
+
+    with (
+        patch.object(HarnessAgent, "responses", new=responses),
+        patch.object(HarnessAgent, "url_path_for_run", return_value="/ng-rollout/rollout-1") as path,
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch(
+            "responses_api_agents.harness_agent.app.get_first_server_config_dict",
+            return_value={"host": "resources", "port": 8001},
+        ),
+        patch(
+            "responses_api_agents.harness_agent.app.get_response_json",
+            new=AsyncMock(
+                side_effect=[
+                    {
+                        "mcp": {
+                            "server_name": "tools",
+                            "url_path": "/mcp",
+                            "headers": {"Authorization": "Bearer session"},
+                        }
+                    },
+                    verify,
+                ]
+            ),
+        ),
+    ):
+        result = await agent.run(MagicMock(cookies={}), body)
+    path.assert_called_once_with("", body)
+    assert seen["url_prefix"] == "/ng-rollout/rollout-1"
+    assert seen["skills_path"] == str(tmp_path)
+    assert seen["mcp"] == {
+        "server_name": "tools",
+        "url": "http://resources:8001/mcp",
+        "transport": "http",
+        "headers": {"Authorization": "Bearer session"},
+    }
+    assert result.custom_metric == 7
+
+
 async def test_grading_command_failure_is_not_reward_zero():
     agent = _make_agent()
     agent._provider.exec = AsyncMock(return_value=SandboxExecResult("", "grader crashed", 2))
@@ -174,6 +281,24 @@ async def test_empty_reward_file_is_not_reward_zero():
 
     with pytest.raises(RuntimeError, match="reward file.*is empty"):
         await stage_and_run_eval(provider, MagicMock(), {}, "true", "/reward", 30)
+
+
+async def test_local_grading_stays_in_workspace(tmp_path):
+    provider = LocalProvider(workspace_root=str(tmp_path))
+    handle = await provider.create(SandboxSpec(image=""))
+    try:
+        reward = await stage_and_run_eval(
+            provider,
+            handle,
+            {"/tests/test.sh": "true"},
+            "bash /tests/test.sh && mkdir -p /logs/verifier && echo 1 > /logs/verifier/reward.txt",
+            "/logs/verifier/reward.txt",
+            30,
+        )
+        assert reward == 1.0
+        assert (handle.raw["workspace"] / "logs" / "verifier" / "reward.txt").is_file()
+    finally:
+        await provider.close(handle)
 
 
 async def test_setup_failure_closes_sandbox():

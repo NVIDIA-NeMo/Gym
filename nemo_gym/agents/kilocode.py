@@ -176,9 +176,9 @@ class KiloCodeHarness:
         root.mkdir(parents=True, exist_ok=True)
         return root
 
-    def _effective_model(self) -> str:
+    def _effective_model(self, model_base_url: str = "") -> str:
         model = self.config.model.model or ""
-        provider = self.config.model.provider
+        provider = self.config.model.provider or ("nemo" if model_base_url else "")
         return f"{provider}/{model}" if provider else model
 
     def _build_kilo_config(self, model_base_url: str = "") -> dict[str, Any]:
@@ -234,7 +234,7 @@ class KiloCodeHarness:
             env["KILO_CONFIG_CONTENT"] = json.dumps(kilo_config)
         return env
 
-    def _build_command(self, project_dir: Path, prompt: str) -> list[str]:
+    def _build_command(self, project_dir: Path, prompt: str, model_base_url: str = "") -> list[str]:
         cmd = [
             *self.command_parts,
             "run",
@@ -244,7 +244,7 @@ class KiloCodeHarness:
             "--format",
             "json",
             "-m",
-            self._effective_model(),
+            self._effective_model(model_base_url),
             "--dir",
             str(project_dir),
         ]
@@ -273,7 +273,7 @@ class KiloCodeHarness:
         data_home.mkdir(parents=True, exist_ok=True)
         config_home.mkdir(parents=True, exist_ok=True)
         env = self._env(str(data_home), str(config_home), model_base_url)
-        cmd = self._build_command(project_dir, prompt)
+        cmd = self._build_command(project_dir, prompt, model_base_url)
 
         try:
             proc = await asyncio.create_subprocess_exec(
