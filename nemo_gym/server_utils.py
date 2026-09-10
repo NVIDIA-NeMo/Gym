@@ -548,6 +548,16 @@ async def raise_for_status(response: ClientResponse) -> None:  # pragma: no cove
             print(f"""Request info: {response.request_info}
 Response content: {content}""")
 
+        raise_response_error_with_content(response, content)
+
+
+def raise_response_error_with_content(response: ClientResponse, content: bytes) -> None:  # pragma: no cover
+    """Raise the pickle-safe ClientResponseError for a non-ok response whose body was already read.
+
+    For callers that consumed the body stream themselves (after which ``raise_for_status``
+    would attach an empty ``response_content``).
+    """
+    if not response.ok:
         try:
             response.raise_for_status()
         except ClientResponseError as e:

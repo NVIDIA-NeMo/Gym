@@ -905,9 +905,15 @@ class VLLMModel(SimpleResponsesAPIModel):
             """
             result_content_str = e.response_content.decode()
 
-            is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
-            )
+            # 400: vLLM's serving-layer pre-checks (example messages above).
+            # 500: the async engine's own input-length check bypasses those
+            # pre-checks and escapes as an internal error ("Input length (N)
+            # exceeds model's maximum context length (M)"); the retry layer
+            # raises it straight through instead of burning retries on it
+            # (see NON_RETRYABLE_500_SUBSTRINGS in nemo_gym/openai_utils.py).
+            is_out_of_context_length = (
+                e.status == 400 and ("context length" in result_content_str or "max_tokens" in result_content_str)
+            ) or (e.status == 500 and "maximum context length" in result_content_str)
             if is_out_of_context_length:
                 if self.config.propagate_context_overflow_errors:
                     setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
@@ -1234,9 +1240,11 @@ class VLLMModel(SimpleResponsesAPIModel):
             completion_dict = await client.create_completion(**completion_body)
         except ClientResponseError as e:
             result_content_str = e.response_content.decode()
-            is_out_of_context_length = e.status == 400 and (
-                "context length" in result_content_str or "max_tokens" in result_content_str
-            )
+            # Same 400 (serving-layer pre-check) / 500 (engine input-length check,
+            # see NON_RETRYABLE_500_SUBSTRINGS) flavors as the chat-completions path.
+            is_out_of_context_length = (
+                e.status == 400 and ("context length" in result_content_str or "max_tokens" in result_content_str)
+            ) or (e.status == 500 and "maximum context length" in result_content_str)
             if is_out_of_context_length:
                 if self.config.propagate_context_overflow_errors:
                     setattr(e, _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE, True)
