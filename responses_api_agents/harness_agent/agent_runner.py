@@ -27,7 +27,9 @@ import nemo_gym  # noqa: E402
 
 assert nemo_gym.__file__.startswith(str(WORK_DIR / "gym_mount")), f"wrong nemo_gym: {nemo_gym.__file__}"
 
+from nemo_gym.agents import resolve_agent  # noqa: E402
 from nemo_gym.agents.config import AgentHarnessConfig  # noqa: E402
+from nemo_gym.config_types import ModelServerRef  # noqa: E402
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming  # noqa: E402
 
 
@@ -35,14 +37,24 @@ def main() -> None:
     rc = json.loads((WORK_DIR / "runner_config.json").read_text())
     body = json.loads((WORK_DIR / "request.json").read_text())
     model_url = (WORK_DIR / "model_url.txt").read_text().strip()
-    cfg_raw = (WORK_DIR / "harness_config.json").read_text().replace("__SANDBOX_MODEL_URL__", model_url)
+    cfg_raw = (WORK_DIR / "agent_kwargs.json").read_text().replace("__SANDBOX_MODEL_URL__", model_url)
 
-    module = importlib.import_module(rc["harness_module"])
-    harness_class = getattr(module, rc["harness_class"])
+    module_name, class_name, _, _ = resolve_agent(rc["agent"])
+    module = importlib.import_module(module_name)
+    harness_class = getattr(module, class_name)
     harness = harness_class(AgentHarnessConfig.model_validate_json(cfg_raw))
 
     params = NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
-    resp = asyncio.run(harness.run(params, model_base_url=harness.config.model.base_url))
+    model_ref = ModelServerRef.model_validate(rc["model_ref"]) if rc.get("model_ref") else None
+    if hasattr(harness, "run_episode"):
+        episode = asyncio.run(
+            harness.run_episode(params, model_base_url=harness.config.model.base_url, model_ref=model_ref)
+        )
+        resp = episode.response.model_copy(
+            update={"_ng_agent_observations": episode.observations.model_dump(mode="json")}
+        )
+    else:
+        resp = asyncio.run(harness.run(params, model_base_url=harness.config.model.base_url))
     (WORK_DIR / "response.json").write_text(resp.model_dump_json())
     print("RUNNER_DONE")
 

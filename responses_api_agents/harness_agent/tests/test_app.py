@@ -34,9 +34,8 @@ def _config(**kwargs) -> HarnessAgentConfig:
         name="sbx",
         resources_server=ResourcesServerRef(type="resources_servers", name="rs"),
         model_server=ModelServerRef(type="responses_api_models", name="model"),
-        harness_module="nemo_gym.agents.codex",
-        harness_class="CodexHarness",
-        harness_config={
+        agent="codex",
+        agent_kwargs={
             "model": {
                 "model": "gym-policy-model",
                 "base_url": "__SANDBOX_MODEL_URL__/v1",
@@ -82,15 +81,10 @@ def test_named_sandbox_provider_is_resolved_with_metadata():
     assert agent._sandbox_default_metadata == {"cluster": "cell3"}
 
 
-def test_runner_config_carries_harness_symbols():
-    agent = _make_agent(
-        harness_module="nemo_gym.agents.codex",
-        harness_class="CodexHarness",
-        sandbox_python="/deps/bin/python3",
-    )
+def test_runner_config_carries_agent_name():
+    agent = _make_agent(agent="codex", sandbox_python="/deps/bin/python3")
     script, runner_config, cmd = agent._runner()
-    assert runner_config["harness_module"] == "nemo_gym.agents.codex"
-    assert runner_config["harness_class"] == "CodexHarness"
+    assert runner_config["agent"] == "codex"
     assert "runner_config.json" in script
     assert "model_base_url=harness.config.model.base_url" in script
     compile(script, "<agent_runner>", "exec")
@@ -157,7 +151,7 @@ def test_sandbox_model_url_keeps_loopback_on_dns_failure():
 def test_sandbox_model_url_uses_direct_harness_endpoint_without_model_server():
     agent = _make_agent(
         model_server=None,
-        harness_config={"model": {"model": "direct", "base_url": "https://provider.example/v1"}},
+        agent_kwargs={"model": {"model": "direct", "base_url": "https://provider.example/v1"}},
     )
 
     assert agent._sandbox_model_url(MagicMock()) == "https://provider.example"

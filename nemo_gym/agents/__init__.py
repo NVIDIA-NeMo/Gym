@@ -29,7 +29,31 @@ __all__ = [
     "OpenClawHarness",
     "PiHarness",
     "PrimeAgentHarness",
+    "resolve_agent",
 ]
+
+
+_AGENTS = {
+    "claude_code": ("nemo_gym.agents.claude_code", "ClaudeCodeHarness", "AgentHarnessConfig"),
+    "cline": ("nemo_gym.agents.cline", "ClineHarness", "AgentHarnessConfig"),
+    "codex": ("nemo_gym.agents.codex", "CodexHarness", "AgentHarnessConfig"),
+    "hermes": ("nemo_gym.agents.hermes", "HermesHarness", "AgentHarnessConfig"),
+    "kilocode": ("nemo_gym.agents.kilocode", "KiloCodeHarness", "AgentHarnessConfig"),
+    "nemo_fabric": ("responses_api_agents.nemo_fabric_agent.app", "NeMoFabricAgent", "NeMoFabricAgentConfig"),
+    "openclaw": ("nemo_gym.agents.openclaw", "OpenClawHarness", "AgentHarnessConfig"),
+    "opencode": ("responses_api_agents.opencode_agent.app", "OpenCodeAgent", "OpenCodeAgentConfig"),
+    "pi": ("nemo_gym.agents.pi", "PiHarness", "AgentHarnessConfig"),
+    "prime": ("nemo_gym.agents.prime", "PrimeAgentHarness", "AgentHarnessConfig"),
+    "terminus_2": ("nemo_gym.agents.terminus_2", "Terminus2Harness", "AgentHarnessConfig"),
+}
+
+
+def resolve_agent(name: str) -> tuple[str, str, str, str]:
+    try:
+        module, agent_class, config_class = _AGENTS[name]
+    except KeyError as exc:
+        raise ValueError(f"Unknown agent: {name}") from exc
+    return module, agent_class, config_class, f"{name}_agent"
 
 
 def __getattr__(name: str) -> Any:
