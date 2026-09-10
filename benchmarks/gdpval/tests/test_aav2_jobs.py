@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from omegaconf import OmegaConf
 
 from benchmarks.gdpval.hsg.aav2 import snapshot
 
@@ -128,7 +129,7 @@ else:
 
 
 @pytest.fixture
-def job(tmp_path):
+def job(tmp_path, request):
     with tempfile.TemporaryDirectory(prefix="gj", dir="/private/tmp") as short:
         local, source, tools = Path(short), tmp_path / "source", tmp_path / "tools"
         package = source / snapshot.PACKAGE
@@ -155,7 +156,14 @@ def job(tmp_path):
             check=True,
         )
         dataset = write(
-            tmp_path / "dataset.jsonl", '{"task_id":"a","reference_file_urls":["file:///lustre/ref.txt"]}\n'
+            tmp_path / "dataset.jsonl",
+            "".join(
+                json.dumps(
+                    {"task_id": f"a{index}" if index else "a", "reference_file_urls": ["file:///lustre/ref.txt"]}
+                )
+                + "\n"
+                for index in range(getattr(request, "param", 1))
+            ),
         )
         config = write(tmp_path / "judge.yaml", "multistage:\n  stages: [{num_tasks: 1}]\n")
         credentials = write(tmp_path / "credentials.env", "export HF_DATASETS_CACHE=/lustre/stale-cache\n")
@@ -302,6 +310,26 @@ def test_judge_modes_use_prepared_candidate_and_frozen_references(job, mode, tri
     assert not list(job.local.rglob("agent.sif"))
 
 
+@pytest.mark.parametrize("job", [220], indirect=True)
+def test_full_judge_accepts_partial_calibration_and_retains_all_final_tasks(job):
+    result = run_job(job, "judge", AAV2_MODE="full", FIXTURE_GYM_RC="37")
+    assert result.returncode == 37, (result.stdout, result.stderr)
+    call = next(item for item in records(job) if "target" in item)
+    stages = OmegaConf.to_container(OmegaConf.create(call["values"]["multistage.stages"]))
+    assert stages == [
+        {
+            "num_tasks": 45,
+            "partial_completion": {
+                "min_success_fraction": 0.97,
+                "min_per_reference_success_fraction": 0.88,
+                "min_successful_rows_per_reference": 1,
+                "tolerate_unresolved": True,
+            },
+        },
+        {"num_tasks": 220, "num_models": 4},
+    ]
+
+
 def test_judge_requires_a_prepared_candidate(job):
     shutil.rmtree(job.run / "prepared/candidate")
     result = run_job(job, "judge")
@@ -320,7 +348,8 @@ def test_rollout_preserves_quoted_serving_args_and_uses_fresh_resume_environment
             os.kill(int((serving / "pid").read_text()), 0)
     installs = [item for item in records(job) if "uv" in item]
     assert installs[0]["project"] != installs[1]["project"]
-    assert installs[0]["cache"] != installs[1]["cache"]
+    assert installs[0]["cache"] == installs[1]["cache"] == str(job.local / "u/uv-cache")
+    assert (job.local / "u/uv-cache").stat().st_mode & 0o777 == 0o700
     assert all(
         item["uv"] == ["sync", "--frozen", "--no-dev", "--managed-python", "--python", "3.13.14"] for item in installs
     )
@@ -328,6 +357,7 @@ def test_rollout_preserves_quoted_serving_args_and_uses_fresh_resume_environment
     assert all(item["values"]["resume_from_cache"] == "true" for item in calls)
     assert all(item["values"]["dispatch_budget_s"] == "3300" for item in calls)
     assert calls[0]["values"]["output_jsonl_fpath"] == calls[1]["values"]["output_jsonl_fpath"]
+    assert all(call["values"]["uv_cache_dir"] == installs[0]["cache"] for call in calls)
 
 
 @pytest.mark.parametrize(

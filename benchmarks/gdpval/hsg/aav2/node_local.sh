@@ -54,7 +54,7 @@ gdpval_prepare() {
         [[ $AAV2_MODE != pilot ]] || STAGES="[{num_tasks: $count}, {num_tasks: $count, num_models: 4}]"
         if [[ $AAV2_MODE == full ]]; then
             calibration=$((rows < 45 ? rows : 45))
-            STAGES="[{num_tasks: $calibration}, {num_tasks: $rows, num_models: 4}]"
+            STAGES="[{num_tasks: $calibration, partial_completion: {min_success_fraction: 0.97, min_per_reference_success_fraction: 0.88, min_successful_rows_per_reference: 1, tolerate_unresolved: true}}, {num_tasks: $rows, num_models: 4}]"
         fi
         PHASE_DIR=$RUN_DIR/judge_$AAV2_MODE
     fi
@@ -67,12 +67,15 @@ gdpval_prepare() {
     export RAY_TMPDIR=/raid/scratch/$SLURM_JOB_USER/r/$SLURM_JOB_ID
     (( ${#RAY_TMPDIR} <= 48 )) || gdpval_fail "Ray scratch prefix is too long"
     export TMPDIR=$RAY_TMPDIR/tmp
-    export UV_CACHE_DIR=$JOB_ROOT/cache/uv UV_PYTHON_INSTALL_DIR=$JOB_ROOT/python UV_PYTHON_BIN_DIR=$JOB_ROOT/bin
+    export UV_CACHE_DIR=/raid/scratch/$SLURM_JOB_USER/uv-cache
+    export UV_PYTHON_INSTALL_DIR=$JOB_ROOT/python UV_PYTHON_BIN_DIR=$JOB_ROOT/bin
     export XDG_CACHE_HOME=$JOB_ROOT/cache/xdg PYTHONPYCACHEPREFIX=$JOB_ROOT/cache/pycache
     export HF_HOME=$JOB_ROOT/cache/huggingface HF_DATASETS_CACHE=$JOB_ROOT/cache/huggingface/datasets
     export PIP_CACHE_DIR=$JOB_ROOT/cache/pip GDPVAL_REF_FILES_DIR=$JOB_ROOT/reference_files
     export APPTAINER_TMPDIR=$JOB_ROOT/apptainer/tmp APPTAINER_CACHEDIR=$JOB_ROOT/apptainer/cache
-    mkdir -p "$TMPDIR" "$UV_CACHE_DIR" "$UV_PYTHON_INSTALL_DIR" "$UV_PYTHON_BIN_DIR" \
+    install -d -m 0700 "$UV_CACHE_DIR"
+    gdpval_local_path "$UV_CACHE_DIR"
+    mkdir -p "$TMPDIR" "$UV_PYTHON_INSTALL_DIR" "$UV_PYTHON_BIN_DIR" \
         "$XDG_CACHE_HOME" "$PYTHONPYCACHEPREFIX" "$HF_HOME" "$HF_DATASETS_CACHE" "$PIP_CACHE_DIR" \
         "$GDPVAL_REF_FILES_DIR" "$APPTAINER_TMPDIR" "$APPTAINER_CACHEDIR"
     gdpval_local_path "$RAY_TMPDIR"
