@@ -5,7 +5,6 @@ sandbox:
       extra_start_args: [--fakeroot, --containall]
       writable_overlay: true
       overlay_root: ???  # Required: an existing absolute directory on disk, not tmpfs.
-      apply_resource_limits: false  # Slurm bounds the containing CPU allocation.
     exec:
       default_timeout_s: 1800
       timeout_grace_s: 30

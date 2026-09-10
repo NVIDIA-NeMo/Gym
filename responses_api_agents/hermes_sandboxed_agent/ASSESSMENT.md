@@ -15,7 +15,9 @@ discussion. Verified and multilingual evaluation are outside the current task.
 **Gym already provided the SWE-bench Pro integration.** This work adds the
 Hermes adapter and launch helpers, and extends two existing components so the
 Pro server can hand its container to the Hermes agent server. The benchmark
-preparation code, example data, verifier and model proxy are reused.
+preparation code, example data, verifier and model proxy are reused. Cluster
+launch scripts and deployment settings live in the separate Slurm evaluations
+repository, on the matching `jnolan/hermes-sandboxed-pro` branch.
 
 The labels below compare our work with Gym `86e2252f5`: **Existing** means reused
 without changes, **Extended** means an existing component we modified, and
@@ -32,10 +34,10 @@ code and images; each run starts its own processes and task containers.
 | [NousResearch Hermes v2026.8.31](prepare_runtime.sh#L11) | **Existing upstream software** | The pinned Hermes program, used without source changes. Runs inside the task container, calls the model and executes terminal/file tools. |
 | [Gym model proxy](../../responses_api_models/openai_model/app.py#L93) | **Existing** | Python web server in the outer container. Forwards requests to the model endpoint; inference happens at that endpoint. |
 | [Apptainer provider](../../nemo_gym/sandbox/providers/apptainer/provider.py#L291) | **Extended** | Existing Python library used by the outer Gym servers. Already created containers, ran commands and transferred files. We added reconnect and an optional writable layer on disk. |
-| [Standalone provider YAML](../../nemo_gym/sandbox/providers/apptainer/configs/apptainer.yaml#L2) and [cluster settings](examples/slurm/cluster-provider.yaml#L1) | **Added** | Configuration files selecting the existing Apptainer backend and supplying mounts and execution settings. |
+| [Standalone provider YAML](../../nemo_gym/sandbox/providers/apptainer/configs/apptainer.yaml#L2) and [cluster settings](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/configs/hermes_sandboxed_pro.yaml#L1) | **Added** | Gym supplies the reusable Apptainer preset; Slurm evaluations supplies cluster mounts and execution settings. |
 | [Image cache preparation](../../resources_servers/swebench_pro/image_cache.py#L44) | **Added** | Converts pinned registry images into SIFs and records their checksums. The Pro server checks the manifest before each container starts. |
-| [Smoke driver](smoke.py#L123), [Slurm launcher](examples/slurm/run_pro.sh#L14) and [reference-patch check](check_verifier.py#L17) | **Added** | Small launch and validation helpers. The driver starts the outer HTTP servers and submits tasks; the reference check exercises the existing verifier. |
-| [Outer Pyxis container image](examples/slurm/run_pro.sh#L31) | **Existing cluster infrastructure** | An already available image containing the Gym/Apptainer execution environment. The example launcher takes its path from `HERMES_CONTAINER_IMAGE`. |
+| [Smoke driver](smoke.py#L123), [Slurm launcher](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/scripts/run_hermes_sandboxed_pro.sh#L17) and [reference-patch check](check_verifier.py#L17) | **Added** | Gym contains the HTTP smoke driver and generic verifier helper. Slurm evaluations contains the cluster launcher. |
+| [Outer Pyxis container image](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/scripts/run_hermes_sandboxed_pro.sh#L34) | **Existing cluster infrastructure** | An already available image containing the Gym/Apptainer execution environment. The example launcher takes its path from `HERMES_CONTAINER_IMAGE`. |
 | [Model endpoint](smoke.py#L160) | **Supplied separately** | For a live run, inference runs outside this CPU job. We have not created a model server; the CPU checks used an unreachable address. |
 
 The [OpenCode sandboxed agent](../opencode_sandboxed_agent/app.py#L886) is also
@@ -49,7 +51,7 @@ OpenCode itself is not started in the Hermes run.
 contains five prepared Pro tasks. The file is unchanged from the base commit.
 Our CPU startup and reference-patch checks both used the
 [Ansible task on line 4](../../resources_servers/swebench_pro/data/example.jsonl#L4).
-The [new launch script selects that existing example file](examples/slurm/run_pro.sh#L45).
+The [new launch script selects that existing example file](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/scripts/run_hermes_sandboxed_pro.sh#L48).
 
 SWE-bench Pro consists of problem data, repository images and grading assets.
 They have different upstream sources:
@@ -126,7 +128,7 @@ flowchart TB
     proxy -->|"HTTP: forward requests"| model
 ```
 
-The [added launch script](examples/slurm/run_pro.sh#L14) starts the outer container
+The [Slurm evaluations launch script](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/scripts/run_hermes_sandboxed_pro.sh#L17) starts the outer container
 within a Slurm CPU allocation. The [added smoke driver starts three separate
 HTTP server processes](smoke.py#L184) there: the Gym Hermes agent server, the Pro
 resources server, and the model proxy. Each has its own port. The task and
@@ -136,8 +138,8 @@ arrives. This is the placement used by our smoke runs. The
 is a library used within the outer servers, rather than another HTTP service.
 
 There are separate software installations. The outer processes use
-[Gym's Python environment](examples/slurm/run_pro.sh#L58). The task container gets the
-[portable Hermes Python installation mounted at /opt/hermes](examples/slurm/cluster-provider.yaml#L13),
+[Gym's Python environment](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/scripts/run_hermes_sandboxed_pro.sh#L63). The task container gets the
+[portable Hermes Python installation mounted at /opt/hermes](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/configs/hermes_sandboxed_pro.yaml#L13),
 built by our new runtime preparation script using the existing
 [portable-Python helper](prepare_runtime.sh#L9). The [task image](../../resources_servers/swebench_pro/app.py#L283)
 supplies the repository's own languages, dependencies and test tools.
@@ -232,9 +234,9 @@ require an [explicit `create.overlay_root`](../../nemo_gym/sandbox/providers/app
 directory. A CPU-node check confirmed `/tmp` is tmpfs. The launcher now uses a
 job-specific directory under `/var/tmp`, checks the filesystem and logs its capacity.
 There is no per-task disk quota in this smoke configuration. The cluster-specific
-[configuration](examples/slurm/cluster-provider.yaml#L1) mounts the existing portable
+[configuration](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/configs/hermes_sandboxed_pro.yaml#L1) mounts the existing portable
 Hermes runtime read-only into task containers; Slurm supplies CPU, memory and
-wall-time limits through the [launch setup](examples/slurm/run_pro.sh#L6).
+wall-time limits through the [launch setup](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/scripts/run_hermes_sandboxed_pro.sh#L6).
 
 ## Review findings: scoring and benchmark compatibility
 

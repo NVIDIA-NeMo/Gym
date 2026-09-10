@@ -40,5 +40,18 @@
     "source_uri": "docker://docker.io/jefzda/sweap-images@sha256:1904c85be697666b9ba0a8ce7d7f7b9ab8fd1a008665da3d9ba3612f51267104",
     "sif_sha256": "ccabe592672510aad7cfa0b709400357c95c3c87df746be34fa4a45755e3911a"
   },
-  "live_model_validation": "Not run"
+  "live_model_validation": "Not run",
+  "repository_split_validation": {
+    "cpu_job": 1920893,
+    "elapsed": "00:00:32",
+    "cpus": 8,
+    "memory_gib": 32,
+    "gpus": 0,
+    "reference_resolved": true,
+    "reference_tests": {
+      "PASSED": 42
+    },
+    "gym_tests": 149,
+    "slurm_evaluations_tests": 103
+  }
 }

@@ -15,13 +15,12 @@ from uuid import uuid4
 
 
 async def check(args):
-    config = json.loads((args.smoke_results / "config.json").read_text())
-    # Scratch is allocated per job; a previous run's scratch directory has been removed.
-    if os.environ.get("HERMES_OVERLAY_ROOT"):
-        config["sandbox"]["apptainer"]["create"]["overlay_root"] = os.environ["HERMES_OVERLAY_ROOT"]
-    os.environ["NEMO_GYM_CONFIG_DICT"] = json.dumps(config)
-
     from omegaconf import OmegaConf
+
+    config = json.loads((args.smoke_results / "config.json").read_text())
+    if args.provider_config:
+        config = OmegaConf.to_container(OmegaConf.merge(config, OmegaConf.load(args.provider_config)), resolve=True)
+    os.environ["NEMO_GYM_CONFIG_DICT"] = json.dumps(config)
 
     from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
     from resources_servers.swebench_pro.app import (
@@ -61,5 +60,6 @@ async def check(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--smoke-results", type=Path, required=True)
+    parser.add_argument("--provider-config", type=Path, help="Optional sandbox provider settings for this run")
     parser.add_argument("--output", type=Path, required=True)
     raise SystemExit(asyncio.run(check(parser.parse_args())))

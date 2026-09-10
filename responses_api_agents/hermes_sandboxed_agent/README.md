@@ -75,7 +75,7 @@ Pro also ships five prepared example rows at
 `resources_servers/swebench_pro/data/example.jsonl`; these include pinned task
 scripts and image digests and can be used for the first smoke run.
 
-## Small cluster smoke run
+## Small HTTP smoke run
 
 `smoke.py` starts actual Gym model, agent and Pro HTTP servers in three processes.
 It avoids Ray for a small single-node run and uses the real Hermes runner and Pro
@@ -84,7 +84,7 @@ verifier. It does not allocate a model server.
 ```bash
 python -m responses_api_agents.hermes_sandboxed_agent.smoke \
   --dataset resources_servers/swebench_pro/data/example.jsonl \
-  --provider-config /path/to/cluster-provider.yaml \
+  --provider-config /path/to/provider.yaml \
   --sif-dir /cache/sifs --output /fresh/path/pro-results \
   --model-url http://MODEL_HOST:MODEL_PORT/v1 --model REAL_MODEL_NAME \
   --instance-id INSTANCE_ID_FROM_DATASET \
@@ -97,36 +97,22 @@ startup and failure handling only; the smoke command exits 1 and records an
 excluded attempt. A live endpoint consumes model inference
 capacity even when the sandbox job itself uses no GPUs.
 
-The [Slurm launcher](examples/slurm/run_pro.sh) and
-[provider settings](examples/slurm/cluster-provider.yaml) supply the Slurm/Pyxis
-mounts, runtime bind and image preparation. Set `HERMES_WORKSPACE` to an absolute
-workspace path containing `Gym/` and `hermes-runtime/`, and set
-`HERMES_CONTAINER_IMAGE` to your existing Pyxis image with Apptainer installed.
-Use `HERMES_EXTRA_MOUNTS` for additional Pyxis mounts, such as uv cache paths. This environment needs `--userns`,
-`--no-mount home,cwd,tmp,proc` and a `/proc:/proc` bind instead of the host config's
-`--containall`. Both Gym processes must use the same node/user and staging files.
-The controller also needs uv's dependency cache mounted because its installed
-packages are symlinks. Task containers receive the Hermes runtime, not that cache.
+Cluster deployment is maintained in the Slurm evaluations repository. See its
+[setup and launch guide](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/docs/hermes-sandboxed-pro.md)
+on the matching `jnolan/hermes-sandboxed-pro` branch.
 
-The launcher creates a job-specific overlay root under `/var/tmp`, checks that
-it is not tmpfs/ramfs, and mounts it into the outer container. It logs the path
-and filesystem. `create.overlay_root` is required when enabling writable
-overlays; it no longer inherits `TMPDIR`. Slurm still bounds total job memory;
-there is no separate per-task disk quota in this smoke configuration.
-
-Submit `run_pro.sh` through `sbatch --partition=cpu --cpus-per-task=8 --mem=32G`,
-with the appropriate account and wall time. Its `--check-verifier` mode uses
-[check_verifier.py](check_verifier.py) to grade the reference patch from a completed smoke run,
-without starting Hermes or contacting a model:
+To check the reference patch with Gym's verifier directly, use:
 
 ```bash
-export HERMES_WORKSPACE=/absolute/path/to/workspace
-export HERMES_CONTAINER_IMAGE=/absolute/path/to/apptainer-environment.sqsh
-sbatch --partition=cpu --cpus-per-task=8 --mem=32G --time=00:30:00 \
-  responses_api_agents/hermes_sandboxed_agent/examples/slurm/run_pro.sh --check-verifier \
+python -m responses_api_agents.hermes_sandboxed_agent.check_verifier \
   --smoke-results /path/to/completed/pro-smoke-results \
+  --provider-config /path/to/provider.yaml \
   --output /path/to/reference-control.jsonl
 ```
+
+`--provider-config` optionally overrides the recorded sandbox settings for the
+current run. This control starts fresh verification containers without Hermes
+or model inference.
 
 Results include inputs, redacted config, server logs, model-call captures,
 Hermes conversation and execution details, extracted patches and Pro test output.
