@@ -57,6 +57,7 @@ from nemo_gym.rollout_correlation import (
     checkpoint_parent_context,
     current_attempt_index,
     current_logical_rollout_id,
+    current_rollout_id,
     execution_identity_from_run_body,
     maybe_rollout_id_from_run_body,
     rollout_context,
@@ -105,6 +106,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         agent_attributes = {"nemo.gym.server.name": self.config.name}
         traced_responses = traced_endpoint(GymSpanGroup.AGENT, "gym.agent.responses", self.responses, agent_attributes)
         app.post("/v1/responses")(traced_responses)
+        app.post(f"/{TOKEN_CAPTURE_PATH_SEGMENT}/v1/responses")(
+            traced_responses
+        )
         # A self-call made with ``url_path_for_run`` lands on a prefixed twin.
         # ``responses`` recovers the rollout id from the path.
         # The same handler serves prefixed and unprefixed calls.
@@ -326,6 +330,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
+        if rollout_id is None:
+            rollout_id = current_rollout_id()
         request_path = getattr(getattr(request, "url", None), "path", "")
         token_capture = f"/{TOKEN_CAPTURE_PATH_SEGMENT}/" in request_path
         return f"{rollout_path_prefix(rollout_id, token_capture=token_capture)}{url_path}"
