@@ -21,7 +21,7 @@ import os
 from copy import deepcopy
 from threading import Lock
 from time import monotonic, time, time_ns
-from typing import Any, ClassVar, Dict, List, Optional, Union
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
 
 from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request, Response
@@ -182,6 +182,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
+    # Some endpoints reject the two equivalent reasoning aliases together.
+    reasoning_history_field: Literal["both", "reasoning_content", "reasoning"] = "both"
     # Keep reconstructed assistant history byte-for-byte in ``content`` for
     # models whose validated direct-vLLM contract includes <think> tags.
     # Response parsing remains controlled independently by
@@ -652,6 +654,22 @@ class VLLMModel(SimpleResponsesAPIModel):
                     pass
                 else:
                     raise NotImplementedError
+
+        # Keep one configured wire field without changing the reasoning text.
+        # The default retains the existing dual-alias compatibility behavior.
+        history_field = self.config.reasoning_history_field
+        if history_field != "both":
+            for message_dict in body_dict["messages"]:
+                if message_dict.get("role") != "assistant":
+                    continue
+                if "reasoning_content" not in message_dict and "reasoning" not in message_dict:
+                    continue
+                reasoning = message_dict.get("reasoning_content")
+                if reasoning is None:
+                    reasoning = message_dict.get("reasoning")
+                message_dict.pop("reasoning_content", None)
+                message_dict.pop("reasoning", None)
+                message_dict[history_field] = reasoning
 
         # Drop a null top_logprobs on the non-capture path (caller-supplied logprobs=True).
         # vLLM treats null as "no logprobs" but a missing field as its default (0), so forwarding null is never useful.

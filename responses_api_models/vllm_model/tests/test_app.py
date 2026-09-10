@@ -3520,6 +3520,60 @@ class TestAssistantReasoningHistoryPreprocess:
         assistant = result["messages"][1]
         assert assistant == {"role": "assistant", "content": original}
 
+    @mark.parametrize("field", ["reasoning_content", "reasoning"])
+    @mark.parametrize("content_list", [False, True])
+    def test_selected_alias_preserves_extracted_reasoning(self, field: str, content_list: bool) -> None:
+        model = _make_reasoning_history_model(preserve_content=False)
+        model.config.reasoning_history_field = field
+        content = "<think>keep this reasoning</think>answer"
+        if content_list:
+            content = [{"type": "text", "text": content}]
+        result = model._preprocess_chat_completion_create_params(MagicMock(), self._body(content))
+
+        assistant = result["messages"][1]
+        assert assistant[field] == "keep this reasoning"
+        assert ("reasoning" if field == "reasoning_content" else "reasoning_content") not in assistant
+        assert assistant["content"] == ([{"type": "text", "text": "answer"}] if content_list else "answer")
+        assert result["messages"][0] == {"role": "system", "content": "system"}
+        assert result["messages"][2] == {"role": "user", "content": "next"}
+
+    @mark.parametrize("field", ["reasoning_content", "reasoning"])
+    @mark.parametrize("reasoning", ["existing reasoning", ""])
+    def test_selected_alias_preserves_existing_reasoning(self, field: str, reasoning: str) -> None:
+        model = _make_reasoning_history_model(preserve_content=True)
+        model.config.reasoning_history_field = field
+        body = self._body(None)
+        tool_calls = [{"id": "call_1", "type": "function", "function": {"name": "echo", "arguments": "{}"}}]
+        body["messages"][1].update(reasoning_content=reasoning, reasoning=reasoning, tool_calls=tool_calls)
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+        assert result["messages"][1] == {
+            "role": "assistant",
+            "content": None,
+            field: reasoning,
+            "tool_calls": tool_calls,
+        }
+
+    def test_selected_alias_does_not_add_reasoning_to_plain_history(self) -> None:
+        model = _make_reasoning_history_model(preserve_content=False)
+        model.config.reasoning_history_field = "reasoning_content"
+        result = model._preprocess_chat_completion_create_params(MagicMock(), self._body("plain answer"))
+
+        assert result["messages"][1] == {"role": "assistant", "content": "plain answer"}
+
+    def test_selected_alias_uses_existing_reasoning_when_content_alias_is_null(self) -> None:
+        model = _make_reasoning_history_model(preserve_content=True)
+        model.config.reasoning_history_field = "reasoning_content"
+        body = self._body("answer")
+        body["messages"][1].update(reasoning_content=None, reasoning="existing reasoning")
+        result = model._preprocess_chat_completion_create_params(MagicMock(), body)
+
+        assert result["messages"][1] == {
+            "role": "assistant",
+            "content": "answer",
+            "reasoning_content": "existing reasoning",
+        }
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Audio sidechannel splice (metadata.audio_data → user-message content block)
