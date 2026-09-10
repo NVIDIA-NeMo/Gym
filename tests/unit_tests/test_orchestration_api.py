@@ -27,9 +27,6 @@ COMPUTE_TWO = {
 
 SERVICE = {"container": "gym:latest", "type": "vllm", "model": "org/model"}
 DRIVER = {"container": "gym:latest", "benchmarks": {"gsm8k": {}}}
-# The Ray Serve gateway script is fetched from driver.gym_install's repo/ref into the vLLM
-# service's own container - required whenever effective_ray_serve is true for a service.
-DRIVER_WITH_GYM_INSTALL = {**DRIVER, "gym_install": {"ref": "main"}}
 JOB = {"output_path": "/tmp/gym-jobs"}
 
 
@@ -235,37 +232,18 @@ COMPUTE_4_NODES_8_GPUS = {
 def test_multi_instance_per_instance_multi_node_tp_accepted_when_footprint_fits():
     # TP8 x PP2 = 16 GPUs/instance > 8 gpus_per_node, so an instance must itself span nodes - the
     # Ray Serve gateway path is forced on. 2 instances x 16 = 32 == 4 nodes x 8 gpus_per_node: fits
-    # exactly. This is the previously-forbidden topology that Ray Serve now supports.
+    # exactly. This is the previously-forbidden topology that Ray Serve now supports. No
+    # driver.gym_install needed - the gateway's own source is embedded directly into the sbatch
+    # script (see _build_vllm_ray_serve_command).
     config = SubmitConfig.model_validate(
         _config(
             services={
                 "svc": {**SERVICE, "tensor_parallel_size": 8, "pipeline_parallel_size": 2, "number_of_instances": 2}
             },
             compute=COMPUTE_4_NODES_8_GPUS,
-            driver=DRIVER_WITH_GYM_INSTALL,
         )
     )
     assert config.services["svc"].number_of_instances == 2
-
-
-def test_multi_instance_per_instance_multi_node_tp_requires_gym_install():
-    # Same topology as above but no driver.gym_install set - the Ray Serve gateway script has
-    # nowhere to be fetched from, so this must fail fast at config-validation time rather than
-    # only when the sbatch script is built.
-    with pytest.raises(ValidationError, match="gym_install"):
-        SubmitConfig.model_validate(
-            _config(
-                services={
-                    "svc": {
-                        **SERVICE,
-                        "tensor_parallel_size": 8,
-                        "pipeline_parallel_size": 2,
-                        "number_of_instances": 2,
-                    }
-                },
-                compute=COMPUTE_4_NODES_8_GPUS,
-            )
-        )
 
 
 COMPUTE_4_NODES_6_GPUS = {
@@ -288,7 +266,6 @@ def test_multi_instance_per_instance_multi_node_tp_number_of_instances_need_not_
         _config(
             services={"svc": {**SERVICE, "tensor_parallel_size": 8, "number_of_instances": 3, "use_ray_serve": True}},
             compute=COMPUTE_4_NODES_6_GPUS,
-            driver=DRIVER_WITH_GYM_INSTALL,
         )
     )
     assert config.services["svc"].number_of_instances == 3
@@ -306,11 +283,9 @@ def test_use_ray_serve_defaults_to_false():
 
 def test_use_ray_serve_opt_in_single_node_multi_instance_accepted():
     # Single-node, multi-instance: vLLM's own --data-parallel-size would normally handle this, but
-    # a user can still opt into the Ray Serve gateway for it.
+    # a user can still opt into the Ray Serve gateway for it. No driver.gym_install needed.
     service = {**SERVICE, "number_of_instances": 4, "use_ray_serve": True}
-    config = SubmitConfig.model_validate(
-        _config(services={"svc": service}, compute=COMPUTE_8_GPUS_PER_NODE, driver=DRIVER_WITH_GYM_INSTALL)
-    )
+    config = SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_8_GPUS_PER_NODE))
     assert config.services["svc"].use_ray_serve is True
 
 
@@ -318,14 +293,8 @@ def test_use_ray_serve_opt_in_does_not_require_gpus_per_node():
     # No node_pools/gpus_per_node info at all - opting in still validates fine (nothing to check
     # against), matching how the default path also skips footprint validation without that info.
     service = {**SERVICE, "use_ray_serve": True}
-    config = SubmitConfig.model_validate(_config(services={"svc": service}, driver=DRIVER_WITH_GYM_INSTALL))
+    config = SubmitConfig.model_validate(_config(services={"svc": service}))
     assert config.services["svc"].use_ray_serve is True
-
-
-def test_use_ray_serve_opt_in_without_gym_install_raises():
-    service = {**SERVICE, "use_ray_serve": True}
-    with pytest.raises(ValidationError, match="gym_install"):
-        SubmitConfig.model_validate(_config(services={"svc": service}))
 
 
 # ---------------------------------------------------------------------------

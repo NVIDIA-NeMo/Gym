@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 import re
 import shlex
 
@@ -122,17 +123,27 @@ def render_gym_cmd(subcommand: str, var_name: str, args: list[str]) -> str:
 def render_repo_checkout(repo: str, ref: str) -> str:
     """Render an &&-chained command that installs git if missing, then does
     `git clone {repo} && cd {name} && git checkout {ref}`, leaving the shell's cwd at the repo
-    root. Shared by the driver entrypoint (which additionally pip-installs the whole package) and
-    the Ray Serve gateway command (which just needs the raw ray_serve_gateway.py file - see
-    _build_vllm_ray_serve_command). The git-install guard lives here rather than per call site
-    because every caller needs git first, regardless of container image - e.g. vllm/vllm-openai
-    doesn't bundle it, and neither does every driver image."""
+    root. Used by the driver entrypoint, which additionally pip-installs the whole package. The
+    git-install guard lives here rather than per call site because every caller needs git first,
+    regardless of container image."""
     repo_name = repo.rstrip("/").split("/")[-1].removesuffix(".git")
     ensure_git = "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git)"
     return (
         f"({ensure_git})"
         f" && git clone {shlex.quote(repo)} && cd {shlex.quote(repo_name)} && git checkout {shlex.quote(ref)}"
     )
+
+
+def render_write_file_from_base64(content: str, dest_path: str) -> str:
+    """Render a command that reconstructs `content` at `dest_path` via a base64 round-trip.
+
+    Avoids embedding arbitrary source text (with its own quotes/`$`/backticks/newlines) directly
+    into a shell command that may itself be nested inside several more layers of quoting (see
+    _build_vllm_ray_serve_command) - the base64 alphabet has no shell-special characters, so it
+    survives any number of quoting layers untouched.
+    """
+    encoded = base64.b64encode(content.encode()).decode()
+    return f"printf '%s' '{encoded}' | base64 -d > {shlex.quote(dest_path)}"
 
 
 def render_driver_entrypoint(

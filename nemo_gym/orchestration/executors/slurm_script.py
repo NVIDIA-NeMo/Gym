@@ -19,14 +19,12 @@ from pathlib import Path
 
 from nemo_gym.orchestration.api import (
     BenchmarkRunConfig,
-    GymInstallConfig,
     NodePool,
     RayServiceConfig,
     SlurmComputeConfig,
     SubmitConfig,
     VllmServiceConfig,  # used in _BUILDERS dispatch table
     effective_ray_serve,
-    gym_install_required_message,
 )
 from nemo_gym.orchestration.executors.script_templates import (
     ENSURE_RAY_INSTALLED,
@@ -35,8 +33,8 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_gym_cmd,
     render_health_check,
     render_ray_prelude,
-    render_repo_checkout,
     render_vllm_ray_symmetric_run,
+    render_write_file_from_base64,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args
 
@@ -214,8 +212,11 @@ def _escape_for_double_quoted_bash(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
 
 
+_RAY_SERVE_GATEWAY_SOURCE_PATH = Path(__file__).resolve().parent.parent / "ray_serve_gateway.py"
+
+
 def _build_vllm_ray_serve_command(
-    service: VllmServiceConfig, total_nodes: int, gym_install: GymInstallConfig, gpus_per_node_values: list[int]
+    service: VllmServiceConfig, total_nodes: int, gpus_per_node_values: list[int]
 ) -> str:
     # Ray Serve (nemo_gym/orchestration/ray_serve_gateway.py) launches all number_of_instances
     # `vllm serve` processes itself and routes requests across them. Ray's own placement-group
@@ -237,17 +238,18 @@ def _build_vllm_ray_serve_command(
         gateway_args += " --trust-remote-code"
 
     # ray_serve_gateway.py has no internal nemo_gym imports (stdlib + ray/fastapi/aiohttp only), so
-    # it's fetched and run as a standalone script rather than `pip install -e .`-ing the whole
-    # nemo_gym package - the vLLM service's own container (e.g. vllm/vllm-openai) never has
-    # nemo_gym installed, and a full package install there risks nemo_gym's own pinned deps (torch,
-    # ray, ...) clobbering vLLM's already-working install. Reuses driver.gym_install (the same
-    # repo/ref the driver itself checks out) instead of a separate per-service field, so the two
-    # can't drift out of sync.
+    # its source is embedded directly (base64-encoded, see render_write_file_from_base64) into the
+    # vLLM service's own container rather than git-cloning the whole nemo_gym repo or `pip install
+    # -e .`-ing the package there - the vLLM container (e.g. vllm/vllm-openai) never has nemo_gym
+    # installed, and a full package install there risks nemo_gym's own pinned deps (torch, ray, ...)
+    # clobbering vLLM's already-working install. This also means using the Ray Serve gateway never
+    # requires driver.gym_install to be configured.
+    write_gateway = render_write_file_from_base64(_RAY_SERVE_GATEWAY_SOURCE_PATH.read_text(), "ray_serve_gateway.py")
     fetch_and_run = (
-        f"{render_repo_checkout(gym_install.repo, gym_install.ref)}"
+        f"{write_gateway}"
         " && pip install --quiet aiohttp"
         f" && ({ENSURE_RAY_INSTALLED})"
-        f" && python3 nemo_gym/orchestration/ray_serve_gateway.py {gateway_args}"
+        f" && python3 ray_serve_gateway.py {gateway_args}"
     )
     if total_nodes <= 1:
         # No multi-node Ray cluster to join - the gateway starts its own local Ray instance and
@@ -263,12 +265,12 @@ def _build_vllm_ray_serve_command(
     # {inner_cmd}` statement that itself sits inside that template's own single-quoted `bash -lc
     # '...'` wrapper. Without protection, fetch_and_run's `&&` chain gets live-parsed as bash
     # operators once that outer bash -lc runs its script: `ray symmetric-run`'s entrypoint would
-    # become just the `git clone` (the first `&&`-segment), which succeeds and exits immediately,
-    # tearing down the whole Ray cluster it just stood up before the repo checkout/install/gateway
-    # launch ever run. Wrapping in `bash -c "<escaped>"` makes the whole chain one opaque token
-    # immune to that live-parsing - double quotes, not shlex.quote's single-quote style, because
-    # this text is substituted inside that template's own single-quoted region: a literal `'`
-    # (which shlex.quote would introduce) would terminate that outer quoting early.
+    # become just the first `&&`-segment, which succeeds and exits immediately, tearing down the
+    # whole Ray cluster it just stood up before the gateway ever launches. Wrapping in `bash -c
+    # "<escaped>"` makes the whole chain one opaque token immune to that live-parsing - double
+    # quotes, not shlex.quote's single-quote style, because this text is substituted inside that
+    # template's own single-quoted region: a literal `'` (which shlex.quote would introduce) would
+    # terminate that outer quoting early.
     return render_vllm_ray_symmetric_run(
         f'bash -c "{_escape_for_double_quoted_bash(fetch_and_run)}"', total_nodes, resource_flags
     )
@@ -295,12 +297,9 @@ def _build_service_command(
     service: VllmServiceConfig | RayServiceConfig,
     total_nodes: int,
     gpus_per_node_values: list[int],
-    gym_install: GymInstallConfig | None,
 ) -> str:
     if isinstance(service, VllmServiceConfig) and effective_ray_serve(service, total_nodes, gpus_per_node_values):
-        if gym_install is None:
-            raise ValueError(gym_install_required_message())
-        return _build_vllm_ray_serve_command(service, total_nodes, gym_install, gpus_per_node_values)
+        return _build_vllm_ray_serve_command(service, total_nodes, gpus_per_node_values)
     if _vllm_spans_multiple_nodes(service, total_nodes):
         return _build_vllm_ray_command(service, total_nodes)
     return _BUILDERS[type(service)](service)
@@ -337,7 +336,7 @@ def build_sbatch_script(
         _render_service_command(
             name,
             service.container,
-            _build_service_command(service, total_nodes, gpus_per_node_values, config.driver.gym_install),
+            _build_service_command(service, total_nodes, gpus_per_node_values),
             service.env or None,
             service.mounts or None,
             # Only services that actually span multiple nodes need the whole allocation's --nodes/
