@@ -71,7 +71,7 @@ import os
 from collections.abc import Mapping
 from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -114,6 +114,10 @@ class TokenIdCaptureSettings(BaseModel):
     # Finalization does not retire the frozen snapshot.
     # Durable delivery permits retirement by snapshot id and version.
     rebuild_response: bool = True
+    # Plural delivery preserves the scored response and adds training_traces.
+    # The legacy default continues projecting a single main response.
+    delivery: Literal["main_chain", "all_traces"] = "main_chain"
+    builder: Literal["prefix_merging", "per_request"] = "prefix_merging"
     # A custom sink normally needs a resolver over the same backend namespace.
     # Without one, every multi-call continuation is unresolved and masked.
     # This flag permits that degraded behavior explicitly.
@@ -163,6 +167,10 @@ class TokenIdCaptureConfig(BaseModel):
     @model_validator(mode="after")
     def _validate(self) -> "TokenIdCaptureConfig":
         block = self.token_id_capture
+        if block.builder == "per_request" and block.delivery != "all_traces":
+            raise ValueError("per_request requires token_id_capture.delivery=all_traces")
+        if block.external_staging and block.delivery == "all_traces":
+            raise ValueError("all_traces delivery is not supported by external_staging; use a TokenSource finalizer")
         if block.external_staging and not block.enabled:
             raise ValueError("token_id_capture.external_staging requires token_id_capture.enabled")
         if block.external_staging and block.rebuild_response:
