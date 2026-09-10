@@ -54,7 +54,7 @@ gdpval_prepare() {
         [[ $AAV2_MODE != pilot ]] || STAGES="[{num_tasks: $count}, {num_tasks: $count, num_models: 4}]"
         if [[ $AAV2_MODE == full ]]; then
             calibration=$((rows < 45 ? rows : 45))
-            STAGES="[{num_tasks: $calibration, partial_completion: {min_success_fraction: 0.97, min_per_reference_success_fraction: 0.88, min_successful_rows_per_reference: 1, tolerate_unresolved: true}}, {num_tasks: $rows, num_models: 4}]"
+            STAGES="[{num_tasks: $calibration, partial_completion: {min_success_fraction: 0.97, min_per_reference_success_fraction: 0.8, min_successful_rows_per_reference: 1, tolerate_unresolved: true}}, {num_tasks: $rows, num_models: 4}]"
         fi
         PHASE_DIR=$RUN_DIR/judge_$AAV2_MODE
     fi

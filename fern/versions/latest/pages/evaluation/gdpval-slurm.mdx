@@ -78,8 +78,10 @@ gdpval_resources_server:
 
 Those ELOs illustrate the file format. Use your frozen reference set's calibrated
 values, and include at least four references for pilot/full mode. Store
-`JUDGE_API_KEY`, optional provider-specific keys, and `TAVILY_API_KEY` for rollout
-in the protected `ENV_FILE`. Credentials are read inside the job. Keep other
+`JUDGE_API_KEY`, optional `JUDGE_GEMINI_API_KEY`, and `TAVILY_API_KEY` for rollout
+in the protected `ENV_FILE`. Gemini uses its dedicated key when set and falls
+back to `JUDGE_API_KEY`; GPT and Claude use `JUDGE_API_KEY`. Credentials are read
+inside the job. Keep other
 scientific environment settings unchanged when resuming.
 
 The six global attachment budgets are frozen when creating a run. To use

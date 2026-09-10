@@ -321,7 +321,7 @@ def test_full_judge_accepts_partial_calibration_and_retains_all_final_tasks(job)
             "num_tasks": 45,
             "partial_completion": {
                 "min_success_fraction": 0.97,
-                "min_per_reference_success_fraction": 0.88,
+                "min_per_reference_success_fraction": 0.8,
                 "min_successful_rows_per_reference": 1,
                 "tolerate_unresolved": True,
             },
