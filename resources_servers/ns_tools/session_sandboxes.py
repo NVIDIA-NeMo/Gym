@@ -35,6 +35,12 @@ Lifecycle (``key`` = the nemo-gym session id of the rollout, see ``session_conte
   ``ttl_s`` (expireTime) is the cluster-side backstop for a dead server.
 * ``aclose()``           deletes every live sandbox at server shutdown.
 
+Transports for the NeMo-Skills HTTP protocol spoken to the sandbox's local server:
+
+* ``exec``  (default) ``curl`` through the sandbox exec API (``sandbox_pool.sandbox_request``).
+* ``http``  direct requests to the sandbox's service port through the OpenSandbox
+  endpoint proxy (``AsyncSandbox.endpoint(port)``), one round trip per call.
+
 Only imported when ns_tools selects ``sandbox_type: sandbox_per_session``.
 """
 
@@ -45,6 +51,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import aiohttp
 import httpx  # exception types only: the nemo_skills client contract catches httpx errors
 from sandbox_pool import sandbox_request
 from session_context import current_session_id
@@ -67,6 +74,8 @@ DEFAULT_METADATA = {
     "nemo.nvidia.com/resources": "custom",
 }
 
+TRANSPORTS = ("exec", "http")
+
 
 def _as_bool(value: Any) -> bool:
     # bool("false") is True; env-fed values arrive as strings.
@@ -74,9 +83,18 @@ def _as_bool(value: Any) -> bool:
 
 
 @dataclass
+class _Ready:
+    """A created, healthy sandbox plus (http transport) its proxied service endpoint."""
+
+    sandbox: AsyncSandbox
+    base_url: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class _Session:
     key: str
-    task: "asyncio.Task[AsyncSandbox]"
+    task: "asyncio.Task[_Ready]"
     created_at: float
     last_used: float
     ipython_sessions: set[str] = field(default_factory=set)
@@ -84,6 +102,10 @@ class _Session:
     @property
     def failed(self) -> bool:
         return self.task.done() and (self.task.cancelled() or self.task.exception() is not None)
+
+    @property
+    def ready(self) -> "_Ready | None":
+        return self.task.result() if self.task.done() and not self.failed else None
 
 
 class SessionSandboxes:
@@ -121,6 +143,8 @@ class SessionSandboxes:
         session_idle_timeout_s: float = 3600.0,
         session_max_lifetime_s: float | None = None,
         sweep_interval_s: float = 60.0,
+        transport: str = "exec",
+        http_max_connections: int = 2048,
         size: int | None = None,
     ) -> None:
         if size is not None:
@@ -143,7 +167,10 @@ class SessionSandboxes:
             raise ValueError("sandbox_per_session backend selected but image is empty — set NS_SANDBOX_IMAGE")
         if int(create_concurrency) < 1 or int(delete_concurrency) < 1:
             raise ValueError("create_concurrency and delete_concurrency must be >= 1")
+        if transport not in TRANSPORTS:
+            raise ValueError(f"sandbox_per_session.transport must be one of {TRANSPORTS}, got {transport!r}")
         self._provider = provider
+        self._tls_verify = _as_bool(connection.get("tls_verify", True))
         self._image = image
         self._pool_ref = str(pool_ref or "")
         self._pool_fallback = _as_bool(pool_fallback)
@@ -173,6 +200,9 @@ class SessionSandboxes:
         self._session_idle_timeout_s = float(session_idle_timeout_s) if session_idle_timeout_s else None
         self._session_max_lifetime_s = float(session_max_lifetime_s) if session_max_lifetime_s else None
         self._sweep_interval_s = float(sweep_interval_s)
+        self._transport = transport
+        self._http_max_connections = int(http_max_connections)
+        self._http: aiohttp.ClientSession | None = None
 
         self._sessions: dict[str, _Session] = {}
         self._ipython_to_key: dict[str, str] = {}
@@ -189,6 +219,10 @@ class SessionSandboxes:
     @property
     def port(self) -> int:
         return self._port
+
+    @property
+    def transport(self) -> str:
+        return self._transport
 
     @property
     def live_count(self) -> int:
@@ -219,6 +253,8 @@ class SessionSandboxes:
                 if keys:
                     LOGGER.info("session sandboxes: deleting %d live sandbox(es) at shutdown", len(keys))
                 await asyncio.gather(*(self._end(key, reason="shutdown") for key in keys))
+                if self._http is not None and not self._http.closed:
+                    await self._http.close()
                 LOGGER.info(
                     "session sandboxes closed: created=%d create_failures=%d deleted=%d",
                     self.created,
@@ -252,15 +288,15 @@ class SessionSandboxes:
     def has_session(self, session_id: str) -> bool:
         return str(session_id) in self._ipython_to_key
 
+    def _entry_for(self, session_id: str) -> "_Session | None":
+        key = self._ipython_to_key.get(str(session_id))
+        return self._sessions.get(key) if key is not None else None
+
     async def sandbox_for(self, session_id: str) -> AsyncSandbox | None:
         """The live sandbox holding an IPython session, or None (never creates one)."""
-        key = self._ipython_to_key.get(str(session_id))
-        if key is None:
-            return None
-        entry = self._sessions.get(key)
-        if entry is None or not entry.task.done() or entry.failed:
-            return None
-        return entry.task.result()
+        entry = self._entry_for(session_id)
+        ready = entry.ready if entry is not None else None
+        return ready.sandbox if ready is not None else None
 
     def release(self, session_id: str) -> None:
         """Forget an IPython session id (the sandbox itself lives until ``end_session``)."""
@@ -272,13 +308,7 @@ class SessionSandboxes:
 
     # ------------------------------------------------------------------ routing
 
-    async def route(self, session_id: str | None) -> AsyncSandbox:
-        """Resolve (creating on first use) the sandbox for the current rollout session.
-
-        Raises httpx.TimeoutException when the sandbox cannot be created, which the NS
-        client collapses into its timeout contract — a sandbox outage degrades rewards,
-        never the server.
-        """
+    async def _route_entry(self, session_id: str | None) -> tuple[_Session, _Ready]:
         if self._closed:
             raise httpx.TimeoutException("session sandboxes are closed")
         if not self._started:
@@ -305,7 +335,7 @@ class SessionSandboxes:
         try:
             # shield: a cancelled tool request must not cancel the creation other
             # requests of the same session are waiting on.
-            sandbox = await asyncio.shield(entry.task)
+            ready = await asyncio.shield(entry.task)
         except asyncio.CancelledError:
             if entry.task.cancelled():
                 raise httpx.TimeoutException(f"session sandbox for {key[:8]} was ended during creation")
@@ -317,7 +347,108 @@ class SessionSandboxes:
         if self._sessions.get(key) is not entry:
             # end_session()/aclose() ran while we were waiting: the sandbox is gone or going.
             raise httpx.TimeoutException(f"session sandbox for {key[:8]} was ended during creation")
-        return sandbox
+        return entry, ready
+
+    async def route(self, session_id: str | None) -> AsyncSandbox:
+        """Resolve (creating on first use) the sandbox for the current rollout session.
+
+        Raises httpx.TimeoutException when the sandbox cannot be created, which the NS
+        client collapses into its timeout contract — a sandbox outage degrades rewards,
+        never the server.
+        """
+        _, ready = await self._route_entry(session_id)
+        return ready.sandbox
+
+    async def request(
+        self,
+        session_id: str | None,
+        method: str,
+        path: str,
+        *,
+        timeout_s: float,
+        headers: dict[str, str] | None = None,
+        payload: str | None = None,
+    ) -> tuple[int, str]:
+        """Send one NS-protocol request to the session's sandbox over the configured transport."""
+        _, ready = await self._route_entry(session_id)
+        return await self._send(ready, method, path, timeout_s=timeout_s, headers=headers, payload=payload)
+
+    async def request_existing(
+        self,
+        session_id: str,
+        method: str,
+        path: str,
+        *,
+        timeout_s: float,
+        headers: dict[str, str] | None = None,
+        payload: str | None = None,
+    ) -> tuple[int, str] | None:
+        """Like ``request`` but never creates: None when no live sandbox holds the session."""
+        entry = self._entry_for(session_id)
+        ready = entry.ready if entry is not None else None
+        if ready is None:
+            return None
+        return await self._send(ready, method, path, timeout_s=timeout_s, headers=headers, payload=payload)
+
+    async def _send(
+        self,
+        ready: _Ready,
+        method: str,
+        path: str,
+        *,
+        timeout_s: float,
+        headers: dict[str, str] | None,
+        payload: str | None,
+    ) -> tuple[int, str]:
+        if self._transport == "http":
+            return await self._http_request(ready, method, path, timeout_s=timeout_s, headers=headers, payload=payload)
+        return await sandbox_request(
+            ready.sandbox, self._port, method, path, timeout_s=timeout_s, headers=headers, payload=payload
+        )
+
+    def _http_session(self) -> aiohttp.ClientSession:
+        if self._http is None or self._http.closed:
+            connector = aiohttp.TCPConnector(
+                limit=self._http_max_connections,
+                limit_per_host=self._http_max_connections,
+                ttl_dns_cache=300,
+                ssl=None if self._tls_verify else False,
+            )
+            self._http = aiohttp.ClientSession(connector=connector)
+        return self._http
+
+    async def _http_request(
+        self,
+        ready: _Ready,
+        method: str,
+        path: str,
+        *,
+        timeout_s: float,
+        headers: dict[str, str] | None,
+        payload: str | None,
+    ) -> tuple[int, str]:
+        """One round trip to the sandbox's service port through the OpenSandbox endpoint proxy."""
+        merged = {**ready.headers, **(headers or {})}
+        try:
+            async with self._http_session().request(
+                method,
+                f"{ready.base_url}{path}",
+                data=payload,
+                headers=merged,
+                timeout=aiohttp.ClientTimeout(total=timeout_s),
+            ) as response:
+                return response.status, await response.text()
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            raise httpx.TimeoutException(f"sandbox http transport error: {exc!r}") from exc
+
+    async def _probe(self, ready: _Ready) -> bool:
+        try:
+            status, _ = await self._send(
+                ready, "GET", self._health_path, timeout_s=self._health_timeout_s, headers=None, payload=None
+            )
+            return status == 200
+        except httpx.TimeoutException:
+            return False
 
     async def report_failure(self, session_id: str | None) -> None:
         """After a transport failure: probe the sandbox and delete it only if it is dead
@@ -327,18 +458,12 @@ class SessionSandboxes:
         lose its state."""
         key = self._key_for(session_id)
         entry = self._sessions.get(key)
-        if entry is None or not entry.task.done() or entry.failed:
+        ready = entry.ready if entry is not None else None
+        if ready is None:
             return
-        sandbox = entry.task.result()
         for attempt in range(2):
-            try:
-                status, _ = await sandbox_request(
-                    sandbox, self._port, "GET", self._health_path, timeout_s=self._health_timeout_s
-                )
-                if status == 200:
-                    return
-            except httpx.TimeoutException:
-                pass
+            if await self._probe(ready):
+                return
             if attempt == 0:
                 await asyncio.sleep(1.0)
         LOGGER.warning("session sandbox %s failed two health probes after a transport failure — deleting it", key[:8])
@@ -390,7 +515,7 @@ class SessionSandboxes:
         await sandbox.start(self._spec(claim=False))
         return sandbox, False
 
-    async def _create(self, key: str) -> AsyncSandbox:
+    async def _create(self, key: str) -> _Ready:
         started = time.monotonic()
         async with self._create_slots:
             if self._closed:
@@ -415,31 +540,37 @@ class SessionSandboxes:
                         execution = await sandbox.exec(f'setsid "$0" -c {shlex.quote(self._service_command)}')
                         if execution.return_code != 0:
                             raise RuntimeError(f"service command failed rc={execution.return_code}")
-                await self._wait_healthy(sandbox)
+                ready = _Ready(sandbox=sandbox)
+                if self._transport == "http":
+                    resolved = await sandbox.endpoint(self._port)
+                    ready.base_url = resolved.endpoint.rstrip("/")
+                    ready.headers = dict(resolved.headers)
+                await self._wait_healthy(ready)
             except BaseException:
                 self.create_failures += 1
                 await self._stop_sandbox(sandbox, key)
                 raise
         self.created += 1
         LOGGER.info(
-            "session sandbox ready key=%s create_s=%.1f (queued %.1f) live=%d created=%d deleted=%d",
+            "session sandbox ready key=%s transport=%s create_s=%.1f (queued %.1f) live=%d created=%d deleted=%d",
             key[:8],
+            self._transport,
             time.monotonic() - started,
             queued_s,
             len(self._sessions),
             self.created,
             self.deleted,
         )
-        return sandbox
+        return ready
 
-    async def _wait_healthy(self, sandbox: AsyncSandbox) -> None:
-        """Gate admission on the same exec path used by tool requests."""
+    async def _wait_healthy(self, ready: _Ready) -> None:
+        """Gate admission on the same path tool requests will use (exec or the proxied endpoint)."""
         deadline = time.monotonic() + self._health_budget_s
         last_error: str | None = None
         while time.monotonic() < deadline:
             try:
-                status, _ = await sandbox_request(
-                    sandbox, self._port, "GET", self._health_path, timeout_s=self._health_timeout_s
+                status, _ = await self._send(
+                    ready, "GET", self._health_path, timeout_s=self._health_timeout_s, headers=None, payload=None
                 )
                 if status == 200:
                     return
@@ -447,7 +578,7 @@ class SessionSandboxes:
             except httpx.TimeoutException as exc:
                 last_error = repr(exc)
             await asyncio.sleep(1.0)
-        raise RuntimeError(f"sandbox never became healthy through exec: {last_error}")
+        raise RuntimeError(f"sandbox never became healthy through {self._transport}: {last_error}")
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox, key: str) -> None:
         async with self._delete_slots:
@@ -481,7 +612,7 @@ class SessionSandboxes:
             # past both, as a last resort.
             budget = self._ready_timeout_s + self._health_budget_s + self._stop_timeout_s
             try:
-                sandbox = await asyncio.wait_for(asyncio.shield(entry.task), timeout=budget)
+                ready = await asyncio.wait_for(asyncio.shield(entry.task), timeout=budget)
             except (asyncio.TimeoutError, TimeoutError):
                 LOGGER.warning(
                     "session sandbox %s create still running after %.0f s — cancelling (may leak until TTL)",
@@ -496,8 +627,8 @@ class SessionSandboxes:
         elif entry.failed:
             return
         else:
-            sandbox = entry.task.result()
-        await self._stop_sandbox(sandbox, key)
+            ready = entry.task.result()
+        await self._stop_sandbox(ready.sandbox, key)
         self.deleted += 1
         LOGGER.info(
             "session sandbox deleted key=%s reason=%s lifetime_s=%.0f live=%d",

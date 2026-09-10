@@ -475,6 +475,40 @@ class SandboxPool:
             return None
         return self._slots[index].sandbox
 
+    async def request(
+        self,
+        session_id: str | None,
+        method: str,
+        path: str,
+        *,
+        timeout_s: float,
+        headers: dict[str, str] | None = None,
+        payload: str | None = None,
+    ) -> tuple[int, str]:
+        """Send one NS-protocol request to the session's pinned pod over exec."""
+        sandbox = await self.route(session_id)
+        return await sandbox_request(
+            sandbox, self._port, method, path, timeout_s=timeout_s, headers=headers, payload=payload
+        )
+
+    async def request_existing(
+        self,
+        session_id: str,
+        method: str,
+        path: str,
+        *,
+        timeout_s: float,
+        headers: dict[str, str] | None = None,
+        payload: str | None = None,
+    ) -> tuple[int, str] | None:
+        """Like ``request`` but never pins: None when the session has no healthy pod."""
+        sandbox = await self.sandbox_for(session_id)
+        if sandbox is None:
+            return None
+        return await sandbox_request(
+            sandbox, self._port, method, path, timeout_s=timeout_s, headers=headers, payload=payload
+        )
+
     async def report_failure(self, session_id: str | None) -> None:
         """Shared pods are health-checked and healed by the maintenance loop; nothing to do per call."""
         return None

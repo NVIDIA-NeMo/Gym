@@ -20,8 +20,10 @@ from pathlib import Path
 
 import httpx
 import pytest
+from aiohttp import web
 
 from nemo_gym.sandbox import SandboxExecResult
+from nemo_gym.sandbox.providers.base import SandboxEndpoint
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -43,6 +45,7 @@ class _FakeSandbox:
     instances: list["_FakeSandbox"] = []
     fail_start = False
     start_delay_s = 0.0
+    endpoint_url = ""  # http transport tests point this at a local aiohttp server
 
     def __init__(self, provider):
         self.provider = provider
@@ -50,7 +53,12 @@ class _FakeSandbox:
         self.stops = 0
         self.commands: list[tuple[str, float | None]] = []
         self.responses: list = []
+        self.endpoint_calls: list[int] = []
         _FakeSandbox.instances.append(self)
+
+    async def endpoint(self, port):
+        self.endpoint_calls.append(port)
+        return SandboxEndpoint(endpoint=_FakeSandbox.endpoint_url, headers={"X-Proxy-Auth": "token"})
 
     async def start(self, spec):
         self.spec = spec
@@ -95,6 +103,12 @@ class TestConfigValidation:
     def test_pool_size_is_rejected(self):
         with pytest.raises(ValueError, match="one sandbox per session"):
             _sessions(size=8)
+
+    def test_unknown_transport_is_rejected(self):
+        with pytest.raises(ValueError, match="transport"):
+            _sessions(transport="grpc")
+        assert _sessions(transport="http").transport == "http"
+        assert _sessions().transport == "exec"
 
     def test_empty_image_is_a_hard_error(self):
         with pytest.raises(ValueError, match="NS_SANDBOX_IMAGE"):
@@ -290,6 +304,112 @@ class TestRouting:
             await sessions.aclose()
             with pytest.raises(httpx.TimeoutException, match="closed"):
                 await sessions.route("ipy-1")
+
+        asyncio.run(main())
+
+
+class TestRequests:
+    def test_exec_transport_request_and_request_existing(self):
+        sessions = _sessions()
+
+        async def main():
+            current_session_id.set("rollout-A")
+            assert await sessions.request_existing("ipy-1", "DELETE", "/sessions/ipy-1", timeout_s=1.0) is None
+            status, body = await sessions.request(
+                "ipy-1",
+                "POST",
+                "/execute",
+                headers={"X-Session-ID": "ipy-1"},
+                payload='{"generated_code": "1"}',
+                timeout_s=5.0,
+            )
+            assert (status, body) == (200, "ok")
+            sandbox = _FakeSandbox.instances[0]
+            command = sandbox.commands[-1][0]
+            assert "--request POST" in command and ":6000/execute" in command and "X-Session-ID: ipy-1" in command
+            assert await sessions.request_existing("ipy-1", "DELETE", "/sessions/ipy-1", timeout_s=1.0) == (200, "ok")
+            assert "--request DELETE" in sandbox.commands[-1][0]
+
+        asyncio.run(main())
+
+
+async def _ns_server(responses: list[tuple[int, str]], calls: list):
+    """A local stand-in for the sandbox's NeMo-Skills HTTP server behind the endpoint proxy."""
+
+    async def respond(request: web.Request) -> web.Response:
+        calls.append((request.method, request.path, await request.text(), dict(request.headers)))
+        status, body = responses.pop(0) if responses else (200, "ok")
+        return web.Response(status=status, text=body)
+
+    app = web.Application()
+    app.router.add_route("*", "/{path:.*}", respond)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    return runner, runner.addresses[0][1]
+
+
+class TestHttpTransport:
+    def test_health_and_requests_go_through_the_proxied_endpoint(self):
+        calls: list = []
+
+        async def main():
+            runner, port = await _ns_server([], calls)
+            _FakeSandbox.endpoint_url = f"http://127.0.0.1:{port}"
+            sessions = _sessions(transport="http")
+            try:
+                current_session_id.set("rollout-A")
+                status, body = await sessions.request(
+                    "ipy-1",
+                    "POST",
+                    "/execute",
+                    headers={"X-Session-ID": "ipy-1"},
+                    payload='{"generated_code": "x=1"}',
+                    timeout_s=5.0,
+                )
+                assert (status, body) == (200, "ok")
+                sandbox = _FakeSandbox.instances[0]
+                assert sandbox.endpoint_calls == [6000]
+                assert not sandbox.commands  # nothing went through exec
+                methods = [(m, p) for m, p, _, _ in calls]
+                assert methods == [("GET", "/health"), ("POST", "/execute")]
+                _, _, body_seen, headers = calls[1]
+                assert body_seen == '{"generated_code": "x=1"}'
+                assert headers["X-Session-ID"] == "ipy-1"
+                assert headers["X-Proxy-Auth"] == "token"  # endpoint headers (proxy auth) are forwarded
+                assert await sessions.request_existing("ipy-1", "DELETE", "/sessions/ipy-1", timeout_s=2.0) == (
+                    200,
+                    "ok",
+                )
+                assert calls[-1][:2] == ("DELETE", "/sessions/ipy-1")
+                await sessions.end_session("rollout-A")
+                assert sandbox.stops == 1
+                await sessions.aclose()
+            finally:
+                await runner.cleanup()
+
+        asyncio.run(main())
+
+    def test_http_errors_keep_the_timeout_contract_and_dead_sandboxes_are_replaced(self):
+        calls: list = []
+
+        async def main():
+            runner, port = await _ns_server([], calls)
+            _FakeSandbox.endpoint_url = f"http://127.0.0.1:{port}"
+            sessions = _sessions(transport="http", health_timeout_s=0.5)
+            try:
+                current_session_id.set("rollout-A")
+                sandbox = await sessions.route("ipy-1")
+                # Server gone: connection refused -> httpx.TimeoutException contract.
+                await runner.cleanup()
+                with pytest.raises(httpx.TimeoutException, match="http transport error"):
+                    await sessions.request("ipy-1", "POST", "/execute", timeout_s=2.0)
+                await sessions.report_failure("ipy-1")  # two failed probes -> deleted
+                assert sandbox.stops == 1
+                assert sessions.live_count == 0
+            finally:
+                await sessions.aclose()
 
         asyncio.run(main())
 

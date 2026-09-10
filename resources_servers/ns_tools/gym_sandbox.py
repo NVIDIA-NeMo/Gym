@@ -17,8 +17,9 @@
 The resources server owns the sandbox lifetimes (a shared :class:`sandbox_pool.SandboxPool`
 or one-per-session :class:`session_sandboxes.SessionSandboxes`) and registers this backend
 when selected. Subclassing ``LocalSandbox`` preserves its request and session behavior
-while replacing only the HTTP transport. The owning backend only needs ``route``,
-``sandbox_for``, ``release``, ``report_failure`` and ``port``.
+while replacing only the HTTP transport. The owning backend only needs ``request``,
+``request_existing``, ``release`` and ``report_failure``; how a request reaches the
+sandbox (exec+curl or direct HTTP through the endpoint proxy) is the backend's choice.
 """
 
 import json
@@ -27,14 +28,13 @@ from typing import Any, Dict
 
 import httpx
 from nemo_skills.code_execution import sandbox as ns_sandbox
-from sandbox_pool import sandbox_request
 
 
 LOGGER = logging.getLogger(__name__)
 
 
 class GymSandbox(ns_sandbox.LocalSandbox):
-    """LocalSandbox with service requests routed through the owning backend's sandbox exec API."""
+    """LocalSandbox with service requests routed through the owning backend."""
 
     def __init__(self, pool: Any, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -43,19 +43,12 @@ class GymSandbox(ns_sandbox.LocalSandbox):
     async def _send_request(self, request: Dict[str, Any], timeout: float):
         session_id = request.pop("session_id", None)
         sid = str(session_id) if session_id is not None else None
-        sandbox = await self._pool.route(sid)
         headers = {"Content-Type": "application/json"}
         if sid is not None:
             headers["X-Session-ID"] = sid
         try:
-            status, text = await sandbox_request(
-                sandbox,
-                self._pool.port,
-                "POST",
-                "/execute",
-                headers=headers,
-                payload=json.dumps(request),
-                timeout_s=timeout + 5.0,
+            status, text = await self._pool.request(
+                sid, "POST", "/execute", headers=headers, payload=json.dumps(request), timeout_s=timeout + 5.0
             )
         except httpx.TimeoutException:
             await self._pool.report_failure(sid)
@@ -79,20 +72,12 @@ class GymSandbox(ns_sandbox.LocalSandbox):
         """
         sid = str(session_id)
         try:
-            # Avoid creating a sandbox just to receive a 404.
-            sandbox = await self._pool.sandbox_for(sid)
-            if sandbox is None:
-                return
-            status, _ = await sandbox_request(
-                sandbox,
-                self._pool.port,
-                "DELETE",
-                f"/sessions/{sid}",
-                headers={"X-Session-ID": sid},
-                timeout_s=10.0,
+            # request_existing never creates a sandbox just to receive a 404.
+            result = await self._pool.request_existing(
+                sid, "DELETE", f"/sessions/{sid}", headers={"X-Session-ID": sid}, timeout_s=10.0
             )
-            if status not in (200, 404):
-                LOGGER.warning("delete_session %s returned HTTP %d", sid, status)
+            if result is not None and result[0] not in (200, 404):
+                LOGGER.warning("delete_session %s returned HTTP %d", sid, result[0])
         except httpx.TimeoutException as exc:
             LOGGER.warning("delete_session %s failed (sandbox teardown/TTL will clean up): %s", sid, exc)
         finally:

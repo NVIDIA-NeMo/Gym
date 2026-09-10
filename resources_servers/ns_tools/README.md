@@ -83,6 +83,11 @@ are honoured. `NS_SANDBOX_CREATE_CONCURRENCY` (64) bounds concurrent creates at 
 batch start; `NS_SANDBOX_POOL_SIZE` is rejected in this mode. `NS_SANDBOX_POOL_REF`
 may still name a prewarmed pool to claim (one claim per session).
 
+`NS_SANDBOX_TRANSPORT` selects how tool requests reach the sandbox's NeMo-Skills
+server: `exec` (default; `curl` through the sandbox exec API) or `http` (direct
+requests to the service port through the OpenSandbox endpoint proxy, one round trip
+per call — roughly 3x lower per-call latency than exec).
+
 ## Sample data format
 Each sample requires:
 - `question`: The math question being asked

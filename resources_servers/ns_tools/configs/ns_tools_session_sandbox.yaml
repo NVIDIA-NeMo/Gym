@@ -19,6 +19,10 @@ ns_tools:
           # the image starts a worker per HOST core and a small pod is OOM-killed on boot.
           NUM_WORKERS: "1"
         port: 6000
+        # How tool requests reach the sandbox's NeMo-Skills server: exec (curl through the
+        # sandbox exec API) or http (direct requests to the service port through the
+        # OpenSandbox endpoint proxy — one round trip per call).
+        transport: ${oc.env:NS_SANDBOX_TRANSPORT,exec}
         # Cluster-side backstop only (expireTime): a sandbox normally lives for one rollout.
         ttl_s: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_TTL_S,7200}}
         # Optional: claim from a prewarmed Pool CRD instead of a direct create (still one per session).
