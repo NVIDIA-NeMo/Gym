@@ -15,6 +15,9 @@ ns_tools:
         - /start-with-nginx.sh
         env:
           EXECD_API_GRACE_SHUTDOWN: 50ms
+          # One HTTP worker per pod: the pod hosts exactly one IPython session. Without this
+          # the image starts a worker per HOST core and a small pod is OOM-killed on boot.
+          NUM_WORKERS: "1"
         port: 6000
         # Cluster-side backstop only (expireTime): a sandbox normally lives for one rollout.
         ttl_s: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_TTL_S,7200}}

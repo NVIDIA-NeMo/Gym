@@ -137,7 +137,10 @@ class TestSpec:
         spec = sandbox.spec
         assert spec.image == "img"
         assert spec.entrypoint == ["/start-with-nginx.sh"]
-        assert spec.env == {"NUM_WORKERS": 1}
+        # Explicit env (stringified) plus thread caps derived from the 4-cpu limit.
+        assert spec.env["NUM_WORKERS"] == "1"
+        assert spec.env["OMP_NUM_THREADS"] == "4"
+        assert spec.env["OPENBLAS_NUM_THREADS"] == "4"
         assert spec.metadata == DEFAULT_METADATA
         assert (spec.resources.cpu, spec.resources.memory_mib, spec.resources.disk_gib) == (4, 8192, 10)
         assert spec.provider_options == {"resource_requests": {"cpu": 2, "memory_mib": 4096, "disk_gib": 5}}

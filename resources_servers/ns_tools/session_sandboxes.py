@@ -50,6 +50,7 @@ from sandbox_pool import sandbox_request
 from session_context import current_session_id
 
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
+from nemo_gym.sandbox.utils import cpu_cap_env
 
 
 LOGGER = logging.getLogger(__name__)
@@ -148,9 +149,11 @@ class SessionSandboxes:
         self._pool_fallback = _as_bool(pool_fallback)
         self._port = int(port)
         self._ttl_s = float(ttl_s) if ttl_s else None
-        self._env = dict(env or {})
-        self._entrypoint = list(entrypoint) if entrypoint else None
         self._resources = dict(resources or {})
+        # Thread caps (OMP/BLAS/...) derived from the pod's cpu limit, so numeric libraries
+        # inside a small pod do not spawn a thread per HOST core; explicit env wins.
+        self._env = {**cpu_cap_env(self._resources.get("cpu")), **{k: str(v) for k, v in (env or {}).items()}}
+        self._entrypoint = list(entrypoint) if entrypoint else None
         self._resource_requests = dict(resource_requests or {})
         self._metadata = {**DEFAULT_METADATA, **{str(k): str(v) for k, v in (metadata or {}).items()}}
         self._setup_files = dict(setup_files or {})
