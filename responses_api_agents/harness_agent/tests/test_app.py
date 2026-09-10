@@ -31,9 +31,7 @@ def _config(**kwargs) -> HarnessAgentConfig:
         name="sbx",
         resources_server=ResourcesServerRef(type="resources_servers", name="rs"),
         model_server=ModelServerRef(type="responses_api_models", name="model"),
-        agent_module="responses_api_agents.opencode_agent.app",
-        agent_class="OpenCodeAgent",
-        agent_config_class="OpenCodeAgentConfig",
+        agent="opencode",
         sandbox_provider={"opensandbox": {}},
     )
     base.update(kwargs)
@@ -57,9 +55,7 @@ def test_config_defaults():
 
 def test_runner_config_carries_agent_symbols():
     agent = _make_agent(
-        agent_module="responses_api_agents.opencode_agent.app",
-        agent_class="OpenCodeAgent",
-        agent_config_class="OpenCodeAgentConfig",
+        agent="opencode",
         sandbox_python="/deps/bin/python3",
     )
     script, runner_config, cmd = agent._runner()
@@ -69,6 +65,12 @@ def test_runner_config_carries_agent_symbols():
     assert "runner_config.json" in script
     compile(script, "<agent_runner>", "exec")
     assert cmd == "/deps/bin/python3 /work/runner.py"
+
+
+def test_unknown_agent_is_rejected():
+    agent = _make_agent(agent="unknown")
+    with pytest.raises(ValueError, match="Unknown agent: unknown"):
+        agent._runner()
 
 
 def test_sandbox_model_url_preserves_remote_hostname_and_port():

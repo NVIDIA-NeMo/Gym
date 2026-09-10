@@ -49,6 +49,29 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 LOG = logging.getLogger(__name__)
 
 
+# registry to be removed in pr 2 of stack
+_AGENTS = {
+    "claude_code": ("responses_api_agents.claude_code_agent.app", "ClaudeCodeAgent", "ClaudeCodeAgentConfig"),
+    "cline": ("responses_api_agents.cline_agent.app", "ClineAgent", "ClineAgentConfig"),
+    "codex": ("responses_api_agents.codex_agent.app", "CodexAgent", "CodexAgentConfig"),
+    "hermes": ("responses_api_agents.hermes_agent.app", "HermesAgent", "HermesAgentConfig"),
+    "kilocode": ("responses_api_agents.kilocode_agent.app", "KiloCodeAgent", "KiloCodeAgentConfig"),
+    "nemo_fabric": ("responses_api_agents.nemo_fabric_agent.app", "NeMoFabricAgent", "NeMoFabricAgentConfig"),
+    "openclaw": ("responses_api_agents.openclaw_agent.app", "OpenClawAgent", "OpenClawAgentConfig"),
+    "opencode": ("responses_api_agents.opencode_agent.app", "OpenCodeAgent", "OpenCodeAgentConfig"),
+    "pi": ("responses_api_agents.pi_agent.app", "PiAgent", "PiAgentConfig"),
+    "prime": ("responses_api_agents.prime_agent.app", "PrimeAgent", "PrimeAgentConfig"),
+    "terminus_2": ("responses_api_agents.terminus_2_agent.app", "Terminus2Agent", "Terminus2AgentConfig"),
+}
+
+
+def resolve_agent(name: str) -> tuple[str, str, str]:
+    try:
+        return _AGENTS[name]
+    except KeyError as exc:
+        raise ValueError(f"Unknown agent: {name}") from exc
+
+
 async def stage_and_run_eval(
     provider,
     handle,
@@ -81,10 +104,8 @@ class HarnessAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     concurrency: int = 64
-    agent_module: str
-    agent_class: str
-    agent_config_class: str
-    agent_config: dict[str, Any] = Field(default_factory=dict)
+    agent: str
+    agent_kwargs: dict[str, Any] = Field(default_factory=dict)
 
     sandbox_provider: dict[str, Any]
     sandbox_image: str = "python:3.12-slim"
@@ -121,7 +142,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
 
     def _build_gym_tar(self) -> Path:
         root = Path(__file__).resolve().parent.parent.parent
-        agent_pkg = "/".join((self.config.agent_module or "responses_api_agents").split(".")[:-1])
+        agent_module, _, _ = resolve_agent(self.config.agent)
+        agent_pkg = "/".join(agent_module.split(".")[:-1])
         tar_path = Path(tempfile.gettempdir()) / f"gym_src_{uuid4().hex}.tar.gz"
         subprocess.run(
             [
@@ -168,10 +190,11 @@ class HarnessAgent(SimpleResponsesAPIAgent):
 
     def _runner(self) -> tuple[str, dict, str]:
         script = (Path(__file__).parent / "agent_runner.py").read_text()
+        agent_module, agent_class, agent_config_class = resolve_agent(self.config.agent)
         runner_config = {
-            "agent_module": self.config.agent_module,
-            "agent_class": self.config.agent_class,
-            "agent_config_class": self.config.agent_config_class,
+            "agent_module": agent_module,
+            "agent_class": agent_class,
+            "agent_config_class": agent_config_class,
         }
         return script, runner_config, f"{self.config.sandbox_python} /work/runner.py"
 
@@ -289,7 +312,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         agent_body = body.model_copy(deep=True)
         if getattr(agent_body, "metadata", None):
             agent_body.metadata = {k: v for k, v in agent_body.metadata.items() if k != "sandbox_eval"}
-        agent_config = dict(self.config.agent_config)
+        agent_config = dict(self.config.agent_kwargs)
         if meta.get("workdir"):
             agent_config = agent_config | {"repo_dir": meta["workdir"]}
         model_url = self._sandbox_model_url(request)
