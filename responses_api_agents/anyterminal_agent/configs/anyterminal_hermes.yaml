@@ -6,15 +6,19 @@ anyterminal_hermes:
       description: Terminal Bench run by the Hermes agent inside the task container.
       value: Evaluate terminal-task capabilities on Terminal Bench with any Gym agent.
 
-      agent_server_module: responses_api_agents.hermes_agent.app
-      agent_server_class: HermesAgent
-      agent_config_class: HermesAgentConfig
+      agent_server_module: nemo_gym.agents.hermes
+      agent_server_class: HermesHarness
+      agent_config_class: AgentHarnessConfig
       agent_kwargs:
+        model:
+          model: ${policy_model_name}
+        timeout_seconds: 1800
         max_turns: 90
-        terminal_backend: local
-        terminal_timeout: 180
-        compression_enabled: true
-        compression_threshold: 0.85
+        settings:
+          terminal_backend: local
+          terminal_timeout: 180
+          compression_enabled: true
+          compression_threshold: 0.85
 
       container_formatter: "docker://{docker_image}"
 

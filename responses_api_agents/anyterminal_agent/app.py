@@ -221,42 +221,44 @@ if openclaw_defaults.get("workspace") == ".":
     openclaw_defaults["workspace"] = str(Path.cwd())
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymEasyInputMessage
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.server_utils import ServerClient
 from {agent_module} import {agent_class}, {agent_cfg_class}
-
-_mock_client = ServerClient.model_construct(global_config_dict={{}})
-_mock_client._build_server_base_url = lambda cfg: MODEL_URL
-
-_cfg_sampling = {{k: v for k, v in SAMPLING.items() if k in {agent_cfg_class}.model_fields}}
-
-_model_server = ModelServerRef(name="policy_model", type="responses_api_models") if MODEL_URL else None
-config = {agent_cfg_class}(
-    host="0.0.0.0",
-    port=0,
-    name="{agent_class_lower}",
-    entrypoint="app.py",
-    model_server=_model_server,
-    resources_server=ResourcesServerRef(name="anyterminal", type="resources_servers"),
-    **{{**_cfg_sampling, **AGENT_KWARGS}},
-)
-agent = {agent_class}(config=config, server_client=_mock_client)
-
-if MODEL_URL:
-    _v1 = MODEL_URL if MODEL_URL.endswith("/v1") else MODEL_URL + "/v1"
-    if hasattr(agent, "resolve_model_base_url"):
-        object.__setattr__(agent, "resolve_model_base_url", lambda *args, **kwargs: _v1)
-    if hasattr(agent, "_resolve_model_base_url"):
-        agent._resolve_model_base_url = lambda *args, **kwargs: _v1
-    if hasattr(agent, "_resolve_base_url"):
-        agent._resolve_base_url = lambda *args, **kwargs: MODEL_URL
 
 body = NeMoGymResponseCreateParamsNonStreaming(
     input=[NeMoGymEasyInputMessage(role="user", content=INSTRUCTION)],
     model=MODEL_NAME,
     **SAMPLING,
 )
-response = asyncio.run(agent.responses(request=Request({{"type": "http", "path_params": {{}}}}), body=body))
+if {agent_cfg_class}.__name__ == "AgentHarnessConfig":
+    agent = {agent_class}(config={agent_cfg_class}(**AGENT_KWARGS))
+    base_url = MODEL_URL if not MODEL_URL or MODEL_URL.endswith("/v1") else f"{{MODEL_URL}}/v1"
+    response = asyncio.run(agent.run(body, model_base_url=base_url or None))
+else:
+    from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+    from nemo_gym.server_utils import ServerClient
+
+    client = ServerClient.model_construct(global_config_dict={{}})
+    client._build_server_base_url = lambda cfg: MODEL_URL
+    cfg_sampling = {{k: v for k, v in SAMPLING.items() if k in {agent_cfg_class}.model_fields}}
+    model_server = ModelServerRef(name="policy_model", type="responses_api_models") if MODEL_URL else None
+    config = {agent_cfg_class}(
+        host="0.0.0.0",
+        port=0,
+        name="{agent_class_lower}",
+        entrypoint="app.py",
+        model_server=model_server,
+        resources_server=ResourcesServerRef(name="anyterminal", type="resources_servers"),
+        **{{**cfg_sampling, **AGENT_KWARGS}},
+    )
+    agent = {agent_class}(config=config, server_client=client)
+    if MODEL_URL:
+        v1 = MODEL_URL if MODEL_URL.endswith("/v1") else MODEL_URL + "/v1"
+        if hasattr(agent, "resolve_model_base_url"):
+            object.__setattr__(agent, "resolve_model_base_url", lambda *args, **kwargs: v1)
+        if hasattr(agent, "_resolve_model_base_url"):
+            agent._resolve_model_base_url = lambda *args, **kwargs: v1
+        if hasattr(agent, "_resolve_base_url"):
+            agent._resolve_base_url = lambda *args, **kwargs: MODEL_URL
+    response = asyncio.run(agent.responses(request=Request({{"type": "http", "path_params": {{}}}}), body=body))
 Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
 print(f"agent finished: {{len(response.output)}} output items", flush=True)
 """
@@ -276,8 +278,8 @@ class GymAgentHarnessProcessor(BaseModel):
 
     @property
     def _agent_key(self) -> str:
-        # responses_api_agents.hermes_agent.app -> hermes_agent
-        return self.config.agent_server_module.split(".")[-2]
+        parts = self.config.agent_server_module.split(".")
+        return f"{parts[-1]}_agent" if parts[-2] == "agents" else parts[-2]
 
     def setup(self) -> Path:
         """Install agent deps into a portable prefix (idempotent, hash-keyed)."""

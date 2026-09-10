@@ -58,7 +58,7 @@ Both flavors are the **same agent class — `CVDPAgent`** (`responses_api_agents
 
 | Field                 | Default                                       | Description                                                                                          |
 | --------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `agent_server_module` | `responses_api_agents.claude_code_agent.app`  | Python module of the Gym harness agent booted inside the sandbox                                     |
+| `agent_server_module` | `nemo_gym.agents.claude_code`                 | Python module of the Gym harness agent booted inside the sandbox                                     |
 | `agent_server_class`  | `ClaudeCodeAgent`                             | Harness agent class                                                                                  |
 | `agent_config_class`  | `ClaudeCodeAgentConfig`                       | Harness agent config class                                                                           |
 | `agent_kwargs`        | `{}`                                          | Passed straight into the harness config class; keys must be valid fields on it (Claude: `model`, `anthropic_base_url`, `anthropic_api_key`, `max_turns`) |

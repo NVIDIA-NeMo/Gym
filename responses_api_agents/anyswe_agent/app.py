@@ -144,9 +144,7 @@ def _r2e_resolved(instance: Dict[str, Any], log: str) -> bool:
 class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: Optional[ModelServerRef] = None
 
-    agent_server_module: str = Field(
-        description="Import path to the agent module, e.g. responses_api_agents.hermes_agent.app"
-    )
+    agent_server_module: str = Field(description="Import path to the agent module, e.g. nemo_gym.agents.hermes")
     agent_server_class: str = Field(description="Agent class name, e.g. HermesAgent")
     agent_config_class: str = Field(description="Agent config class name, e.g. HermesAgentConfig")
     agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
@@ -193,7 +191,8 @@ class GymAgentHarnessProcessor(BaseModel):
 
     @property
     def _agent_key(self) -> str:
-        return self.config.agent_server_module.split(".")[-2]
+        parts = self.config.agent_server_module.split(".")
+        return f"{parts[-1]}_agent" if parts[-2] == "agents" else parts[-2]
 
     def setup(self) -> Path:
         deps_dir = Path(__file__).parent / f"anyswe_{self._agent_key}_deps"
