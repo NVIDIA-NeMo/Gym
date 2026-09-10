@@ -83,6 +83,7 @@ class NemoGymLLM(BaseLLM):
         self._ambiguous_routed_expert_keys: set[_RolloutDetailsKey] = set()
 
         self.context_length_exceeded = False
+        self.last_response_id: str | None = None
         self._extra_chat_params = self._build_extra_chat_params(responses_create_params or {})
 
     @retry(
@@ -134,6 +135,9 @@ class NemoGymLLM(BaseLLM):
             raise ContextLengthExceededError(
                 f"Model {self._model_name} context length exceeded (detected fake response id='chtcmpl-123')"
             )
+        response_id = response_dict.get("id")
+        if isinstance(response_id, str) and response_id:
+            self.last_response_id = response_id
 
         choices = response_dict.get("choices", [])
         choice = choices[0] if isinstance(choices, list) and choices else {}
