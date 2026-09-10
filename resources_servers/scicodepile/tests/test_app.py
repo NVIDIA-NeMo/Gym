@@ -357,3 +357,77 @@ class TestCodeExtraction:
     def test_last_block_wins(self):
         out = preprocess_code_completion("```python\nold = 1\n```\n```python\nnew = 2\n```")
         assert out == "new = 2"
+
+
+class TestCompileUnitSeparation:
+    """`setup_code`, `code` and `test` must never share a compile unit.
+
+    Concatenating them let untrusted model output reach the test's own source. Both
+    cases below were reproduced against the whole benchmark before the fix: the
+    decorator payload passed 200/200 tasks, and `from __future__` failed on all 105
+    tasks with non-empty `setup_code`.
+    """
+
+    def test_trailing_decorator_cannot_replace_check(self):
+        # A dangling decorator used to bind to the test's `def check`, swapping the
+        # assertions for a no-op. A solution returning None then "passed".
+        code = "def add(*a, **k):\n    return None\n@(lambda f: (lambda candidate: None))\n"
+        result = run_task(_task(code))
+        assert result["status"] != "pass", "model output replaced the test's check()"
+        assert result["details"].get("phase") == "model", "the fault must be charged to the model"
+
+    def test_trailing_decorator_returning_none_cannot_erase_check(self):
+        # The `@(lambda f: None)` variant previously erased `check` entirely and was
+        # then filed as a harness failure, hiding a model-caused fault.
+        code = "def add(*a, **k):\n    return None\n@(lambda f: None)\n"
+        result = run_task(_task(code))
+        assert result["status"] != "pass"
+        assert result["details"].get("phase") == "model"
+
+    def test_future_import_works_with_setup_code(self):
+        # `from __future__` must be at the top of *its own* unit. Under concatenation
+        # the setup preceded it and every such solution was scored `syntax_error`.
+        code = "from __future__ import annotations\ndef add(a: int, b: int) -> int:\n    return a + b\n"
+        result = run_task(_task(code, setup_code="HELPER = 1\n"))
+        assert result["status"] == "pass", result
+
+    def test_future_import_works_without_setup_code(self):
+        code = "from __future__ import annotations\ndef add(a: int, b: int) -> int:\n    return a + b\n"
+        assert run_task(_task(code))["status"] == "pass"
+
+    def test_test_can_still_reach_the_solution_namespace(self):
+        # The units share a namespace on purpose: many upstream tests inject stubs via
+        # `candidate.__globals__`. Giving the test a copy broke 13 of the 200 tasks.
+        task = _task("def add(a, b):\n    return helper(a, b)\n")
+        task["test"] = (
+            "def check(candidate):\n"
+            "    candidate.__globals__['helper'] = lambda a, b: a + b\n"
+            "    assert candidate(2, 3) == 5\n"
+        )
+        assert run_task(task)["status"] == "pass"
+
+
+class TestPhaseAttribution:
+    """A fault in dataset-owned code must not be charged to the model."""
+
+    def test_setup_code_failure_is_a_harness_fault(self):
+        result = run_task(
+            _task("def add(a, b):\n    return a + b\n", setup_code="raise RuntimeError('dataset bug')\n")
+        )
+        assert result["status"] == "error"
+        assert result["details"]["phase"] == "setup"
+        assert result["details"]["harness_fault"] is True
+
+    def test_test_body_failure_is_a_harness_fault(self):
+        task = _task("def add(a, b):\n    return a + b\n")
+        task["test"] = "raise RuntimeError('broken test')\ndef check(candidate):\n    pass\n"
+        result = run_task(task)
+        assert result["status"] == "error"
+        assert result["details"]["phase"] == "test"
+        assert result["details"]["harness_fault"] is True
+
+    def test_model_failure_is_not_a_harness_fault(self):
+        result = run_task(_task("import definitely_not_a_real_module_xyz\ndef add(a, b):\n    return a + b\n"))
+        assert result["status"] == "error"
+        assert result["details"]["phase"] == "model"
+        assert "harness_fault" not in result["details"]

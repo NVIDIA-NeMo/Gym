@@ -7,10 +7,15 @@ Reads a JSON request on stdin and writes a JSON result on stdout:
     stdin:  {"setup_code", "code", "test", "entry_point", "max_as_limit", "workdir"}
     stdout: {"status": "pass"|"fail"|"entry_point_missing"|"error"|"timeout", "details": {...}}
 
-The task's own ``test`` field defines ``check(candidate)``; the runner executes
-``setup_code + code + test`` in one namespace and then calls ``check`` with the
-function named by ``entry_point``. This mirrors SciCodePile's own harness and was
-validated against all 200 canonical solutions before it was written.
+The task's own ``test`` field defines ``check(candidate)``. ``setup_code``, ``code``
+and ``test`` are compiled and executed as **three separate units sharing one
+namespace**, then ``check`` is called with the function named by ``entry_point``.
+The separation is load-bearing, not stylistic: concatenating them into one unit let
+a trailing decorator in the model's code bind to the test's own ``def check`` and
+replace the assertions with a no-op, so a solution returning ``None`` passed all 200
+tasks. It also pushed ``from __future__`` imports off the top of the file, scoring
+correct solutions as ``syntax_error`` on the 105 tasks with non-empty ``setup_code``.
+Validated against all 200 canonical solutions.
 
 The runner lives in its own process so that model code cannot corrupt the
 resources server, and so a hang is bounded by the parent's timeout. Every task in
@@ -82,41 +87,78 @@ def _working_directory(workdir):
             pass
 
 
+def _phase_error(reason: str, exc: BaseException, phase: str) -> dict:
+    """Build an error result, recording which compile unit raised.
+
+    ``phase`` is ``setup``, ``model`` or ``test``. Only ``model`` is the model's own
+    code; the other two are dataset-owned, and the parent uses ``harness_fault`` to
+    keep them out of an accuracy figure instead of scoring them as wrong answers.
+    """
+    details = {"reason": reason, "type": type(exc).__name__, "message": str(exc)[:500], "phase": phase}
+    if phase != "model":
+        details["harness_fault"] = True
+    return {"status": "error", "details": details}
+
+
 def run_task(req: dict) -> dict:
     setup_code = req.get("setup_code") or ""
     code = req.get("code") or ""
     test = req.get("test") or ""
     entry_point = req.get("entry_point") or ""
 
-    source = ""
-    if setup_code.strip():
-        source += setup_code + "\n"
-    source += code + "\n" + test + "\n"
-
     # `__name__` is deliberately not "__main__": some harvested sources guard
     # side effects behind a __main__ check and must not run them here.
     namespace: dict = {"__name__": "__scicodepile__"}
 
-    try:
-        compiled = compile(source, "<scicodepile_task>", "exec")
-    except SyntaxError as exc:
-        return {"status": "error", "details": {"reason": "syntax_error", "message": str(exc)[:500]}}
-
-    try:
-        exec(compiled, namespace)
-    except BaseException as exc:
-        return {
-            "status": "error",
-            "details": {"reason": "exec_failed", "type": type(exc).__name__, "message": str(exc)[:500]},
-        }
+    # Three separate compile units sharing one namespace, never one concatenated
+    # source. Concatenating lets a trailing decorator in the model's code bind to
+    # the test's own `def check`, replacing the assertions with a no-op — a
+    # solution returning None then passed all 200 tasks. It also pushed
+    # `from __future__` imports off the top of the file, so a correct solution
+    # using them was scored `syntax_error` on every task with setup_code.
+    # Distinct filenames keep tracebacks and line numbers pointing at the right
+    # source instead of an offset into the concatenation.
+    for phase, src, filename in (
+        ("setup", setup_code, "<scicodepile_setup>"),
+        ("model", code, "<scicodepile_solution>"),
+    ):
+        if phase == "setup" and not src.strip():
+            continue
+        try:
+            compiled = compile(src, filename, "exec")
+        except SyntaxError as exc:
+            return _phase_error("syntax_error", exc, phase)
+        try:
+            exec(compiled, namespace)
+        except BaseException as exc:
+            return _phase_error("exec_failed", exc, phase)
 
     candidate = namespace.get(entry_point)
     if candidate is None:
         return {"status": "entry_point_missing", "details": {"entry_point": entry_point}}
 
+    # The test is its own compile unit, but shares the namespace: many tests reach
+    # into the solution's globals (`candidate.__globals__[...] = stub`) or define
+    # helpers the solution calls, and 13 of the 200 tasks fail if the test is given
+    # a copy. Sharing is safe here because a separate unit is already enough — a
+    # dangling decorator cannot bind across a compile boundary — and the test's own
+    # `def check` executes after the model's code, so it rebinds any `check` the
+    # model may have defined.
+    try:
+        compiled_test = compile(test, "<scicodepile_test>", "exec")
+    except SyntaxError as exc:
+        return _phase_error("syntax_error", exc, "test")
+    try:
+        exec(compiled_test, namespace)
+    except BaseException as exc:
+        return _phase_error("exec_failed", exc, "test")
+
     check = namespace.get("check")
-    if check is None:
-        return {"status": "error", "details": {"reason": "test_defines_no_check"}}
+    if check is None or not callable(check):
+        return {
+            "status": "error",
+            "details": {"reason": "test_defines_no_check", "phase": "test", "harness_fault": True},
+        }
 
     try:
         check(candidate)

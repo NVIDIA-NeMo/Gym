@@ -46,6 +46,8 @@ class FailureCode(str, Enum):
     UNPARSEABLE_RUNNER_OUTPUT = "unparseable_runner_output"
     RUNNER_CRASHED = "runner_crashed"
     TEST_DEFINES_NO_CHECK = "test_defines_no_check"
+    SETUP_CODE_FAILED = "setup_code_failed"
+    TEST_CODE_FAILED = "test_code_failed"
 
 
 # `details.reason` values that mean the harness or the task's own test is at fault.
@@ -152,7 +154,16 @@ class SciCodePileResourcesServer(SimpleResourcesServer):
     def _failure_reason(status: Optional[str], details: Optional[Dict[str, Any]]) -> Optional[FailureCode]:
         if status == "timeout":
             return FailureCode.TIMEOUT
-        return _HARNESS_FAILURE_REASONS.get((details or {}).get("reason"))
+        details = details or {}
+        # The runner marks faults raised by dataset-owned setup_code or by the test's
+        # own module body. Those compile units are not the model's code, so a failure
+        # in them must not be charged to the model as a wrong answer.
+        if details.get("harness_fault"):
+            phase = details.get("phase")
+            if phase == "test":
+                return FailureCode.TEST_CODE_FAILED
+            return FailureCode.SETUP_CODE_FAILED
+        return _HARNESS_FAILURE_REASONS.get(details.get("reason"))
 
     async def _run_task(self, setup_code: str, code: str, test: str, entry_point: str) -> Dict[str, Any]:
         # The scratch CWD is created and removed here, not in the runner: a task that
