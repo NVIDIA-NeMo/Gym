@@ -487,6 +487,7 @@ class SessionSandboxes:
                 ttl_s=self._ttl_s or 7200.0,
                 ready_timeout_s=self._ready_timeout_s,
                 provider_options={"extensions": {"poolRef": self._pool_ref}},
+                ports=(self._port,),  # declared so AsyncSandbox.endpoint(port) can resolve it (http transport)
             )
         return SandboxSpec(
             image=self._image,
@@ -497,6 +498,7 @@ class SessionSandboxes:
             provider_options={"resource_requests": dict(self._resource_requests)} if self._resource_requests else {},
             ttl_s=self._ttl_s or 7200.0,
             ready_timeout_s=self._ready_timeout_s,
+            ports=(self._port,),  # declared so AsyncSandbox.endpoint(port) can resolve it (http transport)
         )
 
     async def _acquire_sandbox(self) -> tuple[AsyncSandbox, bool]:

@@ -160,6 +160,7 @@ class TestSpec:
         assert spec.provider_options == {"resource_requests": {"cpu": 2, "memory_mib": 4096, "disk_gib": 5}}
         assert spec.ttl_s == 7200
         assert spec.ready_timeout_s == 120
+        assert spec.ports == (6000,)  # AsyncSandbox.endpoint() only resolves declared ports
 
     def test_pool_claim_then_fallback_to_direct(self):
         sessions = _sessions(pool_ref="warm")
