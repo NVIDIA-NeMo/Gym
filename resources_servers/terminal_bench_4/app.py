@@ -544,8 +544,11 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         tarball_bytes = 0
         artifact_collection_time_s = 0.0
         agent_stopped = False
-        temp_dir = tempfile.TemporaryDirectory(prefix="nemo-gym-tb4-artifacts-")
+        temp_dir: Optional[tempfile.TemporaryDirectory] = None
         try:
+            # Inside the try on purpose: a full node-local disk raised here once and, with the
+            # directory created before the try, the agent sandbox leaked.
+            temp_dir = tempfile.TemporaryDirectory(prefix="nemo-gym-tb4-artifacts-")
             if self.config.is_verifying_golden_patch:
                 golden_exit_code, golden_output = await self._run_golden_solution(agent_sandbox, task)
             hook_results = await self._run_collect_hooks(agent_sandbox, task)
@@ -555,7 +558,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             )
             artifact_collection_time_s = monotonic() - collect_started_at
         except Exception:
-            temp_dir.cleanup()
+            if temp_dir is not None:
+                temp_dir.cleanup()
             await self._stop_sandbox(agent_sandbox, role="agent", task_name=task.task_name)
             raise
         if self.config.stop_agent_sandbox_before_verify:
@@ -580,7 +584,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             outcome.error_type = type(error).__name__
             raise
         finally:
-            temp_dir.cleanup()
+            if temp_dir is not None:
+                temp_dir.cleanup()
             if not self.config.stop_agent_sandbox_before_verify:
                 agent_stopped = await self._stop_sandbox(agent_sandbox, role="agent", task_name=task.task_name)
             verifier_wall_time_s = monotonic() - verifier_started_at

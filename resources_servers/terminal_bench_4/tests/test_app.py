@@ -639,3 +639,25 @@ class TestApp:
         solution_run = next(c for c in agent.calls if c["command"].startswith(": ng-tb4-run-solution;"))
         assert solution_run["timeout_s"] == 3600.0 and "bash /solution/solve.sh" in solution_run["command"]
         assert verifier.files["/app/out.step"] == b"STEP" and agent.stopped and verifier.stopped
+
+
+class TestLeakOnLocalFailure:
+    @pytest.mark.asyncio
+    async def test_temp_dir_failure_stops_agent_sandbox_and_raises(self, tmp_path: Path, monkeypatch) -> None:
+        """Observed live 2026-09-09: node-local /tmp filled up, TemporaryDirectory raised OSError(28) and the agent
+        sandbox leaked because the directory was created outside the try block."""
+        import tempfile as _tempfile
+
+        task_dir = make_task_dir(tmp_path)
+        server = make_server(tmp_path)
+        agent = FakeSandbox(name="agent", files={"/app/out.step": b"x"})
+        verifier = verifier_with_tests()
+        created = wire_sandboxes(server, agent, verifier)
+
+        def boom(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(_tempfile, "TemporaryDirectory", boom)
+        with pytest.raises(OSError, match="No space left"):
+            await seed_and_verify(server, task_dir)
+        assert agent.stopped and [c["role"] for c in created] == ["agent"]
