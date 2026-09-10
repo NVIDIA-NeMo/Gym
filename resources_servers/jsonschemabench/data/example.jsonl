@@ -1,0 +1,1 @@
+{"responses_create_params":{"input":[{"role":"user","content":"Return a JSON object with an optional string field named author."}]},"schema_str":"{\"type\":\"object\",\"properties\":{\"author\":{\"type\":\"string\"}}}","schema_type":"json","problem_type":"easy","source_record_id":"example-optional-author"}
