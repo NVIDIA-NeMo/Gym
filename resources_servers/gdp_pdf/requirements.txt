@@ -1,5 +1,4 @@
 -e nemo-gym[dev] @ ../../
-pymupdf
+liteparse
 datasets
 huggingface_hub
-orjson

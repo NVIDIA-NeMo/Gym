@@ -11,11 +11,13 @@ gdp_pdf_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      media_base_dir: resources_servers/gdp_pdf/data
+      documents_base_dir: resources_servers/gdp_pdf/data
       dpi: 150
       min_dpi: 72
       max_images: null  # compositing only kicks in reactively, on an actual server-reported image-count limit
       max_pages: null
       include_text: true
       include_images: true
+      image_format: png  # lossless; set jpeg to cut the base64 payload ~28% at the cost of artifacts
+      jpeg_quality: 90
       strip_images_from_output: true

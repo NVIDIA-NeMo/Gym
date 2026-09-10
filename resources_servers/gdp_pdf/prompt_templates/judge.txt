@@ -1,5 +1,6 @@
 Read this json object:
 {{
+  task_prompt: {task_prompt},
   response: {response},
   criteria: {criterion},
 }}

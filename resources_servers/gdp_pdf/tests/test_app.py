@@ -177,7 +177,7 @@ def _verify_request(
         "task_id": "task-1",
         "domain": domain,
         "prompt": PROMPT,
-        "pdf_relpath": "media/pdfs/x.pdf",
+        "document_manifest": "documents/task-1/manifest.json",
         "criteria": [_criterion(1, "States the cap is $5M.")] if criteria is None else criteria,
     }
     return GdpPdfVerifyRequest(
@@ -264,6 +264,7 @@ class TestBuildGymRow:
                 "domain": "Legal",
                 "rubric - 1. criterion": "Says $5M.",
             },
+            "documents/t1/manifest.json",
             "media/pdfs/abc.pdf",
         )
         content = row["responses_create_params"]["input"][0]["content"]
@@ -272,7 +273,8 @@ class TestBuildGymRow:
         meta = row["verifier_metadata"]
         assert meta["task_id"] == "t1"
         assert meta["domain"] == "Legal"
-        assert meta["pdf_relpath"] == "media/pdfs/abc.pdf"
+        assert meta["document_manifest"] == "documents/t1/manifest.json"
+        assert meta["source_pdf"] == "media/pdfs/abc.pdf"
         # The prompt is duplicated into metadata so verify() does not depend on
         # the content-block layout the agent rewrites at rollout time.
         assert meta["prompt"] == PROMPT
@@ -394,9 +396,12 @@ class TestVerify:
         assert result.reward == 0.0
 
     @pytest.mark.asyncio
-    async def test_judge_prompt_omits_task_prompt_and_criterion_metadata(self, server: GdpPdfResourcesServer) -> None:
-        """Matching upstream (surge-ai/gdp-pdf scorer.py): the judge sees only the
-        response and the criterion text -- never the task prompt, type, or severity."""
+    async def test_judge_prompt_includes_task_prompt_but_omits_criterion_metadata(
+        self, server: GdpPdfResourcesServer
+    ) -> None:
+        """The judge sees the response, the task prompt, and the criterion text -- a deliberate
+        deviation from upstream (surge-ai/gdp-pdf scorer.py), which withholds the task prompt --
+        but never the criterion's type/severity/etc. metadata."""
         mock = _mock_judge(server, _scored_content("1"))
         body = _verify_request("The cap is $5M.", criteria=[_criterion(1, "States the cap is $5M.")])
 
@@ -406,7 +411,7 @@ class TestVerify:
         judge_text = sent.messages[0]["content"]
         assert "States the cap is $5M." in judge_text
         assert "The cap is $5M." in judge_text
-        assert PROMPT not in judge_text
+        assert PROMPT in judge_text
         assert "Primary Intent" not in judge_text
         assert "Certain dealbreaker" not in judge_text
         assert mock.await_args.kwargs["server_name"] == "judge"
@@ -588,25 +593,55 @@ class TestMetrics:
 
 
 # ---------------------------------------------------------------------------
-# PDF embedding (exercised against the committed example PDFs)
+# Document embedding (exercised against the committed example manifests)
 # ---------------------------------------------------------------------------
 
 
 EXAMPLE_JSONL = DATA_DIR / "example.jsonl"
-_example_pdfs = sorted((DATA_DIR / "test_media" / "pdfs").glob("*.pdf")) if DATA_DIR.exists() else []
+_example_manifests = (
+    sorted((DATA_DIR / "test_media" / "documents").glob("*/manifest.json")) if DATA_DIR.exists() else []
+)
 
-requires_example_pdf = pytest.mark.skipif(not _example_pdfs, reason="example PDFs not present")
+requires_example_manifest = pytest.mark.skipif(not _example_manifests, reason="example manifests not present")
 
 
-def _row(pdf_relpath: str) -> dict:
+def _row(document_manifest: str, source_pdf: str = "media/pdfs/x.pdf") -> dict:
     return {
         "responses_create_params": {"input": [{"role": "user", "content": [{"type": "input_text", "text": PROMPT}]}]},
-        "verifier_metadata": {"task_id": "t", "pdf_relpath": pdf_relpath, "criteria": [_criterion(1, "a")]},
+        "verifier_metadata": {
+            "task_id": "t",
+            "document_manifest": document_manifest,
+            "source_pdf": source_pdf,
+            "criteria": [_criterion(1, "a")],
+        },
     }
 
 
+def _write_stub_manifest(document_dir: Path, *, page_count: int = 1, page_size: int = 200) -> Path:
+    """A minimal manifest + page PNGs, standing in for a real prepare_document() output."""
+    pages_dir = document_dir / "pages"
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    pages = []
+    for n in range(1, page_count + 1):
+        image_name = f"page_{n:04d}.png"
+        (pages_dir / image_name).write_bytes(b"P" * page_size)
+        pages.append(
+            {"page_number": n, "text": f"page {n} text", "image": f"pages/{image_name}", "width": 10, "height": 10}
+        )
+    manifest = {
+        "source_pdf": "stub.pdf",
+        "source_sha256": "stub-sha",
+        "source_dpi": 150,
+        "page_count": page_count,
+        "pages": pages,
+    }
+    manifest_path = document_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    return manifest_path
+
+
 class TestPrepare:
-    """prepare() with HuggingFace stubbed out -- no network."""
+    """prepare() with HuggingFace and LiteParse rendering stubbed out -- no network, no OCR."""
 
     @staticmethod
     def _source_row(task_id: str, pdf_name: str, criterion: Optional[str] = "Says the thing.") -> dict:
@@ -621,7 +656,7 @@ class TestPrepare:
             row["rubric - 1. criterion"] = criterion
         return row
 
-    def _patch_hf(self, monkeypatch, records: list, downloaded: list) -> None:
+    def _patch_hf(self, monkeypatch, records: list, downloaded: list, rendered: Optional[list] = None) -> None:
         import benchmarks.gdp_pdf.prepare as prepare_module
 
         fake_datasets = MagicMock()
@@ -633,27 +668,44 @@ class TestPrepare:
         monkeypatch.setitem(__import__("sys").modules, "huggingface_hub", fake_hub)
         monkeypatch.setattr(prepare_module, "_resolve_hf_token", lambda: "tok")
 
+        def _fake_prepare_document(pdf_path: Path, document_dir: Path, **kwargs: Any) -> Path:
+            if rendered is not None:
+                rendered.append(pdf_path.name)
+            return _write_stub_manifest(document_dir)
+
+        monkeypatch.setattr(prepare_module, "prepare_document", _fake_prepare_document)
+
     def test_writes_rows_and_downloads_each_pdf(self, monkeypatch, tmp_path: Path) -> None:
         import json
 
         downloaded: list = []
-        self._patch_hf(monkeypatch, [self._source_row("t1", "a.pdf"), self._source_row("t2", "b.pdf")], downloaded)
+        rendered: list = []
+        self._patch_hf(
+            monkeypatch, [self._source_row("t1", "a.pdf"), self._source_row("t2", "b.pdf")], downloaded, rendered
+        )
 
         out = tmp_path / "out.jsonl"
-        rows = _prepare_rows(output_path=out, media_dir=tmp_path / "media")
+        rows = _prepare_rows(output_path=out, media_dir=tmp_path / "media", documents_dir=tmp_path / "documents")
 
         assert len(rows) == 2
         assert downloaded == ["pdfs/a.pdf", "pdfs/b.pdf"]
+        assert rendered == ["a.pdf", "b.pdf"]
         written = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
         assert [r["verifier_metadata"]["task_id"] for r in written] == ["t1", "t2"]
-        assert written[0]["verifier_metadata"]["pdf_relpath"] == "media/pdfs/a.pdf"
+        assert written[0]["verifier_metadata"]["document_manifest"] == "documents/t1/manifest.json"
+        assert written[0]["verifier_metadata"]["source_pdf"] == "media/pdfs/a.pdf"
 
     def test_limit_truncates_the_task_list(self, monkeypatch, tmp_path: Path) -> None:
         downloaded: list = []
         records = [self._source_row(f"t{i}", f"{i}.pdf") for i in range(5)]
         self._patch_hf(monkeypatch, records, downloaded)
 
-        rows = _prepare_rows(output_path=tmp_path / "out.jsonl", media_dir=tmp_path / "media", limit=2)
+        rows = _prepare_rows(
+            output_path=tmp_path / "out.jsonl",
+            media_dir=tmp_path / "media",
+            documents_dir=tmp_path / "documents",
+            limit=2,
+        )
 
         assert len(rows) == 2
 
@@ -666,7 +718,9 @@ class TestPrepare:
         ]
         self._patch_hf(monkeypatch, records, downloaded)
 
-        rows = _prepare_rows(output_path=tmp_path / "out.jsonl", media_dir=tmp_path / "media")
+        rows = _prepare_rows(
+            output_path=tmp_path / "out.jsonl", media_dir=tmp_path / "media", documents_dir=tmp_path / "documents"
+        )
 
         assert [r["verifier_metadata"]["task_id"] for r in rows] == ["good"]
         assert downloaded == ["pdfs/a.pdf"]
@@ -679,7 +733,12 @@ class TestPrepare:
         resolved = MagicMock(return_value="from-config")
         monkeypatch.setattr(prepare_module, "_resolve_hf_token", resolved)
 
-        _prepare_rows(output_path=tmp_path / "o.jsonl", media_dir=tmp_path / "m", hf_token="explicit")
+        _prepare_rows(
+            output_path=tmp_path / "o.jsonl",
+            media_dir=tmp_path / "m",
+            documents_dir=tmp_path / "documents",
+            hf_token="explicit",
+        )
 
         resolved.assert_not_called()
 
@@ -694,53 +753,64 @@ class TestPrepare:
 
 
 class TestFetchExampleMedia:
-    """The committed example.jsonl must be usable from a fresh clone, where no
-    PDF is committed. These run without network."""
+    """The committed example.jsonl must be usable from a fresh clone, where neither the PDF nor
+    the rendered manifest is committed. These run without network or real LiteParse OCR."""
 
     @staticmethod
     def _write_example_jsonl(tmp_path: Path, names: list) -> None:
         with open(tmp_path / "example.jsonl", "w") as f:
             for n in names:
-                f.write(json.dumps(_row(f"test_media/pdfs/{n}")) + "\n")
+                task_id = n.removesuffix(".pdf")
+                f.write(
+                    json.dumps(_row(f"test_media/documents/{task_id}/manifest.json", f"media/pdfs/{n}")) + "\n"
+                )
 
-    def _patch_hub(self, monkeypatch, calls: list, tmp_path: Path):
-        fake = MagicMock()
+    def _patch(self, monkeypatch, downloaded: list, rendered: list):
+        import benchmarks.gdp_pdf.prepare as prepare_module
+
+        fake_hub = MagicMock()
 
         def _dl(**kw):
-            calls.append(kw["filename"])
+            downloaded.append(kw["filename"])
             dest = Path(kw["local_dir"]) / kw["filename"]
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(b"%PDF-1.4 stub")
             return str(dest)
 
-        fake.hf_hub_download = MagicMock(side_effect=_dl)
-        monkeypatch.setitem(__import__("sys").modules, "huggingface_hub", fake)
+        fake_hub.hf_hub_download = MagicMock(side_effect=_dl)
+        monkeypatch.setitem(__import__("sys").modules, "huggingface_hub", fake_hub)
 
-    def test_downloads_only_the_referenced_pdfs(self, monkeypatch, tmp_path: Path) -> None:
+        def _fake_prepare_document(pdf_path: Path, document_dir: Path, **kwargs: Any) -> Path:
+            rendered.append(pdf_path.name)
+            return _write_stub_manifest(document_dir)
+
+        monkeypatch.setattr(prepare_module, "prepare_document", _fake_prepare_document)
+
+    def test_downloads_and_renders_only_the_referenced_documents(self, monkeypatch, tmp_path: Path) -> None:
         self._write_example_jsonl(tmp_path, ["a.pdf", "b.pdf"])
-        calls: list = []
-        self._patch_hub(monkeypatch, calls, tmp_path)
+        downloaded: list = []
+        rendered: list = []
+        self._patch(monkeypatch, downloaded, rendered)
 
         n = fetch_example_media(tmp_path, hf_token="tok")
 
-        # Maps test_media/pdfs/<name> back to the upstream pdfs/<name>.
-        assert calls == ["pdfs/a.pdf", "pdfs/b.pdf"]
+        assert downloaded == ["pdfs/a.pdf", "pdfs/b.pdf"]
+        assert rendered == ["a.pdf", "b.pdf"]
         assert n == 2
-        assert (tmp_path / "test_media/pdfs/a.pdf").is_file()
+        assert (tmp_path / "test_media/documents/a/manifest.json").is_file()
 
-    def test_skips_files_already_present(self, monkeypatch, tmp_path: Path) -> None:
+    def test_skips_documents_already_rendered(self, monkeypatch, tmp_path: Path) -> None:
         self._write_example_jsonl(tmp_path, ["a.pdf", "b.pdf"])
-        present = tmp_path / "test_media/pdfs/a.pdf"
-        present.parent.mkdir(parents=True)
-        present.write_bytes(b"already here")
-        calls: list = []
-        self._patch_hub(monkeypatch, calls, tmp_path)
+        _write_stub_manifest(tmp_path / "test_media/documents/a")
+        downloaded: list = []
+        rendered: list = []
+        self._patch(monkeypatch, downloaded, rendered)
 
         n = fetch_example_media(tmp_path)
 
-        assert calls == ["pdfs/b.pdf"]
+        assert downloaded == ["pdfs/b.pdf"]
+        assert rendered == ["b.pdf"]
         assert n == 1
-        assert present.read_bytes() == b"already here"
 
     def test_missing_example_jsonl_is_actionable(self, tmp_path: Path) -> None:
         with raises(FileNotFoundError, match="prepare.py"):
@@ -748,46 +818,43 @@ class TestFetchExampleMedia:
 
 
 class TestWriteExample:
-    def test_picks_smallest_pdfs_and_rewrites_paths(self, tmp_path: Path) -> None:
+    def test_picks_smallest_documents_and_rewrites_paths(self, tmp_path: Path) -> None:
         import json
 
-        media = tmp_path / "media" / "pdfs"
-        media.mkdir(parents=True)
         # Descending size, so "smallest first" is observable in the output order.
         for i, size in enumerate([5000, 4000, 3000, 2000, 1000, 500]):
-            (media / f"p{i}.pdf").write_bytes(b"x" * size)
-        rows = [_row(f"media/pdfs/p{i}.pdf") for i in range(6)]
+            _write_stub_manifest(tmp_path / "documents" / f"t{i}", page_size=size)
+        rows = [_row(f"documents/t{i}/manifest.json") for i in range(6)]
 
         write_example(rows, tmp_path)
 
         written = [json.loads(line) for line in (tmp_path / "example.jsonl").read_text().splitlines() if line.strip()]
         assert len(written) == 5
-        assert [r["verifier_metadata"]["pdf_relpath"] for r in written] == [
-            "test_media/pdfs/p5.pdf",
-            "test_media/pdfs/p4.pdf",
-            "test_media/pdfs/p3.pdf",
-            "test_media/pdfs/p2.pdf",
-            "test_media/pdfs/p1.pdf",
+        assert [r["verifier_metadata"]["document_manifest"] for r in written] == [
+            "test_media/documents/t5/manifest.json",
+            "test_media/documents/t4/manifest.json",
+            "test_media/documents/t3/manifest.json",
+            "test_media/documents/t2/manifest.json",
+            "test_media/documents/t1/manifest.json",
         ]
-        # PDFs are copied next to the JSONL so example.jsonl is self-contained.
+        # Document caches are copied next to the JSONL so example.jsonl is self-contained.
         for row in written:
-            assert (tmp_path / row["verifier_metadata"]["pdf_relpath"]).is_file()
+            assert (tmp_path / row["verifier_metadata"]["document_manifest"]).is_file()
 
-    def test_rows_without_a_local_pdf_are_dropped(self, tmp_path: Path) -> None:
-        media = tmp_path / "media" / "pdfs"
-        media.mkdir(parents=True)
-        (media / "present.pdf").write_bytes(b"x" * 100)
+    def test_rows_without_a_local_manifest_are_dropped(self, tmp_path: Path) -> None:
+        _write_stub_manifest(tmp_path / "documents" / "present")
 
-        write_example([_row("media/pdfs/present.pdf"), _row("media/pdfs/absent.pdf")], tmp_path)
+        write_example(
+            [_row("documents/present/manifest.json"), _row("documents/absent/manifest.json")],
+            tmp_path,
+        )
 
         assert len((tmp_path / "example.jsonl").read_text().strip().splitlines()) == 1
 
-    def test_large_example_pdf_is_flagged(self, tmp_path: Path, capsys) -> None:
-        media = tmp_path / "media" / "pdfs"
-        media.mkdir(parents=True)
-        (media / "big.pdf").write_bytes(b"x" * (EXAMPLE_PDF_SIZE_WARN_BYTES + 1))
+    def test_large_example_document_is_flagged(self, tmp_path: Path, capsys) -> None:
+        _write_stub_manifest(tmp_path / "documents" / "big", page_size=EXAMPLE_PDF_SIZE_WARN_BYTES + 1)
 
-        write_example([_row("media/pdfs/big.pdf")], tmp_path)
+        write_example([_row("documents/big/manifest.json")], tmp_path)
 
         assert "large for git" in capsys.readouterr().out
 
@@ -799,19 +866,19 @@ class TestExampleData:
         return [json.loads(line) for line in EXAMPLE_JSONL.read_text().splitlines() if line.strip()]
 
     def test_example_rows_are_well_formed(self) -> None:
-        # Must hold on a fresh clone, where no PDF has been downloaded yet.
+        # Must hold on a fresh clone, where nothing has been downloaded or rendered yet.
         rows = self._rows()
         assert rows
         for row in rows:
             meta = row["verifier_metadata"]
             assert meta["criteria"], "every example row needs a rubric"
             assert meta["prompt"]
-            # PDFs are fetched on demand, so only the reference lives in git.
-            assert meta["pdf_relpath"].startswith("test_media/")
+            # Documents are rendered on demand, so only the reference lives in git.
+            assert meta["document_manifest"].startswith("test_media/")
         # Media stays out of the JSONL; the agent embeds it at rollout time.
         assert "base64" not in EXAMPLE_JSONL.read_text()
 
-    @requires_example_pdf
-    def test_referenced_pdfs_resolve_once_fetched(self) -> None:
+    @requires_example_manifest
+    def test_referenced_manifests_resolve_once_fetched(self) -> None:
         for row in self._rows():
-            assert (DATA_DIR / row["verifier_metadata"]["pdf_relpath"]).is_file()
+            assert (DATA_DIR / row["verifier_metadata"]["document_manifest"]).is_file()

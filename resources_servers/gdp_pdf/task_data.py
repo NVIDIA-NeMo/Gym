@@ -6,15 +6,19 @@ All fields currently live inside ``verifier_metadata`` (``GdpPdfVerifyRequest`` 
 it as a loosely-typed dict), so every field below is annotated ``legacy_location:
 verifier_metadata``. ``criteria`` is what ``extract_criteria`` in
 ``benchmarks/gdp_pdf/prepare.py`` derives from the upstream 30-slot wide rubric; ``verify()``
-judges each entry independently. ``pdf_relpath`` is resolved and rendered into page images at
-rollout time by ``gdp_pdf_agent`` (``responses_api_agents/gdp_pdf_agent/app.py``) -- it is not read
-by ``verify()`` itself.
+judges each entry independently. ``document_manifest`` points at a manifest.json (page text +
+pre-rendered 150 DPI page images) produced once at prepare time by
+``benchmarks/gdp_pdf/prepare.py``'s ``prepare_document()``; ``gdp_pdf_agent``
+(``responses_api_agents/gdp_pdf_agent/app.py``) reads it at rollout time -- it is not read by
+``verify()`` itself.
 
-Per Surge AI's own scorer (surge-ai/gdp-pdf, ``src/gdp_pdf/scorer.py``), the judge is shown only
-the model's response and one criterion's ``criterion`` text -- never ``prompt``, ``type``,
-``severity``, ``implicitness``, or ``subjectiveness``. Those fields are kept as task metadata
-(prompt is real data the policy model needs; the rubric metadata fields are useful for provenance
-and analysis) but none of them reach the judge prompt.
+The judge is shown the model's response, the task ``prompt``, and one criterion's ``criterion``
+text -- never ``type``, ``severity``, ``implicitness``, or ``subjectiveness``. Including the task
+prompt is a deliberate deviation from Surge AI's own scorer (surge-ai/gdp-pdf,
+``src/gdp_pdf/scorer.py``), which withholds it entirely; it gives the judge context for criteria
+that are only meaningful relative to what was actually asked. The rubric metadata fields (type,
+severity, implicitness, subjectiveness) are kept for provenance and analysis but never reach the
+judge prompt.
 """
 
 from typing import List, Optional
@@ -79,13 +83,21 @@ class TaskData(BaseModel):
         json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"},
     )
     prompt: str = Field(
-        description="The task prompt shown to the policy model. Not read by verify(): the judge grades "
-        "the response against each criterion alone, matching upstream's scorer.",
+        description="The task prompt shown to the policy model. Also read by verify() and included "
+        "in the judge prompt, giving the judge context for criteria only meaningful relative to "
+        "what was actually asked -- a deliberate deviation from upstream's scorer, which withholds it.",
+        json_schema_extra={"consumed_by": ["prompt", "verify"], "legacy_location": "verifier_metadata"},
+    )
+    document_manifest: str = Field(
+        description="Path to the document's prepare-time manifest.json (page text + pre-rendered "
+        "150 DPI page images), relative to the agent's documents_base_dir.",
         json_schema_extra={"consumed_by": ["prompt"], "legacy_location": "verifier_metadata"},
     )
-    pdf_relpath: str = Field(
-        description="Path to the source PDF relative to the agent's media_base_dir.",
-        json_schema_extra={"consumed_by": ["prompt"], "legacy_location": "verifier_metadata"},
+    source_pdf: Optional[str] = Field(
+        default=None,
+        description="Path to the original source PDF the manifest was rendered from, relative to "
+        "documents_base_dir. Provenance only -- not read by the agent or verify().",
+        json_schema_extra={"consumed_by": ["provenance"], "legacy_location": "verifier_metadata"},
     )
     criteria: List[Criterion] = Field(
         description="Atomic rubric criteria for this task (3-30), judged independently. An empty "

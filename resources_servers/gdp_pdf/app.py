@@ -21,8 +21,10 @@ LLM judge, mirroring Surge AI's own scorer (surge-ai/gdp-pdf,
 ``src/gdp_pdf/scorer.py``):
 
 - One judge call per criterion, Chat Completions with a strict JSON schema
-  (``score`` in ``{"0","1"}`` + ``rationale``). The judge sees only the
-  response and that one criterion -- never the task prompt or the PDF.
+  (``score`` in ``{"0","1"}`` + ``rationale``). The judge sees the response,
+  the task prompt, and that one criterion -- never the PDF or the criterion's
+  type/severity/etc. metadata. Including the task prompt is a deliberate
+  deviation from upstream (Surge's own scorer withholds it entirely).
 - Output is parsed strictly (markdown-fence stripped, JSON-schema validated,
   score coerced to Decimal). A criterion passes iff
   ``score.round(4) >= 1.0``.
@@ -258,8 +260,12 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
             ]
             return self._build_response(body, evaluations)
 
+        task_prompt = str(meta.get("prompt", ""))
         evaluations = await asyncio.gather(
-            *(self._judge_criterion(criterion=c, generated_answer=generated) for c in criteria)
+            *(
+                self._judge_criterion(criterion=c, generated_answer=generated, task_prompt=task_prompt)
+                for c in criteria
+            )
         )
         return self._build_response(body, list(evaluations))
 
@@ -276,16 +282,21 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
             criterion_evaluations=evaluations,
         )
 
-    async def _judge_criterion(self, *, criterion: dict, generated_answer: str) -> CriterionEvaluation:
+    async def _judge_criterion(
+        self, *, criterion: dict, generated_answer: str, task_prompt: str
+    ) -> CriterionEvaluation:
         """Judge one criterion, retrying parse failures up to judge_max_attempts.
 
-        The judge sees only ``generated_answer`` and the criterion text --
-        never the task prompt, PDF, or the criterion's type/severity/etc.
-        metadata -- matching upstream exactly.
+        The judge sees ``generated_answer``, the task prompt, and the criterion text -- never the
+        PDF or the criterion's type/severity/etc. metadata. Including the task prompt is a
+        deliberate deviation from upstream (Surge's own scorer withholds it); it gives the judge
+        context for criteria that are only meaningful relative to what was actually asked.
         """
         cfg = self.config
         criterion_text = str(criterion.get("criterion", ""))
-        user_prompt = self._judge_prompt.format(response=generated_answer, criterion=criterion_text)
+        user_prompt = self._judge_prompt.format(
+            response=generated_answer, criterion=criterion_text, task_prompt=task_prompt
+        )
 
         params = cfg.judge_chat_create_params.model_copy(deep=True)
         params.messages = [{"role": "user", "content": user_prompt}]

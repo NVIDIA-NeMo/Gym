@@ -13,36 +13,40 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-GDP.pdf agent — extends simple_agent to embed the source PDF at rollout time.
+GDP.pdf agent — extends simple_agent to embed a pre-rendered document at rollout time.
 
-GDP.pdf rows reference their PDF by relative path (``verifier_metadata.pdf_relpath``)
-rather than inlining it: the corpus averages ~46 pages per task, so base64 in the
-JSONL would make the dataset unusable. At ``run()`` time this agent extracts the
-document text and renders page images, matching the published setup (parsed text,
-with page images for models that accept vision input).
+GDP.pdf rows reference their document by a manifest path (``verifier_metadata.document_manifest``)
+rather than inlining anything: the corpus averages ~46 pages per task, so base64 in the JSONL
+would make the dataset unusable. The manifest (page text + one 150 DPI PNG screenshot per page) is
+produced **once**, at prepare time (``benchmarks/gdp_pdf/prepare.py``'s ``prepare_document()``),
+not on every rollout -- GDP.pdf's 100 source PDFs are static, so re-running LiteParse OCR and
+page rendering on every row, every repeat, every model (as an earlier version of this agent did)
+redundantly repeats the same expensive parse of the same 100 documents. This agent just reads the
+cached manifest and resizes the cached page PNGs for its reactive DPI backoff, rather than
+re-rendering from the PDF.
 
-DPI/compositing strategy is reactive, not estimated ahead of time: every document
-starts at ``dpi`` (default 150). If the policy model rejects a request (too many
-images, payload too large, context length exceeded), the agent adapts -- widening
-page compositing (multiple pages per image, up to 4) if the server reported an
-explicit image-count limit, otherwise reducing DPI by 20% toward a ``min_dpi``
-floor (default 72) -- and retries. This mirrors Artificial Analysis's GDP.pdf
-methodology (https://artificialanalysis.ai/methodology/intelligence-benchmarking#gdp-pdf),
-which publishes the DPI endpoints (150, 72) and describes page compositing under
-tight per-request image-count limits, not a decrement schedule or a token-budget
-estimate. A terminal (unrecoverable) input-limit failure is scored as a zero
-attempt, matching AA's treatment of failed submissions -- it does not raise, so
-the row still gets verified (and scores 0, since an empty answer earns no rubric
-credit) rather than being dropped from the run entirely.
+DPI/compositing strategy is reactive, not estimated ahead of time: every document starts at
+``dpi`` (default 150, matching the manifest's cached resolution). If the policy model rejects a
+request (too many images, payload too large, context length exceeded), the agent adapts --
+widening page compositing (multiple pages per image, up to 4) if the server reported an explicit
+image-count limit, otherwise reducing DPI by 20% toward a ``min_dpi`` floor (default 72) -- and
+retries. This mirrors Artificial Analysis's GDP.pdf methodology
+(https://artificialanalysis.ai/methodology/intelligence-benchmarking#gdp-pdf), which publishes the
+DPI endpoints (150, 72) and describes page compositing under tight per-request image-count limits,
+not a decrement schedule or a token-budget estimate. A terminal (unrecoverable) input-limit
+failure is scored as a zero attempt, matching AA's treatment of failed submissions -- it does not
+raise, so the row still gets verified (and scores 0, since an empty answer earns no rubric credit)
+rather than being dropped from the run entirely.
 """
 
 import base64
 import io
+import json
 import math
 import re
 from pathlib import Path
 from time import time
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from aiohttp import ClientResponseError
 from fastapi import Request
@@ -67,10 +71,15 @@ _MAX_PAGES_PER_IMAGE = 4
 
 
 class GdpPdfAgentConfig(SimpleAgentConfig):
-    media_base_dir: str = Field(
-        description="Base directory for resolving verifier_metadata.pdf_relpath, relative to the Gym root.",
+    documents_base_dir: str = Field(
+        description="Base directory for resolving verifier_metadata.document_manifest, relative to the Gym root.",
     )
-    dpi: int = Field(default=BASE_DPI, description="Starting DPI for PDF page rendering.")
+    dpi: int = Field(
+        default=BASE_DPI,
+        description="Starting DPI for the reactive backoff. Must match the DPI documents were "
+        "rendered at during prepare (source_dpi in manifest.json) -- pages can only be resized down "
+        "from the cached screenshot, never rendered fresh at a higher DPI.",
+    )
     min_dpi: int = Field(default=MIN_DPI, description="Floor DPI the reactive backoff will reduce to.")
     max_images: Optional[int] = Field(
         default=None,
@@ -81,10 +90,22 @@ class GdpPdfAgentConfig(SimpleAgentConfig):
     )
     max_pages: Optional[int] = Field(
         default=None,
-        description="Cap on rendered/extracted pages per document. None renders every page.",
+        description="Cap on pages read from the manifest per document. None uses every page.",
     )
-    include_text: bool = Field(default=True, description="Include extracted PDF text as an input_text block.")
-    include_images: bool = Field(default=True, description="Include rendered page images as input_image blocks.")
+    include_text: bool = Field(
+        default=True, description="Include the manifest's extracted text as an input_text block."
+    )
+    include_images: bool = Field(
+        default=True, description="Include the manifest's rendered page images as input_image blocks."
+    )
+    image_format: Literal["png", "jpeg"] = Field(
+        default="png",
+        description="Wire format for page images. PNG is the default because it is lossless and the "
+        "model must read fine print off these pages. Set jpeg when payload size is the binding "
+        "constraint: measured over 296 pages sampled across all 100 documents, JPEG-90 is 72% of "
+        "PNG's base64 size (~28% saved).",
+    )
+    jpeg_quality: int = Field(default=90, ge=1, le=100, description="JPEG quality when image_format is jpeg.")
     strip_images_from_output: bool = Field(
         default=True,
         description="Remove base64 input_image blocks from serialized rollout artifacts.",
@@ -201,7 +222,26 @@ def _input_limit(error: ClientResponseError) -> tuple[Optional[str], Optional[in
     return None, None
 
 
-def _compose_pages(images: list[tuple[int, "Image.Image"]], *, image_dpi: int) -> dict[str, Any]:
+def _open_page_image(path: Path, *, source_dpi: int, image_dpi: int) -> "Image.Image":
+    """Open a cached page screenshot, resizing down to ``image_dpi`` if the backoff has reduced
+    it below the DPI it was rendered at. Pages are never re-rendered from the PDF -- only resized
+    from the one screenshot cached at prepare time."""
+    with Image.open(path) as opened:
+        image = opened.convert("RGB")
+    if image_dpi >= source_dpi:
+        return image
+    scale = image_dpi / source_dpi
+    size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+    return image.resize(size, Image.Resampling.LANCZOS)
+
+
+def _compose_pages(
+    images: list[tuple[int, "Image.Image"]],
+    *,
+    image_dpi: int,
+    image_format: str,
+    jpeg_quality: int,
+) -> dict[str, Any]:
     """Combine one or more page images into a single ``input_image`` block. When more than one
     page is given, pages are laid out in a labeled grid so the model can still tell them apart."""
     if len(images) == 1:
@@ -221,89 +261,90 @@ def _compose_pages(images: list[tuple[int, "Image.Image"]], *, image_dpi: int) -
             composed.paste(image, (x, y + label_height))
 
     buf = io.BytesIO()
-    composed.save(buf, format="PNG", optimize=True)
+    if image_format == "jpeg":
+        composed.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
+    else:
+        composed.save(buf, format="PNG", optimize=True)
     b64 = base64.standard_b64encode(buf.getvalue()).decode("ascii")
-    return {"type": "input_image", "image_url": f"data:image/png;base64,{b64}", "detail": "high"}
+    return {"type": "input_image", "image_url": f"data:image/{image_format};base64,{b64}", "detail": "high"}
 
 
-def _extract_document_text(pdf_path: Path, *, max_pages: Optional[int]) -> tuple[list[dict[str, Any]], int]:
-    """Extract document text once, up front -- unlike image rendering, text doesn't change
-    across retry attempts, so there's no reason to re-parse it on every DPI/compositing
-    adaptation. Uses LiteParse (local, no network calls; https://github.com/run-llama/liteparse)
-    for spatial text extraction with OCR, matching Artificial Analysis's GDP.pdf methodology
-    more closely than a bare pymupdf ``get_text()`` call. Returns ``(content_blocks,
+def _load_manifest(manifest_path: Path) -> dict[str, Any]:
+    """Load a prepare-time document manifest, sorting pages by page number."""
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["pages"] = sorted(manifest.get("pages") or [], key=lambda page: page["page_number"])
+    return manifest
+
+
+def _manifest_text_blocks(manifest: dict[str, Any], *, max_pages: Optional[int]) -> tuple[list[dict[str, Any]], int]:
+    """Extracted text doesn't change across retry attempts (unlike page images, which get resized
+    smaller on a DPI backoff), so this only needs to run once per row. Returns ``(content_blocks,
     pages_truncated)`` -- at most one ``input_text`` block, empty if nothing extractable."""
-    from liteparse import LiteParse
-
-    result = LiteParse().parse(str(pdf_path))
-    total_pages = result.total_pages
+    pages = manifest["pages"]
+    total_pages = len(pages)
     page_limit = total_pages if max_pages is None else min(max_pages, total_pages)
     pages_truncated = total_pages - page_limit
-    text = "\n\n".join(page.text for page in result.pages[:page_limit])
+    text = "\n\n".join(page["text"] for page in pages[:page_limit])
     if not text.strip():
         return [], pages_truncated
     return [{"type": "input_text", "text": f"<document>\n{text.strip()}\n</document>"}], pages_truncated
 
 
-def _render_document_content(
-    pdf_path: Path,
-    prompt_blocks: list[dict[str, Any]],
-    text_blocks: list[dict[str, Any]],
+def _render_manifest_images(
+    manifest: dict[str, Any],
+    manifest_dir: Path,
     *,
     delivery: DocumentDelivery,
     max_pages: Optional[int],
-    include_images: bool,
+    source_dpi: int,
+    image_format: str = "jpeg",
+    jpeg_quality: int = 90,
 ) -> tuple[list[dict[str, Any]], int]:
     """Render one attempt's worth of page images at the delivery's current DPI / compositing
-    settings, alongside the prompt and (already-extracted) text blocks. Returns
-    ``(content_blocks, pages_truncated)``."""
-    content: list[dict[str, Any]] = [*prompt_blocks, *text_blocks]
-    if not include_images:
-        return content, 0
+    settings, from the manifest's cached page screenshots. Returns ``(image_blocks,
+    pages_truncated)``."""
+    pages = manifest["pages"]
+    total_pages = len(pages)
+    page_limit = total_pages if max_pages is None else min(max_pages, total_pages)
+    pages_truncated = total_pages - page_limit
+    delivery.page_count = page_limit
+    if not page_limit:
+        return [], pages_truncated
 
-    import pymupdf
+    # Recomputed fresh each attempt from the current max_images -- not carried over --
+    # so a later widened/narrowed max_images always takes full effect immediately.
+    delivery.pages_per_image = 1
+    if delivery.max_images is not None:
+        while delivery.pages_per_image < _MAX_PAGES_PER_IMAGE and (
+            math.ceil(page_limit / delivery.pages_per_image) > delivery.max_images
+        ):
+            delivery.pages_per_image *= 2
 
-    doc = pymupdf.open(str(pdf_path))
-    try:
-        total_pages = doc.page_count
-        page_limit = total_pages if max_pages is None else min(max_pages, total_pages)
-        pages_truncated = total_pages - page_limit
-        delivery.page_count = page_limit
-        if not page_limit:
-            return content, pages_truncated
+    selected = pages[:page_limit]
+    if delivery.max_images is not None:
+        selected = selected[: delivery.max_images * delivery.pages_per_image]
 
-        # Recomputed fresh each attempt from the current max_images -- not carried over --
-        # so a later widened/narrowed max_images always takes full effect immediately.
-        delivery.pages_per_image = 1
-        if delivery.max_images is not None:
-            while delivery.pages_per_image < _MAX_PAGES_PER_IMAGE and (
-                math.ceil(page_limit / delivery.pages_per_image) > delivery.max_images
-            ):
-                delivery.pages_per_image *= 2
+    batches = [selected[i : i + delivery.pages_per_image] for i in range(0, len(selected), delivery.pages_per_image)]
+    delivery.image_count = len(batches)
 
-        page_numbers = list(range(page_limit))
-        if delivery.max_images is not None:
-            page_numbers = page_numbers[: delivery.max_images * delivery.pages_per_image]
-
-        matrix = pymupdf.Matrix(delivery.image_dpi / 72.0, delivery.image_dpi / 72.0)
-        batches = [
-            page_numbers[i : i + delivery.pages_per_image]
-            for i in range(0, len(page_numbers), delivery.pages_per_image)
+    blocks: list[dict[str, Any]] = []
+    for batch in batches:
+        images = [
+            (
+                page["page_number"],
+                _open_page_image(manifest_dir / page["image"], source_dpi=source_dpi, image_dpi=delivery.image_dpi),
+            )
+            for page in batch
         ]
-        delivery.image_count = len(batches)
-        for batch in batches:
-            images = [
-                (
-                    page_no + 1,
-                    Image.open(io.BytesIO(doc.load_page(page_no).get_pixmap(matrix=matrix).tobytes("png"))),
-                )
-                for page_no in batch
-            ]
-            content.append(_compose_pages(images, image_dpi=delivery.image_dpi))
-
-        return content, pages_truncated
-    finally:
-        doc.close()
+        blocks.append(
+            _compose_pages(
+                images,
+                image_dpi=delivery.image_dpi,
+                image_format=image_format,
+                jpeg_quality=jpeg_quality,
+            )
+        )
+    return blocks, pages_truncated
 
 
 def _prompt_blocks(row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -349,7 +390,7 @@ class GdpPdfAgent(SimpleAgent):
     config: GdpPdfAgentConfig
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
-        resolved_base = Path(self.config.media_base_dir)
+        resolved_base = Path(self.config.documents_base_dir)
         if not resolved_base.is_absolute():
             resolved_base = PARENT_DIR / resolved_base
 
@@ -365,7 +406,7 @@ class GdpPdfAgent(SimpleAgent):
         cookies = seed_session_response.cookies
 
         meta = row.get("verifier_metadata") or {}
-        pdf_relpath = meta.get("pdf_relpath")
+        manifest_relpath = meta.get("document_manifest")
         task_id = str(row.get("_ng_task_index", "unknown"))
         rollout_id = self.rollout_id_from_run(body) or "unscoped"
         model_url_path = self.url_path_for_run("/v1/responses", body)
@@ -376,30 +417,44 @@ class GdpPdfAgent(SimpleAgent):
         pages_truncated = 0
         trajectory = None
 
-        if pdf_relpath and (self.config.include_text or self.config.include_images):
-            pdf_path = resolved_base / pdf_relpath
-            if not pdf_path.is_file():
+        if manifest_relpath and (self.config.include_text or self.config.include_images):
+            manifest_path = resolved_base / manifest_relpath
+            if not manifest_path.is_file():
                 hint = "gym eval prepare --benchmark gdp_pdf"
                 raise FileNotFoundError(
-                    f"PDF not found: {pdf_path}\nSource PDFs are not committed. Fetch them with:\n  {hint}"
+                    f"Document manifest not found: {manifest_path}\n"
+                    f"Source documents are not committed. Fetch and render them with:\n  {hint}"
                 )
+            manifest = _load_manifest(manifest_path)
+            manifest_source_dpi = int(manifest.get("source_dpi", self.config.dpi))
+            if manifest_source_dpi != self.config.dpi:
+                raise ValueError(
+                    f"{manifest_path} was rendered at {manifest_source_dpi} DPI, but this agent's "
+                    f"starting dpi is configured as {self.config.dpi}. Pages can only be resized "
+                    "down from the cached screenshot, never rendered fresh at a higher DPI -- "
+                    "either re-render with prepare.py at the configured DPI, or match dpi to it."
+                )
+            manifest_dir = manifest_path.parent
 
             prompt_blocks = _prompt_blocks(row)
             text_blocks: list[dict[str, Any]] = []
-            pages_truncated = 0
             if self.config.include_text:
-                text_blocks, pages_truncated = _extract_document_text(pdf_path, max_pages=self.config.max_pages)
+                text_blocks, pages_truncated = _manifest_text_blocks(manifest, max_pages=self.config.max_pages)
 
             while True:
-                content, image_pages_truncated = _render_document_content(
-                    pdf_path,
-                    prompt_blocks,
-                    text_blocks,
-                    delivery=delivery,
-                    max_pages=self.config.max_pages,
-                    include_images=self.config.include_images,
-                )
-                pages_truncated = max(pages_truncated, image_pages_truncated)
+                image_blocks: list[dict[str, Any]] = []
+                if self.config.include_images:
+                    image_blocks, image_pages_truncated = _render_manifest_images(
+                        manifest,
+                        manifest_dir,
+                        delivery=delivery,
+                        max_pages=self.config.max_pages,
+                        source_dpi=manifest_source_dpi,
+                        image_format=self.config.image_format,
+                        jpeg_quality=self.config.jpeg_quality,
+                    )
+                    pages_truncated = max(pages_truncated, image_pages_truncated)
+                content = [*prompt_blocks, *text_blocks, *image_blocks]
                 params_dict = body.responses_create_params.model_dump(exclude_unset=True)
                 params_dict["input"] = [{"role": "user", "content": content}]
                 params = NeMoGymResponseCreateParamsNonStreaming.model_validate(params_dict)
@@ -430,7 +485,9 @@ class GdpPdfAgent(SimpleAgent):
                     # a cached item for mm_hash=..." and "Failed to apply NanoNemotronVLProcessor
                     # on data=...") must not take the whole evaluation run down over one document.
                     # Score this row as a zero attempt instead, same as a terminal input-limit.
-                    print(f"[gdp_pdf_agent] WARNING: unclassified failure on {pdf_relpath}: {error!r}", flush=True)
+                    print(
+                        f"[gdp_pdf_agent] WARNING: unclassified failure on {manifest_relpath}: {error!r}", flush=True
+                    )
                     terminal_limit = f"unclassified_{type(error).__name__}"
                     model_response = _terminal_failure_response(self.config.model_server.name)
                     break
@@ -478,13 +535,13 @@ class GdpPdfAgent(SimpleAgent):
                 # must not take the whole evaluation run down over one row either. Score it as
                 # a zero attempt and keep going -- the warning below is what makes a real
                 # verifier bug (as opposed to a one-off transient failure) visible for follow-up.
-                print(f"[gdp_pdf_agent] WARNING: /verify failed on {pdf_relpath}: {error!r}", flush=True)
+                print(f"[gdp_pdf_agent] WARNING: /verify failed on {manifest_relpath}: {error!r}", flush=True)
                 terminal_limit = terminal_limit or f"verify_failed_{type(error).__name__}"
                 result["reward"] = 0.0
 
         result["document_delivery"] = delivery.record(terminal_limit) | {"rejected_attempts": delivery.attempts}
         if pages_truncated:
-            print(f"[gdp_pdf_agent] WARNING: truncated {pages_truncated} page(s) of {pdf_relpath} (max_pages)")
+            print(f"[gdp_pdf_agent] WARNING: truncated {pages_truncated} page(s) of {manifest_relpath} (max_pages)")
             result.setdefault("verifier_metadata", meta)["pages_truncated"] = pages_truncated
         if terminal_limit:
             result["failure_reason"] = f"GDP.pdf terminal input limit: {terminal_limit}"

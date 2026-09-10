@@ -19,7 +19,9 @@ gym eval prepare --benchmark gdp_pdf
 ```
 
 Downloads the dataset table and ~467 MB of source PDFs into
-`resources_servers/gdp_pdf/data/media/`, then writes `data/gdp_pdf_benchmark.jsonl`.
+`resources_servers/gdp_pdf/data/media/`, renders each document once (LiteParse OCR for text, page
+screenshots at 150 DPI) into `resources_servers/gdp_pdf/data/documents/`, then writes
+`data/gdp_pdf_benchmark.jsonl`. Already-rendered documents are skipped on re-run.
 
 ## Run
 
@@ -31,6 +33,8 @@ with a vision-capable policy model.
 Absolute scores are not directly comparable to Surge's published numbers. Surge's harness hands the
 raw PDF to native provider document APIs (Claude/Gemini/OpenAI); that has no equivalent for
 open-weight models served via vLLM, so we follow Artificial Analysis's approach instead --
-extracted text (pymupdf, not their LiteParse) plus rendered page images. The judge model also
-differs, and the judge grades each criterion without the source PDF. Artificial Analysis makes the
-same caveat about their own reimplementation not being interchangeable with Surge's.
+LiteParse-extracted text plus rendered page images, with a reactive DPI backoff and page
+compositing under tight image-count limits (see
+`responses_api_agents/gdp_pdf_agent/README.md`). The judge model also differs, and (unlike Surge's
+own scorer) our judge is shown the task prompt alongside each criterion. Artificial Analysis makes
+a similar caveat about their own reimplementation not being interchangeable with Surge's.

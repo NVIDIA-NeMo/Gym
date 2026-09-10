@@ -12,11 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for the gdp_pdf agent's rollout-time PDF embedding, reactive DPI backoff, and
+"""Tests for the gdp_pdf agent's manifest-based document embedding, reactive DPI backoff, and
 page compositing."""
 
 import base64
 import io
+import random
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -34,9 +35,11 @@ from responses_api_agents.gdp_pdf_agent.app import (
     GdpPdfAgent,
     GdpPdfAgentConfig,
     _compose_pages,
-    _extract_document_text,
     _input_limit,
-    _render_document_content,
+    _load_manifest,
+    _manifest_text_blocks,
+    _open_page_image,
+    _render_manifest_images,
     _strip_image_blocks,
 )
 from responses_api_agents.simple_agent.app import SimpleAgentRunRequest, SimpleAgentVerifyResponse
@@ -44,8 +47,13 @@ from responses_api_agents.simple_agent.app import SimpleAgentRunRequest, SimpleA
 
 SERVER_DIR = Path(__file__).resolve().parents[3] / "resources_servers" / "gdp_pdf"
 DATA_DIR = SERVER_DIR / "data"
-_example_pdfs = sorted((DATA_DIR / "test_media" / "pdfs").glob("*.pdf")) if DATA_DIR.exists() else []
-requires_example_pdf = pytest.mark.skipif(not _example_pdfs, reason="example PDFs not present")
+_example_manifests = (
+    sorted((DATA_DIR / "test_media" / "documents").glob("*/manifest.json")) if DATA_DIR.exists() else []
+)
+requires_example_manifest = pytest.mark.skipif(not _example_manifests, reason="example manifests not present")
+_example_manifest_relpath = (
+    f"test_media/documents/{_example_manifests[0].parent.name}/manifest.json" if _example_manifests else None
+)
 
 
 def _agent_config(**overrides) -> GdpPdfAgentConfig:
@@ -57,7 +65,7 @@ def _agent_config(**overrides) -> GdpPdfAgentConfig:
         "max_steps": 1,
         "resources_server": ResourcesServerRef(type="resources_servers", name="gdp_pdf"),
         "model_server": ModelServerRef(type="responses_api_models", name="policy_model"),
-        "media_base_dir": "resources_servers/gdp_pdf/data",
+        "documents_base_dir": "resources_servers/gdp_pdf/data",
     }
     config_kwargs.update(overrides)
     return GdpPdfAgentConfig(**config_kwargs)
@@ -71,13 +79,17 @@ def _block_type(block) -> str:
     return block.get("type") if isinstance(block, dict) else block.type
 
 
-def _run_request(pdf_relpath: str = "test_media/pdfs/x.pdf") -> SimpleAgentRunRequest:
+def _run_request(document_manifest: str = "test_media/documents/x/manifest.json") -> SimpleAgentRunRequest:
     return SimpleAgentRunRequest.model_validate(
         {
             "responses_create_params": {
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "What is the cap?"}]}]
             },
-            "verifier_metadata": {"task_id": "t1", "pdf_relpath": pdf_relpath, "criteria": [{"index": 1}]},
+            "verifier_metadata": {
+                "task_id": "t1",
+                "document_manifest": document_manifest,
+                "criteria": [{"index": 1}],
+            },
         }
     )
 
@@ -218,14 +230,14 @@ class TestDocumentDeliveryAdapt:
 class TestComposePages:
     def test_single_page_is_not_composited(self) -> None:
         image = Image.new("RGB", (100, 140), "red")
-        block = _compose_pages([(1, image)], image_dpi=150)
+        block = _compose_pages([(1, image)], image_dpi=150, image_format="png", jpeg_quality=90)
         encoded = block["image_url"].split(",", 1)[1]
         with Image.open(io.BytesIO(base64.b64decode(encoded))) as decoded:
             assert decoded.size == (100, 140)
 
     def test_multiple_pages_are_composited_into_a_grid(self) -> None:
         images = [(i, Image.new("RGB", (100, 140), "red")) for i in range(1, 5)]
-        block = _compose_pages(images, image_dpi=150)
+        block = _compose_pages(images, image_dpi=150, image_format="png", jpeg_quality=90)
         encoded = block["image_url"].split(",", 1)[1]
         with Image.open(io.BytesIO(base64.b64decode(encoded))) as decoded:
             # 2 columns x 2 rows, each cell >= page size plus a label strip.
@@ -233,99 +245,131 @@ class TestComposePages:
             assert decoded.height > 280
         assert block["type"] == "input_image"
 
+    def test_jpeg_format_is_declared_and_decodes_as_jpeg(self) -> None:
+        image = Image.new("RGB", (100, 140), "red")
+        block = _compose_pages([(1, image)], image_dpi=150, image_format="jpeg", jpeg_quality=90)
+        assert block["image_url"].startswith("data:image/jpeg;base64,")
+        encoded = block["image_url"].split(",", 1)[1]
+        with Image.open(io.BytesIO(base64.b64decode(encoded))) as decoded:
+            assert decoded.format == "JPEG"
+            assert decoded.size == (100, 140)
 
-@requires_example_pdf
-class TestExtractDocumentText:
+    def test_jpeg_payload_is_smaller_than_png_for_a_noisy_page(self) -> None:
+        # Solid colors favor PNG; real page scans are noisy, so seed pixel noise to make the
+        # comparison representative of the actual corpus.
+        rng = random.Random(0)
+        image = Image.new("RGB", (200, 260))
+        image.putdata([(rng.randrange(256), rng.randrange(256), rng.randrange(256)) for _ in range(200 * 260)])
+
+        as_png = _compose_pages([(1, image)], image_dpi=150, image_format="png", jpeg_quality=90)
+        as_jpeg = _compose_pages([(1, image)], image_dpi=150, image_format="jpeg", jpeg_quality=90)
+        assert len(as_jpeg["image_url"]) < len(as_png["image_url"])
+
+
+class TestOpenPageImage:
+    def test_no_resize_when_dpi_matches_source(self, tmp_path: Path) -> None:
+        original = Image.new("RGB", (300, 400), "blue")
+        path = tmp_path / "page.png"
+        original.save(path)
+
+        image = _open_page_image(path, source_dpi=150, image_dpi=150)
+        assert image.size == (300, 400)
+
+    def test_resizes_down_when_dpi_reduced(self, tmp_path: Path) -> None:
+        original = Image.new("RGB", (300, 400), "blue")
+        path = tmp_path / "page.png"
+        original.save(path)
+
+        image = _open_page_image(path, source_dpi=150, image_dpi=75)
+        assert image.size == (150, 200)
+
+
+@requires_example_manifest
+class TestManifestTextBlocks:
     @property
-    def pdf_path(self) -> Path:
-        return _example_pdfs[0]
+    def manifest_path(self) -> Path:
+        return _example_manifests[0]
 
     def test_returns_one_text_block(self) -> None:
-        blocks, pages_truncated = _extract_document_text(self.pdf_path, max_pages=None)
+        manifest = _load_manifest(self.manifest_path)
+        blocks, pages_truncated = _manifest_text_blocks(manifest, max_pages=None)
         assert pages_truncated == 0
         assert len(blocks) == 1
         assert _block_type(blocks[0]) == "input_text"
         assert blocks[0]["text"].startswith("<document>")
 
     def test_max_pages_truncates_and_is_reported(self) -> None:
-        blocks, pages_truncated = _extract_document_text(self.pdf_path, max_pages=1)
+        manifest = _load_manifest(self.manifest_path)
+        blocks, pages_truncated = _manifest_text_blocks(manifest, max_pages=1)
         assert pages_truncated >= 0
         assert len(blocks) <= 1
 
 
-@requires_example_pdf
-class TestRenderDocumentContent:
+@requires_example_manifest
+class TestRenderManifestImages:
     @property
-    def pdf_path(self) -> Path:
-        return _example_pdfs[0]
+    def manifest_path(self) -> Path:
+        return _example_manifests[0]
 
-    def test_injects_text_and_images_after_the_prompt(self) -> None:
-        delivery = DocumentDelivery(50, None)
-        content, pages_truncated = _render_document_content(
-            self.pdf_path,
-            [{"type": "input_text", "text": "What is the cap?"}],
-            [{"type": "input_text", "text": "<document>filing</document>"}],
-            delivery=delivery,
-            max_pages=None,
-            include_images=True,
+    def test_renders_images_from_the_cached_screenshots(self) -> None:
+        manifest = _load_manifest(self.manifest_path)
+        delivery = DocumentDelivery(150, None)
+        blocks, pages_truncated = _render_manifest_images(
+            manifest, self.manifest_path.parent, delivery=delivery, max_pages=None, source_dpi=150
         )
         assert pages_truncated == 0
-        assert _block_type(content[0]) == "input_text"
-        assert content[0]["text"] == "What is the cap?"
-        assert _block_type(content[1]) == "input_text"
-        assert content[1]["text"].startswith("<document>")
-        assert any(_block_type(b) == "input_image" for b in content[2:])
+        assert blocks
+        assert all(_block_type(b) == "input_image" for b in blocks)
         assert delivery.page_count > 0
         assert delivery.image_count > 0
 
-    def test_include_images_false_gives_text_only(self) -> None:
-        delivery = DocumentDelivery(50, None)
-        content, _ = _render_document_content(
-            self.pdf_path,
-            [{"type": "input_text", "text": "q"}],
-            [{"type": "input_text", "text": "<document>filing</document>"}],
-            delivery=delivery,
-            max_pages=None,
-            include_images=False,
-        )
-        assert not any(_block_type(b) == "input_image" for b in content)
-
     def test_max_pages_truncates_and_is_reported(self) -> None:
-        delivery = DocumentDelivery(50, None)
-        _, pages_truncated = _render_document_content(
-            self.pdf_path,
-            [{"type": "input_text", "text": "q"}],
-            [],
-            delivery=delivery,
-            max_pages=1,
-            include_images=True,
+        manifest = _load_manifest(self.manifest_path)
+        delivery = DocumentDelivery(150, None)
+        _, pages_truncated = _render_manifest_images(
+            manifest, self.manifest_path.parent, delivery=delivery, max_pages=1, source_dpi=150
         )
         assert delivery.page_count == 1
         assert pages_truncated >= 0
 
     def test_max_images_composites_pages(self) -> None:
-        delivery = DocumentDelivery(50, 1)
-        content, _ = _render_document_content(
-            self.pdf_path,
-            [{"type": "input_text", "text": "q"}],
-            [],
-            delivery=delivery,
-            max_pages=None,
-            include_images=True,
+        manifest = _load_manifest(self.manifest_path)
+        delivery = DocumentDelivery(150, 1)
+        blocks, _ = _render_manifest_images(
+            manifest, self.manifest_path.parent, delivery=delivery, max_pages=None, source_dpi=150
         )
-        image_blocks = [b for b in content if _block_type(b) == "input_image"]
         # Capped at 1 image; all pages composited into it (up to the 4-page/image limit).
-        assert len(image_blocks) == 1
+        assert len(blocks) == 1
         assert delivery.pages_per_image >= 1
+
+    def test_dpi_backoff_shrinks_rendered_images(self) -> None:
+        manifest = _load_manifest(self.manifest_path)
+        full_delivery = DocumentDelivery(150, None)
+        full_blocks, _ = _render_manifest_images(
+            manifest, self.manifest_path.parent, delivery=full_delivery, max_pages=1, source_dpi=150
+        )
+        reduced_delivery = DocumentDelivery(75, None)
+        reduced_blocks, _ = _render_manifest_images(
+            manifest, self.manifest_path.parent, delivery=reduced_delivery, max_pages=1, source_dpi=150
+        )
+        assert len(reduced_blocks[0]["image_url"]) < len(full_blocks[0]["image_url"])
 
 
 class TestRun:
-    async def test_missing_pdf_raises_actionable_error(self) -> None:
+    async def test_missing_manifest_raises_actionable_error(self) -> None:
         agent = _agent()
         with pytest.raises(FileNotFoundError, match="prepare --benchmark gdp_pdf"):
-            await agent.run(SimpleNamespace(cookies={}), _run_request("test_media/pdfs/does-not-exist.pdf"))
+            await agent.run(
+                SimpleNamespace(cookies={}), _run_request("test_media/documents/does-not-exist/manifest.json")
+            )
 
-    @requires_example_pdf
+    @requires_example_manifest
+    async def test_source_dpi_mismatch_raises(self) -> None:
+        agent = _agent(strip_images_from_output=False, dpi=72)  # manifest is rendered at 150
+        with pytest.raises(ValueError, match="rendered at 150 DPI"):
+            await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
+
+    @requires_example_manifest
     async def test_succeeds_on_first_try_and_verifies_once(self) -> None:
         agent = _agent(strip_images_from_output=False)
         agent.server_client.post = AsyncMock(
@@ -340,15 +384,13 @@ class TestRun:
             patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
             patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
         ):
-            result = await agent.run(
-                SimpleNamespace(cookies={}), _run_request(f"test_media/pdfs/{_example_pdfs[0].name}")
-            )
+            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
         assert result.reward == 1.0
         assert result.document_delivery["image_dpi"] == 150
         assert result.document_delivery["rejected_attempts"] == []
         assert agent.server_client.post.await_count == 2  # seed_session, verify
 
-    @requires_example_pdf
+    @requires_example_manifest
     async def test_adapts_dpi_on_rejection_then_succeeds(self) -> None:
         agent = _agent(strip_images_from_output=False)
         agent.server_client.post = AsyncMock(
@@ -371,14 +413,12 @@ class TestRun:
             patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
             patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
         ):
-            result = await agent.run(
-                SimpleNamespace(cookies={}), _run_request(f"test_media/pdfs/{_example_pdfs[0].name}")
-            )
+            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
         assert len(attempts) == 3
         assert result.document_delivery["image_dpi"] == 96  # 150 -> 120 -> 96
         assert len(result.document_delivery["rejected_attempts"]) == 2
 
-    @requires_example_pdf
+    @requires_example_manifest
     async def test_incomplete_status_triggers_dpi_backoff_without_an_error(self) -> None:
         # vLLM can accept an oversized request and just run out of output room instead of
         # rejecting it outright -- no exception is raised, so this must be detected separately
@@ -404,14 +444,12 @@ class TestRun:
             patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
             patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
         ):
-            result = await agent.run(
-                SimpleNamespace(cookies={}), _run_request(f"test_media/pdfs/{_example_pdfs[0].name}")
-            )
+            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
         assert len(attempts) == 3
         assert result.document_delivery["image_dpi"] == 96  # 150 -> 120 -> 96
         assert result.reward == 1.0  # the eventual complete response, not the truncated ones
 
-    @requires_example_pdf
+    @requires_example_manifest
     async def test_incomplete_status_is_accepted_once_dpi_floor_reached(self) -> None:
         agent = _agent(strip_images_from_output=False, include_images=True, min_dpi=140)
         agent.server_client.post = AsyncMock(
@@ -428,15 +466,13 @@ class TestRun:
             patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
             patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
         ):
-            result = await agent.run(
-                SimpleNamespace(cookies={}), _run_request(f"test_media/pdfs/{_example_pdfs[0].name}")
-            )
+            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
         # Floor reached on the very first backoff attempt (min_dpi=140 >= 150*0.8=120), so the
         # truncated response is accepted as-is rather than looping forever.
         assert result.reward == 0.3
         assert result.failure_reason is None or "output_truncated" not in (result.failure_reason or "")
 
-    @requires_example_pdf
+    @requires_example_manifest
     async def test_incomplete_status_ignored_when_text_only(self) -> None:
         # No images means no DPI to reduce -- retrying would be pointless, so the truncated
         # response is accepted immediately without ever calling adapt().
@@ -455,13 +491,11 @@ class TestRun:
             patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
             patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
         ):
-            result = await agent.run(
-                SimpleNamespace(cookies={}), _run_request(f"test_media/pdfs/{_example_pdfs[0].name}")
-            )
+            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
         assert call.await_count == 1
         assert result.reward == 0.5
 
-    @requires_example_pdf
+    @requires_example_manifest
     async def test_terminal_failure_scores_zero_without_raising(self) -> None:
         agent = _agent(strip_images_from_output=False, min_dpi=140)  # floor reached on first backoff
         agent.server_client.post = AsyncMock(
@@ -476,14 +510,12 @@ class TestRun:
             patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
             patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
         ):
-            result = await agent.run(
-                SimpleNamespace(cookies={}), _run_request(f"test_media/pdfs/{_example_pdfs[0].name}")
-            )
+            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
         assert result.reward == 0.0
         assert result.response.output == []
         assert result.failure_reason == "GDP.pdf terminal input limit: context"
 
-    @requires_example_pdf
+    @requires_example_manifest
     async def test_unrelated_failure_is_not_retried_but_scores_zero(self) -> None:
         # An unclassified, non-auth error (e.g. a rare vLLM-side multimodal-processor bug) must
         # not take the whole evaluation run down over one document -- it becomes a graceful
@@ -501,9 +533,7 @@ class TestRun:
             patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
             patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
         ):
-            result = await agent.run(
-                SimpleNamespace(cookies={}), _run_request(f"test_media/pdfs/{_example_pdfs[0].name}")
-            )
+            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
         assert call.await_count == 1
         assert result.reward == 0.0
         assert result.response.output == []
@@ -520,7 +550,7 @@ class TestRun:
             patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
             pytest.raises(ClientResponseError),
         ):
-            await agent.run(SimpleNamespace(cookies={}), _run_request(f"test_media/pdfs/{_example_pdfs[0].name}"))
+            await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
         assert call.await_count == 1
 
     async def test_non_client_response_exceptions_also_score_zero(self) -> None:
@@ -539,14 +569,12 @@ class TestRun:
             patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
             patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
         ):
-            result = await agent.run(
-                SimpleNamespace(cookies={}), _run_request(f"test_media/pdfs/{_example_pdfs[0].name}")
-            )
+            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
         assert call.await_count == 1
         assert result.reward == 0.0
         assert result.failure_reason == "GDP.pdf terminal input limit: unclassified_AssertionError"
 
-    @requires_example_pdf
+    @requires_example_manifest
     async def test_images_are_stripped_from_the_result_when_enabled(self) -> None:
         agent = _agent(strip_images_from_output=True)
         agent.server_client.post = AsyncMock(
@@ -561,14 +589,12 @@ class TestRun:
             patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
             patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
         ):
-            result = await agent.run(
-                SimpleNamespace(cookies={}), _run_request(f"test_media/pdfs/{_example_pdfs[0].name}")
-            )
+            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
         # `data` from /verify above didn't carry responses_create_params; nothing to assert on
         # content blocks here beyond the call succeeding without image payloads surviving.
         assert result.reward == 1.0
 
-    @requires_example_pdf
+    @requires_example_manifest
     async def test_verify_failure_scores_zero_instead_of_crashing(self) -> None:
         # A /verify-side failure (judge outage, a resources-server bug on some row) must not
         # take the whole evaluation run down either -- same containment as a model-call failure.
@@ -585,9 +611,7 @@ class TestRun:
             patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
             patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
         ):
-            result = await agent.run(
-                SimpleNamespace(cookies={}), _run_request(f"test_media/pdfs/{_example_pdfs[0].name}")
-            )
+            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
         assert result.reward == 0.0
         assert "verify_failed" in result.failure_reason
 
