@@ -83,6 +83,12 @@ def test_normalized_config_rejects_unknown_fields() -> None:
         AgentHarnessConfig.model_validate({"model": {"model": "test-model"}, "timeout": 10})
 
 
+def test_kilo_qualifies_model_for_gym_endpoint() -> None:
+    harness = KiloCodeHarness(AgentHarnessConfig(model=AgentModelConfig(model="test-model")))
+
+    assert harness._effective_model("http://model/v1") == "nemo/test-model"
+
+
 @pytest.mark.parametrize("field", ["timeout_seconds", "max_turns"])
 def test_normalized_limits_must_be_positive(field) -> None:
     with pytest.raises(ValidationError):
