@@ -13,7 +13,7 @@ cvdp_agent_generic_claude:
         type: example
         jsonl_fpath: resources_servers/cvdp/data/example_agentic.jsonl
 
-      # the harness: swap these three + setup_scripts/<key>_deps.sh to change agent
+      # Change agent, agent_kwargs, and setup_scripts/<key>_deps.sh together.
       agent: claude_code
       agent_kwargs:
         model:

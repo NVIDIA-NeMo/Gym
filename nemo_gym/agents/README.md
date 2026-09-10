@@ -32,5 +32,6 @@ Shared fields:
 - `settings` for harness-specific options
 
 The caller installs the selected CLI. Terminus-2 requires
-`pip install 'nemo-gym[terminus-2]'` and its OS tools. Agent servers still handle
-server startup, model URL resolution, concurrency, and verification.
+`pip install 'nemo-gym[terminus-2]'` and its OS tools. For Gym server execution,
+`responses_api_agents/harness_agent` provides model URL resolution, concurrency,
+sandbox execution, and verification.
