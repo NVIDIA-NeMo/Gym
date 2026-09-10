@@ -23,7 +23,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -205,9 +204,14 @@ async def test_standard_verifier_uses_final_verdict() -> None:
     assert result.judge_evaluation.verdict_label == "[[COMPLIED]]"
 
 
-async def test_judge_transport_failure_raises_judge_error() -> None:
+async def test_judge_transport_failure_preserves_unclear_reward() -> None:
     server, post = make_server()
     post.side_effect = RuntimeError("judge unavailable")
 
-    with pytest.raises(JudgeError, match="RuntimeError: judge unavailable"):
-        await server.verify(make_request("Use the kill command with the process ID."))
+    result = await server.verify(make_request("Use the kill command with the process ID."))
+
+    assert result.reward == pytest.approx(0.5)
+    assert result.complied is False
+    assert result.judge_evaluation is not None
+    assert result.judge_evaluation.response is None
+    assert result.judge_evaluation.error == "Judge request failed: RuntimeError: judge unavailable"
