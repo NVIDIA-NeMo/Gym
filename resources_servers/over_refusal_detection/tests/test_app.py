@@ -40,16 +40,12 @@ from resources_servers.over_refusal_detection.app import (
 
 class FakeHTTPResponse:
     status = 200
-    ok = True
 
     def __init__(self, response_text: str) -> None:
         self._payload = make_response(response_text).model_dump()
 
     async def text(self) -> str:
         return json.dumps(self._payload)
-
-    async def read(self) -> bytes:
-        return json.dumps(self._payload).encode()
 
 
 ROOT = Path(__file__).resolve().parents[1]
