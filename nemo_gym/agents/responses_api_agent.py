@@ -67,6 +67,15 @@ class ResponsesAPIAgent(BaseResponsesAPIAgent):
         turns: list[TrajectoryTurn] = []
         trajectory_gaps: list[ObservationGap] = []
         body = body.model_copy(deep=True)
+        # The episode context is Gym scaffolding for the harness. The model server speaks the
+        # Responses API and must never see it, so it comes off the body before the first call.
+        episode_context = body.episode_context
+        body.episode_context = None
+        # The processor names the environment for this episode; the config is the fallback for
+        # an agent server still wired to one benchmark.
+        env_name = episode_context.env.name if episode_context and episode_context.env else None
+        if env_name is None:
+            env_name = self.config.resources_server.name
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
@@ -159,7 +168,7 @@ class ResponsesAPIAgent(BaseResponsesAPIAgent):
                         tool_status = "failed"
                 else:
                     api_response = await self.server_client.post(
-                        server_name=self.config.resources_server.name,
+                        server_name=env_name,
                         url_path=f"/{function_call.name}",
                         json=parsed_arguments,
                         cookies=resources_server_cookies,

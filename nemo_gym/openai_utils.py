@@ -141,6 +141,7 @@ from openai.types.shared_params import FunctionDefinition
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 from typing_extensions import TypedDict
 
+from nemo_gym.episode_context import EpisodeContext
 from nemo_gym.server_utils import (
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG,
     MAX_NUM_TRIES,
@@ -655,6 +656,9 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
         return value
 
     background: Optional[bool] = None
+    # Gym extension, not part of the Responses API: the episode the harness is running in.
+    # Set by the episode processor and consumed by the harness; stripped before any model call.
+    episode_context: Optional[EpisodeContext] = None
     include: Optional[List[ResponseIncludable]] = None
     input: Union[str, NeMoGymResponseInput]
     instructions: Optional[str] = None

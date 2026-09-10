@@ -16,8 +16,9 @@ from abc import abstractmethod
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.status import HTTP_204_NO_CONTENT
 
 
 if TYPE_CHECKING:
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
     from nemo_gym.mcp_auto_exposure import MCPTool
 
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.episode_context import EpisodeContext
 from nemo_gym.judge import judge_failsafe
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -66,7 +68,7 @@ def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
 
 
 # Tool names that would collide with the resources server's own endpoints if advertised over MCP.
-RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "aggregate_metrics", "mcp"})
+RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "sandbox_spec", "aggregate_metrics", "mcp"})
 
 
 class ReverifyMode(str, Enum):
@@ -95,6 +97,8 @@ class BaseRunRequest(BaseModel):
         alias="_ng_rollout_id",
         exclude=True,
     )
+    # Set by the episode processor; absent on the row as it arrives from the collector.
+    episode_context: Optional[EpisodeContext] = None
 
 
 class BaseVerifyRequest(BaseRunRequest):
@@ -126,7 +130,7 @@ class BaseMultiRewardVerifyResponse(BaseVerifyResponse):
 
 
 class BaseSeedSessionRequest(BaseModel):
-    pass
+    episode_context: Optional[EpisodeContext] = None
 
 
 class BaseSeedSessionResponse(BaseModel):
@@ -160,6 +164,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             )
         )
         app.post("/aggregate_metrics")(self.aggregate_metrics)
+        app.post("/sandbox_spec", status_code=200)(self.sandbox_spec)
         app.get("/reverify_mode")(self.get_reverify_mode)
 
         return app
@@ -185,6 +190,17 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
     async def seed_session(self, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
         return BaseSeedSessionResponse()
+
+    async def sandbox_spec(self, body: BaseRunRequest) -> Response:
+        """Declare the runtime this task needs, for the processor to provision.
+
+        The spec is a property of the task, so the environment owns it; the provider is a
+        property of the run, so the processor owns that. Returning 204 (the default) means
+        the task needs no runtime, which is true for most environments.
+
+        Override to return a `SandboxSpec`-shaped mapping, usually derived from the row.
+        """
+        return Response(status_code=HTTP_204_NO_CONTENT)
 
     @abstractmethod
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:

@@ -284,6 +284,8 @@ class TestApp:
         )
 
         async def post(*, server_name, url_path, **kwargs):
+            if url_path == "/sandbox_spec":
+                return _mock_response(status=204)
             if url_path == "/seed_session":
                 return _mock_response()
             if server_name == "simple":
@@ -316,6 +318,7 @@ class TestApp:
         assert [
             (item.kwargs["server_name"], item.kwargs["url_path"]) for item in server_client.post.await_args_list
         ] == [
+            ("resources", "/sandbox_spec"),
             ("resources", "/seed_session"),
             ("simple", "/ng-rollout/4-1/v1/responses"),
             ("model", "/ng-rollout/4-1/v1/responses"),
@@ -395,6 +398,8 @@ class TestApp:
         }
 
         async def post(*, url_path, **kwargs):
+            if url_path == "/sandbox_spec":
+                return _mock_response(status=204)
             if url_path == "/seed_session":
                 return _mock_response()
             if url_path.endswith("/v1/responses"):
@@ -415,6 +420,7 @@ class TestApp:
         result = await processor.run(request, body)
 
         assert [call.kwargs["url_path"] for call in server_client.post.await_args_list] == [
+            "/sandbox_spec",
             "/seed_session",
             "/ng-rollout/0-0/v1/responses" if capture_enabled else "/v1/responses",
             "/verify",
@@ -969,7 +975,12 @@ class TestApp:
         model_response.cookies = {"session": "model"}
         model_response.read.return_value = json.dumps(model_response_payload).encode()
 
-        server.server_client.post.side_effect = [seed_response, model_response]
+        no_runtime = AsyncMock()
+        no_runtime.ok = True
+        no_runtime.status = 204
+        no_runtime.cookies = {}
+
+        server.server_client.post.side_effect = [no_runtime, seed_response, model_response]
 
         response = client.post(
             "/run",
@@ -984,9 +995,11 @@ class TestApp:
 
         post_call_kwargs = [post_call.kwargs for post_call in server.server_client.post.call_args_list]
         assert [kwargs["url_path"] for kwargs in post_call_kwargs] == [
+            "/sandbox_spec",
             "/seed_session",
             "/v1/responses",
         ]
         assert post_call_kwargs[0]["server_name"] == "my resources server"
-        assert post_call_kwargs[1]["server_name"] == "simple_agent"
-        assert post_call_kwargs[1]["cookies"] == {"session": "seeded"}
+        assert post_call_kwargs[1]["server_name"] == "my resources server"
+        assert post_call_kwargs[2]["server_name"] == "simple_agent"
+        assert post_call_kwargs[2]["cookies"] == {"session": "seeded"}
