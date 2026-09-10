@@ -33,7 +33,6 @@ from fastapi import Request, Response
 from pydantic import ConfigDict, Field, ValidationError
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.agents import resolve_agent
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
@@ -62,6 +61,7 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from responses_api_agents.agent_registry import resolve_agent
 
 
 _DEFAULT_HARVEST_GLOBS = ["rtl/**/*.sv", "rtl/**/*.v", "rtl/**/*.vhd", "verif/**/*.sv", "verif/**/*.v"]
