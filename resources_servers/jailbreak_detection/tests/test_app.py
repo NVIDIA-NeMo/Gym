@@ -21,6 +21,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
@@ -372,15 +373,20 @@ async def test_empty_policy_response_returns_zero_without_calling_judge() -> Non
     post.assert_not_awaited()
 
 
-async def test_judge_transport_failure_preserves_unclear_reward() -> None:
+def test_verify_route_preserves_unclear_reward_on_judge_transport_failure() -> None:
     server, post = make_server()
     post.side_effect = RuntimeError("judge unavailable")
 
-    result = await server.verify(make_request("I cannot help with that request."))
+    response = TestClient(server.setup_webserver()).post(
+        "/verify",
+        json=make_request("I cannot help with that request.").model_dump(mode="json"),
+    )
+    result = response.json()
 
-    assert result.reward == pytest.approx(0.25)
-    assert result.reward_safety == pytest.approx(0.25)
-    assert result.is_safe is False
-    assert result.judge_evaluation is not None
-    assert result.judge_evaluation.response is None
-    assert result.judge_evaluation.error == "Judge request failed: RuntimeError: judge unavailable"
+    assert response.status_code == 200
+    assert result["reward"] == pytest.approx(0.25)
+    assert result["reward_safety"] == pytest.approx(0.25)
+    assert result["is_safe"] is False
+    assert result["judge_evaluation"]["response"] is None
+    assert result["judge_evaluation"]["error"] == "Judge request failed: RuntimeError: judge unavailable"
+    assert "_ng_failure_class" not in result
