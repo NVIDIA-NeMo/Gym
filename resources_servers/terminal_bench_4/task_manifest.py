@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import tomllib
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
@@ -75,6 +75,7 @@ class TB4Task:
     collect_hooks: Tuple[CollectHook, ...]
     agent_user: Optional[Union[str, int]]
     compose_services: Tuple[str, ...]
+    solution_env: Dict[str, str] = field(default_factory=dict)
 
     @property
     def is_compose(self) -> bool:
@@ -124,19 +125,31 @@ def parse_artifact(entry: Any) -> ArtifactEntry:
         source, _, service = entry.partition("@")
         if not source:
             raise ValueError(f"Artifact entry has an empty source: {entry!r}")
-        return ArtifactEntry(source=source, service=service or MAIN_SERVICE)
+        return _checked(ArtifactEntry(source=source, service=service or MAIN_SERVICE))
     if isinstance(entry, dict):
         source = entry.get("source")
         if not isinstance(source, str) or not source:
             raise ValueError(f"Artifact table needs a string `source`: {entry!r}")
         exclude = entry.get("exclude") or ()
-        return ArtifactEntry(
-            source=source,
-            service=entry.get("service") or MAIN_SERVICE,
-            destination=entry.get("destination"),
-            exclude=tuple(str(x) for x in exclude),
+        return _checked(
+            ArtifactEntry(
+                source=source,
+                service=entry.get("service") or MAIN_SERVICE,
+                destination=entry.get("destination"),
+                exclude=tuple(str(x) for x in exclude),
+            )
         )
     raise ValueError(f"Unsupported artifact entry: {entry!r}")
+
+
+def _checked(entry: ArtifactEntry) -> ArtifactEntry:
+    if ".." in PurePosixPath(entry.source).parts:
+        raise ValueError(f"Artifact source {entry.source!r} must not contain '..'")
+    if entry.is_main and not entry.relative_to_root:
+        raise ValueError(
+            f"Artifact source {entry.source!r} is the filesystem root; refusing (it would empty the verifier)"
+        )
+    return entry
 
 
 def with_convention_entry(entries: Sequence[ArtifactEntry]) -> Tuple[ArtifactEntry, ...]:
@@ -218,4 +231,5 @@ def load_task(task_folder: Union[str, Path], repo_root: Optional[Path] = None) -
         collect_hooks=hooks,
         agent_user=agent.get("user"),
         compose_services=compose_service_names(task_dir),
+        solution_env={str(k): str(v) for k, v in ((document.get("solution") or {}).get("env") or {}).items()},
     )

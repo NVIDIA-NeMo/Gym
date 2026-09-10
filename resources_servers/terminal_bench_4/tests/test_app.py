@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import io
 import json
 import re
@@ -16,6 +17,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import resources_servers.terminal_bench_4.app as app_module
 from nemo_gym.sandbox import SandboxExecResult, SandboxResources
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.terminal_bench_4.app import (
@@ -30,9 +32,11 @@ from resources_servers.terminal_bench_4.app import (
     build_probe_command,
     clamp_resource_requests,
     derive_resources,
+    parse_pack_output,
     parse_probe_output,
     parse_reward_payload,
     parse_verifier_files_probe,
+    translate_excludes,
 )
 from resources_servers.terminal_bench_4.task_manifest import (
     CONVENTION_ARTIFACTS_DIR,
@@ -73,6 +77,9 @@ class FakeSandbox:
         on_run_tests: Optional[Callable[["FakeSandbox"], int]] = None,
         on_run_solution: Optional[Callable[["FakeSandbox"], int]] = None,
         fail_steps: Optional[Dict[str, int]] = None,
+        pack_rc: int = 0,
+        pack_warning: str = "",
+        stop_raises: bool = False,
     ) -> None:
         self.files: Dict[str, bytes] = dict(files or {})
         self.dirs: set = set(dirs or set())
@@ -82,18 +89,35 @@ class FakeSandbox:
         self.on_run_tests = on_run_tests
         self.on_run_solution = on_run_solution
         self.fail_steps = fail_steps or {}
+        self.pack_rc = pack_rc
+        self.pack_warning = pack_warning
+        self.stop_raises = stop_raises
+        self.excludes_seen: list = []
         self._handle = SimpleNamespace(sandbox_id=f"sb-{name}", provider_name="fake")
 
     # filesystem helpers
     def kind(self, path: str) -> str:
         path = path.rstrip("/") or "/"
+        if path == "/":
+            return "dir"
         if path in self.dirs or any(f.startswith(path + "/") for f in self.files):
             return "dir"
         if path in self.files:
             return "file"
         return "missing"
 
-    def _pack(self, members) -> bytes:
+    @staticmethod
+    def _excluded(name: str, excludes) -> bool:
+        parts = name.split("/")
+        for pattern in excludes:
+            if "/" in pattern:
+                if name == pattern or name.startswith(pattern + "/"):
+                    return True
+            elif any(fnmatch.fnmatchcase(part, pattern) for part in parts):
+                return True
+        return False
+
+    def _pack(self, members, excludes=()) -> bytes:
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
             for member in members:
@@ -104,7 +128,7 @@ class FakeSandbox:
                     archive.addfile(info, io.BytesIO(self.files[absolute]))
                 elif self.kind(absolute) == "dir":
                     for path, data in sorted(self.files.items()):
-                        if path.startswith(absolute + "/"):
+                        if path.startswith(absolute + "/") and not self._excluded(path.lstrip("/"), excludes):
                             info = tarfile.TarInfo(path.lstrip("/"))
                             info.size = len(data)
                             archive.addfile(info, io.BytesIO(data))
@@ -129,10 +153,16 @@ class FakeSandbox:
             paths = shlex.split(body.split("for p in ", 1)[1].split("; do", 1)[0])
             return SandboxExecResult(stdout="".join(f"{self.kind(p)}\t{p}\n" for p in paths), stderr="", return_code=0)
         if step == "pack":
-            members = shlex.split(body.split("-- ", 1)[1].split("; elif", 1)[0])
-            blob = self._pack(members)
+            tar_segment = body.split("then tar ", 1)[1].split("; rc=$?", 1)[0]
+            tokens = shlex.split(tar_segment)
+            excludes = [tok[len("--exclude=") :] for tok in tokens if tok.startswith("--exclude=")]
+            members = tokens[tokens.index("--") + 1 :]
+            members = [m for m in members if not m.startswith("2>")]
+            self.excludes_seen = excludes
+            blob = self._pack(members, excludes)
             self.files[REMOTE_TARBALL] = blob
-            return SandboxExecResult(stdout=f"{len(blob)}\n", stderr="", return_code=0)
+            stdout = f"NG_TB4_SIZE={len(blob)}\nNG_TB4_TAR_RC={self.pack_rc}\n{self.pack_warning}"
+            return SandboxExecResult(stdout=stdout, stderr="", return_code=0)
         if step == "prepare-targets":
             for target in re.findall(r"find (\S+) -mindepth", body):
                 target = shlex.split(target)[0]
@@ -176,6 +206,8 @@ class FakeSandbox:
         Path(local_path).write_bytes(self.files[remote_path])
 
     async def stop(self) -> None:
+        if self.stop_raises:
+            raise RuntimeError("stop failed")
         self.stopped = True
 
 
@@ -372,13 +404,31 @@ class TestHelpers:
         }
 
     def test_pack_and_prepare_commands(self) -> None:
-        command = build_pack_command(["app/out.step", "app/with space"])
+        command = build_pack_command(["app/out.step", "app/with space"], excludes=["app/x/skip me", "*.pyc"])
         assert "tar -czf" in command and "--ignore-failed-read" in command and "'app/with space'" in command
-        assert command.rstrip().endswith(f"stat -c %s {REMOTE_TARBALL}")
+        assert "--exclude='app/x/skip me' --exclude='*.pyc' --" in command
+        assert '[ "$rc" -le 1 ] || exit "$rc"' in command and f"NG_TB4_SIZE=$(stat -c %s {REMOTE_TARBALL})" in command
         with pytest.raises(ValueError):
             build_pack_command([])
+        assert parse_pack_output("NG_TB4_SIZE=12\nNG_TB4_TAR_RC=1\ntar: app: file changed as we read it\n") == (
+            12,
+            1,
+            "tar: app: file changed as we read it",
+        )
+        with pytest.raises(ValueError):
+            parse_pack_output("108\n")
+        assert translate_excludes("app/nemo", ["./megatron_parallel.py", "__pycache__", "*.pyc", "sub/dir/", ""]) == [
+            "app/nemo/megatron_parallel.py",
+            "__pycache__",
+            "*.pyc",
+            "app/nemo/sub/dir",
+        ]
         prepare = build_prepare_targets_command(["/app/evalbench"], ["/app/out.step", "/app/results/a.npz"])
         assert "find /app/evalbench -mindepth 1 -delete && chmod 777 /app/evalbench" in prepare
+        assert (
+            "if [ -L /app/evalbench ] || { [ -e /app/evalbench ] && [ ! -d /app/evalbench ]; }; then unlink /app/evalbench; fi"
+            in prepare
+        )
         assert (
             "mkdir -p /app && chmod 777 /app" in prepare
             and "mkdir -p /app/results && chmod 777 /app/results" in prepare
@@ -675,3 +725,386 @@ class TestResourceRequests:
         assert clamp_resource_requests({}, limits) == {}
         untouched = clamp_resource_requests({"resource_requests": {"disk_gib": 30}}, SandboxResources())
         assert untouched["resource_requests"] == {"disk_gib": 30}
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def now(self) -> float:
+        return self.t
+
+
+def write_task_toml(task_dir: Path, text: str) -> None:
+    (task_dir / "task.toml").write_text(text)
+
+
+class TestReviewFindings:
+    """Regression tests for the 2026-09-09 adversarial review (workflow wf_a9da1516-1d2)."""
+
+    @pytest.mark.asyncio
+    async def test_empty_reward_file_is_data_not_infrastructure(self, tmp_path: Path) -> None:
+        task_dir = make_task_dir(tmp_path)
+        server = make_server(tmp_path)
+        agent = FakeSandbox(name="agent", files={"/app/out.step": b"x"})
+        verifier = verifier_with_tests(on_run_tests=write_reward(""))
+        wire_sandboxes(server, agent, verifier)
+        response = await seed_and_verify(server, task_dir)
+        assert response.reward == 0.0 and not response.evaluation_completed
+        assert "is empty" in response.failure_reason and response.reward_source is None and verifier.stopped
+
+    @pytest.mark.asyncio
+    async def test_empty_reward_json_beside_valid_txt_is_not_scored(self, tmp_path: Path) -> None:
+        task_dir = make_task_dir(tmp_path)
+        server = make_server(tmp_path)
+        agent = FakeSandbox(name="agent", files={"/app/out.step": b"x"})
+        verifier = verifier_with_tests(on_run_tests=write_reward("", as_json=True, also_txt="1\n"))
+        wire_sandboxes(server, agent, verifier)
+        response = await seed_and_verify(server, task_dir)
+        assert not response.evaluation_completed and "reward.json is empty" in response.failure_reason
+
+    @pytest.mark.asyncio
+    async def test_server_enforced_timeout_with_prewritten_reward_is_not_scored(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        clock = FakeClock()
+        monkeypatch.setattr(app_module, "monotonic", clock.now)
+        task_dir = make_task_dir(tmp_path)
+        server = make_server(tmp_path)
+
+        def killed_after_budget(sandbox: FakeSandbox) -> int:
+            sandbox.files["/logs/verifier/reward.txt"] = b"0\n"
+            clock.t += 240.0  # execd enforced the 240 s budget and returned an ordinary exit code
+            return 137
+
+        agent = FakeSandbox(name="agent", files={"/app/out.step": b"x"})
+        verifier = verifier_with_tests(on_run_tests=killed_after_budget)
+        wire_sandboxes(server, agent, verifier)
+        response = await seed_and_verify(server, task_dir)
+        assert not response.evaluation_completed and response.reward == 0.0 and response.reward_source is None
+        assert "budget" in response.failure_reason and response.verifier_sandbox_observation.outcome == "timeout"
+        assert response.verifier_exit_code == 137 and response.verifier_wall_time_s >= 240.0
+
+    @pytest.mark.asyncio
+    async def test_run_tests_error_type_is_not_scored(self, tmp_path: Path) -> None:
+        task_dir = make_task_dir(tmp_path)
+        server = make_server(tmp_path)
+
+        class SandboxErrorFake(FakeSandbox):
+            async def exec(self, command, **kwargs):
+                if command.startswith(": ng-tb4-run-tests;"):
+                    self.files["/logs/verifier/reward.txt"] = b"1\n"
+                    return SandboxExecResult(stdout="", stderr="execd died", return_code=125, error_type="sandbox")
+                return await super().exec(command, **kwargs)
+
+        agent = FakeSandbox(name="agent", files={"/app/out.step": b"x"})
+        verifier = SandboxErrorFake(name="verifier", files={"/tests/test.sh": b"#!/bin/bash\n"})
+        wire_sandboxes(server, agent, verifier)
+        response = await seed_and_verify(server, task_dir)
+        assert not response.evaluation_completed and response.reward_source is None
+        assert (
+            response.verifier_sandbox_observation.outcome == "sandbox_error"
+            and "execd died" in response.verifier_stderr_tail
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_timeout_exception_from_run_tests_is_infrastructure(self, tmp_path: Path) -> None:
+        task_dir = make_task_dir(tmp_path)
+        server = make_server(tmp_path)
+
+        def backend_dead(sandbox: FakeSandbox) -> int:
+            raise ConnectionError("Sandbox backend unreachable")
+
+        agent = FakeSandbox(name="agent", files={"/app/out.step": b"x"})
+        verifier = verifier_with_tests(on_run_tests=backend_dead)
+        wire_sandboxes(server, agent, verifier)
+        with pytest.raises(ConnectionError):
+            await seed_and_verify(server, task_dir)
+        assert agent.stopped and verifier.stopped
+
+    @pytest.mark.asyncio
+    async def test_reward_probe_failure_is_infrastructure(self, tmp_path: Path) -> None:
+        task_dir = make_task_dir(tmp_path)
+        server = make_server(tmp_path)
+        agent = FakeSandbox(name="agent", files={"/app/out.step": b"x"})
+        verifier = verifier_with_tests(on_run_tests=write_reward("1\n"), fail_steps={"probe-reward": 2})
+        wire_sandboxes(server, agent, verifier)
+        with pytest.raises(RuntimeError, match="probing /logs/verifier failed"):
+            await seed_and_verify(server, task_dir)
+        assert verifier.stopped
+
+    @pytest.mark.asyncio
+    async def test_collect_hook_failure_is_recorded_and_grading_continues(self, tmp_path: Path) -> None:
+        task_dir = make_task_dir(tmp_path, extra_toml='[[verifier.collect]]\ncommand = "echo main"\n')
+        server = make_server(tmp_path)
+        agent = FakeSandbox(name="agent", files={"/app/out.step": b"x"}, fail_steps={"collect-hook": 3})
+        verifier = verifier_with_tests(on_run_tests=write_reward("1\n"))
+        wire_sandboxes(server, agent, verifier)
+        response = await seed_and_verify(server, task_dir)
+        assert response.evaluation_completed and response.reward == 1.0
+        assert response.collect_hook_results == [
+            {
+                "service": "main",
+                "command": "echo main",
+                "status": "failed",
+                "return_code": 3,
+                "error_type": None,
+                "output_tail": "forced failure of collect-hook",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_tar_exit_1_is_tolerated_and_recorded(self, tmp_path: Path) -> None:
+        task_dir = make_task_dir(tmp_path)
+        server = make_server(tmp_path)
+        agent = FakeSandbox(
+            name="agent", files={"/app/out.step": b"x"}, pack_rc=1, pack_warning="tar: app: file changed as we read it"
+        )
+        verifier = verifier_with_tests(on_run_tests=write_reward("1\n"))
+        wire_sandboxes(server, agent, verifier)
+        response = await seed_and_verify(server, task_dir)
+        assert response.evaluation_completed and response.reward == 1.0
+        assert response.artifact_tar_return_code == 1 and "file changed" in response.artifact_tar_warnings
+        manifest = json.loads((Path(response.log_dir) / "artifact_manifest.json").read_text())
+        assert manifest["tar_return_code"] == 1 and verifier.files["/app/out.step"] == b"x"
+
+    @pytest.mark.asyncio
+    async def test_excludes_are_applied_when_packing(self, tmp_path: Path) -> None:
+        task_dir = make_task_dir(
+            tmp_path,
+            artifacts='[{source = "/app/evalbench/", exclude = ["./notes.txt", "__pycache__", "*.pyc", "cache/deep"]}]',
+        )
+        server = make_server(tmp_path)
+        agent = FakeSandbox(
+            name="agent",
+            files={
+                "/app/evalbench/a.py": b"1",
+                "/app/evalbench/notes.txt": b"n",
+                "/app/evalbench/__pycache__/a.cpython-311.pyc": b"p",
+                "/app/evalbench/sub/b.pyc": b"p",
+                "/app/evalbench/cache/deep/x": b"c",
+                "/app/evalbench/cache/keep": b"k",
+            },
+        )
+        verifier = verifier_with_tests(on_run_tests=write_reward("1\n"))
+        wire_sandboxes(server, agent, verifier)
+        response = await seed_and_verify(server, task_dir)
+        assert response.evaluation_completed
+        assert response.artifact_excludes == [
+            "app/evalbench/notes.txt",
+            "__pycache__",
+            "*.pyc",
+            "app/evalbench/cache/deep",
+        ]
+        assert agent.excludes_seen == response.artifact_excludes
+        shipped = {p for p in verifier.files if p.startswith("/app/evalbench/")}
+        assert shipped == {"/app/evalbench/a.py", "/app/evalbench/cache/keep"}
+
+    def test_root_and_parent_artifacts_are_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match="filesystem root"):
+            parse_artifact("/")
+        with pytest.raises(ValueError, match="'..'"):
+            parse_artifact("/app/../etc")
+        task_dir = make_task_dir(tmp_path, artifacts='["/"]')
+        with pytest.raises(ValueError, match="filesystem root"):
+            load_task(task_dir)
+
+    @pytest.mark.asyncio
+    async def test_row_extras_named_like_response_fields_do_not_break_the_response(self, tmp_path: Path) -> None:
+        task_dir = make_task_dir(tmp_path)
+        server = make_server(tmp_path)
+        agent = FakeSandbox(name="agent", files={"/app/out.step": b"x"})
+        verifier = verifier_with_tests(on_run_tests=write_reward("1\n"))
+        wire_sandboxes(server, agent, verifier)
+        request = fake_request()
+        extras = {"reward": 0.25, "log_dir": "/stale", "test_output": "stale"}
+        await server.seed_session(request, TerminalBench4SeedSessionRequest(**row(task_dir), **extras))
+        body = TerminalBench4VerifyRequest(
+            **row(task_dir), **extras, responses_create_params={"input": "x"}, response=EMPTY_RESPONSE
+        )
+        response = await server.verify(request, body)
+        assert response.reward == 1.0 and response.test_output != "stale" and response.log_dir != "/stale"
+
+    @pytest.mark.asyncio
+    async def test_bad_task_folder_at_verify_stops_the_seeded_sandbox(self, tmp_path: Path) -> None:
+        task_dir = make_task_dir(tmp_path)
+        server = make_server(tmp_path)
+        agent = FakeSandbox(name="agent", files={"/app/out.step": b"x"})
+        wire_sandboxes(server, agent, verifier_with_tests())
+        request = fake_request()
+        await server.seed_session(request, TerminalBench4SeedSessionRequest(**row(task_dir)))
+        (task_dir / "task.toml").write_text("this is = not [ toml")
+        body = TerminalBench4VerifyRequest(
+            **row(task_dir), responses_create_params={"input": "x"}, response=EMPTY_RESPONSE
+        )
+        with pytest.raises(Exception):
+            await server.verify(request, body)
+        assert agent.stopped and request.session[SESSION_ID_KEY] not in server._sessions
+
+    @pytest.mark.asyncio
+    async def test_reseed_stops_the_previous_sandbox_of_the_same_session(self, tmp_path: Path) -> None:
+        task_dir = make_task_dir(tmp_path)
+        server = make_server(tmp_path)
+        first = FakeSandbox(name="first")
+        second = FakeSandbox(name="second")
+        created = []
+
+        async def fake_create(*, image, resources, role, task):
+            created.append(role)
+            return first if len(created) == 1 else second
+
+        server._create_sandbox = fake_create  # type: ignore[method-assign]
+        request = fake_request()
+        await server.seed_session(request, TerminalBench4SeedSessionRequest(**row(task_dir)))
+        await server.seed_session(request, TerminalBench4SeedSessionRequest(**row(task_dir)))
+        assert first.stopped and not second.stopped and server._sessions["sess-1"].sandbox is second
+
+    @pytest.mark.asyncio
+    async def test_golden_mode_reuses_a_seeded_sandbox(self, tmp_path: Path) -> None:
+        task_dir = make_task_dir(tmp_path)
+        server = make_server(tmp_path, is_verifying_golden_patch=True)
+
+        def solve(sandbox: FakeSandbox) -> int:
+            sandbox.files["/app/out.step"] = b"STEP"
+            return 0
+
+        agent = FakeSandbox(name="agent", on_run_solution=solve)
+        verifier = verifier_with_tests(on_run_tests=write_reward("1\n"))
+        created = wire_sandboxes(server, agent, verifier)
+        response = await seed_and_verify(server, task_dir)
+        assert response.reward == 1.0 and [c["role"] for c in created] == ["agent", "verifier"]
+        solution_run = next(c for c in agent.calls if c["command"].startswith(": ng-tb4-run-solution;"))
+        assert solution_run["env"] == {"DEBIAN_FRONTEND": "noninteractive"}
+
+    @pytest.mark.asyncio
+    async def test_solution_env_from_task_toml_reaches_the_oracle(self, tmp_path: Path) -> None:
+        task_dir = make_task_dir(tmp_path, extra_toml='[solution.env]\nFOO = "bar"\n')
+        server = make_server(tmp_path, is_verifying_golden_patch=True)
+        agent = FakeSandbox(name="agent")
+        verifier = verifier_with_tests(on_run_tests=write_reward("0\n"))
+        wire_sandboxes(server, agent, verifier)
+        await seed_and_verify(server, task_dir)
+        solution_run = next(c for c in agent.calls if c["command"].startswith(": ng-tb4-run-solution;"))
+        assert solution_run["env"] == {"DEBIAN_FRONTEND": "noninteractive", "FOO": "bar"}
+
+    @pytest.mark.asyncio
+    async def test_oracle_on_non_root_image_is_a_typed_error(self, tmp_path: Path) -> None:
+        from resources_servers.terminal_bench_4.app import OracleUnsupportedError
+
+        task_dir = make_task_dir(tmp_path)
+        server = make_server(tmp_path, is_verifying_golden_patch=True)
+        agent = FakeSandbox(name="agent", fail_steps={"solution-mkdir": 1})
+        wire_sandboxes(server, agent, verifier_with_tests())
+        body = TerminalBench4VerifyRequest(
+            **row(task_dir), responses_create_params={"input": "x"}, response=EMPTY_RESPONSE
+        )
+        with pytest.raises(OracleUnsupportedError, match="non-root agent images"):
+            await server.verify(fake_request(session_id=None), body)
+        assert agent.stopped
+
+    @pytest.mark.asyncio
+    async def test_agent_stop_failure_does_not_affect_grading(self, tmp_path: Path) -> None:
+        task_dir = make_task_dir(tmp_path)
+        server = make_server(tmp_path)
+        agent = FakeSandbox(name="agent", files={"/app/out.step": b"x"}, stop_raises=True)
+        verifier = verifier_with_tests(on_run_tests=write_reward("1\n"))
+        wire_sandboxes(server, agent, verifier)
+        response = await seed_and_verify(server, task_dir)
+        assert response.reward == 1.0 and response.evaluation_completed
+        assert response.agent_sandbox_stopped is False and verifier.stopped
+
+    @pytest.mark.asyncio
+    async def test_verifier_user_and_env_reach_only_the_test_run(self, tmp_path: Path) -> None:
+        task_dir = make_task_dir(tmp_path)
+        write_task_toml(
+            task_dir,
+            (task_dir / "task.toml")
+            .read_text()
+            .replace(
+                "[verifier]\ntimeout_sec = 240.0",
+                '[verifier]\ntimeout_sec = 240.0\nuser = "grader"\nenv = { FOO = "bar" }',
+            ),
+        )
+        server = make_server(tmp_path)
+        agent = FakeSandbox(name="agent", files={"/app/out.step": b"x"})
+        verifier = verifier_with_tests(on_run_tests=write_reward("1\n"))
+        wire_sandboxes(server, agent, verifier)
+        response = await seed_and_verify(server, task_dir)
+        assert response.evaluation_completed
+        run_tests = [c for c in verifier.calls if c["command"].startswith(": ng-tb4-run-tests;")]
+        others = [c for c in verifier.calls if not c["command"].startswith(": ng-tb4-run-tests;")]
+        assert run_tests[0]["user"] == "grader" and run_tests[0]["env"] == {"FOO": "bar"}
+        assert all(c["user"] is None and c["env"] is None for c in others)
+
+    @pytest.mark.asyncio
+    async def test_truncated_tarball_download_raises_before_the_verifier_starts(self, tmp_path: Path) -> None:
+        task_dir = make_task_dir(tmp_path)
+        server = make_server(tmp_path)
+
+        class Truncating(FakeSandbox):
+            async def download(self, remote_path, local_path) -> None:
+                Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(local_path).write_bytes(self.files[remote_path][:-1])
+
+        agent = Truncating(name="agent", files={"/app/out.step": b"x" * 50})
+        created = wire_sandboxes(server, agent, verifier_with_tests())
+        with pytest.raises(RuntimeError, match=r"downloaded tarball is \d+ bytes, sandbox reported \d+"):
+            await seed_and_verify(server, task_dir)
+        assert agent.stopped and [c["role"] for c in created] == ["agent"]
+
+    def test_shipped_config_requests_never_exceed_task_limits(self) -> None:
+        import yaml
+
+        config_path = Path(__file__).resolve().parents[1] / "configs" / "terminal_bench_4.yaml"
+        server_cfg = yaml.safe_load(config_path.read_text())["terminal_bench_4_resources_server"]["resources_servers"][
+            "terminal_bench_4"
+        ]
+        sandbox_config = server_cfg["sandbox_config"]
+        for storage_mb in (4096, 10240, 51200):
+            limits = derive_resources(
+                {"cpus": 1, "memory_mb": 2048, "storage_mb": storage_mb},
+                base=dict(sandbox_config["resources"]),
+                use_task_resources=True,
+                cpu_multiplier=server_cfg["cpu_multiplier"],
+                memory_multiplier=server_cfg["memory_multiplier"],
+                min_cpu=server_cfg["min_cpu"],
+                min_memory_mib=server_cfg["min_memory_mib"],
+                min_disk_gib=server_cfg["min_disk_gib"],
+            )
+            requests = clamp_resource_requests(dict(sandbox_config["provider_options"]), limits)["resource_requests"]
+            assert requests["cpu"] <= limits.cpu and requests["memory_mib"] <= limits.memory_mib
+            assert requests["disk_gib"] <= limits.disk_gib
+
+    def test_verifier_sandbox_does_not_get_cpu_cap_env_by_default(self, tmp_path: Path) -> None:
+        server = make_server(tmp_path)
+        assert server.config.verifier_derive_cpu_env is False
+
+
+class TestPrepare:
+    def test_unset_tasks_dir_raises_and_leaves_existing_output_intact(self, tmp_path: Path, monkeypatch) -> None:
+        from benchmarks.terminal_bench_4.prepare import prepare
+
+        monkeypatch.delenv("TB4_TASKS_DIR", raising=False)
+        output = tmp_path / "benchmark.jsonl"
+        output.write_text("keep me\n")
+        with pytest.raises(FileNotFoundError, match="TB4_TASKS_DIR"):
+            prepare(output_path=str(output))
+        assert output.read_text() == "keep me\n"
+
+    def test_prepare_builds_rows_and_skips_compose(self, tmp_path: Path) -> None:
+        from benchmarks.terminal_bench_4.prepare import prepare
+
+        tasks_root = tmp_path / "wl"
+        make_task_dir(tmp_path / "a", name="terminal-bench/alpha")
+        make_task_dir(tmp_path / "b", name="terminal-bench/beta", compose=True)
+        tasks_root.mkdir()
+        (tmp_path / "a" / "tasks" / "alpha").rename(tasks_root / "alpha")
+        (tmp_path / "b" / "tasks" / "beta").rename(tasks_root / "beta")
+        output = tmp_path / "out.jsonl"
+        result = prepare(tasks_dir=str(tasks_root), output_path=str(output), release_tag="v9")
+        rows = [json.loads(line) for line in result.read_text().splitlines()]
+        assert [r["task_name"] for r in rows] == ["terminal-bench/alpha"]
+        assert rows[0]["docker_image"] == "harborframework/terminal-bench:alpha-environment-v9"
+        assert rows[0]["verifier_docker_image"] == "harborframework/terminal-bench:alpha-verifier-v9"
+        assert rows[0]["task_folder"] == str((tasks_root / "alpha").resolve())
+        assert not (tmp_path / "out.jsonl.tmp").exists()

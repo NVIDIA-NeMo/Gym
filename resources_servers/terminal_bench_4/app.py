@@ -87,18 +87,37 @@ _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 # Python fallback for images without GNU tar (arguments: tarball, then members relative to /).
 _PY_PACK = (
-    "import os,sys,tarfile\n"
-    "out=sys.argv[1]\n"
+    "import fnmatch,os,sys,tarfile\n"
+    "args=sys.argv[1:]\n"
+    "out=args.pop(0)\n"
+    "excludes=[]\n"
+    "while args and args[0]=='-x':\n"
+    "    args.pop(0); excludes.append(args.pop(0))\n"
+    "if args and args[0]=='--': args.pop(0)\n"
+    "def skip(name):\n"
+    "    parts=name.split('/')\n"
+    "    for pat in excludes:\n"
+    "        if '/' in pat:\n"
+    "            if name==pat or name.startswith(pat+'/'): return True\n"
+    "        elif any(fnmatch.fnmatchcase(part,pat) for part in parts): return True\n"
+    "    return False\n"
+    "def flt(ti):\n"
+    "    return None if skip(ti.name) else ti\n"
     "with tarfile.open(out,'w:gz') as t:\n"
-    "    for m in sys.argv[2:]:\n"
+    "    for m in args:\n"
     "        p='/'+m\n"
-    "        if os.path.lexists(p): t.add(p,arcname=m)\n"
+    "        if os.path.lexists(p): t.add(p,arcname=m,filter=flt)\n"
 )
+TAR_STDERR = "/tmp/nemo_gym_tb4_tar.err"
 _PY_EXTRACT = "import sys,tarfile\nwith tarfile.open(sys.argv[1],'r:gz') as t:\n    t.extractall('/')\n"
 
 
 class RewardParseError(ValueError):
     """The verifier wrote a reward file that cannot be turned into a number."""
+
+
+class OracleUnsupportedError(RuntimeError):
+    """Golden mode cannot stage /solution in this agent image (non-root image user, no escalation)."""
 
 
 class TerminalBench4ResourcesServerConfig(BaseResourcesServerConfig):
@@ -131,6 +150,8 @@ class TerminalBench4ResourcesServerConfig(BaseResourcesServerConfig):
 
     logs_dir: Path = Path("resources_servers/terminal_bench_4/logs")
     max_test_output_chars: int = Field(default=200_000, gt=0)
+    # Gym's CPU thread-cap env vars go to the agent sandbox; Harbor sets none in the verifier.
+    verifier_derive_cpu_env: bool = False
 
     debug: bool = False
 
@@ -166,11 +187,16 @@ class TerminalBench4VerifyResponse(BaseVerifyResponse):
     reward_source: Optional[str] = None
     rewards: Dict[str, float] = Field(default_factory=dict)
     test_output: str = ""
+    verifier_stderr_tail: str = ""
+    verifier_wall_time_s: float = 0.0
 
     # Artifact phase
     artifact_manifest: List[Dict[str, Any]] = Field(default_factory=list)
     artifacts_packed: int = 0
     artifact_tarball_bytes: int = 0
+    artifact_tar_return_code: Optional[int] = None
+    artifact_tar_warnings: str = ""
+    artifact_excludes: List[str] = Field(default_factory=list)
     collect_hook_results: List[Dict[str, Any]] = Field(default_factory=list)
 
     # Bookkeeping
@@ -222,6 +248,8 @@ class VerifierOutcome:
     error: Optional[str] = None
     error_type: Optional[str] = None
     test_output: str = ""
+    stderr_tail: str = ""
+    wall_time_s: float = 0.0
 
 
 # ---------------------------------------------------------------------------------------------
@@ -257,22 +285,67 @@ def parse_probe_output(stdout: Optional[str]) -> Dict[str, str]:
     return kinds
 
 
-def build_pack_command(members: Sequence[str], tarball: str = REMOTE_TARBALL) -> str:
-    """Pack ``members`` (paths relative to ``/``) into ``tarball`` and print its size in bytes."""
+def translate_excludes(member: str, patterns: Sequence[str]) -> List[str]:
+    """Harbor applies ``exclude`` patterns relative to the directory being archived (``tar -C <dir> .``).
+
+    Packing everything from ``/`` in one archive, a path-like pattern (``./megatron_parallel.py``,
+    ``sub/dir``) is anchored under its member; a bare name or glob (``__pycache__``, ``*.pyc``,
+    ``node_modules``) stays unanchored, which GNU tar matches at any depth (and, as a documented
+    over-approximation, in every member of the archive).
+    """
+    translated: List[str] = []
+    for pattern in patterns:
+        anchored = pattern.startswith("./")
+        cleaned = (pattern[2:] if anchored else pattern).rstrip("/")
+        if not cleaned:
+            continue
+        anchored = anchored or "/" in cleaned
+        translated.append(f"{member}/{cleaned}" if anchored else cleaned)
+    return translated
+
+
+def build_pack_command(members: Sequence[str], tarball: str = REMOTE_TARBALL, excludes: Sequence[str] = ()) -> str:
+    """Pack ``members`` (paths relative to ``/``) into ``tarball``.
+
+    Prints ``NG_TB4_SIZE=<bytes>`` and ``NG_TB4_TAR_RC=<rc>`` followed by tar's warnings. GNU tar exits 1
+    (with a complete archive) when a member changes while it is read, which an agent's leftover
+    background process does routinely; Harbor's best-effort collection grades such a trajectory, so
+    rc 1 is tolerated and recorded, rc >= 2 is a failure.
+    """
     if not members:
         raise ValueError("nothing to pack")
     quoted_members = " ".join(shlex.quote(m) for m in members)
     quoted_tarball = shlex.quote(tarball)
+    quoted_err = shlex.quote(TAR_STDERR)
+    tar_excludes = "".join(f"--exclude={shlex.quote(p)} " for p in excludes)
+    py_excludes = "".join(f"-x {shlex.quote(p)} " for p in excludes)
     body = (
-        f"if [ -e {quoted_tarball} ]; then unlink {quoted_tarball}; fi; "
+        f"if [ -e {quoted_tarball} ]; then unlink {quoted_tarball}; fi; : > {quoted_err}; "
         "if command -v tar >/dev/null 2>&1; then "
-        f"tar -czf {quoted_tarball} -C / --ignore-failed-read -- {quoted_members}; "
+        f"tar -czf {quoted_tarball} -C / --ignore-failed-read {tar_excludes}-- {quoted_members} 2>{quoted_err}; rc=$?; "
         "elif command -v python3 >/dev/null 2>&1; then "
-        f"python3 -c {shlex.quote(_PY_PACK)} {quoted_tarball} {quoted_members}; "
-        f"else echo NG_TB4_NO_PACKER >&2; exit {NO_PACKER_EXIT_CODE}; fi "
-        f"&& stat -c %s {quoted_tarball}"
+        f"python3 -c {shlex.quote(_PY_PACK)} {quoted_tarball} {py_excludes}-- {quoted_members} 2>{quoted_err}; rc=$?; "
+        f"else echo NG_TB4_NO_PACKER >&2; exit {NO_PACKER_EXIT_CODE}; fi; "
+        '[ "$rc" -le 1 ] || exit "$rc"; '
+        f'echo "NG_TB4_SIZE=$(stat -c %s {quoted_tarball})"; echo "NG_TB4_TAR_RC=$rc"; cat {quoted_err}'
     )
     return labeled("pack", body)
+
+
+def parse_pack_output(stdout: Optional[str]) -> Tuple[int, int, str]:
+    """Return (tarball bytes, tar return code, warning text) from the pack command's stdout."""
+    size = rc = None
+    warnings: List[str] = []
+    for line in (stdout or "").splitlines():
+        if line.startswith("NG_TB4_SIZE="):
+            size = int(line.split("=", 1)[1].strip())
+        elif line.startswith("NG_TB4_TAR_RC="):
+            rc = int(line.split("=", 1)[1].strip())
+        elif line.strip():
+            warnings.append(line.rstrip())
+    if size is None or rc is None:
+        raise ValueError(f"pack output lacks the size or return-code marker: {stdout!r}")
+    return size, rc, "\n".join(warnings)
 
 
 def build_extract_command(tarball: str = REMOTE_TARBALL) -> str:
@@ -293,7 +366,11 @@ def build_prepare_targets_command(dir_targets: Sequence[str], file_targets: Sequ
     parts: List[str] = [f"mkdir -p {VERIFIER_DIR} {ARTIFACTS_DIR} && chmod 777 {VERIFIER_DIR} {ARTIFACTS_DIR}"]
     for target in dir_targets:
         q = shlex.quote(target)
-        parts.append(f"mkdir -p {q} && find {q} -mindepth 1 -delete && chmod 777 {q}")
+        # Harbor's empty_dirs guard: a file, dangling link or link-to-file occupying the path is removed first.
+        parts.append(
+            f"if [ -L {q} ] || {{ [ -e {q} ] && [ ! -d {q} ]; }}; then unlink {q}; fi; "
+            f"mkdir -p {q} && find {q} -mindepth 1 -delete && chmod 777 {q}"
+        )
     parents = []
     for target in file_targets:
         parent = PurePosixPath(target).parent.as_posix()
@@ -424,6 +501,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._sessions: Dict[str, AgentSession] = dict()
+        self._last_pack: Dict[str, Any] = {}
 
     # -- configuration helpers --------------------------------------------------------------
 
@@ -482,7 +560,10 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         provider_default_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
 
         env = dict(self.config.sandbox_config.get("env", {}))
-        if self.config.sandbox_config.get("derive_cpu_env", True):
+        derive = self.config.sandbox_config.get("derive_cpu_env", True)
+        if role == "verifier":
+            derive = derive and self.config.verifier_derive_cpu_env
+        if derive:
             env = cpu_cap_env(resources.cpu) | env  # explicit keys win over the derived caps
 
         spec = SandboxSpec(
@@ -533,6 +614,9 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             image=body.docker_image, resources=self._resources_for(task.environment), role="agent", task=task
         )
         session_id = request.session[SESSION_ID_KEY]
+        previous = self._sessions.pop(session_id, None)
+        if previous is not None:
+            await self._stop_sandbox(previous.sandbox, role="agent", task_name=previous.task.task_name)
         self._sessions[session_id] = AgentSession(
             task=task, sandbox=sandbox, docker_image=body.docker_image, started_at=monotonic()
         )
@@ -540,10 +624,16 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: TerminalBench4VerifyRequest) -> TerminalBench4VerifyResponse:
         verify_started_at = monotonic()
-        task = self._load_task(body)
         session_id = request.session.get(SESSION_ID_KEY) or f"golden-{uuid4().hex}"
         session = self._sessions.pop(session_id, None)
-        log_dir = self._session_log_dir(task, session_id)
+        try:
+            task = self._load_task(body)
+            log_dir = self._session_log_dir(task, session_id)
+        except Exception:
+            # A bad task folder or an unwritable log dir must not orphan the seeded agent sandbox.
+            if session is not None:
+                await self._stop_sandbox(session.sandbox, role="agent", task_name=body.task_name)
+            raise
 
         golden_output: Optional[str] = None
         golden_exit_code: Optional[int] = None
@@ -617,8 +707,9 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             await self._stop_sandbox(verifier_sandbox, role="verifier", task_name=task.task_name)
 
         failure_reason = None if outcome.evaluation_completed else (outcome.error or "verifier did not complete")
+        explicit_only = set(TerminalBench4VerifyResponse.model_fields) - set(TerminalBench4VerifyRequest.model_fields)
         response = TerminalBench4VerifyResponse(
-            **body.model_dump(),
+            **body.model_dump(exclude=explicit_only),
             reward=outcome.reward,
             failure_reason=failure_reason,
             evaluation_completed=outcome.evaluation_completed,
@@ -631,6 +722,11 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             artifact_manifest=[p.as_dict() for p in probes],
             artifacts_packed=sum(1 for p in probes if p.status == "ok"),
             artifact_tarball_bytes=tarball_bytes,
+            artifact_tar_return_code=self._last_pack.get("tar_return_code"),
+            artifact_tar_warnings=self._last_pack.get("tar_warnings", ""),
+            artifact_excludes=list(self._last_pack.get("excludes", [])),
+            verifier_stderr_tail=outcome.stderr_tail,
+            verifier_wall_time_s=outcome.wall_time_s,
             collect_hook_results=hook_results,
             agent_sandbox_stopped=agent_stopped,
             artifact_collection_time_s=artifact_collection_time_s,
@@ -661,9 +757,10 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             timeout_s=60,
         )
         if mkdir_result.return_code != 0:
-            raise RuntimeError(
-                f"{task.task_name}: cannot create {SOLUTION_DIR} in the agent image (rc {mkdir_result.return_code}: "
-                f"{(mkdir_result.stderr or '')[-500:]}); golden mode needs a writable root filesystem for the image user"
+            raise OracleUnsupportedError(
+                f"{task.task_name}: cannot create {SOLUTION_DIR} as the image user (rc {mkdir_result.return_code}: "
+                f"{(mkdir_result.stderr or '')[-500:]}). Harbor places /solution with a daemon-level copy; this provider "
+                "has no root escalation, so oracle mode is unavailable on non-root agent images (rollouts are unaffected)"
             )
         for local_path in files:
             remote_path = f"{SOLUTION_DIR}/{local_path.relative_to(solution_dir).as_posix()}"
@@ -677,7 +774,9 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         self._log(f"running golden solution for {task.task_name}")
         try:
             result = await sandbox.exec(
-                labeled("run-solution", f"bash {SOLUTION_DIR}/solve.sh"), timeout_s=self.config.golden_patch_timeout_s
+                labeled("run-solution", f"bash {SOLUTION_DIR}/solve.sh"),
+                timeout_s=self.config.golden_patch_timeout_s,
+                env={"DEBIAN_FRONTEND": "noninteractive", **task.solution_env},  # what Harbor's OracleAgent sets
             )
         except Exception as error:
             return None, f"golden solution raised {type(error).__name__}: {error}"
@@ -734,28 +833,37 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             )
         kinds = parse_probe_output(probe_result.stdout)
         members: List[str] = []
+        excludes: List[str] = []
         for artifact in main_artifacts:
             kind = kinds.get(artifact.normalized_source, "missing")
             status = "ok" if kind in ("dir", "file") else "missing"
             probes.append(ArtifactProbe(artifact.source, artifact.service, kind, status, artifact.relative_to_root))
             if status == "ok" and artifact.relative_to_root:
                 members.append(artifact.relative_to_root)
+                if kind == "dir" and artifact.exclude:
+                    excludes.extend(translate_excludes(artifact.relative_to_root, artifact.exclude))
 
         tarball_local: Optional[Path] = None
         tarball_bytes = 0
+        self._last_pack = {"tar_return_code": None, "tar_warnings": "", "excludes": excludes}
         if members:
-            pack_result = await sandbox.exec(build_pack_command(members), timeout_s=1800)
+            pack_result = await sandbox.exec(build_pack_command(members, excludes=excludes), timeout_s=1800)
             if pack_result.error_type or pack_result.return_code != 0:
                 raise RuntimeError(
                     f"{task.task_name}: packing artifacts failed (rc {pack_result.return_code}, "
                     f"error_type {pack_result.error_type}): {(pack_result.stderr or '')[-800:]}"
                 )
             try:
-                tarball_bytes = int((pack_result.stdout or "").strip().splitlines()[-1])
-            except (IndexError, ValueError) as error:
+                tarball_bytes, tar_rc, tar_warnings = parse_pack_output(pack_result.stdout)
+            except ValueError as error:
                 raise RuntimeError(
-                    f"{task.task_name}: could not read the tarball size: {pack_result.stdout!r}"
+                    f"{task.task_name}: could not read the pack result: {pack_result.stdout!r}"
                 ) from error
+            self._last_pack.update(tar_return_code=tar_rc, tar_warnings=tail(tar_warnings, 4000))
+            if tar_rc == 1:
+                self._log(
+                    f"{task.task_name}: tar exited 1 (a member changed while read); archive kept: {tar_warnings[-300:]}"
+                )
             if tarball_bytes > self.config.artifact_max_bytes:
                 raise RuntimeError(
                     f"{task.task_name}: artifact tarball is {tarball_bytes} bytes, above artifact_max_bytes="
@@ -772,7 +880,9 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             f"{task.task_name}: artifacts probed={len(main_artifacts)} packed={len(members)} bytes={tarball_bytes}"
         )
         (log_dir / "artifact_manifest.json").write_text(
-            json.dumps({"tarball_bytes": tarball_bytes, "entries": [p.as_dict() for p in probes]}, indent=1)
+            json.dumps(
+                {"tarball_bytes": tarball_bytes, "entries": [p.as_dict() for p in probes], **self._last_pack}, indent=1
+            )
         )
         return probes, tarball_local, tarball_bytes
 
@@ -810,6 +920,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         outcome = VerifierOutcome()
         timeout_s = self._verifier_timeout_s(task)
         self._log(f"{task.task_name}: running {TEST_SCRIPT} with timeout {timeout_s:g}s")
+        started_at = monotonic()
         try:
             run_result = await sandbox.exec(
                 labeled("run-tests", f"({TEST_SCRIPT}) > {TEST_STDOUT} 2>&1"),
@@ -817,19 +928,34 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 env=task.verifier_env or None,
                 user=task.verifier_user,
             )
-        except Exception as error:
-            outcome.error = f"verifier command raised {type(error).__name__} after {timeout_s:g}s budget: {error}"
-            outcome.error_type = type(error).__name__
-            await self._download_verifier_files(sandbox, log_dir, outcome)
+        except TimeoutError as error:
+            # The provider's client-side backstop; a timeout is data (Harbor: VerifierTimeoutError).
+            outcome.wall_time_s = monotonic() - started_at
+            outcome.error = f"verifier timed out after its {timeout_s:g}s budget ({type(error).__name__}: {error})"
+            outcome.error_type = "timeout"
+            await self._download_verifier_files(sandbox, log_dir, outcome, reward_required=False)
             return outcome
+        # Any other exception (dead backend, transport failure) propagates: invalidated, not scored.
+        outcome.wall_time_s = monotonic() - started_at
         outcome.exit_code = run_result.return_code
+        outcome.stderr_tail = tail(run_result.stderr or "", 4000)
         if run_result.error_type:
             outcome.error = f"verifier command reported error_type={run_result.error_type}"
             outcome.error_type = run_result.error_type
-            await self._download_verifier_files(sandbox, log_dir, outcome)
+            await self._download_verifier_files(sandbox, log_dir, outcome, reward_required=False)
+            return outcome
+        if outcome.wall_time_s >= timeout_s:
+            # execd enforced the budget itself and returned an ordinary exit code (opensandbox never
+            # reports error_type="timeout"); a reward file written before the kill must not be scored.
+            outcome.error = (
+                f"verifier exceeded its {timeout_s:g}s budget (wall {outcome.wall_time_s:.1f}s, "
+                f"rc {run_result.return_code})"
+            )
+            outcome.error_type = "timeout"
+            await self._download_verifier_files(sandbox, log_dir, outcome, reward_required=False)
             return outcome
 
-        sizes = await self._download_verifier_files(sandbox, log_dir, outcome)
+        sizes = await self._download_verifier_files(sandbox, log_dir, outcome, reward_required=True)
         source = REWARD_JSON if REWARD_JSON in sizes else REWARD_TXT if REWARD_TXT in sizes else None
         if source is None:
             outcome.error = f"verifier wrote neither {VERIFIER_DIR}/{REWARD_JSON} nor {VERIFIER_DIR}/{REWARD_TXT}"
@@ -844,21 +970,42 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         return outcome
 
     async def _download_verifier_files(
-        self, sandbox: AsyncSandbox, log_dir: Path, outcome: VerifierOutcome
+        self, sandbox: AsyncSandbox, log_dir: Path, outcome: VerifierOutcome, *, reward_required: bool
     ) -> Dict[str, int]:
-        """Download reward files, ctrf.json and test-stdout.txt when present; return their sizes."""
+        """Download reward files, ctrf.json and test-stdout.txt when present; return their sizes.
+
+        With ``reward_required`` the probe and the reward-file downloads are load-bearing and raise on
+        failure (infrastructure); ctrf.json and the stdout capture are always best-effort.
+        """
         try:
             probe = await sandbox.exec(build_verifier_files_probe_command(), timeout_s=60)
         except Exception as error:
+            if reward_required:
+                raise RuntimeError(
+                    f"probing {VERIFIER_DIR} for reward files raised {type(error).__name__}: {error}"
+                ) from error
             outcome.error = (outcome.error or "") + f"; probing {VERIFIER_DIR} raised {type(error).__name__}: {error}"
             return {}
+        if probe.error_type or probe.return_code != 0:
+            message = f"probing {VERIFIER_DIR} failed (rc {probe.return_code}, error_type {probe.error_type})"
+            if reward_required:
+                raise RuntimeError(message)
+            outcome.error = (outcome.error or "") + "; " + message
+            return {}
         sizes = parse_verifier_files_probe(probe.stdout)
-        for name, size in sizes.items():
+        for name, size in list(sizes.items()):
+            local_path = log_dir / name
             if size <= 0:
+                # Present but empty: materialize it so parse_reward_payload reports "is empty" (Harbor: RewardFileEmptyError).
+                local_path.write_bytes(b"")
                 continue
             try:
-                await sandbox.download(f"{VERIFIER_DIR}/{name}", log_dir / name)
-            except Exception:
+                await sandbox.download(f"{VERIFIER_DIR}/{name}", local_path)
+            except Exception as error:
+                if reward_required and name in (REWARD_JSON, REWARD_TXT):
+                    raise RuntimeError(
+                        f"downloading {VERIFIER_DIR}/{name} raised {type(error).__name__}: {error}"
+                    ) from error
                 print(f"Failed to download {VERIFIER_DIR}/{name}: {format_exc()}", file=sys.stderr)
                 sizes.pop(name, None)
         stdout_path = log_dir / "test-stdout.txt"

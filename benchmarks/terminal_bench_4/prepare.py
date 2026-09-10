@@ -102,40 +102,43 @@ def prepare(
     sys.path.insert(0, str(_repo_root()))
     from resources_servers.terminal_bench_4.task_manifest import load_task  # noqa: PLC0415
 
-    tasks_root = Path(tasks_dir or os.environ.get("TB4_TASKS_DIR", "")).expanduser()
-    if not str(tasks_root) or not tasks_root.is_dir():
+    raw_tasks_dir = tasks_dir or os.environ.get("TB4_TASKS_DIR")
+    if not raw_tasks_dir:
         raise FileNotFoundError(
             "Point TB4_TASKS_DIR (or prepare(tasks_dir=...)) at a directory of Terminal-Bench 4.0 task folders; "
-            f"got {tasks_root!s}"
+            "neither was given (an empty value would otherwise scan the current directory)"
         )
+    tasks_root = Path(raw_tasks_dir).expanduser()
+    if not tasks_root.is_dir():
+        raise FileNotFoundError(f"TB4 tasks directory does not exist: {tasks_root}")
     inventory = json.loads(Path(inventory_json).read_text()) if inventory_json else None
     output = Path(output_path) if output_path else OUTPUT_PATH
     output.parent.mkdir(parents=True, exist_ok=True)
 
     skipped: dict[str, str] = {}
-    num_samples = 0
-    with output.open("w") as handle:
-        for task_dir in iter_task_dirs(tasks_root, task_names):
-            task = load_task(task_dir)
-            if task.is_compose and not include_compose:
-                skipped[task_dir.name] = f"compose task with services {list(task.compose_services)}"
-                continue
-            if task.requires_gpu and not include_gpu:
-                skipped[task_dir.name] = "requires a GPU"
-                continue
-            handle.write(
-                json.dumps(
-                    build_row(
-                        task_dir, image_repository=image_repository, release_tag=release_tag, inventory=inventory
-                    )
-                )
-                + "\n"
+    rows: list[str] = []
+    for task_dir in iter_task_dirs(tasks_root, task_names):
+        task = load_task(task_dir)
+        if task.is_compose and not include_compose:
+            skipped[task_dir.name] = f"compose task with services {list(task.compose_services)}"
+            continue
+        if task.requires_gpu and not include_gpu:
+            skipped[task_dir.name] = "requires a GPU"
+            continue
+        rows.append(
+            json.dumps(
+                build_row(task_dir, image_repository=image_repository, release_tag=release_tag, inventory=inventory)
             )
-            num_samples += 1
+        )
 
-    print(f"Wrote {num_samples} rows to {output}; skipped {len(skipped)}: {json.dumps(skipped, indent=1)}")
-    if num_samples == 0:
-        raise ValueError(f"No runnable tasks under {tasks_root}")
+    print(f"Prepared {len(rows)} rows from {tasks_root}; skipped {len(skipped)}: {json.dumps(skipped, indent=1)}")
+    if not rows:
+        raise ValueError(f"No runnable tasks under {tasks_root}; existing {output} left untouched")
+    # Write next to the target and rename, so a failed run never truncates a previously prepared file.
+    temporary = output.with_name(output.name + ".tmp")
+    temporary.write_text("".join(row + "\n" for row in rows))
+    temporary.replace(output)
+    print(f"Wrote {len(rows)} rows to {output}")
     return output
 
 
