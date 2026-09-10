@@ -35,10 +35,8 @@ DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
 ROUTER_SERVER_PORT=8000
 WORKER_SERVER_PORT=8001
 
-# Router tuning. Defaults preserve the previous behaviour except for
-# ROUTER_DECODE_POLICY: cache_aware pins every decode request to one node.
 ROUTER_PREFILL_POLICY="${ROUTER_PREFILL_POLICY:-cache_aware}"
-ROUTER_DECODE_POLICY="${ROUTER_DECODE_POLICY:-round_robin}"
+ROUTER_DECODE_POLICY="${ROUTER_DECODE_POLICY:-cache_aware}"
 ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE="${ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE:-1}"
 
 eval_command=$(cat <<EOF
@@ -164,7 +162,6 @@ if (( SLURM_PROCID == 0 )); then
     router_pid=\$!
     trap 'kill "\$router_pid" 2>/dev/null || true' EXIT
 
-    # A dead router leaves every worker up and the endpoint unreachable.
     sleep 5
     if ! kill -0 "\$router_pid" 2>/dev/null; then
         echo "vllm-router exited during startup" >&2
