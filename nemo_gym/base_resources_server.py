@@ -13,13 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import hashlib
+import hmac
+import json
 import logging
 import time
 from abc import abstractmethod
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -93,6 +98,12 @@ class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     session_ttl_s: Optional[float] = None
     # How often the sweeper looks; only meaningful when session_ttl_s is set.
     session_sweep_interval_s: float = 60.0
+    # Reclaim a session this long after it was seeded regardless of activity. Idle time is
+    # not a liveness signal on its own, so this bounds a session whose handler has hung.
+    session_max_lifetime_s: Optional[float] = None
+    # How long a released session id is remembered, so a seed delayed in the network cannot
+    # recreate what was already torn down.
+    session_tombstone_s: float = 900.0
     # The mode of reverification (for gym eval reverify) of this server.
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNKNOWN
 
@@ -140,8 +151,43 @@ class BaseMultiRewardVerifyResponse(BaseVerifyResponse):
     reward_components: dict[str, float]
 
 
+class SessionCloseReason(str, Enum):
+    """Why the caller ended the session. Diagnostic only — it never decides whether the
+    resource is released."""
+
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
+    ABANDONED = "abandoned"
+    EXPIRED = "expired"
+    SHUTDOWN = "shutdown"
+
+
+class SessionCloseStatus(str, Enum):
+    """Terminal states of a close operation.
+
+    There is deliberately no ``not_found``: an unknown id and an already-released one
+    answer identically, so the endpoint cannot be used to probe whether another rollout's
+    session exists.
+    """
+
+    CLOSED = "closed"
+    ALREADY_CLOSED = "already_closed"
+    RELEASE_PENDING = "release_pending"
+    RELEASE_FAILED = "release_failed"
+
+
 class BaseSeedSessionRequest(BaseModel):
-    pass
+    model_config = ConfigDict(populate_by_name=True)
+
+    # Created by the caller before the first seed transmission, so it survives a lost seed
+    # response. The provider's own handle cannot serve here: it is learned *from* that
+    # response, which is exactly what goes missing.
+    ng_session_id: Optional[str] = Field(default=None, alias="_ng_session_id")
+    # Authorizes releasing this one session without the signed cookie. Only its digest is
+    # kept; the value must not reach logs, stored rows, error bodies or telemetry.
+    ng_session_close_token: Optional[str] = Field(default=None, alias="_ng_session_close_token")
 
 
 class BaseSeedSessionResponse(BaseModel):
@@ -149,14 +195,19 @@ class BaseSeedSessionResponse(BaseModel):
 
 
 class BaseCloseSessionRequest(BaseModel):
-    # Which session to release. Served over HTTP the caller identifies itself by cookie and
-    # the route fills this in; the sweeper has no request to read a cookie from and sets it
-    # directly. Either way an override receives it, so both paths reach the same code.
-    session_id: Optional[str] = None
+    model_config = ConfigDict(populate_by_name=True)
+
+    ng_session_id: Optional[str] = Field(default=None, alias="_ng_session_id")
+    ng_session_close_token: Optional[str] = Field(default=None, alias="_ng_session_close_token")
+    reason: SessionCloseReason = SessionCloseReason.COMPLETED
 
 
 class BaseCloseSessionResponse(BaseModel):
-    pass
+    """Lifecycle only. Carries no reward, trajectory, verifier field or provider handle."""
+
+    object: Literal["nemo_gym.session.close"] = "nemo_gym.session.close"
+    status: SessionCloseStatus
+    released: bool
 
 
 class MCPServerMetadata(BaseModel):
@@ -168,16 +219,53 @@ class MCPServerMetadata(BaseModel):
     headers: dict[str, str]
 
 
+def _digest(value: str) -> str:
+    """Hash a secret or payload for comparison without keeping the original."""
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _redact(session_id: Optional[str]) -> str:
+    """A session id is not a secret, but full ids do not belong in logs either."""
+    return f"{session_id[:8]}..." if session_id else "?"
+
+
+@dataclass
+class _SessionRecord:
+    """What the server remembers about one resources allocation.
+
+    It outlives the resource: after release the record stays as a tombstone so a seed
+    request delayed in the network cannot recreate what was already torn down.
+    """
+
+    seed_payload_digest: str
+    seed_response: Any
+    created_at: float
+    last_seen: float
+    close_token_digest: Optional[str] = None
+    # Requests currently executing against this session. Idle expiry ignores a session
+    # while any are in flight, because a rollout can legitimately spend minutes in a model
+    # call without touching the resources server.
+    active_handlers: int = 0
+    # One release runs per session. Concurrent closers await this task instead of each
+    # calling into the environment, so provider cleanup happens once.
+    release_task: Optional[Any] = None
+    closed_at: Optional[float] = None
+
+    @property
+    def is_closed(self) -> bool:
+        return self.closed_at is not None
+
+
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
 
-    # Last activity per session, for the optional idle sweeper. Private (leading underscore)
-    # so pydantic does not try to build a schema for it.
-    _session_last_seen: dict[str, float] = {}
+    # One record per session, live or tombstoned. Private (leading underscore) so pydantic
+    # does not try to build a schema for it.
+    _sessions: dict[str, _SessionRecord] = {}
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        self._session_last_seen = {}
+        self._sessions = {}
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -191,7 +279,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             async def _start_session_sweeper() -> None:  # pragma: no cover - exercised via the task
                 asyncio.create_task(self._sweep_idle_sessions())
 
-        app.post("/seed_session")(self.seed_session)
+        app.post("/seed_session")(self._seed_session_endpoint)
         app.post("/close_session")(self._close_session_endpoint)
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
         app.post("/verify")(
@@ -225,67 +313,198 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         return None
 
     async def seed_session(self, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+        """Allocate whatever this session needs. Default allocates nothing."""
         return BaseSeedSessionResponse()
 
-    def touch_session(self, session_id: str) -> None:
-        """Record activity for a session so the sweeper does not reclaim it.
+    async def release_session(self, session_id: str, reason: SessionCloseReason) -> None:
+        """Release what this session allocated. Default no-op.
 
-        Environments that opt into ``session_ttl_s`` call this whenever a session does
-        something; the sweeper reclaims the ones that stop.
+        Deliberately not named ``close_session``: ``GymnasiumServer``, TALES and OpenAir
+        already define a method by that name with a different signature, and a base method
+        sharing it would silently override theirs. A server migrating to the common route
+        can bridge instead of reimplementing::
+
+            async def release_session(self, session_id, reason):
+                await self.close_session(session_id)
+
+        Identity, conflict checks, idempotency and the response belong to the route
+        adapter. This hook only releases, and only what this server owns. It should be
+        idempotent: a caller that times out will retry.
         """
-        self._session_last_seen[session_id] = time.monotonic()
+        return None
+
+    # ----- session identity and bookkeeping -------------------------------- #
+    def touch_session(self, session_id: str) -> None:
+        """Record activity so idle expiry does not reclaim a session that is still in use."""
+        record = self._sessions.get(session_id)
+        if record is not None:
+            record.last_seen = time.monotonic()
 
     def forget_session(self, session_id: str) -> None:
-        """Stop tracking a session that has already been released."""
-        self._session_last_seen.pop(session_id, None)
+        """Drop a record outright. Expiry normally tombstones instead, so this is for tests
+        and for servers that manage their own identity."""
+        self._sessions.pop(session_id, None)
 
+    @asynccontextmanager
+    async def active_session(self, session_id: Optional[str]):
+        """Mark a session busy for the duration of a handler.
+
+        Two jobs: idle expiry skips a session while a handler is in flight, and a handler
+        cannot start once release has begun — otherwise close, or the reaper, can tear a
+        resource down while verification is still reading it.
+
+        The base uses this around ``/verify``. An environment's tool routes should use it
+        too; broad adoption is #3037.
+        """
+        record = self._sessions.get(session_id) if session_id else None
+        if record is not None:
+            if record.is_closed or record.release_task is not None:
+                raise HTTPException(status_code=409, detail="session is closing")
+            record.active_handlers += 1
+            record.last_seen = time.monotonic()
+        try:
+            yield
+        finally:
+            if record is not None:
+                record.active_handlers = max(0, record.active_handlers - 1)
+                record.last_seen = time.monotonic()
+
+    # ----- seed ------------------------------------------------------------ #
+    async def _seed_session_endpoint(self, request: Request, body: BaseSeedSessionRequest) -> Any:
+        """Deduplicate by the caller-created id, then delegate to ``seed_session``.
+
+        The transport may repeat a seed it is not sure was delivered. Without this the
+        repeat allocates a second resource and the first becomes unreachable, which is the
+        leak the caller-created id exists to prevent.
+        """
+        session_id = body.ng_session_id or request.session.get(SESSION_ID_KEY)
+        payload_digest = _digest(
+            json.dumps(
+                body.model_dump(mode="json", exclude={"ng_session_id", "ng_session_close_token"}),
+                sort_keys=True,
+            )
+        )
+        record = self._sessions.get(session_id) if session_id else None
+
+        if record is not None:
+            if record.is_closed:
+                # A seed delayed in the network must not resurrect a torn-down resource.
+                raise HTTPException(status_code=409, detail="session id has already been closed")
+            if record.seed_payload_digest != payload_digest:
+                raise HTTPException(status_code=409, detail="session id already seeded with a different payload")
+            record.last_seen = time.monotonic()
+            return record.seed_response
+
+        response = await self.seed_session(body)
+        if session_id:
+            now = time.monotonic()
+            self._sessions[session_id] = _SessionRecord(
+                seed_payload_digest=payload_digest,
+                seed_response=response,
+                created_at=now,
+                last_seen=now,
+                close_token_digest=(_digest(body.ng_session_close_token) if body.ng_session_close_token else None),
+            )
+        return response
+
+    # ----- close ----------------------------------------------------------- #
+    async def _close_session_endpoint(
+        self, request: Request, body: BaseCloseSessionRequest, response: Response
+    ) -> BaseCloseSessionResponse:
+        """Resolve identity, authorize, and run exactly one release.
+
+        The adapter owns everything that is not resource release: which session the caller
+        means, whether it may release it, whether release already happened, and what the
+        wire says about it.
+        """
+        cookie_id = request.session.get(SESSION_ID_KEY)
+        body_id = body.ng_session_id
+
+        if cookie_id and body_id and cookie_id != body_id:
+            # Releasing either one would act on a session the caller did not name.
+            raise HTTPException(status_code=409, detail="cookie and session id identify different sessions")
+
+        session_id = body_id or cookie_id
+        record = self._sessions.get(session_id) if session_id else None
+
+        if record is not None and cookie_id is None:
+            # No cookie: the seed response was lost, so the close capability is the only
+            # thing that authorizes release.
+            if record.close_token_digest is None or not body.ng_session_close_token:
+                raise HTTPException(status_code=403, detail="close capability required without a session cookie")
+            if not hmac.compare_digest(record.close_token_digest, _digest(body.ng_session_close_token)):
+                raise HTTPException(status_code=403, detail="close capability does not match")
+
+        return await self._release_once(session_id, record, body.reason, response)
+
+    async def _release_once(
+        self,
+        session_id: Optional[str],
+        record: Optional[_SessionRecord],
+        reason: SessionCloseReason,
+        response: Optional[Response] = None,
+    ) -> BaseCloseSessionResponse:
+        """Run release at most once per session; concurrent callers await the same result.
+
+        An unknown session and an already-released one answer identically, so the endpoint
+        cannot be used to learn whether another rollout's session exists.
+        """
+        if record is None or record.is_closed:
+            return BaseCloseSessionResponse(status=SessionCloseStatus.ALREADY_CLOSED, released=True)
+
+        if record.release_task is None:
+            record.release_task = asyncio.create_task(self.release_session(session_id, reason))
+
+        try:
+            await asyncio.shield(record.release_task)
+        except asyncio.CancelledError:
+            # The caller went away; the release itself keeps running.
+            raise
+        except Exception:
+            logger.warning("releasing session %s failed", _redact(session_id), exc_info=True)
+            record.release_task = None
+            if response is not None:
+                response.status_code = 503
+            return BaseCloseSessionResponse(status=SessionCloseStatus.RELEASE_FAILED, released=False)
+
+        record.closed_at = time.monotonic()
+        record.release_task = None
+        return BaseCloseSessionResponse(status=SessionCloseStatus.CLOSED, released=True)
+
+    # ----- expiry ---------------------------------------------------------- #
     async def _sweep_idle_sessions(self) -> None:
-        """Call ``close_session`` for sessions idle beyond ``session_ttl_s``.
+        """Reclaim sessions no call will reach: a killed trainer, a dropped connection.
 
-        A backstop, not the primary path: the agent layer closes sessions in a finally.
-        This covers what no call can reach - a killed trainer, a dropped connection.
+        Idle time alone is not a liveness signal — a healthy rollout can sit in a long model
+        call — so a session with handlers in flight is skipped, and an absolute lifetime
+        covers the case where a handler itself has hung.
         """
         ttl = self.config.session_ttl_s
         assert ttl is not None
         while True:
             await asyncio.sleep(self.config.session_sweep_interval_s)
             try:
-                now = time.monotonic()
-                expired = [sid for sid, seen in self._session_last_seen.items() if now - seen > ttl]
-                for session_id in expired:
-                    self.forget_session(session_id)
-                    logger.warning("reclaiming environment session %s after %.0fs idle", session_id, ttl)
-                    await self.close_session(BaseCloseSessionRequest(session_id=session_id))
+                await self._sweep_once(time.monotonic(), ttl)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("environment session sweep failed")
 
-    async def _close_session_endpoint(
-        self, request: Request, body: BaseCloseSessionRequest
-    ) -> BaseCloseSessionResponse:
-        """Resolve the cookie session before delegating, so ``close_session`` has one signature.
-
-        Without this the sweeper, which holds a session id but no request, could not tell an
-        override which session to release.
-        """
-        if body.session_id is None:
-            body.session_id = request.session.get(SESSION_ID_KEY)
-        return await self.close_session(body)
-
-    async def close_session(self, body: BaseCloseSessionRequest) -> BaseCloseSessionResponse:
-        """Release whatever this session allocated. Default no-op.
-
-        Environments that hold an external resource - a container, a browser, a provider
-        session - should override this and make it **idempotent**: the caller may time out
-        and retry, and a second call must not produce a different outcome. This is the
-        same contract as ``SandboxProvider.close()``.
-
-        The agent layer calls it in a ``finally`` around the episode, so it also runs when
-        the rollout failed, was cancelled, or timed out - the cases where ``verify()``, the
-        usual place environments release things, never happens.
-        """
-        return BaseCloseSessionResponse()
+    async def _sweep_once(self, now: float, ttl: float) -> None:
+        max_lifetime = self.config.session_max_lifetime_s
+        tombstone_s = self.config.session_tombstone_s
+        for session_id, record in list(self._sessions.items()):
+            if record.is_closed:
+                if now - record.closed_at > tombstone_s:
+                    self._sessions.pop(session_id, None)
+                continue
+            idle_expired = record.active_handlers == 0 and now - record.last_seen > ttl
+            # Not suppressed by active handlers: a handler stuck for hours is the case this
+            # bound exists for.
+            lifetime_expired = max_lifetime is not None and now - record.created_at > max_lifetime
+            if idle_expired or lifetime_expired:
+                logger.warning("reclaiming environment session %s", _redact(session_id))
+                await self._release_once(session_id, record, SessionCloseReason.EXPIRED)
 
     @abstractmethod
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
