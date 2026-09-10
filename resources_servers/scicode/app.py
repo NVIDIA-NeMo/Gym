@@ -163,7 +163,11 @@ class ScicodeResourcesServer(SimpleResourcesServer):
                 if configured_path.is_absolute() or configured_path.parent != Path("."):
                     if not configured_path.is_absolute():
                         configured_path = PARENT_DIR / configured_path
-                    executable = str(configured_path.resolve())
+                    # Keep the configured path rather than resolving symlinks. A virtual
+                    # environment's ``bin/python`` is normally a symlink; dereferencing it
+                    # changes argv[0] to the base interpreter and prevents Python from finding
+                    # the venv's pyvenv.cfg and site-packages.
+                    executable = os.path.abspath(configured_path)
                 else:
                     executable = shutil.which(interpreter.python_executable) or ""
                 if not executable or not Path(executable).is_file() or not os.access(executable, os.X_OK):

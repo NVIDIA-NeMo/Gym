@@ -126,10 +126,16 @@ def test_run_substep_reports_interpreter_launch_error():
 
 
 def test_run_substep_limits_numerical_library_threads():
-    with patch(
-        "resources_servers.scicode.scicode_integration.runner.subprocess.run",
-        return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b""),
-    ) as mocked_run:
+    with (
+        patch.dict(
+            "resources_servers.scicode.scicode_integration.runner.os.environ",
+            {"PYTHONPATH": "/resource/server", "VIRTUAL_ENV": "/resource/server/.venv"},
+        ),
+        patch(
+            "resources_servers.scicode.scicode_integration.runner.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b""),
+        ) as mocked_run,
+    ):
         result = run_substep("assert True", timeout_secs=10.0)
 
     assert result["passed"] is True
@@ -137,6 +143,8 @@ def test_run_substep_limits_numerical_library_threads():
     assert child_env["OPENBLAS_NUM_THREADS"] == "1"
     assert child_env["OMP_NUM_THREADS"] == "1"
     assert child_env["MKL_NUM_THREADS"] == "1"
+    assert "PYTHONPATH" not in child_env
+    assert "VIRTUAL_ENV" not in child_env
 
 
 def test_run_substep_classifies_openblas_thread_failure_as_infrastructure_error():
@@ -146,6 +154,18 @@ def test_run_substep_classifies_openblas_thread_failure_as_infrastructure_error(
         return_value=subprocess.CompletedProcess(args=[], returncode=1, stdout=b"", stderr=stderr),
     ):
         result = run_substep("assert True", timeout_secs=10.0)
+
+    assert result["passed"] is False
+    assert result["infrastructure_error"] is True
+
+
+def test_run_substep_classifies_missing_required_dependency_as_infrastructure_error():
+    stderr = b"ModuleNotFoundError: No module named 'numpy'"
+    with patch(
+        "resources_servers.scicode.scicode_integration.runner.subprocess.run",
+        return_value=subprocess.CompletedProcess(args=[], returncode=1, stdout=b"", stderr=stderr),
+    ):
+        result = run_substep("import numpy", timeout_secs=10.0)
 
     assert result["passed"] is False
     assert result["infrastructure_error"] is True
@@ -367,6 +387,18 @@ class TestApp:
             ("relative", str(relative_python.resolve())),
             ("path", sys.executable),
         ]
+
+    def test_server_preserves_virtualenv_python_symlink(self, tmp_path):
+        base_python = tmp_path / "python3.12"
+        base_python.write_text("#!/bin/sh\n")
+        base_python.chmod(0o755)
+        venv_python = tmp_path / "grading-env" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True)
+        venv_python.symlink_to(base_python)
+
+        server = _server(grading_interpreters=[{"name": "frozen", "python_executable": str(venv_python)}])
+
+        assert server._resolve_grading_interpreters() == [("frozen", str(venv_python.absolute()))]
 
     def test_server_rejects_non_executable_interpreter(self, tmp_path):
         not_executable = tmp_path / "python"

@@ -205,12 +205,24 @@ _GRADING_THREAD_ENV = {
     "OPENBLAS_NUM_THREADS": "1",
     "VECLIB_MAXIMUM_THREADS": "1",
 }
+_INHERITED_PYTHON_ENV = (
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "PYTHONUSERBASE",
+    "UV_PROJECT_ENVIRONMENT",
+    "VIRTUAL_ENV",
+    "__PYVENV_LAUNCHER__",
+)
 _INFRASTRUCTURE_ERROR_MARKERS = (
     "OpenBLAS blas_thread_init:",
     "Resource temporarily unavailable",
     "PyCapsule_Import could not import module",
     "Error importing numpy",
     "numpy.core._multiarray_umath failed to import",
+    "ModuleNotFoundError: No module named 'h5py'",
+    "ModuleNotFoundError: No module named 'numpy'",
+    "ModuleNotFoundError: No module named 'scipy'",
+    "ModuleNotFoundError: No module named 'sympy'",
 )
 
 
@@ -266,6 +278,10 @@ def run_substep(program: str, timeout_secs: float, python_executable: str | None
         # Concurrent SciCode subprocesses can then exceed a cluster's process/thread quota before
         # any model code executes. Pin each isolated grading process to one native thread.
         child_env = os.environ.copy()
+        # The resources server runs in its own uv-managed environment. Do not leak that
+        # environment's Python path or venv selection into separately frozen grading venvs.
+        for variable in _INHERITED_PYTHON_ENV:
+            child_env.pop(variable, None)
         child_env.update(_GRADING_THREAD_ENV)
         proc = subprocess.run(
             [python_executable or sys.executable, source_path],
