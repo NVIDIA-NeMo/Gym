@@ -314,7 +314,11 @@ def test_render_driver_entrypoint_with_gym_install():
     out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
     assert "git clone" in out
     assert "git checkout main" in out
-    assert "uv pip install -e . --system --break-system-packages" in out
+    assert "uv venv --seed .venv" in out
+    assert "source .venv/bin/activate" in out
+    assert "uv pip install -e ." in out
+    assert "--system" not in out
+    assert "--break-system-packages" not in out
     assert 'exec "$@"' in out
     assert '"${GYM_CMD[@]}"' in out
 
