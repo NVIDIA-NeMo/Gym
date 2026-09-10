@@ -120,7 +120,7 @@ class SandboxPool:
         if not connection.get("domain") or not connection.get("api_key"):
             raise ValueError(
                 "sandbox_pool backend selected but the provider connection has an empty "
-                "domain or api_key — set OPENSANDBOX_BASE_URL / OPENSANDBOX_API_KEY"
+                "domain or api_key — set OPENSANDBOX_DOMAIN / OPENSANDBOX_API_KEY"
             )
         self._provider = provider
         self._pool_ref = str(pool_ref or "")

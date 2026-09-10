@@ -57,7 +57,7 @@ def _admit(pool: SandboxPool, index: int) -> None:
 class TestPoolConfigValidation:
     def test_empty_domain_is_a_hard_error(self):
         bad = {"opensandbox": {"connection": {"domain": "", "api_key": "k"}}}
-        with pytest.raises(ValueError, match="OPENSANDBOX_BASE_URL"):
+        with pytest.raises(ValueError, match="OPENSANDBOX_DOMAIN"):
             SandboxPool(provider=bad, image="img", entrypoint=["start"])
 
     def test_empty_api_key_is_a_hard_error(self):

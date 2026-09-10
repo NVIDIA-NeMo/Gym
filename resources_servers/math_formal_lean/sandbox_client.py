@@ -171,7 +171,7 @@ class GymSandboxLean4Client:
         if not connection.get("domain") or not connection.get("api_key"):
             raise ValueError(
                 "sandbox_backend=gym_sandbox requires provider connection domain/api_key — "
-                "set OPENSANDBOX_BASE_URL / OPENSANDBOX_API_KEY"
+                "set OPENSANDBOX_DOMAIN / OPENSANDBOX_API_KEY"
             )
         self._provider = provider
         self._image = image
