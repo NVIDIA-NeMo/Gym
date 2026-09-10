@@ -18,7 +18,7 @@ The dataset is in preparation and the example data can be found in `data/example
 - Failed test cases result in a reward of 0.0 with detailed error information
 
 ### Test execution (for now)
-We use the LiveCodeBench execution code.
+We use the LiveCodeBench execution code. Each verification uses one fresh child process because the reliability guard mutates process-global state. The child returns one versioned payload over a one-way pipe; `unit_test_result_max_bytes` bounds that payload, and `unit_test_global_timeout_secs` caps the input-scaled execution backstop. `num_processes` limits locally awaited Ray tasks. Cancelling an HTTP request asks Ray to interrupt its task; if cancellation delivery is delayed, that remote task remains bounded by the global timeout.
 
 ### Example of rollouts and usage
 

@@ -9,6 +9,10 @@ code_gen:
       value: Improve competitive coding capabilities
       num_processes: 8
       unit_test_timeout_secs: 10
+      # Cap the full child lifetime independently of the number of submitted tests.
+      unit_test_global_timeout_secs: 600
+      # Maximum pickled result and metadata payload accepted from the isolated child.
+      unit_test_result_max_bytes: 16777216
       debug: false
 code_gen_simple_agent:
   responses_api_agents:

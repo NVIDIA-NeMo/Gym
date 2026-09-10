@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 from typing import Generator
 from unittest.mock import MagicMock
 
@@ -23,6 +24,7 @@ from app import (
     CompCodingResourcesServerConfig,
     CompCodingVerifyRequest,
     CompCodingVerifyResponse,
+    _await_remote_result,
 )
 from fastapi.testclient import TestClient
 from lcb_integration.testing_util import MockStdinWithBuffer
@@ -271,6 +273,20 @@ class TestApp:
         )
         res = CompCodingVerifyResponse.model_validate(response.json())
         assert res.reward == 0.0 and res.metadata["error_message"] == "Runtime Error"
+
+    @pytest.mark.parametrize("cancel_error", [None, RuntimeError("Ray unavailable")])
+    async def test_cancelled_wait_requests_remote_ray_cancellation(self, monkeypatch, cancel_error) -> None:
+        future = asyncio.get_running_loop().create_future()
+        cancel = MagicMock(side_effect=cancel_error)
+        monkeypatch.setattr(ray, "cancel", cancel)
+        task = asyncio.create_task(_await_remote_result(future))
+        await asyncio.sleep(0)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        cancel.assert_called_once_with(future, force=False)
 
 
 def _make_server():
