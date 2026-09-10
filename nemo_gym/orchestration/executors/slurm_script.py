@@ -24,11 +24,13 @@ from nemo_gym.orchestration.api import (
     SlurmComputeConfig,
     SubmitConfig,
     VllmServiceConfig,  # used in _BUILDERS dispatch table
+    haproxy_topology,
 )
 from nemo_gym.orchestration.executors.script_templates import (
     bash_var,
     render_driver_entrypoint,
     render_gym_cmd,
+    render_haproxy_multi_instance_command,
     render_health_check,
     render_ray_prelude,
     render_vllm_ray_symmetric_run,
@@ -128,12 +130,11 @@ def _render_service_command(
     )
 
 
-def _vllm_base_flags(service: VllmServiceConfig) -> str:
-    cmd = (
-        f"vllm serve {shlex.quote(service.model)}"
-        f" --port {service.port}"
-        f" --tensor-parallel-size {service.tensor_parallel_size}"
-    )
+def _vllm_base_flags(service: VllmServiceConfig, include_port: bool = True) -> str:
+    cmd = f"vllm serve {shlex.quote(service.model)}"
+    if include_port:
+        cmd += f" --port {service.port}"
+    cmd += f" --tensor-parallel-size {service.tensor_parallel_size}"
     if service.pipeline_parallel_size > 1:
         cmd += f" --pipeline-parallel-size {service.pipeline_parallel_size}"
     if service.extra_args:
@@ -214,20 +215,55 @@ def _build_ray_command(_service: RayServiceConfig) -> str:
     return "ray start --head"
 
 
+def _build_vllm_haproxy_command(
+    name: str, service: VllmServiceConfig, total_nodes: int, max_gpus_per_node: int
+) -> str:
+    # Routes between independent `vllm serve` processes via HAProxy instead of vLLM's own
+    # --data-parallel-size / headless multi-node DP - see api.haproxy_topology for the two modes.
+    nodes_per_instance, instances_per_node = haproxy_topology(service, total_nodes, max_gpus_per_node)
+    cmd_no_port = _vllm_base_flags(service, include_port=False)
+    if service.trust_remote_code:
+        cmd_no_port += " --trust-remote-code"
+    health_path = service.health_check.path if service.health_check else "/health"
+    return render_haproxy_multi_instance_command(
+        name=name,
+        vllm_cmd_no_port=cmd_no_port,
+        frontend_port=service.port,
+        health_path=health_path,
+        nodes_per_instance=nodes_per_instance,
+        instances_per_node=instances_per_node,
+    )
+
+
 _BUILDERS = {
     VllmServiceConfig: _build_vllm_command,
     RayServiceConfig: _build_ray_command,
 }
 
 
+def _uses_haproxy_multi_instance(service: VllmServiceConfig | RayServiceConfig) -> bool:
+    return isinstance(service, VllmServiceConfig) and service.use_haproxy and service.number_of_instances > 1
+
+
 def _vllm_spans_multiple_nodes(service: VllmServiceConfig | RayServiceConfig, total_nodes: int) -> bool:
     # Node count alone determines this: multi-node compute always spans a vLLM service across
     # nodes via Ray, regardless of number_of_instances (single instance's TP/PP, or DP replicas).
     # Non-vLLM services (e.g. a plain Ray head) never span nodes this way.
-    return isinstance(service, VllmServiceConfig) and total_nodes > 1
+    return isinstance(service, VllmServiceConfig) and total_nodes > 1 and not _uses_haproxy_multi_instance(service)
 
 
-def _build_service_command(service: VllmServiceConfig | RayServiceConfig, total_nodes: int) -> str:
+def _service_needs_full_allocation(service: VllmServiceConfig | RayServiceConfig, total_nodes: int) -> bool:
+    # Services whose srun step must run identically on every node of the allocation (multi-node
+    # Ray-spanning vLLM, or an HAProxy multi-instance deployment - the latter needs every node to
+    # launch its local instances/groups even when only the head node also runs HAProxy itself).
+    return _vllm_spans_multiple_nodes(service, total_nodes) or _uses_haproxy_multi_instance(service)
+
+
+def _build_service_command(
+    name: str, service: VllmServiceConfig | RayServiceConfig, total_nodes: int, max_gpus_per_node: int
+) -> str:
+    if _uses_haproxy_multi_instance(service):
+        return _build_vllm_haproxy_command(name, service, total_nodes, max_gpus_per_node)
     if _vllm_spans_multiple_nodes(service, total_nodes):
         return _build_vllm_ray_command(service, total_nodes)
     return _BUILDERS[type(service)](service)
@@ -250,6 +286,8 @@ def build_sbatch_script(
 
     total_nodes, total_ntasks = _node_totals(compute)
     is_multi_node = total_nodes > 1
+    gpus_per_node_values = [p.gpus_per_node for p in compute.node_pools.values() if p.gpus_per_node is not None]
+    max_gpus_per_node = max(gpus_per_node_values) if gpus_per_node_values else 0
 
     ray_prelude = (
         render_ray_prelude()
@@ -261,14 +299,15 @@ def build_sbatch_script(
         _render_service_command(
             name,
             service.container,
-            _build_service_command(service, total_nodes),
+            _build_service_command(name, service, total_nodes, max_gpus_per_node),
             service.env or None,
             service.mounts or None,
-            # Only services that actually span multiple nodes need the whole allocation's --nodes/
-            # --ntasks - not every service in a multi-node job (e.g. a plain Ray head service runs
-            # on a single node regardless of how many nodes the overall job spans).
-            nodes=total_nodes if _vllm_spans_multiple_nodes(service, total_nodes) else None,
-            ntasks=total_ntasks if _vllm_spans_multiple_nodes(service, total_nodes) else None,
+            # Only services that need every node running the same srun step get the whole
+            # allocation's --nodes/--ntasks - not every service in a multi-node job (e.g. a plain
+            # Ray head service runs on a single node regardless of how many nodes the overall job
+            # spans).
+            nodes=total_nodes if _service_needs_full_allocation(service, total_nodes) else None,
+            ntasks=total_ntasks if _service_needs_full_allocation(service, total_nodes) else None,
             pre_command=service.pre_command,
         )
         for name, service in config.services.items()

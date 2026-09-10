@@ -16,7 +16,7 @@
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.api import SubmitConfig, VllmServiceConfig, haproxy_topology
 
 
 COMPUTE = {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}}
@@ -254,3 +254,134 @@ def test_gpu_footprint_no_node_pools_skips_validation():
     # Default COMPUTE fixture has no node_pools, so nothing to validate against.
     config = SubmitConfig.model_validate(_config(services={"svc": _MULTI_SERVICE}))
     assert config.services["svc"].number_of_instances == 4
+
+
+# ---------------------------------------------------------------------------
+# use_haproxy
+# ---------------------------------------------------------------------------
+
+
+def test_use_haproxy_defaults_to_false():
+    config = SubmitConfig.model_validate(_config())
+    assert config.services["svc"].use_haproxy is False
+
+
+def test_use_haproxy_mode_a_multi_node_uneven_split_rejected_same_as_without_haproxy():
+    # use_haproxy Mode A (instances share nodes) still requires number_of_instances % total_nodes == 0.
+    with pytest.raises(ValidationError, match="evenly divisible"):
+        SubmitConfig.model_validate(
+            _config(
+                services={"svc": {**SERVICE, "number_of_instances": 3, "use_haproxy": True}},
+                compute=COMPUTE_MULTI_NODE,
+            )
+        )
+
+
+def test_use_haproxy_mode_b_instance_spans_nodes_accepted():
+    # Each instance needs TP8 but a node only has 4 GPUs, so each instance spans 2 nodes;
+    # 2 instances x 2 nodes/instance == COMPUTE_MULTI_NODE's 2 total nodes... use a 4-node compute
+    # so 2 instances x 2 nodes/instance = 4 total nodes.
+    compute = {
+        "cluster": {
+            "type": "slurm",
+            "account": "my-account",
+            "hostname": "foo",
+            "node_pools": {"compute": {"partition": "batch", "nodes": 4, "gpus_per_node": 4}},
+        }
+    }
+    config = SubmitConfig.model_validate(
+        _config(
+            services={"svc": {**SERVICE, "tensor_parallel_size": 8, "number_of_instances": 2, "use_haproxy": True}},
+            compute=compute,
+        )
+    )
+    assert config.services["svc"].use_haproxy is True
+
+
+def test_use_haproxy_mode_b_wrong_node_count_raises():
+    # 2 instances x 2 nodes/instance == 4, but only 3 nodes given.
+    compute = {
+        "cluster": {
+            "type": "slurm",
+            "account": "my-account",
+            "hostname": "foo",
+            "node_pools": {"compute": {"partition": "batch", "nodes": 3, "gpus_per_node": 4}},
+        }
+    }
+    with pytest.raises(ValidationError, match="occupy its own"):
+        SubmitConfig.model_validate(
+            _config(
+                services={
+                    "svc": {**SERVICE, "tensor_parallel_size": 8, "number_of_instances": 2, "use_haproxy": True}
+                },
+                compute=compute,
+            )
+        )
+
+
+def test_use_haproxy_mode_b_without_flag_still_rejected():
+    # Without use_haproxy, an instance spanning multiple nodes with number_of_instances > 1 stays
+    # unsupported. number_of_instances=4 evenly divides total_nodes=4 so this exercises the
+    # footprint check specifically, not the separate evenly-divisible check.
+    compute = {
+        "cluster": {
+            "type": "slurm",
+            "account": "my-account",
+            "hostname": "foo",
+            "node_pools": {"compute": {"partition": "batch", "nodes": 4, "gpus_per_node": 4}},
+        }
+    }
+    with pytest.raises(ValidationError, match="not supported"):
+        SubmitConfig.model_validate(
+            _config(
+                services={"svc": {**SERVICE, "tensor_parallel_size": 8, "number_of_instances": 4}},
+                compute=compute,
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# haproxy_topology
+# ---------------------------------------------------------------------------
+
+
+def _vllm_service(**overrides):
+    return VllmServiceConfig.model_validate({**SERVICE, **overrides})
+
+
+def test_haproxy_topology_single_node_mode_a():
+    service = _vllm_service(number_of_instances=4)
+    assert haproxy_topology(service, total_nodes=1, max_gpus_per_node=8) == (1, 4)
+
+
+def test_haproxy_topology_multi_node_shared_mode_a():
+    service = _vllm_service(number_of_instances=4, tensor_parallel_size=2)
+    assert haproxy_topology(service, total_nodes=2, max_gpus_per_node=4) == (1, 2)
+
+
+def test_haproxy_topology_mode_a_uneven_raises():
+    service = _vllm_service(number_of_instances=3)
+    with pytest.raises(ValueError, match="evenly divisible"):
+        haproxy_topology(service, total_nodes=2, max_gpus_per_node=8)
+
+
+def test_haproxy_topology_mode_b():
+    service = _vllm_service(number_of_instances=2, tensor_parallel_size=8)
+    assert haproxy_topology(service, total_nodes=4, max_gpus_per_node=4) == (2, 1)
+
+
+def test_haproxy_topology_mode_b_non_multiple_footprint_raises():
+    service = _vllm_service(number_of_instances=2, tensor_parallel_size=6)
+    with pytest.raises(ValueError, match="multiple of max_gpus_per_node"):
+        haproxy_topology(service, total_nodes=4, max_gpus_per_node=4)
+
+
+def test_haproxy_topology_mode_b_wrong_total_nodes_raises():
+    service = _vllm_service(number_of_instances=2, tensor_parallel_size=8)
+    with pytest.raises(ValueError, match="occupy its own"):
+        haproxy_topology(service, total_nodes=3, max_gpus_per_node=4)
+
+
+def test_haproxy_topology_unset_max_gpus_per_node_assumes_mode_a():
+    service = _vllm_service(number_of_instances=1, tensor_parallel_size=8)
+    assert haproxy_topology(service, total_nodes=1, max_gpus_per_node=0) == (1, 1)

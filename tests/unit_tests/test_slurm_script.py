@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,9 @@ import pytest
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint, render_gym_cmd
 from nemo_gym.orchestration.executors.slurm_script import (
+    _build_service_command,
     _build_vllm_command,
+    _build_vllm_haproxy_command,
     _build_vllm_ray_command,
     _node_totals,
     _render_directives,
@@ -280,6 +283,123 @@ def test_build_vllm_ray_command_dp_head_and_worker_branches():
     assert '--data-parallel-address "$HEAD_NODE_IP"' in cmd
     assert "--data-parallel-rpc-port 13345" in cmd
     assert "--data-parallel-start-rank $(( SLURM_NODEID * 2 ))" in cmd
+
+
+# ---------------------------------------------------------------------------
+# _build_vllm_haproxy_command / render_haproxy_multi_instance_command
+# ---------------------------------------------------------------------------
+
+
+def test_build_vllm_haproxy_command_mode_a_shared_node():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        tensor_parallel_size=2,
+        number_of_instances=4,
+        use_haproxy=True,
+    )
+    cmd = _build_vllm_haproxy_command("vllm_model", service, total_nodes=1, max_gpus_per_node=8)
+    assert "bind *:8000" in cmd
+    assert "balance leastconn" in cmd
+    # Instance count is a runtime bash loop (`seq 1 4`), not unrolled at generation time.
+    assert "for i in $(seq 1 4); do" in cmd
+    assert "vllm serve org/model --tensor-parallel-size 2 --port $port &" in cmd
+    assert "port=$(( 8000 + i ))" in cmd
+    assert "symmetric-run" not in cmd
+    assert "distributed-executor-backend ray" not in cmd
+    assert "httpchk GET /health" in cmd
+
+
+def test_build_vllm_haproxy_command_mode_a_backend_count():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        number_of_instances=4,
+        use_haproxy=True,
+    )
+    cmd = _build_vllm_haproxy_command("vllm_model", service, total_nodes=1, max_gpus_per_node=8)
+    assert "for i in $(seq 1 4); do" in cmd
+    assert "backend_node_idx % 1" in cmd
+
+
+def test_build_vllm_haproxy_command_mode_b_spans_nodes():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        tensor_parallel_size=8,
+        number_of_instances=2,
+        use_haproxy=True,
+    )
+    cmd = _build_vllm_haproxy_command("vllm_model", service, total_nodes=4, max_gpus_per_node=4)
+    assert "--distributed-executor-backend ray" in cmd
+    assert "ray symmetric-run" in cmd
+    assert "--min-nodes 2" in cmd
+    assert "backend_node_idx % 2" in cmd
+    assert "for i in $(seq 1 1); do" in cmd
+    assert "--port 8001" in cmd
+
+
+def test_build_vllm_haproxy_command_frontend_port_reserved_for_haproxy():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        number_of_instances=2,
+        use_haproxy=True,
+        port=9000,
+    )
+    cmd = _build_vllm_haproxy_command("vllm_model", service, total_nodes=1, max_gpus_per_node=8)
+    assert "bind *:9000" in cmd
+    assert "port=$(( 9000 + i ))" in cmd
+    assert "--port $port &" in cmd
+
+
+def test_build_vllm_haproxy_command_trust_remote_code():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        number_of_instances=2,
+        use_haproxy=True,
+        trust_remote_code=True,
+    )
+    cmd = _build_vllm_haproxy_command("vllm_model", service, total_nodes=1, max_gpus_per_node=8)
+    assert "--trust-remote-code" in cmd
+
+
+def test_build_vllm_haproxy_command_syntax_is_valid_bash():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        tensor_parallel_size=8,
+        number_of_instances=2,
+        use_haproxy=True,
+    )
+    cmd = _build_vllm_haproxy_command("vllm_model", service, total_nodes=4, max_gpus_per_node=4)
+    result = subprocess.run(["bash", "-n"], input=f"#!/bin/bash\n{cmd}", text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_build_service_command_dispatches_to_haproxy():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        number_of_instances=4,
+        use_haproxy=True,
+    )
+    cmd = _build_service_command("vllm_model", service, total_nodes=1, max_gpus_per_node=8)
+    assert "haproxy" in cmd
+
+
+def test_build_service_command_use_haproxy_single_instance_is_noop(vllm_service):
+    vllm_service.use_haproxy = True
+    cmd = _build_service_command("vllm_model", vllm_service, total_nodes=1, max_gpus_per_node=8)
+    assert "haproxy" not in cmd
 
 
 # ---------------------------------------------------------------------------

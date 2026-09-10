@@ -1,0 +1,44 @@
+compute:
+  cluster:
+    type: slurm
+    hostname: myslurmcluster
+    walltime: "01:00:00"
+    account: myaccount
+    node_pools:
+      compute:
+        partition: batch
+        nodes: 4
+        ntasks_per_node: 1
+        gpus_per_node: 8
+
+services:
+  vllm_model:
+    container: vllm/vllm-openai:v0.9.0
+    type: vllm
+    model: Qwen/Qwen2.5-72B-Instruct
+    trust_remote_code: true
+    tensor_parallel_size: 16     # exceeds a single node's 8 GPUs, so each instance spans its own
+                                  # 2-node group (16 / 8 = 2 nodes/instance)
+    number_of_instances: 2       # 2 instances x 2 nodes/instance = 4 total nodes
+    use_haproxy: true            # required whenever an instance's own TP/PP footprint spans
+                                  # multiple nodes and there's more than one instance
+    port: 8000
+    health_check:
+      timeout_seconds: 1800
+    mounts:
+      - /lustre/datasets:/data
+
+driver:
+  policy_model: vllm_model
+  container: python:3.13
+  gym_install:
+    ref: main
+  benchmarks:
+    gpqa:
+      run:
+        split: benchmark
+        config_paths:
+          - benchmarks/gpqa/config.yaml
+
+job:
+  output_path: /lustre/fsw/my-path

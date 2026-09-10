@@ -63,6 +63,9 @@ class VllmServiceConfig(BaseModelServiceConfig):
     pipeline_parallel_size: int = 1
     trust_remote_code: bool = False
     number_of_instances: int = 1
+    # Route between number_of_instances independent `vllm serve` processes via HAProxy instead of
+    # vLLM's own --data-parallel-size / headless multi-node DP. See haproxy_topology().
+    use_haproxy: bool = False
     # Raw extra flags appended verbatim to `vllm serve` (e.g. "--max-model-len 8192").
     extra_args: str = ""
 
@@ -82,6 +85,45 @@ class VllmServiceConfig(BaseModelServiceConfig):
         elif self.health_check.port is None:
             self.health_check.port = self.port
         return self
+
+
+def haproxy_topology(service: "VllmServiceConfig", total_nodes: int, max_gpus_per_node: int) -> tuple[int, int]:
+    """Returns (nodes_per_instance, instances_per_node) for a use_haproxy multi-instance deployment.
+
+    Exactly one of the two return values is > 1: either each instance's own tensor/pipeline-
+    parallel footprint spans multiple nodes (nodes_per_instance > 1, one instance per node group -
+    "Mode B"), or multiple instances share each node (instances_per_node > 1 - "Mode A").
+    """
+    tp_pp = service.tensor_parallel_size * service.pipeline_parallel_size
+
+    # max_gpus_per_node <= 0 means gpus_per_node wasn't set anywhere in this compute's node_pools -
+    # there's no per-node GPU count to compare against, so assume every instance fits on one node.
+    if max_gpus_per_node > 0 and tp_pp > max_gpus_per_node:
+        if tp_pp % max_gpus_per_node != 0:
+            raise ValueError(
+                f"tensor_parallel_size x pipeline_parallel_size ({tp_pp}) must be a multiple of "
+                f"max_gpus_per_node ({max_gpus_per_node}) so each instance can occupy a whole number of nodes."
+            )
+        nodes_per_instance = tp_pp // max_gpus_per_node
+        expected_total_nodes = service.number_of_instances * nodes_per_instance
+        if total_nodes != expected_total_nodes:
+            raise ValueError(
+                f"use_haproxy with tensor_parallel_size x pipeline_parallel_size ({tp_pp}) exceeding "
+                f"max_gpus_per_node ({max_gpus_per_node}) requires each of the {service.number_of_instances} "
+                f"instance(s) to occupy its own {nodes_per_instance}-node group, i.e. total_nodes == "
+                f"number_of_instances x nodes_per_instance == {expected_total_nodes}, got {total_nodes}."
+            )
+        return nodes_per_instance, 1
+
+    if total_nodes == 1:
+        return 1, service.number_of_instances
+
+    if service.number_of_instances % total_nodes != 0:
+        raise ValueError(
+            f"use_haproxy with number_of_instances={service.number_of_instances} spread across "
+            f"total_nodes={total_nodes} requires number_of_instances to be evenly divisible by total_nodes."
+        )
+    return 1, service.number_of_instances // total_nodes
 
 
 class RayServiceConfig(BaseServiceConfig):
@@ -187,6 +229,7 @@ class SubmitConfig(_StrictModel):
             if (
                 is_multi_node
                 and isinstance(service, VllmServiceConfig)
+                and not service.use_haproxy
                 and service.number_of_instances > 1
                 and service.number_of_instances % total_nodes != 0
             ):
@@ -239,24 +282,40 @@ class SubmitConfig(_StrictModel):
 
         if total_nodes > 1 and service.number_of_instances > 1:
             if tp_pp > max_gpus_per_node:
-                # Each instance's own TP/PP footprint already exceeds a single node's GPU count, so
-                # spreading multiple such instances across nodes would require every instance to
-                # itself span multiple nodes. That's not supported: multi-node data-parallel only
-                # distributes whole instances across nodes with tensor/pipeline parallelism kept
-                # local to each node (see _build_vllm_multi_instance_multi_node_command).
-                raise ValueError(
-                    f"Service '{service_name}' sets number_of_instances={service.number_of_instances} with "
-                    f"tensor_parallel_size={service.tensor_parallel_size} x "
-                    f"pipeline_parallel_size={service.pipeline_parallel_size}={tp_pp}, which exceeds a single "
-                    f"node's gpus_per_node ({max_gpus_per_node}). Multiple instances where each instance's own "
-                    "tensor/pipeline-parallel footprint spans multiple nodes is not supported - reduce "
-                    "tensor_parallel_size/pipeline_parallel_size to fit within one node, or set "
-                    "number_of_instances=1 to let a single instance span nodes."
-                )
+                if not service.use_haproxy:
+                    # Each instance's own TP/PP footprint already exceeds a single node's GPU count,
+                    # so spreading multiple such instances across nodes would require every instance
+                    # to itself span multiple nodes. That's not supported without use_haproxy:
+                    # multi-node data-parallel only distributes whole instances across nodes with
+                    # tensor/pipeline parallelism kept local to each node (see
+                    # _build_vllm_multi_instance_multi_node_command).
+                    raise ValueError(
+                        f"Service '{service_name}' sets number_of_instances={service.number_of_instances} with "
+                        f"tensor_parallel_size={service.tensor_parallel_size} x "
+                        f"pipeline_parallel_size={service.pipeline_parallel_size}={tp_pp}, which exceeds a single "
+                        f"node's gpus_per_node ({max_gpus_per_node}). Multiple instances where each instance's own "
+                        "tensor/pipeline-parallel footprint spans multiple nodes is not supported - reduce "
+                        "tensor_parallel_size/pipeline_parallel_size to fit within one node, set "
+                        "number_of_instances=1 to let a single instance span nodes, or set use_haproxy=true to "
+                        "let each instance occupy its own group of nodes."
+                    )
+                # Each instance's own TP/PP footprint exceeds a single node's GPU count, but
+                # use_haproxy supports this: each instance gets its own dedicated group of nodes
+                # (see haproxy_topology / render_haproxy_multi_instance_command "Mode B").
+                # haproxy_topology validates the split (including the per-group GPU fit) and raises
+                # on its own if infeasible.
+                haproxy_topology(service, total_nodes, max_gpus_per_node)
+                return
             # Multi-node data-parallel: each node runs its own equal share of the replicas with
             # local tensor/pipeline parallelism (see _build_vllm_multi_instance_multi_node_command);
             # the per-node share, not the total footprint, has to fit in that node's GPU count.
-            instances_per_node = service.number_of_instances // total_nodes
+            if service.use_haproxy:
+                # haproxy_topology validates number_of_instances is evenly divisible by total_nodes
+                # (the plain non-haproxy case gets the same check from
+                # _resolve_and_validate_placements before this function ever runs).
+                _, instances_per_node = haproxy_topology(service, total_nodes, max_gpus_per_node)
+            else:
+                instances_per_node = service.number_of_instances // total_nodes
             gpus_needed = tp_pp * instances_per_node
             gpus_available = max_gpus_per_node
             footprint = (
