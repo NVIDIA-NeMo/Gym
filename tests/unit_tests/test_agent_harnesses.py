@@ -54,7 +54,7 @@ def test_terminus_extra_pins_harbor() -> None:
     assert all(" @ " not in dependency for dependency in dependencies)
     assert project["tool"]["uv"]["sources"]["harbor"] == {
         "git": "https://github.com/laude-institute/harbor.git",
-        "rev": "9dddd797b57ab8a0" + "f9d6352a20fce73abbb29573",
+        "rev": "9dddd797b57ab8a0f9d6352a20fce73abbb29573",  # pragma: allowlist secret
     }
 
 
