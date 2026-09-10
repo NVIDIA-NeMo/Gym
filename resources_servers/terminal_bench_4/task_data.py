@@ -46,6 +46,11 @@ class TaskData(BaseModel):
         ),
         json_schema_extra={"consumed_by": ["verify"]},
     )
+    agent_timeout_sec: Optional[float] = Field(
+        default=None,
+        description="The task's [agent] timeout_sec from task.toml (28,800 s in every TB4 task); the agent harness's wall budget.",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
     docker_image_digest: Optional[str] = Field(
         default=None,
         description="Registry digest the agent image tag resolved to when the row was built (provenance only).",

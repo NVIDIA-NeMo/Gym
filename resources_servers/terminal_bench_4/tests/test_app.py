@@ -373,7 +373,7 @@ class TestManifest:
         assert task.task_name == "terminal-bench/demo"
         assert [a.source for a in task.main_artifacts] == [CONVENTION_ARTIFACTS_DIR, "/app/out.step", "/app/dir/"]
         assert [a.source for a in task.sidecar_artifacts] == ["/shared/x"]
-        assert task.verifier_timeout_sec == 240.0
+        assert task.verifier_timeout_sec == 240.0 and task.agent_timeout_sec == 28800.0
         assert task.effective_verifier_environment() == {"cpus": 1, "memory_mb": 4096}
         assert [h.command for h in task.main_collect_hooks] == ["echo main"]
         assert task.sidecar_collect_hooks[0].timeout_sec == 12
@@ -1107,4 +1107,5 @@ class TestPrepare:
         assert rows[0]["docker_image"] == "harborframework/terminal-bench:alpha-environment-v9"
         assert rows[0]["verifier_docker_image"] == "harborframework/terminal-bench:alpha-verifier-v9"
         assert rows[0]["task_folder"] == str((tasks_root / "alpha").resolve())
+        assert rows[0]["agent_timeout_sec"] == 28800.0
         assert not (tmp_path / "out.jsonl.tmp").exists()

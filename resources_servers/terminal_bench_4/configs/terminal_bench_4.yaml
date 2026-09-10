@@ -54,7 +54,9 @@ terminal_bench_4_resources_server:          # instance name — how agents/CLI r
 
       sandbox_provider: sandbox
       sandbox_config:
-        ttl_s: 18000
+        # Must outlive the agent's budget: TB4 tasks allow 28,800 s of agent time, and the same TTL
+        # applies to the verifier sandbox (budgets up to 7,200 s). 5 h would kill an 8 h episode midway.
+        ttl_s: 36000
         ready_timeout_s: 1200
         derive_cpu_env: true
         env:

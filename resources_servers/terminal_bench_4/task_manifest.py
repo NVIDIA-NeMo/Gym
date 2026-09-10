@@ -74,6 +74,7 @@ class TB4Task:
     environment: Dict[str, Any]
     collect_hooks: Tuple[CollectHook, ...]
     agent_user: Optional[Union[str, int]]
+    agent_timeout_sec: Optional[float]
     compose_services: Tuple[str, ...]
     solution_env: Dict[str, str] = field(default_factory=dict)
 
@@ -230,6 +231,7 @@ def load_task(task_folder: Union[str, Path], repo_root: Optional[Path] = None) -
         environment=environment,
         collect_hooks=hooks,
         agent_user=agent.get("user"),
+        agent_timeout_sec=float(agent["timeout_sec"]) if agent.get("timeout_sec") is not None else None,
         compose_services=compose_service_names(task_dir),
         solution_env={str(k): str(v) for k, v in ((document.get("solution") or {}).get("env") or {}).items()},
     )

@@ -64,6 +64,9 @@ def build_row(
             short, "verifier", image_repository=image_repository, release_tag=release_tag
         ),
         "task_folder": str(task_dir.resolve()),
+        # The task's own agent budget ([agent] timeout_sec, 28,800 s in every TB4 task); launchers use it as the
+        # episode wall budget so the harness matches the benchmark's contract.
+        "agent_timeout_sec": task.agent_timeout_sec,
     }
     entry = ((inventory or {}).get("tasks") or {}).get(short) or {}
     for key, field in (("environment_v4", "docker_image_digest"), ("verifier_v4", "verifier_docker_image_digest")):
