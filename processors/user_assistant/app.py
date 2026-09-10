@@ -6,7 +6,7 @@
 from typing import Any, cast
 
 from fastapi import Request
-from pydantic import ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
@@ -26,6 +26,14 @@ class UserAssistantRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
     user_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+
+
+class UserAssistantSeedSessionResponse(BaseModel):
+    """Optional per-episode user parameters resolved by the resources server."""
+
+    model_config = ConfigDict(extra="allow")
+
+    user_responses_create_params: NeMoGymResponseCreateParamsNonStreaming | None = None
 
 
 class UserAssistantVerifyRequest(BaseVerifyRequest):
@@ -88,6 +96,19 @@ class UserAssistantProcessor(MultiAgentProcessor):
             "assistant": body.responses_create_params,
             "user": body.user_responses_create_params,
         }
+
+    def _resolve_seeded_body(
+        self,
+        body: BaseRunRequest,
+        seed_result: dict[str, Any],
+    ) -> UserAssistantRunRequest:
+        user_assistant_body = UserAssistantRunRequest.model_validate(body)
+        resolved = UserAssistantSeedSessionResponse.model_validate(seed_result)
+        if resolved.user_responses_create_params is None:
+            return user_assistant_body
+        return user_assistant_body.model_copy(
+            update={"user_responses_create_params": resolved.user_responses_create_params}
+        )
 
     def _build_verify_request(
         self,

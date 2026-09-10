@@ -1,0 +1,78 @@
+policy_model:
+  responses_api_models:
+    inference_provider:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+
+nemo_sim:
+  resources_servers:
+    nemo_sim:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Deterministic NeMo-Sim persona and general-probe initialization.
+      probe_mix:
+        general_open_ended: 0.5
+        general_educational: 0.5
+      probe_themes:
+        general_open_ended:
+        - topic: local food and dining
+          goal: Seek a practical recommendation about local food and dining.
+        - topic: travel planning
+          goal: Ask for practical advice about planning a trip.
+        general_educational:
+        - topic: local ecology
+          goal: Learn about local ecology by asking focused follow-up questions.
+        - topic: personal finance fundamentals
+          goal: Learn the fundamentals of personal finance through clear explanations.
+
+nemo_sim_assistant:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: nemo_sim
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 2
+
+nemo_sim_user:
+  responses_api_agents:
+    nemo_sim_user:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: nemo_sim
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      locale: en_US
+      incremental_disclosure_ratio: 0.6
+      max_steps: 2
+
+nemo_sim_processor:
+  processors:
+    user_assistant:
+      entrypoint: app.py
+      assistant_agent:
+        type: responses_api_agents
+        name: nemo_sim_assistant
+      user_agent:
+        type: responses_api_agents
+        name: nemo_sim_user
+      resources_server:
+        type: resources_servers
+        name: nemo_sim
+      max_turns: 6
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/nemo_sim/data/example.jsonl
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/nemo_sim/data/example.jsonl
+        license: Apache 2.0

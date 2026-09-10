@@ -259,3 +259,38 @@ async def test_incomplete_agent_response_has_a_structured_termination_reason() -
 
     assert result.termination_reason == "assistant_max_output_tokens"
     assert result.episode_trajectory[-1].data == {"reason": "assistant_max_output_tokens"}
+
+
+@pytest.mark.asyncio
+async def test_uses_user_parameters_resolved_during_session_seed() -> None:
+    processor = _processor(max_turns=2)
+    calls = []
+    resolved_user_params = {
+        "input": [{"role": "developer", "content": "Follow the resolved scenario."}],
+        "metadata": {"nemo_sim": '{"goal":"Learn about local ecology.","persona":{"first_name":"Morgan"}}'},
+    }
+
+    async def post(**kwargs):
+        calls.append(kwargs)
+        if kwargs["url_path"] == "/seed_session":
+            return _http_response(
+                {"user_responses_create_params": resolved_user_params},
+                cookies={"environment": "seeded"},
+            )
+        if kwargs["server_name"] == "assistant":
+            return _http_response(_model_response("assistant-response", "What would you like to learn?"))
+        if kwargs["server_name"] == "user":
+            return _http_response(_model_response("user-response", "Tell me about local ecology."))
+        if kwargs["url_path"] == "/episode_status":
+            return _http_response({"terminated": False})
+        if kwargs["url_path"] == "/verify":
+            return _http_response(kwargs["json"] | {"reward": 1.0})
+        raise AssertionError(kwargs)
+
+    processor.server_client.post = AsyncMock(side_effect=post)
+    result = await processor.run(MagicMock(cookies={}), _request())
+
+    user_call = next(call for call in calls if call["server_name"] == "user")
+    assert user_call["json"].metadata == resolved_user_params["metadata"]
+    assert user_call["json"].input[0].content == "Follow the resolved scenario."
+    assert result.user_responses_create_params["metadata"] == resolved_user_params["metadata"]
