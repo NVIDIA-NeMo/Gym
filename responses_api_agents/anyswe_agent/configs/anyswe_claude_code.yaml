@@ -6,9 +6,7 @@ anyswe_claude_code:
       description: SWE-bench run by Claude Code natively inside the task container.
       value: Eval software engineering capabilities on SWE-bench with any Gym agent.
 
-      agent_server_module: nemo_gym.agents.claude_code
-      agent_server_class: ClaudeCodeHarness
-      agent_config_class: AgentHarnessConfig
+      agent: claude_code
       agent_kwargs:
         model: {model: model}
         max_turns: 100

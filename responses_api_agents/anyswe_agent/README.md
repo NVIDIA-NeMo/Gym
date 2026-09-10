@@ -50,9 +50,7 @@ The included configurations run Hermes Agent, Claude Code, Cline, Pi, OpenClaw, 
 with the same sandbox and grading path. Configure another Gym agent with:
 
 ```yaml
-agent_server_module: nemo_gym.agents.hermes
-agent_server_class: HermesHarness
-agent_config_class: AgentHarnessConfig
+agent: hermes
 agent_kwargs:
   max_turns: 100
   terminal_backend: local

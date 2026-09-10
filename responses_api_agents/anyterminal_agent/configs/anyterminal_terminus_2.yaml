@@ -6,9 +6,7 @@ anyterminal_terminus_2:
       description: Terminal Bench run by Terminus-2 natively inside the task container.
       value: Evaluate terminal-task capabilities on Terminal Bench with any Gym agent.
 
-      agent_server_module: nemo_gym.agents.terminus_2
-      agent_server_class: Terminus2Harness
-      agent_config_class: AgentHarnessConfig
+      agent: terminus_2
       agent_kwargs:
         model:
           model: ${policy_model_name}

@@ -6,9 +6,7 @@ anyswe_cline:
       description: SWE-bench run by the Cline CLI natively inside the task container.
       value: Eval software engineering capabilities on SWE-bench with any Gym agent.
 
-      agent_server_module: nemo_gym.agents.cline
-      agent_server_class: ClineHarness
-      agent_config_class: AgentHarnessConfig
+      agent: cline
       agent_kwargs:
         model:
           model: ${policy_model_name}

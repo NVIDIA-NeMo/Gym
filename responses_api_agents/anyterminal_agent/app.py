@@ -32,6 +32,7 @@ import ray
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.agents import resolve_agent
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef
@@ -278,8 +279,7 @@ class GymAgentHarnessProcessor(BaseModel):
 
     @property
     def _agent_key(self) -> str:
-        parts = self.config.agent_server_module.split(".")
-        return f"{parts[-1]}_agent" if parts[-2] == "agents" else parts[-2]
+        return resolve_agent(self.config.agent)[3]
 
     def setup(self) -> Path:
         """Install agent deps into a portable prefix (idempotent, hash-keyed)."""
@@ -321,11 +321,12 @@ class GymAgentHarnessProcessor(BaseModel):
         cfg: AnyTerminalInstanceConfig = self.config
         instruction = _instruction_from_input(cfg.body)
         (cfg.persistent_dir / "instruction.txt").write_text(instruction)
+        module, agent_class, config_class, _ = resolve_agent(cfg.agent)
         runner = _RUNNER_TEMPLATE.format(
-            agent_module=cfg.agent_server_module,
-            agent_class=cfg.agent_server_class,
-            agent_cfg_class=cfg.agent_config_class,
-            agent_class_lower=cfg.agent_server_class.lower(),
+            agent_module=module,
+            agent_class=agent_class,
+            agent_cfg_class=config_class,
+            agent_class_lower=agent_class.lower(),
         )
         (cfg.persistent_dir / "agent_runner.py").write_text(runner)
         return "/agent_deps_mount/bin/python /trajectories_mount/agent_runner.py"
@@ -337,9 +338,7 @@ class GymAgentHarnessProcessor(BaseModel):
 class AnyTerminalAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: Optional[ModelServerRef] = None
 
-    agent_server_module: str = Field(description="Import path to the agent module")
-    agent_server_class: str = Field(description="Agent class name")
-    agent_config_class: str = Field(description="Agent config class name")
+    agent: str
     agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
 
     container_formatter: str | list[str] = Field(

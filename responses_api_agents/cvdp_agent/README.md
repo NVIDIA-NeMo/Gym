@@ -55,14 +55,13 @@ through the unchanged CVDP verifier.
 
 ### The core idea
 
-Every Gym coding agent (Claude Code, Hermes, ...) exposes the same method: `responses()`.
-`CVDPAgent` never needs to know a harness's CLI — it just boots the named harness
-inside the sandbox and calls its `responses()`. Each harness already knows its own CLI.
+Every core harness exposes the same `run()` method. `CVDPAgent` resolves the configured
+agent name and runs it inside the sandbox.
 
 ### How a run flows
 
 ```
-config names a harness (agent_server_module/class/config_class)
+config names an agent
         │
 CVDPAgent._run_agentic()
   reads verifier_metadata        ← context_files / target_files / harness_files
@@ -70,7 +69,7 @@ CVDPAgent._run_agentic()
   _seed_files()                  → copy safe context files into the workspace (never the hidden harness)
   _build_spec()                  → generate the in-sandbox runner script + workspace files
   upload runtime archive        → provider-neutral harness dependencies
-  AsyncSandbox(...).exec(runner) → the runner imports the harness and calls responses()
+  AsyncSandbox(...).exec(runner) → the runner imports and runs the harness
                                      the harness edits rtl/*.sv with its own tools
   _remote_harvest()              → pull back the produced HDL files
   POST /verify                   ← the unchanged CVDP resources server → reward
@@ -78,13 +77,10 @@ CVDPAgent._run_agentic()
 
 ### What you need to know to use it
 
-- **Pick a harness** by setting three strings in the config:
-`agent_server_module`, `agent_server_class`, `agent_config_class`.
-- `**agent_kwargs`** are passed straight into that harness's config class, so every key must
-be a real field on `<agent_config_class>`. (e.g. for `ClaudeCodeAgentConfig`: `model`,
-`anthropic_base_url`, `anthropic_api_key`, `max_turns`, ...). These are **harness-specific**.
+- **Pick a harness** with `agent`, such as `claude_code` or `hermes`.
+- `agent_kwargs` are passed to the agent's config.
 - **A deps script must exist** for the harness: `setup_scripts/<key>_deps.sh`, where `<key>`
-is derived from the module (`nemo_gym.agents.hermes` maps to `hermes_agent`). It
+is derived from the agent name (`hermes` maps to `hermes_agent`). It
 builds a self-contained prefix (portable Python + nemo_gym + the harness CLI) that is
 packaged once and uploaded into each sandbox.
 - The data format **never changes** when you swap harnesses, and grading always goes through
@@ -161,8 +157,7 @@ download/conversion steps and report-output details.
 - `**app.py**` — the `CVDPAgent` class (both flavors) plus the agentic host-side helpers:
 `load_runner_source()` (reads `sandbox_entrypoint.py` and drops it into the container),
 `harvest()` (collects produced files by glob, skipping files unchanged from what was seeded),
-`agent_key()` (maps a module to its deps-script key), and `deps_recipe_key()` (fingerprints the
-deps cache).
+and `deps_recipe_key()` (fingerprints the deps cache).
 - `**sandbox_entrypoint.py**` — the guest entrypoint copied verbatim into the sandbox and run as
 `python agent_runner.py`. Reads the agent module/class and task inputs from `NV_*` env vars set
 by the agent, imports the named harness, calls `responses()`, and writes the trajectory out.
@@ -176,8 +171,7 @@ Kept as a plain, lintable module rather than a string template.
   - `opencode_agent_deps.sh`: adds portable Node and the pinned `opencode-ai` CLI.
 - `**configs/cvdp_agent_generic_claude.yaml**`, `**configs/cvdp_agent_generic_hermes.yaml**`,
 `**configs/cvdp_agent_generic_opencode.yaml**`
-— example wirings; identical except the `agent_server_*` block, `agent_kwargs`, and deps
-script. They show the harness swap is config-only.
+are example wirings that differ by `agent`, `agent_kwargs`, and dependency script.
 
 ### Runtime requirements
 

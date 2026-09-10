@@ -77,9 +77,7 @@ Swap the agent by changing three fields in the YAML (or overriding on the CLI):
 
 
 ```yaml
-agent_server_module: nemo_gym.agents.hermes
-agent_server_class: HermesHarness
-agent_config_class: AgentHarnessConfig
+agent: hermes
 agent_kwargs:
   max_turns: 30
   terminal_backend: local
