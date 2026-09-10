@@ -3036,7 +3036,7 @@ class TestVLLMConverter:
             )
         )
 
-        expected_output = test_data["expected_output"]
+        expected_output = test_data["expected_output"] | {"thinking": None}
         assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_2_44_OPTIONAL_CHAT_FIELDS)
 
     def test_round_trip_chat_completions_return_token_id_information(self) -> None:
@@ -3142,7 +3142,7 @@ class TestVLLMConverter:
             )
         )
 
-        expected_output = test_data["expected_output_return_token_id_information"]
+        expected_output = test_data["expected_output_return_token_id_information"] | {"thinking": None}
         assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_2_44_OPTIONAL_CHAT_FIELDS)
 
     def test_whitespace_round_trip_chat_completions(self, monkeypatch: MonkeyPatch) -> None:
