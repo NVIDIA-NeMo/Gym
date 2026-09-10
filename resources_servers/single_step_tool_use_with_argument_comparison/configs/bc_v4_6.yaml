@@ -1,0 +1,114 @@
+bc_v4_6_rs:
+  resources_servers:
+    single_step_tool_use_with_argument_comparison:
+      entrypoint: app.py
+      domain: agent
+      tool_call_comparator_config:
+        word_count_similarity_threshold: 0.5
+        use_f1_for_list: true
+        use_strong_list_reward: true
+        list_f1_threshold: 0.8
+        list_f1_min_precision: 1.0
+        list_f1_min_recall: 1.0
+        list_f1_max_actual_to_expected_ratio: 1.0
+        list_f1_reject_duplicate_actual_values: true
+        keep_quotes: true
+        # bash_command and update_progress are graded on the tool name alone.
+        # An empty include list filters every argument off both the expected and
+        # the actual side, so the comparison reduces to {} vs {} and scores 1.0.
+        # This mirrors app.py, where any chat message already scores 1.0: the
+        # content of a shell command or a progress board is not a target the
+        # golden can meaningfully constrain.
+        # browse is deliberately absent - its urls stay exact and its goal is
+        # already skipped by compare_tool_call_arguments.
+        argument_filters:
+          bash_command:
+            included_argument_names: []
+          update_progress:
+            included_argument_names: []
+        argument_comparison_overrides:
+          search:
+            queries:
+              # THE ONLY VALUE THAT DIFFERS FROM bc_v4_5. 0.30 -> 0.40.
+              #
+              # sim = |intersection| / (|expected| + |actual|), so sim == F1 / 2
+              # and the ceiling is 0.5 (identical word bags). For a model query
+              # that is a pure SUBSET of the golden - precision 1.0, recall r -
+              #     sim = r / (1 + r) >= t   <=>   r >= t / (1 - t)
+              #     t = 0.30  ->  r >= 0.4286   delete up to 57% of the words
+              #     t = 0.40  ->  r >= 0.6667   delete up to 33%
+              # So this knob is really a recall floor of 0.667, stricter than
+              # word_count_min_recall: 0.5 below, which it supersedes for
+              # subsets. Measured on real goldens, "keep the first 60% of every
+              # query" falls from a free 1.000 to 0.000.
+              #
+              # Padding is barely affected - adding j junk words gives
+              # sim = L / (2L + j), so the budget only moves from j <= 4L/3 to
+              # j <= L/3, and the ratio and max_unmatched_actual_words caps
+              # below already bind much earlier.
+              #
+              # It does NOT close the year / wrong-entity hack: substituting one
+              # token of ten leaves sim at 0.45, above both thresholds. See
+              # test_wrong_year_still_scores_one_under_both.
+              #
+              # Copied from venkats' 2026-08-15 change to his own search_pivot
+              # config (0.3 -> 0.4) in the env23 run, where the same arithmetic
+              # applies to a comparator that has no floors at all.
+              word_count_similarity_threshold: 0.4
+              word_count_min_precision: 0.6
+              word_count_min_recall: 0.5
+              word_count_max_actual_to_expected_ratio: 1.25
+              word_count_max_unmatched_actual_words: 4
+              # v4 used 3. At 4 the relaxed miss/extra branch only fires when the
+              # golden holds >= 4 queries; 3-query goldens fall back to exact set
+              # match. On mercor goldens this moves ~12.4% of search calls from
+              # the relaxed branch to strict.
+              list_f1_relaxed_min_expected_len: 4
+              list_f1_max_unmatched_expected: 0
+              list_f1_max_unmatched_actual: 1
+              keep_quotes: true
+              coerce_actual_string_to_list: true
+              coerce_actual_string_to_singleton_list: true
+              validate_list_item_schema: true
+              reject_empty_string_list_items: true
+      verified: false
+      description: >-
+        BrowseComp PivotRL single-step verifier, v4.6. Identical to bc_v4_5
+        except that the search.queries word-count similarity threshold moves
+        0.30 -> 0.40, which raises the effective recall floor on a truncated
+        query from 0.43 to 0.67. Browse URL lists remain strict, and
+        bash_command / update_progress still score on tool name alone.
+      value: Improve constrained agentic search while reducing list-F1 reward hacking.
+bc_v4_6_agent:
+  responses_api_agents:
+    tool_simulation_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: bc_v4_6_rs
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/single_step_tool_use_with_argument_comparison/data/train.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: single_step_tool_use_with_argument_comparison
+          version: 0.0.1
+          artifact_fpath: train.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/single_step_tool_use_with_argument_comparison/data/validation.jsonl
+        num_repeats: 1
+        gitlab_identifier:
+          dataset_name: single_step_tool_use_with_argument_comparison
+          version: 0.0.1
+          artifact_fpath: validation.jsonl
+        license: Apache 2.0
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/single_step_tool_use_with_argument_comparison/data/example.jsonl
+        num_repeats: 1
