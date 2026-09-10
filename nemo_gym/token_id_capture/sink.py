@@ -178,6 +178,26 @@ def mark_external_staging_committed(*, rollout_id: str, model_call_id: str) -> N
             f"{context.rollout_id}/{context.model_call_id})"
         )
     context.committed = True
+    from nemo_gym._checkpoint.admission import mark_current_generation_safe
+
+    mark_current_generation_safe("durable_completed")
+
+
+def mark_external_staging_failed(*, rollout_id: str, model_call_id: str) -> None:
+    """Mark a matching call safe after its poison row becomes durable."""
+    context = _CAPTURE_CONTEXT.get()
+    if context is None:
+        raise RuntimeError("no training-token capture context is active")
+    if context.rollout_id != rollout_id or context.model_call_id != model_call_id:
+        raise ValueError(
+            "external staging failure does not match the active capture "
+            f"context ({rollout_id}/{model_call_id} != "
+            f"{context.rollout_id}/{context.model_call_id})"
+        )
+    context.committed = True
+    from nemo_gym._checkpoint.admission import mark_current_generation_safe
+
+    mark_current_generation_safe("durable_failure")
 
 
 def reset_token_sink(token: Token) -> None:
@@ -295,6 +315,10 @@ async def resolve_parent(request_messages: list | None) -> None:
                 context.model_call_id,
                 UNRESOLVED_PARENT_REASON,
             )
+            mark_external_staging_failed(
+                rollout_id=context.rollout_id,
+                model_call_id=context.model_call_id,
+            )
         return
     is_root = context.parent_resolution is not None and context.parent_resolution.status == ParentResolutionStatus.ROOT
     if is_root or (context.source_capture_key is None and not await ledger.has_rows(context.rollout_id)):
@@ -313,6 +337,10 @@ async def resolve_parent(request_messages: list | None) -> None:
         context.rollout_id,
         context.model_call_id,
         UNRESOLVED_PARENT_REASON,
+    )
+    mark_external_staging_failed(
+        rollout_id=context.rollout_id,
+        model_call_id=context.model_call_id,
     )
 
 
@@ -472,6 +500,9 @@ async def commit_entry(
         entry.parent_resolution_reason = resolution.reason or ""
         await context.token_sink.put(entry)
         context.committed = True
+        from nemo_gym._checkpoint.admission import mark_current_generation_safe
+
+        mark_current_generation_safe("durable_completed")
     except Exception:
         await _capture_failed(context, "write")
 

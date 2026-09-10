@@ -46,7 +46,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
 
-from nemo_gym._checkpoint.admission import GATED_MODEL_ROUTE_SUFFIXES, AdmissionLimiter, AdmissionMiddleware
+from nemo_gym._checkpoint.admission import (
+    GATED_MODEL_ROUTE_SUFFIXES,
+    AdmissionLimiter,
+    AdmissionMiddleware,
+    bind_current_model_call,
+    mark_current_generation_started,
+)
 from nemo_gym._checkpoint.artifacts import EXTERNAL_STORAGE_REFERENCE_INDEX_FEATURE
 from nemo_gym._checkpoint.control import (
     AdmissionState,
@@ -57,6 +63,7 @@ from nemo_gym._checkpoint.control import (
 )
 from nemo_gym._checkpoint.ledger import install_model_checkpoint
 from nemo_gym._checkpoint.model_admission import install_model_admission
+from nemo_gym._checkpoint.model_control_contracts import GenerationCutBackend
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
@@ -92,6 +99,7 @@ from nemo_gym.token_id_capture import (
     current_capture_context,
     installed_lineage_store,
     installed_token_sink,
+    mark_external_staging_failed,
     register_call_intent,
     reset_token_sink,
     resolve_parent,
@@ -259,8 +267,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
     def admission_limiter(self) -> AdmissionLimiter:
         if self._admission_limiter is None:
-            self._admission_limiter = AdmissionLimiter()
+            self._admission_limiter = AdmissionLimiter(self.generation_cut_backend())
         return self._admission_limiter
+
+    def generation_cut_backend(self) -> GenerationCutBackend | None:
+        """Return a framework-owned cut backend, if this server has one."""
+        return None
 
     def setup_model_admission(self, app: FastAPI) -> None:
         """Register admission control on this model server.
@@ -276,6 +288,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             limiter=self.admission_limiter(),
             fence=self.checkpoint_fence(),
             instance_role=self.config.instance_role,
+            server_name=self.config.name,
             auth_token=auth_token,
         )
         install_model_checkpoint(
@@ -291,6 +304,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             instance_role=self.config.instance_role,
             server_name=self.config.name,
             auth_token=auth_token,
+            expected_workers=self.config.num_workers or 1,
         )
         if self.config.instance_role == "policy":
             app.add_middleware(
@@ -413,8 +427,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         else:
             request_messages = None
         if "request" in inspect.signature(self.chat_completions).parameters:
+            mark_current_generation_started()
             completion = await self.chat_completions(request=request, body=params)
         else:
+            mark_current_generation_started()
             completion = await self.chat_completions(body=params)
         await capture_tokens(
             completion,
@@ -458,8 +474,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         else:
             request_messages = None
         if "request" in inspect.signature(self.responses).parameters:
+            mark_current_generation_started()
             response = await self.responses(request=request, body=params)
         else:
+            mark_current_generation_started()
             response = await self.responses(body=params)
         # Capture before streaming dispatch wraps the response.
         # Anthropic mapping drops the token fields.
@@ -1301,6 +1319,10 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
             context.model_call_id,
             UNCOMMITTED_CALL_REASON,
         )
+        mark_external_staging_failed(
+            rollout_id=context.rollout_id,
+            model_call_id=context.model_call_id,
+        )
     except Exception:
         logger.exception(
             "Could not poison uncommitted call %s for rollout %s.",
@@ -1403,6 +1425,7 @@ class _CaptureMiddleware:
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
+        bind_current_model_call(model_call_id)
 
         async def _send_with_model_call_id(message: dict[str, Any]) -> None:
             if message.get("type") == "http.response.start":
