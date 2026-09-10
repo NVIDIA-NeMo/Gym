@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Observability hooks for the pinned Hermes ``AIAgent`` integration."""
+
 from __future__ import annotations
 
 import json
@@ -44,6 +46,7 @@ def _text(content: Any) -> str:
 
 
 def normalize_hermes_messages(messages: Iterable[Any], *, id_prefix: str = "hermes") -> list[NeMoGymResponseInputItem]:
+    """Convert a Hermes conversation to ordered Gym Responses items."""
     output: list[NeMoGymResponseInputItem] = []
     for index, message in enumerate(messages):
         if not isinstance(message, dict):
@@ -108,6 +111,8 @@ class _ObservedChildren(list):
 
 
 class HermesAgentObserver:
+    """Instrument one Hermes agent tree without modifying global Hermes state."""
+
     def __init__(
         self,
         *,
