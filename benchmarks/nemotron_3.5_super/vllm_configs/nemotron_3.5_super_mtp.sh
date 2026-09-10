@@ -29,6 +29,8 @@ VLLM_COMMON_ARGS=(
     --data-parallel-size 1
     --api-server-count 1
     --speculative-config '{"method":"mtp","num_speculative_tokens":5}'
+    --enable-mamba-fine-grained-prefix-cache
+    --prefix-match-unit 16
 )
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
