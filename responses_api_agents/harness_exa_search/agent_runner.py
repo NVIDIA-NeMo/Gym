@@ -4,8 +4,10 @@ import asyncio
 import importlib
 import inspect
 import json
+import logging
 import sys
 from pathlib import Path
+from time import monotonic
 
 
 async def main() -> None:
@@ -15,6 +17,7 @@ async def main() -> None:
     from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
     from nemo_gym.server_utils import ServerClient
 
+    logging.basicConfig(level=logging.WARNING)
     settings = json.loads(Path(sys.argv[1]).read_text())
     module = importlib.import_module(settings["harness_module"])
     agent_class = getattr(module, settings["harness_class"])
@@ -54,11 +57,21 @@ async def main() -> None:
     config = config_class(**config_values)
     body = NeMoGymResponseCreateParamsNonStreaming.model_validate_json(Path(settings["input_path"]).read_text())
     agent = agent_class(config=config, server_client=client)
+    started_at = monotonic()
     if "request" in inspect.signature(agent.responses).parameters:
         request = Request({"type": "http", "path": "/v1/responses", "path_params": {}, "headers": []})
         response = await agent.responses(request=request, body=body)
     else:
         response = await agent.responses(body=body)
+    metadata = dict(response.metadata or {})
+    diagnostics = json.loads(metadata.get("agent_run", "{}"))
+    diagnostics.update(
+        harness_module=settings["harness_module"],
+        harness_class=settings["harness_class"],
+        runner_status="returned",
+        runner_duration_ms=(monotonic() - started_at) * 1000,
+    )
+    response.metadata = metadata | {"agent_run": json.dumps(diagnostics, sort_keys=True)}
     Path(settings["output_path"]).write_text(response.model_dump_json())
 
 

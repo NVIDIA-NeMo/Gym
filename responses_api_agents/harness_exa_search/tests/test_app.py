@@ -47,4 +47,8 @@ async def test_smoke_rollout_runs_harness_through_sandbox_api(monkeypatch, task_
     )
     assert result.output[0].content[0].text == task["answer"]
     assert result.model_dump()["object"] == "response"
+    diagnostics = json.loads(result.metadata["agent_run"])
+    assert diagnostics["harness_class"] == "SampleHarness"
+    assert diagnostics["runner_status"] == "returned"
+    assert diagnostics["runner_duration_ms"] >= 0
     assert "temporary-test-key" not in config.model_dump_json()

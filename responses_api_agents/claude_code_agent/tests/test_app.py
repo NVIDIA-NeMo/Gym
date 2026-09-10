@@ -125,7 +125,7 @@ class TestSanity:
 
         response = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="question"))
 
-        assert json.loads(response.metadata["claude_code"]) == metadata
+        assert json.loads(response.metadata["agent_run"]) == metadata
 
 
 class TestBuildCommand:
