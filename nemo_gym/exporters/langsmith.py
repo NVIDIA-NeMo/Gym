@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from dataclasses import dataclass
 from typing import Any, ClassVar, Optional
 
 from langsmith import Client
@@ -19,6 +20,40 @@ from omegaconf import DictConfig
 
 from nemo_gym.config_types import LangSmithConfig
 from nemo_gym.exporters.base import BaseExporter
+
+
+_LANGSMITH_RUNNER_METADATA = {
+    "ls_runner": "nemo-gym",
+    "source": "nemo-gym",
+}
+
+_ROLLOUT_PAYLOAD_KEYS = frozenset(
+    {
+        "responses_create_params",
+        "response",
+        "reward",
+    }
+)
+
+
+@dataclass(frozen=True)
+class _MappedRollout:
+    inputs: dict[str, Any]
+    outputs: dict[str, Any]
+    metadata: dict[str, Any]
+    reward: float
+
+
+def _map_rollout(rollout: dict[str, Any]) -> _MappedRollout:
+    metadata = {key: value for key, value in rollout.items() if key not in _ROLLOUT_PAYLOAD_KEYS}
+    metadata.update(_LANGSMITH_RUNNER_METADATA)
+
+    return _MappedRollout(
+        inputs=rollout["responses_create_params"],
+        outputs=rollout["response"],
+        metadata=metadata,
+        reward=float(rollout["reward"]),
+    )
 
 
 class LangSmithExporter(BaseExporter):

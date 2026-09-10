@@ -610,6 +610,62 @@ class TestLangSmithConfigAvailability:
         assert not config.is_available
 
 
+class TestLangSmithRolloutMapping:
+    def test_maps_responses_io_metadata_and_reward(self) -> None:
+        pytest.importorskip("langsmith")
+        import nemo_gym.exporters.langsmith as langsmith_module
+
+        rollout = {
+            "responses_create_params": {
+                "input": [
+                    {
+                        "role": "user",
+                        "content": "What is 2 + 2?",
+                    }
+                ],
+                "temperature": 0.2,
+            },
+            "response": {
+                "id": "resp-1",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "4",
+                            }
+                        ],
+                    }
+                ],
+            },
+            "reward": 0.75,
+            "score": 0.75,
+            "extracted_answer": "4",
+            "_ng_task_index": 12,
+            "_ng_rollout_index": 3,
+            "agent_ref": {"name": "deep-agent"},
+            "task_source": "math",
+        }
+
+        mapped = langsmith_module._map_rollout(rollout)
+
+        assert mapped.inputs == rollout["responses_create_params"]
+        assert mapped.outputs == rollout["response"]
+        assert mapped.reward == 0.75
+        assert mapped.metadata == {
+            "score": 0.75,
+            "extracted_answer": "4",
+            "_ng_task_index": 12,
+            "_ng_rollout_index": 3,
+            "agent_ref": {"name": "deep-agent"},
+            "task_source": "math",
+            "ls_runner": "nemo-gym",
+            "source": "nemo-gym",
+        }
+
+
 class TestLangSmithExporter:
     def test_setup_creates_client_from_config(self, monkeypatch: MonkeyPatch, langsmith_config: DictConfig) -> None:
         pytest.importorskip("langsmith")
