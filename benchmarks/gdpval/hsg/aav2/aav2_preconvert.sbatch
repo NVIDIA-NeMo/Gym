@@ -34,8 +34,8 @@ PYTHON
 mkdir -p "$JOB_ROOT/container-home"
 setsid "$APPTAINER_BIN/apptainer" exec --cleanenv --no-home \
     --bind /lustre:/lustre,/raid/scratch:/raid/scratch \
-    --env "PYTHONPATH=$GYM_ROOT,TMPDIR=$TMPDIR,HOME=$JOB_ROOT/container-home" \
-    --pwd "$GYM_ROOT" "$GDPVAL_CONTAINER_PATH" \
+    --env "PYTHONPATH=$GYM_ROOT,TMPDIR=$TMPDIR,XDG_CACHE_HOME=$XDG_CACHE_HOME" \
+    --pwd "$GYM_ROOT" "$GDPVAL_CONTAINER_PATH" env "HOME=$JOB_ROOT/container-home" \
     python3 "$LOCAL_PACKAGE/preconvert.py" "$RUN_DIR" --config-json "$JOB_ROOT/judge.json" \
     > "$PHASE_DIR/logs/preconvert-$SLURM_JOB_ID.log" 2>&1 &
 JOB_PIDS+=("$!")

@@ -237,11 +237,12 @@ def test_missing_dataset_reference_input_fails_before_publication(campaign, offi
     assert not (campaign / "prepared").exists()
 
 
-def test_office_failure_never_publishes_prepared_output(campaign, monkeypatch):
+def test_office_failure_is_logged_and_preparation_continues(campaign, monkeypatch, capsys):
     monkeypatch.setattr(preconvert, "preconvert_dir", lambda *_args, **_kwargs: (0, 1, ["converter failed"]))
-    with pytest.raises(ValueError, match="Office conversion incomplete"):
-        preconvert.prepare(campaign)
-    assert not (campaign / "prepared").exists()
+    output = preconvert.prepare(campaign)
+    assert (output / "manifest.json").is_file()
+    assert (output / "candidate/task_one/repeat_0/report.docx").read_bytes() == b"original candidate Office document"
+    assert "Office render skipped: converter failed" in capsys.readouterr().out
     assert not list(campaign.glob(".preparing-*"))
 
 

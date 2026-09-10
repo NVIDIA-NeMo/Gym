@@ -17,7 +17,7 @@ from benchmarks.gdpval.hsg.aav2.completion import read_rows, rollout_complete, t
 from benchmarks.gdpval.hsg.aav2.media import build, tree_paths
 from benchmarks.gdpval.hsg.aav2.source_copy import copy_tree
 from benchmarks.gdpval.hsg.aav2.source_copy import inventory as source_inventory
-from resources_servers.gdpval.preconvert import find_convertible_files, preconvert_dir
+from resources_servers.gdpval.preconvert import preconvert_dir
 
 
 REFERENCE_KEY = "gdpval_resources_server.resources_servers.gdpval.reference_models"
@@ -56,8 +56,8 @@ def inventory(root: Path, *, prepared: bool = False, top_level_names: set[str] |
 def office(root: Path) -> None:
     ok, failed, errors = preconvert_dir(root, max_concurrent=4)
     print(f"Office: converted={ok}, failed={failed}", flush=True)
-    if failed or find_convertible_files(root):
-        raise ValueError("Office conversion incomplete: " + "; ".join(errors[:5]))
+    for error in errors:
+        print(f"Office render skipped: {error}", flush=True)
 
 
 def reference_repeats(task: Path) -> list[Path]:

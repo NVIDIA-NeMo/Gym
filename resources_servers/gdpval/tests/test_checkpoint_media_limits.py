@@ -61,31 +61,35 @@ def test_recursive_inputs_keep_paths_and_pdf_provenance(tmp_path):
     assert _preflight(blocks)["eligible"]
 
 
-def test_missing_nested_office_render_is_ineligible(tmp_path):
+def test_missing_nested_office_render_is_logged_and_skipped(tmp_path, caplog):
     folder = tmp_path / "asset"
     folder.mkdir()
     (folder / "input.docx").write_bytes(b"unrendered input")
-    receipt = _preflight(_section(tmp_path, recursive=True))
-    assert receipt["reasons"] == ["lossy_attachment_omission"]
-    assert "asset/input.docx" in receipt["loss_markers"][0]
+    with caplog.at_level("INFO", logger=comparison.LOGGER.name):
+        blocks = _section(tmp_path, recursive=True)
+    assert _preflight(blocks)["eligible"]
+    assert "Skipping unrendered Office judge file" in caplog.text
+    assert "asset/input.docx" in caplog.text
 
 
 @pytest.mark.parametrize("name", ["input.docx", "inputs.zip"])
-def test_submission_with_unrepresented_file_is_ineligible(tmp_path, name):
-    (tmp_path / "submission.txt").write_text("Visible evidence must not hide an omitted attachment")
+def test_unrendered_office_file_does_not_block_supported_submission(tmp_path, name, caplog):
+    (tmp_path / "submission.txt").write_text("Readable submission")
     if name.endswith(".zip"):
         with zipfile.ZipFile(tmp_path / name, "w") as archive:
             archive.writestr("nested/input.docx", b"Office source without a PDF sidecar")
     else:
         (tmp_path / name).write_bytes(b"Source without a supported representation")
-    blocks = _section(tmp_path)
+    with caplog.at_level("INFO", logger=comparison.LOGGER.name):
+        blocks = _section(tmp_path)
     receipt = comparison.preflight_judge_transport(
         comparison.Judge(name="judge", client=None, model="test"),
         "Compare the submissions",
         {"refs": [], "submission_a": blocks, "submission_b": []},
     )
-    assert receipt["reasons"] == ["lossy_attachment_omission"]
-    assert name in receipt["loss_markers"][0]
+    assert receipt["eligible"]
+    assert "Readable submission" in "".join(block.get("text", "") for block in blocks)
+    assert "input.docx" in caplog.text
 
 
 @pytest.mark.parametrize("archived", [False, True])
@@ -111,16 +115,18 @@ def test_unsupported_files_are_logged_and_supported_evidence_is_judged(tmp_path,
 
 
 def test_omission_survives_exhausted_text_budget(tmp_path, monkeypatch):
-    (tmp_path / "bad.zip").write_bytes(b"invalid archive")
+    (tmp_path / "large.wav").write_bytes(b"larger than the file limit")
     (tmp_path / "notes.txt").write_text("valid evidence" * 10)
+    monkeypatch.setattr(comparison, "MAX_FILE_BYTES_FOR_JUDGE", 1)
     monkeypatch.setattr(comparison, "MAX_SECTION_TEXT_CHARS_FOR_JUDGE", 1)
-    receipt = _preflight(_section(tmp_path))
+    receipt = _preflight(_section(tmp_path, media_mode="images_and_text", audio_capable=True))
     assert receipt["reasons"] == ["lossy_attachment_omission"]
-    assert receipt["loss_markers"] == ["[attachment omitted from bad.zip: unreadable archive]"]
+    assert any("large.wav" in marker for marker in receipt["loss_markers"])
 
 
 @pytest.mark.parametrize("problem", ["unsafe", "duplicate", "corrupt", "crc", "member_limit", "size"])
-def test_rejected_zip_evidence_cannot_pass_preflight(tmp_path, monkeypatch, problem):
+def test_unreadable_zip_members_are_logged_without_blocking_other_files(tmp_path, monkeypatch, caplog, problem):
+    (tmp_path / "submission.txt").write_text("Readable submission")
     path = tmp_path / "inputs.zip"
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
         archive.writestr("first.txt", "original-evidence")
@@ -139,9 +145,11 @@ def test_rejected_zip_evidence_cannot_pass_preflight(tmp_path, monkeypatch, prob
         monkeypatch.setattr(comparison, "MAX_ZIP_MEMBERS_FOR_JUDGE", 1)
     elif problem == "size":
         monkeypatch.setattr(comparison, "MAX_ZIP_MEMBER_BYTES_FOR_JUDGE", 1)
-    receipt = _preflight(_section(tmp_path, recursive=True))
-    assert "lossy_attachment_omission" in receipt["reasons"]
-    assert receipt["loss_markers"]
+    with caplog.at_level("WARNING", logger=comparison.LOGGER.name):
+        blocks = _section(tmp_path, recursive=True)
+    assert _preflight(blocks)["eligible"]
+    assert "Readable submission" in "".join(block.get("text", "") for block in blocks)
+    assert "Skipping unreadable or unsupported ZIP evidence" in caplog.text
     assert not (tmp_path.parent / "escaped.txt").exists()
 
 

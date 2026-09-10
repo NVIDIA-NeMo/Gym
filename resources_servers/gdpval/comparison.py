@@ -852,8 +852,7 @@ def build_file_section(
         omissions: list[str] = []
         extract_dir, members = _maybe_unzip(archive, omissions=omissions)
         for marker in omissions:
-            _append_block({"type": "text", "text": marker})
-            no_files = False
+            LOGGER.warning("Skipping unreadable or unsupported ZIP evidence in %s: %s", archive, marker)
         if extract_dir is not None:
             clean_up_list.append(extract_dir)
             extracted_archives.append((extract_dir.resolve(), archive.relative_to(source_root).as_posix(), members))
@@ -927,6 +926,9 @@ def build_file_section(
         if not info and cached_office_pdf is None:
             LOGGER.info("Skipping unsupported judge file: %s", full_path)
             return
+        if info.get("type") == "DOC" and cached_office_pdf is None:
+            LOGGER.info("Skipping unrendered Office judge file: %s", full_path)
+            return
         _append_block({"type": "text", "text": f"\n{label}:\n"})
         av_identity: tuple[int, str] | None = None
         if info.get("type") in {"AUDIO", "VIDEO"}:
@@ -952,15 +954,6 @@ def build_file_section(
                 )
                 no_files = False
                 return
-        if info.get("type") == "DOC" and cached_office_pdf is None:
-            reason = (
-                "oversize file"
-                if full_path.stat().st_size > MAX_FILE_BYTES_FOR_JUDGE
-                else "no supported representation"
-            )
-            _append_block({"type": "text", "text": f"[attachment omitted for {label}: {reason}]"})
-            no_files = False
-            return
         remaining_text = max(0, MAX_SECTION_TEXT_CHARS_FOR_JUDGE - text_used)
         if media_mode == "images_and_text":
             blocks = get_file_image_text_blocks(

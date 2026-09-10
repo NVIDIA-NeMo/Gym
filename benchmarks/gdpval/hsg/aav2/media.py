@@ -4,8 +4,8 @@
 
 Requires ffmpeg/ffprobe for conversion. Video proxies are lossy, not byte-budget
 guarantees. PCM16/24 audio is replaced only when FLAC is smaller and decodes to
-identical samples. ZIP members are all retained or preparation fails. Video
-conversion rejects extra tracks and alpha; videos below 8 MiB stay unchanged.
+identical samples. Failed or unsupported conversions retain the original bytes.
+Video proxies exclude extra tracks and alpha; videos below 8 MiB stay unchanged.
 Nested ZIP members are copied unchanged. Other formats are copied unchanged; the judge checks
 whether it has a supported representation. Office conversion remains Gym's
 ordinary preconvert step.
@@ -23,6 +23,7 @@ import stat
 import subprocess
 import tempfile
 import zipfile
+import zlib
 from collections.abc import Callable
 from pathlib import Path
 
@@ -35,6 +36,10 @@ PCM_EXTENSIONS = {".wav", ".wave", ".aif", ".aiff"}
 PCM_CODECS = {"pcm_s16le", "pcm_s16be", "pcm_s24le", "pcm_s24be"}
 PROFILE = "h264-720p-crf26-aac128+pcm16-24-flac-v1"
 TIMEOUT = 1800
+
+
+class IntegrityError(ValueError):
+    """A generated artifact or source identity failed validation."""
 
 
 def _hash(path: Path) -> str:
@@ -122,7 +127,10 @@ def _video(source: Path, target: Path) -> dict:
             str(target),
         ]
     )
-    after = _video_identity(target)
+    try:
+        after = _video_identity(target)
+    except (ValueError, KeyError, subprocess.SubprocessError) as error:
+        raise IntegrityError(f"video proxy validation failed: {source}: {error}") from error
     video = after["video"]
     if (
         video["codec_name"] != "h264"
@@ -133,7 +141,7 @@ def _video(source: Path, target: Path) -> dict:
         or any(s["codec_name"] != "aac" for s in after["audio"])
         or abs(before["duration"] - after["duration"]) > max(0.5, before["duration"] * 0.01)
     ):
-        raise ValueError(f"video proxy failed stream/duration validation: {source}")
+        raise IntegrityError(f"video proxy failed stream/duration validation: {source}")
     return {"source_duration": before["duration"], "output_duration": after["duration"]}
 
 
@@ -170,37 +178,54 @@ def _file(
     kind = "unchanged"
     extra = {}
     target.parent.mkdir(parents=True, exist_ok=True)
-    if bookkeeping:
-        kind = "bookkeeping"
-        _copy(source, target)
-    elif extension in VIDEO_EXTENSIONS and source_size >= MIN_VIDEO_BYTES:
-        target = target.with_name(target.name + ".mp4")
-        kind = "h264_video"
-        if target.exists():
-            raise FileExistsError(target)
-        extra = _video(source, target)
-    elif extension in PCM_EXTENSIONS:
-        streams = _probe(source)["streams"]
-        if len(streams) == 1 and streams[0].get("codec_name") in PCM_CODECS:
-            with tempfile.TemporaryDirectory(prefix="gdpval-audio-") as temporary:
-                workspace = Path(temporary)
-                before = _audio_identity(source, workspace)
-                converted = workspace / "converted.flac"
-                _run(["-i", str(source), "-map", "0:a:0", "-c:a", "flac", str(converted)])
-                if _audio_identity(converted, workspace) != before:
-                    raise ValueError(f"FLAC decoded samples changed: {source}")
-                if converted.stat().st_size < source_size:
-                    target = target.with_name(target.name + ".flac")
-                    _copy(converted, target)
-                    kind = "lossless_flac"
-                    extra = {"sample_rate": before[0], "channels": before[1], "decoded_sha256": before[3]}
-    elif extension == ".zip" and not inside_zip:
-        extra = {"members": _zip(source, target, prepare_zip)}
-        kind = "zip"
+    if target.exists() or target.is_symlink():
+        raise FileExistsError(target)
+    original_target = target
+    try:
+        if bookkeeping:
+            kind = "bookkeeping"
+            _copy(source, target)
+        elif extension in VIDEO_EXTENSIONS and source_size >= MIN_VIDEO_BYTES:
+            target = target.with_name(target.name + ".mp4")
+            kind = "h264_video"
+            if target.exists() or target.is_symlink():
+                raise FileExistsError(target)
+            extra = _video(source, target)
+        elif extension in PCM_EXTENSIONS:
+            streams = _probe(source)["streams"]
+            if len(streams) == 1 and streams[0].get("codec_name") in PCM_CODECS:
+                with tempfile.TemporaryDirectory(prefix="gdpval-audio-") as temporary:
+                    workspace = Path(temporary)
+                    before = _audio_identity(source, workspace)
+                    converted = workspace / "converted.flac"
+                    _run(["-i", str(source), "-map", "0:a:0", "-c:a", "flac", str(converted)])
+                    try:
+                        after = _audio_identity(converted, workspace)
+                    except (ValueError, KeyError, subprocess.SubprocessError) as error:
+                        raise IntegrityError(f"FLAC output validation failed: {source}: {error}") from error
+                    if after != before:
+                        raise IntegrityError(f"FLAC decoded samples changed: {source}")
+                    if converted.stat().st_size < source_size:
+                        target = target.with_name(target.name + ".flac")
+                        _copy(converted, target)
+                        kind = "lossless_flac"
+                        extra = {"sample_rate": before[0], "channels": before[1], "decoded_sha256": before[3]}
+        elif extension == ".zip" and not inside_zip:
+            extra = {"members": _zip(source, target, prepare_zip)}
+            kind = "zip"
+    except IntegrityError:
+        raise
+    except (ValueError, KeyError, subprocess.SubprocessError, zipfile.BadZipFile, zlib.error, EOFError) as error:
+        target.unlink(missing_ok=True)
+        target, kind, extra = original_target, "unchanged", {}
+        print(f"Media conversion skipped for {source}: {type(error).__name__}: {error}", flush=True)
     if kind == "unchanged":
         _copy(source, target)
     if _hash(source) != before_hash:
-        raise ValueError(f"source changed during preparation: {source}")
+        raise IntegrityError(f"source changed during preparation: {source}")
+    output_hash = _hash(target)
+    if kind in {"unchanged", "bookkeeping"} and output_hash != before_hash:
+        raise IntegrityError(f"copied bytes changed: {source}")
     return {
         "source": str(source),
         "output": str(target),
@@ -208,7 +233,7 @@ def _file(
         "source_bytes": source_size,
         "output_bytes": target.stat().st_size,
         "source_sha256": before_hash,
-        "output_sha256": _hash(target),
+        "output_sha256": output_hash,
         **extra,
     }
 
@@ -240,8 +265,11 @@ def _zip(source: Path, target: Path, prepare_zip: Callable[[Path], None] | None 
                 member.mkdir(parents=True, exist_ok=True)
                 continue
             member.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(info) as src, member.open("xb") as dst:
-                shutil.copyfileobj(src, dst, 1024 * 1024)
+            try:
+                with archive.open(info) as src, member.open("xb") as dst:
+                    shutil.copyfileobj(src, dst, 1024 * 1024)
+            except (RuntimeError, NotImplementedError) as error:
+                raise ValueError(f"unreadable ZIP member: {info.filename}: {error}") from error
             if member.stat().st_size != info.file_size:
                 raise ValueError(f"incomplete ZIP member: {source}: {name}")
         originals = {p.relative_to(original).as_posix(): _hash(p) for p in original.rglob("*") if p.is_file()}
@@ -250,7 +278,7 @@ def _zip(source: Path, target: Path, prepare_zip: Callable[[Path], None] | None 
             if any(
                 not (original / name).is_file() or _hash(original / name) != sha for name, sha in originals.items()
             ):
-                raise ValueError(f"ZIP preparation modified an original member: {source}")
+                raise IntegrityError(f"ZIP preparation modified an original member: {source}")
         for path in sorted(original.rglob("*")):
             relative = path.relative_to(original)
             output = prepared / relative
@@ -277,12 +305,15 @@ def _zip(source: Path, target: Path, prepare_zip: Callable[[Path], None] | None 
                     else:
                         with path.open("rb") as src, output_zip.open(info, "w") as dst:
                             shutil.copyfileobj(src, dst, 1024 * 1024)
-        with zipfile.ZipFile(target) as output_zip:
-            for record in records:
-                with output_zip.open(record["output"]) as member:
-                    digest = hashlib.file_digest(member, "sha256").hexdigest()
-                if digest != record["output_sha256"]:
-                    raise ValueError(f"ZIP output member changed: {source}: {record['source']}")
+        try:
+            with zipfile.ZipFile(target) as output_zip:
+                for record in records:
+                    with output_zip.open(record["output"]) as member:
+                        digest = hashlib.file_digest(member, "sha256").hexdigest()
+                    if digest != record["output_sha256"]:
+                        raise IntegrityError(f"ZIP output member changed: {source}: {record['source']}")
+        except (zipfile.BadZipFile, zlib.error, KeyError, EOFError) as error:
+            raise IntegrityError(f"ZIP output validation failed: {source}: {error}") from error
     return records
 
 

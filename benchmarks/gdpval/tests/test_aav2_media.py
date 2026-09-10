@@ -77,20 +77,23 @@ def test_nested_destination_and_source_symlink_fail_without_changing_source(tmp_
 
 
 @pytest.mark.parametrize("name", ["../escape.txt", "/absolute.txt", "a/../b.txt", "C:/file.txt"])
-def test_unsafe_zip_fails_without_publication(tmp_path, name):
+def test_unsafe_zip_is_preserved_without_extracting_unsafe_members(tmp_path, name, capsys):
     source = tmp_path / "source"
     source.mkdir()
     with zipfile.ZipFile(source / "files.zip", "w") as archive:
         archive.writestr(name, b"content")
-    with pytest.raises(ValueError, match="ZIP member"):
-        media.build(source, tmp_path / "output")
-    assert not (tmp_path / "output").exists()
-    assert not (tmp_path / "output.media.json").exists()
+    output = tmp_path / "output"
+    manifest = media.build(source, output)
+    assert (output / "files.zip").read_bytes() == (source / "files.zip").read_bytes()
+    assert manifest["entries"][0]["kind"] == "unchanged"
+    assert list(output.iterdir()) == [output / "files.zip"]
+    assert not (tmp_path / "escape.txt").exists()
     assert not list(tmp_path.glob(".gdpval-media-*"))
+    assert "Media conversion skipped" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("case", ["duplicate", "symlink", "corrupt"])
-def test_zip_rejected_members_never_disappear_silently(tmp_path, case):
+@pytest.mark.parametrize("case", ["duplicate", "symlink", "corrupt", "encrypted"])
+def test_unreadable_zip_is_retained_complete(tmp_path, case, capsys):
     source = tmp_path / "source"
     source.mkdir()
     archive_path = source / "files.zip"
@@ -106,9 +109,17 @@ def test_zip_rejected_members_never_disappear_silently(tmp_path, case):
             archive.writestr(info, b"file.txt")
     if case == "corrupt":
         archive_path.write_bytes(archive_path.read_bytes().replace(b"unique payload", b"broken payload"))
-    with pytest.raises((ValueError, zipfile.BadZipFile)):
-        media.build(source, tmp_path / "output")
-    assert not (tmp_path / "output").exists()
+    elif case == "encrypted":
+        payload = bytearray(archive_path.read_bytes())
+        for signature, flag_offset in [(b"PK\x03\x04", 6), (b"PK\x01\x02", 8)]:
+            payload[payload.index(signature) + flag_offset] |= 1
+        archive_path.write_bytes(payload)
+    output = tmp_path / "output"
+    manifest = media.build(source, output)
+    assert (output / "files.zip").read_bytes() == archive_path.read_bytes()
+    assert list(output.iterdir()) == [output / "files.zip"]
+    assert manifest["entries"][0]["source_sha256"] == manifest["entries"][0]["output_sha256"]
+    assert "Media conversion skipped" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
@@ -226,7 +237,7 @@ def test_real_zip_video_proxy_keeps_every_member_and_source_bytes(tmp_path, monk
 
 
 @pytest.mark.parametrize("unsupported", ["extra_audio", "subtitles", "alpha"])
-def test_unsupported_video_features_fail_before_conversion(tmp_path, monkeypatch, unsupported):
+def test_unsupported_video_features_preserve_original(tmp_path, monkeypatch, unsupported, capsys):
     source = tmp_path / "source"
     source.mkdir()
     (source / "clip.mp4").write_bytes(b"fixture")
@@ -236,24 +247,79 @@ def test_unsupported_video_features_fail_before_conversion(tmp_path, monkeypatch
     if unsupported == "subtitles":
         extra.append({"codec_type": "subtitle"})
     monkeypatch.setattr(media, "_probe", lambda _: {"streams": [video, *extra], "format": {"duration": "1"}})
-    with pytest.raises(ValueError, match="unsupported"):
-        media.build(source, tmp_path / "output")
-    assert not (tmp_path / "output").exists()
+    output = tmp_path / "output"
+    media.build(source, output)
+    assert (output / "clip.mp4").read_bytes() == b"fixture"
+    assert not (output / "clip.mp4.mp4").exists()
+    assert "unsupported" in capsys.readouterr().out
 
 
-def test_ffmpeg_failure_does_not_publish_partial_tree(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "failure", [subprocess.TimeoutExpired("ffmpeg", 1800), subprocess.CalledProcessError(1, "ffmpeg")]
+)
+def test_ffmpeg_failure_preserves_original_and_discards_partial_derivative(tmp_path, monkeypatch, failure, capsys):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "clip.mp4").write_bytes(b"original")
+    (source / "notes.txt").write_text("Remaining evidence")
+    monkeypatch.setattr(media, "MIN_VIDEO_BYTES", 0)
+
+    def fail_conversion(original, target):
+        target.write_bytes(b"partial")
+        raise failure
+
+    monkeypatch.setattr(media, "_video", fail_conversion)
+    output = tmp_path / "output"
+    media.build(source, output)
+    assert (output / "clip.mp4").read_bytes() == b"original"
+    assert not (output / "clip.mp4.mp4").exists()
+    assert (output / "notes.txt").read_text() == "Remaining evidence"
+    assert (source / "clip.mp4").read_bytes() == b"original"
+    assert "Media conversion skipped" in capsys.readouterr().out
+
+
+def test_probe_failure_preserves_audio(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "sound.wav").write_bytes(b"unreadable audio")
+
+    def fail_probe(_):
+        raise subprocess.CalledProcessError(1, "ffprobe")
+
+    monkeypatch.setattr(media, "_probe", fail_probe)
+    media.build(source, tmp_path / "output")
+    assert (tmp_path / "output/sound.wav").read_bytes() == b"unreadable audio"
+
+
+@pytest.mark.parametrize("failure", ["source_change", "output_integrity", "filesystem"])
+def test_fallback_does_not_hide_integrity_or_filesystem_failures(tmp_path, monkeypatch, failure):
     source = tmp_path / "source"
     source.mkdir()
     (source / "clip.mp4").write_bytes(b"original")
     monkeypatch.setattr(media, "MIN_VIDEO_BYTES", 0)
 
-    def fail_conversion(original, target):
+    def fail(original, target):
         target.write_bytes(b"partial")
-        raise subprocess.TimeoutExpired("ffmpeg", 1800)
+        if failure == "source_change":
+            original.write_bytes(b"changed source")
+            raise subprocess.TimeoutExpired("ffmpeg", 1800)
+        if failure == "filesystem":
+            raise OSError("write failed")
+        raise media.IntegrityError("output validation failed")
 
-    monkeypatch.setattr(media, "_video", fail_conversion)
-    with pytest.raises(subprocess.TimeoutExpired):
+    monkeypatch.setattr(media, "_video", fail)
+    with pytest.raises((media.IntegrityError, OSError)):
         media.build(source, tmp_path / "output")
     assert not (tmp_path / "output").exists()
-    assert not (tmp_path / "output.media.json").exists()
-    assert (source / "clip.mp4").read_bytes() == b"original"
+
+
+def test_fallback_never_deletes_an_existing_derivative(tmp_path, monkeypatch):
+    source, target = tmp_path / "clip.mp4", tmp_path / "output/clip.mp4"
+    source.write_bytes(b"original")
+    target.parent.mkdir()
+    derivative = target.with_name(target.name + ".mp4")
+    derivative.write_bytes(b"existing artifact")
+    monkeypatch.setattr(media, "MIN_VIDEO_BYTES", 0)
+    with pytest.raises(FileExistsError):
+        media._file(source, target)
+    assert derivative.read_bytes() == b"existing artifact"

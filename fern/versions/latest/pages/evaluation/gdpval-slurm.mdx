@@ -163,11 +163,13 @@ point, PCM32 audio, and audio with extra streams such as embedded artwork are
 preserved. ZIP preparation preserves members
 and adds Office sidecars without changing original files.
 
-Extra video tracks, subtitles, and alpha stop preparation. Nested ZIP members
-and other formats, including STEP and PSD, are copied unchanged. The judge can use
+Unsupported media features, decoding errors, and conversion timeouts preserve
+the original file and are logged. Nested ZIP members and other formats,
+including STEP and PSD, are copied unchanged. The judge can use
 existing PDF sidecars. Otherwise, it logs each unsupported filename and skips
-that file, judging the remaining supported files. All tasks stay included.
-Failed Office renders, oversized requests, and corrupt ZIPs remain errors.
+that file, judging the remaining supported files. Failed Office renders are
+also logged and skipped, as are unreadable or unsupported ZIP members. All tasks
+stay included. Request-size limits still apply.
 
 ## Resume and inspect
 
