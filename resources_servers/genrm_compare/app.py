@@ -61,6 +61,26 @@ from resources_servers.genrm_compare.utils import (
 
 logger = logging.getLogger(__name__)
 
+
+def _is_output_budget_exhausted(raw_response: Dict[str, Any]) -> bool:
+    """True if a Responses API object was cut off by max_output_tokens.
+
+    Gym's chat->Responses conversion sets status="incomplete" with
+    incomplete_details.reason="max_output_tokens" when the model returned finish_reason="length".
+    """
+    if not isinstance(raw_response, dict) or raw_response.get("status") != "incomplete":
+        return False
+    details = raw_response.get("incomplete_details") or {}
+    return isinstance(details, dict) and details.get("reason") == "max_output_tokens"
+
+
+def _escalate_output_budget(current: Optional[int], multiplier: float, cap: int) -> Optional[int]:
+    """Next max_output_tokens to try after a budget-exhausted response (never above cap)."""
+    if current is None or multiplier <= 1.0 or current >= cap:
+        return current
+    return min(int(current * multiplier), cap)
+
+
 # Cohort state for verify(): buffer by prompt_key until num_rollouts_per_prompt received (Difference 1)
 _cohort_lock: asyncio.Lock = asyncio.Lock()
 _cohort_buffers: Dict[str, List[Tuple[Any, asyncio.Future]]] = defaultdict(list)
@@ -87,6 +107,12 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
         debug_logging: Enable verbose logging for debugging
         genrm_parse_retries: Number of retries on parse failures
         genrm_parse_retry_sleep_s: Sleep duration between parse retries
+        genrm_budget_exhausted_retry_multiplier: When the GenRM response is `incomplete` because
+            `max_output_tokens` was reached (reasoning consumed the whole budget and no verdict was
+            emitted), multiply max_output_tokens by this factor on each retry. Default 1.0 = off:
+            measured against a hosted GenRM, runaway reasoning did not converge even at 3x the
+            budget, so escalation mostly burns engine time. Enable only if your prompts converge.
+        genrm_max_output_tokens_cap: Upper bound for the escalated max_output_tokens
         use_principle: Enable principle-based comparison
         default_principle: Default principle when none provided in request
     """
@@ -142,6 +168,8 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     # Retry config for parse failures
     genrm_parse_retries: int = 3
     genrm_parse_retry_sleep_s: float = 0.2
+    genrm_budget_exhausted_retry_multiplier: float = 1.0
+    genrm_max_output_tokens_cap: int = 65536
 
 
 class GenRMCompareVerifyRequest(BaseVerifyRequest):
@@ -490,6 +518,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
                 # Extract output_text from GenRM response (skip reasoning, only parse the final JSON scores)
                 genrm_answer = extract_output_text(raw_response)
+                budget_exhausted = _is_output_budget_exhausted(raw_response)
 
                 try:
                     score_1, score_2, ranking = parse_genrm_output(
@@ -501,13 +530,38 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     return score_1, score_2, ranking
 
                 except GenRMOutputParseError:
+                    current_budget = responses_create_params.max_output_tokens
+                    if budget_exhausted:
+                        # The model hit max_output_tokens before writing the verdict (typically the
+                        # reasoning consumed the whole budget). Retrying with the same budget mostly
+                        # reproduces the same outcome, so escalate it.
+                        logger.warning(
+                            f"[GenRM] Output budget exhausted for pair {pair_idx} "
+                            f"(attempt {attempt_idx + 1}/{max_attempts}, max_output_tokens={current_budget}): "
+                            f"response is incomplete (reason=max_output_tokens) and contains no verdict."
+                        )
+                        if attempt_idx < max_attempts - 1:
+                            escalated = _escalate_output_budget(
+                                current_budget,
+                                cfg.genrm_budget_exhausted_retry_multiplier,
+                                cfg.genrm_max_output_tokens_cap,
+                            )
+                            if escalated != current_budget:
+                                logger.info(f"[GenRM] Retrying pair {pair_idx} with max_output_tokens={escalated}")
+                                responses_create_params.max_output_tokens = escalated
+
                     if attempt_idx < max_attempts - 1:
                         await asyncio.sleep(float(cfg.genrm_parse_retry_sleep_s))
                         continue
 
                     # Give up: fall back to defaults
+                    cause = (
+                        f"output budget exhausted at max_output_tokens={current_budget}"
+                        if budget_exhausted
+                        else "output could not be parsed"
+                    )
                     logger.warning(
-                        f"[GenRM] Parse failed for pair {pair_idx} after {max_attempts} attempts; "
+                        f"[GenRM] Parse failed for pair {pair_idx} after {max_attempts} attempts ({cause}); "
                         f"falling back to defaults."
                     )
                     return cfg.default_score, cfg.default_score, cfg.default_ranking

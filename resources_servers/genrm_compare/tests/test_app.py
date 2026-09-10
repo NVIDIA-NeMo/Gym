@@ -405,6 +405,108 @@ class TestRunSingleComparison:
         call_kwargs = mock_server_client.post.call_args.kwargs
         return call_kwargs["json"]
 
+    @staticmethod
+    def _incomplete_response(reasoning_only: bool = True):
+        """A Responses API object cut off by max_output_tokens: reasoning present, no verdict text."""
+        output = [{"type": "reasoning", "summary": [], "content": [{"type": "reasoning_text", "text": "thinking..."}]}]
+        if not reasoning_only:
+            output.append({"type": "message", "content": [{"type": "output_text", "text": ""}]})
+        return {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}, "output": output}
+
+    @staticmethod
+    def _complete_response(text='{"score_1": 4, "score_2": 2, "ranking": 2}'):
+        return {
+            "status": "completed",
+            "output": [{"type": "message", "content": [{"type": "output_text", "text": text}]}],
+        }
+
+    def test_budget_exhausted_escalates_max_output_tokens_and_recovers(self):
+        """incomplete/max_output_tokens -> retry with a larger budget -> parsed verdict returned."""
+        server, mock_client = self._make_server()
+        server.config.genrm_parse_retries = 2
+        server.config.genrm_parse_retry_sleep_s = 0.0
+        server.config.genrm_budget_exhausted_retry_multiplier = 2.0
+        server.config.genrm_max_output_tokens_cap = 65536
+        bodies = [self._incomplete_response(), self._incomplete_response(), self._complete_response()]
+        budgets = []
+
+        async def fake_post(**kwargs):
+            budgets.append(kwargs["json"].max_output_tokens)  # capture at call time; the params object is mutated
+            resp = AsyncMock()
+            resp.json = AsyncMock(return_value=bodies[len(budgets) - 1])
+            return resp
+
+        mock_client.post = AsyncMock(side_effect=fake_post)
+
+        result = asyncio.run(
+            server._run_single_comparison(
+                [{"role": "user", "content": "q"}], self._make_response_obj("a"), self._make_response_obj("b")
+            )
+        )
+
+        assert result == (4.0, 2.0, 2.0)
+        assert budgets == [1024, 2048, 4096]
+
+    def test_budget_escalation_respects_cap(self):
+        server, mock_client = self._make_server()
+        server.config.genrm_parse_retries = 3
+        server.config.genrm_parse_retry_sleep_s = 0.0
+        server.config.genrm_budget_exhausted_retry_multiplier = 4.0
+        server.config.genrm_max_output_tokens_cap = 3000
+        budgets = []
+
+        async def fake_post(**kwargs):
+            budgets.append(kwargs["json"].max_output_tokens)
+            resp = AsyncMock()
+            resp.json = AsyncMock(return_value=self._incomplete_response())
+            return resp
+
+        mock_client.post = AsyncMock(side_effect=fake_post)
+
+        result = asyncio.run(
+            server._run_single_comparison(
+                [{"role": "user", "content": "q"}], self._make_response_obj("a"), self._make_response_obj("b")
+            )
+        )
+
+        # every attempt exhausted -> defaults; budget escalated once to the cap and then held there
+        assert result == (server.config.default_score, server.config.default_score, server.config.default_ranking)
+        assert budgets == [1024, 3000, 3000, 3000]
+
+    def test_plain_parse_failure_does_not_escalate_budget(self):
+        """A completed-but-unparseable response keeps the original budget on retry."""
+        server, mock_client = self._make_server()
+        server.config.genrm_parse_retries = 1
+        server.config.genrm_parse_retry_sleep_s = 0.0
+        mock_http_response = AsyncMock()
+        mock_http_response.json = AsyncMock(return_value=self._complete_response(text="no json here"))
+        mock_client.post = AsyncMock(return_value=mock_http_response)
+
+        asyncio.run(
+            server._run_single_comparison(
+                [{"role": "user", "content": "q"}], self._make_response_obj("a"), self._make_response_obj("b")
+            )
+        )
+        budgets = [call.kwargs["json"].max_output_tokens for call in mock_client.post.call_args_list]
+        assert budgets == [1024, 1024]
+
+    def test_escalation_off_by_default(self):
+        """Default multiplier is 1.0: budget exhaustion is logged but the budget is not raised."""
+        server, mock_client = self._make_server()
+        assert server.config.genrm_budget_exhausted_retry_multiplier == 1.0
+        server.config.genrm_parse_retries = 1
+        server.config.genrm_parse_retry_sleep_s = 0.0
+        mock_http_response = AsyncMock()
+        mock_http_response.json = AsyncMock(return_value=self._incomplete_response())
+        mock_client.post = AsyncMock(return_value=mock_http_response)
+        asyncio.run(
+            server._run_single_comparison(
+                [{"role": "user", "content": "q"}], self._make_response_obj("a"), self._make_response_obj("b")
+            )
+        )
+        budgets = [call.kwargs["json"].max_output_tokens for call in mock_client.post.call_args_list]
+        assert budgets == [1024, 1024]
+
     def test_responses_passed_via_metadata_not_input(self):
         """response_1 and response_2 are sent in metadata, not appended to input."""
         server, mock_client = self._make_server(use_principle=False)
