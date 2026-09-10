@@ -1,19 +1,27 @@
 codex_agent:
   responses_api_agents:
-    codex_agent:
+    harness_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
         name: ???
       concurrency: 32
-      model: null  # null -> the Codex CLI's own default model; set explicitly for direct endpoints
-      openai_api_key: ${openai_api_key}
-      openai_base_url: null  # null -> https://api.openai.com/v1 (must include /v1; Codex appends /responses)
-      sandbox_mode: danger-full-access  # read-only | workspace-write | danger-full-access
-      timeout: 600
-      system_prompt: null  # inserted as a developer message via `developer_instructions`
-      reasoning_effort: null  # passed as `model_reasoning_effort` (e.g. low, medium, high)
-      codex_version: 0.144.4  # required: npm version pinned on auto-install for reproducibility
-      cwd: null  # working root for `codex exec --cd`; null -> fresh temp dir per request
-      stream_idle_timeout_ms: null  # provider stream idle budget; null -> timeout * 1000
-      extra_config: {}  # extra config.toml content deep-merged over the generated base config
+      agent: codex
+      agent_kwargs:
+        model:
+          model: null
+          api_key: ${openai_api_key}
+          base_url: null
+          settings:
+            reasoning_effort: null
+            stream_idle_timeout_ms: null
+        timeout_seconds: 600
+        settings:
+          sandbox_mode: danger-full-access
+          extra_config: {}
+      sandbox_provider:
+        local: {}
+      sandbox_image: ""
+      setup_commands:
+        - command -v codex || npm install -g '@openai/codex@0.144.4'
+      rollout_timeout: 600

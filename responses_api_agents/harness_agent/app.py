@@ -42,6 +42,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import SandboxSpec
 from nemo_gym.sandbox.providers.registry import create_provider
@@ -49,6 +50,7 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
 LOG = logging.getLogger(__name__)
+_INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 
 
 async def stage_and_run_eval(
@@ -83,9 +85,8 @@ class HarnessAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: Optional[ModelServerRef] = None
     concurrency: int = 64
-    harness_module: str
-    harness_class: str
-    harness_config: AgentHarnessConfig
+    agent: str
+    agent_kwargs: AgentHarnessConfig
 
     sandbox_provider: str | dict[str, Any]
     sandbox_image: str = "python:3.12-slim"
@@ -101,6 +102,13 @@ class HarnessAgentConfig(BaseResponsesAPIAgentConfig):
 
 class HarnessAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
+
+
+class HarnessAgentVerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(extra="allow")
+    turns_used: int = 0
+    finished_naturally: bool = False
+    ng_agent_observations: Optional[AgentObservationBundle] = None
 
 
 class HarnessAgent(SimpleResponsesAPIAgent):
@@ -152,8 +160,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
     def _sandbox_model_url(self, request: Request) -> str:
         """Model endpoint URL, host rewritten to an IP reachable from sandboxes, no /v1 suffix."""
         if self.config.model_server is None:
-            assert self.config.harness_config is not None
-            return (self.config.harness_config.model.base_url or "").removesuffix("/v1")
+            return (self.config.agent_kwargs.model.base_url or "").removesuffix("/v1")
         cfg = get_first_server_config_dict(self.server_client.global_config_dict, self.config.model_server.name)
         base = cfg.get("base_url") or self.server_client._build_server_base_url(cfg)
         if isinstance(base, (list, ListConfig)):
@@ -173,8 +180,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
     def _runner(self) -> tuple[str, dict, str]:
         script = (Path(__file__).parent / "agent_runner.py").read_text()
         runner_config = {
-            "harness_module": self.config.harness_module,
-            "harness_class": self.config.harness_class,
+            "agent": self.config.agent,
+            "model_ref": self.config.model_server.model_dump(mode="json") if self.config.model_server else None,
         }
         return script, runner_config, f"{self.config.sandbox_python} runner.py"
 
@@ -204,6 +211,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             await raise_for_status(agent_resp)
             cookies = agent_resp.cookies
             agent_resp_json = await get_response_json(agent_resp)
+            observations = agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None)
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -212,7 +220,22 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 cookies=cookies,
             )
             await raise_for_status(verify_resp)
-            return BaseVerifyResponse.model_validate(await get_response_json(verify_resp))
+            result = await get_response_json(verify_resp)
+            gym_response = NeMoGymResponse.model_validate(agent_resp_json)
+            turns = sum(
+                getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
+                for item in gym_response.output
+            )
+            last = gym_response.output[-1] if gym_response.output else None
+            return HarnessAgentVerifyResponse.model_validate(
+                result
+                | {
+                    "turns_used": turns,
+                    "finished_naturally": getattr(last, "type", None) == "message"
+                    and getattr(last, "role", None) == "assistant",
+                    "ng_agent_observations": observations,
+                }
+            )
 
     async def _grade_in_box(self, handle, grade_spec: dict) -> float:
         return await stage_and_run_eval(
@@ -303,15 +326,14 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         agent_body = body.model_copy(deep=True)
         if getattr(agent_body, "metadata", None):
             agent_body.metadata = {k: v for k, v in agent_body.metadata.items() if k != "sandbox_eval"}
-        assert self.config.harness_config is not None
-        harness_config = self.config.harness_config.model_dump(mode="json")
+        agent_kwargs = self.config.agent_kwargs.model_dump(mode="json")
         if meta.get("workdir"):
-            harness_config = harness_config | {"workspace": meta["workdir"]}
+            agent_kwargs = agent_kwargs | {"workspace": meta["workdir"]}
         model_url = self._sandbox_model_url(request)
         files = {
             "/work/model_url.txt": model_url,
             "/work/request.json": agent_body.model_dump_json(),
-            "/work/harness_config.json": json.dumps(harness_config),
+            "/work/agent_kwargs.json": json.dumps(agent_kwargs),
             "/work/runner_config.json": json.dumps(runner_config),
             "/work/runner.py": runner_script,
         }
@@ -330,9 +352,10 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                     f"runner failed ({r.return_code}): {(logs.stdout or logs.stderr or r.stderr or '')[-6000:]}"
                 )
 
-            resp = NeMoGymResponse.model_validate(
-                await self._download_json(handle, self._box_path(handle, "/work/response.json"))
-            )
+            response_json = await self._download_json(handle, self._box_path(handle, "/work/response.json"))
+            if not getattr(request, "path_params", {}).get("rollout_id"):
+                response_json.pop(_INTERNAL_OBSERVATIONS_KEY, None)
+            resp = NeMoGymResponse.model_validate(response_json)
 
             grade_raw = meta.get("sandbox_eval")
             grade_spec = json.loads(grade_raw) if isinstance(grade_raw, str) else grade_raw
