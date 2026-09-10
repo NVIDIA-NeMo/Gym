@@ -329,19 +329,22 @@ class TestServerUtils:
         head_server = HeadServer(config=BaseServerConfig(host="", port=0))
 
         with TestClient(head_server.setup_webserver()) as client:
-            response = client.get("/")
-            assert response.status_code == 200
-            assert response.json() == {"status": "ok"}
+            for path in ("/", "/livez"):
+                response = client.get(path)
+                assert response.status_code == 200
+                assert response.json() == {"status": "ok"}
 
-            response = client.get("/health")
-            assert response.status_code == 503
-            assert response.json() == {"status": "starting"}
+            for path in ("/health", "/healthz", "/readyz"):
+                response = client.get(path)
+                assert response.status_code == 503
+                assert response.json() == {"status": "starting"}
 
             head_server.mark_ready()
 
-            response = client.get("/health")
-            assert response.status_code == 200
-            assert response.json() == {"status": "ok"}
+            for path in ("/health", "/healthz", "/readyz"):
+                response = client.get(path)
+                assert response.status_code == 200
+                assert response.json() == {"status": "ok"}
 
     async def test_HeadServer_global_config_dict_yaml(self, monkeypatch: MonkeyPatch) -> None:
         global_config_dict = DictConfig({"a": 2})
@@ -562,7 +565,7 @@ class TestServerUtils:
 
         TestSimpleServer.run_webserver()
 
-    def test_setup_liveness_exposes_root_and_health(self) -> None:
+    def test_setup_liveness_exposes_conventional_probe_surface(self) -> None:
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
@@ -570,7 +573,7 @@ class TestServerUtils:
         BaseServer.setup_liveness(MagicMock(), app)
 
         with TestClient(app) as client:
-            for path in ("/", "/health"):
+            for path in ("/", "/health", "/healthz", "/livez", "/readyz"):
                 response = client.get(path)
                 assert response.status_code == 200
                 assert response.json() == {"status": "ok"}

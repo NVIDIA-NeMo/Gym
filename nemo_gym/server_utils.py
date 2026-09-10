@@ -626,6 +626,9 @@ class BaseServer(BaseModel):
         return server_config
 
     def setup_liveness(self, app: FastAPI) -> None:
+        @app.get("/readyz", include_in_schema=False)
+        @app.get("/livez", include_in_schema=False)
+        @app.get("/healthz", include_in_schema=False)
         @app.get("/health", include_in_schema=False)
         @app.get("/", include_in_schema=False)
         async def _liveness():
@@ -1113,10 +1116,13 @@ class HeadServer(BaseServer):
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
+        @app.get("/livez", include_in_schema=False)
         @app.get("/", include_in_schema=False)
         async def _liveness():
             return {"status": "ok"}
 
+        @app.get("/readyz", include_in_schema=False)
+        @app.get("/healthz", include_in_schema=False)
         @app.get("/health", include_in_schema=False)
         async def _readiness(response: Response):
             if not self._ready:
