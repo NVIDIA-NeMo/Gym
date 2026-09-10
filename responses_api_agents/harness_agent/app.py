@@ -98,6 +98,7 @@ class HarnessAgentConfig(BaseResponsesAPIAgentConfig):
     eval_timeout: int = 1800
     rollout_timeout: int = 2400
 
+
 class HarnessAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
