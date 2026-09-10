@@ -175,6 +175,14 @@ class OverRefusalDetectionResourcesServer(SimpleResourcesServer):
     async def _request_judge(
         self, responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     ) -> tuple[Optional[NeMoGymResponse], Optional[str]]:
+        """Call the judge while preserving this verifier's legacy failure contract.
+
+        Transport, HTTP, JSON, and schema failures return ``(None, error)`` so
+        ``verify()`` applies ``reward_if_unclear``. Using ``call_judge()`` here would
+        instead expose a reward-zero failure marker that direct ``run_examples()``
+        callers do not yet handle. Gym #2135/#3180 and NeMo-RL #4061 track replacing
+        this compatibility path with typed and masked outcomes.
+        """
         cfg = self.config
         try:
             response = await self.server_client.post(
