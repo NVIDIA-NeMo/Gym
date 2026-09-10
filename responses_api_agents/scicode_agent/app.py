@@ -147,7 +147,8 @@ def _token_metrics(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
     steps = [step for r in rows for step in r["step_usage"] if step["status"] != "prefilled"]
     generated = [step for step in steps if step["status"] == "generated"]
     metrics = {
-        "token_usage_version": TOKEN_USAGE_VERSION,
+        # Aggregate values are exported as numeric scores by NeMo Evaluator.
+        "token_usage_version": 1,
         "num_subproblems": len(steps),
         "num_generated_steps": len(generated),
         "num_steps_with_usage": sum(step["usage"] is not None for step in generated),
@@ -304,7 +305,12 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
                     ]
                 }
             )
-        return await super().aggregate_metrics(body)
+        metrics = await super().aggregate_metrics(body)
+        # NeMo Evaluator requires numeric scores. Omit unavailable values rather
+        # than exporting nulls or inventing zero consumption.
+        metrics.agent_metrics = {k: v for k, v in metrics.agent_metrics.items() if v is not None}
+        metrics.key_metrics = {k: v for k, v in metrics.key_metrics.items() if v is not None}
+        return metrics
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """Headline SciCode metric: sub-step-weighted accuracy = total passed / total over all rollouts."""

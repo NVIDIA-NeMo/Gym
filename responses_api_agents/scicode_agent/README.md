@@ -24,7 +24,7 @@ For each of `input`, `output`, and `total`, `key_metrics` exposes:
 
 Repeats count separately. The subproblem denominator includes final, rejected, and
 skipped steps; only prefilled steps are excluded. `generation_coverage` is generated
-steps / non-prefilled steps. With no eligible sub-steps, the subproblem mean is null.
+steps / non-prefilled steps. With no eligible sub-steps, the subproblem mean is omitted.
 
 - Count all reported usage, including incorrect or invalid code and generations
   that hit a token limit. Incorrect or invalid code does not stop later steps.
@@ -32,15 +32,15 @@ steps / non-prefilled steps. With no eligible sub-steps, the subproblem mean is 
   tokens. Earlier generations still count. Aborted rollouts are excluded from
   completed-rollout metrics.
 - If any generated response lacks usage, suppress all aggregate token statistics,
-  set the named token means to null, and report `token_usage_complete: false`.
+  omit the token means, and report `token_usage_complete: false`.
   Accuracy, coverage, and raw rollout records remain available. Missing optional
   reasoning/cache breakdowns do not invalidate known input/output/total usage.
 
 `step_usage` records each step's number, status, and usage. Coverage counts are
 `num_subproblems`, `num_generated_steps`, and `num_steps_with_usage`.
 
-New records carry `token_usage_version: scicode-v1`. Legacy records contain only
-final-step usage and retain their old metrics. Mixing accounting versions is rejected.
+Rollouts carry `token_usage_version: scicode-v1`; aggregates use numeric version `1`
+for evaluator export. Legacy records retain final-step metrics. Mixing versions is rejected.
 
 ## Configuration
 

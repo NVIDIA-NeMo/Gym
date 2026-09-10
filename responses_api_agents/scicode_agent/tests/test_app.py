@@ -432,7 +432,8 @@ class TestTokenAccounting:
         assert result.agent_metrics["num_steps_with_usage"] == 8
         assert result.key_metrics["generation_coverage"] == 1.0
         assert result.key_metrics["token_usage_complete"] is True
-        assert result.agent_metrics["token_usage_version"] == TOKEN_USAGE_VERSION
+        assert result.agent_metrics["token_usage_version"] == 1
+        assert all(isinstance(value, (int, float)) for value in result.agent_metrics.values())
         assert [g["mean/output_tokens"] for g in result.group_level_metrics] == [150, 1650]
 
     @pytest.mark.asyncio
@@ -489,8 +490,10 @@ class TestTokenAccounting:
         assert body.model_dump() == original
         assert result.key_metrics["token_usage_complete"] is not missing_usage
         assert result.key_metrics["generation_coverage"] == 1.0
+        for section in (result.agent_metrics, result.key_metrics):
+            assert all(value is not None and not isinstance(value, str) for value in section.values())
         if missing_usage:
-            assert result.key_metrics["mean/output_tokens_per_problem"] is None
+            assert "mean/output_tokens_per_problem" not in result.key_metrics
 
             def check_no_numeric_tokens(value):
                 if isinstance(value, dict):
