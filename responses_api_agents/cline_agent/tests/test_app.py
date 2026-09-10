@@ -600,15 +600,14 @@ class TestConfigYaml:
         cfg_path = Path(__file__).resolve().parent.parent / "configs" / "cline_agent.yaml"
         data = yaml.safe_load(cfg_path.read_text())
         assert "cline_agent" in data
-        inner = data["cline_agent"]["responses_api_agents"]["cline_agent"]
+        inner = data["cline_agent"]["responses_api_agents"]["harness_agent"]
         assert inner["entrypoint"] == "app.py"
-        assert inner["command"] == "cline"
+        assert inner["harness_config"]["settings"]["command"] == "cline"
         assert inner["concurrency"] == 8
         # The shipped config routes model calls through a Gym model server, so `model` is the bare
         # name the server serves and the agent supplies the provider and base URL.
         assert inner["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
-        # The version is pinned: the event parser was validated against it.
-        assert inner["cline_version"]
+        assert "cline@3.0.55" in inner["setup_commands"][0]
 
     def test_anyswe_config_parses(self) -> None:
         # The SWE-bench path: anyswe runs this agent inside the task image and grades the patch.
