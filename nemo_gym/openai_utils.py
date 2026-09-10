@@ -87,6 +87,7 @@ from nemo_gym.server_utils import (
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG,
     MAX_NUM_TRIES,
     ClientResponse,
+    ClientResponseError,
     get_response_json,
     raise_for_status,
     request,
@@ -470,6 +471,14 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 RATE_LIMIT_ERROR_CODES = [429, 502, 503, 504, 520]
 RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [500]
 
+# Deterministic request errors that vLLM raises past its pre-checks, so they
+# surface as 500s instead of 400s (e.g. the async engine's own input-length
+# check: "Input length (N) exceeds model's maximum context length (M)").
+# Retrying cannot succeed — the same request produces the same error — so
+# these are surfaced to the caller immediately, where the vllm_model server's
+# out-of-context handler converts them into a graceful finish_reason="length".
+NON_RETRYABLE_500_SUBSTRINGS = ("maximum context length",)
+
 
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     """This is just a stub class that wraps around aiohttp"""
@@ -510,6 +519,19 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                     max_num_tries += 1
 
                 content = (await response.content.read()).decode()
+
+                # Deterministic client errors masquerading as 500s: retrying
+                # burns tries on a guaranteed-identical failure. Raise now with
+                # the body attached (the stream is consumed, so raise_for_status
+                # later would surface an empty response_content and downstream
+                # handlers could no longer recognize the error).
+                if response.status == 500 and any(s in content for s in NON_RETRYABLE_500_SUBSTRINGS):
+                    try:
+                        response.raise_for_status()
+                    except ClientResponseError as e:
+                        e.response_content = content.encode()
+                        raise e
+
                 kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "server_error"
                 print(
                     f"[model_retry url={request_kwargs.get('url')} status={response.status} kind={kind} try={tries} max_tries={max_num_tries} error_msg={content[:200]}]",
