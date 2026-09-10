@@ -151,7 +151,8 @@ class LeanCatResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class LeanCatRunRequest(BaseRunRequest):
-    # Fields arrive from each row's `verifier_metadata` (see prepare_leancat.py).
+    # Fields arrive as flat row columns (see prepare.py); the validator below also
+    # accepts them nested under `verifier_metadata` for hand-written rows.
     verifier_metadata: Optional[Dict[str, Any]] = None
 
     formal_statement: str

@@ -28,6 +28,11 @@ leancat_leancat_simple_agent:
         jsonl_fpath: benchmarks/leancat/data/leancat_benchmark.jsonl
         prepare_script: benchmarks/leancat/prepare.py
         license: CC-BY-4.0
+        # The paper's Appendix D.1 prompt. `{formal_statement}` is filled from the row's
+        # top-level field, which carries the pinned CAT_statement/*.lean bytes verbatim
+        # (trailing newline included) -- that is what keeps the rendered prompt byte-identical
+        # to the reference harness's.
+        prompt_config: benchmarks/prompts/eval/leancat/paper.yaml
         # Paper v2: k=4 for generalist models, k=32 for the specialized provers of Table 3.
         # Goedel-Prover-V2-32B is in Table 3, so 32 is the comparable budget.
         # NOTE: this is applied at preprocessing. Passing --num-repeats as well multiplies

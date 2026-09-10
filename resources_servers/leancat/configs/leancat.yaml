@@ -26,11 +26,8 @@ leancat_simple_agent:
         type: responses_api_models
         name: policy_model
       datasets:
-      - name: train
-        type: train
-        jsonl_fpath: resources_servers/leancat/data/train.jsonl
-        license: CC-BY-4.0
       - name: example
         type: example
         jsonl_fpath: resources_servers/leancat/data/example.jsonl
+        prompt_config: benchmarks/prompts/eval/leancat/paper.yaml
         license: CC-BY-4.0
