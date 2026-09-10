@@ -73,7 +73,9 @@ IPython session restarted by an execution timeout stays on the same sandbox.
 Size the pod for ONE Python session: limits `NS_SANDBOX_SESSION_CPU_LIMIT` /
 `NS_SANDBOX_SESSION_MEM_LIMIT_MIB` / `NS_SANDBOX_SESSION_DISK_LIMIT_GIB` (4 / 8192 /
 10) and requests `NS_SANDBOX_SESSION_CPU_REQUEST` / `..._MEM_REQUEST_MIB` /
-`..._DISK_REQUEST_GIB` (2 / 4096 / 5). Every sandbox carries the pod labels
+`..._DISK_REQUEST_GIB` (1 / 2048 / 5; one IPython session is one Python process). The
+pod runs a single HTTP worker (`NUM_WORKERS=1`) with OMP/BLAS thread caps derived from
+the cpu limit. Every sandbox carries the pod labels
 `nemo.nvidia.com/resources: custom` and `nemo-gym.nvidia.com/purpose:
 ns-tools-per-session` (`metadata`, extendable in the yaml); the first one exempts the
 pod from the request-clamping admission policy on the NeMo cells so the requests

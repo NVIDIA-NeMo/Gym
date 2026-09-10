@@ -36,9 +36,10 @@ ns_tools:
           cpu: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_CPU_LIMIT,4}}
           memory_mib: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_MEM_LIMIT_MIB,8192}}
           disk_gib: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_DISK_LIMIT_GIB,10}}
+        # One IPython session = one Python process: request 1 cpu, keep the limit for bursts.
         resource_requests:
-          cpu: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_CPU_REQUEST,2}}
-          memory_mib: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_MEM_REQUEST_MIB,4096}}
+          cpu: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_CPU_REQUEST,1}}
+          memory_mib: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_MEM_REQUEST_MIB,2048}}
           disk_gib: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_DISK_REQUEST_GIB,5}}
         # Pod labels (OpenSandbox propagates metadata as labels), merged over the backend's
         # defaults (purpose=ns-tools-per-session). nemo.nvidia.com/resources=custom exempts the
