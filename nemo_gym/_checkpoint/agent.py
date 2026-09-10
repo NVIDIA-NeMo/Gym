@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, Header, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym._checkpoint.control import CheckpointControlRequest, CheckpointPhase, ControlError, ControlFence
 from nemo_gym.rollout_correlation import ROLLOUT_ID_PATTERN
@@ -36,7 +36,7 @@ from nemo_gym.token_id_capture.control_routes import require_control_auth
 AGENT_CHECKPOINT_URL_PREFIX = "/ng-control/v1/agent-checkpoint"
 AGENT_STATE_SUBDIR = "agent"
 AGENT_MANIFEST_NAME = "manifest.json"
-AGENT_CHECKPOINT_SCHEMA_VERSION = 1
+AGENT_CHECKPOINT_SCHEMA_VERSION = 2
 AGENT_EXECUTION_GENERATION_HEADER = "x-nemo-gym-agent-execution-generation"
 
 _CURRENT_AGENT_EXECUTION: ContextVar[Optional["AgentExecution"]] = ContextVar(
@@ -73,21 +73,61 @@ class AgentPrepareIncompleteError(ControlError):
     code = "agent_prepare_incomplete"
 
 
-class AgentBoundaryRecord(BaseModel):
-    """Continuation state after one complete whitebox agent turn."""
+class AgentCompletionAcknowledgmentError(ControlError):
+    code = "agent_completion_acknowledgment_error"
+
+
+class AgentBoundaryKind(str, Enum):
+    """The durable phase represented by an agent boundary."""
+
+    PENDING_MODEL = "pending_model"
+    TURN_COMPLETE = "turn_complete"
+
+
+class PendingModelPayload(BaseModel):
+    """A completed model generation whose actions may still be pending."""
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[AGENT_CHECKPOINT_SCHEMA_VERSION] = AGENT_CHECKPOINT_SCHEMA_VERSION
+    model_call_id: str = Field(min_length=1)
+    response: dict[str, Any]
+    model_server_cookies: dict[str, str] = Field(default_factory=dict)
+    usage: Optional[dict[str, Any]] = None
+    pending_action_cursor: int = Field(ge=0)
+    resource_request_id: str = Field(min_length=1)
+
+
+class AgentBoundaryRecord(BaseModel):
+    """Continuation state at a generation-safe whitebox agent boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1, AGENT_CHECKPOINT_SCHEMA_VERSION] = AGENT_CHECKPOINT_SCHEMA_VERSION
     rollout_id: str = Field(pattern=ROLLOUT_ID_PATTERN.pattern)
     attempt_index: int = Field(ge=0)
     boundary_index: int = Field(ge=0)
+    turn_index: int = Field(default=0, ge=0)
+    boundary_kind: AgentBoundaryKind = AgentBoundaryKind.TURN_COMPLETE
+    pending_model: Optional[PendingModelPayload] = None
     output_items: list[dict[str, Any]]
     usage: Optional[dict[str, Any]] = None
     last_committed_model_call_id: Optional[str] = None
     resource_state_revisions: dict[str, int] = Field(default_factory=dict)
     agent_state: dict[str, Any] = Field(default_factory=dict)
     created_at: float = Field(default_factory=time.time)
+
+    @model_validator(mode="after")
+    def validate_boundary_phase(self) -> "AgentBoundaryRecord":
+        # Schema-v1 callers used boundary_index as the turn index. Preserve
+        # that source compatibility while every newly written record carries
+        # both stable indices explicitly.
+        if "turn_index" not in self.model_fields_set:
+            self.turn_index = self.boundary_index
+        if self.boundary_kind == AgentBoundaryKind.PENDING_MODEL and self.pending_model is None:
+            raise ValueError("pending_model boundaries require a pending_model payload")
+        if self.boundary_kind == AgentBoundaryKind.TURN_COMPLETE and self.pending_model is not None:
+            raise ValueError("turn_complete boundaries cannot carry a pending_model payload")
+        return self
 
 
 class AgentExecution:
@@ -110,6 +150,8 @@ class AgentExecution:
         self.boundary: Optional[AgentBoundaryRecord] = None
         self.continuation = continuation
         self.terminal_result: Any = None
+        self.result_identity: Optional[str] = None
+        self.result_digest: Optional[str] = None
         self.started_at = time.time()
         self.resume_event = asyncio.Event()
         self.resume_event.set()
@@ -131,6 +173,14 @@ class AgentResumeRequest(CheckpointControlRequest):
     pass
 
 
+class AgentAcknowledgeRequest(BaseModel):
+    rollout_id: str = Field(pattern=ROLLOUT_ID_PATTERN.pattern)
+    attempt_index: int = Field(ge=0)
+    execution_generation: int = Field(ge=1)
+    result_identity: str = Field(min_length=1, max_length=512)
+    result_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class AgentRetireRequest(CheckpointControlRequest):
     rollout_id: str = Field(pattern=ROLLOUT_ID_PATTERN.pattern)
     attempt_index: int = Field(ge=0)
@@ -139,10 +189,9 @@ class AgentRetireRequest(CheckpointControlRequest):
 class AgentCheckpointParticipant:
     """Own active whitebox executions and park them at committed boundaries.
 
-    Successful terminal results remain replayable until a shared durable
-    acknowledgement layer releases them. Prepare reports those results as
-    ``completed_unacknowledged`` and must not be treated as publishable while
-    that count is nonzero.
+    Successful terminal results remain replayable until their receipt is
+    acknowledged. Prepare reports those results as ``completed_unacknowledged``
+    and must not publish while that count is nonzero.
     """
 
     def __init__(self, instance_name: Optional[str] = None) -> None:
@@ -151,6 +200,7 @@ class AgentCheckpointParticipant:
         self._generations: dict[tuple[str, int], int] = {}
         self._restored: dict[tuple[str, int], AgentBoundaryRecord] = {}
         self._tombstones: set[tuple[str, int]] = set()
+        self._acknowledged: dict[tuple[str, int], tuple[int, str, str]] = {}
         self._accepting = True
         self._changed = asyncio.Condition()
 
@@ -223,6 +273,7 @@ class AgentCheckpointParticipant:
             if outcome == "completed":
                 execution.state = AgentExecutionState.COMPLETED
                 execution.terminal_result = result
+                execution.result_identity, execution.result_digest = _result_receipt(result)
                 execution.continuation = None
                 execution.outer_task = None
             else:
@@ -238,6 +289,46 @@ class AgentCheckpointParticipant:
                 execution.parked_task = None
                 self._executions.pop(key, None)
         await self._notify()
+
+    async def acknowledge(self, receipt: AgentAcknowledgeRequest) -> dict[str, Any]:
+        """Release one retained result only when its complete receipt matches."""
+        key = (receipt.rollout_id, receipt.attempt_index)
+        expected = (
+            receipt.execution_generation,
+            receipt.result_identity,
+            receipt.result_digest,
+        )
+        acknowledged = self._acknowledged.get(key)
+        if acknowledged is not None:
+            if acknowledged != expected:
+                raise AgentCompletionAcknowledgmentError(
+                    f"acknowledgment does not match rollout {receipt.rollout_id!r} "
+                    f"attempt {receipt.attempt_index}'s completed receipt"
+                )
+            return {"acknowledged": False, "idempotent": True}
+
+        execution = self._executions.get(key)
+        if execution is None or execution.state != AgentExecutionState.COMPLETED:
+            raise AgentCompletionAcknowledgmentError(
+                f"rollout {receipt.rollout_id!r} attempt {receipt.attempt_index} has no retained completed result"
+            )
+        actual = (
+            execution.generation,
+            execution.result_identity,
+            execution.result_digest,
+        )
+        if actual != expected:
+            raise AgentCompletionAcknowledgmentError(
+                f"acknowledgment receipt mismatch for rollout {receipt.rollout_id!r} attempt {receipt.attempt_index}"
+            )
+
+        self._executions.pop(key)
+        execution.state = AgentExecutionState.RETIRED
+        execution.terminal_result = None
+        self._acknowledged[key] = expected
+        self._tombstones.add(key)
+        await self._notify()
+        return {"acknowledged": True, "idempotent": False}
 
     def continuation(self, execution: AgentExecution) -> Optional[AgentBoundaryRecord]:
         if not self._owns(execution):
@@ -391,10 +482,22 @@ class AgentCheckpointParticipant:
             "parked_with_boundary": len(parked_with_boundary),
             "parked_without_boundary": len(parked_without_boundary),
             "completed_unacknowledged": len(completed_unacknowledged),
+            "acknowledged_completed": len(self._acknowledged),
             "active": len(active),
             "blocking_attempts": [self._execution_status(execution) for execution in blocking_attempts],
             "completed_unacknowledged_attempts": [
                 self._execution_status(execution) for execution in completed_unacknowledged
+            ],
+            "selected_boundaries": [
+                {
+                    "rollout_id": execution.rollout_id,
+                    "attempt_index": execution.attempt_index,
+                    "boundary_index": execution.boundary.boundary_index,
+                    "turn_index": execution.boundary.turn_index,
+                    "boundary_kind": execution.boundary.boundary_kind.value,
+                    "resource_state_revisions": execution.boundary.resource_state_revisions,
+                }
+                for execution in parked_with_boundary
             ],
             "executions": [self._execution_status(execution) for execution in all_executions],
         }
@@ -439,12 +542,47 @@ class AgentCheckpointParticipant:
             "state": execution.state.value,
             "parked_boundary_state": parked_boundary_state,
             "boundary_index": execution.boundary.boundary_index if execution.boundary is not None else None,
+            "turn_index": execution.boundary.turn_index if execution.boundary is not None else None,
+            "boundary_kind": execution.boundary.boundary_kind.value if execution.boundary is not None else None,
+            "resource_state_revisions": (
+                execution.boundary.resource_state_revisions if execution.boundary is not None else {}
+            ),
+            **(
+                {
+                    "completion_receipt": {
+                        "rollout_id": execution.rollout_id,
+                        "attempt_index": execution.attempt_index,
+                        "execution_generation": execution.generation,
+                        "result_identity": execution.result_identity,
+                        "result_digest": execution.result_digest,
+                    }
+                }
+                if execution.state == AgentExecutionState.COMPLETED
+                else {}
+            ),
             "age_seconds": round(time.time() - execution.started_at, 3),
         }
 
     async def _notify(self) -> None:
         async with self._changed:
             self._changed.notify_all()
+
+
+def _result_receipt(result: Any) -> tuple[str, str]:
+    if isinstance(result, BaseModel):
+        value = result.model_dump(mode="json")
+    else:
+        value = result
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    digest = hashlib.sha256(payload).hexdigest()
+    result_identity = None
+    if isinstance(value, dict):
+        candidate = value.get("id")
+        if candidate is None and isinstance(value.get("response"), dict):
+            candidate = value["response"].get("id")
+        if candidate is not None:
+            result_identity = str(candidate)
+    return result_identity or digest, digest
 
 
 def _digest(path: Path) -> str:
@@ -624,6 +762,14 @@ def install_agent_checkpoint(
             frozenset(CheckpointPhase),
         )
         return {"checkpoint_id": checkpoint_id, **participant.status()}
+
+    @app.post(f"{AGENT_CHECKPOINT_URL_PREFIX}/acknowledge")
+    async def acknowledge(
+        body: AgentAcknowledgeRequest,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        require_control_auth(authorization, auth_token)
+        return await participant.acknowledge(body)
 
     @app.post(f"{AGENT_CHECKPOINT_URL_PREFIX}/commit")
     async def commit(
