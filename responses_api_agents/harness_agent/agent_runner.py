@@ -38,6 +38,7 @@ def main() -> None:
     body = json.loads((WORK_DIR / "request.json").read_text())
     model_url = (WORK_DIR / "model_url.txt").read_text().strip()
     cfg_raw = (WORK_DIR / "agent_kwargs.json").read_text().replace("__SANDBOX_MODEL_URL__", model_url)
+    runtime = json.loads((WORK_DIR / "runtime.json").read_text())
 
     module_name, class_name, _, _ = resolve_agent(rc["agent"])
     module = importlib.import_module(module_name)
@@ -46,15 +47,30 @@ def main() -> None:
 
     params = NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
     model_ref = ModelServerRef.model_validate(rc["model_ref"]) if rc.get("model_ref") else None
-    if hasattr(harness, "run_episode"):
-        episode = asyncio.run(
-            harness.run_episode(params, model_base_url=harness.config.model.base_url, model_ref=model_ref)
+    run_kwargs = {"model_base_url": harness.config.model.base_url}
+    if runtime.get("skills_path"):
+        run_kwargs["skills_path"] = str(WORK_DIR / "skills")
+    mcp = runtime.get("mcp")
+    if mcp and rc["agent"] == "claude_code":
+        run_kwargs["mcp_config"] = harness.write_mcp_config(
+            server_name=mcp["server_name"],
+            url=mcp["url"],
+            output_dir=WORK_DIR,
+            transport=mcp["transport"],
+            headers=mcp.get("headers"),
         )
+    elif mcp and rc["agent"] == "codex":
+        entry = {"url": mcp["url"]}
+        if mcp.get("headers"):
+            entry["http_headers"] = mcp["headers"]
+        run_kwargs["mcp_servers"] = {mcp["server_name"]: entry}
+    if hasattr(harness, "run_episode"):
+        episode = asyncio.run(harness.run_episode(params, model_ref=model_ref, **run_kwargs))
         resp = episode.response.model_copy(
             update={"_ng_agent_observations": episode.observations.model_dump(mode="json")}
         )
     else:
-        resp = asyncio.run(harness.run(params, model_base_url=harness.config.model.base_url))
+        resp = asyncio.run(harness.run(params, **run_kwargs))
     (WORK_DIR / "response.json").write_text(resp.model_dump_json())
     print("RUNNER_DONE")
 

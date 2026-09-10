@@ -20,6 +20,7 @@ import socket
 import subprocess
 import tempfile
 from asyncio import Semaphore
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Mapping, Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -30,14 +31,14 @@ from omegaconf import ListConfig
 from pydantic import ConfigDict, Field
 
 from nemo_gym.agents.config import AgentHarnessConfig
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict, get_global_config_dict
+from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict, get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -51,6 +52,7 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 
 LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
+_RUN_CONTEXT: ContextVar[dict[str, Any]] = ContextVar("harness_agent_run_context", default={})
 
 
 async def stage_and_run_eval(
@@ -62,6 +64,12 @@ async def stage_and_run_eval(
     timeout_s: int,
 ) -> float:
     """Stage eval files into the sandbox, run them and get the reward."""
+    if handle.provider_name == "local":
+        paths = {str(parent) for path in [*eval_files, reward_file] for parent in [Path(path), *Path(path).parents]}
+        for path in sorted(paths - {"/", "."}, key=len, reverse=True):
+            eval_command = eval_command.replace(path, path.lstrip("/"))
+        eval_files = {path.lstrip("/"): content for path, content in eval_files.items()}
+        reward_file = reward_file.lstrip("/")
     with tempfile.TemporaryDirectory() as td:
         for target, content in eval_files.items():
             local = Path(td) / uuid4().hex
@@ -175,7 +183,9 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             except OSError:
                 pass
         netloc = f"{host}:{parsed.port}" if parsed.port else host
-        return urlunsplit((parsed.scheme or "http", netloc, parsed.path, parsed.query, parsed.fragment))
+        base_url = urlunsplit((parsed.scheme or "http", netloc, parsed.path, parsed.query, parsed.fragment))
+        prefix = _RUN_CONTEXT.get().get("url_prefix") or self.url_path_for_request("", request)
+        return f"{base_url.rstrip('/')}{prefix}"
 
     def _runner(self) -> tuple[str, dict, str]:
         script = (Path(__file__).parent / "agent_runner.py").read_text()
@@ -201,16 +211,31 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             )
             await raise_for_status(seed_resp)
             cookies = seed_resp.cookies
+            seed_json = await get_response_json(seed_resp)
 
-            agent_resp = await self.server_client.post(
-                server_name=self.config.name,
-                url_path="/v1/responses",
-                json=body.responses_create_params,
-                cookies=cookies,
-            )
-            await raise_for_status(agent_resp)
-            cookies = agent_resp.cookies
-            agent_resp_json = await get_response_json(agent_resp)
+            runtime: dict[str, Any] = {}
+            mcp = seed_json.get(NEMO_GYM_MCP_METADATA_KEY)
+            if isinstance(mcp, dict):
+                resources_cfg = get_first_server_config_dict(
+                    self.server_client.global_config_dict, self.config.resources_server.name
+                )
+                resources_url = self.server_client._build_server_base_url(resources_cfg).rstrip("/")
+                runtime["mcp"] = {
+                    "server_name": str(mcp.get("server_name") or self.config.resources_server.name),
+                    "url": f"{resources_url}/{str(mcp.get('url_path') or '/mcp').lstrip('/')}",
+                    "transport": str(mcp.get("transport") or "http"),
+                    "headers": mcp.get("headers") if isinstance(mcp.get("headers"), dict) else None,
+                }
+            skills_path = ((body.model_extra or {}).get(SKILLS_REF_KEY_NAME) or {}).get("path")
+            if skills_path:
+                runtime["skills_path"] = str(skills_path)
+            runtime["url_prefix"] = self.url_path_for_run("", body)
+            token = _RUN_CONTEXT.set(runtime)
+            try:
+                agent_resp = await self.responses(request, body.responses_create_params)
+            finally:
+                _RUN_CONTEXT.reset(token)
+            agent_resp_json = agent_resp.model_dump(mode="json")
             observations = agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None)
 
             verify_resp = await self.server_client.post(
@@ -247,7 +272,9 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             timeout_s=self.config.eval_timeout,
         )
 
-    async def _provision_box(self, image: str, files: dict[str, str], model_url: str):
+    async def _provision_box(
+        self, image: str, files: dict[str, str], model_url: str, skills_path: Optional[str] = None
+    ):
         sandbox_spec = dict(self.config.sandbox_spec)
         sandbox_spec["metadata"] = self._sandbox_default_metadata | dict(sandbox_spec.get("metadata", {}))
         spec = SandboxSpec(image=image, **sandbox_spec)
@@ -280,6 +307,23 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 )
                 if r.return_code != 0:
                     raise RuntimeError(f"gym source extraction failed: {(r.stderr or '')[:300]}")
+            if skills_path:
+                source = Path(skills_path)
+                if not source.is_dir():
+                    raise ValueError(f"skills path is not a directory: {source}")
+                with tempfile.TemporaryDirectory() as td:
+                    archive = Path(td) / "skills.tar.gz"
+                    subprocess.run(["tar", "czf", str(archive), "-C", str(source), "."], check=True)
+                    target = self._box_path(handle, "/work/skills.tar.gz")
+                    await self._provider.upload_file(handle, archive, target)
+                skills_dir = self._box_path(handle, "/work/skills")
+                r = await self._provider.exec(
+                    handle,
+                    f"mkdir -p {shlex.quote(skills_dir)} && tar xzf {shlex.quote(target)} -C {shlex.quote(skills_dir)}",
+                    timeout_s=300,
+                )
+                if r.return_code != 0:
+                    raise RuntimeError(f"skills extraction failed: {(r.stderr or '')[:300]}")
             for cmd in self.config.setup_commands:
                 r = await self._provider.exec(handle, cmd, timeout_s=900)
                 if r.return_code != 0:
@@ -324,6 +368,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
 
         runner_script, runner_config, runner_cmd = self._runner()
         agent_body = body.model_copy(deep=True)
+        runtime = _RUN_CONTEXT.get()
         if getattr(agent_body, "metadata", None):
             agent_body.metadata = {k: v for k, v in agent_body.metadata.items() if k != "sandbox_eval"}
         agent_kwargs = self.config.agent_kwargs.model_dump(mode="json")
@@ -334,10 +379,11 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             "/work/model_url.txt": model_url,
             "/work/request.json": agent_body.model_dump_json(),
             "/work/agent_kwargs.json": json.dumps(agent_kwargs),
+            "/work/runtime.json": json.dumps(runtime | {"skills_path": bool(runtime.get("skills_path"))}),
             "/work/runner_config.json": json.dumps(runner_config),
             "/work/runner.py": runner_script,
         }
-        handle = await self._provision_box(image, files, model_url)
+        handle = await self._provision_box(image, files, model_url, runtime.get("skills_path"))
         try:
             work_dir = self._box_path(handle, "/work")
             r = await self._provider.exec(
@@ -353,7 +399,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 )
 
             response_json = await self._download_json(handle, self._box_path(handle, "/work/response.json"))
-            if not getattr(request, "path_params", {}).get("rollout_id"):
+            if not runtime.get("url_prefix") and not getattr(request, "path_params", {}).get("rollout_id"):
                 response_json.pop(_INTERNAL_OBSERVATIONS_KEY, None)
             resp = NeMoGymResponse.model_validate(response_json)
 

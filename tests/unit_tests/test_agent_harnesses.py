@@ -48,7 +48,8 @@ def test_optional_harness_is_not_imported_by_star() -> None:
 
 
 def test_terminus_extra_pins_harbor() -> None:
-    project = tomllib.loads((Path(__file__).parents[2] / "pyproject.toml").read_text())
+    root = Path(__file__).parents[2]
+    project = tomllib.loads((root / "pyproject.toml").read_text())
     dependencies = project["project"]["optional-dependencies"]["terminus-2"]
     assert "harbor==0.1.42" in dependencies
     assert all(" @ " not in dependency for dependency in dependencies)
@@ -56,6 +57,14 @@ def test_terminus_extra_pins_harbor() -> None:
         "git": "https://github.com/laude-institute/harbor.git",
         "rev": "9dddd797b57ab8a0f9d6352a20fce73abbb29573",  # pragma: allowlist secret
     }
+    script = (root / "responses_api_agents/terminus_2_agent/scripts/terminus_2_agent_deps.sh").read_text()
+    assert 'install_python_packages "$NEMO_GYM_ROOT[terminus-2]"' in script
+
+
+def test_kilo_qualifies_model_for_gym_endpoint() -> None:
+    harness = KiloCodeHarness(AgentHarnessConfig(model=AgentModelConfig(model="test-model")))
+
+    assert harness._effective_model("http://model/v1") == "nemo/test-model"
 
 
 @pytest.mark.parametrize(
