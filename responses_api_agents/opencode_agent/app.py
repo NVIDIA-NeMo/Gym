@@ -24,7 +24,7 @@ import sqlite3
 from asyncio import Semaphore
 from collections.abc import Mapping
 from pathlib import Path
-from time import time
+from time import monotonic, time
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -609,8 +609,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         *,
         rollout_id: Optional[str] = None,
         collect_observations: bool = True,
-    ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle]:
+    ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle, dict[str, Any]]:
         """Run one headless OpenCode session and read its persisted artifact."""
+        started_at = monotonic()
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
         work_dir = self._workspace_root()
         project_dir = self._repo_dir(work_dir)
@@ -673,7 +674,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     invocation.status = run_status
             if timed_out:
                 observations.gaps.append(ObservationGap(code="agent_run_timeout"))
-            return output_items, usage, self.config.model, observations
+            run_metadata = {
+                "duration_ms": (monotonic() - started_at) * 1000,
+                "is_error": run_status != "completed",
+                "returncode": proc.returncode,
+                "status": run_status,
+            }
+            if timed_out:
+                run_metadata["error_type"] = "timeout"
+            return output_items, usage, self.config.model, observations, run_metadata
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -693,7 +702,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         system_prompt = "\n\n".join(system_parts) if system_parts else None
         prompt = user_message if system_prompt is None else f"{system_prompt}\n\n{user_message}"
 
-        output_items, usage, model_name, observations = await self._run_opencode(
+        output_items, usage, model_name, observations, run_metadata = await self._run_opencode(
             user_message,
             system_prompt,
             rollout_id=rollout_id,
@@ -743,6 +752,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
+            metadata={"agent_run": json.dumps(run_metadata, sort_keys=True)},
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
