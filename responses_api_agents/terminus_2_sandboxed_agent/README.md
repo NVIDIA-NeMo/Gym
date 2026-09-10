@@ -10,14 +10,17 @@ gym env start \
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \
     --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
     --config responses_api_agents/terminus_2_sandboxed_agent/configs/terminus_2_sandboxed_agent.yaml \
-    --config resources_servers/swebench/configs/swebench.yaml
+    --config resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1.yaml \
+    ++terminus_2_sandboxed_agent.responses_api_agents.terminus_2_sandboxed_agent.resources_server.name=terminal_bench_2_1_resources_server
 ```
 
 To run one row from a benchmark JSONL after starting the servers:
 
 ```bash
+gym eval prepare --config benchmarks/terminal_bench_2_1/terminus_2.yaml
+
 python responses_api_agents/terminus_2_sandboxed_agent/client.py \
-    +benchmark_jsonl=benchmarks/swebench/data/swebench_verified_benchmark.jsonl
+    +benchmark_jsonl=benchmarks/terminal_bench_2_1/data/benchmark.jsonl
 ```
 
 The agent calls the configured model server exclusively through the Responses

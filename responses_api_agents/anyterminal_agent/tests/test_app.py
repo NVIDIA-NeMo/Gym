@@ -20,26 +20,35 @@ harness install) are bypassed by calling staticmethods/properties directly rathe
 constructing the agent.
 """
 
+import hashlib
 import json
+import os
+import shutil
+import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
 from nemo_gym.sandbox.providers.docker import DockerProvider
+from nemo_gym.server_utils import ServerClient
+from responses_api_agents.anyterminal_agent import app
 from responses_api_agents.anyterminal_agent.app import (
     _RUNNER_TEMPLATE,
     AnyTerminalAgent,
     AnyTerminalAgentConfig,
     AnyTerminalInstanceConfig,
+    AnyTerminalServerConfig,
     GymAgentHarnessProcessor,
     RunTerminalAgent,
     _build_provider,
+    _file_lock,
     _format_container,
     _instruction_from_input,
     _read_task_meta,
@@ -161,8 +170,10 @@ class TestExampleData:
 # ── helpers ───────────────────────────────────────────────────────────────────────
 
 
-def _make_body(content: str = "solve this") -> NeMoGymResponseCreateParamsNonStreaming:
-    return NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": content}], model="test-model")
+def _make_body(content: str = "solve this", **kwargs) -> NeMoGymResponseCreateParamsNonStreaming:
+    return NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"role": "user", "content": content}], model="test-model", **kwargs
+    )
 
 
 def _make_instance_config(tmp_path: Path, **overrides) -> AnyTerminalInstanceConfig:
@@ -228,6 +239,70 @@ class TestReadTaskMeta:
         result = _read_task_meta(tmp_path)
         assert result.get("agent_timeout_sec") is None
         assert result.get("verifier_timeout_sec") is None
+
+
+# ── AnyTerminalAgent._setup_params ──────────────────────────────────────────────────
+
+
+def _make_setup_agent(tmp_path: Path, **config_overrides) -> AnyTerminalAgent:
+    # model_post_init has heavy side effects (deps install, provider resolution) that
+    # _setup_params doesn't touch, so bypass it and set only what _setup_params reads.
+    with patch.object(AnyTerminalAgent, "model_post_init", lambda self, context: None):
+        agent = AnyTerminalAgent(config=_config(**config_overrides), server_client=MagicMock(spec=ServerClient))
+    agent._server = AnyTerminalServerConfig(
+        run_session_id="test_session",
+        base_results_dir=tmp_path / "results",
+        model_server_url="",
+        nemo_gym_root=PARENT_DIR,
+        agent_deps_dir=tmp_path,
+    )
+    return agent
+
+
+class TestSetupParams:
+    def test_uses_per_task_timeout_by_default(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path)
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path), "agent_timeout_sec": "900"})
+
+        params = agent._setup_params(body)
+
+        assert params.tb_agent_timeout == 900
+
+    def test_global_agent_timeout_overrides_per_task_timeout(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path, global_agent_timeout=7200)
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path), "agent_timeout_sec": "900"})
+
+        params = agent._setup_params(body)
+
+        assert params.tb_agent_timeout == 7200
+
+    def test_global_agent_timeout_applies_without_per_task_timeout(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path, global_agent_timeout=7200)
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
+
+        params = agent._setup_params(body)
+
+        assert params.tb_agent_timeout == 7200
+
+    def test_sandbox_ttl_is_derived_when_timeouts_would_outlive_it(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path, global_agent_timeout=12500)
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path), "verifier_timeout_sec": "900"})
+
+        params = agent._setup_params(body)
+
+        assert params.tb_sandbox_ttl == 12500 + 900 + 600
+
+    def test_sandbox_ttl_default_kept_when_already_sufficient(self, tmp_path: Path) -> None:
+        agent = _make_setup_agent(tmp_path)
+        body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path), "agent_timeout_sec": "900"})
+
+        params = agent._setup_params(body)
+
+        assert params.tb_sandbox_ttl == 7200
+
+    def test_global_agent_timeout_rejects_zero(self) -> None:
+        with pytest.raises(ValidationError, match="global_agent_timeout"):
+            _config(global_agent_timeout=0)
 
 
 # ── _instruction_from_input ───────────────────────────────────────────────────────
@@ -506,6 +581,78 @@ class TestHarnessProcessorSetup:
             proc.setup()
         assert "already at" in capsys.readouterr().out
 
+    def test_rechecks_sentinel_after_acquiring_lock(self, tmp_path: Path) -> None:
+        proc = self._proc_no_script()
+        deps_dir = tmp_path / "deps" / "anyterminal_no_such_agent_deps"
+        lock_path = deps_dir.parent / f".{deps_dir.name}.lockdir"
+        lock_path.mkdir(parents=True)
+
+        def finish_other_install(_seconds: float) -> None:
+            deps_dir.mkdir()
+            (deps_dir / ".installed").write_text(hashlib.sha256(b"no-script").hexdigest())
+            shutil.rmtree(lock_path)
+
+        with (
+            patch.object(type(proc), "_parent", new_callable=PropertyMock, return_value=tmp_path),
+            patch("responses_api_agents.anyterminal_agent.app.time.sleep", side_effect=finish_other_install),
+        ):
+            assert proc.setup() == deps_dir
+
+        assert not lock_path.exists()
+
+    def test_file_lock_retries_when_lock_disappears_before_stat(self, tmp_path: Path) -> None:
+        setup_dir = tmp_path / "target"
+        lock_path = setup_dir.parent / f".{setup_dir.name}.lockdir"
+        lock_path.mkdir()
+        original_stat = Path.stat
+        removed = False
+
+        def stat(path: Path, *args, **kwargs):
+            nonlocal removed
+            if path == lock_path and not removed:
+                removed = True
+                shutil.rmtree(lock_path)
+                raise FileNotFoundError
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(Path, "stat", stat):
+            with _file_lock(setup_dir, "test", max_wait=0, poll_interval=0):
+                assert lock_path.exists()
+
+    def test_file_lock_timeout_does_not_remove_existing_lock(self, tmp_path: Path) -> None:
+        setup_dir = tmp_path / "target"
+        lock_path = setup_dir.parent / f".{setup_dir.name}.lockdir"
+        lock_path.mkdir()
+
+        with pytest.raises(TimeoutError):
+            with _file_lock(setup_dir, "test", max_wait=0, poll_interval=0):
+                pass
+
+        assert lock_path.exists()
+
+    def test_stale_lock_is_reclaimed(self, tmp_path: Path) -> None:
+        setup_dir = tmp_path / "target"
+        lock_path = setup_dir.parent / f".{setup_dir.name}.lockdir"
+        lock_path.mkdir(parents=True)
+        old = time.time() - app._AGENT_DEPS_LOCK_STALE_AFTER_SECONDS - 1
+        os.utime(lock_path, (old, old))
+
+        with _file_lock(setup_dir, "test", max_wait=1, poll_interval=0):
+            assert lock_path.exists()  # reacquired fresh by us, not the stale one
+
+        assert not lock_path.exists()
+
+    def test_fresh_lock_is_not_reclaimed(self, tmp_path: Path) -> None:
+        setup_dir = tmp_path / "target"
+        lock_path = setup_dir.parent / f".{setup_dir.name}.lockdir"
+        lock_path.mkdir(parents=True)
+
+        with pytest.raises(TimeoutError):
+            with _file_lock(setup_dir, "test", max_wait=0, poll_interval=0):
+                pass
+
+        assert lock_path.exists()
+
 
 # ── GymAgentHarnessProcessor.get_run_command ─────────────────────────────────────
 
@@ -609,6 +756,25 @@ class TestProcessSingleDatapoint:
 
         metrics = json.loads(cfg.metrics_fpath.read_text())
         assert metrics["agent_timed_out"] is True
+        assert metrics["mask_sample"] is True
+
+    async def test_container_killed_mid_run_sets_flag_and_masks(self, tmp_path: Path) -> None:
+        # exec() on a container the TTL already removed returns error_type="sandbox" without
+        # raising, so this must be caught the same way a "timeout" is, not just via the
+        # except-block sandbox_failed path (which never fires here).
+        cfg = _make_instance_config(tmp_path)
+        sandbox = SimpleNamespace(
+            start=AsyncMock(),
+            exec=AsyncMock(return_value=_sandbox_result(return_code=125, error_type="sandbox")),
+            stop=AsyncMock(),
+        )
+        with patch("responses_api_agents.anyterminal_agent.app.AsyncSandbox", return_value=sandbox):
+            with patch.object(RunTerminalAgent, "_stage_tests", new=AsyncMock(return_value=None)):
+                await RunTerminalAgent(config=cfg).process_single_datapoint()
+
+        metrics = json.loads(cfg.metrics_fpath.read_text())
+        assert metrics["agent_timed_out"] is True
+        assert metrics["sandbox_failed"] is False
         assert metrics["mask_sample"] is True
 
     async def test_sandbox_start_failure_is_isolated(self, tmp_path: Path) -> None:

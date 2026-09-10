@@ -15,6 +15,7 @@
 
 """SWE-bench Pro resources server."""
 
+import asyncio
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -74,6 +75,29 @@ HARNESS_ENV_TO_SCRUB = (
 )
 
 
+def _verification_deadline(total_timeout: float | None) -> float | None:
+    """Wall-clock instant by which all attempts for one rollout must be done."""
+    return None if total_timeout is None else time() + total_timeout
+
+
+def _budget_spent(deadline: float | None) -> bool:
+    return deadline is not None and time() >= deadline
+
+
+def _attempt_budget(attempt_timeout: float | None, deadline: float | None) -> float | None:
+    """The smaller of this attempt's ceiling and what is left of the rollout's budget.
+
+    ``asyncio.timeout(None)`` is a no-op, so both being unset preserves the old
+    unbounded behaviour for anyone who wants it back.
+    """
+    remaining = None if deadline is None else max(deadline - time(), 0.0)
+    if attempt_timeout is None:
+        return remaining
+    if remaining is None:
+        return attempt_timeout
+    return min(attempt_timeout, remaining)
+
+
 class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     apply_anti_cheating: bool = True
@@ -81,6 +105,22 @@ class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     evaluation_timeout: int | None = None
     # A verdict-less run is retried on a new sandbox; see `inconclusive_reason`.
     inconclusive_verification_retries: int = 2
+    # Ceiling on ONE verification attempt, covering sandbox creation as well as
+    # the verification run. `evaluation_timeout` bounds only the test command
+    # inside the sandbox, so creation is otherwise unbounded here. 1200s is
+    # ~2.6x the p99 of observed per-rollout verification (461s) and above the
+    # healthy maximum (735s), while still cutting the multi-attempt pile-ups
+    # that leave dozens of verifications in flight at a job's wall clock.
+    verification_attempt_timeout: float | None = 1200.0
+    # Ceiling on ALL attempts for one rollout. Without it the worst case is
+    # `1 + inconclusive_verification_retries` times the per-attempt ceiling,
+    # which can exceed what remains of the job's wall clock -- and a rollout
+    # that never returns holds the whole run open, because collection ends only
+    # when the last rollout does.
+    verification_total_timeout: float | None = 2700.0
+    # Cleanup gets its own, smaller ceiling: a stop() that hangs in `finally`
+    # would defeat the attempt timeout it runs after.
+    verification_stop_timeout: float | None = 120.0
     # Which container repairs to apply; see `ENVIRONMENT_REPAIRS`.
     environment_repairs: tuple[str, ...] = DEFAULT_ENVIRONMENT_REPAIRS
     image_repository: str = "docker.io/jefzda/sweap-images"
@@ -348,20 +388,22 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         eval_sandbox_start_time_taken = 0.0
         patch_verification_time_taken = 0.0
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
+        deadline = _verification_deadline(self.config.verification_total_timeout)
         for attempt in range(1, attempts + 1):
             eval_sandbox: AsyncSandbox | None = None
             start_time = time()
             try:
-                eval_sandbox = await self._create_sandbox(body, files=sandbox_files)
-                eval_sandbox_start_time_taken = time() - start_time
-                verification_start = time()
-                result = await run_verification(
-                    sandbox=eval_sandbox,
-                    inputs=inputs,
-                    log_dir=run_log_dir,
-                    timeout_s=self.config.evaluation_timeout,
-                )
-                patch_verification_time_taken = time() - verification_start
+                async with asyncio.timeout(_attempt_budget(self.config.verification_attempt_timeout, deadline)):
+                    eval_sandbox = await self._create_sandbox(body, files=sandbox_files)
+                    eval_sandbox_start_time_taken = time() - start_time
+                    verification_start = time()
+                    result = await run_verification(
+                        sandbox=eval_sandbox,
+                        inputs=inputs,
+                        log_dir=run_log_dir,
+                        timeout_s=self.config.evaluation_timeout,
+                    )
+                    patch_verification_time_taken = time() - verification_start
             except Exception as exc:
                 eval_sandbox_start_time_taken = time() - start_time
                 patch_verification_time_taken = 0.0
@@ -375,11 +417,20 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             finally:
                 if eval_sandbox is not None:
                     try:
-                        await eval_sandbox.stop()
+                        async with asyncio.timeout(self.config.verification_stop_timeout):
+                            await eval_sandbox.stop()
                     except Exception:
                         print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
 
             reason = inconclusive_reason(result, asdict(inputs))
+            if reason is not None and _budget_spent(deadline):
+                print(
+                    f"Verification for {body.instance_id} gave up after {attempt} attempt(s): "
+                    f"the {self.config.verification_total_timeout}s budget for this rollout is spent "
+                    f"({reason})",
+                    file=sys.stderr,
+                )
+                break
             if reason is None or attempt == attempts:
                 if reason is not None:
                     print(

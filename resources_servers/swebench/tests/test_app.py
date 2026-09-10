@@ -152,9 +152,15 @@ class TestApp:
         derived = [name for name in CPU_CAP_ENV_VARS if name != "OMP_NUM_THREADS"]
         assert {name: spec.env[name] for name in derived} == {name: "2" for name in derived}
 
-        # Opt-out and no-cpu-limit paths keep env untouched.
-        assert (await created_spec({"resources": {"cpu": 2}, "derive_cpu_env": False})).env == {}
-        assert (await created_spec({"resources": {"memory_mib": 1024}})).env == {}
+        # Opt-out and no-cpu-limit paths omit only the derived caps; the
+        # SWE-bench Verified Python environment is applied independently.
+        for sandbox_config in (
+            {"resources": {"cpu": 2}, "derive_cpu_env": False},
+            {"resources": {"memory_mib": 1024}},
+        ):
+            spec = await created_spec(sandbox_config)
+            assert not set(CPU_CAP_ENV_VARS) & spec.env.keys()
+            assert spec.env["CONDA_DEFAULT_ENV"] == "testbed"
 
     def test_unobserved_response_omits_optional_field(self) -> None:
         response = SWEBenchVerifyResponse.model_construct(verifier_sandbox_observation=None)
