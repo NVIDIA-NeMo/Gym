@@ -1623,7 +1623,6 @@ def test_downconverting_an_unsupported_type_names_it_and_the_way_out():
         ("background", True),
         ("context_management", []),
         ("conversation", "conv_1"),
-        ("include", ["reasoning.encrypted_content"]),
         ("max_tool_calls", 2),
         ("previous_response_id", "resp_1"),
         ("prompt", {"id": "pmpt_1"}),
@@ -1637,6 +1636,15 @@ def test_downconverting_present_responses_only_fields_fails_explicitly(
 
     with pytest.raises(NotImplementedError, match=field):
         converter.responses_to_chat_completion_create_params(params)
+
+
+def test_downconverting_ignores_include(converter: ResponsesConverter):
+    params = NeMoGymResponseCreateParamsNonStreaming(input="hi", include=["reasoning.encrypted_content"])
+
+    chat_params = converter.responses_to_chat_completion_create_params(params)
+
+    assert "include" not in chat_params.model_dump(exclude_unset=True)
+    assert chat_params.messages == [{"content": [{"text": "hi", "type": "text"}], "role": "user"}]
 
 
 def test_downconverting_null_responses_only_fields_treats_them_as_absent(converter: ResponsesConverter):
