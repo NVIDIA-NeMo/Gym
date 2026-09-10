@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# PHASE 2: prepare separate candidate/reference trees; no provider requests.
+# PHASE 2: prepare candidate copies; no provider requests.
 #SBATCH --job-name=aav2-preconvert
 #SBATCH --partition=cpu
 #SBATCH --nodes=1
@@ -25,19 +25,13 @@ source "$JOB_ROOT/node_local.sh"
 gdpval_prepare preconvert
 gdpval_prepare_sandbox "$JUDGE_SIF"
 # The SIF needs only stdlib and its existing Office/media tools.
-"$GYM_PYTHON" - "$JUDGE_CONFIG" "$JOB_ROOT/judge.json" <<'PYTHON'
-import json, sys
-from pathlib import Path
-from omegaconf import OmegaConf
-Path(sys.argv[2]).write_text(json.dumps(OmegaConf.to_container(OmegaConf.load(sys.argv[1]), resolve=False)))
-PYTHON
 mkdir -p "$JOB_ROOT/container-home"
 setsid "$APPTAINER_BIN/apptainer" exec --cleanenv --no-home \
     --bind /lustre:/lustre,/raid/scratch:/raid/scratch \
     --env "PYTHONPATH=$GYM_ROOT,TMPDIR=$TMPDIR,XDG_CACHE_HOME=$XDG_CACHE_HOME" \
     --pwd "$GYM_ROOT" "$GDPVAL_CONTAINER_PATH" env "HOME=$JOB_ROOT/container-home" \
-    python3 "$LOCAL_PACKAGE/preconvert.py" "$RUN_DIR" --config-json "$JOB_ROOT/judge.json" \
+    python3 "$LOCAL_PACKAGE/preconvert.py" "$RUN_DIR" \
     > "$PHASE_DIR/logs/preconvert-$SLURM_JOB_ID.log" 2>&1 &
 JOB_PIDS+=("$!")
 wait "${JOB_PIDS[${#JOB_PIDS[@]}-1]}"
-echo "Prepared inputs: $RUN_DIR/prepared"
+echo "Prepared candidate: $RUN_DIR/prepared/candidate"

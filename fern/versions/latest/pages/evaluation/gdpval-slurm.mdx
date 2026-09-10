@@ -135,11 +135,11 @@ checks every task's finish marker, and excludes prior verify caches and judge
 directories. `import.json` records source paths and hashes. Imported runs support
 preconversion and judging; they cannot resume model rollout.
 
-Reference mirrors may contain symlinks. Preconversion copies only their visible
-entries, preserving `FILTER_MANIFEST.txt` and recording link targets. Files
-excluded by a mirror stay excluded even when they share a target directory with
-retained files. The supplied reference YAML is frozen unchanged; the prepared
-overlay changes evidence paths while retaining its model IDs and ELOs.
+Point `JUDGE_CONFIG` at the existing prepared reference caches. Preconversion
+processes only the candidate; it does not copy, convert, or inventory reference
+trees. Judging uses the supplied reference paths, model IDs, and ELOs unchanged.
+Reference mirrors may contain symlinks; their visible files remain the reference
+evidence used for judging.
 
 ## Preparation and judging
 
@@ -154,9 +154,10 @@ overlay. Jobs verify their hashes and stage code, environments,
 images, parsers, and caches under node-local storage. Safetensors weights stay
 shared through a read-only mount. Outputs remain in the durable run directory.
 
-Preconversion creates separate candidate/reference views under `prepared/` and
-records source/output hashes. It uses Gym's existing Office-to-PDF converter
-inside the SIF. Supported large videos become H.264 proxies up to 720p with AAC
+Preconversion creates a separate candidate view under `prepared/candidate/`
+and preserves the original deliverables. It uses Gym's existing Office-to-PDF
+converter inside the SIF. Existing reference caches are reused directly.
+Supported large videos become H.264 proxies up to 720p with AAC
 sound; these are lossy views, not byte-size guarantees. PCM16/24 WAV and AIFF
 become FLAC only when decoded samples match and the output shrinks. Floating
 point, PCM32 audio, and audio with extra streams such as embedded artwork are
@@ -180,9 +181,10 @@ and mode. To resume rollout, use:
 bash "$RUN/package/run_aav2.sh" rollout resume "$RUN"
 ```
 
-A run allows one active phase at a time. Prepared data must still match its
-recorded hashes. Changing inputs or the judging protocol requires a new run;
-do not edit native cache or journal files.
+A run allows one active phase at a time. Preconversion reuses an existing
+candidate view when it has finish markers for every dataset task. Changing
+inputs or the judging protocol requires a new run; do not edit native cache or
+journal files.
 
 Read the job IDs printed by the launcher and the logs under the run directory.
 Judging uses separate `judge_smoke`, `judge_pilot`, and `judge_full` directories.
