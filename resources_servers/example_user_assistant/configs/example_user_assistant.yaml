@@ -16,7 +16,7 @@ example_user_assistant:
 
 example_assistant:
   responses_api_agents:
-    standard_agent:
+    simple_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
