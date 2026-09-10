@@ -14,7 +14,6 @@ from omegaconf import DictConfig, OmegaConf
 from benchmarks.webvoyager import prepare as webvoyager_prepare
 from benchmarks.webvoyager.prepare import REPO_ROOT, write_env
 from benchmarks.webvoyager.prepare import main as prepare_main
-from benchmarks.webvoyager.summarize import load_dataset, load_rows, summarize, write_missing_rows
 from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
 
@@ -32,7 +31,7 @@ class _DownloadResponse:
         return self.payload
 
 
-def _source_rows(count: int = 552) -> bytes:
+def _source_rows(count: int = webvoyager_prepare.EXPECTED_TASKS) -> bytes:
     rows = (
         json.dumps(
             {
@@ -79,40 +78,45 @@ def test_prepare_enforces_the_maintained_552_task_population(monkeypatch, tmp_pa
 
     assert webvoyager_prepare.prepare(source=source, output=output) == output
     rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
-    assert len(rows) == 552
+    assert len(rows) == webvoyager_prepare.EXPECTED_TASKS
     assert rows[0]["responses_create_params"]["input"] == []
     assert rows[0]["web_task"]["runtime_profile"] == "visual_browser"
 
-    payload = _source_rows(551)
+    payload = _source_rows(webvoyager_prepare.EXPECTED_TASKS - 1)
     source.write_bytes(payload)
     monkeypatch.setattr(webvoyager_prepare, "SOURCE_SHA256", hashlib.sha256(payload).hexdigest())
-    with pytest.raises(ValueError, match="exactly 552 tasks"):
+    with pytest.raises(ValueError, match=f"exactly {webvoyager_prepare.EXPECTED_TASKS} tasks"):
         webvoyager_prepare.prepare(source=source, output=output)
 
 
-def test_source_lock_matches_the_automatic_download() -> None:
-    lock_path = Path(__file__).parents[1] / "source_lock.json"
-    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+def test_provenance_matches_the_automatic_download_and_profiles() -> None:
+    provenance_path = Path(__file__).parents[1] / "provenance.json"
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
 
-    assert lock == {
+    assert provenance["dataset"] == {
         "repository": "https://github.com/jayl940712/webarena_benchmarks",
         "commit": webvoyager_prepare.SOURCE_COMMIT,
         "path": "webvoyager.jsonl",
         "sha256": webvoyager_prepare.SOURCE_SHA256,
         "raw_url": webvoyager_prepare.SOURCE_URL,
-        "task_count": 552,
+        "task_count": webvoyager_prepare.EXPECTED_TASKS,
     }
+    assert set(provenance["policy_profiles"]) == set(webvoyager_prepare.PROFILE_CONFIGS)
+    assert {
+        profile: config["sampling"] for profile, config in provenance["policy_profiles"].items()
+    } == webvoyager_prepare.PROFILE_SAMPLING
 
 
 def test_nano_omni_policy_preserves_history_thinking() -> None:
     benchmark_dir = Path(__file__).parents[1]
-    config = yaml.safe_load((benchmark_dir / "configs/nano_omni_policy.yaml").read_text(encoding="utf-8"))
+    config = yaml.safe_load((benchmark_dir / "configs/nano_omni.yaml").read_text(encoding="utf-8"))
     kwargs = config["policy_model"]["responses_api_models"]["vllm_model"]["chat_template_kwargs"]
     assert kwargs == {"truncate_history_thinking": False}
 
-    recipe_lock = json.loads((benchmark_dir / "nano_omni_recipe_lock.json").read_text(encoding="utf-8"))
-    assert recipe_lock["policy_transport_endpoint"] == "/v1/chat/completions"
-    assert recipe_lock["policy_chat_template_kwargs"] == kwargs
+    provenance = json.loads((benchmark_dir / "provenance.json").read_text(encoding="utf-8"))
+    profile = provenance["policy_profiles"]["nano_omni"]
+    assert profile["transport_endpoint"] == "/v1/chat/completions"
+    assert profile["chat_template"]["kwargs"] == kwargs
 
 
 def test_nano_omni_and_qwen_share_runtime_and_dataset_but_not_policy_protocol() -> None:
@@ -147,6 +151,14 @@ def test_nano_omni_and_qwen_share_runtime_and_dataset_but_not_policy_protocol() 
     assert model["sampling_overrides"] == {"temperature": 0.1, "top_p": 0.9}
     assert model["replace_developer_role_with_system"] is True
 
+    provenance = json.loads((benchmark_dir / "provenance.json").read_text(encoding="utf-8"))
+    qwen_profile = provenance["policy_profiles"]["qwen35_122b_a10b"]
+    assert qwen_profile["chat_template_kwargs"] == model["chat_template_kwargs"]
+    assert {
+        "temperature": qwen_profile["sampling"]["temperature"],
+        "top_p": qwen_profile["sampling"]["top_p"],
+    } == model["sampling_overrides"]
+
 
 def test_qwen_profile_composes_with_the_runtime_config_schema() -> None:
     benchmark_dir = Path(__file__).parents[1]
@@ -166,6 +178,30 @@ def test_qwen_profile_composes_with_the_runtime_config_schema() -> None:
     assert model.replace_developer_role_with_system is True
     assert model.chat_template_kwargs == {"enable_thinking": True}
     assert model.sampling_overrides == {"temperature": 0.1, "top_p": 0.9}
+
+
+def test_nano_omni_profile_composes_transport_override_with_runtime_schema() -> None:
+    benchmark_dir = Path(__file__).parents[1]
+    resolved = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.merge(
+                GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                DictConfig(
+                    {
+                        "config_paths": [str(benchmark_dir / "configs/nano_omni.yaml")],
+                        "policy_base_url": "http://127.0.0.1:8000/v1",
+                    }
+                ),
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+
+    model = resolved.policy_model.responses_api_models.vllm_model
+    assert model.base_url == "http://127.0.0.1:8000/v1"
+    assert model.chat_template_kwargs == {"truncate_history_thinking": False}
 
 
 @pytest.mark.parametrize(
@@ -222,124 +258,3 @@ def test_prepare_prints_copyable_cli_commands(monkeypatch, capsys, tmp_path) -> 
     assert f"{gym_cli} env prefetch" in output
     assert f"{gym_cli} env start" in output
     assert f"{gym_cli} eval run --no-serve" in output
-
-
-def test_summary_keeps_fixed_denominator_and_exposes_masked_failures() -> None:
-    report = summarize(
-        [
-            {"task_id": "a", "task_success": True, "mask_sample": False},
-            {"task_id": "b", "task_success": False, "mask_sample": True, "failure_kind": "judge_unparseable"},
-        ]
-    )
-
-    assert report["success"] == 1
-    assert report["strict_sr"] == 1 / 552
-    assert report["missing"] == 550
-    assert report["failure_kinds"] == {"judge_unparseable": 1}
-    assert report["comparable"] is False
-
-
-def test_summary_merges_worker_outputs_and_builds_exact_cleanup_input(tmp_path) -> None:
-    dataset = tmp_path / "dataset.jsonl"
-    dataset_rows = [
-        {"responses_create_params": {"metadata": {"task_id": task_id}}, "payload": task_id}
-        for task_id in ("a", "b", "c")
-    ]
-    dataset.write_text("".join(json.dumps(row) + "\n" for row in dataset_rows), encoding="utf-8")
-    worker_root = tmp_path / "workers"
-    for worker, rows in {
-        "worker-00": [{"task_id": "a", "task_success": True, "mask_sample": False}],
-        "worker-01": [{"task_id": "b", "task_success": False, "mask_sample": False}],
-    }.items():
-        output = worker_root / worker / "rollouts.jsonl"
-        output.parent.mkdir(parents=True)
-        output.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
-
-    loaded_dataset, expected = load_dataset(dataset)
-    report = summarize(load_rows([worker_root]), expected_task_ids=expected)
-    cleanup = tmp_path / "cleanup.jsonl"
-    write_missing_rows(loaded_dataset, set(report["missing_task_ids"]), cleanup)
-
-    assert report["expected"] == 3
-    assert report["completed_unique"] == 2
-    assert report["missing_task_ids"] == ["c"]
-    assert report["success"] == 1
-    assert [json.loads(line)["payload"] for line in cleanup.read_text().splitlines()] == ["c"]
-
-
-def test_summary_discards_large_trajectory_payloads_while_loading(tmp_path) -> None:
-    output = tmp_path / "worker-00" / "rollouts.jsonl"
-    output.parent.mkdir(parents=True)
-    output.write_text(
-        json.dumps(
-            {
-                "task_id": "a",
-                "task_success": False,
-                "mask_sample": True,
-                "failure_kind": "judge_unparseable",
-                "responses": [{"screenshots": ["large-payload"]}],
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    assert load_rows([output]) == [
-        {
-            "task_id": "a",
-            "task_success": False,
-            "mask_sample": True,
-            "failure_kind": "judge_unparseable",
-        }
-    ]
-
-
-def test_summary_marks_duplicate_worker_results_non_comparable() -> None:
-    report = summarize(
-        [
-            {"task_id": "a", "task_success": True, "mask_sample": False},
-            {"task_id": "a", "task_success": True, "mask_sample": False},
-        ],
-        expected_task_ids={"a"},
-    )
-
-    assert report["duplicate_task_ids"] == ["a"]
-    assert report["comparable"] is False
-
-
-def test_summary_retries_masked_rows_as_well_as_missing_rows(tmp_path) -> None:
-    dataset_rows = [
-        {"responses_create_params": {"metadata": {"task_id": task_id}}, "payload": task_id}
-        for task_id in ("a", "b", "c")
-    ]
-    report = summarize(
-        [
-            {"task_id": "a", "task_success": False, "mask_sample": True},
-            {"task_id": "b", "task_success": False, "mask_sample": False},
-        ],
-        expected_task_ids={"a", "b", "c"},
-    )
-    cleanup = tmp_path / "cleanup.jsonl"
-    write_missing_rows(dataset_rows, set(report["retry_task_ids"]), cleanup)
-
-    assert report["invalid_task_ids"] == ["a"]
-    assert report["missing_task_ids"] == ["c"]
-    assert report["retry_task_ids"] == ["a", "c"]
-    assert [json.loads(line)["payload"] for line in cleanup.read_text().splitlines()] == ["a", "c"]
-
-
-def test_summary_accepts_declared_cleanup_supersession() -> None:
-    report = summarize(
-        [
-            {"task_id": "a", "task_success": False, "mask_sample": True},
-            {"task_id": "a", "task_success": True, "mask_sample": False},
-        ],
-        expected_task_ids={"a"},
-        superseded_task_ids={"a"},
-    )
-
-    assert report["duplicate_task_ids"] == []
-    assert report["superseded_task_ids"] == ["a"]
-    assert report["success"] == 1
-    assert report["invalid_or_infrastructure"] == 0
-    assert report["comparable"] is True

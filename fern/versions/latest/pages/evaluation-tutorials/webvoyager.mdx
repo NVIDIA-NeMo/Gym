@@ -86,6 +86,10 @@ For Qwen3.5-122B-A10B-FP8, Gym launches the checked-in TP8 local-vLLM profile:
 For Nano Omni, configure `POLICY_BASE_URL`, `POLICY_API_KEY`, and
 `POLICY_MODEL_NAME`, then use `--profile nano_omni`.
 
+The helper writes the private, gitignored
+`benchmarks/webvoyager/env.yaml`. Commands run from that directory load it
+automatically, so no separate `--config` argument is required.
+
 <Note>
 
 Tokenizer, chat template, multimodal processor, reasoning parser, and
@@ -131,19 +135,23 @@ The portable sequential command is:
   --output ../../results/webvoyager/full/rollouts.jsonl
 ```
 
-Reconcile worker outputs against the pinned denominator:
+Merge worker outputs and compute one global result with Gym's standard
+aggregation and health-check commands:
 
 ```bash
-cd ../..
-./.venv/bin/python benchmarks/webvoyager/summarize.py \
-  results/webvoyager/full/workers \
-  --dataset benchmarks/webvoyager/data/webvoyager.jsonl \
-  --output results/webvoyager/full/summary.json \
-  --missing-output results/webvoyager/full/retry.jsonl
+../../.venv/bin/gym eval aggregate \
+  --input-glob "../../results/webvoyager/shards/*/rollouts.jsonl" \
+  --output ../../results/webvoyager/full/rollouts.jsonl
+
+../../.venv/bin/gym eval health-check \
+  ../../results/webvoyager/full \
+  --rollouts-file rollouts.jsonl
 ```
 
-A reportable result has all 552 task IDs exactly once and no unresolved
-missing, duplicate, unexpected, masked, or infrastructure rows.
+The aggregate command reports scored and dropped coverage from the worker
+sidecars, and the health check detects malformed and duplicate rollout
+identities. A reportable result has 552 scored rows, no dropped coverage, and
+no unresolved health findings.
 
 ## Runtime and training safety
 
@@ -157,7 +165,8 @@ Browser-provider, proxy/CAPTCHA, model-server, and judge failures produce
 masked retryable samples instead of reward-zero policy examples. Only a
 completed trajectory judged unsuccessful is a valid reward-zero sample.
 
-The checked-in profile YAML and recipe-lock JSON files are the authoritative
-source for model-specific protocol and serving parameters. Cluster images,
-scheduler scripts, caches, checkpoint placement, and large run artifacts are
-deployment concerns and are intentionally outside this benchmark tutorial.
+The checked-in profile YAML files and `provenance.json` are the authoritative
+source for model-specific protocol, serving parameters, and immutable dataset
+identity. Cluster images, scheduler scripts, caches, checkpoint placement, and
+large run artifacts are deployment concerns and are intentionally outside this
+benchmark tutorial.

@@ -43,9 +43,9 @@ proxy/CAPTCHA availability, judge behavior, and exact policy serving assets
 remain part of the reproducibility contract. Direct policy comparison also
 requires those inputs to be held fixed.
 
-The profile YAML and recipe-lock JSON files are the machine-readable authority
-for model-specific serving behavior. For complete prerequisites, setup, smoke,
-full-population execution, and reconciliation, use the
+The profile YAML files and `provenance.json` are the machine-readable authority
+for model-specific serving behavior and immutable source identity. For complete
+prerequisites, setup, smoke, full-population execution, and reconciliation, use the
 [Fern WebVoyager tutorial](../../fern/versions/latest/pages/evaluation-tutorials/webvoyager.mdx).
 
 ## Runtime boundary
@@ -82,6 +82,10 @@ Generate a private, mode-0600 composition for one policy profile:
   --force-env
 ```
 
+This writes the private, gitignored `benchmarks/webvoyager/env.yaml`. Gym
+automatically loads that file when commands run from the benchmark directory,
+so the commands below do not need a separate `--config` argument.
+
 Run the component servers in the foreground:
 
 ```bash
@@ -100,18 +104,26 @@ Stop `gym env start` with Ctrl-C. Gym currently has no separate `env stop`
 command and does not own an external proxy, judge gateway, or externally
 managed model server.
 
-## Fixed-denominator reporting
+## Reporting and sharded runs
+
+A single `gym eval run` writes aggregate metrics and runs rollout health checks
+automatically. When workers write separate rollout files, use Gym's standard
+aggregation command to merge them and compute one global result:
 
 ```bash
-cd ../..
-./.venv/bin/python benchmarks/webvoyager/summarize.py \
-  results/webvoyager/qwen/rollouts.jsonl \
-  --dataset benchmarks/webvoyager/data/webvoyager.jsonl \
-  --output results/webvoyager/qwen/summary.json \
-  --missing-output results/webvoyager/qwen/retry.jsonl
+cd benchmarks/webvoyager
+../../.venv/bin/gym eval aggregate \
+  --input-glob "../../results/webvoyager/shards/*/rollouts.jsonl" \
+  --output ../../results/webvoyager/full/rollouts.jsonl
+
+../../.venv/bin/gym eval health-check \
+  ../../results/webvoyager/full \
+  --rollouts-file rollouts.jsonl
 ```
 
-A reportable full result has all 552 task IDs exactly once and no unresolved
-missing, duplicate, unexpected, masked, or infrastructure rows. Browser,
-provider, proxy/CAPTCHA, model-server, and judge failures are masked and routed
-to retry input rather than silently counted as policy reward zero.
+`gym eval aggregate` reports scored and dropped coverage from the worker
+sidecars; the health check detects malformed and duplicate rollout identities.
+A reportable full result has 552 scored rows, no dropped coverage, and no
+unresolved health findings. Browser, provider, proxy/CAPTCHA, model-server, and
+judge failures are masked and routed to retry rather than silently counted as
+policy reward zero.
