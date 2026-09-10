@@ -13,60 +13,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import logging
 
-from pytest import approx, fixture, mark, raises
+from pytest import fixture
 
+from nemo_gym.openai_utils import NeMoGymResponseFunctionToolCall
 from resources_servers.single_step_tool_use_with_argument_comparison.common.verification_utils import (
-    ActionComparator,
-    ActionComparisonResult,
-    FunctionCallAction,
-    FunctionCallBatchAction,
-    MessageAction,
-    ParallelToolCallRewardMode,
+    ExpectedFunctionCall,
     StepRewardCategory,
+    ToolCallArgumentComparisonOverride,
+    ToolCallArgumentFilter,
+    ToolCallComparator,
     ToolCallComparatorConfig,
-    find_maximum_matching,
-    get_tool_calls,
 )
 
 
-def call(query: str, name: str = "search") -> FunctionCallAction:
-    return FunctionCallAction(type="function_call", name=name, arguments=json.dumps({"query": query}))
-
-
-def batch(*calls: FunctionCallAction) -> FunctionCallBatchAction:
-    return FunctionCallBatchAction(type="function_call_batch", calls=list(calls))
-
-
-def build_comparator(word_count_similarity_threshold: float = 0.1, **config_overrides: object) -> ActionComparator:
-    """Most tests here are about parallel tool-call counting, so the master switch defaults to on.
-
-    Tests for the off (shipped default) behaviour pass `parallel_tool_call_rewarding=False`.
-    """
-    config_overrides.setdefault("parallel_tool_call_rewarding", True)
-    return ActionComparator(
-        config=ToolCallComparatorConfig(
-            word_count_similarity_threshold=word_count_similarity_threshold, **config_overrides
-        )
-    )
-
-
-def outcome(result: ActionComparisonResult) -> tuple[float, StepRewardCategory]:
-    return result.reward, result.category
-
-
-class TestActionComparator:
+class TestToolCallComparator:
     @fixture
-    def action_comparator(self) -> ActionComparator:
-        return build_comparator()
+    def tool_call_comparator(self) -> ToolCallComparator:
+        comparator_config = ToolCallComparatorConfig(word_count_similarity_threshold=0.1)
+        return ToolCallComparator(config=comparator_config)
 
-    def test_get_tool_calls(self) -> None:
-        alpha, beta = call("alpha"), call("beta")
-        assert get_tool_calls(alpha) == [alpha]
-        assert get_tool_calls(batch(alpha, beta)) == [alpha, beta]
-        assert get_tool_calls(MessageAction(type="message", content="hello")) == []
-
-    def test_compare_tool_call(self, action_comparator: ActionComparator) -> None:
+    # TODO: test assertions below use True/False and 0.0/1.0 inconsistently due to return type
+    # change from bool to float. Python's True == 1.0 and False == 0.0 so they still pass.
+    def test_compare_tool_call(self, tool_call_comparator: ToolCallComparator) -> None:
         arguments_object = {
             "first": "one",
             "second": 2,
@@ -78,278 +48,1134 @@ class TestActionComparator:
             },
         }
         arguments_string = json.dumps(arguments_object)
-        expected_function_call = FunctionCallAction(
+        expected_function_call = ExpectedFunctionCall(
             type="function_call",
             name="send",
             arguments=arguments_string,
         )
 
-        def compare(name: str, arguments: str) -> tuple[float, StepRewardCategory]:
-            actual_tool_call = FunctionCallAction(type="function_call", name=name, arguments=arguments)
-            return outcome(action_comparator.compare_tool_call(expected_function_call, actual_tool_call))
+        different_tool_tool_call = NeMoGymResponseFunctionToolCall(
+            call_id="different_tool",
+            name="receive",
+            arguments=arguments_string,
+        )
+        assert tool_call_comparator.compare_tool_call(expected_function_call, different_tool_tool_call) == (
+            0.0,
+            StepRewardCategory.UNEXPECTED_TOOL,
+        )
 
-        assert compare("receive", arguments_string) == (0.0, StepRewardCategory.UNEXPECTED_TOOL)
-        assert compare("send", "first=one") == (0.0, StepRewardCategory.ARGUMENTS_DECODE_ERROR)
-        assert compare("send", arguments_string) == (1.0, StepRewardCategory.EXPECTED_TOOL_CALL)
-        assert compare("send", json.dumps(arguments_object | {"fourth": [1, "element3"]})) == (
+        invalid_arguments_tool_call = NeMoGymResponseFunctionToolCall(
+            call_id="invalid_arguments",
+            name="send",
+            arguments="first=one",
+        )
+        assert tool_call_comparator.compare_tool_call(expected_function_call, invalid_arguments_tool_call) == (
+            0.0,
+            StepRewardCategory.ARGUMENTS_DECODE_ERROR,
+        )
+
+        matching_arguments_tool_call = NeMoGymResponseFunctionToolCall(
+            call_id="matching_arguments",
+            name="send",
+            arguments=arguments_string,
+        )
+        assert tool_call_comparator.compare_tool_call(expected_function_call, matching_arguments_tool_call) == (
+            1.0,
+            StepRewardCategory.EXPECTED_TOOL_CALL,
+        )
+
+        different_argument_value_object = {
+            "first": "one",
+            "second": 2,
+            "third": True,
+            "fourth": [1, "element3"],
+            "fifth": {
+                "inner1": "value1",
+                "inner2": False,
+            },
+        }
+        different_argument_value_string = json.dumps(different_argument_value_object)
+        different_argument_value_tool_call = NeMoGymResponseFunctionToolCall(
+            call_id="different_argument_value",
+            name="send",
+            arguments=different_argument_value_string,
+        )
+        assert tool_call_comparator.compare_tool_call(expected_function_call, different_argument_value_tool_call) == (
             0.0,
             StepRewardCategory.ARGUMENT_VALUE_DIFFERENT,
         )
-        assert compare("send", json.dumps(arguments_object | {"fifth": {"inner": "value1", "inner2": False}})) == (
+
+        different_argument_key_object = {
+            "first": "one",
+            "second": 2,
+            "third": True,
+            "fourth": [1, "element2"],
+            "fifth": {
+                "inner": "value1",
+                "inner2": False,
+            },
+        }
+        different_argument_key_tool_call = NeMoGymResponseFunctionToolCall(
+            call_id="different_argument_key",
+            name="send",
+            arguments=json.dumps(different_argument_key_object),
+        )
+        assert tool_call_comparator.compare_tool_call(expected_function_call, different_argument_key_tool_call) == (
             0.0,
             StepRewardCategory.ARGUMENT_OBJECT_KEYS_DIFFERENT,
         )
-        assert compare("send", json.dumps(arguments_object | {"fourth": [1]})) == (
-            0.0,
-            StepRewardCategory.ARGUMENT_LIST_LENGTH_DIFFERENT,
-        )
 
-    def test_compare_action_dispatches_on_expected_type(self, action_comparator: ActionComparator) -> None:
-        message = MessageAction(type="message", content="This is a message.")
-        other_message = MessageAction(type="message", content="A completely different message.")
-        tool_call = call("alpha")
-
-        # Currently, any chat message is assigned a reward of one.
-        assert outcome(action_comparator.compare_action(message, other_message)) == (
-            1.0,
-            StepRewardCategory.EXPECTED_CHAT_MESSAGE_FOUND,
-        )
-        assert outcome(action_comparator.compare_action(message, tool_call)) == (
-            0.0,
-            StepRewardCategory.NO_EXPECTED_CHAT_MESSAGE,
-        )
-        assert outcome(action_comparator.compare_action(tool_call, message)) == (
-            0.0,
-            StepRewardCategory.NO_EXPECTED_TOOL_CALL,
-        )
-        assert outcome(action_comparator.compare_action(batch(tool_call, call("beta")), message)) == (
-            0.0,
-            StepRewardCategory.NO_EXPECTED_TOOL_CALL,
-        )
-        assert outcome(action_comparator.compare_action(tool_call, tool_call)) == (
+        tool_call_comparator.config.argument_filters = {
+            "send": ToolCallArgumentFilter(
+                included_argument_names=["first", "second", "third", "fifth"],
+            )
+        }
+        assert tool_call_comparator.compare_tool_call(expected_function_call, different_argument_value_tool_call) == (
             1.0,
             StepRewardCategory.EXPECTED_TOOL_CALL,
         )
 
-    def test_compare_action_rejects_unsupported_action(self, action_comparator: ActionComparator) -> None:
-        with raises(NotImplementedError):
-            action_comparator.compare_action("not an action", call("alpha"))  # type: ignore[arg-type]
-
-    def test_compare_tool_calls_ignores_tool_call_order(self, action_comparator: ActionComparator) -> None:
-        expected_batch = batch(call("alpha"), call("beta"))
-
-        assert outcome(action_comparator.compare_action(expected_batch, batch(call("beta"), call("alpha")))) == (
-            1.0,
-            StepRewardCategory.EXPECTED_TOOL_CALL_BATCH,
+        receive_expected_function_call = ExpectedFunctionCall(
+            type="function_call",
+            name="receive",
+            arguments=arguments_string,
         )
-
-    def test_compare_tool_calls_rejects_mismatched_counts_by_default(
-        self, action_comparator: ActionComparator
-    ) -> None:
-        expected_batch = batch(call("alpha"), call("beta"))
-        too_many = batch(call("alpha"), call("beta"), call("gamma"))
-
-        assert outcome(action_comparator.compare_action(expected_batch, too_many)) == (
-            0.0,
-            StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT,
+        receive_different_argument_value_tool_call = NeMoGymResponseFunctionToolCall(
+            call_id="receive_different_argument_value",
+            name="receive",
+            arguments=different_argument_value_string,
         )
-        assert outcome(action_comparator.compare_action(expected_batch, call("alpha"))) == (
-            0.0,
-            StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT,
-        )
-
-    def test_rewarding_off_ignores_the_call_count(self) -> None:
-        """The shipped default. This is what makes the feature a no-op for pre-existing datasets."""
-        off = build_comparator(parallel_tool_call_rewarding=False)
-        expected_call = call("alpha")
-
-        # Surplus calls cost nothing, however many, and wherever the expected call appears.
-        for surplus in range(1, 4):
-            actual = batch(expected_call, *[call(f"junk{index}") for index in range(surplus)])
-            assert outcome(off.compare_action(expected_call, actual)) == (
-                1.0,
-                StepRewardCategory.EXPECTED_TOOL_CALL,
-            ), f"{surplus} surplus call(s) should not change the reward"
-        assert outcome(off.compare_action(expected_call, batch(call("junk"), expected_call))) == (
-            1.0,
-            StepRewardCategory.EXPECTED_TOOL_CALL,
-        )
-
-        # A batch still needs all of its expected calls present, but tolerates extras.
-        expected_batch = batch(call("alpha"), call("beta"))
-        assert outcome(off.compare_action(expected_batch, batch(call("beta"), call("alpha"), call("junk")))) == (
-            1.0,
-            StepRewardCategory.EXPECTED_TOOL_CALL_BATCH,
-        )
-        assert off.compare_action(expected_batch, batch(call("alpha"), call("junk"))).reward == 0.0
-
-        # The reward mode is not consulted either: f1 does not charge for surplus while off.
-        off_f1 = build_comparator(
-            parallel_tool_call_rewarding=False, parallel_tool_call_reward_mode=ParallelToolCallRewardMode.F1
-        )
-        assert off_f1.compare_action(expected_call, batch(expected_call, call("j1"), call("j2"))).reward == 1.0
-
-        # The expected call still has to actually be there.
-        assert outcome(off.compare_action(expected_call, batch(call("junk"), call("other")))) == (
+        assert tool_call_comparator.compare_tool_call(
+            receive_expected_function_call, receive_different_argument_value_tool_call
+        ) == (
             0.0,
             StepRewardCategory.ARGUMENT_VALUE_DIFFERENT,
         )
-        assert outcome(off.compare_action(expected_call, MessageAction(type="message", content="hi"))) == (
-            0.0,
-            StepRewardCategory.NO_EXPECTED_TOOL_CALL,
-        )
 
-    def test_rewarding_on_constrains_the_call_count(self, action_comparator: ActionComparator) -> None:
-        """The contrast: with the switch on, a surplus call is disqualifying by default."""
-        assert outcome(action_comparator.compare_action(call("alpha"), batch(call("alpha"), call("junk")))) == (
-            0.0,
-            StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT,
-        )
-        assert outcome(action_comparator.compare_action(batch(call("alpha")), batch(call("alpha"), call("junk")))) == (
-            0.0,
-            StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT,
-        )
-
-    def test_f1_charges_for_surplus_when_rewarding_is_on(self) -> None:
-        """`f1` is the opt-in for precision, and it applies even where the gate lets a shape through."""
-        comparator = build_comparator(
-            allow_superset=True, parallel_tool_call_reward_mode=ParallelToolCallRewardMode.F1
-        )
-        expected_call = call("alpha")
-
-        # 2 * 1 / (1 + 3)
-        assert comparator.compare_action(expected_call, batch(expected_call, call("j1"), call("j2"))).reward == approx(
-            0.5
-        )
-
-    @mark.parametrize("reward_mode", list(ParallelToolCallRewardMode))
-    def test_cardinality_gate_admits_only_configured_shapes(self, reward_mode: ParallelToolCallRewardMode) -> None:
-        expected_batch = batch(call("alpha"), call("beta"))
-        too_few = call("alpha")
-        too_many = batch(call("alpha"), call("beta"), call("gamma"))
-        rejected = (0.0, StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT)
-
-        subset_comparator = build_comparator(allow_subset=True, parallel_tool_call_reward_mode=reward_mode)
-        assert subset_comparator.compare_action(expected_batch, too_few).reward > 0.0
-        assert outcome(subset_comparator.compare_action(expected_batch, too_many)) == rejected
-
-        superset_comparator = build_comparator(allow_superset=True, parallel_tool_call_reward_mode=reward_mode)
-        assert superset_comparator.compare_action(expected_batch, too_many).reward > 0.0
-        assert outcome(superset_comparator.compare_action(expected_batch, too_few)) == rejected
-
-        permissive_comparator = build_comparator(
-            allow_subset=True, allow_superset=True, parallel_tool_call_reward_mode=reward_mode
-        )
-        assert permissive_comparator.compare_action(expected_batch, too_few).reward > 0.0
-        assert permissive_comparator.compare_action(expected_batch, too_many).reward > 0.0
-
-    @mark.parametrize("reward_mode", [ParallelToolCallRewardMode.BINARY_STRICT, ParallelToolCallRewardMode.FRACTIONAL])
-    def test_gated_shapes_get_full_credit_without_f1(self, reward_mode: ParallelToolCallRewardMode) -> None:
-        """Under the pre-F1 modes the gate is a free pass, which is exactly what `f1` exists to fix."""
-        expected_batch = batch(call("alpha"), call("beta"))
-        full_credit = (1.0, StepRewardCategory.EXPECTED_TOOL_CALL_BATCH)
-
-        undercalling = build_comparator(allow_subset=True, parallel_tool_call_reward_mode=reward_mode)
-        assert outcome(undercalling.compare_action(expected_batch, call("alpha"))) == full_credit
-
-        spamming = build_comparator(allow_superset=True, parallel_tool_call_reward_mode=reward_mode)
-        spam = batch(call("alpha"), call("beta"), *[call(f"junk{index}") for index in range(20)])
-        assert outcome(spamming.compare_action(expected_batch, spam)) == full_credit
-
-    @mark.parametrize("matched_count", range(4))
-    def test_fractional_scores_the_matched_share_of_required_calls(self, matched_count: int) -> None:
-        comparator = build_comparator(parallel_tool_call_reward_mode=ParallelToolCallRewardMode.FRACTIONAL)
-        expected_batch = batch(call("alpha"), call("beta"), call("gamma"))
-
-        matched = [call(query) for query in ("alpha", "beta", "gamma")[:matched_count]]
-        missed = [call(f"wrong{index}") for index in range(3 - matched_count)]
-
-        assert comparator.compare_action(expected_batch, batch(*matched, *missed)).reward == approx(matched_count / 3)
-
-    def test_f1_rewards_only_an_exact_set_of_calls(self) -> None:
-        expected_batch = batch(call("alpha"), call("beta"))
-        f1_mode = {"parallel_tool_call_reward_mode": ParallelToolCallRewardMode.F1}
-
-        # An exact match, in any order, is still worth full credit.
-        assert outcome(
-            build_comparator(**f1_mode).compare_action(expected_batch, batch(call("beta"), call("alpha")))
-        ) == (
-            1.0,
-            StepRewardCategory.EXPECTED_TOOL_CALL_BATCH,
-        )
-
-        # Half the calls right at the right call count: 2 * 1 / (2 + 2).
-        half_right = build_comparator(**f1_mode).compare_action(expected_batch, batch(call("alpha"), call("wrong")))
-        assert half_right.reward == approx(0.5)
-
-        # Emitting only the easy call no longer earns a free pass: 2 * 1 / (2 + 1).
-        undercalling = build_comparator(allow_subset=True, **f1_mode)
-        undercalled = undercalling.compare_action(expected_batch, call("alpha"))
-        assert undercalled.reward == approx(2 / 3)
-        assert undercalled.category == StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT
-
-        # Neither does burying the correct calls in junk: 2 * 2 / (2 + 22).
-        spamming = build_comparator(allow_superset=True, **f1_mode)
-        spam = batch(call("alpha"), call("beta"), *[call(f"junk{index}") for index in range(20)])
-        spammed = spamming.compare_action(expected_batch, spam)
-        assert spammed.reward == approx(1 / 6)
-        assert spammed.category == StepRewardCategory.FUNCTION_CALL_BATCH_LENGTH_DIFFERENT
-
-    def test_failure_category_describes_an_unmatched_call(self, action_comparator: ActionComparator) -> None:
-        expected_batch = batch(call("alpha"), call("beta", name="lookup"))
-
-        # One call matched; the other used a tool that was never expected.
-        assert outcome(
-            action_comparator.compare_action(expected_batch, batch(call("alpha"), call("beta", name="other")))
-        ) == (0.0, StepRewardCategory.UNEXPECTED_TOOL)
-
-        # One call matched; the other reached the right tool with the wrong argument.
-        assert outcome(
-            action_comparator.compare_action(expected_batch, batch(call("alpha"), call("wrong", name="lookup")))
-        ) == (0.0, StepRewardCategory.ARGUMENT_VALUE_DIFFERENT)
-
-    def test_matching_survives_a_fuzzy_non_transitive_relation(self) -> None:
-        # Word-count similarity is fuzzy, so "aa bb cc dd" clears the threshold against both actual calls
-        # while "aa bb" only clears it against the first. Pairing the expected calls in order would strand
-        # the second one; the comparator has to find the pairing that satisfies both.
-        comparator = build_comparator(word_count_similarity_threshold=0.3)
-        expected_batch = batch(call("aa bb cc dd"), call("aa bb"))
-        actual_batch = batch(call("aa bb"), call("cc dd"))
-
-        assert outcome(comparator.compare_action(expected_batch, actual_batch)) == (
-            1.0,
-            StepRewardCategory.EXPECTED_TOOL_CALL_BATCH,
-        )
-
-    def test_find_maximum_matching_uses_augmenting_paths(self) -> None:
-        # Expected call 0 can take either actual call while expected call 1 can only take actual call 0,
-        # so reaching two matches requires reassigning actual call 0 away from expected call 0.
-        assert find_maximum_matching([[0, 1], [0]]) == {0: 1, 1: 0}
-        assert find_maximum_matching([[], []]) == {}
-        assert find_maximum_matching([[0], [0]]) == {0: 0}
-
-    def test_compare_tool_call_arguments(self, action_comparator: ActionComparator) -> None:
-        assert action_comparator.compare_tool_call_arguments(None, "None") == (
+    # TODO: test assertions below use True/False instead of 1.0/0.0 to match the old return type.
+    # Python's True == 1.0 and False == 0.0 so they still pass, but should be updated for clarity.
+    def test_compare_tool_call_arguments(self, tool_call_comparator: ToolCallComparator) -> None:
+        assert tool_call_comparator.compare_tool_call_arguments(None, "None") == (
             False,
             StepRewardCategory.ARGUMENT_VALUE_TYPE_DIFFERENT,
         )
-        assert action_comparator.compare_tool_call_arguments(1.0, 1.0 + 1e-9) == (True, None)
-        assert action_comparator.compare_tool_call_arguments(1.0, 2.0) == (
+
+        assert tool_call_comparator.compare_tool_call_arguments(
+            {"x": 1},
+            {
+                "x": 1,
+                "y": 2,
+            },
+        ) == (False, StepRewardCategory.ARGUMENT_OBJECT_KEYS_DIFFERENT)
+        assert tool_call_comparator.compare_tool_call_arguments(
+            {
+                "x": 1,
+                "y": 3,
+            },
+            {
+                "x": 1,
+                "y": 2,
+            },
+        ) == (False, StepRewardCategory.ARGUMENT_VALUE_DIFFERENT)
+        assert tool_call_comparator.compare_tool_call_arguments(
+            {
+                "x": 1,
+                "y": "two",
+                "z": True,
+            },
+            {
+                "y": "two",
+                "x": 1,
+                "z": True,
+            },
+        ) == (True, None)
+
+        assert tool_call_comparator.compare_tool_call_arguments(
+            [
+                "first",
+                2,
+            ],
+            [
+                "first",
+                2,
+                "three",
+            ],
+        ) == (False, StepRewardCategory.ARGUMENT_LIST_LENGTH_DIFFERENT)
+        assert tool_call_comparator.compare_tool_call_arguments(
+            [
+                "first",
+                2,
+            ],
+            [
+                "one",
+                2,
+            ],
+        ) == (False, StepRewardCategory.ARGUMENT_VALUE_DIFFERENT)
+        assert tool_call_comparator.compare_tool_call_arguments(
+            [
+                "first",
+                2,
+                "three",
+            ],
+            [
+                "first",
+                2,
+                "three",
+            ],
+        ) == (True, None)
+
+        assert tool_call_comparator.compare_tool_call_arguments(3.1, 3.11) == (
             False,
             StepRewardCategory.ARGUMENT_VALUE_DIFFERENT,
         )
-        assert action_comparator.compare_tool_call_arguments("one", "one") == (True, None)
-        assert action_comparator.compare_tool_call_arguments("one", "two") == (
+        assert tool_call_comparator.compare_tool_call_arguments(3.1, 3.1) == (True, None)
+
+        assert tool_call_comparator.compare_tool_call_arguments("value1", "value2") == (
             False,
             StepRewardCategory.ARGUMENT_VALUE_DIFFERENT,
         )
-        assert action_comparator.compare_tool_call_arguments("one two three", "one two three") == (True, None)
-        assert action_comparator.compare_tool_call_arguments("one two three", "four five six") == (
+        assert tool_call_comparator.compare_tool_call_arguments("value1", "value1") == (True, None)
+        assert tool_call_comparator.compare_tool_call_arguments("the", "the cat") == (
             False,
             StepRewardCategory.ARGUMENT_VALUE_DIFFERENT,
         )
-        assert action_comparator.compare_tool_call_arguments(True, True) == (True, None)
-        assert action_comparator.compare_tool_call_arguments(1, 2) == (
+        assert tool_call_comparator.compare_tool_call_arguments("the dog", "the") == (
             False,
             StepRewardCategory.ARGUMENT_VALUE_DIFFERENT,
         )
+        assert tool_call_comparator.compare_tool_call_arguments("the cat", "the dog") == (True, None)
+        assert tool_call_comparator.compare_tool_call_arguments(
+            "the cat ate some food", "the dog ran to the store"
+        ) == (
+            False,
+            StepRewardCategory.ARGUMENT_VALUE_DIFFERENT,
+        )
+        assert tool_call_comparator.compare_tool_call_arguments("Birds are animals.", "The birds fly.") == (True, None)
+
+        assert tool_call_comparator.compare_tool_call_arguments(26, 25) == (
+            False,
+            StepRewardCategory.ARGUMENT_VALUE_DIFFERENT,
+        )
+        assert tool_call_comparator.compare_tool_call_arguments(26, 26) == (True, None)
+
+        assert tool_call_comparator.compare_tool_call_arguments(False, True) == (
+            False,
+            StepRewardCategory.ARGUMENT_VALUE_DIFFERENT,
+        )
+        assert tool_call_comparator.compare_tool_call_arguments(False, False) == (True, None)
+
+    def test_apply_argument_filter(self) -> None:
+        first_string_value = "first"
+        second_string_value = "second"
+        list_value = ["element1", "element2", "element3"]
+        single_item_dictionary_value = {
+            "key4": "value4",
+        }
+        two_items_dictionary_value = {
+            "first_key": "first_value",
+            "second_key": "second_value",
+        }
+        four_items_dictionary_value = {
+            "key1": "value1",
+            "key2": "value2",
+            "key3": "value3",
+            "key4": "value4",
+        }
+
+        empty_filter = ToolCallArgumentFilter(included_argument_names=None)
+        assert ToolCallComparator._apply_argument_filter(empty_filter, first_string_value) is first_string_value
+        assert ToolCallComparator._apply_argument_filter(empty_filter, second_string_value) is second_string_value
+        assert ToolCallComparator._apply_argument_filter(empty_filter, list_value) is list_value
+        assert (
+            ToolCallComparator._apply_argument_filter(empty_filter, single_item_dictionary_value)
+            is single_item_dictionary_value
+        )
+        assert (
+            ToolCallComparator._apply_argument_filter(empty_filter, two_items_dictionary_value)
+            is two_items_dictionary_value
+        )
+        assert (
+            ToolCallComparator._apply_argument_filter(empty_filter, four_items_dictionary_value)
+            is four_items_dictionary_value
+        )
+
+        included_arguments_filter = ToolCallArgumentFilter(
+            included_argument_names=["second", "element3", "key1", "key4"]
+        )
+        assert (
+            ToolCallComparator._apply_argument_filter(included_arguments_filter, first_string_value)
+            is first_string_value
+        )
+        assert (
+            ToolCallComparator._apply_argument_filter(included_arguments_filter, second_string_value)
+            is second_string_value
+        )
+        assert ToolCallComparator._apply_argument_filter(included_arguments_filter, list_value) is list_value
+        assert (
+            ToolCallComparator._apply_argument_filter(included_arguments_filter, single_item_dictionary_value)
+            == single_item_dictionary_value
+        )
+        assert ToolCallComparator._apply_argument_filter(included_arguments_filter, two_items_dictionary_value) == {}
+        assert ToolCallComparator._apply_argument_filter(included_arguments_filter, four_items_dictionary_value) == {
+            "key1": "value1",
+            "key4": "value4",
+        }
+
+
+class TestToolCallComparatorF1PartialReward:
+    """Tests for partial F1 reward (use_list_f1_threshold=False)."""
+
+    @fixture
+    def comparator(self) -> ToolCallComparator:
+        config = ToolCallComparatorConfig(
+            word_count_similarity_threshold=0.3,
+            use_f1_for_list=True,
+            use_list_f1_threshold=False,
+        )
+        return ToolCallComparator(config=config)
+
+    @fixture
+    def comparator_with_threshold(self) -> ToolCallComparator:
+        config = ToolCallComparatorConfig(
+            word_count_similarity_threshold=0.3,
+            use_f1_for_list=True,
+            use_list_f1_threshold=True,
+            list_f1_threshold=0.5,
+        )
+        return ToolCallComparator(config=config)
+
+    def test_exact_list_match_returns_1(self, comparator: ToolCallComparator) -> None:
+        score, category = comparator.compare_tool_call_arguments(["a", "b", "c"], ["a", "b", "c"])
+        assert score == 1.0
+        assert category is None
+        assert len(comparator.list_f1_match_details) == 1
+        detail = comparator.list_f1_match_details[0]
+        assert detail.tp == 3
+        assert detail.f1 == 1.0
+        assert detail.matched_pairs == [(0, 0), (1, 1), (2, 2)]
+        assert detail.score_matrix == [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+
+    def test_partial_list_match_returns_f1(self, comparator: ToolCallComparator) -> None:
+        # expected: [1, 2, 3], actual: [1, 2] -> tp=2, precision=2/2=1.0, recall=2/3=0.667, f1=0.8
+        score, category = comparator.compare_tool_call_arguments([1, 2, 3], [1, 2])
+        assert abs(score - 0.8) < 1e-6
+        assert category == StepRewardCategory.ARGUMENT_LIST_F1_PARTIAL
+        assert len(comparator.list_f1_match_details) == 1
+        detail = comparator.list_f1_match_details[0]
+        assert detail.expected_values == [1, 2, 3]
+        assert detail.actual_values == [1, 2]
+        assert detail.tp == 2
+        assert detail.precision == 1.0
+        assert abs(detail.recall - 2 / 3) < 1e-6
+        assert abs(detail.f1 - 0.8) < 1e-6
+        assert detail.matched_pairs == [(0, 0), (1, 1)]
+        assert detail.score_matrix == [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 0.0],
+        ]
+
+    def test_no_list_match_returns_0(self, comparator: ToolCallComparator) -> None:
+        score, category = comparator.compare_tool_call_arguments([1, 2, 3], [4, 5, 6])
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_LIST_F1_BELOW_THRESHOLD
+        assert len(comparator.list_f1_match_details) == 1
+        detail = comparator.list_f1_match_details[0]
+        assert detail.tp == 0
+        assert detail.f1 == 0.0
+        assert detail.matched_pairs == []
+        assert detail.score_matrix == [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ]
+
+    def test_empty_lists_return_1(self, comparator: ToolCallComparator) -> None:
+        score, category = comparator.compare_tool_call_arguments([], [])
+        assert score == 1.0
+        assert category is None
+        assert len(comparator.list_f1_match_details) == 0
+
+    def test_one_empty_list_returns_0(self, comparator: ToolCallComparator) -> None:
+        score, category = comparator.compare_tool_call_arguments([1, 2], [])
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_LIST_F1_BELOW_THRESHOLD
+        assert len(comparator.list_f1_match_details) == 0
+
+    def test_threshold_mode_returns_binary(self, comparator_with_threshold: ToolCallComparator) -> None:
+        # Same partial match as above (f1=0.8 >= threshold 0.5) -> binary 1.0
+        score, category = comparator_with_threshold.compare_tool_call_arguments([1, 2, 3], [1, 2])
+        assert score == 1.0
+        assert category is None
+        assert len(comparator_with_threshold.list_f1_match_details) == 1
+        detail = comparator_with_threshold.list_f1_match_details[0]
+        assert abs(detail.f1 - 0.8) < 1e-6
+
+    def test_threshold_mode_below_threshold_returns_0(self, comparator_with_threshold: ToolCallComparator) -> None:
+        # expected: [1, 2, 3, 4, 5], actual: [1] -> tp=1, precision=1/1=1.0, recall=1/5=0.2, f1=0.333 < 0.5
+        score, category = comparator_with_threshold.compare_tool_call_arguments([1, 2, 3, 4, 5], [1])
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_LIST_F1_BELOW_THRESHOLD
+
+    def test_partial_f1_propagates_through_compare_tool_call(self, comparator: ToolCallComparator) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps({"items": [1, 2, 3]}),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="test",
+            name="search",
+            arguments=json.dumps({"items": [1, 2]}),
+        )
+        reward, category = comparator.compare_tool_call(expected, actual)
+        assert abs(reward - 0.8) < 1e-6
+        assert category == StepRewardCategory.ARGUMENT_LIST_F1_PARTIAL
+        assert len(comparator.list_f1_match_details) == 1
+        detail = comparator.list_f1_match_details[0]
+        assert detail.expected_values == [1, 2, 3]
+        assert detail.actual_values == [1, 2]
+        assert detail.matched_pairs == [(0, 0), (1, 1)]
+
+
+class TestToolCallComparatorStrongListReward:
+    @fixture
+    def comparator(self) -> ToolCallComparator:
+        config = ToolCallComparatorConfig(
+            word_count_similarity_threshold=0.5,
+            use_f1_for_list=True,
+            use_strong_list_reward=True,
+            list_f1_threshold=0.8,
+            list_f1_min_precision=1.0,
+            list_f1_min_recall=1.0,
+            list_f1_max_actual_to_expected_ratio=1.0,
+        )
+        return ToolCallComparator(config=config)
+
+    def test_exact_list_match_returns_1(self, comparator: ToolCallComparator) -> None:
+        score, category = comparator.compare_tool_call_arguments(["a", "b", "c"], ["a", "b", "c"])
+        assert score == 1.0
+        assert category is None
+        detail = comparator.list_f1_match_details[0]
+        assert detail.strong_match_failure_reasons == []
+
+    def test_partial_list_match_returns_0_even_when_f1_is_high(
+        self,
+        comparator: ToolCallComparator,
+    ) -> None:
+        score, category = comparator.compare_tool_call_arguments([1, 2, 3], [1, 2])
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_LIST_F1_WEAK_MATCH
+        detail = comparator.list_f1_match_details[0]
+        assert abs(detail.f1 - 0.8) < 1e-6
+        assert "recall_below_floor" in detail.strong_match_failure_reasons
+
+    def test_duplicate_padding_returns_0(self, comparator: ToolCallComparator) -> None:
+        score, category = comparator.compare_tool_call_arguments(["a", "b"], ["a", "b", "a"])
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_LIST_F1_WEAK_MATCH
+        detail = comparator.list_f1_match_details[0]
+        assert detail.actual_duplicate_count == 1
+        assert "duplicate_actual_values" in detail.strong_match_failure_reasons
+
+    def test_overbroad_list_returns_0(self, comparator: ToolCallComparator) -> None:
+        score, category = comparator.compare_tool_call_arguments(["a"], ["a", "b"])
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_LIST_F1_WEAK_MATCH
+        detail = comparator.list_f1_match_details[0]
+        assert detail.actual_to_expected_ratio == 2.0
+        assert "actual_list_overbroad" in detail.strong_match_failure_reasons
+
+    def test_fuzzy_query_element_match_returns_0(self, comparator: ToolCallComparator) -> None:
+        score, category = comparator.compare_tool_call_arguments(
+            ["alpha beta gamma delta"],
+            ["alpha beta"],
+        )
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_LIST_F1_WEAK_MATCH
+        detail = comparator.list_f1_match_details[0]
+        assert detail.tp == 0
+        assert "f1_below_threshold" in detail.strong_match_failure_reasons
+
+    def test_ambiguous_list_match_uses_optimal_matching(self) -> None:
+        comparator = ToolCallComparator(
+            config=ToolCallComparatorConfig(
+                word_count_similarity_threshold=0.4,
+                use_f1_for_list=True,
+                use_strong_list_reward=True,
+                list_f1_threshold=0.8,
+                list_f1_min_precision=1.0,
+                list_f1_min_recall=1.0,
+                list_f1_max_actual_to_expected_ratio=1.0,
+            )
+        )
+
+        score, category = comparator.compare_tool_call_arguments(
+            ["alpha beta", "alpha beta gamma delta"],
+            ["alpha beta gamma", "alpha beta"],
+        )
+
+        assert score == 1.0
+        assert category is None
+        detail = comparator.list_f1_match_details[0]
+        assert detail.tp == 2
+        assert detail.matched_pairs == [(0, 1), (1, 0)]
+
+
+class TestToolCallComparatorToolSpecificStrongListReward:
+    @fixture
+    def comparator(self) -> ToolCallComparator:
+        config = ToolCallComparatorConfig(
+            word_count_similarity_threshold=0.5,
+            use_f1_for_list=True,
+            use_strong_list_reward=True,
+            list_f1_threshold=0.8,
+            list_f1_min_precision=1.0,
+            list_f1_min_recall=1.0,
+            list_f1_max_actual_to_expected_ratio=1.0,
+            keep_quotes=True,
+            argument_comparison_overrides={
+                "search": {
+                    "queries": ToolCallArgumentComparisonOverride(
+                        word_count_similarity_threshold=0.25,
+                        word_count_min_precision=0.5,
+                        word_count_min_recall=0.3,
+                        word_count_max_actual_to_expected_ratio=1.5,
+                        word_count_max_unmatched_actual_words=5,
+                        list_f1_relaxed_min_expected_len=3,
+                        list_f1_max_unmatched_expected=1,
+                        list_f1_max_unmatched_actual=1,
+                        keep_quotes=True,
+                        coerce_actual_string_to_list=True,
+                        coerce_actual_string_to_singleton_list=True,
+                        validate_list_item_schema=True,
+                        reject_empty_string_list_items=True,
+                    )
+                }
+            },
+        )
+        return ToolCallComparator(config=config)
+
+    def test_search_query_uses_relaxed_element_match(self, comparator: ToolCallComparator) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps({"queries": ["Hawthorn Trophy bonus points Motorsport Ireland"]}),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="actual",
+            name="search",
+            arguments=json.dumps({"queries": ["Hawthorn Trophy bonus points table Motorsport Ireland"]}),
+        )
+        score, category = comparator.compare_tool_call(expected, actual)
+        assert score == 1.0
+        assert category == StepRewardCategory.EXPECTED_TOOL_CALL
+
+    def test_search_query_rejects_broad_element_padding(self, comparator: ToolCallComparator) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps({"queries": ["Hawthorn Trophy bonus points Motorsport Ireland"]}),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="actual",
+            name="search",
+            arguments=json.dumps(
+                {
+                    "queries": [
+                        "Hawthorn Trophy bonus points Motorsport Ireland official source "
+                        "wikipedia reddit news pdf overview details"
+                    ]
+                }
+            ),
+        )
+        score, category = comparator.compare_tool_call(expected, actual)
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_LIST_F1_WEAK_MATCH
+
+    def test_search_query_json_string_list_is_coerced(self, comparator: ToolCallComparator) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps({"queries": ["alpha beta gamma"]}),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="actual",
+            name="search",
+            arguments=json.dumps({"queries": json.dumps(["alpha beta gamma"])}),
+        )
+        score, category = comparator.compare_tool_call(expected, actual)
+        assert score == 1.0
+        assert category == StepRewardCategory.EXPECTED_TOOL_CALL
+
+    def test_search_query_plain_string_is_coerced_for_singleton_gold(
+        self,
+        comparator: ToolCallComparator,
+    ) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps({"queries": ["alpha beta gamma"]}),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="actual",
+            name="search",
+            arguments=json.dumps({"queries": "alpha beta gamma"}),
+        )
+        score, category = comparator.compare_tool_call(expected, actual)
+        assert score == 1.0
+        assert category == StepRewardCategory.EXPECTED_TOOL_CALL
+
+    def test_search_query_plain_string_is_not_coerced_for_multi_query_gold(
+        self,
+        comparator: ToolCallComparator,
+    ) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps({"queries": ["alpha beta gamma", "delta epsilon zeta"]}),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="actual",
+            name="search",
+            arguments=json.dumps({"queries": "alpha beta gamma"}),
+        )
+        score, category = comparator.compare_tool_call(expected, actual)
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_VALUE_TYPE_DIFFERENT
+
+    def test_malformed_singleton_list_string_is_coerced(
+        self,
+        comparator: ToolCallComparator,
+    ) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps({"queries": ["PayPal proxy Jamie Miller compensation"]}),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="actual",
+            name="search",
+            arguments=json.dumps({"queries": "[PayPal proxy Jamie Miller]"}),
+        )
+        score, category = comparator.compare_tool_call(expected, actual)
+        assert score == 1.0
+        assert category == StepRewardCategory.EXPECTED_TOOL_CALL
+
+    def test_search_query_still_rejects_missing_list_items(self, comparator: ToolCallComparator) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps(
+                {
+                    "queries": [
+                        "Hawthorn Trophy bonus points Motorsport Ireland",
+                        "Dunlop Hawthorn Trophy bonus points starters",
+                    ]
+                }
+            ),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="actual",
+            name="search",
+            arguments=json.dumps({"queries": ["Hawthorn Trophy bonus points table Motorsport Ireland"]}),
+        )
+        score, category = comparator.compare_tool_call(expected, actual)
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_LIST_F1_WEAK_MATCH
+        detail = comparator.list_f1_match_details[0]
+        assert "recall_below_floor" in detail.strong_match_failure_reasons
+
+    def test_search_query_allows_one_missing_item_for_three_or_more_gold(
+        self,
+        comparator: ToolCallComparator,
+    ) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps(
+                {
+                    "queries": [
+                        "alpha beta gamma",
+                        "delta epsilon zeta",
+                        "eta theta iota",
+                    ]
+                }
+            ),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="actual",
+            name="search",
+            arguments=json.dumps({"queries": ["alpha beta gamma", "delta epsilon zeta"]}),
+        )
+        score, category = comparator.compare_tool_call(expected, actual)
+        assert score == 1.0
+        assert category == StepRewardCategory.EXPECTED_TOOL_CALL
+        detail = comparator.list_f1_match_details[0]
+        assert detail.tp == 2
+        assert detail.strong_match_failure_reasons == []
+
+    def test_search_query_allows_one_extra_item_for_three_or_more_gold(
+        self,
+        comparator: ToolCallComparator,
+    ) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps(
+                {
+                    "queries": [
+                        "alpha beta gamma",
+                        "delta epsilon zeta",
+                        "eta theta iota",
+                    ]
+                }
+            ),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="actual",
+            name="search",
+            arguments=json.dumps(
+                {
+                    "queries": [
+                        "alpha beta gamma",
+                        "delta epsilon zeta",
+                        "eta theta iota",
+                        "unrelated reward check",
+                    ]
+                }
+            ),
+        )
+        score, category = comparator.compare_tool_call(expected, actual)
+        assert score == 1.0
+        assert category == StepRewardCategory.EXPECTED_TOOL_CALL
+        detail = comparator.list_f1_match_details[0]
+        assert detail.tp == 3
+        assert detail.strong_match_failure_reasons == []
+
+    def test_search_query_rejects_non_string_extra_even_when_one_extra_allowed(
+        self,
+        comparator: ToolCallComparator,
+    ) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps(
+                {
+                    "queries": [
+                        "alpha beta gamma",
+                        "delta epsilon zeta",
+                        "eta theta iota",
+                    ]
+                }
+            ),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="actual",
+            name="search",
+            arguments=json.dumps({"queries": ["alpha beta gamma", "delta epsilon zeta", "eta theta iota", 123]}),
+        )
+        score, category = comparator.compare_tool_call(expected, actual)
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_LIST_SCHEMA_MALFORMED
+
+    def test_search_query_rejects_empty_extra_even_when_one_extra_allowed(
+        self,
+        comparator: ToolCallComparator,
+    ) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps(
+                {
+                    "queries": [
+                        "alpha beta gamma",
+                        "delta epsilon zeta",
+                        "eta theta iota",
+                    ]
+                }
+            ),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="actual",
+            name="search",
+            arguments=json.dumps({"queries": ["alpha beta gamma", "delta epsilon zeta", "eta theta iota", "  "]}),
+        )
+        score, category = comparator.compare_tool_call(expected, actual)
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_LIST_SCHEMA_MALFORMED
+
+    def test_search_query_allows_one_substitution_for_three_or_more_gold(
+        self,
+        comparator: ToolCallComparator,
+    ) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps(
+                {
+                    "queries": [
+                        "alpha beta gamma",
+                        "delta epsilon zeta",
+                        "eta theta iota",
+                    ]
+                }
+            ),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="actual",
+            name="search",
+            arguments=json.dumps(
+                {
+                    "queries": [
+                        "alpha beta gamma",
+                        "delta epsilon zeta",
+                        "unrelated reward check",
+                    ]
+                }
+            ),
+        )
+        score, category = comparator.compare_tool_call(expected, actual)
+        assert score == 1.0
+        assert category == StepRewardCategory.EXPECTED_TOOL_CALL
+        detail = comparator.list_f1_match_details[0]
+        assert detail.tp == 2
+        assert detail.strong_match_failure_reasons == []
+
+    def test_search_query_rejects_two_missing_items_for_three_or_more_gold(
+        self,
+        comparator: ToolCallComparator,
+    ) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps(
+                {
+                    "queries": [
+                        "alpha beta gamma",
+                        "delta epsilon zeta",
+                        "eta theta iota",
+                    ]
+                }
+            ),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="actual",
+            name="search",
+            arguments=json.dumps({"queries": ["alpha beta gamma"]}),
+        )
+        score, category = comparator.compare_tool_call(expected, actual)
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_LIST_F1_WEAK_MATCH
+        detail = comparator.list_f1_match_details[0]
+        assert "unmatched_expected_above_limit" in detail.strong_match_failure_reasons
+
+    def test_search_query_rejects_two_extra_items_for_three_or_more_gold(
+        self,
+        comparator: ToolCallComparator,
+    ) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps(
+                {
+                    "queries": [
+                        "alpha beta gamma",
+                        "delta epsilon zeta",
+                        "eta theta iota",
+                    ]
+                }
+            ),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="actual",
+            name="search",
+            arguments=json.dumps(
+                {
+                    "queries": [
+                        "alpha beta gamma",
+                        "delta epsilon zeta",
+                        "eta theta iota",
+                        "unrelated reward check",
+                        "another unrelated probe",
+                    ]
+                }
+            ),
+        )
+        score, category = comparator.compare_tool_call(expected, actual)
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_LIST_F1_WEAK_MATCH
+        detail = comparator.list_f1_match_details[0]
+        assert "unmatched_actual_above_limit" in detail.strong_match_failure_reasons
+
+    def test_search_query_rejects_duplicate_under_relaxed_list_rule(
+        self,
+        comparator: ToolCallComparator,
+    ) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps(
+                {
+                    "queries": [
+                        "alpha beta gamma",
+                        "delta epsilon zeta",
+                        "eta theta iota",
+                    ]
+                }
+            ),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="actual",
+            name="search",
+            arguments=json.dumps({"queries": ["alpha beta gamma", "delta epsilon zeta", "alpha beta gamma"]}),
+        )
+        score, category = comparator.compare_tool_call(expected, actual)
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_LIST_F1_WEAK_MATCH
+        detail = comparator.list_f1_match_details[0]
+        assert "duplicate_actual_values" in detail.strong_match_failure_reasons
+
+    def test_browse_url_does_not_use_search_query_override(self, comparator: ToolCallComparator) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="browse",
+            arguments=json.dumps({"urls": ["https://example.com/alpha-beta-gamma"]}),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="actual",
+            name="browse",
+            arguments=json.dumps({"urls": ["https://example.com/alpha-beta"]}),
+        )
+        score, category = comparator.compare_tool_call(expected, actual)
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_LIST_F1_WEAK_MATCH
+        detail = comparator.list_f1_match_details[0]
+        assert detail.tp == 0
+
+    def test_browse_url_does_not_use_search_query_list_relaxation(self, comparator: ToolCallComparator) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="browse",
+            arguments=json.dumps(
+                {
+                    "urls": [
+                        "https://example.com/one",
+                        "https://example.com/two",
+                        "https://example.com/three",
+                    ]
+                }
+            ),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="actual",
+            name="browse",
+            arguments=json.dumps({"urls": ["https://example.com/one", "https://example.com/two"]}),
+        )
+        score, category = comparator.compare_tool_call(expected, actual)
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_LIST_F1_WEAK_MATCH
+        detail = comparator.list_f1_match_details[0]
+        assert "recall_below_floor" in detail.strong_match_failure_reasons
+
+
+class TestToolCallComparatorRealWorldCases:
+    """Tests from real model outputs where queries arg is a string instead of a list."""
+
+    @fixture
+    def comparator(self) -> ToolCallComparator:
+        config = ToolCallComparatorConfig(
+            word_count_similarity_threshold=0.3,
+            use_f1_for_list=True,
+            use_list_f1_threshold=False,
+        )
+        return ToolCallComparator(config=config)
+
+    def test_queries_string_instead_of_list_nosia(self, comparator: ToolCallComparator) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps({"queries": ['"Environmental Modeling Prediction" "Figure A" NOSIA']}),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="chatcmpl-tool-b6eb12d375957a8c",
+            name="search",
+            arguments=json.dumps({"queries": '["NOSIA-II" "Weather Ready Nation" Mission Service Areas]'}),
+        )
+        reward, category = comparator.compare_tool_call(expected, actual)
+        assert reward == 0.0
+        assert category == StepRewardCategory.ARGUMENT_VALUE_TYPE_DIFFERENT
+        assert len(comparator.list_f1_match_details) == 0
+
+    def test_queries_string_instead_of_list_wga(self, comparator: ToolCallComparator) -> None:
+        expected = ExpectedFunctionCall(
+            type="function_call",
+            name="search",
+            arguments=json.dumps({"queries": ["non-original screenplay wga credit rules"]}),
+        )
+        actual = NeMoGymResponseFunctionToolCall(
+            call_id="chatcmpl-tool-ae08555b2ca7a66d",
+            name="search",
+            arguments=json.dumps(
+                {"queries": '["production executive" "non-original" screenplay credit percentage WGA]'}
+            ),
+        )
+        reward, category = comparator.compare_tool_call(expected, actual)
+        assert reward == 0.0
+        assert category == StepRewardCategory.ARGUMENT_VALUE_TYPE_DIFFERENT
+        assert len(comparator.list_f1_match_details) == 0
+
+
+class TestToolCallComparatorKeepQuotes:
+    """Tests for keep_quotes=True: quoted substrings are parsed as single tokens.
+
+    With keep_quotes=True, a substring inside matching quote characters (single or double)
+    is treated as one token, quotes preserved. This makes quoted phrases distinct from the
+    same words unquoted, which matters for search-query-style arguments where quoting
+    signals an exact-phrase intent.
+    """
+
+    @fixture
+    def comparator(self) -> ToolCallComparator:
+        config = ToolCallComparatorConfig(
+            word_count_similarity_threshold=0.3,
+            keep_quotes=True,
+        )
+        return ToolCallComparator(config=config)
+
+    @fixture
+    def comparator_default(self) -> ToolCallComparator:
+        config = ToolCallComparatorConfig(word_count_similarity_threshold=0.3)
+        return ToolCallComparator(config=config)
+
+    def test_default_keep_quotes_is_false(self) -> None:
+        config = ToolCallComparatorConfig(word_count_similarity_threshold=0.3)
+        assert config.keep_quotes is False
+
+    def test_keep_quotes_flag_changes_tokenization(self) -> None:
+        # Strong discriminator: same inputs, different score based on keep_quotes.
+        #
+        # Input: expected='"a b c d e"' vs actual='a b c d e'.
+        #
+        # With keep_quotes=False (plain whitespace split):
+        #   expected tokens: ['"a', 'b', 'c', 'd', 'e"']  (5 tokens; first/last carry quotes)
+        #   actual   tokens: ['a', 'b', 'c', 'd', 'e']    (5 tokens)
+        #   intersection: {'b','c','d'} = 3; similarity = 3/10 = 0.3, not < 0.3 -> PASS.
+        #
+        # With keep_quotes=True (quoted-phrase-aware):
+        #   expected tokens: ['"a b c d e"']  (1 token, short-string rule applies)
+        #   exact equality with 'a b c d e' fails -> FAIL.
+        expected = '"a b c d e"'
+        actual = "a b c d e"
+
+        config_off = ToolCallComparatorConfig(word_count_similarity_threshold=0.3)
+        comp_off = ToolCallComparator(config=config_off)
+        score_off, _ = comp_off.compare_tool_call_arguments(expected, actual)
+        assert score_off == 1.0
+
+        config_on = ToolCallComparatorConfig(word_count_similarity_threshold=0.3, keep_quotes=True)
+        comp_on = ToolCallComparator(config=config_on)
+        score_on, category_on = comp_on.compare_tool_call_arguments(expected, actual)
+        assert score_on == 0.0
+        assert category_on == StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
+
+    def test_baseline_identical_strings_still_match_without_flag(self, comparator_default: ToolCallComparator) -> None:
+        # Regression: with keep_quotes unset, today's behavior is unchanged.
+        # Both sides tokenize identically via plain .split(), so they match.
+        score, category = comparator_default.compare_tool_call_arguments('"hello world" zumba', '"hello world" zumba')
+        assert score == 1.0
+        assert category is None
+
+    def test_baseline_quoted_vs_unquoted_without_flag(self, comparator_default: ToolCallComparator) -> None:
+        # Without keep_quotes, quotes are just glued to adjacent words:
+        #   expected tokens: ['"hello', 'world"', 'zumba']
+        #   actual   tokens: ['hello', 'world', 'zumba']
+        # Shared word total = 1 ('zumba'); similarity = 1 / (3+3) = 0.167 < 0.3 -> fail.
+        # This locks in current behavior so we can detect drift once keep_quotes lands.
+        score, category = comparator_default.compare_tool_call_arguments('"hello world" zumba', "hello world zumba")
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
+
+    def test_quoted_phrase_matches_same_quoted_phrase(self, comparator: ToolCallComparator) -> None:
+        score, category = comparator.compare_tool_call_arguments('"hello world" zumba', '"hello world" zumba')
+        assert score == 1.0
+        assert category is None
+
+    def test_quoted_phrase_order_independent(self, comparator: ToolCallComparator) -> None:
+        score, category = comparator.compare_tool_call_arguments('"hello world" zumba', 'zumba "hello world"')
+        assert score == 1.0
+        assert category is None
+
+    def test_quoted_phrase_distinct_from_unquoted_same_words(self, comparator: ToolCallComparator) -> None:
+        # With keep_quotes, '"hello world"' is one token and does NOT match unquoted
+        # 'hello' + 'world'. Only 'zumba' overlaps. Similarity = 0 / (2+3) = 0 -> fail.
+        score, category = comparator.compare_tool_call_arguments('"hello world" zumba', "hello world zumba")
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
+
+    def test_inner_words_of_quoted_phrase_not_matched_separately(self, comparator: ToolCallComparator) -> None:
+        # Expected: ['"hello world"'] (1 token). <2 tokens triggers exact-string rule.
+        # Actual: 'hello zumba world' != '"hello world"' -> fail.
+        score, category = comparator.compare_tool_call_arguments('"hello world"', "hello zumba world")
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
+
+    def test_multiple_quoted_phrases_order_independent(self, comparator: ToolCallComparator) -> None:
+        score, category = comparator.compare_tool_call_arguments(
+            '"new york" "los angeles"', '"los angeles" "new york"'
+        )
+        assert score == 1.0
+        assert category is None
+
+    def test_unbalanced_quote_strips_and_warns(self, comparator: ToolCallComparator, caplog) -> None:
+        # Unbalanced quote on expected side -> strip all quote chars, fall back to
+        # whitespace split, emit a warning. After strip both sides are identical.
+        caplog.set_level(logging.WARNING)
+        score, category = comparator.compare_tool_call_arguments('"hello world zumba', "hello world zumba")
+        assert score == 1.0
+        assert category is None
+        assert any(
+            "unbalanced" in rec.message.lower() or "unmatched" in rec.message.lower() for rec in caplog.records
+        ), f"expected an unbalanced-quote warning, got: {[r.message for r in caplog.records]}"
+
+    def test_single_quoted_short_string_requires_exact_match(self, comparator: ToolCallComparator) -> None:
+        # Expected tokenizes to 1 token ['"hi"']; <2 triggers exact-equality rule.
+        # '"hi"' != 'hi' -> fail.
+        score, category = comparator.compare_tool_call_arguments('"hi"', "hi")
+        assert score == 0.0
+        assert category == StepRewardCategory.ARGUMENT_VALUE_DIFFERENT
+
+    def test_quoted_phrase_case_insensitive(self, comparator: ToolCallComparator) -> None:
+        score, category = comparator.compare_tool_call_arguments('"Hello World" Zumba', '"hello world" zumba')
+        assert score == 1.0
+        assert category is None
+
+    def test_single_quote_chars_supported(self, comparator: ToolCallComparator) -> None:
+        score, category = comparator.compare_tool_call_arguments("'hello world' zumba", "zumba 'hello world'")
+        assert score == 1.0
+        assert category is None
+
+    def test_mixed_quote_types_supported(self, comparator: ToolCallComparator) -> None:
+        score, category = comparator.compare_tool_call_arguments("\"hi there\" 'bye now'", "'bye now' \"hi there\"")
+        assert score == 1.0
+        assert category is None
+
+    def test_quoted_strings_inside_f1_list(self) -> None:
+        config = ToolCallComparatorConfig(
+            word_count_similarity_threshold=0.3,
+            use_f1_for_list=True,
+            use_list_f1_threshold=True,
+            list_f1_threshold=0.5,
+            keep_quotes=True,
+        )
+        comp = ToolCallComparator(config=config)
+        score, category = comp.compare_tool_call_arguments(
+            ['"hello world" zumba', "other query here"],
+            ["other query here", '"hello world" zumba'],
+        )
+        assert score == 1.0
+        assert category is None
