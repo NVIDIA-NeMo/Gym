@@ -1011,7 +1011,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         if self._external_capture_enabled:
-            await self._finalize_external_capture(chat_completion_dict)
+            await self._finalize_external_capture(
+                chat_completion_dict, as_responses=request.url.path in {"/v1/responses", "/v1/messages"}
+            )
 
         if self.config.return_token_id_information:
             message_dict = choice_dict["message"]
@@ -1079,7 +1081,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
-    async def _finalize_external_capture(self, payload: Dict[str, Any]) -> None:
+    async def _finalize_external_capture(self, payload: Dict[str, Any], *, as_responses: bool = False) -> None:
         """Validate and record a response staged by the inference worker.
 
         The worker returns commit coordinates only after ``StagingSink.stage`` succeeds.
@@ -1130,6 +1132,14 @@ class VLLMModel(SimpleResponsesAPIModel):
                 raise ValueError(f"served response for {coords.model_call_id} carries no envelope id")
             child_staging_chain = list(context.parent_staging_chain) + [str(coords.staging_key)]
             response_items, _ = strip_token_fields(response_to_output_items(payload))
+            if as_responses:
+                # Match the representation served by responses(), including separate
+                # reasoning items. Chat callers instead echo the wrapped assistant text.
+                response_items = [
+                    item.model_dump()
+                    for message in response_items
+                    for item in self._converter.postprocess_assistant_message_dict(message)
+                ]
             # Compute one fingerprint for the response items.
             # Compute another for the request and response items together.
             # If either input cannot be fingerprinted, store no fingerprints and continue recording the call.
