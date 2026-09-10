@@ -153,7 +153,7 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         model_response = await self.server_client.post(
             server_name=self.config.model_server.name,
             url_path="/v1/responses",
-            json=body,
+            json=body.model_dump(exclude_unset=True, exclude_none=True),
             cookies=request.cookies,
         )
         await raise_for_status(model_response)
@@ -173,6 +173,8 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         solutions: Dict[str, str] = {}
         out_of_context = False
         last_response_json = None
+        response_create_params = body.responses_create_params.model_dump(exclude_unset=True, exclude_none=True)
+        response_create_params.pop("input", None)
 
         for cur_step in range(total):
             # Prefilled steps provide context for later steps but are not scored (no solution entry).
@@ -196,7 +198,10 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
                 gen_response = await self.server_client.post(
                     server_name=self.config.name,
                     url_path="/v1/responses",
-                    json={"input": [{"role": "user", "content": user_content}]},
+                    json={
+                        **response_create_params,
+                        "input": [{"role": "user", "content": user_content}],
+                    },
                     cookies=cookies,
                 )
                 await raise_for_status(gen_response)

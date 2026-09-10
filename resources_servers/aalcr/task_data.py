@@ -2,12 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-data schema for the aalcr server.
 
-There is no verifier_metadata: all nine task fields ride as REQUIRED top-level row fields on
-``AALCRVerifyRequest`` (app.py), so all nine stay required here even though verify() only reads
-``question``, ``answer``, and ``input_tokens_band`` — the other six exist to be echoed into
-``AALCRVerifyResponse``. ``input_tokens_band`` is narrowed to the five-band Literal: verify()'s
-``match`` statement has no default case, so any other value crashes with an UnboundLocalError,
-making the enum the server's real contract even though the wire types it as a bare ``str``.
+There is no verifier_metadata: task fields ride as top-level row fields on ``AALCRVerifyRequest``
+(app.py). Version metadata defaults to the legacy protocol so committed examples and historical
+rows remain valid, while prepared benchmark rows always record it explicitly.
 """
 
 from typing import Literal
@@ -57,4 +54,20 @@ class TaskData(BaseModel):
             "so these five values are the de-facto enum."
         ),
         json_schema_extra={"consumed_by": ["verify", "metrics"]},
+    )
+    aa_lcr_version: Literal["1.0.0", "1.1"] = Field(
+        default="1.0.0",
+        description="AA-LCR benchmark version used to prepare this row.",
+        json_schema_extra={"consumed_by": ["verify", "provenance"]},
+    )
+    aa_lcr_dataset_revision: str = Field(
+        default="bdae010bbce259820c0e34c1d7cce210d966fb75",  # pragma: allowlist secret
+        pattern=r"^[0-9a-f]{40}$",
+        description="Immutable Hugging Face dataset commit used to prepare this row.",
+        json_schema_extra={"consumed_by": ["verify", "provenance"]},
+    )
+    aa_lcr_judge_protocol: Literal["legacy_v1_0", "official_v1_1"] = Field(
+        default="legacy_v1_0",
+        description="Judge prompt and verdict protocol required for this row.",
+        json_schema_extra={"consumed_by": ["verify", "provenance"]},
     )

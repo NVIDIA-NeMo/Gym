@@ -190,6 +190,18 @@ def test_github_full_test_jobs_reclaim_disk_before_dependency_restore() -> None:
             assert section.index("reclaim_runner_disk.sh") < section.index("Cache uv dependencies")
 
 
+def test_scheduled_cicd_runs_do_not_cancel_in_progress() -> None:
+    cicd_workflow = CICD_MAIN_WORKFLOW.read_text()
+    unit_workflow = UNIT_TEST_WORKFLOW.read_text()
+
+    assert (
+        "concurrency:\n"
+        "  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}\n"
+        "  cancel-in-progress: ${{ github.event_name != 'schedule' }}\n" in cicd_workflow
+    )
+    assert "concurrency:" not in unit_workflow
+
+
 def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
     results_path = (
@@ -224,7 +236,12 @@ def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
     assert "if: false" not in workflow
     assert "Temporarily disabled" not in workflow
     assert "needs.pre-flight.outputs.docs_only" not in workflow
-    assert "runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}" in workflow
+    runner_label = (
+        "runs-on: ${{ startsWith(needs.pre-flight.outputs.runner_prefix, 'ephe-v2-') "
+        "&& format('{0}-a{1}', needs.pre-flight.outputs.runner_prefix, github.run_attempt) "
+        "|| needs.pre-flight.outputs.runner_prefix }}"
+    )
+    assert runner_label in workflow
     assert "matrix:" in workflow
     assert "script: ${{ matrix.script }}" in workflow
     assert "test-type: ${{ matrix.test_type }}" in workflow
@@ -241,7 +258,12 @@ def test_cicd_container_build_pushes_sha_image_after_unit_tests() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
 
     assert "name: Build Gym container" in workflow
-    assert "runs-on: ${{ needs.pre-flight.outputs.runner_prefix }}" in workflow
+    runner_label = (
+        "runs-on: ${{ startsWith(needs.pre-flight.outputs.runner_prefix, 'ephe-v2-') "
+        "&& format('{0}-a{1}', needs.pre-flight.outputs.runner_prefix, github.run_attempt) "
+        "|| needs.pre-flight.outputs.runner_prefix }}"
+    )
+    assert runner_label in workflow
     assert "uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f" in workflow
     assert "uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25" in workflow
     assert "build-contexts: nemo-gym=." in workflow
@@ -345,14 +367,11 @@ def test_nemo_cicd_test_gate_matches_event_and_job_results(
 def test_cicd_nightly_jobs_require_upstream_success() -> None:
     workflow = CICD_MAIN_WORKFLOW.read_text()
 
-    # A job's own `if:` replaces (not ANDs with) the implicit success()-of-
-    # needs check, so container_build/gpu_e2e_tests/provider_e2e_tests must
-    # explicitly check needs.*.result themselves. `is_nightly` is a single
-    # source of truth on classify_changes, referenced by three downstream
-    # jobs (container_build, gpu_e2e_tests, provider_e2e_tests) instead of
-    # each re-deriving github.event_name == 'schedule' || ... . notify-failure
-    # deliberately does NOT use it (see test_notify_failure_fires_even_if_
-    # classify_changes_is_skipped for why).
+    # `is_nightly` is a single source of truth on classify_changes, referenced
+    # by three downstream jobs (container_build, gpu_e2e_tests, and
+    # provider_e2e_tests) instead of each re-deriving github.event_name.
+    # notify-failure deliberately does NOT use it (see
+    # test_notify_failure_fires_even_if_classify_changes_is_skipped for why).
     assert workflow.count("needs.classify_changes.outputs.is_nightly == 'true'") == 3
     non_definition = workflow.replace(
         "is_nightly: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}", ""
@@ -362,6 +381,18 @@ def test_cicd_nightly_jobs_require_upstream_success() -> None:
     assert workflow.count("needs.classify_changes.result == 'success' &&") == 3
     assert "(needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')" in workflow
     assert "needs.container_build.result == 'success'" in workflow
+
+
+def test_cicd_docs_only_nightly_jobs_override_skipped_unit_status() -> None:
+    jobs = _cicd_main_jobs()
+
+    # Scheduled docs-only runs skip unit_tests. The explicit status function
+    # makes GitHub evaluate each downstream condition instead of applying its
+    # implicit success() check to the skipped dependency first.
+    for job_name in ("container_build", "gpu_e2e_tests", "provider_e2e_tests"):
+        condition = jobs[job_name]["if"]
+        assert "always() && !cancelled() &&" in condition
+        assert ("(needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')") in condition
 
 
 @pytest.mark.parametrize(

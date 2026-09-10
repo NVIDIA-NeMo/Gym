@@ -544,6 +544,28 @@ async def test_attach_pty_session_query(takeover: bool, since: int | None, expec
     await session.close()
 
 
+async def test_connect_ws_retries_server_disconnected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ServerDisconnectedError during WS upgrade is transient; _connect_ws must retry."""
+    import aiohttp
+
+    from nemo_gym.sandbox.providers.opensandbox.pty import attach_pty_session
+
+    monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", (0,))
+    client = FakeHttpClient(
+        ws=[FakeWs([CONNECTED])],
+        ws_error=[aiohttp.ServerDisconnectedError()],
+    )
+    session = await attach_pty_session(
+        client=client,  # type: ignore[arg-type]
+        base_url="http://server/base",
+        headers={},
+        session_id="s-1",
+        request_timeout_s=5.0,
+    )
+    assert len(client.ws_calls) == 2, "first call raised ServerDisconnected; second should succeed"
+    await session.close()
+
+
 async def test_attach_pty_session_failure_closes_client() -> None:
     from nemo_gym.sandbox.providers.opensandbox.pty import attach_pty_session
 
@@ -566,6 +588,67 @@ async def test_evicted_session_reports_takeover() -> None:
     with pytest.raises(SandboxPtyError, match="taken over"):
         await session.read()
     await session.close()
+
+
+async def _diagnosed_session(close_code: int, notice: str | None) -> tuple[OpenSandboxPtySession, FakeWs, list[int]]:
+    """Session whose socket dies with ``close_code``; diagnose returns ``notice``."""
+    calls: list[int] = []
+
+    async def diagnose() -> str | None:
+        calls.append(1)
+        return notice
+
+    ws = FakeWs([CONNECTED], close_code=close_code)
+    session = OpenSandboxPtySession(
+        client=FakeHttpClient(ws=ws),  # type: ignore[arg-type]
+        ws=ws,  # type: ignore[arg-type]
+        session_id="s-1",
+        session_url="http://server/v1/sandboxes/sb-1/proxy/44772/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+        diagnose=diagnose,
+    )
+    return session, ws, calls
+
+
+async def test_unexpected_close_reports_oom_diagnosis() -> None:
+    # A socket dying with a bare server-error close often means the sandbox
+    # itself died; the diagnosis (an OOM kill here) must replace the close code
+    # everywhere the session's death surfaces.
+    session, ws, calls = await _diagnosed_session(1011, "Sandbox was OOM-killed. state='Failed'")
+    ws.closed = True
+    with pytest.raises(SandboxPtyError, match="OOM-killed"):
+        await session.wait_exit(timeout_s=5)
+    with pytest.raises(SandboxPtyError, match="OOM-killed"):
+        await session.read()
+    assert calls == [1]
+    await session.close()
+
+
+async def test_unexpected_close_without_diagnosis_keeps_close_code() -> None:
+    session, ws, calls = await _diagnosed_session(1011, None)
+    ws.closed = True
+    with pytest.raises(SandboxPtyError, match="close code 1011"):
+        await session.wait_exit(timeout_s=5)
+    assert calls == [1]
+    await session.close()
+
+
+async def test_takeover_close_skips_diagnosis() -> None:
+    # An eviction names its own cause; the sandbox is alive, so don't poll it.
+    session, ws, calls = await _diagnosed_session(4001, "Sandbox was OOM-killed.")
+    ws.closed = True
+    with pytest.raises(SandboxPtyError, match="taken over"):
+        await session.wait_exit(timeout_s=5)
+    assert calls == []
+    await session.close()
+
+
+async def test_user_close_skips_diagnosis() -> None:
+    session, _, calls = await _diagnosed_session(1000, "Sandbox was OOM-killed.")
+    await session._wait_connected(1.0)
+    await session.close()
+    assert calls == []
 
 
 async def test_provider_attach_pty_reuses_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -656,6 +739,127 @@ async def test_provider_attach_pty_does_not_retry_without_takeover(monkeypatch: 
     with pytest.raises(SandboxPtyError, match="already has an attached client"):
         await provider.attach_pty(handle, "s-7", takeover=False)
     assert clients_handed == 1, "without takeover the rejection is definitive"
+
+
+async def test_provider_attach_pty_detaches_own_stale_attachment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A takeover attach must release the provider's own live attachment to
+    that session first: execd then has nothing to evict, so callers need no
+    manual detach() before re-attaching (the terminal_bench verify() path)."""
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    class FakeRaw:
+        async def get_endpoint(self, port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint="server/v1/sandboxes/sb-1/proxy/44772", headers={})
+
+    provider = OpenSandboxProvider(connection={"domain": "server", "api_key": "k", "protocol": "https"})
+    old_ws = FakeWs([CONNECTED])  # parks after the frame: a live attachment
+    old = OpenSandboxPtySession(
+        client=FakeHttpClient(ws=old_ws),  # type: ignore[arg-type]
+        ws=old_ws,  # type: ignore[arg-type]
+        session_id="s-7",
+        session_url="https://server/v1/sandboxes/sb-1/proxy/44772/pty/s-7",
+        headers={},
+        request_timeout_s=5.0,
+        owned=False,
+    )
+    await old._wait_connected(1.0)
+    provider._pty_sessions.add(old)
+
+    monkeypatch.setattr(provider, "_pty_http_client", lambda: FakeHttpClient(ws=FakeWs([CONNECTED])))
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=FakeRaw())
+    session = await provider.attach_pty(handle, "s-7", takeover=True)
+    assert old._detached, "the stale local attachment must be detached before the takeover dial"
+    assert old_ws.closed
+    await session.close()
+    await old.close()
+
+
+def _always_refused_provider(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Provider whose every takeover attach is refused as 'already attached'."""
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    provider = OpenSandboxProvider(connection={"domain": "server", "api_key": "k", "protocol": "https"})
+
+    def _client() -> FakeHttpClient:
+        rejected = FakeWs([], close_code=1008)
+        rejected.closed = True
+        return FakeHttpClient(ws=rejected)
+
+    monkeypatch.setattr(provider, "_pty_http_client", _client)
+    monkeypatch.setattr(pty_module, "_PTY_TAKEOVER_RETRY_DELAYS", (0.0,))
+    return provider
+
+
+async def test_provider_attach_pty_reports_dead_sandbox_on_exhausted_takeover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A takeover refused across every retry usually means the sandbox is gone
+    (its stale attachment can never acknowledge the eviction); the error must
+    say that, not 'already has an attached client'."""
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+
+    class DeadRaw:
+        async def get_endpoint(self, port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint="server/v1/sandboxes/sb-1/proxy/44772", headers={})
+
+        async def get_info(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                status=SimpleNamespace(state="Failed", reason="FAILED", message="1/1 observed pods failed; node lost")
+            )
+
+    provider = _always_refused_provider(monkeypatch)
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=DeadRaw())
+    with pytest.raises(SandboxPtyError, match="Sandbox is dead") as exc_info:
+        await provider.attach_pty(handle, "s-7", takeover=True)
+    assert "already has an attached client" in str(exc_info.value.__cause__)
+
+
+async def test_provider_attach_pty_keeps_refusal_when_status_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+
+    class OpaqueRaw:
+        async def get_endpoint(self, port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint="server/v1/sandboxes/sb-1/proxy/44772", headers={})
+
+        async def get_info(self) -> SimpleNamespace:
+            raise RuntimeError("control plane unavailable")
+
+    provider = _always_refused_provider(monkeypatch)
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=OpaqueRaw())
+    with pytest.raises(SandboxPtyError, match="already has an attached client"):
+        await provider.attach_pty(handle, "s-7", takeover=True)
+
+
+async def test_provider_session_reports_non_oom_death_on_server_error_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A session whose socket dies with a server-error close while the sandbox
+    is in a terminal non-OOM state (node lost) must name the death, not the
+    close code — seen live as a bare 'close code 1011' on verify()."""
+    pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
+    pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+
+    class LostRaw:
+        async def get_endpoint(self, port: int) -> SimpleNamespace:
+            return SimpleNamespace(endpoint="server/v1/sandboxes/sb-1/proxy/44772", headers={})
+
+        async def get_info(self) -> SimpleNamespace:
+            return SimpleNamespace(status=SimpleNamespace(state="Failed", reason="FAILED", message="node lost"))
+
+    provider = OpenSandboxProvider(connection={"domain": "server", "api_key": "k", "protocol": "https"})
+    dying = FakeWs([CONNECTED], close_code=1011)
+    dying.closed = True
+    monkeypatch.setattr(provider, "_pty_http_client", lambda: FakeHttpClient(ws=dying))
+    handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=LostRaw())
+    session = await provider.attach_pty(handle, "s-7", takeover=True)
+    with pytest.raises(SandboxPtyError, match="Sandbox is dead"):
+        await session.wait_exit(timeout_s=5)
+    await session.close()
 
 
 async def test_create_rejected_before_connected_raises_and_cleans_up() -> None:
@@ -842,6 +1046,129 @@ async def test_barren_reconnects_give_up(monkeypatch: pytest.MonkeyPatch) -> Non
     )
     with pytest.raises(SandboxPtyError):
         await asyncio.wait_for(session.wait_exit(), timeout=10)
+    await session.close()
+
+
+async def test_policy_violation_on_reattach_retries_after_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An "already attached" refusal on a reattach is a race (the server hasn't
+    evicted the dead previous client yet); the pump must wait out
+    _PTY_TAKEOVER_RETRY_DELAYS and succeed on the next attempt."""
+    monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", ())
+    monkeypatch.setattr(pty_module, "_PTY_TAKEOVER_RETRY_DELAYS", (0,))
+    monkeypatch.setattr(pty_module.OpenSandboxPtySession, "_reattach_socket", _REAL_REATTACH)
+
+    # Initial socket: connected + data, then the connection drops without a close frame.
+    first = FakeWs([CONNECTED, _binary(b"\x01ab")], close_code=1006)
+    first.closed = True
+
+    # First reattach: refused — the server still counts the dead client as attached.
+    race = FakeWs([], close_code=pty_module.WS_CLOSE_POLICY_VIOLATION)
+    race.closed = True
+
+    # Second reattach: server cleaned up; session resumes from offset 2.
+    resume = b"\x03" + (2).to_bytes(8, "big") + b"cd"
+    second = FakeWs([_binary(resume), _text({"type": "exit", "exit_code": 0})])
+    second.closed = True
+
+    client = FakeHttpClient(ws=[first, race, second])
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=await client.ws_connect("ws://server/base/pty/s-1/ws", headers={}),
+        session_id="s-1",
+        session_url="http://server/base/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+    )
+    assert await session.read() == b"ab"
+    assert await session.read() == b"cd", "session must resume after the takeover-race delay"
+    assert await session.wait_exit() == 0
+    assert len(client.ws_calls) == 3, "initial + 1 race reattach + 1 successful reattach"
+    await session.close()
+
+
+async def test_policy_violation_exhausted_gives_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When all _PTY_TAKEOVER_RETRY_DELAYS are consumed the pump gives up."""
+    monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", ())
+    monkeypatch.setattr(pty_module, "_PTY_TAKEOVER_RETRY_DELAYS", (0, 0))
+    monkeypatch.setattr(pty_module.OpenSandboxPtySession, "_reattach_socket", _REAL_REATTACH)
+
+    first = FakeWs([CONNECTED, _binary(b"\x01x")], close_code=1006)
+    first.closed = True
+    # Every reattach is refused as "already attached" — the server never recovers.
+    always_race = FakeWs([], close_code=pty_module.WS_CLOSE_POLICY_VIOLATION)
+    always_race.closed = True
+
+    client = FakeHttpClient(ws=[first, always_race, always_race, always_race])
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=await client.ws_connect("ws://server/base/pty/s-1/ws", headers={}),
+        session_id="s-1",
+        session_url="http://server/base/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+    )
+    await session.read()  # b"x" from first
+    with pytest.raises(SandboxPtyError, match="already has an attached client"):
+        await session.wait_exit(timeout_s=5)
+    # initial + reattach after the drop + 2 takeover retries (delays exhausted on the 3rd refusal)
+    assert len(client.ws_calls) == 4
+    await session.close()
+
+
+async def test_policy_violation_on_initial_socket_does_not_reattach(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An "already attached" refusal on the very first socket means another
+    client really owns the session; the pump must not retry."""
+    monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", ())
+    monkeypatch.setattr(pty_module, "_PTY_TAKEOVER_RETRY_DELAYS", (0,))
+    monkeypatch.setattr(pty_module.OpenSandboxPtySession, "_reattach_socket", _REAL_REATTACH)
+
+    ws = FakeWs([CONNECTED], close_code=pty_module.WS_CLOSE_POLICY_VIOLATION)
+    ws.closed = True
+    client = FakeHttpClient(ws=[ws])  # a re-dial would pop an empty list and fail
+
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=await client.ws_connect("ws://server/base/pty/s-1/ws", headers={}),
+        session_id="s-1",
+        session_url="http://server/base/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+    )
+    with pytest.raises(SandboxPtyError, match="already has an attached client"):
+        await session.wait_exit(timeout_s=5)
+    assert len(client.ws_calls) == 1, "a refusal on the initial socket must not trigger reattach"
+    await session.close()
+
+
+async def test_policy_violation_on_initial_takeover_socket_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An "already attached" refusal on an initial takeover socket means the
+    server is still evicting the previous, dead client; the pump must wait out
+    _PTY_TAKEOVER_RETRY_DELAYS and succeed, exactly as on reattach."""
+    monkeypatch.setattr(pty_module, "_PTY_RETRY_DELAYS", ())
+    monkeypatch.setattr(pty_module, "_PTY_TAKEOVER_RETRY_DELAYS", (0,))
+    monkeypatch.setattr(pty_module.OpenSandboxPtySession, "_reattach_socket", _REAL_REATTACH)
+
+    # Initial takeover attach: refused before any frame arrives.
+    race = FakeWs([], close_code=pty_module.WS_CLOSE_POLICY_VIOLATION)
+    race.closed = True
+    # Retry: the server has evicted the dead client; session attaches from offset 0.
+    good = FakeWs([CONNECTED, _binary(b"\x01ab"), _text({"type": "exit", "exit_code": 0})])
+    good.closed = True
+
+    client = FakeHttpClient(ws=[race, good])
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=await client.ws_connect("ws://server/base/pty/s-1/ws?takeover=1", headers={}),
+        session_id="s-1",
+        session_url="http://server/base/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+        owned=False,
+        takeover=True,
+    )
+    assert await session.read() == b"ab", "session must attach after waiting out the eviction race"
+    assert await session.wait_exit() == 0
+    assert len(client.ws_calls) == 2, "refused initial takeover + 1 successful retry"
     await session.close()
 
 
@@ -1059,6 +1386,37 @@ async def test_detach_keeps_session_alive_and_reattach_resumes() -> None:
     assert len(client.delete_calls) == 1, "an owned close still ends the session"
 
 
+async def test_reattach_retries_refused_takeover(monkeypatch: pytest.MonkeyPatch) -> None:
+    """reattach() dials with takeover: an "already attached" refusal on that
+    socket is execd still evicting our own detached socket, so the new pump
+    must retry rather than end the session (seen live in run_detached polls)."""
+    monkeypatch.setattr(pty_module, "_PTY_TAKEOVER_RETRY_DELAYS", (0,))
+    monkeypatch.setattr(pty_module.OpenSandboxPtySession, "_reattach_socket", _REAL_REATTACH)
+
+    ws1 = FakeWs([CONNECTED, _binary(b"\x01before")])
+    refused = FakeWs([], close_code=pty_module.WS_CLOSE_POLICY_VIOLATION)
+    refused.closed = True
+    resume = b"\x03" + (6).to_bytes(8, "big") + b"after"
+    ws3 = FakeWs([_binary(resume), _text({"type": "exit", "exit_code": 0})])
+    ws3.closed = True
+    client = FakeHttpClient(ws=[refused, ws3])
+    session = OpenSandboxPtySession(
+        client=client,  # type: ignore[arg-type]
+        ws=ws1,  # type: ignore[arg-type]
+        session_id="s-1",
+        session_url="http://server/v1/sandboxes/sb-1/proxy/44772/pty/s-1",
+        headers={},
+        request_timeout_s=5.0,
+    )
+    assert await session.read() == b"before"
+    await session.detach()
+    await session.reattach()
+    assert await session.read() == b"after", "the refused reattach must be retried, not fatal"
+    assert await session.wait_exit() == 0
+    assert len(client.ws_calls) == 2, "reattach dial + one takeover retry"
+    await session.close()
+
+
 async def test_close_while_detached_releases_and_unblocks_readers() -> None:
     ws = FakeWs([CONNECTED])
     client = FakeHttpClient(ws=ws)
@@ -1096,8 +1454,10 @@ class _LaunchWs(FakeWs):
     async def send_bytes(self, data: bytes) -> None:
         await super().send_bytes(data)
         self._state["launch"] = data
-        quoted = data.decode().splitlines()[-1].split("'")
-        self._state["marker"] = f"{quoted[3]}{quoted[5]}:0\r\n".encode()
+        quoted = data.decode().splitlines()[-2].split("'")
+        token = quoted[3] + quoted[5]
+        self._state["start"] = f"{token}S\r\n".encode()
+        self._state["marker"] = f"{token}:0\r\n".encode()
 
 
 class _ReplayWs(FakeWs):
@@ -1111,7 +1471,7 @@ class _ReplayWs(FakeWs):
     async def __anext__(self) -> SimpleNamespace:
         if not self._messages and not self._state.get("served"):
             self._state["served"] = True
-            payload = b"work-output\n" + self._state["marker"]
+            payload = self._state["start"] + b"work-output\n" + self._state["marker"]
             return _binary(b"\x03" + struct.pack(">Q", self._offset) + payload)
         return await super().__anext__()
 
