@@ -493,8 +493,8 @@ def test_build_sbatch_script_service_env_before_driver_env(bench_dir):
     script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
     svc_env_idx = script.index("SVC_KEY=svc_val")
     drv_env_idx = script.index("DRV_KEY=drv_val")
-    svc_srun_idx = script.index("srun --overlap --no-container-mount-home --container-image=vllm:latest")
-    drv_srun_idx = script.index("srun --overlap --no-container-mount-home --container-image=python:3.12")
+    svc_srun_idx = script.index("--container-image=vllm:latest")
+    drv_srun_idx = script.index("--container-image=python:3.12")
     # Service env prefix appears before service srun; driver env prefix appears before driver srun.
     assert svc_env_idx < svc_srun_idx
     assert drv_env_idx < drv_srun_idx
@@ -676,11 +676,18 @@ def test_build_sbatch_script_driver_mounts(bench_dir):
     assert "--container-mounts=/lustre/checkpoints:/ckpts" in driver_srun_line
 
 
-def test_build_sbatch_script_no_mounts_by_default(submit_config, bench_dir):
+def test_build_sbatch_script_no_service_mounts_by_default(submit_config, bench_dir):
+    """Services get no mounts unless configured. The driver is the exception and
+    always mounts the job directory, because that is where its artifacts go --
+    see test_driver_can_write_its_artifacts_into_the_job_directory."""
     benchmark = submit_config.driver.benchmarks["gsm8k"]
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
-    assert "--container-mounts" not in script
+
+    service_lines = [line for line in script.splitlines() if "srun" in line and "--output=logs/driver.log" not in line]
+    assert service_lines, "expected at least one service srun line"
+    for line in service_lines:
+        assert "--container-mounts" not in line
 
 
 # ---------------------------------------------------------------------------
@@ -1027,3 +1034,49 @@ def submit_config_with_policy():
             "job": {"output_path": "/remote/jobs"},
         }
     )
+
+
+def test_driver_can_write_its_artifacts_into_the_job_directory():
+    """A run that cannot reach the job directory completes cleanly and produces
+    nothing: `output_jsonl_fpath` is relative, `#SBATCH --chdir` only sets the
+    host-side cwd of the batch script, and a Pyxis container starts in whatever
+    directory its image declares. Both the mount and the workdir are required.
+    """
+    config = SubmitConfig.model_validate(
+        {
+            "services": {},
+            "compute": {"hsg": {"type": "slurm", "account": "acct"}},
+            "driver": {
+                "container": "gym:latest",
+                "mounts": ["/host/cache:/cache"],
+                "benchmarks": {"gpqa": {}},
+            },
+            "job": {"output_path": "/jobs"},
+        }
+    )
+    bench_dir = Path("/jobs/gym-job-x/gpqa")
+
+    script = build_sbatch_script(config, "gpqa", config.driver.benchmarks["gpqa"], config.compute["hsg"], bench_dir)
+
+    driver_line = next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
+    assert f"--container-workdir={bench_dir}" in driver_line
+    assert f"{bench_dir}:{bench_dir}" in driver_line
+    # the caller's own mounts must survive alongside the injected one
+    assert "/host/cache:/cache" in driver_line
+
+
+def test_driver_job_dir_is_mounted_even_with_no_configured_mounts():
+    config = SubmitConfig.model_validate(
+        {
+            "services": {},
+            "compute": {"hsg": {"type": "slurm", "account": "acct"}},
+            "driver": {"container": "gym:latest", "benchmarks": {"gpqa": {}}},
+            "job": {"output_path": "/jobs"},
+        }
+    )
+    bench_dir = Path("/jobs/gym-job-x/gpqa")
+
+    script = build_sbatch_script(config, "gpqa", config.driver.benchmarks["gpqa"], config.compute["hsg"], bench_dir)
+
+    driver_line = next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
+    assert f"--container-mounts={bench_dir}:{bench_dir}" in driver_line

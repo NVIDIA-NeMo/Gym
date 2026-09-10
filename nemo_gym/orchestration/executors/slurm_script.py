@@ -58,7 +58,8 @@ def _render_directives(compute: SlurmComputeConfig, remote_bench_dir: Path, benc
     lines.append(f"#SBATCH --account={compute.account}")
     if compute.walltime:
         lines.append(f"#SBATCH --time={compute.walltime}")
-    # --chdir makes relative paths (logs/, artifacts/) resolve correctly inside the job.
+    # --chdir sets the batch script's cwd on the HOST, so srun --output=logs/... resolves there.
+    # Container-side cwd is set separately per step (see driver_workdir_flag).
     lines.append(f"#SBATCH --chdir={remote_bench_dir}")
     for key, val in compute.extra_args.items():
         lines.append(f"#SBATCH --{key}={val}")
@@ -299,12 +300,22 @@ def build_sbatch_script(
     prepare_command = ""
     driver_env_prefix = _resolve_env(config.driver.env) if config.driver.env else ""
     driver_node_flags = " --nodes=1 --ntasks=1" if is_multi_node else ""
-    driver_mounts_flag = (
-        f" --container-mounts={','.join(shlex.quote(m) for m in config.driver.mounts)}" if config.driver.mounts else ""
-    )
+    # The driver writes everything relative to the job directory -- `output_path`
+    # above is `artifacts/rollouts.jsonl`. `#SBATCH --chdir` sets the cwd of the
+    # BATCH script on the host, but inside a Pyxis container the cwd is whatever
+    # the image declares and the job directory is not visible at all unless it is
+    # mounted. Without both of these the run completes cleanly, exits 0, and
+    # writes every artifact into the container's ephemeral overlay, which is
+    # discarded on exit: no rollouts, no metrics, no preprocessed data, and
+    # nothing to say so. Logs survive only because srun resolves `--output` on
+    # the host, which is what makes the loss so easy to miss.
+    driver_mounts = [*config.driver.mounts, f"{remote_bench_dir}:{remote_bench_dir}"]
+    driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
+    driver_workdir_flag = f" --container-workdir={shlex.quote(str(remote_bench_dir))}"
     driver_command = (
         f"{gym_cmd}\n"
-        f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag} --container-image={shlex.quote(config.driver.container)} "
+        f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
+        f"{driver_workdir_flag} --container-image={shlex.quote(config.driver.container)} "
         f"--output=logs/driver.log {entrypoint}"
     )
 
