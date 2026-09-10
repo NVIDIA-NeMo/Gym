@@ -16,6 +16,27 @@ from automationbench.rubric.registry import AssertionRegistry
 from automationbench.runner import AutomationBenchEnv
 
 
+class AutomationBenchAAEnv(AutomationBenchEnv):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        api_fetch = next(tool for tool in self._all_tool_defs if tool.name == "api_fetch")
+        properties = api_fetch.parameters["properties"]
+        descriptions = {
+            "params": "Query parameters as a JSON object. Use {} when there are no query parameters.",
+            "body": "Request body as a JSON object. Use {} when there is no request body.",
+        }
+        for name, description in descriptions.items():
+            properties[name] = {"type": "object", "description": description}
+
+    def update_tool_args(self, tool_name, tool_args, messages, state, **kwargs):
+        updated = super().update_tool_args(tool_name, tool_args, messages, state, **kwargs)
+        if tool_name == "api_fetch":
+            for name in ("params", "body"):
+                if tool_args.get(name) == {}:
+                    updated[name] = {}
+        return updated
+
+
 def aa_headline(state, **kwargs) -> float:
     info = state.get("info", {}) or {}
     assertions = info.get("assertions", []) or []
@@ -126,6 +147,6 @@ def load_environment(domains=None, max_turns: int = 50, toolset: str = "api", se
         ],
         weights=[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     )
-    return AutomationBenchEnv(
+    return AutomationBenchAAEnv(
         dataset=dataset, rubric=rubric, max_turns=max_turns, toolset=toolset, search_top_k=search_top_k, **kwargs
     )
