@@ -816,3 +816,73 @@ async def test_run_real_timeout(fake_binary: str) -> None:
     provider = docker_provider.DockerProvider()
     with pytest.raises(TimeoutError):
         await provider._run([shutil.which("sleep"), "5"], timeout_s=0.1)
+
+
+# --------------------------------------------------------------------------- #
+# Reattaching to a container another process created
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_serialize_handle_carries_what_connect_needs(fake_binary: str) -> None:
+    provider = docker_provider.DockerProvider(exec={"exec_shell": "sh"})
+    handle = _make_handle(name="nemo-gym-a", image="img:1", shell="bash", env={"K": "v"}, published_ports=(8080,))
+
+    descriptor = await provider.serialize_handle(handle)
+
+    assert descriptor == {
+        "sandbox_id": "nemo-gym-a",
+        "image": "img:1",
+        "shell": "bash",
+        "env": {"K": "v"},
+        "published_ports": [8080],
+    }
+
+
+@pytest.mark.asyncio
+async def test_connect_rebuilds_a_handle_for_a_running_container(
+    monkeypatch: pytest.MonkeyPatch, fake_binary: str
+) -> None:
+    """A resources server creates the container; the agent server only gets the descriptor."""
+    provider, rec = _make_provider(monkeypatch, lambda _argv: (0, "true\timg:1\n", ""))
+
+    handle = await provider.connect({"sandbox_id": "nemo-gym-a", "image": "img:1", "shell": "sh"})
+
+    assert handle.sandbox_id == "nemo-gym-a"
+    assert handle.provider_name == "docker"
+    assert handle.raw.image == "img:1"
+    assert _contains_seq(rec.calls[0]["argv"], ["inspect"])
+
+
+@pytest.mark.asyncio
+async def test_connect_reads_the_image_back_when_the_descriptor_omits_it(
+    monkeypatch: pytest.MonkeyPatch, fake_binary: str
+) -> None:
+    provider, _rec = _make_provider(monkeypatch, lambda _argv: (0, "true\tinspected:2\n", ""))
+
+    handle = await provider.connect({"sandbox_id": "nemo-gym-a", "shell": "sh"})
+
+    assert handle.raw.image == "inspected:2"
+
+
+@pytest.mark.asyncio
+async def test_connect_refuses_a_stopped_container(monkeypatch: pytest.MonkeyPatch, fake_binary: str) -> None:
+    """Exec against a stopped container fails later and less clearly, so refuse here."""
+    provider, _rec = _make_provider(monkeypatch, lambda _argv: (0, "false\timg:1\n", ""))
+
+    with pytest.raises(docker_provider.DockerCreateError, match="not running"):
+        await provider.connect({"sandbox_id": "nemo-gym-a"})
+
+
+@pytest.mark.asyncio
+async def test_connect_refuses_an_unknown_container(monkeypatch: pytest.MonkeyPatch, fake_binary: str) -> None:
+    provider, _rec = _make_provider(monkeypatch, lambda _argv: (1, "", "No such object: nemo-gym-a\n"))
+
+    with pytest.raises(docker_provider.DockerCreateError, match="No such object"):
+        await provider.connect({"sandbox_id": "nemo-gym-a"})
+
+
+@pytest.mark.asyncio
+async def test_connect_requires_a_sandbox_id(fake_binary: str) -> None:
+    provider = docker_provider.DockerProvider(exec={"exec_shell": "sh"})
+
+    with pytest.raises(docker_provider.DockerCreateError, match="requires a sandbox_id"):
+        await provider.connect({"image": "img:1"})
