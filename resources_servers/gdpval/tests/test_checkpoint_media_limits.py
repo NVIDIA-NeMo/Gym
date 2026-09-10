@@ -92,6 +92,7 @@ def test_submission_with_unrepresented_file_is_ineligible(tmp_path, name):
 def test_unsupported_files_are_logged_and_supported_evidence_is_judged(tmp_path, caplog, archived):
     files = {"design.step": b"CAD", "poster.psd": b"8BPS\x00", "notes.txt": b"Readable submission"}
     if archived:
+        files["nested.zip"] = b"Nested archive is not expanded"
         with zipfile.ZipFile(tmp_path / "submission.zip", "w") as archive:
             for name, content in files.items():
                 archive.writestr(name, content)
@@ -104,6 +105,8 @@ def test_unsupported_files_are_logged_and_supported_evidence_is_judged(tmp_path,
     assert "Readable submission" in text
     assert "design.step" not in text and "poster.psd" not in text
     assert "design.step" in caplog.text and "poster.psd" in caplog.text
+    if archived:
+        assert "nested.zip" not in text and "nested.zip" in caplog.text
     assert _preflight(blocks)["eligible"]
 
 
@@ -116,7 +119,7 @@ def test_omission_survives_exhausted_text_budget(tmp_path, monkeypatch):
     assert receipt["loss_markers"] == ["[attachment omitted from bad.zip: unreadable archive]"]
 
 
-@pytest.mark.parametrize("problem", ["unsafe", "duplicate", "corrupt", "crc", "member_limit", "size", "nested"])
+@pytest.mark.parametrize("problem", ["unsafe", "duplicate", "corrupt", "crc", "member_limit", "size"])
 def test_rejected_zip_evidence_cannot_pass_preflight(tmp_path, monkeypatch, problem):
     path = tmp_path / "inputs.zip"
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
@@ -128,8 +131,6 @@ def test_rejected_zip_evidence_cannot_pass_preflight(tmp_path, monkeypatch, prob
                 archive.writestr("first.txt", "different evidence")
         elif problem == "member_limit":
             archive.writestr("second.txt", "missing evidence")
-        elif problem == "nested":
-            archive.writestr("nested.zip", b"not an expanded archive")
     if problem == "corrupt":
         path.write_bytes(b"invalid ZIP")
     elif problem == "crc":

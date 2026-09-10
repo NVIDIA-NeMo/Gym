@@ -159,11 +159,12 @@ records source/output hashes. It uses Gym's existing Office-to-PDF converter
 inside the SIF. Supported large videos become H.264 proxies up to 720p with AAC
 sound; these are lossy views, not byte-size guarantees. PCM16/24 WAV and AIFF
 become FLAC only when decoded samples match and the output shrinks. Floating
-point and PCM32 audio are preserved. ZIP preparation preserves members
+point, PCM32 audio, and audio with extra streams such as embedded artwork are
+preserved. ZIP preparation preserves members
 and adds Office sidecars without changing original files.
 
-Extra video tracks, subtitles, alpha, and nested archives stop preparation.
-Other formats, including STEP and PSD, are copied unchanged. The judge can use
+Extra video tracks, subtitles, and alpha stop preparation. Nested ZIP members
+and other formats, including STEP and PSD, are copied unchanged. The judge can use
 existing PDF sidecars. Otherwise, it logs each unsupported filename and skips
 that file, judging the remaining supported files. All tasks stay included.
 Failed Office renders, oversized requests, and corrupt ZIPs remain errors.

@@ -924,7 +924,7 @@ def build_file_section(
             return
         info = FILE_TYPE_MAP.get(full_path.suffix.lower().lstrip(".")) or {}
         cached_office_pdf = provenance.office_pdfs.get(full_path) or fallback_pdfs_by_dir[parent].get(full_path)
-        if not info and cached_office_pdf is None and full_path.suffix.lower() != ".zip":
+        if not info and cached_office_pdf is None:
             LOGGER.info("Skipping unsupported judge file: %s", full_path)
             return
         _append_block({"type": "text", "text": f"\n{label}:\n"})
@@ -952,7 +952,7 @@ def build_file_section(
                 )
                 no_files = False
                 return
-        if full_path.suffix.lower() == ".zip" or (info.get("type") == "DOC" and cached_office_pdf is None):
+        if info.get("type") == "DOC" and cached_office_pdf is None:
             reason = (
                 "oversize file"
                 if full_path.stat().st_size > MAX_FILE_BYTES_FOR_JUDGE

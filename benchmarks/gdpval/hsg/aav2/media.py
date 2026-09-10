@@ -6,7 +6,7 @@ Requires ffmpeg/ffprobe for conversion. Video proxies are lossy, not byte-budget
 guarantees. PCM16/24 audio is replaced only when FLAC is smaller and decodes to
 identical samples. ZIP members are all retained or preparation fails. Video
 conversion rejects extra tracks and alpha; videos below 8 MiB stay unchanged.
-Nested ZIPs are rejected. Other formats are copied unchanged; the judge checks
+Nested ZIP members are copied unchanged. Other formats are copied unchanged; the judge checks
 whether it has a supported representation. Office conversion remains Gym's
 ordinary preconvert step.
 """
@@ -24,7 +24,7 @@ import subprocess
 import tempfile
 import zipfile
 from collections.abc import Callable
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from nemo_gym.deliverables import IGNORE_FILES
 
@@ -157,7 +157,12 @@ def _copy(source: Path, target: Path) -> None:
 
 
 def _file(
-    source: Path, target: Path, prepare_zip: Callable[[Path], None] | None = None, *, bookkeeping: bool = False
+    source: Path,
+    target: Path,
+    prepare_zip: Callable[[Path], None] | None = None,
+    *,
+    bookkeeping: bool = False,
+    inside_zip: bool = False,
 ) -> dict:
     before_hash = _hash(source)
     source_size = source.stat().st_size
@@ -189,7 +194,7 @@ def _file(
                     _copy(converted, target)
                     kind = "lossless_flac"
                     extra = {"sample_rate": before[0], "channels": before[1], "decoded_sha256": before[3]}
-    elif extension == ".zip":
+    elif extension == ".zip" and not inside_zip:
         extra = {"members": _zip(source, target, prepare_zip)}
         kind = "zip"
     if kind == "unchanged":
@@ -227,7 +232,6 @@ def _zip(source: Path, target: Path, prepare_zip: Callable[[Path], None] | None 
                 or mode not in {0, stat.S_IFREG, stat.S_IFDIR}
                 or info.file_size > 1024**3
                 or name in names
-                or PurePosixPath(name).suffix.lower() == ".zip"
             ):
                 raise ValueError(f"unsupported/unsafe/duplicate ZIP member: {source}: {info.filename}")
             names.add(name)
@@ -253,7 +257,7 @@ def _zip(source: Path, target: Path, prepare_zip: Callable[[Path], None] | None 
             if path.is_dir():
                 output.mkdir(parents=True, exist_ok=True)
                 continue
-            record = _file(path, output)
+            record = _file(path, output, inside_zip=True)
             record["source"] = relative.as_posix()
             record["output"] = Path(record["output"]).relative_to(prepared).as_posix()
             if relative.as_posix() not in originals:

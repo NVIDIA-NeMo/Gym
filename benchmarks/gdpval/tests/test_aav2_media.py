@@ -3,6 +3,7 @@
 
 import hashlib
 import importlib.util
+import io
 import json
 import shutil
 import stat
@@ -27,8 +28,12 @@ def test_plain_files_and_zip_are_byte_preserved_and_existing_output_fails(tmp_pa
     source.mkdir()
     (source / "notes.txt").write_text("Reference notes\n")
     (source / "empty").mkdir()
+    nested = io.BytesIO()
+    with zipfile.ZipFile(nested, "w") as archive:
+        archive.writestr("code.js", "export default 42;")
     with zipfile.ZipFile(source / "files.zip", "w") as archive:
         archive.writestr("nested/notes.txt", "All original content")
+        archive.writestr("nested/code.zip", nested.getvalue())
         archive.writestr("empty/", "")
     output = tmp_path / "output"
     manifest = media.build(source, output)
@@ -71,8 +76,8 @@ def test_nested_destination_and_source_symlink_fail_without_changing_source(tmp_
     assert not (tmp_path / "output").exists()
 
 
-@pytest.mark.parametrize("name", ["../escape.txt", "/absolute.txt", "a/../b.txt", "nested.zip", "C:/file.txt"])
-def test_unsafe_or_nested_zip_fails_without_publication(tmp_path, name):
+@pytest.mark.parametrize("name", ["../escape.txt", "/absolute.txt", "a/../b.txt", "C:/file.txt"])
+def test_unsafe_zip_fails_without_publication(tmp_path, name):
     source = tmp_path / "source"
     source.mkdir()
     with zipfile.ZipFile(source / "files.zip", "w") as archive:
