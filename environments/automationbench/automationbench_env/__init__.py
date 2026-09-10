@@ -131,21 +131,43 @@ def objectives_passed(state, **kwargs) -> float:
     return float(_counts(state)["objectives_passed"])
 
 
-def load_environment(domains=None, max_turns: int = 50, toolset: str = "api", search_top_k=None, **kwargs):
+REWARD_FNS = ("aa_headline", "partial_credit")
+
+
+def load_environment(
+    domains=None,
+    max_turns: int = 50,
+    toolset: str = "api",
+    search_top_k=None,
+    reward_fn: str = "aa_headline",
+    **kwargs,
+):
+    """Build the AutomationBench environment.
+
+    `reward_fn` selects which rubric function carries the reward weight:
+    "aa_headline" (default) is the guardrail-gated Artificial Analysis metric,
+    "partial_credit" is upstream's ungated fraction, which counts a broken
+    guardrail as a single failed assertion instead of zeroing the task. Both
+    are always reported as metrics, so runs stay comparable across modes.
+    """
     import verifiers as vf
 
+    if reward_fn not in REWARD_FNS:
+        raise ValueError(f"reward_fn must be one of {REWARD_FNS}, got {reward_fn!r}")
+
     dataset = get_combined_dataset(list(domains) if domains else list(DEFAULT_DOMAINS))
+    funcs = [
+        partial_credit,
+        aa_headline,
+        task_completed_correctly,
+        guardrails_violated,
+        guardrails_total,
+        objectives_passed,
+        objectives_total,
+    ]
     rubric = vf.Rubric(
-        funcs=[
-            partial_credit,
-            aa_headline,
-            task_completed_correctly,
-            guardrails_violated,
-            guardrails_total,
-            objectives_passed,
-            objectives_total,
-        ],
-        weights=[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        funcs=funcs,
+        weights=[1.0 if func.__name__ == reward_fn else 0.0 for func in funcs],
     )
     return AutomationBenchEnv(
         dataset=dataset, rubric=rubric, max_turns=max_turns, toolset=toolset, search_top_k=search_top_k, **kwargs
