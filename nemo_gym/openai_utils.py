@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import time
 from asyncio import sleep
 from typing import (
     Annotated,
@@ -843,6 +844,21 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
 RATE_LIMIT_ERROR_CODES = [429, 502, 503, 504, 520]
 RETRY_ERROR_CODES = RATE_LIMIT_ERROR_CODES + [500]
 
+# NVCF's invocation API does not hold a slow request open indefinitely. If the
+# function has not finished inside the NVCF-POLL-SECONDS window it answers 202
+# with the request id in an NVCF-REQID header and expects the caller to poll for
+# the result; 302 means the result was too large to inline and must be fetched
+# from the Location header.
+#
+# These are 2xx/3xx, so `ClientResponse.ok` is true for both and nothing below
+# raises. Left unhandled, the 202's request-metadata body gets parsed as if it
+# were a chat completion, which downstream becomes a silent default judge score.
+# https://docs.api.nvidia.com/cloud-functions/reference/getfunctioninvocationresult
+NVCF_PENDING_STATUS = 202
+NVCF_LARGE_RESULT_STATUS = 302
+NVCF_REQUEST_ID_HEADER = "NVCF-REQID"
+NVCF_POLL_STATUS_URL = "https://api.nvcf.nvidia.com/v2/nvcf/pexec/status"
+
 
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     """This is just a stub class that wraps around aiohttp"""
@@ -860,6 +876,99 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         description="Extra headers to include in every request.",
     )
 
+    nvcf_poll_status_url: str = Field(
+        default=NVCF_POLL_STATUS_URL,
+        description=(
+            "Base URL polled after NVCF answers 202. Deliberately not derived from "
+            "base_url: the status endpoint lives on a different host than the "
+            "per-function invocation domain, and poll requests are short enough that "
+            "they do not need whatever keepalive proxy base_url may point at."
+        ),
+    )
+
+    nvcf_poll_interval_seconds: float = Field(
+        default=1.0,
+        description="Delay between polls of the NVCF status endpoint.",
+    )
+
+    nvcf_poll_timeout_seconds: float = Field(
+        default=1900.0,
+        description=(
+            "How long to keep polling before giving up on a pending NVCF request. "
+            "Defaults just above NVCF's own 30-minute request expiry so the terminal "
+            "answer comes from the service rather than from us abandoning it early."
+        ),
+    )
+
+    async def _fetch_nvcf_large_result(self, response: ClientResponse) -> ClientResponse:
+        """Follow a 302 from NVCF to wherever the oversized result actually lives."""
+        location = response.headers.get("Location")
+        if not location:
+            print(
+                f"[nvcf_poll status={NVCF_LARGE_RESULT_STATUS} error=missing_location]",
+                flush=True,
+            )
+            return response
+
+        # No Authorization header: these point at object storage and carry their own
+        # pre-signed credentials, so forwarding our bearer token would leak the key
+        # to a third party.
+        return await request(method="GET", url=location, _internal=self.internal)
+
+    async def _resolve_nvcf_pending(
+        self, response: ClientResponse, headers: Dict[str, str]
+    ) -> ClientResponse:
+        """Drive NVCF's 202-then-poll flow to a terminal response.
+
+        Anything that is not a 202 or 302 is returned untouched, so endpoints that
+        never use this protocol (local vLLM, the integrate gateway) are unaffected.
+        """
+        if response.status == NVCF_LARGE_RESULT_STATUS:
+            return await self._fetch_nvcf_large_result(response)
+
+        if response.status != NVCF_PENDING_STATUS:
+            return response
+
+        request_id = response.headers.get(NVCF_REQUEST_ID_HEADER)
+        if not request_id:
+            # Nothing to poll, and returning the 202 as-is means its metadata body
+            # gets parsed as a completion. Log it: the downstream symptom is a
+            # default judge score, which is otherwise invisible.
+            print(
+                f"[nvcf_poll status={NVCF_PENDING_STATUS} "
+                f"error=missing_{NVCF_REQUEST_ID_HEADER.lower()}]",
+                flush=True,
+            )
+            return response
+
+        poll_url = f"{self.nvcf_poll_status_url.rstrip('/')}/{request_id}"
+        deadline = time.monotonic() + self.nvcf_poll_timeout_seconds
+        polls = 0
+
+        while response.status == NVCF_PENDING_STATUS:
+            if time.monotonic() > deadline:
+                print(
+                    f"[nvcf_poll reqid={request_id} polls={polls} error=poll_timeout "
+                    f"after={self.nvcf_poll_timeout_seconds:.0f}s]",
+                    flush=True,
+                )
+                return response
+
+            await sleep(self.nvcf_poll_interval_seconds)
+            polls += 1
+            response = await request(
+                method="GET", url=poll_url, headers=headers, _internal=self.internal
+            )
+
+        if response.status == NVCF_LARGE_RESULT_STATUS:
+            response = await self._fetch_nvcf_large_result(response)
+
+        print(
+            f"[nvcf_poll reqid={request_id} polls={polls} final_status={response.status}]",
+            flush=True,
+        )
+        return response
+
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
         request_kwargs = request_kwargs | {
             "headers": self.default_headers
@@ -876,6 +985,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         while tries < max_num_tries:
             tries += 1
             response = await request(**request_kwargs)
+            # Resolve NVCF's pending/large-result protocol before the retry check, so
+            # the decision below is made on the terminal status. A poll that ends in
+            # 504 therefore re-invokes the function rather than returning a 202 body.
+            response = await self._resolve_nvcf_pending(
+                response, request_kwargs.get("headers") or {}
+            )
 
             if response.status in RETRY_ERROR_CODES:
                 # If we hit a rate limit, we don't want to hit max num tries, so we increment both.
