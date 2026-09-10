@@ -140,12 +140,5 @@ def render_driver_entrypoint(
         return '"${GYM_CMD[@]}"'
 
     preamble.append('exec "$@"')
-    # set -euo pipefail: without it, a failed step (a bad ref, a network
-    # blip on the clone, a failed install) does not stop the script -- it
-    # silently falls through to exec "$@" running whatever was already on
-    # disk/PATH before this preamble ran, which surfaces as a much more
-    # confusing failure far downstream (e.g. duplicate/ambiguous component
-    # discovery from a half-applied gym_install) instead of a clear error
-    # at the actual failing step.
     body = "\n    ".join(["set -euo pipefail", *preamble])
     return f"bash -c '\n    {body}\n' -- \"${{GYM_CMD[@]}}\""
