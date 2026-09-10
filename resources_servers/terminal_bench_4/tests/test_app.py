@@ -377,7 +377,7 @@ class TestHelpers:
         with pytest.raises(ValueError):
             build_pack_command([])
         prepare = build_prepare_targets_command(["/app/evalbench"], ["/app/out.step", "/app/results/a.npz"])
-        assert "find /app/evalbench -mindepth 1 -maxdepth 1 -exec rm -rf {} +" in prepare
+        assert "find /app/evalbench -mindepth 1 -delete && chmod 777 /app/evalbench" in prepare
         assert (
             "mkdir -p /app && chmod 777 /app" in prepare
             and "mkdir -p /app/results && chmod 777 /app/results" in prepare

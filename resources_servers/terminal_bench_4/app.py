@@ -264,7 +264,7 @@ def build_pack_command(members: Sequence[str], tarball: str = REMOTE_TARBALL) ->
     quoted_members = " ".join(shlex.quote(m) for m in members)
     quoted_tarball = shlex.quote(tarball)
     body = (
-        f"rm -f {quoted_tarball}; "
+        f"if [ -e {quoted_tarball} ]; then unlink {quoted_tarball}; fi; "
         "if command -v tar >/dev/null 2>&1; then "
         f"tar -czf {quoted_tarball} -C / --ignore-failed-read -- {quoted_members}; "
         "elif command -v python3 >/dev/null 2>&1; then "
@@ -283,7 +283,7 @@ def build_extract_command(tarball: str = REMOTE_TARBALL) -> str:
         "elif command -v python3 >/dev/null 2>&1; then "
         f"python3 -c {shlex.quote(_PY_EXTRACT)} {quoted_tarball}; "
         f"else echo NG_TB4_NO_PACKER >&2; exit {NO_PACKER_EXIT_CODE}; fi "
-        f"&& rm -f {quoted_tarball}"
+        f"&& unlink {quoted_tarball}"
     )
     return labeled("extract", body)
 
@@ -293,7 +293,7 @@ def build_prepare_targets_command(dir_targets: Sequence[str], file_targets: Sequ
     parts: List[str] = [f"mkdir -p {VERIFIER_DIR} {ARTIFACTS_DIR} && chmod 777 {VERIFIER_DIR} {ARTIFACTS_DIR}"]
     for target in dir_targets:
         q = shlex.quote(target)
-        parts.append(f"mkdir -p {q} && find {q} -mindepth 1 -maxdepth 1 -exec rm -rf {{}} + && chmod 777 {q}")
+        parts.append(f"mkdir -p {q} && find {q} -mindepth 1 -delete && chmod 777 {q}")
     parents = []
     for target in file_targets:
         parent = PurePosixPath(target).parent.as_posix()
