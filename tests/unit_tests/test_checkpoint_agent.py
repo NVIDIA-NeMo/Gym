@@ -30,8 +30,8 @@ from nemo_gym._checkpoint import (
     AgentCheckpointError,
     AgentCheckpointParticipant,
     AgentCompletedExecutionAcknowledgementError,
+    AgentCompletionReceipt,
     AgentContinuationRoot,
-    AgentExecutionIdentity,
     AgentStaleAttemptError,
     CheckpointArtifactReference,
     CheckpointPhase,
@@ -60,6 +60,20 @@ def _boundary(*, attempt_index: int = 0, boundary_index: int = 1) -> AgentBounda
         last_committed_model_call_id="call-1",
         resource_state_revisions={"resources": 3},
     )
+
+
+def _completion_receipt(
+    participant: AgentCheckpointParticipant,
+    rollout_id: str,
+    attempt_index: int,
+) -> AgentCompletionReceipt:
+    status = participant.status()
+    raw = next(
+        item["completion_receipt"]
+        for item in status["completed_unacknowledged_attempts"]
+        if item["rollout_id"] == rollout_id and item["attempt_index"] == attempt_index
+    )
+    return AgentCompletionReceipt.model_validate(raw)
 
 
 @pytest.mark.asyncio
@@ -100,6 +114,9 @@ async def test_timed_out_prepare_can_retire_and_retry() -> None:
                 "state": "running",
                 "parked_boundary_state": None,
                 "boundary_index": None,
+                "turn_index": None,
+                "boundary_kind": None,
+                "resource_state_revisions": {},
                 "age_seconds": status.json()["blocking_attempts"][0]["age_seconds"],
             }
         ]
@@ -176,9 +193,9 @@ async def test_acknowledge_completed_releases_result_and_fences_attempt() -> Non
     participant = AgentCheckpointParticipant()
     execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
     await participant.finish(execution, outcome="completed", result={"reward": 1.0})
-    identity = AgentExecutionIdentity(rollout_id="rollout-a", attempt_index=0)
+    receipt = _completion_receipt(participant, "rollout-a", 0)
 
-    assert await participant.acknowledge_completed([identity]) == [identity]
+    assert await participant.acknowledge_completed([receipt]) == [receipt]
     assert participant.status()["completed_unacknowledged"] == 0
     assert participant.resolve("rollout-a", 0) is None
     assert ("rollout-a", 0) not in participant._generations
@@ -186,7 +203,7 @@ async def test_acknowledge_completed_releases_result_and_fences_attempt() -> Non
         await participant.begin("rollout-a", 0, task=None)
 
     # A lost HTTP response is safe: retrying the same acknowledgement succeeds.
-    assert await participant.acknowledge_completed([identity]) == [identity]
+    assert await participant.acknowledge_completed([receipt]) == [receipt]
 
 
 @pytest.mark.asyncio
@@ -194,12 +211,16 @@ async def test_acknowledge_completed_validates_batch_before_releasing_results() 
     participant = AgentCheckpointParticipant()
     execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
     await participant.finish(execution, outcome="completed", result={"reward": 1.0})
+    receipt = _completion_receipt(participant, "rollout-a", 0)
+
+    with pytest.raises(AgentCompletedExecutionAcknowledgementError, match="receipt mismatch"):
+        await participant.acknowledge_completed([receipt.model_copy(update={"result_digest": "f" * 64})])
 
     with pytest.raises(AgentCompletedExecutionAcknowledgementError):
         await participant.acknowledge_completed(
             [
-                AgentExecutionIdentity(rollout_id="rollout-a", attempt_index=0),
-                AgentExecutionIdentity(rollout_id="rollout-a", attempt_index=1),
+                receipt,
+                receipt.model_copy(update={"attempt_index": 1}),
             ]
         )
 
@@ -310,6 +331,8 @@ async def test_acknowledgement_route_unblocks_checkpoint_prepare() -> None:
     await participant.finish(execution, outcome="completed", result={"reward": 1.0})
     second_execution = await participant.begin("rollout-b", 2, task=asyncio.current_task())
     await participant.finish(second_execution, outcome="completed", result={"reward": 2.0})
+    first_receipt = _completion_receipt(participant, "rollout-a", 0).model_dump(mode="json")
+    second_receipt = _completion_receipt(participant, "rollout-b", 2).model_dump(mode="json")
     fence = ControlFence()
     app = FastAPI()
     install_control_plane(
@@ -334,7 +357,7 @@ async def test_acknowledgement_route_unblocks_checkpoint_prepare() -> None:
             "/ng-control/v1/agent-checkpoint/acknowledge-completed",
             json={
                 "schema_version": 1,
-                "executions": [{"rollout_id": "rollout-a", "attempt_index": 1}],
+                "executions": [{**first_receipt, "attempt_index": 1}],
             },
             headers=headers,
         )
@@ -343,8 +366,8 @@ async def test_acknowledgement_route_unblocks_checkpoint_prepare() -> None:
             json={
                 "schema_version": 1,
                 "executions": [
-                    {"rollout_id": "rollout-a", "attempt_index": 0},
-                    {"rollout_id": "rollout-b", "attempt_index": 2},
+                    first_receipt,
+                    second_receipt,
                 ],
             },
             headers=headers,
@@ -359,8 +382,8 @@ async def test_acknowledgement_route_unblocks_checkpoint_prepare() -> None:
             json={
                 "schema_version": 1,
                 "executions": [
-                    {"rollout_id": "rollout-a", "attempt_index": 0},
-                    {"rollout_id": "rollout-b", "attempt_index": 2},
+                    first_receipt,
+                    second_receipt,
                 ],
             },
             headers=headers,
@@ -372,8 +395,8 @@ async def test_acknowledgement_route_unblocks_checkpoint_prepare() -> None:
     assert acknowledged.status_code == 200
     assert acknowledged.json() == {
         "acknowledged": [
-            {"rollout_id": "rollout-a", "attempt_index": 0},
-            {"rollout_id": "rollout-b", "attempt_index": 2},
+            first_receipt,
+            second_receipt,
         ]
     }
     assert prepared.status_code == 200

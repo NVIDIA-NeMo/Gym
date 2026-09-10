@@ -45,6 +45,7 @@ AGENT_STATE_SUBDIR = "agent"
 AGENT_MANIFEST_NAME = "manifest.json"
 AGENT_CONTINUATION_INDEX_NAME = "continuations.jsonl"
 AGENT_CHECKPOINT_SCHEMA_VERSION = 1
+AGENT_BOUNDARY_SCHEMA_VERSION = 2
 AGENT_EXECUTION_GENERATION_HEADER = "x-nemo-gym-agent-execution-generation"
 COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE = "completed_result_acknowledgement"
 
@@ -95,13 +96,25 @@ class AgentExecutionIdentity(BaseModel):
     attempt_index: int = Field(ge=0)
 
 
+class AgentCompletionReceipt(AgentExecutionIdentity):
+    """Exact retained result that a durable caller may acknowledge."""
+
+    execution_generation: int = Field(ge=1)
+    result_identity: str = Field(min_length=1, max_length=512)
+    result_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class AgentAcknowledgeRequest(AgentCompletionReceipt):
+    """Compatibility name for acknowledging one exact completion receipt."""
+
+
 class AgentCompletedExecutionAcknowledgementRequest(BaseModel):
     """Batch of completed results now owned durably by the caller."""
 
     model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal[AGENT_CHECKPOINT_SCHEMA_VERSION] = AGENT_CHECKPOINT_SCHEMA_VERSION
-    executions: list[AgentExecutionIdentity] = Field(min_length=1)
+    executions: list[AgentCompletionReceipt] = Field(min_length=1)
 
     @model_validator(mode="after")
     def validate_unique_executions(self) -> "AgentCompletedExecutionAcknowledgementRequest":
@@ -116,24 +129,57 @@ class AgentCompletedExecutionAcknowledgementResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    acknowledged: list[AgentExecutionIdentity]
+    acknowledged: list[AgentCompletionReceipt]
 
 
-class AgentBoundaryRecord(BaseModel):
-    """Continuation state after one complete whitebox agent turn."""
+class AgentBoundaryKind(str, Enum):
+    """The durable phase represented by an agent boundary."""
+
+    PENDING_MODEL = "pending_model"
+    TURN_COMPLETE = "turn_complete"
+
+
+class PendingModelPayload(BaseModel):
+    """A completed model generation whose actions may still be pending."""
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[AGENT_CHECKPOINT_SCHEMA_VERSION] = AGENT_CHECKPOINT_SCHEMA_VERSION
+    model_call_id: str = Field(min_length=1)
+    response: dict[str, Any]
+    model_server_cookies: dict[str, str] = Field(default_factory=dict)
+    usage: Optional[dict[str, Any]] = None
+    pending_action_cursor: int = Field(ge=0)
+    resource_request_id: str = Field(min_length=1)
+
+
+class AgentBoundaryRecord(BaseModel):
+    """Continuation state at a generation-safe whitebox agent boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1, AGENT_BOUNDARY_SCHEMA_VERSION] = AGENT_BOUNDARY_SCHEMA_VERSION
     rollout_id: str = Field(pattern=ROLLOUT_ID_PATTERN.pattern)
     attempt_index: int = Field(ge=0)
     boundary_index: int = Field(ge=0)
+    turn_index: int = Field(default=0, ge=0)
+    boundary_kind: AgentBoundaryKind = AgentBoundaryKind.TURN_COMPLETE
+    pending_model: Optional[PendingModelPayload] = None
     output_items: list[dict[str, Any]]
     usage: Optional[dict[str, Any]] = None
     last_committed_model_call_id: Optional[str] = None
     resource_state_revisions: dict[str, int] = Field(default_factory=dict)
     agent_state: dict[str, Any] = Field(default_factory=dict)
     created_at: float = Field(default_factory=time.time)
+
+    @model_validator(mode="after")
+    def validate_boundary_phase(self) -> "AgentBoundaryRecord":
+        if "turn_index" not in self.model_fields_set:
+            self.turn_index = self.boundary_index
+        if self.boundary_kind == AgentBoundaryKind.PENDING_MODEL and self.pending_model is None:
+            raise ValueError("pending_model boundaries require a pending_model payload")
+        if self.boundary_kind == AgentBoundaryKind.TURN_COMPLETE and self.pending_model is not None:
+            raise ValueError("turn_complete boundaries cannot carry a pending_model payload")
+        return self
 
 
 class AgentExecution:
@@ -156,6 +202,8 @@ class AgentExecution:
         self.boundary: Optional[AgentBoundaryRecord] = None
         self.continuation = continuation
         self.terminal_result: Any = None
+        self.result_identity: Optional[str] = None
+        self.result_digest: Optional[str] = None
         self.started_at = time.time()
         self.resume_event = asyncio.Event()
         self.resume_event.set()
@@ -200,7 +248,7 @@ class AgentCheckpointParticipant:
         # They cannot be bounded safely until the wire protocol supplies a
         # coordinated epoch/high-watermark after which old identities cannot recur.
         self._tombstones: set[tuple[str, int]] = set()
-        self._acknowledged: set[tuple[str, int]] = set()
+        self._acknowledged: dict[tuple[str, int], tuple[int, str, str]] = {}
         self._accepting = True
         self._changed = asyncio.Condition()
 
@@ -277,6 +325,7 @@ class AgentCheckpointParticipant:
             if outcome == "completed":
                 execution.state = AgentExecutionState.COMPLETED
                 execution.terminal_result = result
+                execution.result_identity, execution.result_digest = _result_receipt(result)
                 execution.continuation = None
                 execution.outer_task = None
             else:
@@ -416,17 +465,27 @@ class AgentCheckpointParticipant:
 
     async def acknowledge_completed(
         self,
-        identities: list[AgentExecutionIdentity],
-    ) -> list[AgentExecutionIdentity]:
+        receipts: list[AgentCompletionReceipt],
+    ) -> list[AgentCompletionReceipt]:
         """Atomically release terminal results after the caller owns them durably."""
-        keys = [(identity.rollout_id, identity.attempt_index) for identity in identities]
+        keys = [(receipt.rollout_id, receipt.attempt_index) for receipt in receipts]
         if len(keys) != len(set(keys)):
             raise AgentCompletedExecutionAcknowledgementError("completed execution acknowledgements must be unique")
 
         # Validate the complete batch before releasing any result. A malformed
         # batch must not leave only some executions acknowledged.
-        for key in keys:
-            if key in self._acknowledged:
+        for key, receipt in zip(keys, receipts):
+            expected = (
+                receipt.execution_generation,
+                receipt.result_identity,
+                receipt.result_digest,
+            )
+            acknowledged = self._acknowledged.get(key)
+            if acknowledged is not None:
+                if acknowledged != expected:
+                    raise AgentCompletedExecutionAcknowledgementError(
+                        f"acknowledgement does not match rollout {key[0]!r} attempt {key[1]}'s completed receipt"
+                    )
                 continue
             execution = self._executions.get(key)
             if execution is None:
@@ -437,17 +496,37 @@ class AgentCheckpointParticipant:
                 raise AgentCompletedExecutionAcknowledgementError(
                     f"rollout {key[0]!r} attempt {key[1]} is not completed with a retained result"
                 )
+            actual = (
+                execution.generation,
+                execution.result_identity,
+                execution.result_digest,
+            )
+            if actual != expected:
+                raise AgentCompletedExecutionAcknowledgementError(
+                    f"acknowledgement receipt mismatch for rollout {key[0]!r} attempt {key[1]}"
+                )
 
-        for key in keys:
+        for key, receipt in zip(keys, receipts):
             if key in self._acknowledged:
                 continue
             execution = self._executions.pop(key)
             execution.state = AgentExecutionState.RETIRED
             execution.terminal_result = None
-            self._acknowledged.add(key)
+            self._acknowledged[key] = (
+                receipt.execution_generation,
+                receipt.result_identity,
+                receipt.result_digest,
+            )
             self._generations.pop(key, None)
         await self._notify()
-        return identities
+        return receipts
+
+    async def acknowledge(self, receipt: AgentAcknowledgeRequest) -> dict[str, Any]:
+        """Release one exact terminal result, preserving idempotent retry semantics."""
+        key = (receipt.rollout_id, receipt.attempt_index)
+        idempotent = key in self._acknowledged
+        await self.acknowledge_completed([receipt])
+        return {"acknowledged": not idempotent, "idempotent": idempotent}
 
     def status(self) -> dict[str, Any]:
         all_executions = list(self._executions.values())
@@ -482,10 +561,22 @@ class AgentCheckpointParticipant:
             "parked_with_boundary": len(parked_with_boundary),
             "parked_without_boundary": len(parked_without_boundary),
             "completed_unacknowledged": len(completed_unacknowledged),
+            "acknowledged_completed": len(self._acknowledged),
             "active": len(active),
             "blocking_attempts": [self._execution_status(execution) for execution in blocking_attempts],
             "completed_unacknowledged_attempts": [
                 self._execution_status(execution) for execution in completed_unacknowledged
+            ],
+            "selected_boundaries": [
+                {
+                    "rollout_id": execution.rollout_id,
+                    "attempt_index": execution.attempt_index,
+                    "boundary_index": execution.boundary.boundary_index,
+                    "turn_index": execution.boundary.turn_index,
+                    "boundary_kind": execution.boundary.boundary_kind.value,
+                    "resource_state_revisions": execution.boundary.resource_state_revisions,
+                }
+                for execution in parked_with_boundary
             ],
             "executions": [self._execution_status(execution) for execution in all_executions],
         }
@@ -534,12 +625,47 @@ class AgentCheckpointParticipant:
             "state": execution.state.value,
             "parked_boundary_state": parked_boundary_state,
             "boundary_index": execution.boundary.boundary_index if execution.boundary is not None else None,
+            "turn_index": execution.boundary.turn_index if execution.boundary is not None else None,
+            "boundary_kind": execution.boundary.boundary_kind.value if execution.boundary is not None else None,
+            "resource_state_revisions": (
+                execution.boundary.resource_state_revisions if execution.boundary is not None else {}
+            ),
+            **(
+                {
+                    "completion_receipt": {
+                        "rollout_id": execution.rollout_id,
+                        "attempt_index": execution.attempt_index,
+                        "execution_generation": execution.generation,
+                        "result_identity": execution.result_identity,
+                        "result_digest": execution.result_digest,
+                    }
+                }
+                if execution.state == AgentExecutionState.COMPLETED
+                else {}
+            ),
             "age_seconds": round(time.time() - execution.started_at, 3),
         }
 
     async def _notify(self) -> None:
         async with self._changed:
             self._changed.notify_all()
+
+
+def _result_receipt(result: Any) -> tuple[str, str]:
+    if isinstance(result, BaseModel):
+        value = result.model_dump(mode="json")
+    else:
+        value = result
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    digest = hashlib.sha256(payload).hexdigest()
+    result_identity = None
+    if isinstance(value, dict):
+        candidate = value.get("id")
+        if candidate is None and isinstance(value.get("response"), dict):
+            candidate = value["response"].get("id")
+        if candidate is not None:
+            result_identity = str(candidate)
+    return result_identity or digest, digest
 
 
 def _digest(path: Path) -> str:
@@ -765,6 +891,14 @@ def install_agent_checkpoint(
     auth_token: str,
 ) -> None:
     """Install acknowledgement, prepare, commit, restore, resume, and retire routes."""
+
+    @app.post(f"{AGENT_CHECKPOINT_URL_PREFIX}/acknowledge")
+    async def acknowledge(
+        body: AgentAcknowledgeRequest,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        require_control_auth(authorization, auth_token)
+        return await participant.acknowledge(body)
 
     @app.post(f"{AGENT_CHECKPOINT_URL_PREFIX}/acknowledge-completed")
     async def acknowledge_completed(
