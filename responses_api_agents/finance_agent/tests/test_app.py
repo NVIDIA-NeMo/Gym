@@ -55,7 +55,11 @@ _SHIPPED_CONFIGS = {
 }
 
 #: Fields with no default, so each profile has to state its own policy.
-_POLICY_FIELDS = ("no_tool_call_nudge", "max_time_seconds", "abort_on_tool_error_types")
+_POLICY_FIELDS = (
+    "no_tool_call_nudge",
+    "max_time_seconds",
+    "abort_on_tool_error_types",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +230,7 @@ class TestFinanceAgentConfig:
     def test_shipped_profile_builds_a_valid_config(self, instance: str) -> None:
         config = _make_config(policy=_shipped_policy(instance))
         assert config.no_tool_call_nudge
+        assert config.continue_if_not_tool_call is True
 
     @pytest.mark.parametrize("field", _POLICY_FIELDS)
     def test_omitting_a_policy_field_is_rejected(self, field: str) -> None:
@@ -249,6 +254,7 @@ class TestFinanceAgentConfig:
         assert config.model_call_timeout is None
         assert config.tool_call_timeout is None
         assert config.truncate_on_overflow is False
+        assert config.continue_if_not_tool_call is True
 
     def test_custom_config(self) -> None:
         config = _make_config(
@@ -256,6 +262,7 @@ class TestFinanceAgentConfig:
             max_time_seconds=60.0,
             done_tools=["submit_final_result", "abort"],
             no_tool_call_nudge="Keep going.",
+            continue_if_not_tool_call=False,
             abort_on_tool_error_types=["RetryExhaustedError"],
             model_call_timeout=30.0,
             tool_call_timeout=60.0,
@@ -265,6 +272,7 @@ class TestFinanceAgentConfig:
         assert config.max_time_seconds == 60.0
         assert config.done_tools == ["submit_final_result", "abort"]
         assert config.no_tool_call_nudge == "Keep going."
+        assert config.continue_if_not_tool_call is False
         assert config.abort_on_tool_error_types == ["RetryExhaustedError"]
         assert config.model_call_timeout == 30.0
         assert config.tool_call_timeout == 60.0
@@ -429,17 +437,38 @@ class TestAbortingErrorType:
 
 
 class TestResponses:
+    def test_text_only_turn_ends_episode_when_continue_if_not_tool_call_is_false(self) -> None:
+        """Training overlay: a text-only assistant turn ends the
+        episode after a single model call.
+
+        Gym shipped profiles leave ``continue_if_not_tool_call`` true.
+        GRPO sets it to false because NeMo-RL requires each turn's prompt tokens
+        to extend the previous turn's, and re-serializing a reasoning turn
+        back into history strips its thinking block, breaking that prefix.
+        """
+        agent, client = _make_agent_and_client(_make_config(max_steps=3, continue_if_not_tool_call=False))
+        agent.server_client.post.return_value = _dotjson_mock(_text_response("Hello!"))
+
+        res = client.post("/v1/responses", json=_INPUT)
+        assert res.status_code == 200
+
+        assert agent.server_client.post.call_count == 1, (
+            "text-only turn should end the episode instead of looping to max_steps"
+        )
+        output = res.json()["output"]
+        assert not [o for o in output if o["type"] == "message" and o["role"] == "user"], (
+            "no 'Continue.' should be injected when continue_if_not_tool_call is false"
+        )
+        assert res.json()["metadata"]["stop_reason"] == "text_only"
+
     def test_text_only_response_injects_continue_until_max_steps(self) -> None:
         """Text-only assistant responses must inject the nudge and keep looping
         (mirrors vals-ai/finance-agent ``_before_query`` + ``_should_stop=False``)
         rather than terminating after one step.
 
-        The historical break-on-text behavior caused training to silently
-        truncate trajectories whenever the model emitted explanatory text
-        between tool calls -- which is exactly what Nemotron-Nano did on
-        its rs0 chunk, masking partial progress as a "completed" rollout.
+        Eval default: ``continue_if_not_tool_call`` is true.
         """
-        config = _make_config(max_steps=3)
+        config = _make_config(max_steps=3, continue_if_not_tool_call=True)
         agent, client = _make_agent_and_client(config)
         agent.server_client.post.return_value = _dotjson_mock(_text_response("Hello!"))
 
@@ -453,9 +482,7 @@ class TestResponses:
 
         user_continues = [o for o in output if o["type"] == "message" and o["role"] == "user"]
         assert len(user_continues) >= 1, "no 'Continue.' user message injected"
-        assert any(o["content"] == "Continue." for o in user_continues), (
-            f"Continue. literal missing; got user contents: {[o['content'] for o in user_continues]}"
-        )
+        assert all(o["content"] == _V1_POLICY["no_tool_call_nudge"] for o in user_continues)
 
     def test_text_only_response_injects_the_v2_nudge(self) -> None:
         """The FABv2 profile names submit_final_result instead of sending a bare
@@ -471,7 +498,9 @@ class TestResponses:
         assert all(o["content"] == _V2_POLICY["no_tool_call_nudge"] for o in nudges)
 
     def test_nudge_is_configurable(self) -> None:
-        agent, client = _make_agent_and_client(_make_config(max_steps=1, no_tool_call_nudge="Keep going."))
+        agent, client = _make_agent_and_client(
+            _make_config(max_steps=1, continue_if_not_tool_call=True, no_tool_call_nudge="Keep going.")
+        )
         agent.server_client.post.return_value = _dotjson_mock(_text_response("Hello!"))
 
         res = client.post("/v1/responses", json=_INPUT)
@@ -483,7 +512,7 @@ class TestResponses:
         """Continue.-loop must yield as soon as a done-tool fires -- otherwise
         the agent could keep looping past a legitimate terminal tool call.
         """
-        config = _make_config(max_steps=5)
+        config = _make_config(max_steps=5, continue_if_not_tool_call=True)
         agent, client = _make_agent_and_client(config)
 
         text_then_submit_responses = [
@@ -502,11 +531,12 @@ class TestResponses:
         assert "submit_final_result" in fn_names, "done-tool should still terminate after Continue. injection"
 
     def test_tool_call_then_text_continues_until_max_steps(self) -> None:
-        """Tool call → text response no longer terminates -- under C1 the
-        loop injects ``Continue.`` and keeps going.  Bounded by max_steps
-        here so the test doesn't run forever.
+        """Tool call → text response no longer terminates when
+        ``continue_if_not_tool_call`` is true -- the loop injects
+        ``Continue.`` and keeps going.  Bounded by max_steps here so the test
+        doesn't run forever.
         """
-        config = _make_config(max_steps=2)
+        config = _make_config(max_steps=2, continue_if_not_tool_call=True)
         agent, client = _make_agent_and_client(config)
 
         tool_call_data = _tool_call_response("sec_filing_search", json.dumps({"ticker": "AAPL"}))

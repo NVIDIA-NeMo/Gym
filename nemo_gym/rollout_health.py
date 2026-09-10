@@ -23,11 +23,12 @@ import orjson
 
 from nemo_gym.health.checks import (
     _INCOMPLETE_MODEL_CALL_GAPS,
+    _LENGTH_LIMIT_FINISH_REASONS,
     _ROLLOUT_CHECKS,
     _ROLLOUT_SPECS,
     _TASK_SPECS,
     CHECK_REGISTRY,
-    _bind_policy_calls,
+    _bind_policy_call_views,
     _canonical_trajectory,
     _is_failed,
     _is_successful,
@@ -42,6 +43,7 @@ from nemo_gym.health.checks import (
     normalize_ignored_checks,
 )
 from nemo_gym.health.types import (
+    CALL_BINDING_INPUTS,
     QUALITY_SUMMARY_FILENAME,
     ROLLOUT_ID_KEY,
     ROLLOUT_INDEX_KEY,
@@ -119,7 +121,7 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
     turns_observed = trajectory_observed and not _trajectory_has_gap(trajectory, "turns_unavailable")
     model_calls_observed = trajectory_observed and not _trajectory_has_any_gap(trajectory, _INCOMPLETE_MODEL_CALL_GAPS)
     calls = _normalized_trajectory_calls(trajectory) if trajectory_observed else []
-    bindings = _bind_policy_calls(trajectory, calls) if trajectory_observed else _bind_policy_calls({}, [])
+    turn_bindings, owned_bindings = _bind_policy_call_views(trajectory if trajectory_observed else {}, calls)
     findings: list[Finding] = []
     unobserved: list[str] = []
 
@@ -154,7 +156,9 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         if CheckInput.AGENT_TURNS in spec.reads and not turns_observed:
             unobserved.append(spec.id)
             continue
-        if CheckInput.BOUND_CALLS in spec.reads:
+        binding_input = next(iter(spec.reads & CALL_BINDING_INPUTS), None)
+        bindings = owned_bindings if binding_input == CheckInput.OWNED_MODEL_CALLS else turn_bindings
+        if binding_input is not None:
             if not model_calls_observed:
                 unobserved.append(spec.id)
                 continue
@@ -171,6 +175,12 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
             or not bindings.matched_calls
             or not _transcript_tokens(record)[2]
             or any(call.get("tokens_in") is None or call.get("tokens_out") is None for call in bindings.matched_calls)
+        ):
+            unobserved.append(spec.id)
+            continue
+        if spec.id == "model_call_runaway_generation" and any(
+            call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS and call.get("response") is None
+            for call in bindings.matched_calls
         ):
             unobserved.append(spec.id)
             continue
@@ -208,9 +218,9 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
         findings=findings,
         unobserved=unobserved,
         capture_observed=bool(calls),
-        policy_calls_observed=bindings.complete,
+        policy_calls_observed=turn_bindings.complete,
         model_calls=len(calls),
-        successful_model_calls=sum(_is_successful(call) for call in bindings.matched_calls),
+        successful_model_calls=sum(_is_successful(call) for call in turn_bindings.matched_calls),
         model_call_errors=len(failed),
         errors_by_status=dict(errors_by_status),
         ended_on_error=bool(calls and _is_failed(calls[-1])),
