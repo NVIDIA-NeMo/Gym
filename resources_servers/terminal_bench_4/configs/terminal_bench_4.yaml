@@ -43,7 +43,9 @@ terminal_bench_4_resources_server:          # instance name — how agents/CLI r
       memory_multiplier: 1.0
       min_cpu: 1
       min_memory_mib: 2048
-      min_disk_gib: 10
+      # Never below the disk scheduling request below (30 GiB); a request above the limit leaves the
+      # pod Pending on platforms that honour custom resources (observed 2026-09-09).
+      min_disk_gib: 30
 
       # Verifier stdout, reward files, ctrf.json and the artifact manifest are mirrored here per
       # session (gitignored). Point it outside the checkout for real runs.

@@ -384,6 +384,25 @@ def derive_resources(
     return SandboxResources.from_mapping(resources)
 
 
+def clamp_resource_requests(provider_options: Dict[str, Any], limits: SandboxResources) -> Dict[str, Any]:
+    """Cap ``provider_options.resource_requests`` at the sandbox limits.
+
+    Kubernetes rejects a pod whose request exceeds its limit, and on a platform that honours custom
+    resources (the ``nemo.nvidia.com/resources: custom`` label) such a sandbox sits in ``Pending``
+    until the create call times out. Task-derived limits (e.g. ``storage_mb = 10240`` -> 10 GiB) can be
+    smaller than the config's scheduling requests (30 GiB disk), so clamp every request to its limit.
+    """
+    requests = provider_options.get("resource_requests")
+    if not isinstance(requests, dict):
+        return provider_options
+    clamped = dict(requests)
+    for key, limit in (("cpu", limits.cpu), ("memory_mib", limits.memory_mib), ("disk_gib", limits.disk_gib)):
+        if limit is not None and key in clamped and clamped[key] is not None and clamped[key] > limit:
+            clamped[key] = limit
+    provider_options["resource_requests"] = clamped
+    return provider_options
+
+
 def safe_name(value: str) -> str:
     return _SAFE_NAME_RE.sub("_", value).strip("_") or "task"
 
@@ -482,10 +501,15 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             },
             resources=resources,
             entrypoint=None,
-            provider_options=deepcopy(self.config.sandbox_config.get("provider_options") or {}),
+            provider_options=clamp_resource_requests(
+                deepcopy(self.config.sandbox_config.get("provider_options") or {}), resources
+            ),
         )
         sandbox = AsyncSandbox(provider)
-        self._log(f"starting {role} sandbox for {task.task_name} from {image} with {resources}")
+        self._log(
+            f"starting {role} sandbox for {task.task_name} from {image} with {resources} "
+            f"requests={spec.provider_options.get('resource_requests')}"
+        )
         await sandbox.start(spec)
         return sandbox
 

@@ -28,6 +28,7 @@ from resources_servers.terminal_bench_4.app import (
     build_pack_command,
     build_prepare_targets_command,
     build_probe_command,
+    clamp_resource_requests,
     derive_resources,
     parse_probe_output,
     parse_reward_payload,
@@ -661,3 +662,16 @@ class TestLeakOnLocalFailure:
         with pytest.raises(OSError, match="No space left"):
             await seed_and_verify(server, task_dir)
         assert agent.stopped and [c["role"] for c in created] == ["agent"]
+
+
+class TestResourceRequests:
+    def test_requests_are_clamped_to_limits(self) -> None:
+        limits = SandboxResources(cpu=2.0, memory_mib=4096, disk_gib=10)
+        options = clamp_resource_requests(
+            {"resource_requests": {"cpu": 0.5, "memory_mib": 512, "disk_gib": 30}, "other": {"x": 1}}, limits
+        )
+        assert options["resource_requests"] == {"cpu": 0.5, "memory_mib": 512, "disk_gib": 10}
+        assert options["other"] == {"x": 1}
+        assert clamp_resource_requests({}, limits) == {}
+        untouched = clamp_resource_requests({"resource_requests": {"disk_gib": 30}}, SandboxResources())
+        assert untouched["resource_requests"] == {"disk_gib": 30}
