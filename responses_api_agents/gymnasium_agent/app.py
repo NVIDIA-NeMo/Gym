@@ -23,7 +23,7 @@ from typing import Any, Optional
 from fastapi import Body, Request, Response
 from pydantic import ConfigDict, Field, TypeAdapter
 
-from nemo_gym._checkpoint import RESOURCE_STATE_REVISION_HEADER, AgentBoundaryRecord
+from nemo_gym._checkpoint import AgentBoundaryRecord
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
@@ -53,6 +53,17 @@ def _cookie_values(cookies: Any) -> dict[str, str]:
         name: str(getattr(cookie, "value", cookie))
         for name, cookie in (cookies.items() if cookies is not None else ())
     }
+
+
+def _merge_cookies(current: Any, updates: Any) -> Any:
+    if current is None or current is updates:
+        return updates
+    merged = _cookie_values(current)
+    merged.update(_cookie_values(updates))
+    return merged
+
+
+RESOURCE_STATE_REVISION_HEADER = "x-nemo-gym-resource-state-revision"
 
 
 class GymnasiumAgentConfig(BaseResponsesAPIAgentConfig):
@@ -242,7 +253,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                 model_call_id = headers.get(MODEL_CALL_ID_HEADER)
             await raise_for_status(model_resp)
             model_response = NeMoGymResponse.model_validate(await get_response_json(model_resp))
-            model_server_cookies = model_resp.cookies
+            model_server_cookies = _merge_cookies(model_server_cookies, model_resp.cookies)
             last_model_response = model_response
 
             new_outputs.extend(model_response.output)
