@@ -158,7 +158,11 @@ fi
 # moments the driver has real work queued. Raising it to 1024 to match the engines is harmless
 # but unsupported -- P2D8 requested 4,096 and never had more than ~264 in flight.
 #
-# Stays under the 16k per-host aiohttp connector cap set below until roughly D32.
+# The ceiling above this is GLOBAL_AIOHTTP_CONNECTOR_LIMIT_PER_HOST, not the engines. Gym defaults
+# it to 1024 *divided by the server's num_workers* (server_utils.py:96,163), and every LLM request
+# goes to one host -- the router -- so that is a hard cap on outstanding requests no matter how
+# large this semaphore is. Raise the two together or the extra slots just queue in the client.
+# (An earlier version of this comment claimed a 16k cap; there is no such default.)
 MAX_NUM_SEQS_PER_DECODE_ENGINE=${MAX_NUM_SEQS_PER_DECODE_ENGINE:-512}
 # Settings layer, lowest to highest: manifest defaults -> these env vars -> anything you add on
 # the gym command line. Each is unset by default, so nothing here overrides what the manifest
