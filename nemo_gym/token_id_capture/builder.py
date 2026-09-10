@@ -296,6 +296,7 @@ def prefix_merging(
         ):
             duplicate_conflicts.append(candidate.model_call_id)
     entries = list(deduped.values())
+    captured_full_prompts = {entry.model_call_id for entry in entries if not entry.prompt_is_delta}
 
     # Chain construction assumes full prompts.
     # Materialize delta records before sorting or checking parent digests.
@@ -365,8 +366,20 @@ def prefix_merging(
         parent, ambiguous, note = _resolve_parent(node, nodes_by_call_id, prefix_index)
         if note:
             parent_link_failures[note] = parent_link_failures.get(note, 0) + 1
-            # A recovered fallback found a safe parent.
-            if not note.endswith("_recovered"):
+            # A canonical next prompt can rewrite a consumed response or its
+            # template (for example, remove an empty thinking prefix). A complete,
+            # independently verified capture can still train as its own root.
+            # Do not invent a token-prefix join or use this for delta/missing/
+            # unresolved parents. Retry admission below remains unchanged.
+            rewritten_full_prompt = (
+                all_traces
+                and note == "parent_digest_mismatch"
+                and entry.parent_resolution == ParentResolutionStatus.RESOLVED
+                and entry.model_call_id in captured_full_prompts
+                and entry.cum_len is not None
+                and entry.digest is not None
+            )
+            if not note.endswith("_recovered") and not rewritten_full_prompt:
                 node.unresolved_boundary = True
                 unresolved_parent_calls.append(entry.model_call_id)
         if parent is not None:

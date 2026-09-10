@@ -283,3 +283,52 @@ def test_direct_projection_rejects_wrong_rollout_and_unavailable_terminal():
         project_training_traces("wrong", run_builder(entries, all_traces=True))
     with pytest.raises(ValueError, match="terminal"):
         project_training_traces("r1", run_builder(entries, terminal_call_id="absent", all_traces=True))
+
+
+@pytest.mark.parametrize("builder", ["prefix_merging", "per_request"])
+def test_rewritten_empty_thinking_template_keeps_complete_calls_as_separate_roots(builder):
+    # The sampled request has an empty thinking prefix; the canonical next
+    # request removes it while retaining the sampled tool-call text.
+    first = _entry("a", [1, 2, 151667, 271, 151668, 271], [151657, 10, 151658, 151645])
+    second = _entry("b", [1, 2, 151657, 10, 151658, 151645, 3], [11, 12], "a")
+    for entries in ([first, second], [second, first]):
+        result = _build(entries, builder, explicit_terminal_call_id="b")
+        assert not result["mask_sample"]
+        envelope = result["training_traces"]
+        assert len(envelope["traces"]) == 2
+        assert _owned(envelope) == {
+            entry.model_call_id: (entry.generation_token_ids, entry.generation_log_probs) for entry in entries
+        }
+        for trace in envelope["traces"]:
+            entry = first if trace["model_call_ids"] == ["a"] else second
+            assert trace["token_ids"] == entry.prompt_token_ids + entry.generation_token_ids
+            assert trace["loss_mask"] == [0] * len(entry.prompt_token_ids) + [1] * len(entry.generation_token_ids)
+        assert result["metrics"]["parent_link_failures"] == {"parent_digest_mismatch": 1}
+    legacy = _assemble("r1", [first, second], "prefix_merging", "policy", explicit_terminal_call_id="b")
+    assert legacy["mask_sample"]
+
+
+@pytest.mark.parametrize("builder", ["prefix_merging", "per_request"])
+@pytest.mark.parametrize(
+    "damage",
+    [
+        {"prompt_is_delta": True},
+        {"parent_resolution": ParentResolutionStatus.UNRESOLVED},
+        {"parent_call_id": "absent"},
+        {"digest": None},
+    ],
+)
+def test_rewritten_prompt_fallback_requires_self_contained_verified_capture(builder, damage):
+    first = _entry("a", [1, 2], [10])
+    second = _entry("b", [1, 3, 4], [11], "a").model_copy(update=damage)
+    result = _build([first, second], builder, explicit_terminal_call_id="b")
+    assert result["mask_sample"] and "training_traces" not in result
+
+
+@pytest.mark.parametrize("builder", ["prefix_merging", "per_request"])
+def test_rewritten_prompt_does_not_disambiguate_retry_siblings(builder):
+    first = _entry("a", [1, 2], [10])
+    retry = _entry("retry", [1, 2], [12])
+    second = _entry("b", [1, 3, 4], [11], "a")
+    result = _build([first, retry, second], builder, explicit_terminal_call_id="b")
+    assert result["mask_sample"] and "training_traces" not in result

@@ -318,6 +318,13 @@ single-response behavior. `per_request` requires `delivery: all_traces`.
 - `per_request` uses the same captured-call admission and retry selection, then emits each retained
   call with its exact full prompt and sampled generation.
 
+In plural delivery, a complete captured prompt can remain an independent root when its resolved
+parent's sampled tokens are no longer a prefix of the canonical next prompt, for example after
+removing an empty thinking template. This fallback requires a valid cumulative token length and
+digest for the complete captured call. It preserves the exact conditioning tokens without joining
+across the rewrite. Delta records, missing or unresolved parents, and ambiguous retries still fail
+closed. The default `main_chain` behavior is unchanged.
+
 The plural mode leaves the scored `response` and scalar `reward` unchanged and adds a top-level
 `training_traces` envelope. Native inline token fields are also preserved. A trainer must explicitly
 consume the envelope; reading only `response.output` does not consume plural training data.
