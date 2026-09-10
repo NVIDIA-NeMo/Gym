@@ -1,0 +1,76 @@
+# Resources server: owns Terminal-Bench 4.0 verification (verify()) and reward.
+#
+# Grading follows Harbor's `[verifier] environment_mode = "separate"` contract: the declared
+# artifacts are collected from the agent sandbox, the agent sandbox is stopped, a fresh sandbox
+# is started from the task's prebuilt VERIFIER image (tests baked into /tests), the artifacts are
+# re-materialized at their original absolute paths, /tests/test.sh runs, and the reward is read
+# from /logs/verifier/reward.json (preferred) or reward.txt. Rows: see task_data.py.
+terminal_bench_4_resources_server:          # instance name — how agents/CLI refer to this server
+  resources_servers:                        # server type: resources_servers | responses_api_agents | responses_api_models
+    terminal_bench_4:                       # implementation directory under resources_servers/
+      allowed_agents: [opencode_sandboxed_agent]
+      entrypoint: app.py                    # server entry module
+      domain: agent                         # long-horizon terminal tasks graded by hidden tests
+      description: Terminal-Bench 4.0 tasks graded Harbor-style in a separate verifier sandbox from the task's prebuilt verifier image.
+      verified: false                       # set true once the benchmark has been baselined and reviewed
+
+      # Golden-patch (oracle) mode: verify() creates the agent sandbox itself, uploads solution/ to
+      # /solution, runs solve.sh, then grades exactly as it would grade an agent. Use it to prove the
+      # verifier path before any model run.
+      is_verifying_golden_patch: false
+      golden_patch_timeout_s: 3600
+
+      # Per-task `[verifier] timeout_sec` (60 s .. 7200 s across TB4) scaled and clamped.
+      verifier_timeout_multiplier: 1.0
+      verifier_timeout_floor_s: 60
+      verifier_timeout_cap_s: null
+      collect_hook_default_timeout_s: 300
+
+      # Artifacts cross as ONE gzip tarball through the provider file API; refuse anything larger.
+      artifact_max_bytes: 2147483648
+      # Multi-service (docker-compose) tasks and their sidecar artifacts cannot exist in a single
+      # sandbox; rows for such tasks are refused at seed_session unless this is flipped.
+      allow_compose_tasks: false
+      allow_gpu_tasks: false
+      # Harbor tears the agent environment down before the verifier starts; keep that order.
+      stop_agent_sandbox_before_verify: true
+
+      # Sandbox resources come from the task's `[environment]` (agent) and `[verifier.environment]`
+      # or `[environment]` (verifier) blocks, scaled by the multipliers and floored; set
+      # use_task_resources=false to use sandbox_config.resources for every task instead.
+      use_task_resources: true
+      cpu_multiplier: 1.0
+      memory_multiplier: 1.0
+      min_cpu: 1
+      min_memory_mib: 2048
+      min_disk_gib: 10
+
+      # Verifier stdout, reward files, ctrf.json and the artifact manifest are mirrored here per
+      # session (gitignored). Point it outside the checkout for real runs.
+      logs_dir: resources_servers/terminal_bench_4/logs
+      max_test_output_chars: 200000
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        derive_cpu_env: true
+        env:
+          # execd holds each finished command's response open for this long (default 1s);
+          # a short grace keeps every command and the readiness probe from paying that tail.
+          EXECD_API_GRACE_SHUTDOWN: "50ms"
+        resources:
+          # Fallback / floor when a task declares nothing (TB4 tasks declare cpus, memory_mb, storage_mb).
+          cpu: 2
+          memory_mib: 4096
+          disk_gib: 30
+        provider_options:
+          # Scheduling requests, kept below the limits so sandboxes pack densely.
+          resource_requests:
+            cpu: 0.5
+            memory_mib: 512
+            disk_gib: 30
+        metadata:
+          benchmark: terminal-bench-4.0
+
+      debug: false

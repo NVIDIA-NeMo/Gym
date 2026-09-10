@@ -1,0 +1,23 @@
+config_paths:
+- responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
+- resources_servers/terminal_bench_4/configs/terminal_bench_4.yaml
+
+
+terminal_bench_4_opencode_resources_server:
+  _inherit_from: terminal_bench_4_resources_server
+
+terminal_bench_4_opencode_sandboxed_agent:
+  _inherit_from: opencode_sandboxed_agent
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: terminal_bench_4_opencode_resources_server
+      datasets:
+        - name: terminal_bench_4
+          type: benchmark
+          # Built by prepare.py from a local TB4 task tree (TB4_TASKS_DIR); rows carry absolute
+          # task folders, so the prepared file is machine-specific and stays out of git.
+          jsonl_fpath: benchmarks/terminal_bench_4/data/benchmark.jsonl
+          prepare_script: benchmarks/terminal_bench_4/prepare.py
+          num_repeats: 1

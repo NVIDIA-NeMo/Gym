@@ -48,3 +48,15 @@ terminal_bench_2_1_terminus_2_sandboxed_resources_server:
       sandbox_config:
         metadata:
           nemo.nvidia.com/resources: custom
+
+terminal_bench_4_opencode_sandboxed_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      remote_opencode_install_script_path: /mnt/s3-data/data/bxyu/opencode/install.sh
+      remote_opencode_binary_path: /mnt/s3-data/data/bxyu/opencode/opencode-linux-x64
+terminal_bench_4_opencode_resources_server:
+  resources_servers:
+    terminal_bench_4:
+      sandbox_config:
+        metadata:
+          nemo.nvidia.com/resources: custom
