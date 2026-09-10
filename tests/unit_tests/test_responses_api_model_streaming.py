@@ -564,6 +564,16 @@ class TestSynthesizeSSE:
         assert failed["error"] == {"code": "server_error", "message": "boom"}
         assert failed["output"] == []
 
+    def test_unknown_usage_details_are_omitted_from_the_wire(self) -> None:
+        response = _build_response([_message_item("hello")]).model_dump(mode="json")
+        response["usage"]["input_tokens_details"]["cached_tokens"] = None
+        events = self._events("".join(synthesize_responses_sse(response)))
+        for event in (events[0], events[-1]):
+            usage = event["response"]["usage"]
+            assert "input_tokens_details" not in usage
+            assert usage["output_tokens_details"] == {"reasoning_tokens": 0}
+            assert usage["total_tokens"] == 10
+
 
 # The streaming sanitizer intentionally removes these input item types.
 # The transcript preservation check excludes them.

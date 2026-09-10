@@ -241,6 +241,18 @@ def _sse_event(payload: dict[str, Any]) -> str:
     return f"event: {payload['type']}\ndata: {json.dumps(payload)}\n\n"
 
 
+def _omit_unknown_usage_details(usage: dict[str, Any]) -> dict[str, Any]:
+    """Drop a usage detail object whose counter is null; strict SSE clients reject the null but accept the absence."""
+    usage = dict(usage)
+    for details_key, counter_key in (
+        ("input_tokens_details", "cached_tokens"),
+        ("output_tokens_details", "reasoning_tokens"),
+    ):
+        if (usage.get(details_key) or {}).get(counter_key) is None:
+            usage.pop(details_key, None)
+    return usage
+
+
 def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[NamespaceMap] = None) -> Iterator[str]:
     """Re-emit a complete Responses API response object as an SSE event stream.
 
@@ -255,6 +267,8 @@ def synthesize_responses_sse(response_json: dict[str, Any], ns_map: Optional[Nam
             namespace, name = ns_map[item["name"]]
             item = {**item, "namespace": namespace, "name": name}
         output_items.append(item)
+    if response_json.get("usage") is not None:
+        response_json = {**response_json, "usage": _omit_unknown_usage_details(response_json["usage"])}
 
     yield _sse_event(
         {"type": "response.created", "response": {**response_json, "status": "in_progress", "output": []}}
