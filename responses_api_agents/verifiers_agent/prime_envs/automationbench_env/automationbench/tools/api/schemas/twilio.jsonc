@@ -1,0 +1,87 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "twilio",
+  "endpoints": [
+    {
+      "id": "twilio.messages.create",
+      "path": "twilio/2010-04-01/Accounts/{AccountSid}/Messages.json",
+      "method": "POST",
+      "description": "Dispatch an SMS message using Twilio.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "Body": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "From": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "To": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "Body",
+          "From",
+          "To"
+        ],
+        "type": "object"
+      },
+      "response": "{sid, from, to, body, status, date_created, date_sent, price, price_unit}",
+      "internalPath": {
+        "AccountSid": "workspace"
+      }
+    },
+    {
+      "id": "twilio.calls.create",
+      "path": "twilio/2010-04-01/Accounts/{AccountSid}/Calls.json",
+      "method": "POST",
+      "description": "Place an outbound phone call through Twilio. A TwiML URL must be supplied to handle call flow.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "From": {
+            "type": "string"
+          },
+          "To": {
+            "type": "string"
+          },
+          "Url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "From",
+          "To",
+          "Url"
+        ],
+        "type": "object"
+      },
+      "response": "{sid, from, to, status, date_created, price, price_unit}",
+      "internalPath": {
+        "AccountSid": "workspace"
+      }
+    }
+  ]
+}

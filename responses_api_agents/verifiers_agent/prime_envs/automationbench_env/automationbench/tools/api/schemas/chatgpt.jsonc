@@ -1,0 +1,334 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "openai",
+  "endpoints": [
+    {
+      "id": "openai.chat.completions.create",
+      "path": "openai/v1/chat/completions",
+      "method": "POST",
+      "description": "Generate a chat completion. Submit a conversation as an ordered list of messages using system, user, and assistant roles, and receive an AI-generated reply. This is the primary endpoint for ChatGPT-style exchanges.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "frequency_penalty": {
+            "type": "number"
+          },
+          "logit_bias": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "max_completion_tokens": {
+            "type": "integer"
+          },
+          "max_tokens": {
+            "type": "integer"
+          },
+          "messages": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "role": {
+                  "enum": [
+                    "system",
+                    "developer",
+                    "user",
+                    "assistant"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "role",
+                "content"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "model": {
+            "type": "string"
+          },
+          "n": {
+            "type": "integer"
+          },
+          "presence_penalty": {
+            "type": "number"
+          },
+          "response_format": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "seed": {
+            "type": "integer"
+          },
+          "stop": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ]
+          },
+          "stream": {
+            "type": "boolean"
+          },
+          "temperature": {
+            "type": "number"
+          },
+          "tool_choice": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "auto",
+                  "required"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "object"
+              }
+            ]
+          },
+          "tools": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "top_p": {
+            "type": "number"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "messages",
+          "model"
+        ],
+        "type": "object"
+      },
+      "response": "{id, object: 'chat.completion', created (unix timestamp), model, choices: [{index, message: {role: 'assistant', content: string}, finish_reason: 'stop'|'length'|'content_filter'}], usage: {prompt_tokens, completion_tokens, total_tokens}}"
+    },
+    {
+      "id": "openai.completions.create",
+      "path": "openai/v1/completions",
+      "method": "POST",
+      "description": "Generate a text completion using the legacy non-chat interface. Provide a prompt string and receive a generated continuation. Current models favor the chat/completions endpoint instead.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "best_of": {
+            "type": "integer"
+          },
+          "echo": {
+            "type": "boolean"
+          },
+          "frequency_penalty": {
+            "type": "number"
+          },
+          "logit_bias": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "logprobs": {
+            "type": "integer"
+          },
+          "max_tokens": {
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "n": {
+            "type": "integer"
+          },
+          "presence_penalty": {
+            "type": "number"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "stop": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ]
+          },
+          "stream": {
+            "type": "boolean"
+          },
+          "suffix": {
+            "type": "string"
+          },
+          "temperature": {
+            "type": "number"
+          },
+          "top_p": {
+            "type": "number"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "response": "{id, object: 'text_completion', created (unix timestamp), model, choices: [{text, index, logprobs, finish_reason: 'stop'|'length'}], usage: {prompt_tokens, completion_tokens, total_tokens}}"
+    },
+    {
+      "id": "openai.responses.create",
+      "path": "openai/v1/responses",
+      "method": "POST",
+      "description": "Generate a response via the stateful Responses API for multi-turn conversations. Link responses using previous_response_id to maintain context. Supports tools, function calling, and file or image inputs.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "input": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "content": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "enum": [
+                        "user"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "role",
+                    "content"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 1,
+                "type": "array"
+              }
+            ]
+          },
+          "instructions": {
+            "type": "string"
+          },
+          "max_output_tokens": {
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "previous_response_id": {
+            "type": "string"
+          },
+          "reasoning": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "store": {
+            "type": "boolean"
+          },
+          "stream": {
+            "type": "boolean"
+          },
+          "temperature": {
+            "type": "number"
+          },
+          "text": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "tools": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "top_p": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "input",
+          "model"
+        ],
+        "type": "object"
+      },
+      "response": "{id, created_at, model, object: 'response', output: [{id, type: 'message', role: 'assistant', content: [{type: 'output_text', text: string, annotations: []}], status}], output_text (string convenience field), temperature, top_p, max_output_tokens, previous_response_id, status: 'completed'|'in_progress'|'queued', usage: {input_tokens, output_tokens, output_tokens_details: {reasoning_tokens}, total_tokens}}"
+    },
+    {
+      "id": "openai.moderations.create",
+      "path": "openai/v1/moderations",
+      "method": "POST",
+      "description": "Screen text for policy violations. Produces per-category flags along with confidence scores. Use this to verify that content complies with OpenAI usage policies before passing it to a model.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "input": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "input"
+        ],
+        "type": "object"
+      },
+      "response": "{id, model, results: [{flagged: boolean, categories: {sexual, hate, harassment, harassment/threatening, self-harm, self-harm/intent, self-harm/instructions, sexual/minors, hate/threatening, violence, violence/graphic, illicit, illicit/violent}, category_scores: {same keys, float 0.0–1.0}}]}"
+    }
+  ]
+}

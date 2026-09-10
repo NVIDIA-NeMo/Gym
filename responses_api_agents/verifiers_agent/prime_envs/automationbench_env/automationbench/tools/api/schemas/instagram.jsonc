@@ -1,0 +1,169 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "instagram",
+  "endpoints": [
+    {
+      "id": "instagram.media.createContainer",
+      "path": "instagram/v25/{accountId}/media",
+      "method": "POST",
+      "description": "First step of the publishing flow: create a media container (image, reel, carousel, or story) that will be used when publishing the post. For a single photo, supply image_url. For a reel or video, supply video_url and media_type=REELS. For a story, set media_type=STORIES. For individual carousel items, set is_carousel_item=true. For the carousel wrapper, set media_type=CAROUSEL and include a children array of container IDs.",
+      "parameters": {
+        "accountId": {
+          "type": "string",
+          "description": "The Instagram Business Account ID to create the container under.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "alt_text": {
+            "type": "string"
+          },
+          "audio_name": {
+            "type": "string"
+          },
+          "caption": {
+            "type": "string"
+          },
+          "children": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "collaborators": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "cover_url": {
+            "type": "string"
+          },
+          "image_url": {
+            "type": "string"
+          },
+          "is_carousel_item": {
+            "type": "boolean"
+          },
+          "location_id": {
+            "type": "string"
+          },
+          "media_type": {
+            "enum": [
+              "CAROUSEL",
+              "REELS",
+              "STORIES"
+            ],
+            "type": "string"
+          },
+          "share_to_feed": {
+            "type": "boolean"
+          },
+          "thumb_offset": {
+            "type": "integer"
+          },
+          "user_tags": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "video_url": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "response": "{id (container ID)}"
+    },
+    {
+      "id": "instagram.media.publish",
+      "path": "instagram/v25/{accountId}/media_publish",
+      "method": "POST",
+      "description": "Second step of the publishing flow: publish a container that was created in step 1. For single photos: create the container then call this endpoint. For carousels: create each item container, create the carousel wrapper with a children array, then call this endpoint.",
+      "parameters": {
+        "accountId": {
+          "type": "string",
+          "description": "The Instagram Business Account ID to publish under.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "creation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "creation_id"
+        ],
+        "type": "object"
+      },
+      "response": "{id (published media ID)}"
+    },
+    {
+      "id": "instagram.media.getContainerStatus",
+      "path": "instagram/v25/{containerId}",
+      "method": "GET",
+      "description": "Check the processing status of a media container created in step 1. Poll this endpoint until status_code returns FINISHED before proceeding to media_publish. This step is mandatory for video and reel containers, which require processing time.",
+      "parameters": {
+        "containerId": {
+          "type": "string",
+          "description": "The container ID returned by the createContainer operation.",
+          "required": true,
+          "location": "path"
+        },
+        "fields": {
+          "type": "string",
+          "description": "Comma-separated field names to include in the response (e.g. 'id,status_code,status').",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{id, status_code: 'EXPIRED'|'ERROR'|'FINISHED'|'IN_PROGRESS'|'PUBLISHED', status (string — human-readable status message, present on ERROR)}"
+    },
+    {
+      "id": "instagram.media.get",
+      "path": "instagram/v25/{mediaId}",
+      "method": "GET",
+      "description": "Retrieve fields from a published Instagram media object. Can also be used to poll container status by requesting status_code in the fields parameter.",
+      "parameters": {
+        "mediaId": {
+          "type": "string",
+          "description": "The media object ID or container ID to query.",
+          "required": true,
+          "location": "path"
+        },
+        "fields": {
+          "type": "string",
+          "description": "Comma-separated fields to return. For published media: id, media_type, media_url, caption, permalink, thumbnail_url, timestamp, username, like_count, comments_count, shortcode, is_comment_enabled, is_shared_to_feed, alt_text. For containers: id, status_code, status.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "For media: {id, media_type, media_url, caption, permalink, thumbnail_url, timestamp, username, like_count, comments_count, shortcode, is_comment_enabled, is_shared_to_feed, alt_text}. For containers: {id, status_code: 'EXPIRED'|'ERROR'|'FINISHED'|'IN_PROGRESS'|'PUBLISHED', status}"
+    }
+  ]
+}

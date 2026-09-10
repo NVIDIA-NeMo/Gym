@@ -1,0 +1,298 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "reamaze",
+  "endpoints": [
+    {
+      "id": "reamaze.conversations.list",
+      "path": "reamaze/v1/conversations",
+      "method": "GET",
+      "description": "Retrieve all Re:amaze conversations, tickets, and threads. Fetch the full list of support conversations.",
+      "parameters": {
+        "filter": {
+          "type": "string",
+          "enum": [
+            "archived",
+            "open",
+            "unassigned",
+            "all"
+          ],
+          "description": "Narrow conversations by their current state.",
+          "location": "query"
+        },
+        "for": {
+          "type": "string",
+          "description": "Restrict results to a specific user's email address.",
+          "location": "query"
+        },
+        "sort": {
+          "type": "string",
+          "description": "Ordering applied to the returned results.",
+          "location": "query"
+        },
+        "tag": {
+          "type": "string",
+          "description": "Restrict results to conversations with a given tag.",
+          "location": "query"
+        },
+        "category": {
+          "type": "string",
+          "description": "Restrict results to a specific category slug.",
+          "location": "query"
+        },
+        "page": {
+          "type": "integer",
+          "description": "Which page of results to return.",
+          "location": "query"
+        },
+        "start_date": {
+          "type": "string",
+          "description": "Return only conversations created on or after this date.",
+          "location": "query"
+        },
+        "end_date": {
+          "type": "string",
+          "description": "Return only conversations created on or before this date.",
+          "location": "query"
+        },
+        "origin": {
+          "type": "string",
+          "description": "Restrict results to a particular conversation channel or origin.",
+          "location": "query"
+        }
+      },
+      "response": "{conversations: [ConversationObject], page_size: int, page_count: int, total_count: int}"
+    },
+    {
+      "id": "reamaze.conversations.create",
+      "path": "reamaze/v1/conversations",
+      "method": "POST",
+      "description": "Open a new Re:amaze conversation or support ticket.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "conversation": {
+            "additionalProperties": true,
+            "properties": {
+              "category": {
+                "type": "string"
+              },
+              "status": {
+                "enum": [
+                  "unresolved",
+                  "resolved",
+                  "archived",
+                  "pending",
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5,
+                  6,
+                  7,
+                  8,
+                  9
+                ]
+              }
+            },
+            "required": [
+              "category"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "conversation"
+        ],
+        "type": "object"
+      },
+      "response": "{conversation: ConversationObject, id: string}"
+    },
+    {
+      "id": "reamaze.conversations.update",
+      "path": "reamaze/v1/conversations/{conversation_id}",
+      "method": "PUT",
+      "description": "Modify an existing Re:amaze conversation. Adjust its status, category, tags, or assigned agent.",
+      "parameters": {
+        "conversation_id": {
+          "type": "string",
+          "description": "Identifier of the conversation to update.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "conversation": {
+            "additionalProperties": true,
+            "description": "conversation: {status (optional, integer — 0=Open, 1=Responded, 2=Done, 3=Spam, 4=Archived, 5=On Hold, 6=Auto-Done, 7=AI Agent Assigned, 8=AI Agent Done, 9=Spam AI), hold_until (optional, ISO 8601 datetime — when status=5), assignee: {email (optional, string)}, tag_list (optional, array of strings), category (optional, string — email channel name), data (optional, object — custom field key-value pairs), brand (optional, string — brand URL for moving conversations)}",
+            "properties": {
+              "status": {
+                "enum": [
+                  "unresolved",
+                  "resolved",
+                  "archived",
+                  "pending",
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5,
+                  6,
+                  7,
+                  8,
+                  9
+                ]
+              }
+            },
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "unresolved",
+              "resolved",
+              "archived",
+              "pending",
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "response": "{conversation: ConversationObject, id: string}"
+    },
+    {
+      "id": "reamaze.conversations.addMessage",
+      "path": "reamaze/v1/conversations/{conversation_id}/messages",
+      "method": "POST",
+      "description": "Append a message or reply to an existing Re:amaze conversation.",
+      "parameters": {
+        "conversation_id": {
+          "type": "string",
+          "description": "Identifier of the conversation to add a message to.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "message": {
+            "additionalProperties": true,
+            "properties": {
+              "attachment": {
+                "type": "string"
+              },
+              "body": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "suppress_autoresolve": {
+                "type": "boolean"
+              },
+              "suppress_notifications": {
+                "type": "boolean"
+              },
+              "user": {
+                "additionalProperties": true,
+                "properties": {
+                  "email": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "visibility": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "body"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "response": "{message: MessageObject, conversation_id: string, message_id: string}"
+    },
+    {
+      "id": "reamaze.contacts.list",
+      "path": "reamaze/v1/contacts",
+      "method": "GET",
+      "description": "Retrieve all Re:amaze contacts and customers.",
+      "parameters": {},
+      "response": "{contacts: [ContactObject], count: int}"
+    },
+    {
+      "id": "reamaze.contacts.create",
+      "path": "reamaze/v1/contacts",
+      "method": "POST",
+      "description": "Add a new Re:amaze contact or customer record.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "contact": {
+            "additionalProperties": true,
+            "properties": {
+              "email": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "external_id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "notes": {
+                "type": "string"
+              },
+              "phone": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "email"
+            ],
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "response": "{contact: ContactObject, id: string}"
+    }
+  ]
+}

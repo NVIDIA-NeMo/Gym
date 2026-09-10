@@ -1,0 +1,365 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "linkedin",
+  "endpoints": [
+    {
+      "id": "linkedin.me.get",
+      "path": "linkedin/v2/me",
+      "method": "GET",
+      "description": "Retrieve the currently authenticated member's profile. Returns profile data including name, headline, location, industry, and contact details.",
+      "parameters": {},
+      "response": "{success, id, localizedFirstName, localizedLastName, headline, location, summary, public_profile_url, profile_picture_url, phone}"
+    },
+    {
+      "id": "linkedin.people.get",
+      "path": "linkedin/v2/people/{profile_id}",
+      "method": "GET",
+      "description": "Fetch a LinkedIn member's profile by their ID. Returns complete profile information for the specified person.",
+      "parameters": {
+        "profile_id": {
+          "type": "string",
+          "description": "The member's profile ID.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "{success, profile: Profile}"
+    },
+    {
+      "id": "linkedin.people.search",
+      "path": "linkedin/v2/people",
+      "method": "GET",
+      "description": "Query LinkedIn profiles using keywords, company, job title, or location. Returns matching profiles from the user's connections and wider network.",
+      "parameters": {
+        "keywords": {
+          "type": "string",
+          "description": "Search terms matched against name, headline, summary, or email.",
+          "required": false,
+          "location": "query"
+        },
+        "company": {
+          "type": "string",
+          "description": "Narrow results to profiles at this company.",
+          "required": false,
+          "location": "query"
+        },
+        "title": {
+          "type": "string",
+          "description": "Narrow results by job title.",
+          "required": false,
+          "location": "query"
+        },
+        "location": {
+          "type": "string",
+          "description": "Narrow results by geographic location.",
+          "required": false,
+          "location": "query"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Maximum profiles to return (default 10).",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{success, profiles: [Profile], count}"
+    },
+    {
+      "id": "linkedin.connections.list",
+      "path": "linkedin/v2/connections",
+      "method": "GET",
+      "description": "Retrieve the authenticated member's first-degree connections. Optionally filter by keywords matching name, headline, or company.",
+      "parameters": {
+        "q": {
+          "type": "string",
+          "description": "Query type — use 'viewer' to fetch the authenticated member's connections.",
+          "required": false,
+          "location": "query"
+        },
+        "keywords": {
+          "type": "string",
+          "description": "Restrict connections by name, headline, or company.",
+          "required": false,
+          "location": "query"
+        },
+        "start": {
+          "type": "integer",
+          "description": "Starting offset for pagination (default 0).",
+          "required": false,
+          "location": "query"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Connections to return per page (default 50, recommended max 50).",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{elements: [{to: 'urn:li:person:xxx'}], paging: {count, start, total}}"
+    },
+    {
+      "id": "linkedin.organizations.list",
+      "path": "linkedin/v2/organizations",
+      "method": "GET",
+      "description": "Enumerate LinkedIn organizations and companies. Filter by name or restrict to organizations the current user manages.",
+      "parameters": {
+        "name": {
+          "type": "string",
+          "description": "Filter organizations by partial name match.",
+          "required": false,
+          "location": "query"
+        },
+        "role_type": {
+          "type": "string",
+          "description": "Restrict results by the user's role type.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{success, companies: [Company], total_count}"
+    },
+    {
+      "id": "linkedin.organizations.get",
+      "path": "linkedin/v2/organizations/{company_id}",
+      "method": "GET",
+      "description": "Retrieve detailed information for a specific LinkedIn organization or company by ID.",
+      "parameters": {
+        "company_id": {
+          "type": "string",
+          "description": "The organization or company ID.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "{success, company: Company}"
+    },
+    {
+      "id": "linkedin.jobs.list",
+      "path": "linkedin/v2/jobs",
+      "method": "GET",
+      "description": "Enumerate LinkedIn job postings so their IDs can be discovered before fetching a specific posting.",
+      "parameters": {},
+      "response": "{elements: [{id, title, company_id, company_name, location, is_active, description, posted_at}], paging: {count, start, total}}"
+    },
+    {
+      "id": "linkedin.jobs.get",
+      "path": "linkedin/v2/jobs/{job_id}",
+      "method": "GET",
+      "description": "Fetch information for a LinkedIn job posting by its ID. Returns the job title, company, location, description, and requirements.",
+      "parameters": {
+        "job_id": {
+          "type": "string",
+          "description": "The job posting ID.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "{success, id, title, company_id, company_name, location, is_active, description, workplace_type, employment_type, seniority_level, industry, job_functions, skills_required, experience_years, salary_range, apply_url, posted_at, expires_at}"
+    },
+    {
+      "id": "linkedin.ugcPosts.create",
+      "path": "linkedin/v2/ugcPosts",
+      "method": "POST",
+      "description": "Publish a UGC post or article on behalf of the authenticated user. Accepts both the standard LinkedIn UGC nested format and a simplified flat parameter format.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "author": {
+            "type": "string"
+          },
+          "lifecycleState": {
+            "type": "string"
+          },
+          "specificContent": {
+            "additionalProperties": true,
+            "properties": {
+              "com.linkedin.ugc.ShareContent": {
+                "additionalProperties": true,
+                "properties": {
+                  "shareCommentary": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "text": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "visibility": {
+            "additionalProperties": true,
+            "properties": {
+              "com.linkedin.ugc.MemberNetworkVisibility": {
+                "enum": [
+                  "PUBLIC",
+                  "CONNECTIONS",
+                  "LOGGED_IN"
+                ],
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "author",
+          "lifecycleState"
+        ],
+        "type": "object"
+      },
+      "response": "{success, post: Post, id, author, visibility}"
+    },
+    {
+      "id": "linkedin.ugcPosts.search",
+      "path": "linkedin/v2/ugcPosts",
+      "method": "GET",
+      "description": "Locate UGC posts by author. The official API accepts q=authors with an authors=List(URN) parameter. This endpoint additionally supports filtering by author profile ID or matching against post text.",
+      "parameters": {
+        "q": {
+          "type": "string",
+          "description": "Query mode — use 'authors' to retrieve posts from a specific author.",
+          "required": false,
+          "location": "query"
+        },
+        "author": {
+          "type": "string",
+          "description": "Restrict posts to this author's profile ID.",
+          "required": false,
+          "location": "query"
+        },
+        "sortBy": {
+          "type": "string",
+          "description": "Ordering criterion. Enum: 'CREATED'|'LAST_MODIFIED'. Default: LAST_MODIFIED.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{success, posts: [Post], count}"
+    },
+    {
+      "id": "linkedin.companyUpdates.create",
+      "path": "linkedin/v2/companyUpdates",
+      "method": "POST",
+      "description": "Publish an update or post to a company page. The authenticated user must hold administrator privileges for the specified company.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "comment": {
+            "type": "string"
+          },
+          "company": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "image_url": {
+            "type": "string"
+          },
+          "submitted_url": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "comment",
+          "company"
+        ],
+        "type": "object"
+      },
+      "response": "{success, post: Post, id, company_id, company_name}"
+    },
+    {
+      "id": "linkedin.invitations.create",
+      "path": "linkedin/v2/invitations",
+      "method": "POST",
+      "description": "Dispatch a connection invitation to another LinkedIn member. Identify the recipient by profile URL, profile ID, or invitee identifier. Sending duplicate invitations to the same profile will be rejected.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "profile_url": {
+            "type": "string"
+          },
+          "tracking_token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile_url"
+        ],
+        "type": "object"
+      },
+      "response": "{success, id, invitation_id, profile_url, status ('sent'), sent_at, message, invitation_type, sender_profile_id, recipient_profile_url}"
+    },
+    {
+      "id": "linkedin.messages.create",
+      "path": "linkedin/v2/messages",
+      "method": "POST",
+      "description": "Deliver a direct message to a LinkedIn connection. Identify the recipient by profile ID, email, profile URL, or a recipients array.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "profile_id": {
+            "type": "string"
+          },
+          "profile_url": {
+            "type": "string"
+          },
+          "recipients": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "response": "{success, message: Message}"
+    }
+  ]
+}

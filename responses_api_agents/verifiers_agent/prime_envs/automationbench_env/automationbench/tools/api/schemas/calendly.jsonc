@@ -1,0 +1,368 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "calendly",
+  "endpoints": [
+    {
+      "id": "calendly.scheduled_events.list",
+      "path": "calendly/scheduled_events",
+      "method": "GET",
+      "description": "Retrieve scheduled events (meetings, appointments, and bookings). Supports filtering by user, invitee email, date range, or status.",
+      "parameters": {
+        "organization": {
+          "type": "string",
+          "description": "Limit results to events belonging to the organization at this URI.",
+          "required": false,
+          "location": "query"
+        },
+        "user": {
+          "type": "string",
+          "description": "Limit results to events for the user at this URI. Required when organization is not provided.",
+          "required": false,
+          "location": "query"
+        },
+        "invitee_email": {
+          "type": "string",
+          "description": "Limit results to events that include the specified invitee email.",
+          "required": false,
+          "location": "query"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "canceled"
+          ],
+          "description": "Narrow results to events with this status.",
+          "required": false,
+          "location": "query"
+        },
+        "min_start_time": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Return only events starting at or after this ISO 8601 UTC timestamp.",
+          "required": false,
+          "location": "query"
+        },
+        "max_start_time": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Return only events starting before this ISO 8601 UTC timestamp.",
+          "required": false,
+          "location": "query"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Number of records per page (1–100, default 20).",
+          "required": false,
+          "location": "query"
+        },
+        "page_token": {
+          "type": "string",
+          "description": "Continuation token for the next page of results.",
+          "required": false,
+          "location": "query"
+        },
+        "sort": {
+          "type": "string",
+          "description": "Order results by start_time. Accepted values: 'start_time:asc' or 'start_time:desc'.",
+          "required": false,
+          "location": "query"
+        },
+        "group": {
+          "type": "string",
+          "description": "Limit results to events for the group at this URI.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{collection: [Event], pagination: {count, next_page, next_page_token}}"
+    },
+    {
+      "id": "calendly.scheduled_events.get",
+      "path": "calendly/scheduled_events/{uuid}",
+      "method": "GET",
+      "description": "Fetch complete details for a single scheduled event by its UUID or by the complete URI returned from scheduled_events.list, including time, location, host, and invitee counts.",
+      "parameters": {
+        "uuid": {
+          "type": "string",
+          "description": "UUID or complete URI of the scheduled event to retrieve.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "{resource: Event}"
+    },
+    {
+      "id": "calendly.scheduled_events.cancel",
+      "path": "calendly/scheduled_events/{uuid}/cancellation",
+      "method": "POST",
+      "description": "Cancel a scheduled event. Generates a cancellation record and sends notifications to all invitees.",
+      "parameters": {
+        "uuid": {
+          "type": "string",
+          "description": "UUID or complete URI of the scheduled event to cancel.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "reason": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "response": "{resource: Cancellation}"
+    },
+    {
+      "id": "calendly.scheduled_events.invitees.list",
+      "path": "calendly/scheduled_events/{uuid}/invitees",
+      "method": "GET",
+      "description": "List all invitees on a scheduled event, including their booking status, contact details, and question responses.",
+      "parameters": {
+        "uuid": {
+          "type": "string",
+          "description": "UUID or complete URI of the scheduled event whose invitees to list.",
+          "required": true,
+          "location": "path"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Number of records per page (1–100, default 20).",
+          "required": false,
+          "location": "query"
+        },
+        "email": {
+          "type": "string",
+          "description": "Narrow results to invitees matching this exact email address.",
+          "required": false,
+          "location": "query"
+        },
+        "page_token": {
+          "type": "string",
+          "description": "Continuation token for the next page of results.",
+          "required": false,
+          "location": "query"
+        },
+        "sort": {
+          "type": "string",
+          "description": "Order results. Accepted values: 'created_at:asc' or 'created_at:desc'.",
+          "required": false,
+          "location": "query"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "canceled"
+          ],
+          "description": "Narrow results to invitees with this status.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{collection: [Invitee], pagination: {count, next_page, next_page_token}}"
+    },
+    {
+      "id": "calendly.invitee_no_shows.create",
+      "path": "calendly/invitee_no_shows",
+      "method": "POST",
+      "description": "Flag an invitee as a no-show. Registers that the attendee did not appear for their scheduled meeting.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "invitee": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "invitee"
+        ],
+        "type": "object"
+      },
+      "response": "{resource: InviteeNoShow}"
+    },
+    {
+      "id": "calendly.event_types.list",
+      "path": "calendly/event_types",
+      "method": "GET",
+      "description": "List the available meeting types and scheduling page configurations for a user or organization.",
+      "parameters": {
+        "organization": {
+          "type": "string",
+          "description": "Return event types for the organization at this URI.",
+          "required": false,
+          "location": "query"
+        },
+        "user": {
+          "type": "string",
+          "description": "Return event types for the user at this URI.",
+          "required": false,
+          "location": "query"
+        },
+        "active": {
+          "type": "boolean",
+          "description": "When provided, filters to only active or only inactive event types.",
+          "required": false,
+          "location": "query"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Number of records per page (1–100, default 20).",
+          "required": false,
+          "location": "query"
+        },
+        "page_token": {
+          "type": "string",
+          "description": "Continuation token for the next page of results.",
+          "required": false,
+          "location": "query"
+        },
+        "sort": {
+          "type": "string",
+          "description": "Order results. Accepted values: 'name:asc' or 'name:desc'.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{collection: [EventType], pagination: {count, next_page, next_page_token}}"
+    },
+    {
+      "id": "calendly.users.get",
+      "path": "calendly/users/{user_id}",
+      "method": "GET",
+      "description": "Fetch a Calendly user by UUID, or supply 'me' to get the authenticated user. Returns the user's profile, scheduling URL, and timezone.",
+      "parameters": {
+        "user_id": {
+          "type": "string",
+          "description": "UUID of the user, or 'me' for the currently authenticated user.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "{resource: User}"
+    },
+    {
+      "id": "calendly.one_off_event_types.create",
+      "path": "calendly/one_off_event_types",
+      "method": "POST",
+      "description": "Generate a one-time meeting link. Creates a unique scheduling URL for a standalone meeting that is not tied to a recurring event type.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "co_hosts": {
+            "items": {},
+            "type": "array"
+          },
+          "duration": {
+            "type": "integer"
+          },
+          "end_date": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "location_additional_info": {
+            "type": "string"
+          },
+          "location_kind": {
+            "enum": [
+              "physical",
+              "phone_call",
+              "inbound_call",
+              "outbound_call",
+              "zoom_conference",
+              "google_conference",
+              "microsoft_teams_conference",
+              "webex_conference",
+              "goto_meeting_conference",
+              "custom"
+            ],
+            "type": "string"
+          },
+          "location_location": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "start_date": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "response": "{resource: Event, booking_url: string}"
+    },
+    {
+      "id": "calendly.scheduling_links.create",
+      "path": "calendly/scheduling_links",
+      "method": "POST",
+      "description": "Schedule a Calendly meeting by generating a booking link for an event type. When invitee_email is provided, this also creates the scheduled event and invitee record immediately (simulating a completed booking). Use this endpoint to book meetings, schedule appointments, or create events with specific invitees.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "end_time": {
+            "type": "string"
+          },
+          "event_guests": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "invitee_email": {
+            "type": "string"
+          },
+          "max_event_count": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "owner_type": {
+            "type": "string"
+          },
+          "start_time": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "max_event_count",
+          "owner",
+          "owner_type"
+        ],
+        "type": "object"
+      },
+      "response": "{resource: {booking_url (string), owner (string), owner_type (string)}}"
+    }
+  ]
+}

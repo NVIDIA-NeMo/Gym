@@ -2,3 +2,8 @@
 verifiers[ta]==0.3.0
 # NLTK 3.10 rejects imports from Gym's component-local virtualenv.
 nltk<3.10
+--extra-index-url https://hub.primeintellect.ai/primeintellect/simple/
+--extra-index-url https://hub.primeintellect.ai/zapier/simple/
+--extra-index-url https://hub.primeintellect.ai/prime/simple/
+acereason-math
+-e ./prime_envs/automationbench_env

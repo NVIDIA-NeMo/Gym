@@ -1,0 +1,859 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "salesforce",
+  "endpoints": [
+    {
+      "id": "salesforce.query",
+      "path": "salesforce/services/data/v61.0/query",
+      "method": "GET",
+      "description": "Run a SOQL query to search, filter, and fetch Salesforce records using standard SOQL syntax: SELECT fields FROM sObject [WHERE conditions] [ORDER BY field] [LIMIT n].",
+      "parameters": {
+        "q": {
+          "type": "string",
+          "description": "Complete SOQL query string (e.g., \"SELECT Id, Name FROM Contact WHERE LastName = 'Smith'\").",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "response": "{totalSize: int, done: boolean, records: [record], results: [record] (compatibility alias), count: int}"
+    },
+    {
+      "id": "salesforce.search",
+      "path": "salesforce/services/data/v61.0/search",
+      "method": "GET",
+      "description": "Run a SOSL full-text search across multiple Salesforce object types.",
+      "parameters": {
+        "q": {
+          "type": "string",
+          "description": "SOSL query string (e.g., \"FIND {term} IN ALL FIELDS RETURNING Account, Contact\").",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "response": "{search_records: [record], query: string}"
+    },
+    {
+      "id": "salesforce.sobjects.record.get",
+      "path": "salesforce/services/data/v61.0/sobjects/{sObjectType}/{id}",
+      "method": "GET",
+      "description": "Fetch a single Salesforce record by its ID. Works for Contact, Lead, Account, Opportunity, Case, or any sObject type.",
+      "parameters": {
+        "sObjectType": {
+          "type": "string",
+          "description": "The Salesforce sObject type name (Contact, Account, Lead, Opportunity, Case, Task, Event, etc.).",
+          "required": true,
+          "location": "path"
+        },
+        "id": {
+          "type": "string",
+          "description": "The ID of the record to fetch.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "sObject record with all fields"
+    },
+    {
+      "id": "salesforce.sobjects.contact.create",
+      "path": "salesforce/services/data/v61.0/sobjects/Contact",
+      "method": "POST",
+      "description": "Add a new Contact record to Salesforce.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "AccountId": {
+            "type": "string"
+          },
+          "Description": {
+            "type": "string"
+          },
+          "Email": {
+            "type": "string"
+          },
+          "FirstName": {
+            "type": "string"
+          },
+          "LastName": {
+            "type": "string"
+          },
+          "LeadSource": {
+            "type": "string"
+          },
+          "MailingCity": {
+            "type": "string"
+          },
+          "MailingCountry": {
+            "type": "string"
+          },
+          "MailingPostalCode": {
+            "type": "string"
+          },
+          "MailingState": {
+            "type": "string"
+          },
+          "MailingStreet": {
+            "type": "string"
+          },
+          "Phone": {
+            "type": "string"
+          },
+          "Title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "LastName"
+        ],
+        "type": "object"
+      },
+      "response": "{id: string, success: true}"
+    },
+    {
+      "id": "salesforce.sobjects.contact.update",
+      "path": "salesforce/services/data/v61.0/sobjects/Contact/{id}",
+      "method": "PATCH",
+      "description": "Modify the fields of an existing Salesforce Contact.",
+      "parameters": {
+        "id": {
+          "type": "string",
+          "description": "The ID of the Contact record to update.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "AccountId": {},
+          "Description": {},
+          "Email": {},
+          "FirstName": {},
+          "LastName": {},
+          "LeadSource": {},
+          "MailingCity": {},
+          "MailingCountry": {},
+          "MailingPostalCode": {},
+          "MailingState": {},
+          "MailingStreet": {},
+          "Phone": {},
+          "Title": {}
+        },
+        "type": "object"
+      },
+      "response": "204 No Content on success"
+    },
+    {
+      "id": "salesforce.sobjects.lead.create",
+      "path": "salesforce/services/data/v61.0/sobjects/Lead",
+      "method": "POST",
+      "description": "Add a new Lead record to Salesforce.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "City": {
+            "type": "string"
+          },
+          "Company": {
+            "type": "string"
+          },
+          "Country": {
+            "type": "string"
+          },
+          "Description": {
+            "type": "string"
+          },
+          "Email": {
+            "type": "string"
+          },
+          "FirstName": {
+            "type": "string"
+          },
+          "Industry": {
+            "type": "string"
+          },
+          "LastName": {
+            "type": "string"
+          },
+          "LeadSource": {
+            "type": "string"
+          },
+          "Phone": {
+            "type": "string"
+          },
+          "PostalCode": {
+            "type": "string"
+          },
+          "Rating": {
+            "type": "string"
+          },
+          "State": {
+            "type": "string"
+          },
+          "Status": {
+            "type": "string"
+          },
+          "Street": {
+            "type": "string"
+          },
+          "Title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "Company",
+          "LastName"
+        ],
+        "type": "object"
+      },
+      "response": "{id: string, success: true}"
+    },
+    {
+      "id": "salesforce.sobjects.lead.update",
+      "path": "salesforce/services/data/v61.0/sobjects/Lead/{id}",
+      "method": "PATCH",
+      "description": "Modify the fields of an existing Salesforce Lead.",
+      "parameters": {
+        "id": {
+          "type": "string",
+          "description": "The ID of the Lead record to update.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "City": {},
+          "Company": {},
+          "Country": {},
+          "Description": {},
+          "Email": {},
+          "FirstName": {},
+          "Industry": {},
+          "LastName": {},
+          "LeadSource": {},
+          "OwnerId": {},
+          "Phone": {},
+          "PostalCode": {},
+          "Rating": {},
+          "State": {},
+          "Status": {},
+          "Street": {},
+          "Title": {}
+        },
+        "type": "object"
+      },
+      "response": "204 No Content on success"
+    },
+    {
+      "id": "salesforce.actions.convertLead",
+      "path": "salesforce/services/data/v61.0/actions/standard/convertLead",
+      "method": "POST",
+      "description": "Convert a Salesforce Lead into a Contact, optionally creating an associated opportunity in the process.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "inputs": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "accountId": {},
+                "convertedStatus": {},
+                "createOpportunity": {},
+                "leadId": {},
+                "opportunityId": {}
+              },
+              "required": [
+                "accountId",
+                "convertedStatus",
+                "leadId"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "response": "{contact, lead, opportunity}"
+    },
+    {
+      "id": "salesforce.sobjects.account.create",
+      "path": "salesforce/services/data/v61.0/sobjects/Account",
+      "method": "POST",
+      "description": "Add a new Account record to Salesforce.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "AnnualRevenue": {
+            "type": "number"
+          },
+          "BillingCity": {
+            "type": "string"
+          },
+          "BillingCountry": {
+            "type": "string"
+          },
+          "BillingPostalCode": {
+            "type": "string"
+          },
+          "BillingState": {
+            "type": "string"
+          },
+          "BillingStreet": {
+            "type": "string"
+          },
+          "Description": {
+            "type": "string"
+          },
+          "Industry": {
+            "type": "string"
+          },
+          "Name": {
+            "type": "string"
+          },
+          "NumberOfEmployees": {
+            "type": "integer"
+          },
+          "Phone": {
+            "type": "string"
+          },
+          "Type": {
+            "type": "string"
+          },
+          "Website": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "Name"
+        ],
+        "type": "object"
+      },
+      "response": "{id: string, success: true}"
+    },
+    {
+      "id": "salesforce.sobjects.account.update",
+      "path": "salesforce/services/data/v61.0/sobjects/Account/{id}",
+      "method": "PATCH",
+      "description": "Modify the fields of an existing Salesforce Account.",
+      "parameters": {
+        "id": {
+          "type": "string",
+          "description": "The ID of the Account record to update.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "AnnualRevenue": {},
+          "BillingCity": {},
+          "BillingCountry": {},
+          "BillingPostalCode": {},
+          "BillingState": {},
+          "BillingStreet": {},
+          "Description": {},
+          "Industry": {},
+          "Name": {},
+          "NumberOfEmployees": {},
+          "Phone": {},
+          "Type": {},
+          "Website": {}
+        },
+        "type": "object"
+      },
+      "response": "204 No Content on success"
+    },
+    {
+      "id": "salesforce.sobjects.opportunity.create",
+      "path": "salesforce/services/data/v61.0/sobjects/Opportunity",
+      "method": "POST",
+      "description": "Add a new Opportunity (deal) record to Salesforce.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "AccountId": {},
+          "Amount": {},
+          "CloseDate": {},
+          "Description": {},
+          "LeadSource": {},
+          "Name": {},
+          "Probability": {},
+          "StageName": {}
+        },
+        "required": [
+          "CloseDate",
+          "Name",
+          "StageName"
+        ],
+        "type": "object"
+      },
+      "response": "{id: string, success: true}"
+    },
+    {
+      "id": "salesforce.sobjects.opportunity.update",
+      "path": "salesforce/services/data/v61.0/sobjects/Opportunity/{id}",
+      "method": "PATCH",
+      "description": "Modify the fields of an existing Salesforce Opportunity.",
+      "parameters": {
+        "id": {
+          "type": "string",
+          "description": "The ID of the Opportunity record to update.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "AccountId": {},
+          "Amount": {},
+          "CloseDate": {},
+          "Competitor": {},
+          "Description": {},
+          "IsClosed": {},
+          "IsWon": {},
+          "Name": {},
+          "NextStep": {},
+          "Probability": {},
+          "RiskLevel": {},
+          "StageName": {}
+        },
+        "type": "object"
+      },
+      "response": "204 No Content on success"
+    },
+    {
+      "id": "salesforce.sobjects.campaign.create",
+      "path": "salesforce/services/data/v61.0/sobjects/Campaign",
+      "method": "POST",
+      "description": "Add a new Campaign record to Salesforce.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "BudgetedCost": {},
+          "Description": {},
+          "EndDate": {},
+          "ExpectedRevenue": {},
+          "IsActive": {},
+          "Name": {},
+          "StartDate": {},
+          "Status": {},
+          "Type": {}
+        },
+        "required": [
+          "Name"
+        ],
+        "type": "object"
+      },
+      "response": "{id: string, success: true}"
+    },
+    {
+      "id": "salesforce.sobjects.campaignMember.create",
+      "path": "salesforce/services/data/v61.0/sobjects/CampaignMember",
+      "method": "POST",
+      "description": "Associate a Contact or Lead with a Campaign by creating a CampaignMember record that links the person to the campaign.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "CampaignId": {},
+          "ContactId": {},
+          "Status": {}
+        },
+        "required": [
+          "CampaignId",
+          "ContactId"
+        ],
+        "type": "object"
+      },
+      "response": "{id: string, success: true}"
+    },
+    {
+      "id": "salesforce.sobjects.case.create",
+      "path": "salesforce/services/data/v61.0/sobjects/Case",
+      "method": "POST",
+      "description": "Open a new Case (support ticket) in Salesforce.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "AccountId": {},
+          "ContactId": {},
+          "Description": {},
+          "Origin": {},
+          "Priority": {},
+          "Reason": {},
+          "Status": {},
+          "Subject": {},
+          "SuppliedName": {},
+          "Type": {}
+        },
+        "type": "object"
+      },
+      "response": "{id: string, success: true}"
+    },
+    {
+      "id": "salesforce.sobjects.caseComment.create",
+      "path": "salesforce/services/data/v61.0/sobjects/CaseComment",
+      "method": "POST",
+      "description": "Append a comment to a Case by creating a CaseComment record with ParentId pointing to the target Case.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "CommentBody": {
+            "type": "string"
+          },
+          "ParentId": {}
+        },
+        "required": [
+          "CommentBody",
+          "ParentId"
+        ],
+        "type": "object"
+      },
+      "response": "{id: string, success: true}"
+    },
+    {
+      "id": "salesforce.sobjects.task.create",
+      "path": "salesforce/services/data/v61.0/sobjects/Task",
+      "method": "POST",
+      "description": "Add a new Task record to Salesforce.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "ActivityDate": {},
+          "Description": {},
+          "OwnerId": {},
+          "Priority": {},
+          "Status": {},
+          "Subject": {},
+          "WhatId": {},
+          "WhoId": {}
+        },
+        "required": [
+          "Subject"
+        ],
+        "type": "object"
+      },
+      "response": "{id: string, success: true}"
+    },
+    {
+      "id": "salesforce.sobjects.event.create",
+      "path": "salesforce/services/data/v61.0/sobjects/Event",
+      "method": "POST",
+      "description": "Add a new Event (meeting or calendar entry) to Salesforce.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "Description": {},
+          "EndDateTime": {},
+          "IsAllDayEvent": {},
+          "Location": {},
+          "StartDateTime": {},
+          "Subject": {},
+          "WhatId": {},
+          "WhoId": {}
+        },
+        "required": [
+          "EndDateTime",
+          "StartDateTime",
+          "Subject"
+        ],
+        "type": "object"
+      },
+      "response": "{id: string, success: true}"
+    },
+    {
+      "id": "salesforce.sobjects.note.create",
+      "path": "salesforce/services/data/v61.0/sobjects/Note",
+      "method": "POST",
+      "description": "Attach a Note to a record in Salesforce.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "Body": {},
+          "IsPrivate": {},
+          "ParentId": {},
+          "Title": {}
+        },
+        "required": [
+          "ParentId"
+        ],
+        "type": "object"
+      },
+      "response": "{id: string, success: true}"
+    },
+    {
+      "id": "salesforce.sobjects.attachment.create",
+      "path": "salesforce/services/data/v61.0/sobjects/Attachment",
+      "method": "POST",
+      "description": "Attach a file to an existing Salesforce record.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "Body": {},
+          "Description": {},
+          "IsPrivate": {},
+          "Name": {},
+          "ParentId": {}
+        },
+        "required": [
+          "Body",
+          "Name",
+          "ParentId"
+        ],
+        "type": "object"
+      },
+      "response": "{id: string, success: true}"
+    },
+    {
+      "id": "salesforce.sobjects.document.create",
+      "path": "salesforce/services/data/v61.0/sobjects/Document",
+      "method": "POST",
+      "description": "Store a Document inside a Salesforce Folder.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "Body": {},
+          "Description": {},
+          "FolderId": {},
+          "Keywords": {},
+          "Name": {}
+        },
+        "required": [
+          "Body",
+          "FolderId",
+          "Name"
+        ],
+        "type": "object"
+      },
+      "response": "{id: string, success: true}"
+    },
+    {
+      "id": "salesforce.sobjects.record.delete",
+      "path": "salesforce/services/data/v61.0/sobjects/{sObjectType}/{id}",
+      "method": "DELETE",
+      "description": "Remove a record from Salesforce using its sObject type and record ID.",
+      "parameters": {
+        "sObjectType": {
+          "type": "string",
+          "description": "The Salesforce sObject type name (Contact, Account, Lead, Opportunity, etc.).",
+          "required": true,
+          "location": "path"
+        },
+        "id": {
+          "type": "string",
+          "description": "The ID of the record to remove.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "204 No Content on success"
+    },
+    {
+      "id": "salesforce.sobjects.record.update",
+      "path": "salesforce/services/data/v61.0/sobjects/{sObjectType}/{id}",
+      "method": "PATCH",
+      "description": "Modify any Salesforce record using its sObject type and ID. General-purpose update endpoint.",
+      "parameters": {
+        "sObjectType": {
+          "type": "string",
+          "description": "The Salesforce sObject type name.",
+          "required": true,
+          "location": "path"
+        },
+        "id": {
+          "type": "string",
+          "description": "The ID of the record to modify.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {},
+        "type": "object"
+      },
+      "response": "204 No Content on success"
+    },
+    {
+      "id": "salesforce.actions.emailSimple",
+      "path": "salesforce/services/data/v61.0/actions/standard/emailSimple",
+      "method": "POST",
+      "description": "Dispatch an email via Salesforce using the Simple Email standard action.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "inputs": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "bccAddresses": {},
+                "bodyFormat": {},
+                "ccAddresses": {},
+                "emailAddresses": {},
+                "emailBody": {},
+                "emailSubject": {},
+                "relatedToId": {},
+                "senderType": {}
+              },
+              "required": [
+                "emailAddresses",
+                "emailBody",
+                "emailSubject"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "response": "{isSuccess: true}"
+    },
+    {
+      "id": "salesforce.flow.launch",
+      "path": "salesforce/services/data/v61.0/actions/custom/flow/{flowName}",
+      "method": "POST",
+      "description": "Trigger a Salesforce Flow by its name.",
+      "parameters": {
+        "flowName": {
+          "type": "string",
+          "description": "The name or ID of the flow to trigger.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {},
+        "type": "object"
+      },
+      "response": "Flow execution result with status"
+    },
+    {
+      "id": "salesforce.report.run",
+      "path": "salesforce/services/data/v61.0/analytics/reports/{reportId}",
+      "method": "GET",
+      "description": "Execute a Salesforce report and return the results.",
+      "parameters": {
+        "reportId": {
+          "type": "string",
+          "description": "The identifier of the report to run.",
+          "required": true,
+          "location": "path"
+        },
+        "includeDetails": {
+          "type": "boolean",
+          "description": "When true, includes row-level detail records in the result.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "Report result with fact_map, groupings, and aggregates"
+    },
+    {
+      "id": "salesforce.file.create",
+      "path": "salesforce/services/data/v61.0/sobjects/ContentVersion",
+      "method": "POST",
+      "description": "Upload a file to Salesforce as a ContentVersion record.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "Description": {},
+          "FirstPublishLocationId": {
+            "type": "string"
+          },
+          "PathOnClient": {},
+          "Title": {},
+          "VersionData": {}
+        },
+        "required": [
+          "PathOnClient",
+          "VersionData"
+        ],
+        "type": "object"
+      },
+      "response": "{id: string, success: true}"
+    },
+    {
+      "id": "salesforce.file.addToRecord",
+      "path": "salesforce/services/data/v61.0/sobjects/ContentDocumentLink",
+      "method": "POST",
+      "description": "Associate an existing file (ContentDocument) with a specific Salesforce record.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "ContentDocumentId": {},
+          "LinkedEntityId": {
+            "type": "string"
+          },
+          "ShareType": {},
+          "Visibility": {}
+        },
+        "required": [
+          "ContentDocumentId",
+          "LinkedEntityId"
+        ],
+        "type": "object"
+      },
+      "response": "{id: string, success: true}"
+    },
+    {
+      "id": "salesforce.contentNote.create",
+      "path": "salesforce/services/data/v61.0/sobjects/ContentNote",
+      "method": "POST",
+      "description": "Create a rich-text enhanced content note in Salesforce.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "Content": {},
+          "Title": {},
+          "object": {},
+          "record_id": {}
+        },
+        "required": [
+          "Content",
+          "Title"
+        ],
+        "type": "object"
+      },
+      "response": "{id: string, success: true}"
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "linkedin_conversions",
+  "endpoints": [
+    {
+      "id": "linkedin_conversions.events.create",
+      "path": "linkedin/conversions/rest/conversionEvents",
+      "method": "POST",
+      "description": "Transmit a server-side conversion event to LinkedIn via the Conversions API. Events are matched to LinkedIn members through hashed user identifiers (email, first name, last name, title, company, country). The conversion parameter must reference an existing conversion action configured in LinkedIn Campaign Manager.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "number"
+          },
+          "company": {
+            "type": "string"
+          },
+          "conversion": {
+            "type": "string"
+          },
+          "conversion_happened_at": {
+            "type": "string"
+          },
+          "country": {
+            "type": "string"
+          },
+          "currency_code": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "first_name": {
+            "type": "string"
+          },
+          "last_name": {
+            "type": "string"
+          },
+          "lead_id": {
+            "type": "string"
+          },
+          "linkedin_first_party_ads_tracking_uuid": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "conversion"
+        ],
+        "type": "object"
+      },
+      "response": "{success, event: {id, account, conversion, email, amount, currency_code}, event_id}"
+    }
+  ]
+}

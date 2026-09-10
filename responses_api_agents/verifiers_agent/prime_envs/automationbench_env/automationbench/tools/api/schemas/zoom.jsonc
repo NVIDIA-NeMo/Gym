@@ -1,0 +1,335 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "zoom",
+  "endpoints": [
+    {
+      "id": "zoom.users.meetings.list",
+      "path": "zoom/v2/users/{userId}/meetings",
+      "method": "GET",
+      "description": "Retrieve all meetings for a given user, including upcoming and past sessions. Supports filtering by meeting type.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "description": "The user's ID or email address. Use 'me' to refer to the currently authenticated user.",
+          "required": true,
+          "location": "path"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "scheduled",
+            "live",
+            "upcoming"
+          ],
+          "description": "Type of meetings to return: scheduled, live, or upcoming (default 'live').",
+          "location": "query"
+        },
+        "page_size": {
+          "type": "integer",
+          "description": "How many records to include per page (default 30, maximum 300).",
+          "location": "query"
+        },
+        "next_page_token": {
+          "type": "string",
+          "description": "Pagination cursor to fetch the following page of results.",
+          "location": "query"
+        },
+        "page_number": {
+          "type": "integer",
+          "description": "Page index to return (deprecated; use next_page_token instead).",
+          "location": "query"
+        }
+      },
+      "response": "{page_count, page_number, page_size, total_records, next_page_token, meetings: [{uuid, id, host_id, topic, type, start_time, duration, timezone, created_at, join_url}]}",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "zoom.users.meetings.create",
+      "path": "zoom/v2/users/{userId}/meetings",
+      "method": "POST",
+      "description": "Schedule a new Zoom meeting for the specified user.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "description": "The user's ID or email address. Use 'me' to refer to the currently authenticated user.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "agenda": {
+            "type": "string"
+          },
+          "duration": {
+            "type": "integer"
+          },
+          "host_email": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          },
+          "registration_required": {
+            "type": "boolean"
+          },
+          "settings": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "start_time": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "topic": {
+            "type": "string"
+          },
+          "type": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "response": "201 Created: {uuid, id, host_id, topic, type, start_time, duration, timezone, created_at, agenda, join_url, password}",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "zoom.meetings.get",
+      "path": "zoom/v2/meetings/{meetingId}",
+      "method": "GET",
+      "description": "Retrieve the full details of a specific Zoom meeting using its ID.",
+      "parameters": {
+        "meetingId": {
+          "type": "string",
+          "description": "The identifier of the target meeting.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "{uuid, id, host_id, topic, type, start_time, duration, timezone, created_at, agenda, join_url, password}"
+    },
+    {
+      "id": "zoom.meetings.update",
+      "path": "zoom/v2/meetings/{meetingId}",
+      "method": "PATCH",
+      "description": "Modify an existing Zoom meeting. Only the fields provided in the request body are changed.",
+      "parameters": {
+        "meetingId": {
+          "type": "string",
+          "description": "The identifier of the meeting to update.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "agenda": {
+            "type": "string"
+          },
+          "duration": {
+            "type": "integer"
+          },
+          "password": {
+            "type": "string"
+          },
+          "start_time": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "topic": {
+            "type": "string"
+          },
+          "type": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "response": "204 No Content on success (empty JSON object)"
+    },
+    {
+      "id": "zoom.meetings.registrants.list",
+      "path": "zoom/v2/meetings/{meetingId}/registrants",
+      "method": "GET",
+      "description": "Retrieve all registrants and participants for a Zoom meeting, with optional filtering by approval status.",
+      "parameters": {
+        "meetingId": {
+          "type": "string",
+          "description": "The identifier of the target meeting.",
+          "required": true,
+          "location": "path"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "approved",
+            "denied"
+          ],
+          "description": "Restrict results to registrants with this approval status.",
+          "location": "query"
+        }
+      },
+      "response": "{page_count, page_size, total_records, registrants: [{id, email, first_name, last_name, status, create_time, join_url}], participants: [Participant]}"
+    },
+    {
+      "id": "zoom.meetings.registrants.create",
+      "path": "zoom/v2/meetings/{meetingId}/registrants",
+      "method": "POST",
+      "description": "Register a new attendee for a Zoom meeting. When auto-approve is enabled (approval_type=0), the registrant is confirmed automatically.",
+      "parameters": {
+        "meetingId": {
+          "type": "string",
+          "description": "The identifier of the target meeting.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "first_name": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "last_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "first_name",
+          "last_name"
+        ],
+        "type": "object"
+      },
+      "response": "201 Created: {registrant_id, id (meeting id), topic, start_time, join_url}"
+    },
+    {
+      "id": "zoom.webinars.registrants.create",
+      "path": "zoom/v2/webinars/{webinarId}/registrants",
+      "method": "POST",
+      "description": "Register a new attendee for a Zoom webinar (type=2 meeting).",
+      "parameters": {
+        "webinarId": {
+          "type": "string",
+          "description": "The identifier of the target webinar.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "first_name": {
+            "type": "string"
+          },
+          "last_name": {
+            "type": "string"
+          },
+          "registrants_confirmation_email": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "email",
+          "first_name"
+        ],
+        "type": "object"
+      },
+      "response": "201 Created: {registrant_id, id (webinar id), topic, start_time, join_url}"
+    },
+    {
+      "id": "zoom.users.recordings.list",
+      "path": "zoom/v2/users/{userId}/recordings",
+      "method": "GET",
+      "description": "Retrieve cloud recordings for a user. Supports narrowing results by meeting topic.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "description": "The user's ID or email address. Use 'me' to refer to the currently authenticated user.",
+          "required": true,
+          "location": "path"
+        },
+        "topic": {
+          "type": "string",
+          "description": "Filter recordings to those whose topic partially matches this string.",
+          "location": "query"
+        },
+        "page_size": {
+          "type": "integer",
+          "description": "Number of recordings to return per page (default 30, maximum 300).",
+          "location": "query"
+        }
+      },
+      "response": "{from, to, page_count, page_number, page_size, total_records, next_page_token, meetings: [{uuid, id, topic, host_id, host_email, start_time, end_time, duration, recording_count, total_size, recording_files}]}",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "zoom.meetings.recordings.get",
+      "path": "zoom/v2/meetings/{meetingId}/recordings",
+      "method": "GET",
+      "description": "Retrieve cloud recording details for a particular meeting using its ID.",
+      "parameters": {
+        "meetingId": {
+          "type": "string",
+          "description": "The meeting ID or UUID to retrieve recordings for.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Recording object with uuid, id, topic, host_id, host_email, start_time, end_time, duration, recording_count, total_size, recording_files"
+    },
+    {
+      "id": "zoom.meetings.summary.get",
+      "path": "zoom/v2/meetings/{meetingId}/meeting_summary",
+      "method": "GET",
+      "description": "Fetch a summary for a given meeting by its ID or UUID, including details and current status information.",
+      "parameters": {
+        "meetingId": {
+          "type": "string",
+          "description": "The meeting ID or UUID to retrieve the summary for.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "{id, uuid, topic, start_time, duration, status, agenda}"
+    }
+  ]
+}

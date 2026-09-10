@@ -1,0 +1,594 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "mailchimp",
+  "endpoints": [
+    {
+      "id": "mailchimp.lists.members.create",
+      "path": "mailchimp/3.0/lists/{list_id}/members",
+      "method": "POST",
+      "description": "Subscribe a new member to the audience. Returns an error 400 if the member already exists, unless the status is 'pending'.",
+      "parameters": {
+        "list_id": {
+          "type": "string",
+          "description": "Identifier of the target audience.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "email_address": {
+            "type": "string"
+          },
+          "email_type": {
+            "type": "string"
+          },
+          "ip_signup": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "location": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "merge_fields": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "subscribed",
+              "unsubscribed",
+              "cleaned",
+              "pending",
+              "transactional"
+            ],
+            "type": "string"
+          },
+          "tags": {
+            "items": {},
+            "type": "array"
+          },
+          "timestamp_signup": {
+            "type": "string"
+          },
+          "vip": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "email_address",
+          "status"
+        ],
+        "type": "object"
+      },
+      "response": "ListMember object"
+    },
+    {
+      "id": "mailchimp.lists.members.get",
+      "path": "mailchimp/3.0/lists/{list_id}/members/{subscriber_hash}",
+      "method": "GET",
+      "description": "Fetch details for a single audience member using their subscriber hash. Works for subscribed, unsubscribed, and bounced records.",
+      "parameters": {
+        "list_id": {
+          "type": "string",
+          "description": "Identifier of the target audience.",
+          "required": true,
+          "location": "path"
+        },
+        "subscriber_hash": {
+          "type": "string",
+          "description": "MD5 hash of the member's lowercased email address, or the email address itself.",
+          "required": true,
+          "location": "path"
+        },
+        "fields": {
+          "type": "string",
+          "description": "Comma-separated list of fields to include in the response.",
+          "required": false,
+          "location": "query"
+        },
+        "exclude_fields": {
+          "type": "string",
+          "description": "Comma-separated list of fields to omit from the response.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "ListMember object"
+    },
+    {
+      "id": "mailchimp.lists.members.list",
+      "path": "mailchimp/3.0/lists/{list_id}/members",
+      "method": "GET",
+      "description": "Return all subscribers in a Mailchimp audience, with optional filtering by status, opt-in date, and sort preferences.",
+      "parameters": {
+        "list_id": {
+          "type": "string",
+          "description": "Identifier of the target audience.",
+          "required": true,
+          "location": "path"
+        },
+        "fields": {
+          "type": "string",
+          "description": "Comma-separated list of fields to include in the response.",
+          "required": false,
+          "location": "query"
+        },
+        "exclude_fields": {
+          "type": "string",
+          "description": "Comma-separated list of fields to omit from the response.",
+          "required": false,
+          "location": "query"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Number of records to return per page (default 10, max 1000).",
+          "required": false,
+          "location": "query"
+        },
+        "offset": {
+          "type": "integer",
+          "description": "Number of records to skip before starting the page (default 0).",
+          "required": false,
+          "location": "query"
+        },
+        "status": {
+          "type": "string",
+          "description": "Subscription status to filter by.",
+          "required": false,
+          "location": "query"
+        },
+        "since_timestamp_opt": {
+          "type": "string",
+          "description": "Limit results to members who opted in after this timestamp.",
+          "required": false,
+          "location": "query"
+        },
+        "before_timestamp_opt": {
+          "type": "string",
+          "description": "Limit results to members who opted in before this timestamp.",
+          "required": false,
+          "location": "query"
+        },
+        "sort_field": {
+          "type": "string",
+          "description": "Field name to sort results by.",
+          "required": false,
+          "location": "query"
+        },
+        "sort_dir": {
+          "type": "string",
+          "description": "Direction to sort results (ascending or descending).",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": {
+        "members": [
+          "ListMember"
+        ],
+        "list_id": "string",
+        "total_items": "integer"
+      }
+    },
+    {
+      "id": "mailchimp.lists.members.update",
+      "path": "mailchimp/3.0/lists/{list_id}/members/{subscriber_hash}",
+      "method": "PATCH",
+      "description": "Update attributes such as email address, subscription status, merge fields, or VIP flag for an existing list member.",
+      "parameters": {
+        "list_id": {
+          "type": "string",
+          "description": "Identifier of the target audience.",
+          "required": true,
+          "location": "path"
+        },
+        "subscriber_hash": {
+          "type": "string",
+          "description": "MD5 hash of the member's lowercased email address, or the email address itself.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "email_address": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "merge_fields": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "subscribed",
+              "unsubscribed",
+              "cleaned",
+              "pending"
+            ],
+            "type": "string"
+          },
+          "vip": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "response": "ListMember object"
+    },
+    {
+      "id": "mailchimp.lists.members.delete",
+      "path": "mailchimp/3.0/lists/{list_id}/members/{subscriber_hash}",
+      "method": "DELETE",
+      "description": "Archive a member from the audience. The record is not permanently deleted and can be re-added later.",
+      "parameters": {
+        "list_id": {
+          "type": "string",
+          "description": "Identifier of the target audience.",
+          "required": true,
+          "location": "path"
+        },
+        "subscriber_hash": {
+          "type": "string",
+          "description": "MD5 hash of the member's lowercased email address, or the email address itself.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Empty response (HTTP 204)"
+    },
+    {
+      "id": "mailchimp.lists.members.tags",
+      "path": "mailchimp/3.0/lists/{list_id}/members/{subscriber_hash}/tags",
+      "method": "POST",
+      "description": "Apply or remove tags on a list member. Tags that do not yet exist will be automatically created.",
+      "parameters": {
+        "list_id": {
+          "type": "string",
+          "description": "Identifier of the target audience.",
+          "required": true,
+          "location": "path"
+        },
+        "subscriber_hash": {
+          "type": "string",
+          "description": "MD5 hash of the member's lowercased email address, or the email address itself.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "tags": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "status": {
+                  "enum": [
+                    "active",
+                    "inactive"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "status"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "tags"
+        ],
+        "type": "object"
+      },
+      "response": "Empty response (HTTP 204)"
+    },
+    {
+      "id": "mailchimp.lists.members.notes.create",
+      "path": "mailchimp/3.0/lists/{list_id}/members/{subscriber_hash}/notes",
+      "method": "POST",
+      "description": "Add a text note to a subscriber's contact record in the audience.",
+      "parameters": {
+        "list_id": {
+          "type": "string",
+          "description": "Identifier of the target audience.",
+          "required": true,
+          "location": "path"
+        },
+        "subscriber_hash": {
+          "type": "string",
+          "description": "MD5 hash of the member's lowercased email address, or the email address itself.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "note"
+        ],
+        "type": "object"
+      },
+      "response": "MemberNote object"
+    },
+    {
+      "id": "mailchimp.lists.list",
+      "path": "mailchimp/3.0/lists",
+      "method": "GET",
+      "description": "Enumerate all audiences in a Mailchimp account. Returns all mailing lists with their names and subscriber counts.",
+      "parameters": {},
+      "response": {
+        "lists": [
+          "List"
+        ],
+        "total_items": "integer"
+      }
+    },
+    {
+      "id": "mailchimp.lists.create",
+      "path": "mailchimp/3.0/lists",
+      "method": "POST",
+      "description": "Set up a new audience in your Mailchimp account.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "campaign_defaults": {
+            "properties": {
+              "from_email": {
+                "type": "string"
+              },
+              "from_name": {
+                "type": "string"
+              },
+              "language": {
+                "type": "string"
+              },
+              "subject": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from_name",
+              "from_email",
+              "subject",
+              "language"
+            ],
+            "type": "object"
+          },
+          "contact": {
+            "properties": {
+              "address1": {
+                "type": "string"
+              },
+              "address2": {
+                "type": "string"
+              },
+              "city": {
+                "type": "string"
+              },
+              "company": {
+                "type": "string"
+              },
+              "country": {
+                "type": "string"
+              },
+              "phone": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "zip": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "company",
+              "address1",
+              "city",
+              "state",
+              "zip",
+              "country"
+            ],
+            "type": "object"
+          },
+          "email_type_option": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "permission_reminder": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "contact",
+          "permission_reminder",
+          "campaign_defaults",
+          "email_type_option"
+        ],
+        "type": "object"
+      },
+      "response": "List object"
+    },
+    {
+      "id": "mailchimp.campaigns.create",
+      "path": "mailchimp/3.0/campaigns",
+      "method": "POST",
+      "description": "Set up a new email campaign in Mailchimp.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "recipients": {
+            "properties": {
+              "list_id": {
+                "type": "string"
+              },
+              "segment_opts": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "list_id"
+            ],
+            "type": "object"
+          },
+          "settings": {
+            "properties": {
+              "auto_footer": {
+                "type": "boolean"
+              },
+              "from_name": {
+                "type": "string"
+              },
+              "inline_css": {
+                "type": "boolean"
+              },
+              "preview_text": {
+                "type": "string"
+              },
+              "reply_to": {
+                "type": "string"
+              },
+              "subject_line": {
+                "type": "string"
+              },
+              "template_id": {
+                "type": "integer"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "subject_line",
+              "from_name",
+              "reply_to"
+            ],
+            "type": "object"
+          },
+          "tracking": {
+            "properties": {
+              "ecomm360": {
+                "type": "boolean"
+              },
+              "goal_tracking": {
+                "type": "boolean"
+              },
+              "google_analytics": {
+                "type": "string"
+              },
+              "html_clicks": {
+                "type": "boolean"
+              },
+              "opens": {
+                "type": "boolean"
+              },
+              "text_clicks": {
+                "type": "boolean"
+              }
+            },
+            "type": "object"
+          },
+          "type": {
+            "enum": [
+              "regular",
+              "plaintext",
+              "absplit",
+              "rss",
+              "variate"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "response": "Campaign object"
+    },
+    {
+      "id": "mailchimp.campaigns.send",
+      "path": "mailchimp/3.0/campaigns/{campaign_id}/actions/send",
+      "method": "POST",
+      "description": "Dispatch a campaign that is ready to send. RSS-type campaigns follow their defined schedule; all others are delivered immediately.",
+      "parameters": {
+        "campaign_id": {
+          "type": "string",
+          "description": "Identifier of the campaign to send.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Empty response (HTTP 204)"
+    },
+    {
+      "id": "mailchimp.lists.tags.list",
+      "path": "mailchimp/3.0/lists/{list_id}/tag-search",
+      "method": "GET",
+      "description": "Look up tags on an audience by name. When no name is provided, all tags in the audience are returned.",
+      "parameters": {
+        "list_id": {
+          "type": "string",
+          "description": "Identifier of the target audience.",
+          "required": true,
+          "location": "path"
+        },
+        "name": {
+          "type": "string",
+          "description": "Name or partial name to filter tags by.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": {
+        "tags": [
+          "MemberTag"
+        ],
+        "total_items": "integer"
+      }
+    }
+  ]
+}

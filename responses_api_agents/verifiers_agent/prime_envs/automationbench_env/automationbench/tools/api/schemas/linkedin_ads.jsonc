@@ -1,0 +1,241 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "linkedin_ads",
+  "endpoints": [
+    {
+      "id": "linkedin_ads.audiences.create",
+      "path": "linkedin/ads/rest/adAccounts/{accountId}/dmpSegments",
+      "method": "POST",
+      "description": "Define a new LinkedIn Matched Audience (DMP Segment). Audiences can be USER type (email-based) or COMPANY type (company-based) and are applied for targeting within LinkedIn ad campaigns.",
+      "parameters": {
+        "accountId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "description": "The LinkedIn Ads account ID."
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "response": "{success, audience: {id, name, audience_type, account_id}, audience_id}"
+    },
+    {
+      "id": "linkedin_ads.audiences.addContact",
+      "path": "linkedin/ads/rest/dmpSegments/{segmentId}/users",
+      "method": "POST",
+      "description": "Enroll a contact (user) in a LinkedIn Matched Audience. The contact is identified by email address. Supply action=ADD as a query parameter.",
+      "parameters": {
+        "segmentId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "description": "The audience or segment ID to enroll the contact into."
+        },
+        "action": {
+          "type": "string",
+          "required": true,
+          "location": "query",
+          "description": "Must be 'ADD'."
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "audience": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "first_name": {
+            "type": "string"
+          },
+          "last_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "audience"
+        ],
+        "type": "object"
+      },
+      "response": "{success, member_id, account, audience_id, entity_type: 'CONTACT', status: 'ACTIVE'}"
+    },
+    {
+      "id": "linkedin_ads.audiences.addCompany",
+      "path": "linkedin/ads/rest/dmpSegments/{segmentId}/companies",
+      "method": "POST",
+      "description": "Enroll a company in a LinkedIn Matched Audience. The company is identified by company ID or name. Supply action=ADD as a query parameter.",
+      "parameters": {
+        "segmentId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "description": "The audience or segment ID to enroll the company into."
+        },
+        "action": {
+          "type": "string",
+          "required": true,
+          "location": "query",
+          "description": "Must be 'ADD'."
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "audience": {
+            "type": "string"
+          },
+          "company_id": {
+            "type": "string"
+          },
+          "company_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "audience"
+        ],
+        "type": "object"
+      },
+      "response": "{success, member_id, account, audience_id, entity_type: 'COMPANY', status: 'ACTIVE'}"
+    },
+    {
+      "id": "linkedin_ads.audiences.removeEmail",
+      "path": "linkedin/ads/rest/dmpSegments/{segmentId}/users",
+      "method": "DELETE",
+      "description": "Withdraw an email address from a LinkedIn Matched Audience.",
+      "parameters": {
+        "segmentId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "description": "The audience or segment ID to remove the email from."
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "audience": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "audience",
+          "email"
+        ],
+        "type": "object"
+      },
+      "response": "{success, account, audience_id, email, removed}"
+    },
+    {
+      "id": "linkedin_ads.conversions.create",
+      "path": "linkedin/ads/rest/conversions",
+      "method": "POST",
+      "description": "Submit a conversion event to LinkedIn Ads. Conversion events capture actions users perform after viewing or engaging with LinkedIn advertisements.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "conversion": {
+            "type": "string"
+          },
+          "currency": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "first_name": {
+            "type": "string"
+          },
+          "last_name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "account",
+          "conversion"
+        ],
+        "type": "object"
+      },
+      "response": "{success, conversion: {id, account_id, conversion_name, value, currency_code}, event_id}"
+    },
+    {
+      "id": "linkedin_ads.analytics.create",
+      "path": "linkedin/ads/rest/adAnalytics",
+      "method": "POST",
+      "description": "Generate an analytics report for a LinkedIn Ads account. Returns performance metrics across campaigns.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "report_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "account"
+        ],
+        "type": "object"
+      },
+      "response": "{success, report: {id, account_id, report_type}, report_id}"
+    }
+  ]
+}

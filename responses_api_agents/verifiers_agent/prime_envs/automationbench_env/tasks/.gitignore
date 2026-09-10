@@ -1,0 +1,2 @@
+# task JSONs are not tracked; point AUTOMATIONBENCH_TASK_DIR at a local copy
+*.json

@@ -1,0 +1,359 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "google_ads",
+  "endpoints": [
+    {
+      "id": "google_ads.googleAds.search",
+      "path": "googleads/v19/customers/{customerId}/googleAds:search",
+      "method": "POST",
+      "description": "Run a GAQL (Google Ads Query Language) query against the account. This environment provides campaign and user-list rows, including their seeded metric fields. Example queries: 'SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type FROM campaign', 'SELECT user_list.id, user_list.name, user_list.description FROM user_list'.",
+      "parameters": {
+        "customerId": {
+          "type": "string",
+          "description": "Google Ads customer ID — digits only, no dashes.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "pageToken": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "response": "{results: [{campaign?, adGroup?, userList?, ...resource fields}], nextPageToken?, totalResultsCount?}"
+    },
+    {
+      "id": "google_ads.campaigns.get",
+      "path": "googleads/v19/customers/{customerId}/campaigns/{campaignId}",
+      "method": "GET",
+      "description": "Fetch a single campaign using its resource name or numeric ID.",
+      "parameters": {
+        "customerId": {
+          "type": "string",
+          "description": "Google Ads customer ID.",
+          "required": true,
+          "location": "path"
+        },
+        "campaignId": {
+          "type": "string",
+          "description": "Numeric ID of the campaign to retrieve.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "{resourceName, id, name, status, advertisingChannelType, startDate, endDate, campaignBudget}"
+    },
+    {
+      "id": "google_ads.campaigns.mutate",
+      "path": "googleads/v19/customers/{customerId}/campaigns:mutate",
+      "method": "POST",
+      "description": "Apply a batch of create, update, or remove operations across one or more campaigns in a single call.",
+      "parameters": {
+        "customerId": {
+          "type": "string",
+          "description": "Google Ads customer ID.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "operations": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "create": {},
+                "remove": {
+                  "type": "string"
+                },
+                "update": {},
+                "updateMask": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "partialFailure": {
+            "type": "boolean"
+          },
+          "validateOnly": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "operations"
+        ],
+        "type": "object"
+      },
+      "response": "{results: [{resourceName}], partialFailureError?}"
+    },
+    {
+      "id": "google_ads.userLists.removeMembers",
+      "path": "googleads/v19/customers/{customerId}/userLists/{listId}:removeMembers",
+      "method": "POST",
+      "description": "Delete a member (identified by email) from a Google Ads customer match user list. Use this to exclude a contact from a remarketing audience.",
+      "parameters": {
+        "customerId": {
+          "type": "string",
+          "description": "Google Ads customer ID — digits only, no dashes.",
+          "required": true,
+          "location": "path"
+        },
+        "listId": {
+          "type": "string",
+          "description": "ID of the user list (audience) from which the member should be removed.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "email": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "type": "object"
+      },
+      "response": "{success: true, list_id: string, email: string}"
+    },
+    {
+      "id": "google_ads.offlineUserDataJobs.create",
+      "path": "googleads/v19/customers/{customerId}/offlineUserDataJobs:create",
+      "method": "POST",
+      "description": "Instantiate an offline user data job for adding or removing members in a customer match list. After creating the job, queue operations, then execute the job.",
+      "parameters": {
+        "customerId": {
+          "type": "string",
+          "description": "Google Ads customer ID.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "job": {
+            "additionalProperties": true,
+            "properties": {
+              "customerMatchUserListMetadata": {
+                "additionalProperties": true,
+                "properties": {
+                  "userList": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "type": {}
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "response": "{resourceName: string (the job resource name)}"
+    },
+    {
+      "id": "google_ads.offlineUserDataJobs.addOperations",
+      "path": "googleads/v19/customers/{customerId}/offlineUserDataJobs/{offlineUserDataJobId}:addOperations",
+      "method": "POST",
+      "description": "Enqueue user identifiers to be added or removed as part of an offline user data job.",
+      "parameters": {
+        "customerId": {
+          "type": "string",
+          "description": "Google Ads customer ID.",
+          "required": true,
+          "location": "path"
+        },
+        "offlineUserDataJobId": {
+          "type": "string",
+          "description": "Identifier of the offline user data job to update.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "enablePartialFailure": {
+            "type": "boolean"
+          },
+          "operations": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "create": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "userIdentifiers": {
+                      "items": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "hashedEmail": {
+                            "type": "string"
+                          },
+                          "hashedPhoneNumber": {
+                            "type": "string"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                },
+                "remove": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "userIdentifiers": {
+                      "items": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "hashedEmail": {
+                            "type": "string"
+                          },
+                          "hashedPhoneNumber": {
+                            "type": "string"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "operations"
+        ],
+        "type": "object"
+      },
+      "response": "{}"
+    },
+    {
+      "id": "google_ads.offlineUserDataJobs.run",
+      "path": "googleads/v19/customers/{customerId}/offlineUserDataJobs/{offlineUserDataJobId}:run",
+      "method": "POST",
+      "description": "Trigger execution of an offline user data job to apply its queued operations. This is an asynchronous long-running operation.",
+      "parameters": {
+        "customerId": {
+          "type": "string",
+          "description": "Google Ads customer ID.",
+          "required": true,
+          "location": "path"
+        },
+        "offlineUserDataJobId": {
+          "type": "string",
+          "description": "Identifier of the offline user data job to execute.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {},
+        "type": "object"
+      },
+      "response": "{name: string (long-running operation resource name)}"
+    },
+    {
+      "id": "google_ads.conversions.uploadClickConversions",
+      "path": "googleads/v19/customers/{customerId}:uploadClickConversions",
+      "method": "POST",
+      "description": "Submit offline click conversion events to Google Ads, matched by gclid (Google click ID). Used to attribute sales or sign-ups that originated from an ad click but were completed outside the browser.",
+      "parameters": {
+        "customerId": {
+          "type": "string",
+          "description": "Google Ads customer ID.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "conversions": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "conversionAction": {
+                  "type": "string"
+                },
+                "conversionDateTime": {
+                  "type": "string"
+                },
+                "conversionValue": {
+                  "type": "number"
+                },
+                "currencyCode": {
+                  "type": "string"
+                },
+                "gclid": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "conversionAction",
+                "conversionDateTime",
+                "gclid"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "partialFailure": {
+            "type": "boolean"
+          },
+          "validateOnly": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "conversions"
+        ],
+        "type": "object"
+      },
+      "response": "{results: [{gclid, conversionAction, conversionDateTime}], partialFailureError?}"
+    }
+  ]
+}

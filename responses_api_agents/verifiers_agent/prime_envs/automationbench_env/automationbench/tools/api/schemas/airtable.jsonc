@@ -1,0 +1,233 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "airtable",
+  "endpoints": [
+    {
+      "id": "airtable.meta.bases",
+      "path": "airtable/v0/meta/bases",
+      "method": "GET",
+      "description": "Enumerate the Airtable bases (applications) this account can access. Use this to discover a base's ID before reading its tables or records.",
+      "parameters": {},
+      "response": "{bases: [{id, name, permissionLevel}]}"
+    },
+    {
+      "id": "airtable.meta.tables",
+      "path": "airtable/v0/meta/bases/{baseId}/tables",
+      "method": "GET",
+      "description": "Enumerate the tables inside a given Airtable base. Returns each table's ID and display name for use with the record endpoints.",
+      "parameters": {
+        "baseId": {
+          "type": "string",
+          "description": "Identifier of the Airtable base whose tables should be listed.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "{tables: [{id, name}]}"
+    },
+    {
+      "id": "airtable.records.list",
+      "path": "airtable/v0/{baseId}/{tableId}",
+      "method": "GET",
+      "description": "Fetch or search records from an Airtable table. Use filterByFormula to narrow results to matching entries (e.g., \"{Name}='Acme'\").",
+      "parameters": {
+        "baseId": {
+          "type": "string",
+          "description": "Identifier for the Airtable base (application).",
+          "required": true,
+          "location": "path"
+        },
+        "tableId": {
+          "type": "string",
+          "description": "Name or identifier of the target table.",
+          "required": true,
+          "location": "path"
+        },
+        "filterByFormula": {
+          "type": "string",
+          "description": "An Airtable formula expression used to filter records, e.g. \"{Status}='Active'\".",
+          "location": "query"
+        },
+        "sort": {
+          "type": "array",
+          "description": "A list of sort configuration objects, e.g. [{field: 'Name', direction: 'asc'}]. Each object specifies a field (string) and direction ('asc'|'desc').",
+          "location": "query"
+        },
+        "fields": {
+          "type": "array",
+          "description": "List of field names to include in the response. Only the listed fields will be returned.",
+          "location": "query"
+        },
+        "pageSize": {
+          "type": "integer",
+          "description": "How many records to return per page (maximum 100).",
+          "location": "query"
+        },
+        "offset": {
+          "type": "string",
+          "description": "Continuation token from a prior response, used to retrieve the next page of results.",
+          "location": "query"
+        },
+        "cellFormat": {
+          "type": "string",
+          "enum": [
+            "json",
+            "string"
+          ],
+          "description": "Determines how cell values are formatted: 'json' (default) or 'string'.",
+          "location": "query"
+        },
+        "timeZone": {
+          "type": "string",
+          "description": "Timezone to apply when rendering date values (e.g. 'America/New_York').",
+          "location": "query"
+        },
+        "userLocale": {
+          "type": "string",
+          "description": "Locale setting used for value formatting (e.g. 'en-us').",
+          "location": "query"
+        },
+        "maxRecords": {
+          "type": "integer",
+          "description": "Upper limit on the total number of records to return.",
+          "location": "query"
+        },
+        "view": {
+          "type": "string",
+          "description": "Name or ID of a specific view to use when listing records.",
+          "location": "query"
+        }
+      },
+      "response": "{records: [{id, fields: {fieldName: value, ...}, createdTime}], offset (pagination token if more records exist)}"
+    },
+    {
+      "id": "airtable.records.create",
+      "path": "airtable/v0/{baseId}/{tableId}",
+      "method": "POST",
+      "description": "Insert one or more new records into an Airtable table. Provide field values as a key/value object that matches the table's field names.",
+      "parameters": {
+        "baseId": {
+          "type": "string",
+          "description": "Identifier for the Airtable base.",
+          "required": true,
+          "location": "path"
+        },
+        "tableId": {
+          "type": "string",
+          "description": "Name or identifier of the target table.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "fields": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "required": [
+          "fields"
+        ],
+        "type": "object"
+      },
+      "response": "{id, fields: {...}, createdTime}"
+    },
+    {
+      "id": "airtable.records.update",
+      "path": "airtable/v0/{baseId}/{tableId}/{recordId}",
+      "method": "PATCH",
+      "description": "Modify an existing record in an Airtable table. Include only the fields you wish to update.",
+      "parameters": {
+        "baseId": {
+          "type": "string",
+          "description": "Identifier for the Airtable base.",
+          "required": true,
+          "location": "path"
+        },
+        "tableId": {
+          "type": "string",
+          "description": "Name or identifier of the target table.",
+          "required": true,
+          "location": "path"
+        },
+        "recordId": {
+          "type": "string",
+          "description": "The unique record identifier (rec...).",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "fields": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "required": [
+          "fields"
+        ],
+        "type": "object"
+      },
+      "response": "{id, fields: {...}, createdTime}"
+    },
+    {
+      "id": "airtable.records.comment",
+      "path": "airtable/v0/{baseId}/{tableId}/{recordId}/comments",
+      "method": "POST",
+      "description": "Post a comment on a particular record within an Airtable table.",
+      "parameters": {
+        "baseId": {
+          "type": "string",
+          "description": "Identifier for the Airtable base.",
+          "required": true,
+          "location": "path"
+        },
+        "tableId": {
+          "type": "string",
+          "description": "Name or identifier of the target table.",
+          "required": true,
+          "location": "path"
+        },
+        "recordId": {
+          "type": "string",
+          "description": "The unique record identifier (rec...).",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "response": "{id (comment ID), text, createdTime, author: {id, name}}"
+    }
+  ]
+}

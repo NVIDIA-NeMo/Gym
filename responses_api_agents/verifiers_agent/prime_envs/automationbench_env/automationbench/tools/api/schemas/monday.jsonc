@@ -1,0 +1,142 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "monday",
+  "endpoints": [
+    {
+      "id": "monday.boards.list",
+      "path": "monday/v2/boards",
+      "method": "GET",
+      "description": "Enumerate the Monday.com boards available in the connected workspace so their IDs can be used for item operations.",
+      "parameters": {},
+      "response": "{boards: [{id, name}]}"
+    },
+    {
+      "id": "monday.items.find",
+      "path": "monday/v2/items:find",
+      "method": "POST",
+      "description": "Search for an item by name on a Monday.com board. Returns the item ID required for subsequent column update operations.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "board_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "board_id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "response": "{items: [{id, name, board: {id, name}, column_values: [{id, title, text, value}]}]}"
+    },
+    {
+      "id": "monday.items.create",
+      "path": "monday/v2/items:create",
+      "method": "POST",
+      "description": "Add a new row (item) to a Monday.com board.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "board_id": {
+            "type": "string"
+          },
+          "column_values": {
+            "type": "string"
+          },
+          "group_id": {
+            "type": "string"
+          },
+          "item_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "board_id",
+          "item_name"
+        ],
+        "type": "object"
+      },
+      "response": "{id, name, board: {id, name}}"
+    },
+    {
+      "id": "monday.items.updateColumn",
+      "path": "monday/v2/items/{itemId}/columns:update",
+      "method": "POST",
+      "description": "Set a column value for an item. Use column_type to indicate the kind of column: 'status' for status/dropdown columns, 'date' for date columns (value: YYYY-MM-DD), 'number' for numeric columns, 'text' for text columns.",
+      "parameters": {
+        "itemId": {
+          "type": "string",
+          "description": "The item ID.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "{id, name, column_values: [{id, title, text, value}]}",
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "board_id": {
+            "type": "string"
+          },
+          "column_id": {
+            "type": "string"
+          },
+          "column_type": {
+            "enum": [
+              "status",
+              "date",
+              "number",
+              "text"
+            ],
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          }
+        },
+        "required": [
+          "board_id",
+          "column_id",
+          "value"
+        ],
+        "type": "object"
+      }
+    }
+  ]
+}

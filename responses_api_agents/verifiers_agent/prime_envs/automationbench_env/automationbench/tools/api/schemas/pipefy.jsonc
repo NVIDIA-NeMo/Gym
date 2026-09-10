@@ -1,0 +1,146 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "pipefy",
+  "endpoints": [
+    {
+      "id": "pipefy.database.tables.list",
+      "path": "pipefy/v1/tables",
+      "method": "GET",
+      "description": "Enumerate the Pipefy database tables available in the connected workspace so their IDs can be used with record search.",
+      "parameters": {},
+      "response": "{tables: [{id, name}]}"
+    },
+    {
+      "id": "pipefy.database.findRecords",
+      "path": "pipefy/v1/tables/{tableId}/records:find",
+      "method": "GET",
+      "description": "Search for records within a Pipefy database table by title. Returns all matching entries along with their associated field values.",
+      "parameters": {
+        "tableId": {
+          "type": "string",
+          "description": "Identifier for the Pipefy table or database.",
+          "required": true,
+          "location": "path"
+        },
+        "title": {
+          "type": "string",
+          "description": "The title or name string to search for.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "response": "{records: [{id, title, record_fields: [{field: {id, label}, value}]}]}"
+    },
+    {
+      "id": "pipefy.cards.create",
+      "path": "pipefy/v1/cards",
+      "method": "POST",
+      "description": "Add a new card to a Pipefy pipe, populating it with the specified field values.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "fields_attributes": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "pipe_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "fields_attributes",
+          "pipe_id"
+        ],
+        "type": "object"
+      },
+      "response": "{card: {id, title, current_phase: {id, name}, fields: [{field: {id, label}, value}]}}"
+    },
+    {
+      "id": "pipefy.cards.move",
+      "path": "pipefy/v1/cards/{cardId}/move",
+      "method": "POST",
+      "description": "Relocate a Pipefy card to another phase (column) within a pipe.",
+      "parameters": {
+        "cardId": {
+          "type": "string",
+          "description": "Identifier of the card to move.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "destination_phase_id": {
+            "type": "string"
+          },
+          "pipe_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "destination_phase_id"
+        ],
+        "type": "object"
+      },
+      "response": "{card: {id, title, current_phase: {id, name}}}"
+    },
+    {
+      "id": "pipefy.cards.updateField",
+      "path": "pipefy/v1/cards/{cardId}/fields:update",
+      "method": "POST",
+      "description": "Modify the value of a specific field on a Pipefy card.",
+      "parameters": {
+        "cardId": {
+          "type": "string",
+          "description": "Identifier of the card to update.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "field_id": {
+            "type": "string"
+          },
+          "pipe_id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "field_id",
+          "value"
+        ],
+        "type": "object"
+      },
+      "response": "{card: {id, title, fields: [{field: {id, label}, value}]}, success (bool)}"
+    }
+  ]
+}

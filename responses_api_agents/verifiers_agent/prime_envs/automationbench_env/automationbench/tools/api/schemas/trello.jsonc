@@ -1,0 +1,244 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "trello",
+  "endpoints": [
+    {
+      "id": "trello.members.boards",
+      "path": "trello/1/members/{memberId}/boards",
+      "method": "GET",
+      "description": "Retrieve all boards belonging to a member. Pass memberId='me' to get the authenticated user's boards. Useful for discovering board IDs by name before querying lists or cards.",
+      "parameters": {
+        "memberId": {
+          "type": "string",
+          "description": "The member ID, or 'me' to refer to the authenticated user.",
+          "required": true,
+          "location": "path"
+        },
+        "filter": {
+          "type": "string",
+          "description": "Scope of boards to return: all, open, closed, members, organization, public (defaults to open).",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "[{id, name, closed, url}]"
+    },
+    {
+      "id": "trello.cards.create",
+      "path": "trello/1/cards",
+      "method": "POST",
+      "description": "Add a new card to a Trello list.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "desc": {
+            "type": "string"
+          },
+          "due": {
+            "type": "string"
+          },
+          "idBoard": {
+            "type": "string"
+          },
+          "idList": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "pos": {
+            "anyOf": [
+              {
+                "enum": [
+                  "top",
+                  "bottom"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          }
+        },
+        "required": [
+          "idList",
+          "name"
+        ],
+        "type": "object"
+      },
+      "response": "{id, name, desc, idList, idBoard, due, dueComplete, closed, labels, pos}"
+    },
+    {
+      "id": "trello.boards.lists",
+      "path": "trello/1/boards/{id}/lists",
+      "method": "GET",
+      "description": "Retrieve all lists present on a given Trello board.",
+      "parameters": {
+        "id": {
+          "type": "string",
+          "description": "Identifier of the board.",
+          "required": true,
+          "location": "path"
+        },
+        "filter": {
+          "type": "string",
+          "description": "Scope of lists to return: all, open, closed, none (defaults to all).",
+          "location": "query"
+        }
+      },
+      "response": "[{id, name, closed, idBoard}]"
+    },
+    {
+      "id": "trello.boards.cards",
+      "path": "trello/1/boards/{id}/cards",
+      "method": "GET",
+      "description": "Retrieve all cards on a given Trello board.",
+      "parameters": {
+        "id": {
+          "type": "string",
+          "description": "Identifier of the board.",
+          "required": true,
+          "location": "path"
+        },
+        "filter": {
+          "type": "string",
+          "description": "Scope of cards to return: all, closed, none, open, visible (defaults to all).",
+          "location": "query"
+        }
+      },
+      "response": "[{id, name, desc, idList, idBoard, due, dueComplete, closed, labels}]"
+    },
+    {
+      "id": "trello.cards.update",
+      "path": "trello/1/cards/{id}",
+      "method": "PUT",
+      "description": "Edit properties of an existing Trello card. Only include the fields you wish to change; all others remain unchanged.",
+      "parameters": {
+        "id": {
+          "type": "string",
+          "description": "The card ID or shortLink.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "closed": {
+            "type": "boolean"
+          },
+          "desc": {
+            "type": "string"
+          },
+          "due": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "dueComplete": {
+            "type": "boolean"
+          },
+          "idBoard": {
+            "type": "string"
+          },
+          "idList": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "pos": {
+            "anyOf": [
+              {
+                "enum": [
+                  "top",
+                  "bottom"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "number"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "response": "{id, name, desc, idList, idBoard, due, dueComplete, closed, labels, pos}"
+    },
+    {
+      "id": "trello.cards.addLabel",
+      "path": "trello/1/cards/{id}/idLabels",
+      "method": "POST",
+      "description": "Attach a label to a Trello card using its label ID. Label IDs can be found via GET /1/boards/{id}/labels.",
+      "parameters": {
+        "id": {
+          "type": "string",
+          "description": "Identifier of the card.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "[{id, idBoard, name, color}]",
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "id": "trello.cards.comment",
+      "path": "trello/1/cards/{id}/actions/comments",
+      "method": "POST",
+      "description": "Post a comment on a Trello card.",
+      "parameters": {
+        "id": {
+          "type": "string",
+          "description": "Identifier of the card.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "response": "{id, type: 'commentCard', date, data: {text, card: {id, name}, board: {id, name}}}"
+    }
+  ]
+}

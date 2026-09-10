@@ -1,0 +1,106 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "buffer",
+  "endpoints": [
+    {
+      "id": "buffer.profiles.list",
+      "path": "buffer/1/profiles.json",
+      "method": "GET",
+      "description": "Retrieve all social media profiles (channels) connected to the current Buffer user. Returns the channel IDs required to create posts.",
+      "parameters": {},
+      "response": "[{id, service, service_username, avatar, timezone, paused, statistics: {followers, following}}]"
+    },
+    {
+      "id": "buffer.posts.list",
+      "path": "buffer/1/posts.json",
+      "method": "GET",
+      "description": "Retrieve posts for a Buffer organization, optionally filtered by channel, status, and age.",
+      "parameters": {
+        "organization_id": {
+          "type": "string",
+          "description": "Buffer organization ID.",
+          "required": true,
+          "location": "query"
+        },
+        "channel_id": {
+          "type": "string",
+          "description": "Only return posts for this channel.",
+          "location": "query"
+        },
+        "status": {
+          "type": "string",
+          "description": "Only return posts with this status.",
+          "location": "query"
+        },
+        "days": {
+          "type": "integer",
+          "description": "Only return posts published within this many days of the task's current time.",
+          "location": "query"
+        }
+      },
+      "response": "{success: true, posts: [{id, organization_id, channel_id, text, status, engagement_rate, published_at, day, hour, type, channel}], total: integer}"
+    },
+    {
+      "id": "buffer.updates.create",
+      "path": "buffer/1/updates/create.json",
+      "method": "POST",
+      "description": "Queue a post to a Buffer channel, schedule it for a specific time, or publish it immediately. Set 'now' to publish right away, 'top' to insert at the front of the queue, or 'scheduled_at' to pick an exact send time. Without these options, the post is appended to the next available queue slot.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "attachment": {
+            "type": "boolean"
+          },
+          "media": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "now": {
+            "type": "boolean"
+          },
+          "profile_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "scheduled_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "shorten": {
+            "type": "boolean"
+          },
+          "text": {
+            "type": "string"
+          },
+          "top": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "profile_ids"
+        ],
+        "type": "object"
+      },
+      "response": "{success (bool), buffer_count (int), buffer_percentage (int), updates: [{id, created_at, day, due_at, due_time, media, profile_id, profile_service, status, text, text_formatted, user_id, via}]}"
+    }
+  ]
+}

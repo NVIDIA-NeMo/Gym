@@ -1,0 +1,154 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "facebook_pages",
+  "endpoints": [
+    {
+      "id": "facebook_pages.accounts.list",
+      "path": "facebook/v25/me/accounts",
+      "method": "GET",
+      "description": "List the Facebook Pages managed by the authenticated user. Use this to discover a Page ID before reading or publishing Page content.",
+      "parameters": {},
+      "response": "{data: [{id, name}], paging: {cursors: {before, after}}}"
+    },
+    {
+      "id": "facebook_pages.feed.list",
+      "path": "facebook/v25/{pageId}/feed",
+      "method": "GET",
+      "description": "Fetch posts from a Facebook Page's feed. Returns published posts ordered from newest to oldest.",
+      "parameters": {
+        "pageId": {
+          "type": "string",
+          "description": "Identifier of the target Facebook Page.",
+          "required": true,
+          "location": "path"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "How many posts to retrieve (default 10, maximum 100).",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{data: [{id, message, story, created_time, permalink_url}], paging: {cursors: {before, after}}}"
+    },
+    {
+      "id": "facebook_pages.feed.create",
+      "path": "facebook/v25/{pageId}/feed",
+      "method": "POST",
+      "description": "Publish a new post to a Facebook Page's feed. At least one of message or link must be provided.",
+      "parameters": {
+        "pageId": {
+          "type": "string",
+          "description": "Identifier of the target Facebook Page.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "call_to_action": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "feed_targeting": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "link": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "place": {
+            "type": "string"
+          },
+          "published": {
+            "type": "boolean"
+          },
+          "scheduled_publish_time": {
+            "type": "integer"
+          },
+          "tags": {
+            "type": "string"
+          },
+          "targeting": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "required": [
+          "link",
+          "message"
+        ],
+        "type": "object"
+      },
+      "response": "{id (post ID in format pageId_postId)}"
+    },
+    {
+      "id": "facebook_pages.photos.create",
+      "path": "facebook/v25/{pageId}/photos",
+      "method": "POST",
+      "description": "Add a photo to a Facebook Page. Provide url for a hosted image or source for a direct file upload. Supports both published and unpublished photo posts.",
+      "parameters": {
+        "pageId": {
+          "type": "string",
+          "description": "Identifier of the target Facebook Page.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "alt_text_custom": {
+            "type": "string"
+          },
+          "caption": {
+            "type": "string"
+          },
+          "no_story": {
+            "type": "boolean"
+          },
+          "place": {
+            "type": "string"
+          },
+          "published": {
+            "type": "boolean"
+          },
+          "scheduled_publish_time": {
+            "type": "integer"
+          },
+          "source": {
+            "type": "string"
+          },
+          "temporary": {
+            "type": "boolean"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "response": "{id (photo ID), post_id (associated post ID)}"
+    }
+  ]
+}

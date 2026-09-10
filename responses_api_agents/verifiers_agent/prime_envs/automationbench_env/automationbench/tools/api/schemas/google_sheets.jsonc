@@ -1,0 +1,444 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "google_sheets",
+  "endpoints": [
+    {
+      "id": "sheets.spreadsheets.create",
+      "path": "sheets/v4/spreadsheets",
+      "method": "POST",
+      "description": "Generate a new spreadsheet. Creates a fresh Google Sheets document with optional initial sheet configuration.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "properties": {
+            "additionalProperties": true,
+            "properties": {
+              "title": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "title"
+            ],
+            "type": "object"
+          },
+          "sheets": {
+            "items": {},
+            "type": "array"
+          }
+        },
+        "required": [
+          "properties"
+        ],
+        "type": "object"
+      },
+      "response": "Spreadsheet: {spreadsheetId, properties: {title}, sheets: [{properties: {sheetId, title, index, sheetType}}], spreadsheetUrl}"
+    },
+    {
+      "id": "sheets.spreadsheets.get",
+      "path": "sheets/v4/spreadsheets/{spreadsheetId}",
+      "method": "GET",
+      "description": "Retrieve a spreadsheet by its ID. Returns document metadata, sheet listings, and optionally the grid cell data.",
+      "parameters": {
+        "spreadsheetId": {
+          "type": "string",
+          "description": "Identifier of the spreadsheet to retrieve.",
+          "required": true,
+          "location": "path"
+        },
+        "includeGridData": {
+          "type": "boolean",
+          "description": "Whether to include cell-level data in the response (default false).",
+          "required": false,
+          "location": "query"
+        },
+        "ranges": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Specific ranges to retrieve from the spreadsheet in A1 notation (e.g., 'Sheet1!A1:B5').",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "Spreadsheet: {spreadsheetId, properties: {title}, sheets: [{properties: {sheetId, title, index, sheetType}, data}], spreadsheetUrl}"
+    },
+    {
+      "id": "sheets.spreadsheets.batchUpdate",
+      "path": "sheets/v4/spreadsheets/{spreadsheetId}:batchUpdate",
+      "method": "POST",
+      "description": "Execute one or more structural changes on a spreadsheet in one request. Supports adding sheets (AddSheetRequest), deleting sheets (DeleteSheetRequest), renaming sheets (UpdateSheetPropertiesRequest), and other layout operations.",
+      "parameters": {
+        "spreadsheetId": {
+          "type": "string",
+          "description": "Identifier of the target spreadsheet.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "requests": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "addSheet": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "properties": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "index": {
+                          "type": "integer"
+                        },
+                        "title": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "title"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "type": "object"
+                },
+                "deleteSheet": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "sheetId": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                },
+                "updateSheetProperties": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "fields": {
+                      "type": "string"
+                    },
+                    "properties": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "index": {
+                          "type": "integer"
+                        },
+                        "sheetId": {
+                          "type": "string"
+                        },
+                        "title": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "sheetId"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "response": "{spreadsheetId, replies: [{addSheet?: {properties: {sheetId, title, index, sheetType}}}]}"
+    },
+    {
+      "id": "sheets.spreadsheets.sheets.copyTo",
+      "path": "sheets/v4/spreadsheets/{spreadsheetId}/sheets/{sheetId}:copyTo",
+      "method": "POST",
+      "description": "Duplicate a sheet tab into a different spreadsheet.",
+      "parameters": {
+        "spreadsheetId": {
+          "type": "string",
+          "description": "Identifier of the source spreadsheet.",
+          "required": true,
+          "location": "path"
+        },
+        "sheetId": {
+          "type": "string",
+          "description": "Identifier of the sheet to duplicate.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "destinationSpreadsheetId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "destinationSpreadsheetId"
+        ],
+        "type": "object"
+      },
+      "response": "{sheetId, title, index, sheetType}"
+    },
+    {
+      "id": "sheets.spreadsheets.values.get",
+      "path": "sheets/v4/spreadsheets/{spreadsheetId}/values/{range}",
+      "method": "GET",
+      "description": "Read cell contents from a specific range. Retrieves data from a range specified in A1 notation (e.g., 'Sheet1!A1:Z100').",
+      "parameters": {
+        "spreadsheetId": {
+          "type": "string",
+          "description": "Identifier of the target spreadsheet.",
+          "required": true,
+          "location": "path"
+        },
+        "range": {
+          "type": "string",
+          "description": "The cell range to read in A1 notation (e.g., 'Sheet1!A1:Z100').",
+          "required": true,
+          "location": "path"
+        },
+        "majorDimension": {
+          "type": "string",
+          "enum": [
+            "ROWS",
+            "COLUMNS"
+          ],
+          "description": "Primary axis of the returned values array (default ROWS).",
+          "required": false,
+          "location": "query"
+        },
+        "valueRenderOption": {
+          "type": "string",
+          "enum": [
+            "FORMATTED_VALUE",
+            "UNFORMATTED_VALUE",
+            "FORMULA"
+          ],
+          "description": "Controls how cell values are rendered in the response (default FORMATTED_VALUE).",
+          "required": false,
+          "location": "query"
+        },
+        "dateTimeRenderOption": {
+          "type": "string",
+          "enum": [
+            "SERIAL_NUMBER",
+            "FORMATTED_STRING"
+          ],
+          "description": "Controls how date and time values appear (default SERIAL_NUMBER).",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "ValueRange: {range, majorDimension, values: [[cell, ...], ...]}"
+    },
+    {
+      "id": "sheets.spreadsheets.values.batchGet",
+      "path": "sheets/v4/spreadsheets/{spreadsheetId}/values:batchGet",
+      "method": "GET",
+      "description": "Retrieve multiple cell ranges from a spreadsheet in one request. Specify each range as a repeated 'ranges' query parameter in A1 notation.",
+      "parameters": {
+        "spreadsheetId": {
+          "type": "string",
+          "description": "Identifier of the target spreadsheet.",
+          "required": true,
+          "location": "path"
+        },
+        "ranges": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Cell ranges to read in A1 notation (repeated query parameter, e.g., ranges=Sheet1!A1:B5&ranges=Sheet2!A1:C10).",
+          "required": false,
+          "location": "query"
+        },
+        "majorDimension": {
+          "type": "string",
+          "enum": [
+            "ROWS",
+            "COLUMNS"
+          ],
+          "description": "Primary axis of the returned values arrays.",
+          "required": false,
+          "location": "query"
+        },
+        "valueRenderOption": {
+          "type": "string",
+          "enum": [
+            "FORMATTED_VALUE",
+            "UNFORMATTED_VALUE",
+            "FORMULA"
+          ],
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{spreadsheetId, valueRanges: [{range, majorDimension, values: [[cell, ...], ...]}]}"
+    },
+    {
+      "id": "sheets.spreadsheets.values.append",
+      "path": "sheets/v4/spreadsheets/{spreadsheetId}/values/{range}:append",
+      "method": "POST",
+      "description": "Insert new rows of data into a spreadsheet following the last occupied row in the given range.",
+      "parameters": {
+        "spreadsheetId": {
+          "type": "string",
+          "description": "Identifier of the target spreadsheet.",
+          "required": true,
+          "location": "path"
+        },
+        "range": {
+          "type": "string",
+          "description": "A1-notation range indicating where to append data (e.g., 'Sheet1!A1:E1').",
+          "required": true,
+          "location": "path"
+        },
+        "valueInputOption": {
+          "type": "string",
+          "enum": [
+            "RAW",
+            "USER_ENTERED"
+          ],
+          "description": "How the input should be interpreted (required). USER_ENTERED parses formulas and values; RAW inserts text as-is.",
+          "required": true,
+          "location": "query"
+        },
+        "insertDataOption": {
+          "type": "string",
+          "enum": [
+            "OVERWRITE",
+            "INSERT_ROWS"
+          ],
+          "description": "Determines whether existing rows are overwritten or new rows are inserted (default OVERWRITE).",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "majorDimension": {
+            "type": "string"
+          },
+          "range": {
+            "type": "string"
+          },
+          "values": {
+            "items": {
+              "items": {},
+              "type": "array"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "values"
+        ],
+        "type": "object"
+      },
+      "response": "{spreadsheetId, tableRange, updates: {spreadsheetId, updatedRange, updatedRows, updatedColumns, updatedCells}}"
+    },
+    {
+      "id": "sheets.spreadsheets.values.update",
+      "path": "sheets/v4/spreadsheets/{spreadsheetId}/values/{range}",
+      "method": "PUT",
+      "description": "Replace the contents of a given range in a spreadsheet. Overwrites whatever cells currently exist in the target range.",
+      "parameters": {
+        "spreadsheetId": {
+          "type": "string",
+          "description": "Identifier of the target spreadsheet.",
+          "required": true,
+          "location": "path"
+        },
+        "range": {
+          "type": "string",
+          "description": "A1-notation range to overwrite (e.g., 'Sheet1!A1:B5').",
+          "required": true,
+          "location": "path"
+        },
+        "valueInputOption": {
+          "type": "string",
+          "enum": [
+            "RAW",
+            "USER_ENTERED"
+          ],
+          "description": "How the input should be interpreted (required).",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "majorDimension": {
+            "type": "string"
+          },
+          "range": {
+            "type": "string"
+          },
+          "values": {
+            "items": {
+              "items": {},
+              "type": "array"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "values"
+        ],
+        "type": "object"
+      },
+      "response": "{spreadsheetId, updatedRange, updatedRows, updatedColumns, updatedCells, updatedData: ValueRange}"
+    },
+    {
+      "id": "sheets.spreadsheets.values.clear",
+      "path": "sheets/v4/spreadsheets/{spreadsheetId}/values/{range}:clear",
+      "method": "POST",
+      "description": "Erase the contents of a spreadsheet range. Deletes cell values while keeping the cells and their formatting in place.",
+      "parameters": {
+        "spreadsheetId": {
+          "type": "string",
+          "description": "Identifier of the target spreadsheet.",
+          "required": true,
+          "location": "path"
+        },
+        "range": {
+          "type": "string",
+          "description": "A1-notation range to clear (e.g., 'Sheet1!A1:B5').",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {},
+        "type": "object"
+      },
+      "response": "{spreadsheetId, clearedRange}"
+    }
+  ]
+}

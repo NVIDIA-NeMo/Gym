@@ -1,0 +1,3519 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "quickbooks",
+  "endpoints": [
+    {
+      "id": "quickbooks.query.get",
+      "path": "quickbooks/v3/company/{companyId}/query",
+      "method": "GET",
+      "description": "Run a QuickBooks query supplied as a URL parameter. Supports SELECT * or COUNT(*), WHERE conditions joined by AND, LIKE and IN filters, ORDERBY, and pagination with STARTPOSITION and MAXRESULTS.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "description": "The QuickBooks company (realm) identifier.",
+          "required": true,
+          "location": "path"
+        },
+        "query": {
+          "type": "string",
+          "description": "Complete QuickBooks query statement.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "response": "{QueryResponse: {entity_type: [records], startPosition: int, maxResults: int, totalCount: int}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.query",
+      "path": "quickbooks/v3/company/{companyId}/query",
+      "method": "POST",
+      "description": "Run a QuickBooks query to find and filter entity records. Supports SELECT * or COUNT(*), WHERE conditions joined by AND, LIKE and IN filters, ORDERBY, and pagination with STARTPOSITION and MAXRESULTS. OR, joins, and grouping are not supported.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "description": "The QuickBooks company (realm) identifier.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "response": "{QueryResponse: {entity_type: [records], startPosition: int, maxResults: int, totalCount: int}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.customer.get",
+      "path": "quickbooks/v3/company/{companyId}/customer/{customerId}",
+      "method": "GET",
+      "description": "Look up one customer record by ID, returning all of its fields.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "description": "The QuickBooks company identifier.",
+          "required": true,
+          "location": "path"
+        },
+        "customerId": {
+          "type": "string",
+          "description": "Unique ID of the customer to retrieve.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Customer object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.customer.create",
+      "path": "quickbooks/v3/company/{companyId}/customer",
+      "method": "POST",
+      "description": "Add a new customer record. DisplayName must not duplicate any existing customer, vendor, or employee name.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "description": "The QuickBooks company identifier.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "Active": {},
+          "BillAddr": {},
+          "BillWithParent": {},
+          "CompanyName": {},
+          "CurrencyRef": {},
+          "DefaultTaxCodeRef": {},
+          "DisplayName": {},
+          "FamilyName": {},
+          "Fax": {},
+          "GivenName": {},
+          "Job": {},
+          "MiddleName": {},
+          "Mobile": {},
+          "Notes": {},
+          "ParentRef": {},
+          "PaymentMethodRef": {},
+          "PreferredDeliveryMethod": {},
+          "PrimaryEmailAddr": {},
+          "PrimaryPhone": {},
+          "PrintOnCheckName": {},
+          "SalesTermRef": {},
+          "ShipAddr": {},
+          "Suffix": {},
+          "Taxable": {},
+          "Title": {},
+          "WebAddr": {}
+        },
+        "required": [
+          "DisplayName"
+        ],
+        "type": "object"
+      },
+      "response": "{Customer: Customer object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      },
+      "forbiddenBody": [
+        "Id",
+        "SyncToken"
+      ]
+    },
+    {
+      "id": "quickbooks.customer.update",
+      "path": "quickbooks/v3/company/{companyId}/customer",
+      "method": "POST",
+      "description": "Modify an existing customer. The request body must include Id and the current SyncToken. Supports sparse updates when sparse is set to true.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "description": "The QuickBooks company identifier.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "Active": {},
+          "BillAddr": {},
+          "CompanyName": {},
+          "DisplayName": {},
+          "FamilyName": {},
+          "GivenName": {},
+          "Id": {},
+          "Notes": {},
+          "PrimaryEmailAddr": {},
+          "PrimaryPhone": {},
+          "ShipAddr": {},
+          "SyncToken": {},
+          "sparse": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "Id",
+          "SyncToken"
+        ],
+        "type": "object"
+      },
+      "response": "{Customer: updated Customer object}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.vendor.get",
+      "path": "quickbooks/v3/company/{companyId}/vendor/{vendorId}",
+      "method": "GET",
+      "description": "Fetch a single vendor record by its unique identifier.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "vendorId": {
+          "type": "string",
+          "description": "Unique ID of the vendor.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Vendor object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.vendor.create",
+      "path": "quickbooks/v3/company/{companyId}/vendor",
+      "method": "POST",
+      "description": "Register a new vendor. DisplayName must not duplicate any existing customer, vendor, or employee name.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "AcctNum": {},
+          "Active": {},
+          "BillAddr": {},
+          "BillRate": {},
+          "CompanyName": {},
+          "CurrencyRef": {},
+          "DisplayName": {},
+          "FamilyName": {},
+          "Fax": {},
+          "GivenName": {},
+          "MiddleName": {},
+          "Mobile": {},
+          "PrimaryEmailAddr": {},
+          "PrimaryPhone": {},
+          "PrintOnCheckName": {},
+          "Suffix": {},
+          "TaxIdentifier": {},
+          "TermRef": {
+            "additionalProperties": true,
+            "properties": {
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "value"
+            ],
+            "type": "object"
+          },
+          "Vendor1099": {},
+          "WebAddr": {}
+        },
+        "required": [
+          "DisplayName"
+        ],
+        "type": "object"
+      },
+      "response": "{Vendor: Vendor object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      },
+      "forbiddenBody": [
+        "Id",
+        "SyncToken"
+      ]
+    },
+    {
+      "id": "quickbooks.vendor.update",
+      "path": "quickbooks/v3/company/{companyId}/vendor",
+      "method": "POST",
+      "description": "Update an existing vendor record. Must include Id and SyncToken in the request.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "Active": {},
+          "BillAddr": {},
+          "CompanyName": {},
+          "DisplayName": {},
+          "Id": {},
+          "PrimaryEmailAddr": {},
+          "PrimaryPhone": {},
+          "SyncToken": {},
+          "TermRef": {
+            "additionalProperties": true,
+            "properties": {
+              "value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "value"
+            ],
+            "type": "object"
+          },
+          "Vendor1099": {},
+          "sparse": {}
+        },
+        "required": [
+          "Id",
+          "SyncToken"
+        ],
+        "type": "object"
+      },
+      "response": "{Vendor: updated Vendor object}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.account.get",
+      "path": "quickbooks/v3/company/{companyId}/account/{accountId}",
+      "method": "GET",
+      "description": "Retrieve a single chart-of-accounts entry by its identifier.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "accountId": {
+          "type": "string",
+          "description": "Unique ID of the account.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Account object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.account.create",
+      "path": "quickbooks/v3/company/{companyId}/account",
+      "method": "POST",
+      "description": "Add a new account to the chart of accounts. Name and AccountType are required.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Name": {},
+          "AccountType": {},
+          "AccountSubType": {},
+          "AcctNum": {},
+          "Description": {},
+          "Active": {},
+          "SubAccount": {},
+          "ParentRef": {},
+          "CurrencyRef": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "AccountType",
+          "Name"
+        ]
+      },
+      "response": "{Account: Account object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.account.update",
+      "path": "quickbooks/v3/company/{companyId}/account",
+      "method": "POST",
+      "description": "Modify an existing account. Must include Id and SyncToken.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {},
+          "sparse": {},
+          "Name": {},
+          "AccountType": {},
+          "AccountSubType": {},
+          "AcctNum": {},
+          "Description": {},
+          "Active": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{Account: updated Account object}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.invoice.get",
+      "path": "quickbooks/v3/company/{companyId}/invoice/{invoiceId}",
+      "method": "GET",
+      "description": "Fetch a single invoice including its line items, customer, and payment status.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "invoiceId": {
+          "type": "string",
+          "description": "Unique ID of the invoice.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Invoice object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.invoice.create",
+      "path": "quickbooks/v3/company/{companyId}/invoice",
+      "method": "POST",
+      "description": "Generate a new invoice for a customer. At minimum, requires a customer reference and at least one line item.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "ApplyTaxAfterDiscount": {},
+          "BillAddr": {},
+          "BillEmail": {},
+          "ClassRef": {},
+          "CustomerMemo": {},
+          "CustomerRef": {
+            "additionalProperties": true,
+            "properties": {
+              "value": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "DepartmentRef": {},
+          "Deposit": {},
+          "DocNumber": {},
+          "DueDate": {},
+          "Line": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "Amount": {},
+                "DetailType": {},
+                "SalesItemLineDetail": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "ItemRef": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "value": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "Qty": {},
+                    "UnitPrice": {}
+                  },
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "PrivateNote": {},
+          "SalesTermRef": {},
+          "ShipAddr": {},
+          "ShipDate": {},
+          "TrackingNum": {},
+          "TxnDate": {},
+          "TxnTaxDetail": {}
+        },
+        "required": [
+          "CustomerRef",
+          "Line"
+        ],
+        "type": "object"
+      },
+      "response": "{Invoice: Invoice object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      },
+      "forbiddenBody": [
+        "Id",
+        "SyncToken"
+      ]
+    },
+    {
+      "id": "quickbooks.invoice.update",
+      "path": "quickbooks/v3/company/{companyId}/invoice",
+      "method": "POST",
+      "description": "Update an existing invoice. Must include Id and SyncToken. Supports sparse updates.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "BillAddr": {},
+          "CustomerRef": {},
+          "DocNumber": {},
+          "DueDate": {},
+          "Id": {},
+          "Line": {},
+          "PrivateNote": {},
+          "SyncToken": {},
+          "TxnDate": {},
+          "sparse": {}
+        },
+        "required": [
+          "Id",
+          "SyncToken"
+        ],
+        "type": "object"
+      },
+      "response": "{Invoice: updated Invoice object}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.invoice.delete",
+      "path": "quickbooks/v3/company/{companyId}/invoice",
+      "method": "POST",
+      "description": "Permanently remove an invoice. The request must include the Id and SyncToken, and the operation=delete query parameter.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'delete'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "required": [
+          "Id",
+          "SyncToken"
+        ],
+        "type": "object"
+      },
+      "response": "{Invoice: {Id, status: 'Deleted'}}",
+      "internalPath": {
+        "companyId": "workspace"
+      },
+      "fixedParams": {
+        "operation": "delete"
+      },
+      "hiddenParams": [
+        "operation"
+      ]
+    },
+    {
+      "id": "quickbooks.invoice.send",
+      "path": "quickbooks/v3/company/{companyId}/invoice/{invoiceId}/send",
+      "method": "POST",
+      "description": "Email an invoice to the customer. Uses the BillEmail address on the invoice unless overridden via query parameter.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "invoiceId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "sendTo": {
+          "type": "string",
+          "description": "Override email address to send the invoice to.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{Invoice: Invoice object with EmailStatus updated}",
+      "internalPath": {
+        "companyId": "workspace"
+      },
+      "hiddenParams": [
+        "sendTo"
+      ]
+    },
+    {
+      "id": "quickbooks.invoice.void",
+      "path": "quickbooks/v3/company/{companyId}/invoice",
+      "method": "POST",
+      "description": "Void an invoice, zeroing out its balance while preserving the record for audit purposes. Include Id, SyncToken, and set void to true in the query.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'void'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "required": [
+          "Id",
+          "SyncToken"
+        ],
+        "type": "object"
+      },
+      "response": "{Invoice: voided Invoice object}",
+      "internalPath": {
+        "companyId": "workspace"
+      },
+      "fixedParams": {
+        "operation": "void"
+      },
+      "hiddenParams": [
+        "operation"
+      ]
+    },
+    {
+      "id": "quickbooks.item.get",
+      "path": "quickbooks/v3/company/{companyId}/item/{itemId}",
+      "method": "GET",
+      "description": "Look up a single product or service item by its identifier.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "itemId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Item object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.item.create",
+      "path": "quickbooks/v3/company/{companyId}/item",
+      "method": "POST",
+      "description": "Create a new product or service item. Requires Name and the appropriate account references based on item type.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "Active": {},
+          "AssetAccountRef": {},
+          "Description": {},
+          "ExpenseAccountRef": {},
+          "IncomeAccountRef": {},
+          "InvStartDate": {},
+          "Name": {},
+          "ParentRef": {},
+          "PurchaseCost": {},
+          "PurchaseDesc": {},
+          "QtyOnHand": {},
+          "Sku": {},
+          "SubItem": {},
+          "Taxable": {},
+          "TrackQtyOnHand": {},
+          "Type": {},
+          "UnitPrice": {}
+        },
+        "required": [
+          "Name"
+        ],
+        "type": "object"
+      },
+      "response": "{Item: Item object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.item.update",
+      "implemented": false,
+      "path": "quickbooks/v3/company/{companyId}/item",
+      "method": "POST",
+      "description": "Modify an existing item. Must include Id and SyncToken.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {},
+          "sparse": {},
+          "Name": {},
+          "Type": {},
+          "Description": {},
+          "UnitPrice": {},
+          "PurchaseCost": {},
+          "QtyOnHand": {},
+          "Active": {},
+          "Taxable": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{Item: updated Item object}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.payment.get",
+      "path": "quickbooks/v3/company/{companyId}/payment/{paymentId}",
+      "method": "GET",
+      "description": "Retrieve a single customer payment record.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "paymentId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Payment object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.payment.create",
+      "path": "quickbooks/v3/company/{companyId}/payment",
+      "method": "POST",
+      "description": "Record funds collected from a customer. The Line array links the payment to specific open invoices.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "ARAccountRef": {},
+          "CurrencyRef": {},
+          "CustomerRef": {
+            "additionalProperties": true,
+            "properties": {
+              "value": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "DepositToAccountRef": {},
+          "ExchangeRate": {},
+          "Line": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "Amount": {},
+                "LinkedTxn": {
+                  "items": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "TxnId": {},
+                      "TxnType": {}
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "PaymentMethodRef": {},
+          "PaymentRefNum": {},
+          "PrivateNote": {},
+          "TotalAmt": {
+            "type": "number"
+          },
+          "TxnDate": {}
+        },
+        "required": [
+          "CustomerRef",
+          "TotalAmt"
+        ],
+        "type": "object"
+      },
+      "response": "{Payment: Payment object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.payment.update",
+      "implemented": false,
+      "path": "quickbooks/v3/company/{companyId}/payment",
+      "method": "POST",
+      "description": "Modify an existing payment record.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {},
+          "sparse": {},
+          "TotalAmt": {},
+          "Line": {},
+          "PaymentMethodRef": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{Payment: updated Payment object}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.payment.delete",
+      "implemented": false,
+      "path": "quickbooks/v3/company/{companyId}/payment",
+      "method": "POST",
+      "description": "Permanently remove a payment record.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'delete'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{Payment: {Id, status: 'Deleted'}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.payment.void",
+      "implemented": false,
+      "path": "quickbooks/v3/company/{companyId}/payment",
+      "method": "POST",
+      "description": "Void a customer payment while keeping the record for historical reference.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'void'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{Payment: voided Payment object}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.bill.get",
+      "path": "quickbooks/v3/company/{companyId}/bill/{billId}",
+      "method": "GET",
+      "description": "Fetch a single bill (vendor invoice) by its identifier.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "billId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Bill object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.bill.create",
+      "path": "quickbooks/v3/company/{companyId}/bill",
+      "method": "POST",
+      "description": "Enter a new bill from a vendor. Requires a vendor reference and at least one line item, which can be item-based or account-based.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "APAccountRef": {},
+          "DepartmentRef": {},
+          "DocNumber": {},
+          "DueDate": {},
+          "Line": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "AccountBasedExpenseLineDetail": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "AccountRef": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "value": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  },
+                  "type": "object"
+                },
+                "Amount": {},
+                "DetailType": {
+                  "enum": [
+                    "AccountBasedExpenseLineDetail",
+                    "ItemBasedExpenseLineDetail"
+                  ],
+                  "type": "string"
+                },
+                "ItemBasedExpenseLineDetail": {
+                  "additionalProperties": true,
+                  "properties": {
+                    "ItemRef": {
+                      "additionalProperties": true,
+                      "properties": {
+                        "value": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "Qty": {},
+                    "UnitPrice": {}
+                  },
+                  "type": "object"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "PrivateNote": {},
+          "SalesTermRef": {},
+          "TxnDate": {},
+          "TxnTaxDetail": {},
+          "VendorRef": {
+            "additionalProperties": true,
+            "properties": {
+              "value": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "Line",
+          "VendorRef"
+        ],
+        "type": "object"
+      },
+      "response": "{Bill: Bill object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.bill.update",
+      "implemented": false,
+      "path": "quickbooks/v3/company/{companyId}/bill",
+      "method": "POST",
+      "description": "Modify an existing bill.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {},
+          "sparse": {},
+          "VendorRef": {},
+          "Line": {},
+          "DocNumber": {},
+          "TxnDate": {},
+          "DueDate": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{Bill: updated Bill object}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.bill.delete",
+      "implemented": false,
+      "path": "quickbooks/v3/company/{companyId}/bill",
+      "method": "POST",
+      "description": "Permanently remove a bill record.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'delete'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{Bill: {Id, status: 'Deleted'}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.estimate.get",
+      "path": "quickbooks/v3/company/{companyId}/estimate/{estimateId}",
+      "method": "GET",
+      "description": "Retrieve a single estimate (quote/proposal) by its identifier.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "estimateId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Estimate object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.estimate.create",
+      "path": "quickbooks/v3/company/{companyId}/estimate",
+      "method": "POST",
+      "description": "Create a new estimate for a customer. Requires a customer reference and line items.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "CustomerRef": {
+            "type": "object",
+            "properties": {
+              "value": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          },
+          "Line": {},
+          "DocNumber": {},
+          "TxnDate": {},
+          "DueDate": {},
+          "ExpirationDate": {},
+          "TxnStatus": {},
+          "PrivateNote": {},
+          "CustomerMemo": {},
+          "BillAddr": {},
+          "ShipAddr": {},
+          "BillEmail": {},
+          "SalesTermRef": {},
+          "DepartmentRef": {},
+          "ClassRef": {},
+          "TxnTaxDetail": {},
+          "ApplyTaxAfterDiscount": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "CustomerRef",
+          "Line"
+        ]
+      },
+      "response": "{Estimate: Estimate object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.estimate.update",
+      "path": "quickbooks/v3/company/{companyId}/estimate",
+      "method": "POST",
+      "description": "Modify an existing estimate. Must include Id and SyncToken.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {},
+          "sparse": {},
+          "CustomerRef": {},
+          "Line": {},
+          "TxnStatus": {},
+          "DocNumber": {},
+          "DueDate": {},
+          "ExpirationDate": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{Estimate: updated Estimate object}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.estimate.delete",
+      "path": "quickbooks/v3/company/{companyId}/estimate",
+      "method": "POST",
+      "description": "Permanently remove an estimate.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'delete'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{Estimate: {Id, status: 'Deleted'}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.estimate.send",
+      "path": "quickbooks/v3/company/{companyId}/estimate/{estimateId}/send",
+      "method": "POST",
+      "description": "Email an estimate to the customer using the BillEmail on the estimate or an override address.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "estimateId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "sendTo": {
+          "type": "string",
+          "description": "Override recipient email address.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{Estimate: Estimate with EmailStatus updated}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.purchase.get",
+      "path": "quickbooks/v3/company/{companyId}/purchase/{purchaseId}",
+      "method": "GET",
+      "description": "Retrieve a single purchase (expense) transaction.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "purchaseId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Purchase object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.purchase.create",
+      "path": "quickbooks/v3/company/{companyId}/purchase",
+      "method": "POST",
+      "description": "Record a new expense transaction. Requires the payment account, how it was paid, and at least one expense line.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "AccountRef": {
+            "type": "object",
+            "properties": {
+              "value": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          },
+          "PaymentType": {},
+          "Line": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "DetailType": {},
+                "Amount": {},
+                "AccountBasedExpenseLineDetail": {}
+              },
+              "additionalProperties": true
+            }
+          },
+          "DocNumber": {},
+          "TxnDate": {},
+          "PrivateNote": {},
+          "EntityRef": {},
+          "DepartmentRef": {},
+          "CurrencyRef": {},
+          "TxnTaxDetail": {},
+          "Credit": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "AccountRef",
+          "Line",
+          "PaymentType"
+        ]
+      },
+      "response": "{Purchase: Purchase object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.purchase.update",
+      "path": "quickbooks/v3/company/{companyId}/purchase",
+      "method": "POST",
+      "description": "Modify an existing purchase.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {},
+          "sparse": {},
+          "AccountRef": {},
+          "PaymentType": {},
+          "Line": {},
+          "TxnDate": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{Purchase: updated Purchase object}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.purchase.delete",
+      "path": "quickbooks/v3/company/{companyId}/purchase",
+      "method": "POST",
+      "description": "Permanently remove a purchase transaction.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'delete'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{Purchase: {Id, status: 'Deleted'}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.billpayment.get",
+      "path": "quickbooks/v3/company/{companyId}/billpayment/{billPaymentId}",
+      "method": "GET",
+      "description": "Retrieve a single vendor bill payment.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "billPaymentId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "BillPayment object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.billpayment.create",
+      "path": "quickbooks/v3/company/{companyId}/billpayment",
+      "method": "POST",
+      "description": "Pay one or more vendor bills. Specify the payment method (check or credit card) and link to the bills being paid.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "APAccountRef": {},
+          "CheckPayment": {
+            "additionalProperties": true,
+            "properties": {
+              "BankAccountRef": {
+                "additionalProperties": true,
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "CreditCardPayment": {
+            "additionalProperties": true,
+            "properties": {
+              "CCAccountRef": {
+                "additionalProperties": true,
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "type": "object"
+          },
+          "DocNumber": {},
+          "Line": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "Amount": {
+                  "type": "number"
+                },
+                "LinkedTxn": {
+                  "items": {
+                    "additionalProperties": true,
+                    "properties": {
+                      "TxnId": {},
+                      "TxnType": {}
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "PayType": {},
+          "PrivateNote": {},
+          "TotalAmt": {
+            "type": "number"
+          },
+          "TxnDate": {},
+          "VendorRef": {
+            "additionalProperties": true,
+            "properties": {
+              "value": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "Line",
+          "PayType",
+          "TotalAmt",
+          "VendorRef"
+        ],
+        "type": "object"
+      },
+      "response": "{BillPayment: BillPayment object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.billpayment.delete",
+      "implemented": false,
+      "path": "quickbooks/v3/company/{companyId}/billpayment",
+      "method": "POST",
+      "description": "Permanently remove a vendor bill payment.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'delete'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{BillPayment: {Id, status: 'Deleted'}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.billpayment.void",
+      "implemented": false,
+      "path": "quickbooks/v3/company/{companyId}/billpayment",
+      "method": "POST",
+      "description": "Void a vendor payment while retaining the record.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'void'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{BillPayment: voided BillPayment object}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.creditmemo.get",
+      "path": "quickbooks/v3/company/{companyId}/creditmemo/{creditMemoId}",
+      "method": "GET",
+      "description": "Fetch a single credit memo by its identifier.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "creditMemoId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "CreditMemo object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.creditmemo.create",
+      "path": "quickbooks/v3/company/{companyId}/creditmemo",
+      "method": "POST",
+      "description": "Issue a credit memo to a customer. Reduces the customer's outstanding balance.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "CustomerRef": {
+            "type": "object",
+            "properties": {
+              "value": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          },
+          "Line": {},
+          "DocNumber": {},
+          "TxnDate": {},
+          "PrivateNote": {},
+          "BillAddr": {},
+          "BillEmail": {},
+          "DepartmentRef": {},
+          "ClassRef": {},
+          "CurrencyRef": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "CustomerRef",
+          "Line"
+        ]
+      },
+      "response": "{CreditMemo: CreditMemo object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.creditmemo.delete",
+      "path": "quickbooks/v3/company/{companyId}/creditmemo",
+      "method": "POST",
+      "description": "Permanently remove a credit memo.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'delete'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{CreditMemo: {Id, status: 'Deleted'}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.salesreceipt.get",
+      "path": "quickbooks/v3/company/{companyId}/salesreceipt/{salesReceiptId}",
+      "method": "GET",
+      "description": "Retrieve a single sales receipt by its identifier.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "salesReceiptId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "SalesReceipt object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.salesreceipt.create",
+      "path": "quickbooks/v3/company/{companyId}/salesreceipt",
+      "method": "POST",
+      "description": "Record a point-of-sale transaction where the buyer pays immediately upon purchase.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "BillAddr": {},
+          "BillEmail": {},
+          "ClassRef": {},
+          "CustomerRef": {
+            "additionalProperties": true,
+            "properties": {
+              "value": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "DepartmentRef": {},
+          "DepositToAccountRef": {},
+          "DocNumber": {},
+          "Line": {},
+          "PaymentMethodRef": {},
+          "PrivateNote": {},
+          "ShipAddr": {},
+          "TxnDate": {}
+        },
+        "required": [
+          "CustomerRef",
+          "Line"
+        ],
+        "type": "object"
+      },
+      "response": "{SalesReceipt: SalesReceipt object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.salesreceipt.delete",
+      "implemented": false,
+      "path": "quickbooks/v3/company/{companyId}/salesreceipt",
+      "method": "POST",
+      "description": "Permanently remove a sales receipt.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'delete'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{SalesReceipt: {Id, status: 'Deleted'}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.salesreceipt.send",
+      "path": "quickbooks/v3/company/{companyId}/salesreceipt/{salesReceiptId}/send",
+      "method": "POST",
+      "description": "Email a sales receipt to the customer.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "salesReceiptId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "sendTo": {
+          "type": "string",
+          "description": "Override recipient email address.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{SalesReceipt: SalesReceipt with EmailStatus updated}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.purchaseorder.get",
+      "path": "quickbooks/v3/company/{companyId}/purchaseorder/{purchaseOrderId}",
+      "method": "GET",
+      "description": "Fetch a single purchase order by its identifier.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "purchaseOrderId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "PurchaseOrder object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.purchaseorder.create",
+      "path": "quickbooks/v3/company/{companyId}/purchaseorder",
+      "method": "POST",
+      "description": "Submit a new purchase order to a vendor for goods or services.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "VendorRef": {
+            "type": "object",
+            "properties": {
+              "value": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          },
+          "Line": {},
+          "DocNumber": {},
+          "TxnDate": {},
+          "DueDate": {},
+          "Memo": {},
+          "VendorAddr": {},
+          "ShipAddr": {},
+          "ShipMethodRef": {},
+          "DepartmentRef": {},
+          "ClassRef": {},
+          "APAccountRef": {},
+          "CurrencyRef": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Line",
+          "VendorRef"
+        ]
+      },
+      "response": "{PurchaseOrder: PurchaseOrder object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.purchaseorder.update",
+      "path": "quickbooks/v3/company/{companyId}/purchaseorder",
+      "method": "POST",
+      "description": "Modify an existing purchase order.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {},
+          "sparse": {},
+          "VendorRef": {},
+          "Line": {},
+          "POStatus": {},
+          "DueDate": {},
+          "Memo": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{PurchaseOrder: updated PurchaseOrder object}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.purchaseorder.delete",
+      "path": "quickbooks/v3/company/{companyId}/purchaseorder",
+      "method": "POST",
+      "description": "Permanently remove a purchase order.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'delete'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{PurchaseOrder: {Id, status: 'Deleted'}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.vendorcredit.get",
+      "path": "quickbooks/v3/company/{companyId}/vendorcredit/{vendorCreditId}",
+      "method": "GET",
+      "description": "Retrieve a single vendor credit.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "vendorCreditId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "VendorCredit object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.vendorcredit.create",
+      "path": "quickbooks/v3/company/{companyId}/vendorcredit",
+      "method": "POST",
+      "description": "Record a credit from a vendor that can be applied against future bills.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "VendorRef": {
+            "type": "object",
+            "properties": {
+              "value": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          },
+          "Line": {},
+          "DocNumber": {},
+          "TxnDate": {},
+          "APAccountRef": {},
+          "DepartmentRef": {},
+          "CurrencyRef": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Line",
+          "VendorRef"
+        ]
+      },
+      "response": "{VendorCredit: VendorCredit object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.vendorcredit.delete",
+      "path": "quickbooks/v3/company/{companyId}/vendorcredit",
+      "method": "POST",
+      "description": "Permanently remove a vendor credit.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'delete'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{VendorCredit: {Id, status: 'Deleted'}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.journalentry.get",
+      "path": "quickbooks/v3/company/{companyId}/journalentry/{journalEntryId}",
+      "method": "GET",
+      "description": "Fetch a single journal entry.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "journalEntryId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "JournalEntry object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.journalentry.create",
+      "path": "quickbooks/v3/company/{companyId}/journalentry",
+      "method": "POST",
+      "description": "Create a manual journal entry with debit and credit lines. Total debits must equal total credits.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Line": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "DetailType": {},
+                "Amount": {},
+                "JournalEntryLineDetail": {
+                  "type": "object",
+                  "properties": {
+                    "PostingType": {
+                      "type": "string",
+                      "enum": [
+                        "Debit",
+                        "Credit"
+                      ]
+                    },
+                    "AccountRef": {
+                      "type": "object",
+                      "properties": {
+                        "value": {
+                          "type": "string"
+                        }
+                      },
+                      "additionalProperties": true
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "DocNumber": {},
+          "TxnDate": {},
+          "Adjustment": {},
+          "PrivateNote": {},
+          "CurrencyRef": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Line"
+        ]
+      },
+      "response": "{JournalEntry: JournalEntry object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.journalentry.delete",
+      "path": "quickbooks/v3/company/{companyId}/journalentry",
+      "method": "POST",
+      "description": "Permanently remove a journal entry.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'delete'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{JournalEntry: {Id, status: 'Deleted'}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.deposit.get",
+      "path": "quickbooks/v3/company/{companyId}/deposit/{depositId}",
+      "method": "GET",
+      "description": "Retrieve a single deposit record.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "depositId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Deposit object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.deposit.create",
+      "path": "quickbooks/v3/company/{companyId}/deposit",
+      "method": "POST",
+      "description": "Record funds deposited into a bank account from one or more sources.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "DepositToAccountRef": {
+            "type": "object",
+            "properties": {
+              "value": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          },
+          "Line": {},
+          "TxnDate": {},
+          "PrivateNote": {},
+          "DepartmentRef": {},
+          "CurrencyRef": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "DepositToAccountRef",
+          "Line"
+        ]
+      },
+      "response": "{Deposit: Deposit object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.deposit.delete",
+      "path": "quickbooks/v3/company/{companyId}/deposit",
+      "method": "POST",
+      "description": "Permanently remove a deposit.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'delete'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{Deposit: {Id, status: 'Deleted'}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.transfer.get",
+      "path": "quickbooks/v3/company/{companyId}/transfer/{transferId}",
+      "method": "GET",
+      "description": "Retrieve a single inter-account transfer.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "transferId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Transfer object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.transfer.create",
+      "path": "quickbooks/v3/company/{companyId}/transfer",
+      "method": "POST",
+      "description": "Move funds between two accounts within the company.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "FromAccountRef": {
+            "type": "object",
+            "properties": {
+              "value": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          },
+          "ToAccountRef": {
+            "type": "object",
+            "properties": {
+              "value": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          },
+          "Amount": {},
+          "TxnDate": {},
+          "PrivateNote": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Amount",
+          "FromAccountRef",
+          "ToAccountRef"
+        ]
+      },
+      "response": "{Transfer: Transfer object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.transfer.delete",
+      "path": "quickbooks/v3/company/{companyId}/transfer",
+      "method": "POST",
+      "description": "Permanently remove a transfer record.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'delete'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{Transfer: {Id, status: 'Deleted'}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.employee.get",
+      "path": "quickbooks/v3/company/{companyId}/employee/{employeeId}",
+      "method": "GET",
+      "description": "Retrieve a single employee record.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "employeeId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Employee object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.employee.create",
+      "path": "quickbooks/v3/company/{companyId}/employee",
+      "method": "POST",
+      "description": "Add a new employee to the company.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "GivenName": {},
+          "FamilyName": {},
+          "DisplayName": {},
+          "MiddleName": {},
+          "PrintOnCheckName": {},
+          "SSN": {},
+          "BirthDate": {},
+          "HiredDate": {},
+          "PrimaryAddr": {},
+          "PrimaryPhone": {},
+          "Mobile": {},
+          "PrimaryEmailAddr": {},
+          "Active": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "FamilyName",
+          "GivenName"
+        ]
+      },
+      "response": "{Employee: Employee object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.employee.update",
+      "path": "quickbooks/v3/company/{companyId}/employee",
+      "method": "POST",
+      "description": "Modify an existing employee record.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {},
+          "sparse": {},
+          "GivenName": {},
+          "FamilyName": {},
+          "DisplayName": {},
+          "Active": {},
+          "PrimaryAddr": {},
+          "PrimaryPhone": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{Employee: updated Employee object}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.department.get",
+      "path": "quickbooks/v3/company/{companyId}/department/{departmentId}",
+      "method": "GET",
+      "description": "Retrieve a single department record.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "departmentId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Department object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.department.create",
+      "path": "quickbooks/v3/company/{companyId}/department",
+      "method": "POST",
+      "description": "Create a new department for organizational tracking.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Name": {},
+          "Active": {},
+          "SubDepartment": {},
+          "ParentRef": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Name"
+        ]
+      },
+      "response": "{Department: Department object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.term.get",
+      "path": "quickbooks/v3/company/{companyId}/term/{termId}",
+      "method": "GET",
+      "description": "Retrieve a single payment terms entry.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "termId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Term object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.term.create",
+      "path": "quickbooks/v3/company/{companyId}/term",
+      "method": "POST",
+      "description": "Define new payment terms specifying due days and optional early-payment discounts.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Name": {},
+          "Type": {},
+          "Active": {},
+          "DueDays": {},
+          "DiscountPercent": {},
+          "DiscountDays": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Name"
+        ]
+      },
+      "response": "{Term: Term object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.paymentmethod.get",
+      "path": "quickbooks/v3/company/{companyId}/paymentmethod/{paymentMethodId}",
+      "method": "GET",
+      "description": "Retrieve a single payment method.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "paymentMethodId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "PaymentMethod object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.paymentmethod.create",
+      "path": "quickbooks/v3/company/{companyId}/paymentmethod",
+      "method": "POST",
+      "description": "Add a new payment method option.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Name": {},
+          "Type": {},
+          "Active": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Name"
+        ]
+      },
+      "response": "{PaymentMethod: PaymentMethod object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.taxcode.get",
+      "path": "quickbooks/v3/company/{companyId}/taxcode/{taxCodeId}",
+      "method": "GET",
+      "description": "Retrieve a single tax code. Tax codes are read-only through the API and cannot be created or modified directly.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "taxCodeId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "TaxCode object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.taxrate.get",
+      "path": "quickbooks/v3/company/{companyId}/taxrate/{taxRateId}",
+      "method": "GET",
+      "description": "Retrieve a single tax rate. Tax rates are read-only through the API.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "taxRateId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "TaxRate object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.timeactivity.get",
+      "path": "quickbooks/v3/company/{companyId}/timeactivity/{timeActivityId}",
+      "method": "GET",
+      "description": "Retrieve a single time tracking entry.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "timeActivityId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "TimeActivity object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.timeactivity.create",
+      "path": "quickbooks/v3/company/{companyId}/timeactivity",
+      "method": "POST",
+      "description": "Record hours spent by a team member or outside contractor, with optional client billing.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "NameOf": {},
+          "EmployeeRef": {},
+          "TxnDate": {},
+          "Hours": {},
+          "Minutes": {},
+          "HourlyRate": {},
+          "BillableStatus": {},
+          "CustomerRef": {},
+          "ItemRef": {},
+          "Description": {},
+          "DepartmentRef": {},
+          "ClassRef": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "EmployeeRef",
+          "NameOf"
+        ]
+      },
+      "response": "{TimeActivity: TimeActivity object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.timeactivity.update",
+      "path": "quickbooks/v3/company/{companyId}/timeactivity",
+      "method": "POST",
+      "description": "Modify an existing time entry.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {},
+          "sparse": {},
+          "Hours": {},
+          "Minutes": {},
+          "HourlyRate": {},
+          "BillableStatus": {},
+          "Description": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{TimeActivity: updated TimeActivity object}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.timeactivity.delete",
+      "path": "quickbooks/v3/company/{companyId}/timeactivity",
+      "method": "POST",
+      "description": "Permanently remove a time tracking entry.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'delete'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{TimeActivity: {Id, status: 'Deleted'}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.refundreceipt.get",
+      "path": "quickbooks/v3/company/{companyId}/refundreceipt/{refundReceiptId}",
+      "method": "GET",
+      "description": "Retrieve a single refund receipt.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "refundReceiptId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "RefundReceipt object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.refundreceipt.create",
+      "path": "quickbooks/v3/company/{companyId}/refundreceipt",
+      "method": "POST",
+      "description": "Issue a refund to a customer for returned items or overpayments.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "CurrencyRef": {},
+          "CustomerRef": {
+            "additionalProperties": true,
+            "properties": {
+              "value": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "DepartmentRef": {},
+          "DepositToAccountRef": {},
+          "DocNumber": {},
+          "Line": {},
+          "PaymentType": {},
+          "PrivateNote": {},
+          "TxnDate": {}
+        },
+        "required": [
+          "CustomerRef",
+          "Line"
+        ],
+        "type": "object"
+      },
+      "response": "{RefundReceipt: RefundReceipt object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.refundreceipt.delete",
+      "implemented": false,
+      "path": "quickbooks/v3/company/{companyId}/refundreceipt",
+      "method": "POST",
+      "description": "Permanently remove a refund receipt.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'delete'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{RefundReceipt: {Id, status: 'Deleted'}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.attachable.get",
+      "path": "quickbooks/v3/company/{companyId}/attachable/{attachableId}",
+      "method": "GET",
+      "description": "Retrieve metadata for an attached file or note.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "attachableId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Attachable object",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.attachable.create",
+      "path": "quickbooks/v3/company/{companyId}/attachable",
+      "method": "POST",
+      "description": "Attach a file or note to one or more entities or transactions.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "FileName": {},
+          "ContentType": {},
+          "Note": {},
+          "AttachableRef": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "EntityRef": {
+                  "type": "object",
+                  "properties": {
+                    "value": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "Invoice",
+                        "Bill",
+                        "Customer"
+                      ]
+                    }
+                  },
+                  "additionalProperties": true
+                },
+                "IncludeOnSend": {}
+              },
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "response": "{Attachable: Attachable object with Id}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.attachable.delete",
+      "path": "quickbooks/v3/company/{companyId}/attachable",
+      "method": "POST",
+      "description": "Permanently remove an attachment.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "operation": {
+          "type": "string",
+          "description": "Must be set to 'delete'.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "Id": {},
+          "SyncToken": {}
+        },
+        "additionalProperties": true,
+        "required": [
+          "Id",
+          "SyncToken"
+        ]
+      },
+      "response": "{Attachable: {Id, status: 'Deleted'}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.batch",
+      "path": "quickbooks/v3/company/{companyId}/batch",
+      "method": "POST",
+      "description": "Bundle several create, read, update, delete, or query calls into one HTTP round-trip. Each batch item specifies an entity, operation, and payload. Maximum of 30 items per batch.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "type": "object",
+        "properties": {
+          "BatchItemRequest": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "bId": {
+                  "type": "string"
+                },
+                "operation": {
+                  "type": "string",
+                  "enum": [
+                    "create",
+                    "update",
+                    "delete",
+                    "query"
+                  ]
+                },
+                "Entity_Type": {
+                  "type": "object",
+                  "properties": {
+                    "entity": {}
+                  },
+                  "additionalProperties": true
+                }
+              },
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "response": "{BatchItemResponse: [{bId, Entity_Type or Fault}]}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.cdc",
+      "path": "quickbooks/v3/company/{companyId}/cdc",
+      "method": "GET",
+      "description": "Poll for recently modified records across one or more entity types. Returns only data updated after the specified cutoff, enabling efficient sync.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "entities": {
+          "type": "string",
+          "description": "Comma-separated list of entity types to check (e.g., 'Invoice,Customer,Payment').",
+          "required": true,
+          "location": "query"
+        },
+        "changedSince": {
+          "type": "string",
+          "description": "ISO 8601 timestamp. Only records modified after this time are returned.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "response": "{CDCResponse: [{QueryResponse: [{entity_type: [records]}]}]}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.companyinfo.get",
+      "path": "quickbooks/v3/company/{companyId}/companyinfo/{companyId}",
+      "method": "GET",
+      "description": "Retrieve company profile information including name, address, fiscal year settings, and contact details.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "description": "The QuickBooks company identifier (used in both path segments).",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "{CompanyInfo: {CompanyName, LegalName, CompanyAddr, CustomerCommunicationAddr, PrimaryPhone, CompanyEmailAddr, FiscalYearStartMonth, Country, MetaData}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.preferences.get",
+      "path": "quickbooks/v3/company/{companyId}/preferences",
+      "method": "GET",
+      "description": "Retrieve the company's accounting and feature preferences, including sales, purchase, and tax settings.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "{Preferences: {AccountingInfoPrefs, SalesFormsPrefs, VendorAndPurchasesPrefs, TaxPrefs, EmailMessagesPrefs, ...}}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.reports.profitandloss",
+      "path": "quickbooks/v3/company/{companyId}/reports/ProfitAndLoss",
+      "method": "GET",
+      "description": "Generate a profit and loss (income) statement for a given date range.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "start_date": {
+          "type": "string",
+          "description": "Start of the reporting period (YYYY-MM-DD).",
+          "required": false,
+          "location": "query"
+        },
+        "end_date": {
+          "type": "string",
+          "description": "End of the reporting period (YYYY-MM-DD).",
+          "required": false,
+          "location": "query"
+        },
+        "accounting_method": {
+          "type": "string",
+          "description": "Reporting method: Cash or Accrual.",
+          "required": false,
+          "location": "query"
+        },
+        "summarize_column_by": {
+          "type": "string",
+          "description": "Time granularity for columns (e.g., Month, Quarter, Year, Total).",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{Header, Columns, Rows with account-level income and expense data}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.reports.balancesheet",
+      "path": "quickbooks/v3/company/{companyId}/reports/BalanceSheet",
+      "method": "GET",
+      "description": "Generate a balance sheet report showing assets, liabilities, and equity as of a specific date.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "start_date": {
+          "type": "string",
+          "description": "Start of the reporting period (YYYY-MM-DD).",
+          "required": false,
+          "location": "query"
+        },
+        "end_date": {
+          "type": "string",
+          "description": "End of the reporting period (YYYY-MM-DD).",
+          "required": false,
+          "location": "query"
+        },
+        "accounting_method": {
+          "type": "string",
+          "description": "Cash or Accrual.",
+          "required": false,
+          "location": "query"
+        },
+        "summarize_column_by": {
+          "type": "string",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{Header, Columns, Rows with asset, liability, and equity account data}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.reports.customerbalance",
+      "path": "quickbooks/v3/company/{companyId}/reports/CustomerBalance",
+      "method": "GET",
+      "description": "Generate a report showing outstanding balances by customer.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "start_date": {
+          "type": "string",
+          "required": false,
+          "location": "query"
+        },
+        "end_date": {
+          "type": "string",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{Header, Columns, Rows with per-customer balance data}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.reports.vendorbalance",
+      "path": "quickbooks/v3/company/{companyId}/reports/VendorBalance",
+      "method": "GET",
+      "description": "Generate a report showing outstanding balances owed to each vendor.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "start_date": {
+          "type": "string",
+          "required": false,
+          "location": "query"
+        },
+        "end_date": {
+          "type": "string",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{Header, Columns, Rows with per-vendor balance data}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.reports.agedreceivables",
+      "path": "quickbooks/v3/company/{companyId}/reports/AgedReceivables",
+      "method": "GET",
+      "description": "Generate an accounts receivable aging report, bucketing outstanding customer invoices by how overdue they are.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "report_date": {
+          "type": "string",
+          "description": "Point-in-time date for the aging calculation (YYYY-MM-DD).",
+          "required": false,
+          "location": "query"
+        },
+        "aging_period": {
+          "type": "integer",
+          "description": "Number of days per aging bucket (default 30).",
+          "required": false,
+          "location": "query"
+        },
+        "num_periods": {
+          "type": "integer",
+          "description": "Number of aging buckets (default 4).",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{Header, Columns, Rows with aged receivable data by customer}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.reports.agedpayables",
+      "path": "quickbooks/v3/company/{companyId}/reports/AgedPayables",
+      "method": "GET",
+      "description": "Generate an accounts payable aging report, bucketing outstanding vendor bills by how overdue they are.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "report_date": {
+          "type": "string",
+          "description": "Point-in-time date for the aging calculation (YYYY-MM-DD).",
+          "required": false,
+          "location": "query"
+        },
+        "aging_period": {
+          "type": "integer",
+          "description": "Number of days per aging bucket (default 30).",
+          "required": false,
+          "location": "query"
+        },
+        "num_periods": {
+          "type": "integer",
+          "description": "Number of aging buckets (default 4).",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{Header, Columns, Rows with aged payable data by vendor}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.reports.generalledger",
+      "path": "quickbooks/v3/company/{companyId}/reports/GeneralLedger",
+      "method": "GET",
+      "description": "Generate a general ledger report showing all transactions posted to each account.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "start_date": {
+          "type": "string",
+          "required": false,
+          "location": "query"
+        },
+        "end_date": {
+          "type": "string",
+          "required": false,
+          "location": "query"
+        },
+        "accounting_method": {
+          "type": "string",
+          "required": false,
+          "location": "query"
+        },
+        "account": {
+          "type": "string",
+          "description": "Filter to a specific account by ID.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{Header, Columns, Rows with transaction-level ledger data}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    },
+    {
+      "id": "quickbooks.reports.trialbalance",
+      "path": "quickbooks/v3/company/{companyId}/reports/TrialBalance",
+      "method": "GET",
+      "description": "Generate a trial balance report listing all accounts with their debit and credit totals.",
+      "parameters": {
+        "companyId": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "start_date": {
+          "type": "string",
+          "required": false,
+          "location": "query"
+        },
+        "end_date": {
+          "type": "string",
+          "required": false,
+          "location": "query"
+        },
+        "accounting_method": {
+          "type": "string",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{Header, Columns, Rows with per-account debit and credit totals}",
+      "internalPath": {
+        "companyId": "workspace"
+      }
+    }
+  ]
+}

@@ -1,0 +1,326 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "freshdesk",
+  "endpoints": [
+    {
+      "id": "freshdesk.tickets.list",
+      "path": "freshdesk/api/v2/tickets",
+      "method": "GET",
+      "description": "Retrieve all tickets from the helpdesk. Fetches open, pending, resolved, and closed support cases and issues.",
+      "parameters": {},
+      "response": "[Ticket] (JSON array of ticket objects)"
+    },
+    {
+      "id": "freshdesk.tickets.get",
+      "path": "freshdesk/api/v2/tickets/{id}",
+      "method": "GET",
+      "description": "Fetch a single ticket by its ID. Use this to look up a specific support case or issue.",
+      "parameters": {
+        "id": {
+          "type": "string",
+          "description": "The unique identifier of the ticket to fetch.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Ticket object"
+    },
+    {
+      "id": "freshdesk.tickets.create",
+      "path": "freshdesk/api/v2/tickets",
+      "method": "POST",
+      "description": "Submit a new support ticket to the helpdesk. Specify the subject, description, priority, status, and assigned agent when opening the ticket.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "requester_id": {
+            "type": "string"
+          },
+          "responder_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "subject"
+        ],
+        "type": "object"
+      },
+      "response": "Ticket object"
+    },
+    {
+      "id": "freshdesk.tickets.update",
+      "path": "freshdesk/api/v2/tickets/{id}",
+      "method": "PUT",
+      "description": "Modify an existing support ticket. Update fields such as status, priority, assigned agent, group, tags, subject, or description.",
+      "parameters": {
+        "id": {
+          "type": "string",
+          "description": "The unique identifier of the ticket to update.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "group_id": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "responder_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "response": "Ticket object"
+    },
+    {
+      "id": "freshdesk.tickets.search",
+      "path": "freshdesk/api/v2/search/tickets",
+      "method": "GET",
+      "description": "Query tickets using a structured filter syntax such as \"(status:2 OR priority:3)\". Useful for locating tickets matching specific field criteria.",
+      "parameters": {
+        "query": {
+          "type": "string",
+          "description": "A filter expression using Freshdesk query syntax, e.g. \"(status:2 OR priority:3)\".",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "SearchTicketsResponse: {tickets: [Ticket], count: int}"
+    },
+    {
+      "id": "freshdesk.tickets.notes.list",
+      "path": "freshdesk/api/v2/tickets/{ticket_id}/conversations",
+      "method": "GET",
+      "description": "Retrieve all notes and replies in the conversation thread of a ticket. Returns the full correspondence history for a support case.",
+      "parameters": {
+        "ticket_id": {
+          "type": "string",
+          "description": "The identifier of the ticket whose conversations to retrieve.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "ListNotesResponse: {notes: [Note], count: int}"
+    },
+    {
+      "id": "freshdesk.tickets.notes.create",
+      "path": "freshdesk/api/v2/tickets/{ticket_id}/notes",
+      "method": "POST",
+      "description": "Append a note to a ticket. The note can be internal (private) or visible to the requester (public).",
+      "parameters": {
+        "ticket_id": {
+          "type": "string",
+          "description": "The identifier of the ticket to attach the note to.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "private": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "body"
+        ],
+        "type": "object"
+      },
+      "response": "{ticket_id, note_id}"
+    },
+    {
+      "id": "freshdesk.contacts.list",
+      "path": "freshdesk/api/v2/contacts",
+      "method": "GET",
+      "description": "Retrieve all contacts (customers and requesters) stored in Freshdesk.",
+      "parameters": {},
+      "response": "ListContactsResponse: {contacts: [Contact], count: int}"
+    },
+    {
+      "id": "freshdesk.contacts.get",
+      "path": "freshdesk/api/v2/contacts/{id}",
+      "method": "GET",
+      "description": "Look up a single contact record by ID. Returns full details for the specified customer or requester.",
+      "parameters": {
+        "id": {
+          "type": "string",
+          "description": "The unique identifier of the contact to fetch.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Contact object"
+    },
+    {
+      "id": "freshdesk.contacts.create",
+      "path": "freshdesk/api/v2/contacts",
+      "method": "POST",
+      "description": "Register a new contact in Freshdesk. Use this to add a customer, requester, or any person to the system.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "company_id": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "job_title": {
+            "type": "string"
+          },
+          "mobile": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "phone": {
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "response": "Contact object"
+    },
+    {
+      "id": "freshdesk.contacts.search",
+      "path": "freshdesk/api/v2/search/contacts",
+      "method": "GET",
+      "description": "Search for contacts using a structured query or direct lookup by email or contact ID. Useful for finding a specific customer or requester.",
+      "parameters": {
+        "query": {
+          "type": "string",
+          "description": "A filter expression using Freshdesk query syntax, e.g. \"(email:'user@example.com')\".",
+          "required": false,
+          "location": "query"
+        },
+        "email": {
+          "type": "string",
+          "description": "Locate a contact by their exact email address.",
+          "required": false,
+          "location": "query"
+        },
+        "contact_id": {
+          "type": "string",
+          "description": "Locate a contact by their unique ID.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "SearchContactsResponse: {contacts: [Contact], count: int}"
+    },
+    {
+      "id": "freshdesk.companies.create",
+      "path": "freshdesk/api/v2/companies",
+      "method": "POST",
+      "description": "Add a new company (organization or business account) to Freshdesk.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "domains": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "response": "Company object"
+    }
+  ]
+}

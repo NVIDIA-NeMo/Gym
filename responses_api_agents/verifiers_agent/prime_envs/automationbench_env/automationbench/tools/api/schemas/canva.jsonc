@@ -1,0 +1,269 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "canva",
+  "endpoints": [
+    {
+      "id": "canva.designs.create",
+      "path": "canva/rest/v1/designs",
+      "method": "POST",
+      "description": "Create a new design in Canva. Use design_type {type: preset, name: doc|whiteboard|presentation} for a preset, or {type: custom, width: integer, height: integer} for custom pixel dimensions. Designs left unedited are automatically removed after 7 days.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "asset_id": {
+            "type": "string"
+          },
+          "design_type": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "enum": [
+                      "doc",
+                      "whiteboard",
+                      "presentation"
+                    ],
+                    "type": "string"
+                  },
+                  "type": {
+                    "const": "preset"
+                  }
+                },
+                "required": [
+                  "type",
+                  "name"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "height": {
+                    "maximum": 8000,
+                    "minimum": 40,
+                    "type": "integer"
+                  },
+                  "type": {
+                    "const": "custom"
+                  },
+                  "width": {
+                    "maximum": 8000,
+                    "minimum": 40,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "type",
+                  "width",
+                  "height"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "design_type"
+        ],
+        "type": "object"
+      },
+      "response": "{design: {id, title, owner: {user_id, team_id}, urls: {edit_url, view_url}, thumbnail: {width, height, url}, created_at, updated_at, page_count}}"
+    },
+    {
+      "id": "canva.designs.get",
+      "path": "canva/rest/v1/designs/{designId}",
+      "method": "GET",
+      "description": "Retrieve a specific Canva design by its ID. Returns metadata such as the title, ownership, editor/viewer URLs, and thumbnail.",
+      "parameters": {
+        "designId": {
+          "type": "string",
+          "description": "Unique identifier of the design to retrieve.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "{design: {id, title, owner, urls: {edit_url, view_url}, thumbnail, created_at, updated_at, page_count}}"
+    },
+    {
+      "id": "canva.designs.list",
+      "path": "canva/rest/v1/designs",
+      "method": "GET",
+      "description": "Browse or search designs in Canva. Narrow results by ownership (owned, shared, any). Supports paginating through results using a continuation token.",
+      "parameters": {
+        "query": {
+          "type": "string",
+          "description": "Keyword search terms (maximum 255 characters).",
+          "location": "query"
+        },
+        "ownership": {
+          "type": "string",
+          "enum": [
+            "any",
+            "owned",
+            "shared"
+          ],
+          "description": "Scope of designs to include in the search (default: 'any').",
+          "location": "query"
+        },
+        "sort_by": {
+          "type": "string",
+          "enum": [
+            "relevance",
+            "modified_descending",
+            "modified_ascending",
+            "title_descending",
+            "title_ascending"
+          ],
+          "description": "Ordering applied to the results (default: 'relevance').",
+          "location": "query"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Number of results per page (1–100, default 25).",
+          "location": "query"
+        },
+        "continuation": {
+          "type": "string",
+          "description": "Pagination token obtained from a prior response to fetch the next page.",
+          "location": "query"
+        }
+      },
+      "response": "{items: [{id, title, owner, urls, thumbnail, created_at, updated_at, page_count}], continuation (only if more results exist)}"
+    },
+    {
+      "id": "canva.exports.create",
+      "path": "canva/rest/v1/exports",
+      "method": "POST",
+      "description": "Initiate an asynchronous job to export a Canva design to a file format. Supported formats include: pdf, jpg, png, gif, pptx, mp4. Use the returned job ID to poll for the download URL.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "design_id": {
+            "type": "string"
+          },
+          "format": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "required": [
+          "design_id",
+          "format"
+        ],
+        "type": "object"
+      },
+      "response": "{job: {id, status: 'in_progress'|'success'|'failed', urls: [string] (on success, expire 24h), error: {code, message} (on failure)}}"
+    },
+    {
+      "id": "canva.exports.get",
+      "path": "canva/rest/v1/exports/{exportId}",
+      "method": "GET",
+      "description": "Check the current state of a design export job. Continue polling until status reaches 'success' or 'failed'. Upon success, the urls field contains download links that expire after 24 hours.",
+      "parameters": {
+        "exportId": {
+          "type": "string",
+          "description": "Unique identifier of the export job.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "{job: {id, status: 'in_progress'|'success'|'failed', urls: [string], error: {code, message}}}"
+    },
+    {
+      "id": "canva.asset-uploads.create",
+      "path": "canva/rest/v1/asset-uploads",
+      "method": "POST",
+      "description": "Upload a media asset (image or video) to Canva using binary file transfer. Send the raw file as application/octet-stream with an Asset-Upload-Metadata header containing JSON with a Base64-encoded asset name. Poll the returned job ID to verify the upload completed.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "name_base64": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name_base64"
+        ],
+        "type": "object"
+      },
+      "response": "{job: {id, status: 'in_progress'|'success'|'failed', error: {code, message}, asset: {type, id, name, tags, created_at, updated_at, owner, thumbnail} (on success)}}"
+    },
+    {
+      "id": "canva.url-asset-uploads.create",
+      "path": "canva/rest/v1/url-asset-uploads",
+      "method": "POST",
+      "description": "Upload a media asset (image or video) to Canva by providing a publicly accessible URL. Once uploaded, the asset can be used in designs. Poll the returned job ID to verify completion.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "url"
+        ],
+        "type": "object"
+      },
+      "response": "{job: {id, status: 'in_progress'|'success'|'failed', error: {code, message}, asset: {type, id, name, tags, created_at, updated_at, owner, thumbnail} (on success)}}"
+    },
+    {
+      "id": "canva.url-asset-uploads.get",
+      "path": "canva/rest/v1/url-asset-uploads/{jobId}",
+      "method": "GET",
+      "description": "Check the progress of a URL-based asset upload job. Continue polling until status is 'success' or 'failed'. The asset field is populated with the uploaded asset's details on success.",
+      "parameters": {
+        "jobId": {
+          "type": "string",
+          "description": "Unique identifier of the URL asset upload job.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "{job: {id, status: 'in_progress'|'success'|'failed', error: {code, message}, asset: {type, id, name, tags, created_at, updated_at, owner, thumbnail}}}"
+    },
+    {
+      "id": "canva.asset-uploads.get",
+      "path": "canva/rest/v1/asset-uploads/{jobId}",
+      "method": "GET",
+      "description": "Check the progress of a binary asset upload job. Continue polling until status is 'success' or 'failed'. The asset field is populated with the uploaded asset's details on success.",
+      "parameters": {
+        "jobId": {
+          "type": "string",
+          "description": "Unique identifier of the asset upload job.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "{job: {id, status: 'in_progress'|'success'|'failed', error: {code, message}, asset: {type, id, name, tags, created_at, updated_at, owner, thumbnail}}}"
+    }
+  ]
+}

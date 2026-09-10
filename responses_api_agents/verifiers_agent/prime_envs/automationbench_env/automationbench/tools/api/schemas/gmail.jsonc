@@ -1,0 +1,856 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "gmail",
+  "endpoints": [
+    {
+      "id": "gmail.users.messages.list",
+      "path": "gmail/v1/users/{userId}/messages",
+      "method": "GET",
+      "description": "Retrieve messages from the user's mailbox, optionally narrowed by label, sender, subject, or a search query.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "description": "The user's email address. Use 'me' to refer to the authenticated user.",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "q": {
+          "type": "string",
+          "description": "Filter messages by a query string. Supports Gmail search operators (from:, to:, subject:, is:unread, label:, etc.).",
+          "required": false,
+          "location": "query"
+        },
+        "labelIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Restrict results to messages that carry all of the specified label IDs.",
+          "required": false,
+          "location": "query"
+        },
+        "maxResults": {
+          "type": "integer",
+          "description": "Upper limit on messages to return (default 100, max 500).",
+          "required": false,
+          "location": "query"
+        },
+        "includeSpamTrash": {
+          "type": "boolean",
+          "description": "When true, also returns messages from the SPAM and TRASH folders.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "ListMessagesResponse: {messages: [{id, threadId}], resultSizeEstimate: int}",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.messages.get",
+      "path": "gmail/v1/users/{userId}/messages/{id}",
+      "method": "GET",
+      "description": "Fetch a specific email message by its ID.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "id": {
+          "type": "string",
+          "description": "Unique identifier of the message to fetch.",
+          "required": true,
+          "location": "path"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "full",
+            "minimal",
+            "raw",
+            "metadata"
+          ],
+          "description": "Response format: full (default), minimal, raw, or metadata.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "Message object with full payload",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.messages.send",
+      "path": "gmail/v1/users/{userId}/messages/send",
+      "method": "POST",
+      "description": "Compose and deliver an email. Provide exactly one message representation: raw must be the base64url encoding of a complete RFC 2822 message with a To header, other headers, a blank line, and the body; payload must include a non-empty To header and base64url-encoded body.data or parts[].body.data. Use base64_encode to produce encoded values.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        }
+      },
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "payload": {
+            "oneOf": [
+              {
+                "required": [
+                  "body"
+                ]
+              },
+              {
+                "required": [
+                  "parts"
+                ]
+              }
+            ],
+            "properties": {
+              "body": {
+                "properties": {
+                  "data": {
+                    "minLength": 1,
+                    "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}(?:==)?|[A-Za-z0-9_-]{3}=?)?$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "data"
+                ],
+                "type": "object"
+              },
+              "headers": {
+                "contains": {
+                  "properties": {
+                    "name": {
+                      "enum": [
+                        "TO",
+                        "To",
+                        "tO",
+                        "to"
+                      ],
+                      "type": "string"
+                    },
+                    "value": {
+                      "minLength": 1,
+                      "pattern": "\\S",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                "items": {
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "value": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "parts": {
+                "items": {
+                  "properties": {
+                    "body": {
+                      "properties": {
+                        "data": {
+                          "minLength": 1,
+                          "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}(?:==)?|[A-Za-z0-9_-]{3}=?)?$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "data"
+                      ],
+                      "type": "object"
+                    },
+                    "mimeType": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "body"
+                  ],
+                  "type": "object"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "headers"
+            ],
+            "type": "object"
+          },
+          "threadId": {
+            "type": "string"
+          },
+          "raw": {
+            "minLength": 1,
+            "pattern": "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2}(?:==)?|[A-Za-z0-9_-]{3}=?)?$",
+            "type": "string"
+          }
+        },
+        "oneOf": [
+          {
+            "required": [
+              "payload"
+            ]
+          },
+          {
+            "required": [
+              "raw"
+            ]
+          }
+        ],
+        "type": "object"
+      },
+      "response": "Sent Message with id, threadId, labelIds",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.messages.delete",
+      "path": "gmail/v1/users/{userId}/messages/{id}",
+      "method": "DELETE",
+      "description": "Permanently and irrecoverably destroy a specific message from the mailbox.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "id": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Empty (204 No Content)",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.messages.trash",
+      "path": "gmail/v1/users/{userId}/messages/{id}/trash",
+      "method": "POST",
+      "description": "Send a message to the Trash folder by applying the TRASH label and removing the INBOX label.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "id": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Message with updated labelIds",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.messages.untrash",
+      "path": "gmail/v1/users/{userId}/messages/{id}/untrash",
+      "method": "POST",
+      "description": "Move a trashed message back to the inbox.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "id": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Message with updated labelIds",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.messages.modify",
+      "path": "gmail/v1/users/{userId}/messages/{id}/modify",
+      "method": "POST",
+      "description": "Add or remove labels on a specific message. Useful for archiving, toggling read/unread state, or applying custom labels.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "id": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "addLabelIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "removeLabelIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "response": "Message with updated labelIds",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.drafts.list",
+      "path": "gmail/v1/users/{userId}/drafts",
+      "method": "GET",
+      "description": "List all saved drafts in the user's mailbox.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "maxResults": {
+          "type": "integer",
+          "required": false,
+          "location": "query"
+        },
+        "q": {
+          "type": "string",
+          "required": false,
+          "location": "query"
+        },
+        "includeSpamTrash": {
+          "type": "boolean",
+          "description": "When true, also includes drafts from SPAM and TRASH.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "ListDraftsResponse: {drafts: [{id, message: {id, threadId}}], resultSizeEstimate: int}",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.drafts.get",
+      "path": "gmail/v1/users/{userId}/drafts/{id}",
+      "method": "GET",
+      "description": "Fetch a specific draft by its ID.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "id": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "minimal",
+            "full",
+            "raw",
+            "metadata"
+          ],
+          "description": "The format in which to return the draft.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "Draft: {id, message: Message}",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.drafts.create",
+      "path": "gmail/v1/users/{userId}/drafts",
+      "method": "POST",
+      "description": "Store a new message as an unsent draft in the mailbox.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "message": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "response": "Draft: {id, message: {id, threadId, labelIds: [DRAFT]}}",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.drafts.delete",
+      "path": "gmail/v1/users/{userId}/drafts/{id}",
+      "method": "DELETE",
+      "description": "Permanently and irrecoverably remove a specific draft from the mailbox.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "id": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Empty (204)",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.drafts.update",
+      "path": "gmail/v1/users/{userId}/drafts/{id}",
+      "method": "PUT",
+      "description": "Replace an existing draft with entirely different message content.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "id": {
+          "type": "string",
+          "description": "Identifier of the draft to replace.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "message": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "response": "Draft: {id, message: {id, threadId, labelIds: [DRAFT]}}",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.drafts.send",
+      "path": "gmail/v1/users/{userId}/drafts/send",
+      "method": "POST",
+      "description": "Deliver the specified draft as a sent message.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "response": "Sent Message",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.labels.list",
+      "path": "gmail/v1/users/{userId}/labels",
+      "method": "GET",
+      "description": "List all labels in the user's mailbox.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        }
+      },
+      "response": "ListLabelsResponse: {labels: [Label]}",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.labels.get",
+      "path": "gmail/v1/users/{userId}/labels/{id}",
+      "method": "GET",
+      "description": "Fetch a specific label by its ID.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "id": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Label object",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.labels.create",
+      "path": "gmail/v1/users/{userId}/labels",
+      "method": "POST",
+      "description": "Create a new label in the user's mailbox.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "labelListVisibility": {
+            "type": "string"
+          },
+          "messageListVisibility": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "response": "Created Label with id",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.labels.update",
+      "path": "gmail/v1/users/{userId}/labels/{id}",
+      "method": "PUT",
+      "description": "Update the configuration of an existing label.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "id": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {},
+        "type": "object"
+      },
+      "response": "Updated Label",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.labels.delete",
+      "path": "gmail/v1/users/{userId}/labels/{id}",
+      "method": "DELETE",
+      "description": "Permanently remove a label and strip it from every message it was applied to.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "id": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Empty (204)",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.threads.list",
+      "path": "gmail/v1/users/{userId}/threads",
+      "method": "GET",
+      "description": "List conversation threads from the user's mailbox.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "q": {
+          "type": "string",
+          "required": false,
+          "location": "query"
+        },
+        "labelIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Restrict results to threads carrying all of the specified label IDs.",
+          "required": false,
+          "location": "query"
+        },
+        "maxResults": {
+          "type": "integer",
+          "required": false,
+          "location": "query"
+        },
+        "includeSpamTrash": {
+          "type": "boolean",
+          "description": "When true, also includes threads from SPAM and TRASH.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "ListThreadsResponse: {threads: [{id, snippet, historyId}], resultSizeEstimate: int}",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.threads.get",
+      "path": "gmail/v1/users/{userId}/threads/{id}",
+      "method": "GET",
+      "description": "Retrieve a full email thread along with every message it contains.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "id": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "full",
+            "minimal",
+            "metadata"
+          ],
+          "description": "Response detail level: full (complete message data, default), minimal (IDs and labels only), or metadata (IDs, labels, and headers).",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "Thread: {id, snippet, messages: [Message]}",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.threads.trash",
+      "path": "gmail/v1/users/{userId}/threads/{id}/trash",
+      "method": "POST",
+      "description": "Send an entire thread to the Trash folder.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "id": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Thread with updated messages",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.threads.untrash",
+      "path": "gmail/v1/users/{userId}/threads/{id}/untrash",
+      "method": "POST",
+      "description": "Recover a trashed thread and return it to the inbox.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "id": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Thread with updated messages",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.threads.delete",
+      "path": "gmail/v1/users/{userId}/threads/{id}",
+      "method": "DELETE",
+      "description": "Irreversibly destroy a thread together with every message it contains.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "id": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Empty (204)",
+      "internalPath": {
+        "userId": "me"
+      }
+    },
+    {
+      "id": "gmail.users.threads.modify",
+      "path": "gmail/v1/users/{userId}/threads/{id}/modify",
+      "method": "POST",
+      "description": "Bulk-apply or remove labels across every message in a thread.",
+      "parameters": {
+        "userId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "default": "me"
+        },
+        "id": {
+          "type": "string",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "addLabelIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "removeLabelIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "response": "Thread with updated messages",
+      "internalPath": {
+        "userId": "me"
+      }
+    }
+  ]
+}

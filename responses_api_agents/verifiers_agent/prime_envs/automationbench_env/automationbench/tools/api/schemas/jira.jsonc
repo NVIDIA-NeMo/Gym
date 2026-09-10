@@ -1,0 +1,123 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "jira",
+  "endpoints": [
+    {
+      "id": "jira.projects.search",
+      "path": "jira/rest/api/3/project/search",
+      "method": "GET",
+      "description": "Query Jira projects by name or key. Returns the project key required when creating new issues.",
+      "parameters": {
+        "query": {
+          "type": "string",
+          "description": "Text to match against project name or key.",
+          "location": "query"
+        },
+        "maxResults": {
+          "type": "integer",
+          "description": "Maximum number of results to return (default 50).",
+          "location": "query"
+        }
+      },
+      "response": "{values: [{id, key, name, projectTypeKey}], total, isLast}"
+    },
+    {
+      "id": "jira.issues.create",
+      "path": "jira/rest/api/3/issue",
+      "method": "POST",
+      "description": "Submit a new Jira issue. Requires a project key, issue type, and summary. Priority is optional (Highest, High, Medium, Low, Lowest).",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "fields": {
+            "additionalProperties": true,
+            "properties": {
+              "issuetype": {
+                "additionalProperties": true,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "type": "object"
+              },
+              "project": {
+                "additionalProperties": true,
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key"
+                ],
+                "type": "object"
+              },
+              "summary": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "project",
+              "issuetype",
+              "summary"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "fields"
+        ],
+        "type": "object"
+      },
+      "response": "{id, key (e.g. PROJ-42), self}"
+    },
+    {
+      "id": "jira.issues.comment",
+      "path": "jira/rest/api/3/issue/{issueIdOrKey}/comment",
+      "method": "POST",
+      "description": "Post a comment on a Jira issue. Provide plain text and it will be automatically converted to ADF format.",
+      "parameters": {
+        "issueIdOrKey": {
+          "type": "string",
+          "description": "Issue key (e.g. PROJ-42) or numeric issue ID.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "body": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "body"
+        ],
+        "type": "object"
+      },
+      "response": "{id, body, created, updated, author: {displayName, accountId}}"
+    }
+  ]
+}

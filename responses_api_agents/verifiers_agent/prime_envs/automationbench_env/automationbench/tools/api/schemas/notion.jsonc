@@ -1,0 +1,118 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "notion",
+  "endpoints": [
+    {
+      "id": "notion.pages.create",
+      "path": "notion/v1/pages",
+      "method": "POST",
+      "description": "Create a new Notion page under a given parent (page or database) with specified properties. Use the children array to supply block content. For public integrations only, omit the parent to create a private workspace-level page.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "children": {
+            "items": {},
+            "type": "array"
+          },
+          "content": {
+            "items": {},
+            "type": "array"
+          },
+          "cover": {
+            "type": "object"
+          },
+          "icon": {
+            "type": "object"
+          },
+          "markdown": {
+            "type": "string"
+          },
+          "parent": {
+            "type": "object"
+          },
+          "position": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "properties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "template": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "required": [
+          "properties"
+        ],
+        "type": "object"
+      },
+      "response": "{id, object: 'page', url, public_url, created_time, last_edited_time, archived, in_trash, is_locked, parent, properties: {title: {title: [{text: {content}}]}}, icon, cover, created_by, last_edited_by}"
+    },
+    {
+      "id": "notion.pages.update",
+      "path": "notion/v1/pages/{page_id}",
+      "method": "PATCH",
+      "description": "Modify an existing Notion page's properties, icon, cover, archived or trash status, or locked state. A template can also be applied. Note: to add new content blocks, use the Append block children API rather than this endpoint.",
+      "parameters": {
+        "page_id": {
+          "type": "string",
+          "description": "The UUID of the page to update.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "archived": {
+            "type": "boolean"
+          },
+          "cover": {
+            "type": "object"
+          },
+          "erase_content": {
+            "type": "boolean"
+          },
+          "icon": {
+            "type": "object"
+          },
+          "in_trash": {
+            "type": "boolean"
+          },
+          "is_locked": {
+            "type": "boolean"
+          },
+          "properties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "template": {
+            "additionalProperties": true,
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "response": "{id, object: 'page', url, public_url, archived, in_trash, is_locked, last_edited_time, properties, icon, cover, created_by, last_edited_by}"
+    }
+  ]
+}

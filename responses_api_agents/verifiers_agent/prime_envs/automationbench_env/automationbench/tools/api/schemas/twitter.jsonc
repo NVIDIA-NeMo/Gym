@@ -1,0 +1,175 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "twitter",
+  "endpoints": [
+    {
+      "id": "twitter.tweets.create",
+      "path": "twitter/2/tweets",
+      "method": "POST",
+      "description": "Publish a new tweet. To reply to an existing tweet, supply the target tweet ID via reply.in_reply_to_tweet_id.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "reply": {
+            "additionalProperties": true,
+            "description": "reply (optional): {in_reply_to_tweet_id (string)}",
+            "properties": {
+              "in_reply_to_tweet_id": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "response": "{data: {id, text}}"
+    },
+    {
+      "id": "twitter.tweets.search",
+      "path": "twitter/2/tweets/search/recent",
+      "method": "GET",
+      "description": "Find tweets published within the past 7 days. Accepts full-text search operators such as from:user, #hashtag, and others.",
+      "parameters": {
+        "query": {
+          "type": "string",
+          "description": "Search expression up to 512 characters. Supports operators: from:, to:, #hashtag, @mention, is:retweet, lang:.",
+          "required": true,
+          "location": "query"
+        },
+        "max_results": {
+          "type": "integer",
+          "description": "Number of results to return per page (range 10–100, default 10).",
+          "location": "query"
+        },
+        "tweet.fields": {
+          "type": "string",
+          "description": "Comma-separated list of tweet fields to include: id,text,author_id,created_at,public_metrics,conversation_id.",
+          "location": "query"
+        },
+        "expansions": {
+          "type": "string",
+          "description": "Related objects to expand alongside the results, e.g. 'author_id'.",
+          "location": "query"
+        },
+        "next_token": {
+          "type": "string",
+          "description": "Cursor token from the previous page of results, used for pagination.",
+          "location": "query"
+        }
+      },
+      "response": "{data: [{id, text, author_id, created_at, public_metrics}], meta: {newest_id, oldest_id, result_count, next_token}}"
+    },
+    {
+      "id": "twitter.users.getByUsername",
+      "path": "twitter/2/users/by/username/{username}",
+      "method": "GET",
+      "description": "Retrieve a user's profile by their @username (omit the @). Returns id, name, username, and any additionally requested fields.",
+      "parameters": {
+        "username": {
+          "type": "string",
+          "description": "The target user's handle, without the @ prefix.",
+          "required": true,
+          "location": "path"
+        },
+        "user.fields": {
+          "type": "string",
+          "description": "Comma-separated user fields to include: id,name,username,description,public_metrics,verified,created_at.",
+          "location": "query"
+        }
+      },
+      "response": "{data: {id, name, username, description, public_metrics, verified, created_at}}"
+    },
+    {
+      "id": "twitter.users.follow",
+      "path": "twitter/2/users/{id}/following",
+      "method": "POST",
+      "description": "Follow another user on behalf of an authenticated account. Requires user-context OAuth credentials.",
+      "parameters": {
+        "id": {
+          "type": "string",
+          "description": "The user ID of the authenticated account performing the follow.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "target_user_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_user_id"
+        ],
+        "type": "object"
+      },
+      "response": "{data: {following (bool), pending_follow (bool)}}"
+    },
+    {
+      "id": "twitter.tweets.like",
+      "path": "twitter/2/users/{id}/likes",
+      "method": "POST",
+      "description": "Like a tweet on behalf of an authenticated user. Requires user-context OAuth credentials.",
+      "parameters": {
+        "id": {
+          "type": "string",
+          "description": "The user ID of the authenticated account performing the like.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "tweet_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tweet_id"
+        ],
+        "type": "object"
+      },
+      "response": "{data: {liked (bool)}}"
+    },
+    {
+      "id": "twitter.users.me",
+      "path": "twitter/2/users/me",
+      "method": "GET",
+      "description": "Returns the profile of the currently authenticated user. Useful for retrieving your own account ID, username, and display name.",
+      "parameters": {
+        "user.fields": {
+          "type": "string",
+          "description": "Comma-separated list of user fields to include in the response.",
+          "location": "query"
+        }
+      },
+      "response": "{data: {id, name, username, description, public_metrics, verified, created_at}}"
+    }
+  ]
+}

@@ -1,0 +1,788 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "google_calendar",
+  "endpoints": [
+    {
+      "id": "calendar.calendars.insert",
+      "path": "calendar/v3/calendars",
+      "method": "POST",
+      "description": "Create a new Google Calendar. Provide a name and an optional description to initialize the calendar.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "summary"
+        ],
+        "type": "object"
+      },
+      "response": "Calendar: {success, calendar: {id, summary, description, accessRole}}"
+    },
+    {
+      "id": "calendar.calendars.get",
+      "path": "calendar/v3/calendars/{calendarId}",
+      "method": "GET",
+      "description": "Retrieve a specific calendar by its ID. Returns the calendar's metadata and configuration details.",
+      "parameters": {
+        "calendarId": {
+          "type": "string",
+          "description": "The ID of the calendar to fetch.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Calendar: {success, calendar: {id, summary, description, accessRole}}"
+    },
+    {
+      "id": "calendar.calendarList.list",
+      "path": "calendar/v3/users/me/calendarList",
+      "method": "GET",
+      "description": "Retrieve all calendars the current user can access. Supports filtering by access role or inclusion of hidden and deleted calendars.",
+      "parameters": {
+        "showHidden": {
+          "type": "boolean",
+          "description": "When true, hidden calendars are included in the response.",
+          "required": false,
+          "location": "query"
+        },
+        "showDeleted": {
+          "type": "boolean",
+          "description": "When true, deleted calendars are included in the response.",
+          "required": false,
+          "location": "query"
+        },
+        "minAccessRole": {
+          "type": "string",
+          "enum": [
+            "freeBusyReader",
+            "owner",
+            "reader",
+            "writer"
+          ],
+          "description": "Only return calendars at or above this access role level.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "CalendarList: {success, calendars: [Calendar], resultCount: int}"
+    },
+    {
+      "id": "calendar.events.quickAdd",
+      "path": "calendar/v3/calendars/{calendarId}/events/quickAdd",
+      "method": "POST",
+      "description": "Create a calendar event from a plain-language text description such as 'Dinner with Michael 7pm on Friday'. Parses natural language to infer event details.",
+      "parameters": {
+        "calendarId": {
+          "type": "string",
+          "description": "The ID of the calendar to add the event to.",
+          "required": true,
+          "location": "path"
+        },
+        "text": {
+          "type": "string",
+          "description": "Natural language description of the event to create.",
+          "required": true,
+          "location": "query"
+        },
+        "sendUpdates": {
+          "type": "string",
+          "enum": [
+            "all",
+            "externalOnly",
+            "none"
+          ],
+          "description": "Controls which attendees receive notifications about the event creation.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "Event: {success, event: {id, summary, start, end, attendees}}"
+    },
+    {
+      "id": "calendar.events.insert",
+      "path": "calendar/v3/calendars/{calendarId}/events",
+      "method": "POST",
+      "description": "Create a fully specified calendar event. Schedule a new meeting, appointment, or occurrence with start/end times, attendees, location, recurrence rules, reminders, and other details.",
+      "parameters": {
+        "calendarId": {
+          "type": "string",
+          "description": "The ID of the calendar to create the event in.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "oneOf": [
+          {
+            "properties": {
+              "end": {
+                "required": [
+                  "date"
+                ]
+              },
+              "start": {
+                "required": [
+                  "date"
+                ]
+              }
+            }
+          },
+          {
+            "properties": {
+              "end": {
+                "required": [
+                  "dateTime"
+                ]
+              },
+              "start": {
+                "required": [
+                  "dateTime"
+                ]
+              }
+            }
+          }
+        ],
+        "properties": {
+          "allDay": {
+            "type": "boolean"
+          },
+          "attendees": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "displayName": {
+                  "type": "string"
+                },
+                "email": {
+                  "type": "string"
+                },
+                "optional": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "email"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "colorId": {
+            "type": "string"
+          },
+          "conferencing": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          },
+          "end": {
+            "additionalProperties": true,
+            "oneOf": [
+              {
+                "required": [
+                  "date"
+                ]
+              },
+              {
+                "required": [
+                  "dateTime"
+                ]
+              }
+            ],
+            "properties": {
+              "date": {
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                "type": "string"
+              },
+              "dateTime": {
+                "type": "string"
+              },
+              "timeZone": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "eventType": {
+            "enum": [
+              "default",
+              "outOfOffice",
+              "focusTime",
+              "workingLocation",
+              "birthday"
+            ],
+            "type": "string"
+          },
+          "guestsCanModify": {
+            "type": "boolean"
+          },
+          "location": {
+            "type": "string"
+          },
+          "recurrenceCount": {
+            "type": "integer"
+          },
+          "recurrenceFrequency": {
+            "enum": [
+              "daily",
+              "weekly",
+              "monthly",
+              "yearly"
+            ],
+            "type": "string"
+          },
+          "recurrenceUntil": {
+            "type": "string"
+          },
+          "remindersMethods": {
+            "items": {},
+            "type": "array"
+          },
+          "remindersMinutes": {
+            "type": "integer"
+          },
+          "remindersUseDefault": {
+            "type": "boolean"
+          },
+          "start": {
+            "additionalProperties": true,
+            "oneOf": [
+              {
+                "required": [
+                  "date"
+                ]
+              },
+              {
+                "required": [
+                  "dateTime"
+                ]
+              }
+            ],
+            "properties": {
+              "date": {
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                "type": "string"
+              },
+              "dateTime": {
+                "type": "string"
+              },
+              "timeZone": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "transparency": {
+            "enum": [
+              "transparent",
+              "opaque"
+            ],
+            "type": "string"
+          },
+          "visibility": {
+            "enum": [
+              "default",
+              "public",
+              "private",
+              "confidential"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "end",
+          "start"
+        ],
+        "type": "object"
+      },
+      "response": "Event: {success, event: {id, summary, start, end, attendees, location, ...}}"
+    },
+    {
+      "id": "calendar.events.list",
+      "path": "calendar/v3/calendars/{calendarId}/events",
+      "method": "GET",
+      "description": "List or search events on a calendar. Filter by keyword, date range, or time window to find upcoming meetings and appointments.",
+      "parameters": {
+        "calendarId": {
+          "type": "string",
+          "description": "The ID of the calendar to query events from.",
+          "required": true,
+          "location": "path"
+        },
+        "q": {
+          "type": "string",
+          "description": "Free-text search term matched against summary, description, location, and attendees.",
+          "required": false,
+          "location": "query"
+        },
+        "timeMin": {
+          "type": "string",
+          "description": "Exclusive lower bound on event end time (ISO 8601). Returns events that end after this timestamp.",
+          "required": false,
+          "location": "query"
+        },
+        "timeMax": {
+          "type": "string",
+          "description": "Exclusive upper bound on event start time (ISO 8601). Returns events that begin before this timestamp.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "EventList: {success, events: [Event], resultCount: int}"
+    },
+    {
+      "id": "calendar.events.get",
+      "path": "calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "method": "GET",
+      "description": "Fetch a single calendar event by its ID. Returns full event details including attendees, time, location, and description.",
+      "parameters": {
+        "calendarId": {
+          "type": "string",
+          "description": "The ID of the calendar containing the event.",
+          "required": true,
+          "location": "path"
+        },
+        "eventId": {
+          "type": "string",
+          "description": "The ID of the event to retrieve.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Event: {success, event: {id, summary, description, start, end, attendees, location, ...}}"
+    },
+    {
+      "id": "calendar.events.update",
+      "path": "calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "method": "PUT",
+      "description": "Replace an existing calendar event with updated details. Modify the title, time, location, attendees, recurrence, or visibility.",
+      "parameters": {
+        "calendarId": {
+          "type": "string",
+          "description": "The ID of the calendar containing the event.",
+          "required": true,
+          "location": "path"
+        },
+        "eventId": {
+          "type": "string",
+          "description": "The ID of the event to update.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "not": {
+          "anyOf": [
+            {
+              "properties": {
+                "end": {
+                  "required": [
+                    "dateTime"
+                  ],
+                  "type": "object"
+                },
+                "start": {
+                  "required": [
+                    "date"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "end",
+                "start"
+              ]
+            },
+            {
+              "properties": {
+                "end": {
+                  "required": [
+                    "date"
+                  ],
+                  "type": "object"
+                },
+                "start": {
+                  "required": [
+                    "dateTime"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "end",
+                "start"
+              ]
+            }
+          ]
+        },
+        "properties": {
+          "allDay": {
+            "type": "boolean"
+          },
+          "attendees": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "displayName": {
+                  "type": "string"
+                },
+                "email": {
+                  "type": "string"
+                },
+                "optional": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "email"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "colorId": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "end": {
+            "additionalProperties": true,
+            "oneOf": [
+              {
+                "required": [
+                  "date"
+                ]
+              },
+              {
+                "required": [
+                  "dateTime"
+                ]
+              }
+            ],
+            "properties": {
+              "date": {
+                "minLength": 1,
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                "type": "string"
+              },
+              "dateTime": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "timeZone": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "location": {
+            "type": "string"
+          },
+          "recurrenceCount": {
+            "type": "integer"
+          },
+          "recurrenceFrequency": {
+            "type": "string"
+          },
+          "recurrenceUntil": {
+            "type": "string"
+          },
+          "remindersMethods": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "remindersMinutes": {
+            "type": "integer"
+          },
+          "remindersUseDefault": {
+            "type": "boolean"
+          },
+          "startDateTime": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "start__dateTime": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "start": {
+            "additionalProperties": true,
+            "oneOf": [
+              {
+                "required": [
+                  "date"
+                ]
+              },
+              {
+                "required": [
+                  "dateTime"
+                ]
+              }
+            ],
+            "properties": {
+              "date": {
+                "minLength": 1,
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                "type": "string"
+              },
+              "dateTime": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "timeZone": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "endDateTime": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "end__dateTime": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "transparency": {
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "response": "Event: {success, event: {id, summary, start, end, ...}}"
+    },
+    {
+      "id": "calendar.events.patch",
+      "path": "calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "method": "PATCH",
+      "description": "Perform a partial update on an existing calendar event, changing only the fields that are supplied.",
+      "parameters": {
+        "calendarId": {
+          "type": "string",
+          "description": "The ID of the calendar containing the event.",
+          "required": true,
+          "location": "path"
+        },
+        "eventId": {
+          "type": "string",
+          "description": "The ID of the event to partially update.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "not": {
+          "anyOf": [
+            {
+              "properties": {
+                "end": {
+                  "required": [
+                    "dateTime"
+                  ],
+                  "type": "object"
+                },
+                "start": {
+                  "required": [
+                    "date"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "end",
+                "start"
+              ]
+            },
+            {
+              "properties": {
+                "end": {
+                  "required": [
+                    "date"
+                  ],
+                  "type": "object"
+                },
+                "start": {
+                  "required": [
+                    "dateTime"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "end",
+                "start"
+              ]
+            }
+          ]
+        },
+        "properties": {
+          "end": {
+            "oneOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "additionalProperties": true,
+                "oneOf": [
+                  {
+                    "required": [
+                      "date"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "dateTime"
+                    ]
+                  }
+                ],
+                "properties": {
+                  "date": {
+                    "minLength": 1,
+                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                    "type": "string"
+                  },
+                  "dateTime": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "timeZone": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            ]
+          },
+          "endDateTime": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "end__dateTime": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "start": {
+            "oneOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "additionalProperties": true,
+                "oneOf": [
+                  {
+                    "required": [
+                      "date"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "dateTime"
+                    ]
+                  }
+                ],
+                "properties": {
+                  "date": {
+                    "minLength": 1,
+                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                    "type": "string"
+                  },
+                  "dateTime": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "timeZone": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            ]
+          },
+          "startDateTime": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "start__dateTime": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "response": "Event: {success, event: {id, summary, start, end, ...}}"
+    },
+    {
+      "id": "calendar.events.delete",
+      "path": "calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "method": "DELETE",
+      "description": "Remove a calendar event. Cancels and deletes a meeting, appointment, or occurrence. Attendees can optionally be notified.",
+      "parameters": {
+        "calendarId": {
+          "type": "string",
+          "description": "The ID of the calendar containing the event.",
+          "required": true,
+          "location": "path"
+        },
+        "eventId": {
+          "type": "string",
+          "description": "The ID of the event to delete.",
+          "required": true,
+          "location": "path"
+        },
+        "sendUpdates": {
+          "type": "string",
+          "enum": [
+            "all",
+            "externalOnly",
+            "none"
+          ],
+          "description": "Who receives cancellation notifications: 'all'=every attendee, 'externalOnly'=only external attendees, 'none'=no notifications sent.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "204 No Content (empty body)"
+    }
+  ]
+}

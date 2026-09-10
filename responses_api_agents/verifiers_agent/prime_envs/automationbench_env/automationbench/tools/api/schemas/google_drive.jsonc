@@ -1,0 +1,198 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "google_drive",
+  "endpoints": [
+    {
+      "id": "google_drive.files.list",
+      "path": "drive/v3/files",
+      "method": "GET",
+      "description": "Enumerate files in Google Drive. Filter results with the q parameter using Drive query language (e.g., \"name contains 'report'\" or \"'folderId' in parents\").",
+      "parameters": {
+        "q": {
+          "type": "string",
+          "required": false,
+          "location": "query",
+          "description": "Filter expression using the Drive query language. Examples: \"name contains 'budget'\", \"'folderID' in parents\", \"mimeType = 'application/vnd.google-apps.folder'\"."
+        },
+        "pageSize": {
+          "type": "integer",
+          "required": false,
+          "location": "query",
+          "description": "Upper bound on the number of files returned per page (default 10, max 1000)."
+        },
+        "fields": {
+          "type": "string",
+          "required": false,
+          "location": "query",
+          "description": "Comma-delimited list of fields to include in the response."
+        },
+        "orderBy": {
+          "type": "string",
+          "required": false,
+          "location": "query",
+          "description": "Specifies sort order. Common values: name, modifiedTime, createdTime. Append ' desc' for descending order."
+        },
+        "pageToken": {
+          "type": "string",
+          "required": false,
+          "location": "query",
+          "description": "Continuation token for the next page of results."
+        }
+      },
+      "response": "{kind: 'drive#fileList', files: [{id, name, mimeType, parents, webViewLink}], nextPageToken, incompleteSearch}"
+    },
+    {
+      "id": "google_drive.files.get",
+      "path": "drive/v3/files/{fileId}",
+      "method": "GET",
+      "description": "Fetch metadata for a specific file or folder using its ID.",
+      "parameters": {
+        "fileId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "description": "Identifier of the file to fetch."
+        },
+        "fields": {
+          "type": "string",
+          "required": false,
+          "location": "query",
+          "description": "Comma-delimited list of fields to include in the response."
+        }
+      },
+      "response": "{kind: 'drive#file', id, name, mimeType, parents, webViewLink, alternateLink}"
+    },
+    {
+      "id": "google_drive.files.update",
+      "path": "drive/v3/files/{fileId}",
+      "method": "PATCH",
+      "description": "Modify file metadata. Use addParents/removeParents to relocate a file between folders. Use name to give a file a new name.",
+      "parameters": {
+        "fileId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "description": "Identifier of the file to modify."
+        },
+        "addParents": {
+          "type": "string",
+          "required": false,
+          "location": "query",
+          "description": "Comma-delimited list of parent folder IDs to add."
+        },
+        "removeParents": {
+          "type": "string",
+          "required": false,
+          "location": "query",
+          "description": "Comma-delimited list of parent folder IDs to remove."
+        },
+        "fields": {
+          "type": "string",
+          "required": false,
+          "location": "query",
+          "description": "Comma-delimited list of fields to include in the response."
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "response": "{kind: 'drive#file', id, name, parents, success}"
+    },
+    {
+      "id": "google_drive.files.copy",
+      "path": "drive/v3/files/{fileId}/copy",
+      "method": "POST",
+      "description": "Duplicate a file and return metadata for the newly created copy.",
+      "parameters": {
+        "fileId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "description": "Identifier of the file to duplicate."
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "parents": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "response": "{kind: 'drive#file', id, name, mimeType, parents}"
+    },
+    {
+      "id": "google_drive.files.create",
+      "path": "drive/v3/files",
+      "method": "POST",
+      "description": "Generate a new file or folder. Set mimeType to 'application/vnd.google-apps.folder' to create a folder.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "mimeType": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parents": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "response": "{kind: 'drive#file', id, name, mimeType, parents}"
+    },
+    {
+      "id": "google_drive.files.delete",
+      "path": "drive/v3/files/{fileId}",
+      "method": "DELETE",
+      "description": "Irreversibly remove a file. The file is destroyed immediately with no recovery option.",
+      "parameters": {
+        "fileId": {
+          "type": "string",
+          "required": true,
+          "location": "path",
+          "description": "Identifier of the file to remove."
+        }
+      },
+      "response": "{success, deleted}"
+    }
+  ]
+}

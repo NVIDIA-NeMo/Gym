@@ -1,0 +1,303 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "zoho_desk",
+  "endpoints": [
+    {
+      "id": "zoho_desk.tickets.list",
+      "path": "zoho/v1/tickets",
+      "method": "GET",
+      "description": "Browse or search Zoho Desk support tickets. Retrieve all tickets, cases, or locate a specific one by query or ID.",
+      "parameters": {
+        "query": {
+          "type": "string",
+          "description": "Search expression to locate a particular ticket.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "Array of ticket objects"
+    },
+    {
+      "id": "zoho_desk.tickets.create",
+      "path": "zoho/v1/tickets",
+      "method": "POST",
+      "description": "Open a new Zoho Desk support ticket, case, or issue.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "assigneeId": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "classification": {
+            "type": "string"
+          },
+          "contactId": {
+            "type": "string"
+          },
+          "departmentId": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "priority": {
+            "enum": [
+              "Low",
+              "Medium",
+              "High"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "Open",
+              "On Hold",
+              "Escalated",
+              "Closed",
+              "Re-Opened"
+            ],
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "departmentId",
+          "subject"
+        ],
+        "type": "object"
+      },
+      "response": "Created ticket object with id"
+    },
+    {
+      "id": "zoho_desk.tickets.update",
+      "path": "zoho/v1/tickets/{ticketId}",
+      "method": "PUT",
+      "description": "Modify a Zoho Desk ticket. Update its status, priority, assigned agent, or classification.",
+      "parameters": {
+        "ticketId": {
+          "type": "string",
+          "description": "Identifier of the ticket to update.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "assigneeId": {
+            "type": "string"
+          },
+          "classification": {
+            "type": "string"
+          },
+          "departmentId": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "priority": {
+            "enum": [
+              "Low",
+              "Medium",
+              "High"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "Open",
+              "On Hold",
+              "Escalated",
+              "Closed",
+              "Re-Opened"
+            ],
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "response": "Updated ticket object"
+    },
+    {
+      "id": "zoho_desk.tickets.comment",
+      "path": "zoho/v1/tickets/{ticketId}/comments",
+      "method": "POST",
+      "description": "Attach a comment, reply, or internal note to an existing Zoho Desk ticket.",
+      "parameters": {
+        "ticketId": {
+          "type": "string",
+          "description": "Identifier of the ticket to comment on.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "commenterId": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "contentType": {
+            "enum": [
+              "html",
+              "plainText"
+            ],
+            "type": "string"
+          },
+          "isPublic": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
+      "response": "{id: string, content: string, isPublic: bool, createdAt: string}"
+    },
+    {
+      "id": "zoho_desk.contacts.list",
+      "path": "zoho/v1/contacts",
+      "method": "GET",
+      "description": "Browse or search Zoho Desk contacts and customers. Look up contacts by email, search query, or ID.",
+      "parameters": {
+        "query": {
+          "type": "string",
+          "description": "Search expression to find matching contacts.",
+          "required": false,
+          "location": "query"
+        },
+        "email": {
+          "type": "string",
+          "description": "Find contacts with this exact email address.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "Array of contact objects"
+    },
+    {
+      "id": "zoho_desk.contacts.create",
+      "path": "zoho/v1/contacts",
+      "method": "POST",
+      "description": "Add a new Zoho Desk contact or customer record.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "firstName": {
+            "type": "string"
+          },
+          "lastName": {
+            "type": "string"
+          },
+          "mobile": {
+            "type": "string"
+          },
+          "phone": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "lastName"
+        ],
+        "type": "object"
+      },
+      "response": "Created contact object with id"
+    },
+    {
+      "id": "zoho_desk.accounts.find",
+      "path": "zoho/v1/accounts",
+      "method": "GET",
+      "description": "Look up a Zoho Desk account, company, or organization by name or account ID.",
+      "parameters": {
+        "accountId": {
+          "type": "string",
+          "description": "The account ID to look up.",
+          "required": false,
+          "location": "query"
+        },
+        "accountName": {
+          "type": "string",
+          "description": "The company or account name to search for.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "Array of account objects"
+    },
+    {
+      "id": "zoho_desk.accounts.create",
+      "path": "zoho/v1/accounts",
+      "method": "POST",
+      "description": "Add a new Zoho Desk account, company, or organization record.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "accountName": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "industry": {
+            "type": "string"
+          },
+          "website": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountName"
+        ],
+        "type": "object"
+      },
+      "response": "Created account object with id"
+    }
+  ]
+}

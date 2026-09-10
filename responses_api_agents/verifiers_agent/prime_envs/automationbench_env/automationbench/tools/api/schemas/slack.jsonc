@@ -1,0 +1,712 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "slack",
+  "endpoints": [
+    {
+      "id": "slack.conversations.list",
+      "path": "slack/conversations.list",
+      "method": "GET",
+      "description": "Fetch all conversations in a Slack workspace, paginated and limited by the token's granted scopes.",
+      "parameters": {
+        "exclude_archived": {
+          "type": "boolean",
+          "description": "If true, archived conversations are excluded from results (default false).",
+          "required": false,
+          "location": "query"
+        },
+        "types": {
+          "type": "string",
+          "description": "Comma-separated channel type filter: public_channel, private_channel, mpim, im (default 'public_channel').",
+          "required": false,
+          "location": "query"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Maximum items per page (hard max 1000, recommended 200 or fewer).",
+          "required": false,
+          "location": "query"
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Pagination cursor taken from response_metadata.next_cursor.",
+          "required": false,
+          "location": "query"
+        },
+        "team_id": {
+          "type": "string",
+          "description": "Workspace ID, required only when using an org-level token.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": {
+        "ok": true,
+        "channels": [
+          "Channel"
+        ],
+        "response_metadata": {
+          "next_cursor": "string"
+        }
+      }
+    },
+    {
+      "id": "slack.conversations.info",
+      "path": "slack/conversations.info",
+      "method": "GET",
+      "description": "Fetch details about a specific conversation. Returns a channel object including topic, purpose, member count, and archive status.",
+      "parameters": {
+        "channel": {
+          "type": "string",
+          "description": "ID of the conversation to look up.",
+          "required": true,
+          "location": "query"
+        },
+        "include_locale": {
+          "type": "boolean",
+          "description": "Set true to include the locale for this conversation (default false).",
+          "required": false,
+          "location": "query"
+        },
+        "include_num_members": {
+          "type": "boolean",
+          "description": "Set true to include the member count in the response (default false).",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": {
+        "ok": true,
+        "channel": "Channel"
+      }
+    },
+    {
+      "id": "slack.conversations.create",
+      "path": "slack/conversations.create",
+      "method": "POST",
+      "description": "Create a new public or private Slack channel. Names must use lowercase letters, numbers, hyphens, and underscores only (max 80 characters).",
+      "response": {
+        "ok": true,
+        "channel": "Channel"
+      },
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "is_private": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "team_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "id": "slack.conversations.invite",
+      "path": "slack/conversations.invite",
+      "method": "POST",
+      "description": "Add between 1 and 100 users to a public or private channel. The caller must already be a member of the channel.",
+      "response": {
+        "ok": true,
+        "channel": "Channel"
+      },
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "type": "string"
+          },
+          "force": {
+            "type": "boolean"
+          },
+          "users": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "items": {},
+                "type": "array"
+              }
+            ]
+          }
+        },
+        "required": [
+          "channel",
+          "users"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "id": "slack.conversations.archive",
+      "path": "slack/conversations.archive",
+      "method": "POST",
+      "description": "Archive a channel or DM to prevent any further messages from being posted. Not supported for all conversation types.",
+      "response": {
+        "ok": true
+      },
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "id": "slack.conversations.setTopic",
+      "path": "slack/conversations.setTopic",
+      "method": "POST",
+      "description": "Set or replace the topic line shown at the top of a channel. The calling user must be a member of the conversation.",
+      "response": {
+        "ok": true,
+        "channel": "Channel"
+      },
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "type": "string"
+          },
+          "topic": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel",
+          "topic"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "id": "slack.conversations.members",
+      "path": "slack/conversations.members",
+      "method": "GET",
+      "description": "Get a paginated list of user IDs belonging to a conversation.",
+      "parameters": {
+        "channel": {
+          "type": "string",
+          "description": "ID of the conversation whose members should be listed.",
+          "required": true,
+          "location": "query"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Maximum members per page (hard max 1000, recommended 200 or fewer).",
+          "required": false,
+          "location": "query"
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Pagination cursor taken from response_metadata.next_cursor.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": {
+        "ok": true,
+        "members": [
+          "string"
+        ],
+        "response_metadata": {
+          "next_cursor": "string"
+        }
+      }
+    },
+    {
+      "id": "slack.conversations.history",
+      "path": "slack/conversations.history",
+      "method": "GET",
+      "description": "Fetch previous messages and events from a channel or conversation. Results are returned newest-first.",
+      "parameters": {
+        "channel": {
+          "type": "string",
+          "description": "ID of the conversation to read history from.",
+          "required": true,
+          "location": "query"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Maximum items to return (default 100, hard max 1000, recommended 200 or fewer).",
+          "required": false,
+          "location": "query"
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Pagination cursor taken from response_metadata.next_cursor.",
+          "required": false,
+          "location": "query"
+        },
+        "latest": {
+          "type": "string",
+          "description": "Retrieve only messages sent before this Unix timestamp (defaults to now).",
+          "required": false,
+          "location": "query"
+        },
+        "oldest": {
+          "type": "string",
+          "description": "Retrieve only messages sent after this Unix timestamp (defaults to 0).",
+          "required": false,
+          "location": "query"
+        },
+        "inclusive": {
+          "type": "boolean",
+          "description": "When true, messages at the exact oldest or latest boundary are included (default false).",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": {
+        "ok": true,
+        "messages": [
+          "Message"
+        ],
+        "has_more": true,
+        "response_metadata": {
+          "next_cursor": "string"
+        }
+      }
+    },
+    {
+      "id": "slack.conversations.replies",
+      "path": "slack/conversations.replies",
+      "method": "GET",
+      "description": "Retrieve all messages in a thread, including the original parent and all replies.",
+      "parameters": {
+        "channel": {
+          "type": "string",
+          "description": "ID of the conversation containing the thread.",
+          "required": true,
+          "location": "query"
+        },
+        "ts": {
+          "type": "string",
+          "description": "Timestamp of the parent message that starts the thread. Must match an existing message.",
+          "required": true,
+          "location": "query"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Maximum items per page (hard max 1000, recommended 200 or fewer).",
+          "required": false,
+          "location": "query"
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Pagination cursor taken from response_metadata.next_cursor.",
+          "required": false,
+          "location": "query"
+        },
+        "latest": {
+          "type": "string",
+          "description": "Only include messages before this Unix timestamp.",
+          "required": false,
+          "location": "query"
+        },
+        "oldest": {
+          "type": "string",
+          "description": "Only include messages after this Unix timestamp.",
+          "required": false,
+          "location": "query"
+        },
+        "inclusive": {
+          "type": "boolean",
+          "description": "When true, messages at the exact oldest or latest boundary are included (default false).",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": {
+        "ok": true,
+        "messages": [
+          "Message"
+        ],
+        "has_more": true,
+        "response_metadata": {
+          "next_cursor": "string"
+        }
+      }
+    },
+    {
+      "id": "slack.chat.postMessage",
+      "path": "slack/chat.postMessage",
+      "method": "POST",
+      "description": "Send a new message to a channel or direct message. Include thread_ts to post as a reply within an existing thread.",
+      "response": {
+        "ok": true,
+        "channel": "string",
+        "ts": "string",
+        "message": "Message"
+      },
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "attachments": {
+            "items": {},
+            "type": "array"
+          },
+          "blocks": {
+            "items": {},
+            "type": "array"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "icon_emoji": {
+            "type": "string"
+          },
+          "icon_url": {
+            "type": "string"
+          },
+          "mrkdwn": {
+            "type": "boolean"
+          },
+          "parse": {
+            "type": "string"
+          },
+          "reply_broadcast": {
+            "type": "boolean"
+          },
+          "text": {
+            "type": "string"
+          },
+          "thread_ts": {
+            "type": "string"
+          },
+          "unfurl_links": {
+            "type": "boolean"
+          },
+          "unfurl_media": {
+            "type": "boolean"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "id": "slack.chat.update",
+      "path": "slack/chat.update",
+      "method": "POST",
+      "description": "Change the text or block content of a previously posted message.",
+      "response": {
+        "ok": true,
+        "channel": "string",
+        "ts": "string",
+        "text": "string"
+      },
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "attachments": {
+            "items": {},
+            "type": "array"
+          },
+          "blocks": {
+            "items": {},
+            "type": "array"
+          },
+          "channel": {
+            "type": "string"
+          },
+          "parse": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel",
+          "ts"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "id": "slack.chat.delete",
+      "path": "slack/chat.delete",
+      "method": "POST",
+      "description": "Permanently remove a previously posted message from a channel.",
+      "response": {
+        "ok": true,
+        "channel": "string",
+        "ts": "string"
+      },
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "type": "string"
+          },
+          "ts": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel",
+          "ts"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "id": "slack.reactions.add",
+      "path": "slack/reactions.add",
+      "method": "POST",
+      "description": "Attach an emoji reaction to a message.",
+      "response": {
+        "ok": true
+      },
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel",
+          "timestamp",
+          "name"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "id": "slack.reactions.get",
+      "path": "slack/reactions.get",
+      "method": "GET",
+      "description": "Retrieve all emoji reactions on a message.",
+      "parameters": {
+        "channel": {
+          "type": "string",
+          "description": "Channel where the target message was posted.",
+          "required": true,
+          "location": "query"
+        },
+        "timestamp": {
+          "type": "string",
+          "description": "Timestamp of the message whose reactions to retrieve.",
+          "required": true,
+          "location": "query"
+        },
+        "full": {
+          "type": "boolean",
+          "description": "When true, returns the complete list of reacting users.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": {
+        "ok": true,
+        "message": "Message"
+      }
+    },
+    {
+      "id": "slack.search.messages",
+      "path": "slack/search.messages",
+      "method": "GET",
+      "description": "Search across messages in the workspace matching a query. Supports in:channel and from:user modifier syntax.",
+      "parameters": {
+        "query": {
+          "type": "string",
+          "description": "Search expression. Supports in:channel_name and from:user_id modifiers.",
+          "required": true,
+          "location": "query"
+        },
+        "sort": {
+          "type": "string",
+          "description": "Sort matching messages by 'score' or 'timestamp' (default 'score').",
+          "required": false,
+          "location": "query"
+        },
+        "sort_dir": {
+          "type": "string",
+          "description": "Sort direction: 'asc' or 'desc' (default 'desc').",
+          "required": false,
+          "location": "query"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Results per page (max 100, default 20).",
+          "required": false,
+          "location": "query"
+        },
+        "page": {
+          "type": "integer",
+          "description": "Page of results to return (default 1).",
+          "required": false,
+          "location": "query"
+        },
+        "highlight": {
+          "type": "boolean",
+          "description": "When true, matched terms are highlighted in the returned text.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": {
+        "ok": true,
+        "messages": {
+          "total": 0,
+          "matches": [
+            "Message"
+          ]
+        }
+      }
+    },
+    {
+      "id": "slack.users.list",
+      "path": "slack/users.list",
+      "method": "GET",
+      "description": "Enumerate all members of a Slack workspace. Useful for locating a user by display name or real name when their email or ID is unknown.",
+      "parameters": {},
+      "response": {
+        "ok": true,
+        "members": [
+          "User"
+        ]
+      }
+    },
+    {
+      "id": "slack.users.lookupByEmail",
+      "path": "slack/users.lookupByEmail",
+      "method": "GET",
+      "description": "Look up a workspace member using their email address. Requires the users:read.email scope.",
+      "parameters": {
+        "email": {
+          "type": "string",
+          "description": "Email address of the workspace member to find.",
+          "required": true,
+          "location": "query"
+        }
+      },
+      "response": {
+        "ok": true,
+        "user": "User"
+      }
+    },
+    {
+      "id": "slack.users.info",
+      "path": "slack/users.info",
+      "method": "GET",
+      "description": "Retrieve the profile and account details for a single Slack user.",
+      "parameters": {
+        "user": {
+          "type": "string",
+          "description": "ID of the user to look up.",
+          "required": true,
+          "location": "query"
+        },
+        "include_locale": {
+          "type": "boolean",
+          "description": "When true, the user's locale is included in the response (default false).",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": {
+        "ok": true,
+        "user": "User"
+      }
+    },
+    {
+      "id": "slack.users.profile.set",
+      "path": "slack/users.profile.set",
+      "method": "POST",
+      "description": "Update profile fields for a user, such as status text and emoji.",
+      "response": {
+        "ok": true,
+        "profile": "object"
+      },
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "profile": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "user": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "id": "slack.conversations.open",
+      "path": "slack/conversations.open",
+      "method": "POST",
+      "description": "Open or resume a direct message or multi-person DM. Use this to obtain a DM channel ID before sending a message with chat.postMessage.",
+      "response": {
+        "ok": true,
+        "channel": "Channel"
+      },
+      "request": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "type": "string"
+          },
+          "return_im": {
+            "type": "boolean"
+          },
+          "users": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    }
+  ]
+}

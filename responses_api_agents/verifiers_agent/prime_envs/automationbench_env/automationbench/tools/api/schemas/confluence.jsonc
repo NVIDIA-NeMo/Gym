@@ -1,0 +1,92 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "confluence",
+  "endpoints": [
+    {
+      "id": "confluence.pages.create",
+      "path": "confluence/wiki/api/v2/pages",
+      "method": "POST",
+      "description": "Create a new Confluence page. Supply the spaceId and an optional parentId to nest the page under an existing one. Page body content should use storage (HTML-like) format. To create blog posts, use the separate /wiki/api/v2/blogposts endpoint.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "body": {
+            "additionalProperties": false,
+            "oneOf": [
+              {
+                "required": [
+                  "value"
+                ]
+              },
+              {
+                "required": [
+                  "storage"
+                ]
+              }
+            ],
+            "properties": {
+              "representation": {
+                "type": "string"
+              },
+              "storage": {
+                "additionalProperties": false,
+                "properties": {
+                  "representation": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value"
+                ],
+                "type": "object"
+              },
+              "value": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "parentId": {
+            "type": "string"
+          },
+          "spaceId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "body",
+          "spaceId",
+          "title"
+        ],
+        "type": "object"
+      },
+      "response": "{id, title, status, spaceId, parentId, body: {representation, value}, version: {number}, _links: {webui}}"
+    }
+  ]
+}

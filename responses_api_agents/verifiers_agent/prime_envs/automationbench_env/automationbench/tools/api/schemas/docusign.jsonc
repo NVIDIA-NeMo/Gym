@@ -1,0 +1,529 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "docusign",
+  "endpoints": [
+    {
+      "id": "docusign.envelopes.create",
+      "path": "docusign/v2.1/accounts/{accountId}/envelopes",
+      "method": "POST",
+      "description": "Create and optionally dispatch an envelope. Builds a new envelope from a template or with inline documents. Set status to 'sent' to deliver immediately or 'created' to save as a draft.",
+      "parameters": {
+        "accountId": {
+          "type": "string",
+          "description": "The external account number (int) or account ID GUID.",
+          "required": true,
+          "location": "path",
+          "default": "default"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "compositeTemplates": {
+            "items": {},
+            "type": "array"
+          },
+          "documents": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "documentBase64": {
+                  "type": "string"
+                },
+                "documentId": {
+                  "type": "string"
+                },
+                "fileExtension": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "emailBlurb": {
+            "type": "string"
+          },
+          "emailSubject": {
+            "type": "string"
+          },
+          "recipients": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "sent",
+              "created"
+            ],
+            "type": "string"
+          },
+          "templateId": {
+            "type": "string"
+          },
+          "templateRoles": {
+            "items": {},
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "response": "EnvelopeSummary: {envelopeId, uri, statusDateTime, status}",
+      "internalPath": {
+        "accountId": "workspace"
+      }
+    },
+    {
+      "id": "docusign.envelopes.get",
+      "path": "docusign/v2.1/accounts/{accountId}/envelopes/{envelopeId}",
+      "method": "GET",
+      "description": "Retrieve details for a single envelope, including overall status, sender, recipients, documents, and key timestamps.",
+      "parameters": {
+        "accountId": {
+          "type": "string",
+          "description": "The DocuSign account ID.",
+          "required": true,
+          "location": "path",
+          "default": "default"
+        },
+        "envelopeId": {
+          "type": "string",
+          "description": "GUID of the envelope to retrieve.",
+          "required": true,
+          "location": "path"
+        },
+        "include": {
+          "type": "string",
+          "description": "Comma-separated list of additional resources to embed in the response (e.g. 'recipients', 'documents').",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "Envelope resource with full details.",
+      "internalPath": {
+        "accountId": "workspace"
+      }
+    },
+    {
+      "id": "docusign.envelopes.list",
+      "path": "docusign/v2.1/accounts/{accountId}/envelopes",
+      "method": "GET",
+      "description": "Search envelopes and track status changes. Filter by date range, status, folder, or keyword. The from_date parameter is mandatory.",
+      "parameters": {
+        "accountId": {
+          "type": "string",
+          "description": "The DocuSign account ID.",
+          "required": true,
+          "location": "path",
+          "default": "default"
+        },
+        "from_date": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Earliest date for the search window (ISO 8601). Required.",
+          "required": true,
+          "location": "query"
+        },
+        "to_date": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Latest date for the search window (ISO 8601). Defaults to current time.",
+          "required": false,
+          "location": "query"
+        },
+        "status": {
+          "type": "string",
+          "description": "Comma-separated statuses to filter by: completed, created, declined, deleted, delivered, processing, sent, signed, voided.",
+          "required": false,
+          "location": "query"
+        },
+        "from_to_status": {
+          "type": "string",
+          "description": "Qualifies the date range: Changed (default), Created, Delivered, Sent, Signed, Completed, Declined, Voided, Deleted, Processing, or TimedOut.",
+          "required": false,
+          "location": "query"
+        },
+        "order": {
+          "type": "string",
+          "description": "Sort direction: 'asc' or 'desc'.",
+          "required": false,
+          "location": "query"
+        },
+        "order_by": {
+          "type": "string",
+          "description": "Field to sort by: 'last_modified', 'created', 'sent', or 'status'.",
+          "required": false,
+          "location": "query"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Maximum number of envelopes to return (hard max 1000).",
+          "required": false,
+          "location": "query"
+        },
+        "start_position": {
+          "type": "integer",
+          "description": "Zero-based offset for pagination.",
+          "required": false,
+          "location": "query"
+        },
+        "search_text": {
+          "type": "string",
+          "description": "Keyword to match against envelope metadata.",
+          "required": false,
+          "location": "query"
+        },
+        "folder_ids": {
+          "type": "string",
+          "description": "Comma-separated folder IDs to narrow the search scope.",
+          "required": false,
+          "location": "query"
+        },
+        "include": {
+          "type": "string",
+          "description": "Additional data to embed: 'custom_fields', 'documents', 'recipients', etc.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "EnvelopesInformation: {envelopes: [Envelope], resultSetSize: string, totalSetSize: string, startPosition: string, endPosition: string, nextUri: string, previousUri: string}",
+      "internalPath": {
+        "accountId": "workspace"
+      }
+    },
+    {
+      "id": "docusign.envelopes.update",
+      "path": "docusign/v2.1/accounts/{accountId}/envelopes/{envelopeId}",
+      "method": "PUT",
+      "description": "Modify an existing envelope. Transition a draft to sent by setting status to 'sent'. Cancel an in-flight envelope by setting status to 'voided' along with a voidedReason.",
+      "parameters": {
+        "accountId": {
+          "type": "string",
+          "description": "The DocuSign account ID.",
+          "required": true,
+          "location": "path",
+          "default": "default"
+        },
+        "envelopeId": {
+          "type": "string",
+          "description": "Identifier of the envelope to modify.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "emailBlurb": {
+            "type": "string"
+          },
+          "emailSubject": {
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "sent",
+              "voided"
+            ],
+            "type": "string"
+          },
+          "voidedReason": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "response": "Updated Envelope resource.",
+      "internalPath": {
+        "accountId": "workspace"
+      }
+    },
+    {
+      "id": "docusign.envelopes.recipients.list",
+      "path": "docusign/v2.1/accounts/{accountId}/envelopes/{envelopeId}/recipients",
+      "method": "GET",
+      "description": "Retrieve all recipients for an envelope, including every signer, CC recipient, and their current status.",
+      "parameters": {
+        "accountId": {
+          "type": "string",
+          "description": "The DocuSign account ID.",
+          "required": true,
+          "location": "path",
+          "default": "default"
+        },
+        "envelopeId": {
+          "type": "string",
+          "description": "Identifier of the envelope whose recipients to retrieve.",
+          "required": true,
+          "location": "path"
+        },
+        "include_tabs": {
+          "type": "string",
+          "description": "Set to 'true' to include field/tab details for each recipient.",
+          "required": false,
+          "location": "query"
+        },
+        "include_extended": {
+          "type": "string",
+          "description": "Set to 'true' to include extended recipient details.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "Recipients: {signers: [Signer], carbonCopies: [CarbonCopy], recipientCount: string}",
+      "internalPath": {
+        "accountId": "workspace"
+      }
+    },
+    {
+      "id": "docusign.envelopes.recipients.create",
+      "path": "docusign/v2.1/accounts/{accountId}/envelopes/{envelopeId}/recipients",
+      "method": "POST",
+      "description": "Append signers or CC recipients to an existing envelope.",
+      "parameters": {
+        "accountId": {
+          "type": "string",
+          "description": "The DocuSign account ID.",
+          "required": true,
+          "location": "path",
+          "default": "default"
+        },
+        "envelopeId": {
+          "type": "string",
+          "description": "Identifier of the envelope to add recipients to.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "carbonCopies": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "email": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "recipientId": {
+                  "type": "string"
+                },
+                "routingOrder": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "signers": {
+            "items": {
+              "additionalProperties": true,
+              "properties": {
+                "email": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "recipientId": {
+                  "type": "string"
+                },
+                "roleName": {
+                  "type": "string"
+                },
+                "routingOrder": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "response": "Updated Recipients resource.",
+      "internalPath": {
+        "accountId": "workspace"
+      }
+    },
+    {
+      "id": "docusign.templates.list",
+      "path": "docusign/v2.1/accounts/{accountId}/templates",
+      "method": "GET",
+      "description": "Browse envelope templates available in the account, with optional filtering by template name.",
+      "parameters": {
+        "accountId": {
+          "type": "string",
+          "description": "The DocuSign account ID.",
+          "required": true,
+          "location": "path",
+          "default": "default"
+        },
+        "search_text": {
+          "type": "string",
+          "description": "Filter templates by matching name.",
+          "required": false,
+          "location": "query"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Number of templates to return per page.",
+          "required": false,
+          "location": "query"
+        },
+        "start_position": {
+          "type": "integer",
+          "description": "Zero-based offset for pagination.",
+          "required": false,
+          "location": "query"
+        },
+        "order": {
+          "type": "string",
+          "description": "Sort direction: 'asc' or 'desc'.",
+          "required": false,
+          "location": "query"
+        },
+        "order_by": {
+          "type": "string",
+          "description": "Field to sort by: 'name', 'modified', or 'used'.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "EnvelopeTemplateResults: {envelopeTemplates: [Template], resultSetSize: string, totalSetSize: string, startPosition: string, endPosition: string}",
+      "internalPath": {
+        "accountId": "workspace"
+      }
+    },
+    {
+      "id": "docusign.templates.get",
+      "path": "docusign/v2.1/accounts/{accountId}/templates/{templateId}",
+      "method": "GET",
+      "description": "Fetch a template by ID. Returns full template details including attached documents, recipients, and custom fields.",
+      "parameters": {
+        "accountId": {
+          "type": "string",
+          "description": "The DocuSign account ID.",
+          "required": true,
+          "location": "path",
+          "default": "default"
+        },
+        "templateId": {
+          "type": "string",
+          "description": "GUID of the template to retrieve.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "Template resource with full details.",
+      "internalPath": {
+        "accountId": "workspace"
+      }
+    },
+    {
+      "id": "docusign.templates.documents",
+      "path": "docusign/v2.1/accounts/{accountId}/templates/{templateId}/documents",
+      "method": "GET",
+      "description": "Retrieve the list of documents attached to a template.",
+      "parameters": {
+        "accountId": {
+          "type": "string",
+          "description": "The DocuSign account ID.",
+          "required": true,
+          "location": "path",
+          "default": "default"
+        },
+        "templateId": {
+          "type": "string",
+          "description": "Identifier of the template whose documents to list.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "response": "TemplateDocumentsResult: {templateId: string, templateDocuments: [Document]}",
+      "internalPath": {
+        "accountId": "workspace"
+      }
+    },
+    {
+      "id": "docusign.workspaces.list",
+      "path": "docusign/v2.1/accounts/{accountId}/workspaces",
+      "method": "GET",
+      "description": "Retrieve all document collaboration workspaces associated with the specified DocuSign account.",
+      "parameters": {
+        "accountId": {
+          "type": "string",
+          "description": "The DocuSign account ID.",
+          "required": true,
+          "location": "path",
+          "default": "default"
+        }
+      },
+      "response": "WorkspaceList: {workspaces: [Workspace]}",
+      "internalPath": {
+        "accountId": "workspace"
+      }
+    },
+    {
+      "id": "docusign.workspaces.create",
+      "path": "docusign/v2.1/accounts/{accountId}/workspaces",
+      "method": "POST",
+      "description": "Provision a new document collaboration workspace within the account.",
+      "parameters": {
+        "accountId": {
+          "type": "string",
+          "description": "The DocuSign account ID.",
+          "required": true,
+          "location": "path",
+          "default": "default"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "ownerEmail": {
+            "type": "string"
+          },
+          "ownerName": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "response": "Created Workspace resource.",
+      "internalPath": {
+        "accountId": "workspace"
+      }
+    }
+  ]
+}

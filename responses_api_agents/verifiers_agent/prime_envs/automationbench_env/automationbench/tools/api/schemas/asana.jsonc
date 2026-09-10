@@ -1,0 +1,173 @@
+// Copyright 2026 Zapier, Inc.
+// SPDX-License-Identifier: MIT
+
+// The API schemas contained in this repository were independently derived from publicly
+// available API documentation provided by the respective companies listed herein. These
+// schemas represent the functional structure of API endpoints (including endpoint paths,
+// field names, data types, and response shapes) and are used solely for benchmarking purposes.
+//
+// This project is not affiliated with, endorsed by, sponsored by, or officially connected
+// with any of the companies whose API schemas are represented. All product names, logos, and
+// brands referenced are property of their respective owners and are used here only for
+// purposes of factual identification.
+//
+// No live API endpoints are accessed by this benchmark. All API behavior is simulated from
+// the derived schemas. No API keys, authentication credentials, or developer accounts were
+// used to obtain the schema information contained herein.
+
+{
+  "api": "asana",
+  "endpoints": [
+    {
+      "id": "asana.projects.list",
+      "path": "asana/1.0/projects",
+      "method": "GET",
+      "description": "List projects visible to the connected Asana account. Use the returned project and workspace GIDs to discover sections and create tasks in the correct project.",
+      "parameters": {
+        "workspace": {
+          "type": "string",
+          "description": "Optionally return only projects in this workspace GID.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{data: [{gid, name, workspace: {gid}}]}"
+    },
+    {
+      "id": "asana.tasks.create",
+      "path": "asana/1.0/tasks",
+      "method": "POST",
+      "description": "Create a new task in Asana. Associate it with a workspace, and optionally attach it to projects, specify an assignee, set a due date, and apply tags.",
+      "parameters": {},
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "assignee": {
+            "type": "string"
+          },
+          "completed": {
+            "type": "boolean"
+          },
+          "due_on": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "parent": {
+            "type": "string"
+          },
+          "projects": {
+            "description": "projects (optional, array of project GIDs)",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "tags": {
+            "description": "tags (optional, array of tag GIDs)",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "workspace": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "response": "{data: {gid, name, notes, due_on, completed, assignee, workspace, created_at}}"
+    },
+    {
+      "id": "asana.sections.getForProject",
+      "path": "asana/1.0/projects/{project_gid}/sections",
+      "method": "GET",
+      "description": "Retrieve all sections belonging to a project. Returns each section's GID and display name.",
+      "parameters": {
+        "project_gid": {
+          "type": "string",
+          "description": "The globally unique identifier of the project.",
+          "required": true,
+          "location": "path"
+        },
+        "limit": {
+          "type": "integer",
+          "description": "Number of results to return per page (max 100).",
+          "required": false,
+          "location": "query"
+        },
+        "offset": {
+          "type": "string",
+          "description": "Token used to paginate through additional results.",
+          "required": false,
+          "location": "query"
+        }
+      },
+      "response": "{data: [{gid, name, project: {gid, name}}]}"
+    },
+    {
+      "id": "asana.sections.addTask",
+      "path": "asana/1.0/sections/{section_gid}/addTask",
+      "method": "POST",
+      "description": "Place an existing task into a section within a project. Obtain the section GID first via GET /projects/{project_gid}/sections.",
+      "parameters": {
+        "section_gid": {
+          "type": "string",
+          "description": "The globally unique identifier of the section.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "insert_after": {
+            "type": "string"
+          },
+          "insert_before": {
+            "type": "string"
+          },
+          "task": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "task"
+        ],
+        "type": "object"
+      },
+      "response": "{data: {}}"
+    },
+    {
+      "id": "asana.tasks.addTag",
+      "path": "asana/1.0/tasks/{task_gid}/addTag",
+      "method": "POST",
+      "description": "Apply a tag to an existing task in Asana.",
+      "parameters": {
+        "task_gid": {
+          "type": "string",
+          "description": "The globally unique identifier of the task.",
+          "required": true,
+          "location": "path"
+        }
+      },
+      "request": {
+        "additionalProperties": true,
+        "properties": {
+          "tag": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tag"
+        ],
+        "type": "object"
+      },
+      "response": "{data: {}}"
+    }
+  ]
+}
