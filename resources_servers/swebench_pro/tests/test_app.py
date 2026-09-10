@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -27,6 +28,8 @@ from resources_servers.swebench_pro.app import (
     SWEBenchProResourcesServer,
     SWEBenchProResourcesServerConfig,
     SWEBenchProSeedSessionRequest,
+    _attempt_budget,
+    _budget_spent,
 )
 from resources_servers.swebench_pro.verification import VerificationResult
 
@@ -66,7 +69,12 @@ def fake_pty(session_id: str = "pty-session") -> SimpleNamespace:
     return SimpleNamespace(create=AsyncMock(return_value=session))
 
 
-def make_server(*, golden: bool, apply_anti_cheating: bool = True) -> SWEBenchProResourcesServer:
+def make_server(
+    *,
+    golden: bool,
+    apply_anti_cheating: bool = True,
+    **overrides: object,
+) -> SWEBenchProResourcesServer:
     config = SWEBenchProResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
@@ -77,6 +85,7 @@ def make_server(*, golden: bool, apply_anti_cheating: bool = True) -> SWEBenchPr
         is_verifying_golden_patch=golden,
         apply_anti_cheating=apply_anti_cheating,
         prefetch_go_modules=True,
+        **overrides,
     )
     return SWEBenchProResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -374,3 +383,75 @@ async def test_shutdown_stops_abandoned_session_sandboxes() -> None:
     first.stop.assert_awaited_once()
     second.stop.assert_awaited_once()
     assert server._session_id_to_sandbox == {}
+
+
+def inconclusive_result() -> VerificationResult:
+    """A verdict-less run: `inconclusive_reason` reports "no usable output"."""
+    return VerificationResult(completed=True, resolved=False, patch_applied=True, test_results=None)
+
+
+def test_verify_bounds_an_attempt_that_never_returns(monkeypatch: MonkeyPatch) -> None:
+    """A hung attempt must fail the rollout, not hold the run open until the wall clock."""
+    server = make_server(golden=True, verification_attempt_timeout=0.05, inconclusive_verification_retries=0)
+
+    async def _hang(*args: object, **kwargs: object) -> None:
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(server, "_create_sandbox", _hang)
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+
+    assert response.status_code == 200
+    assert response.json()["evaluation_completed"] is False
+    assert response.json()["reward"] == 0.0
+    assert "Verification failed" in response.json()["error"]
+
+
+def test_verify_stops_retrying_once_the_rollout_budget_is_spent(monkeypatch: MonkeyPatch) -> None:
+    """The retry sequence is bounded in aggregate, not just per attempt."""
+    clock = {"t": 1000.0}
+    monkeypatch.setattr("resources_servers.swebench_pro.app.time", lambda: clock["t"])
+    server = make_server(golden=True, verification_total_timeout=1500.0)
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
+
+    async def _verify(**kwargs: object) -> VerificationResult:
+        clock["t"] += 1000.0
+        return inconclusive_result()
+
+    verify = AsyncMock(side_effect=_verify)
+    monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", verify)
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+
+    assert response.status_code == 200
+    # Budget is 1500s and each attempt burns 1000s: the second attempt still
+    # starts (500s left, which is what its own ceiling is clamped to) and the
+    # third never does.
+    assert verify.await_count == 2
+
+
+def test_verify_uses_every_attempt_when_no_budget_is_set(monkeypatch: MonkeyPatch) -> None:
+    """Leaving both ceilings unset preserves the previous unbounded behaviour."""
+    server = make_server(golden=True, verification_attempt_timeout=None, verification_total_timeout=None)
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
+    verify = AsyncMock(return_value=inconclusive_result())
+    monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", verify)
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+
+    assert response.status_code == 200
+    assert verify.await_count == 3
+
+
+def test_attempt_budget_takes_the_smaller_of_the_two_ceilings(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr("resources_servers.swebench_pro.app.time", lambda: 100.0)
+    assert _attempt_budget(None, None) is None
+    assert _attempt_budget(30.0, None) == 30.0
+    assert _attempt_budget(None, 150.0) == 50.0
+    assert _attempt_budget(30.0, 150.0) == 30.0
+    assert _attempt_budget(80.0, 150.0) == 50.0
+    # A spent budget yields zero rather than a negative timeout.
+    assert _attempt_budget(30.0, 90.0) == 0.0
+    assert _budget_spent(None) is False
+    assert _budget_spent(90.0) is True
+    assert _budget_spent(150.0) is False

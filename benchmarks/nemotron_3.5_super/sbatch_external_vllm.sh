@@ -93,6 +93,10 @@ DECODE_SERVER_PORT=8002
 PREFILL_DP_RPC_PORT=13345
 DECODE_DP_RPC_PORT=13346
 
+ROUTER_PREFILL_POLICY="${ROUTER_PREFILL_POLICY:-cache_aware}"
+ROUTER_DECODE_POLICY="${ROUTER_DECODE_POLICY:-cache_aware}"
+ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE="${ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE:-1}"
+
 eval_command=$(cat <<EOF
 set -euo pipefail
 
@@ -254,8 +258,8 @@ if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
         wait_for_vllm_health "decode" "http://\$DECODE_HEAD:$DECODE_SERVER_PORT/health" "\$prefill_pid" "prefill"
 
         vllm-router \
-            --prefill-policy cache_aware \
-            --decode-policy cache_aware \
+            --prefill-policy $ROUTER_PREFILL_POLICY \
+            --decode-policy $ROUTER_DECODE_POLICY \
             --balance-abs-threshold 4 \
             --balance-rel-threshold 1.1 \
             --vllm-pd-disaggregation \
@@ -263,7 +267,7 @@ if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
             --decode "http://\$DECODE_HEAD:$DECODE_SERVER_PORT" \
             --host \$PREFILL_HEAD \
             --port $ROUTER_SERVER_PORT \
-            --intra-node-data-parallel-size 1 \
+            --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
             --request-timeout-secs 86400 \
             --log-level error &
         router_pid=\$!
@@ -321,18 +325,17 @@ else
     # Preserve main's independent topology for models that fit one complete
     # tensor-parallel replica on each node.
     if (( SLURM_PROCID == 0 )); then
-        # @bxyu-nvidia: for --intra-node-data-parallel-size: Not sure what to set this to other than 1. I can't tell from the docs what is appropriate and 1 seems to work fine.
         # Set a super long request timeout since some reasoning requests may take a long time to generate.
         # Don't manually wait as vllm-router will wait for the URLs to come up
         router_args=( \
-            --prefill-policy cache_aware \
-            --decode-policy cache_aware \
+            --prefill-policy $ROUTER_PREFILL_POLICY \
+            --decode-policy $ROUTER_DECODE_POLICY \
             --balance-abs-threshold 4 \
             --balance-rel-threshold 1.1 \
             --vllm-pd-disaggregation \
             --host \$this_node_hostname \
             --port $ROUTER_SERVER_PORT \
-            --intra-node-data-parallel-size 1 \
+            --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
             --request-timeout-secs 86400 \
             --log-level error
         )
@@ -348,6 +351,12 @@ else
         vllm-router "\${router_args[@]}" &
         router_pid=\$!
         trap 'kill "\$router_pid" 2>/dev/null || true' EXIT
+
+        sleep 5
+        if ! kill -0 "\$router_pid" 2>/dev/null; then
+            echo "vllm-router exited during startup" >&2
+            exit 1
+        fi
     fi
 
     if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then

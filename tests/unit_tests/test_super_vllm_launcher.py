@@ -113,7 +113,12 @@ vllm() {
 vllm-router() {
     printf '%s\0' "$@" >&2
     touch "$TEST_STATE_DIR/router-ready"
-    if [[ "$TEST_COUPLED_HEAD" == 1 ]]; then kill -TERM "$$"; fi
+    if [[ "$TEST_COUPLED_HEAD" == 1 ]]; then
+        kill -TERM "$$"
+    else
+        # Independent mode checks router liveness before starting vLLM.
+        while true; do command sleep 0.01; done
+    fi
 }
 curl() { [[ -f "$TEST_STATE_DIR/service-ready" ]]; }
 sleep() { command sleep 0.01; }
@@ -264,6 +269,48 @@ hostname() { printf 'node%s\n' "$SLURM_PROCID"; }
                         )
                     else:
                         self.assertEqual(router, [])
+
+    def test_router_overrides_apply_to_both_deployment_modes(self):
+        """Preserve main's configurable router policies and local data-parallel size in both modes."""
+        for mode in ("independent", "coupled"):
+            with self.subTest(mode=mode):
+                env = {
+                    "VLLM_PD_DEPLOYMENT_MODE": mode,
+                    "ROUTER_PREFILL_POLICY": "round_robin",
+                    "ROUTER_DECODE_POLICY": "random",
+                    "ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE": "2",
+                }
+                _, command = self.generate_commands(env=env)
+                _, _, _, router = self.serving_arguments(command, rank=0, coupled_head=mode == "coupled", env=env)
+                for flag, value in (
+                    ("--prefill-policy", "round_robin"),
+                    ("--decode-policy", "random"),
+                    ("--intra-node-data-parallel-size", "2"),
+                ):
+                    self.assertEqual(router.count(flag), 1)
+                    self.assertEqual(router[router.index(flag) + 1], value)
+
+    def test_independent_router_startup_failure_stops_launch(self):
+        """Stop independent startup when the router exits during main's five-second startup check."""
+        stubs = r"""
+VLLM_COMMON_ARGS=()
+VLLM_PREFILL_ARGS=()
+VLLM_DECODE_ARGS=()
+vllm-router() { return "$TEST_ROUTER_STATUS"; }
+vllm() { printf 'unexpected-vllm-start\n'; }
+hostname() { printf 'node0\n'; }
+# Reap the failed router deterministically instead of waiting five real seconds.
+sleep() { printf 'startup-delay=%s\n' "$1"; wait "$router_pid" || true; }
+"""
+        _, command = self.generate_commands()
+        for router_status in (0, 7):
+            with self.subTest(router_status=router_status):
+                status, stdout, stderr = self.run_shell(
+                    stubs + command, env={"TEST_ROUTER_STATUS": str(router_status)}
+                )
+                self.assertEqual(status, 1, stderr)
+                self.assertEqual(stdout, "startup-delay=5\n")
+                self.assertIn("vllm-router exited during startup", stderr)
 
     def test_existing_recipes_preserve_sampling_overrides(self):
         """Pass through existing models' sampling parameters without injecting Ultra evaluation defaults."""
