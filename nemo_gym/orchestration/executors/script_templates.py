@@ -118,14 +118,26 @@ def render_driver_entrypoint(
     preamble: list[str] = []
 
     if repo and ref:
-        repo_name = repo.rstrip("/").split("/")[-1].removesuffix(".git")
+        # Clone outside the working directory, and never `cd` into it. Both
+        # matter, and both were learned from a failed run:
+        #
+        # * The driver's cwd is the job directory, so cloning here would put a
+        #   second copy of every built-in asset under it. Gym resolves named
+        #   assets against cwd AND the install root, so `--model-type
+        #   openai_model` then matches twice and the run aborts as ambiguous.
+        # * `cd`-ing into the clone and staying there would silently redirect
+        #   every relative output path -- `+output_jsonl_fpath=artifacts/...` --
+        #   into the clone instead of the job directory, which is the same
+        #   artifact loss the container workdir exists to prevent.
+        #
+        # `uv pip install -e <path>` installs from a path, so no `cd` is needed.
         preamble += [
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
             'source "$HOME/.local/bin/env"',
-            f"git clone {shlex.quote(repo)}",
-            f"cd {shlex.quote(repo_name)}",
-            f"git checkout {shlex.quote(ref)}",
-            "uv pip install -e . --system",
+            'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
+            f'git clone {shlex.quote(repo)} "$GYM_SRC/gym"',
+            f'git -C "$GYM_SRC/gym" checkout {shlex.quote(ref)}',
+            'uv pip install -e "$GYM_SRC/gym" --system',
         ]
 
     if prepare_cmd:

@@ -313,8 +313,10 @@ def test_render_driver_entrypoint_no_install_no_prepare():
 def test_render_driver_entrypoint_with_gym_install():
     out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
     assert "git clone" in out
-    assert "git checkout main" in out
-    assert "uv pip install -e . --system" in out
+    # checkout and install both target the out-of-tree clone; see
+    # test_gym_install_does_not_clone_into_the_job_directory for why.
+    assert "checkout main" in out
+    assert 'uv pip install -e "$GYM_SRC/gym" --system' in out
     assert 'exec "$@"' in out
     assert '"${GYM_CMD[@]}"' in out
 
@@ -328,7 +330,7 @@ def test_render_driver_entrypoint_with_prepare():
 def test_render_driver_entrypoint_install_and_prepare():
     out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "v1.0", "gym eval prepare")
     assert "git clone" in out
-    assert "git checkout v1.0" in out
+    assert "checkout v1.0" in out
     assert "gym eval prepare" in out
     assert 'exec "$@"' in out
 
@@ -1080,3 +1082,23 @@ def test_driver_job_dir_is_mounted_even_with_no_configured_mounts():
 
     driver_line = next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
     assert f"--container-mounts={bench_dir}:{bench_dir}" in driver_line
+
+
+def test_gym_install_does_not_clone_into_the_job_directory():
+    """The driver's cwd is the job directory. A clone there gives Gym a second
+    copy of every built-in asset, and named lookups (`--model-type
+    openai_model`) then abort as ambiguous against the installed copy."""
+    entrypoint = render_driver_entrypoint(repo="https://github.com/NVIDIA-NeMo/gym", ref="abc123", prepare_cmd=None)
+
+    assert "mktemp -d /tmp/gym-install-" in entrypoint
+    assert 'git clone https://github.com/NVIDIA-NeMo/gym "$GYM_SRC/gym"' in entrypoint
+
+
+def test_gym_install_never_changes_the_working_directory():
+    """`cd` into the clone would redirect every relative output path -- the
+    driver writes `artifacts/rollouts.jsonl` relative to cwd -- into the clone,
+    losing the artifacts exactly as an unmounted job dir does."""
+    entrypoint = render_driver_entrypoint(repo="https://github.com/NVIDIA-NeMo/gym", ref="abc123", prepare_cmd=None)
+
+    assert "\n    cd " not in entrypoint
+    assert not any(line.strip().startswith("cd ") for line in entrypoint.splitlines())
