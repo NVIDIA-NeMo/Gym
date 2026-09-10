@@ -24,6 +24,7 @@ from fastapi import FastAPI
 from nemo_gym._checkpoint import (
     AGENT_MANIFEST_NAME,
     AGENT_STATE_SUBDIR,
+    AgentBoundaryKind,
     AgentBoundaryRecord,
     AgentCheckpointError,
     AgentCheckpointParticipant,
@@ -33,6 +34,7 @@ from nemo_gym._checkpoint import (
     ControlFence,
     DuplicateExecutionError,
     MultiProcessCapability,
+    PendingModelPayload,
     commit_agent_state,
     install_agent_checkpoint,
     install_control_plane,
@@ -53,6 +55,35 @@ def _boundary(*, attempt_index: int = 0, boundary_index: int = 1) -> AgentBounda
         last_committed_model_call_id="call-1",
         resource_state_revisions={"resources": 3},
     )
+
+
+def test_pending_model_boundary_round_trips_typed_generation_state() -> None:
+    boundary = AgentBoundaryRecord(
+        rollout_id="rollout-a",
+        attempt_index=0,
+        boundary_index=3,
+        turn_index=2,
+        boundary_kind=AgentBoundaryKind.PENDING_MODEL,
+        pending_model=PendingModelPayload(
+            model_call_id="call-2",
+            response={"id": "response-2", "output": [{"type": "function_call", "call_id": "tool-2"}]},
+            model_server_cookies={"model-session": "abc"},
+            usage={"total_tokens": 7},
+            pending_action_cursor=1,
+            resource_request_id="resource-request-2",
+        ),
+        output_items=[],
+        usage={"total_tokens": 11},
+        resource_state_revisions={"resources": 4},
+    )
+
+    restored = AgentBoundaryRecord.model_validate_json(boundary.model_dump_json())
+
+    assert restored.boundary_kind == AgentBoundaryKind.PENDING_MODEL
+    assert restored.turn_index == 2
+    assert restored.pending_model is not None
+    assert restored.pending_model.pending_action_cursor == 1
+    assert restored.pending_model.resource_request_id == "resource-request-2"
 
 
 @pytest.mark.asyncio
@@ -93,6 +124,9 @@ async def test_timed_out_prepare_can_retire_and_retry() -> None:
                 "state": "running",
                 "parked_boundary_state": None,
                 "boundary_index": None,
+                "turn_index": None,
+                "boundary_kind": None,
+                "resource_state_revisions": {},
                 "age_seconds": status.json()["blocking_attempts"][0]["age_seconds"],
             }
         ]
@@ -257,6 +291,64 @@ async def test_prepare_route_rejects_completed_unacknowledged_result() -> None:
     assert "completed_unacknowledged=1" in prepare.json()["error"]["detail"]
     assert fence.phase == CheckpointPhase.IDLE
     assert status.json()["completed_unacknowledged"] == 1
+
+
+@pytest.mark.asyncio
+async def test_completed_result_acknowledgment_is_receipt_bound_and_idempotent() -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    await participant.finish(execution, outcome="completed", result={"id": "result-1", "reward": 1.0})
+    receipt = participant.status()["completed_unacknowledged_attempts"][0]["completion_receipt"]
+    fence = ControlFence()
+    app = FastAPI()
+    install_control_plane(
+        app,
+        capabilities=ControlCapabilities(
+            component="responses_api_agents",
+            name="agent",
+            multi_process=MultiProcessCapability(mode="single_worker", num_workers=1),
+        ),
+        fence=fence,
+    )
+    install_agent_checkpoint(app, participant=participant, fence=fence, auth_token="secret")
+    headers = {"authorization": "Bearer secret"}
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        wrong_generation = await client.post(
+            "/ng-control/v1/agent-checkpoint/acknowledge",
+            json={**receipt, "execution_generation": receipt["execution_generation"] + 1},
+            headers=headers,
+        )
+        wrong_digest = await client.post(
+            "/ng-control/v1/agent-checkpoint/acknowledge",
+            json={**receipt, "result_digest": "0" * 64},
+            headers=headers,
+        )
+        acknowledged = await client.post(
+            "/ng-control/v1/agent-checkpoint/acknowledge",
+            json=receipt,
+            headers=headers,
+        )
+        duplicate = await client.post(
+            "/ng-control/v1/agent-checkpoint/acknowledge",
+            json=receipt,
+            headers=headers,
+        )
+        prepared = await client.post(
+            "/ng-control/v1/agent-checkpoint/prepare",
+            json={"checkpoint_id": "checkpoint-1", "deadline_ts": time.time() + 2},
+            headers=headers,
+        )
+
+    assert wrong_generation.status_code == 409
+    assert wrong_digest.status_code == 409
+    assert acknowledged.json() == {"acknowledged": True, "idempotent": False}
+    assert duplicate.json() == {"acknowledged": False, "idempotent": True}
+    assert prepared.status_code == 200
+    assert prepared.json()["completed_unacknowledged"] == 0
+    assert participant.status()["acknowledged_completed"] == 1
+    with pytest.raises(AgentStaleAttemptError):
+        await participant.begin("rollout-a", 0, task=None)
 
 
 @pytest.mark.asyncio
