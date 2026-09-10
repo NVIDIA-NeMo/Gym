@@ -611,6 +611,10 @@ trap cleanup_server EXIT INT TERM
             {
                 echo "events { worker_connections 16384; }"
                 echo "http {"
+                # Log the upstream, not just the client: without it every line shows the eval
+                # node and there is no way to tell whether the hash is actually spreading load.
+                echo "    log_format lb '\\\$remote_addr \\\$status upstream: \\\$upstream_addr session: \\\$http_x_session_id';"
+                echo "    access_log /dev/stdout lb;"
                 # Empty header means no session -- fall back to the per-request id so those
                 # requests spread rather than all piling onto one node.
                 echo "    map \\\$http_x_session_id \\\$hash_key { \"\"  \\\$request_id; default \\\$http_x_session_id; }"
