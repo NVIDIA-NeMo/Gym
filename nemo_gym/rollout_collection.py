@@ -1075,11 +1075,12 @@ Aggregate metrics: {aggregate_metrics_fpath}""")
                 res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
                 try:
                     await raise_for_status(res)
-                except Exception:
+                except Exception as e:
                     print(
                         "[rollout_collection] /run failed "
                         f"status={getattr(res, 'status', None)} "
-                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "
+                        f"response_content={getattr(e, 'response_content', 'Response content not found')}",
                         flush=True,
                     )
                     raise
