@@ -765,6 +765,252 @@ class TestLangSmithExporter:
         assert exporter.dataset_id == "dataset-1"
         assert exporter.experiment_id == "experiment-1"
 
+    def test_log_rollouts_creates_one_dataset_example_per_task(
+        self,
+        monkeypatch: MonkeyPatch,
+        langsmith_config: DictConfig,
+    ) -> None:
+        pytest.importorskip("langsmith")
+        import nemo_gym.exporters.langsmith as langsmith_module
+
+        client = MagicMock()
+        client.has_dataset.return_value = True
+        client.read_dataset.return_value.id = "dataset-1"
+        client.create_project.return_value.id = "experiment-1"
+        monkeypatch.setattr(
+            langsmith_module,
+            "Client",
+            MagicMock(return_value=client),
+        )
+
+        exporter = langsmith_module.LangSmithExporter(langsmith_config)
+        exporter.setup()
+
+        rollouts = [
+            {
+                "responses_create_params": {
+                    "input": [{"role": "user", "content": "What is 2 + 2?"}],
+                },
+                "response": {"output_text": "4"},
+                "reward": 1.0,
+                "score": 1.0,
+                "_ng_task_index": 7,
+                "_ng_rollout_index": 0,
+                "agent_ref": {"name": "deep-agent"},
+                "task_source": "math",
+            },
+            {
+                "responses_create_params": {
+                    "input": [{"role": "user", "content": "What is 2 + 2?"}],
+                },
+                "response": {"output_text": "Four"},
+                "reward": 1.0,
+                "score": 1.0,
+                "_ng_task_index": 7,
+                "_ng_rollout_index": 1,
+                "agent_ref": {"name": "deep-agent"},
+                "task_source": "math",
+            },
+        ]
+
+        exporter._log_rollouts(rollouts)
+
+        client.create_examples.assert_called_once()
+        kwargs = client.create_examples.call_args.kwargs
+
+        assert kwargs["dataset_id"] == "dataset-1"
+        assert len(kwargs["examples"]) == 1
+
+        example = kwargs["examples"][0]
+        assert example["inputs"] == rollouts[0]["responses_create_params"]
+        assert example["metadata"] == {
+            "_ng_task_index": 7,
+            "task_source": "math",
+            "ls_runner": "nemo-gym",
+            "source": "nemo-gym",
+        }
+        assert "outputs" not in example
+        assert "id" in example
+
+    def test_log_rollouts_creates_completed_run_for_each_rollout(
+        self,
+        monkeypatch: MonkeyPatch,
+        langsmith_config: DictConfig,
+    ) -> None:
+        pytest.importorskip("langsmith")
+        import nemo_gym.exporters.langsmith as langsmith_module
+
+        client = MagicMock()
+        client.has_dataset.return_value = True
+        client.read_dataset.return_value.id = "dataset-1"
+        client.create_project.return_value.id = "experiment-1"
+        monkeypatch.setattr(
+            langsmith_module,
+            "Client",
+            MagicMock(return_value=client),
+        )
+
+        exporter = langsmith_module.LangSmithExporter(langsmith_config)
+        exporter.setup()
+
+        rollouts = [
+            {
+                "responses_create_params": {
+                    "input": [{"role": "user", "content": "What is 2 + 2?"}],
+                },
+                "response": {"output_text": "4"},
+                "reward": 1.0,
+                "_ng_task_index": 7,
+                "_ng_rollout_index": 0,
+                "agent_ref": {"name": "deep-agent"},
+                "task_source": "math",
+            },
+            {
+                "responses_create_params": {
+                    "input": [{"role": "user", "content": "What is 2 + 2?"}],
+                },
+                "response": {"output_text": "Four"},
+                "reward": 1.0,
+                "_ng_task_index": 7,
+                "_ng_rollout_index": 1,
+                "agent_ref": {"name": "deep-agent"},
+                "task_source": "math",
+            },
+        ]
+
+        exporter._log_rollouts(rollouts)
+
+        assert client.create_run.call_count == 2
+
+        example_id = client.create_examples.call_args.kwargs["examples"][0]["id"]
+
+        for rollout, call in zip(
+            rollouts,
+            client.create_run.call_args_list,
+            strict=True,
+        ):
+            kwargs = call.kwargs
+            rollout_index = rollout["_ng_rollout_index"]
+
+            assert kwargs["name"] == f"task-7-rollout-{rollout_index}"
+            assert kwargs["run_type"] == "chain"
+            assert kwargs["inputs"] == rollout["responses_create_params"]
+            assert kwargs["outputs"] == rollout["response"]
+            assert kwargs["project_name"] == "gym-experiment"
+            assert kwargs["reference_example_id"] == example_id
+            assert kwargs["trace_id"] == kwargs["id"]
+            assert kwargs["tags"] == ["nemo-gym"]
+            assert kwargs["extra"]["metadata"]["_ng_rollout_index"] == rollout_index
+            assert kwargs["start_time"] <= kwargs["end_time"]
+
+        assert client.create_run.call_args_list[0].kwargs["id"] != client.create_run.call_args_list[1].kwargs["id"]
+
+    def test_log_rollouts_attaches_reward_feedback_to_the_run(
+        self,
+        monkeypatch: MonkeyPatch,
+        langsmith_config: DictConfig,
+    ) -> None:
+        pytest.importorskip("langsmith")
+        import nemo_gym.exporters.langsmith as langsmith_module
+
+        client = MagicMock()
+        client.has_dataset.return_value = True
+        client.read_dataset.return_value.id = "dataset-1"
+        client.create_project.return_value.id = "experiment-1"
+        monkeypatch.setattr(
+            langsmith_module,
+            "Client",
+            MagicMock(return_value=client),
+        )
+
+        exporter = langsmith_module.LangSmithExporter(langsmith_config)
+        exporter.setup()
+        exporter._log_rollouts(
+            [
+                {
+                    "responses_create_params": {
+                        "input": [{"role": "user", "content": "What is 2 + 2?"}],
+                    },
+                    "response": {"output_text": "4"},
+                    "reward": 0.75,
+                    "_ng_task_index": 7,
+                    "_ng_rollout_index": 0,
+                    "agent_ref": {"name": "deep-agent"},
+                    "task_source": "math",
+                }
+            ]
+        )
+
+        client.create_feedback.assert_called_once()
+        kwargs = client.create_feedback.call_args.kwargs
+        run_id = client.create_run.call_args.kwargs["id"]
+
+        assert kwargs["key"] == "reward"
+        assert kwargs["score"] == 0.75
+        assert kwargs["run_id"] == run_id
+        assert kwargs["trace_id"] == run_id
+        assert kwargs["session_id"] == "experiment-1"
+        assert kwargs["feedback_id"] == langsmith_module._stable_uuid(
+            run_id,
+            "feedback",
+            "reward",
+        )
+        assert kwargs["source_info"] == {
+            "ls_runner": "nemo-gym",
+            "source": "nemo-gym",
+        }
+
+    def test_log_rollouts_updates_existing_reward_feedback(
+        self,
+        monkeypatch: MonkeyPatch,
+        langsmith_config: DictConfig,
+    ) -> None:
+        pytest.importorskip("langsmith")
+        from langsmith.utils import LangSmithConflictError
+
+        import nemo_gym.exporters.langsmith as langsmith_module
+
+        client = MagicMock()
+        client.has_dataset.return_value = True
+        client.read_dataset.return_value.id = "dataset-1"
+        client.create_project.return_value.id = "experiment-1"
+        client.create_feedback.side_effect = LangSmithConflictError("feedback already exists")
+        monkeypatch.setattr(
+            langsmith_module,
+            "Client",
+            MagicMock(return_value=client),
+        )
+
+        exporter = langsmith_module.LangSmithExporter(langsmith_config)
+        exporter.setup()
+        exporter._log_rollouts(
+            [
+                {
+                    "responses_create_params": {
+                        "input": [{"role": "user", "content": "What is 2 + 2?"}],
+                    },
+                    "response": {"output_text": "4"},
+                    "reward": 0.75,
+                    "_ng_task_index": 7,
+                    "_ng_rollout_index": 0,
+                    "agent_ref": {"name": "deep-agent"},
+                    "task_source": "math",
+                }
+            ]
+        )
+
+        run_id = client.create_run.call_args.kwargs["id"]
+        feedback_id = langsmith_module._stable_uuid(
+            run_id,
+            "feedback",
+            "reward",
+        )
+
+        client.update_feedback.assert_called_once_with(
+            feedback_id,
+            score=0.75,
+        )
+
     def test_teardown_ends_experiment_closes_client_and_is_idempotent(
         self, monkeypatch: MonkeyPatch, langsmith_config: DictConfig
     ) -> None:
