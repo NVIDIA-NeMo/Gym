@@ -76,8 +76,9 @@ Size the pod for ONE Python session: limits `NS_SANDBOX_SESSION_CPU_LIMIT` /
 `..._DISK_REQUEST_GIB` (1 / 2048 / 5; one IPython session is one Python process). The
 pod runs a single HTTP worker (`NUM_WORKERS=1`) with OMP/BLAS thread caps derived from
 the cpu limit. Every sandbox carries the pod labels
-`nemo.nvidia.com/resources: custom` and `nemo-gym.nvidia.com/purpose:
-ns-tools-per-session` (`metadata`, extendable in the yaml); the first one exempts the
+`nemo.nvidia.com/resources: custom` and `purpose: ns-tools-per-session` (`metadata`,
+extendable in the yaml; the provider adds its `nemo-gym.nvidia.com/*` attribution
+labels); the first one exempts the
 pod from the request-clamping admission policy on the NeMo cells so the requests
 are honoured. `NS_SANDBOX_CREATE_CONCURRENCY` (64) bounds concurrent creates at a
 batch start; `NS_SANDBOX_POOL_SIZE` is rejected in this mode. `NS_SANDBOX_POOL_REF`
