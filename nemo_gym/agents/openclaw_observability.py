@@ -41,6 +41,7 @@ def discover_openclaw_session_tree(
     agents_root: Path,
     root_session_id: str,
 ) -> tuple[OpenClawSessionTree, list[ObservationGap]]:
+    """Read exact retained-session lineage from OpenClaw's session stores."""
     agents_root = agents_root.resolve()
     stores = sorted(
         store
@@ -174,6 +175,7 @@ def build_openclaw_observation_tree(
     *,
     model_ref: ModelServerRef | None = None,
 ) -> AgentObservationBundle:
+    """Combine per-session observations after exact store-based lineage discovery."""
     combined = AgentObservationBundle(source=OPENCLAW_OBSERVATION_SOURCE)
     for invocation_id, parent_id, conversation, events in sessions:
         events = list(events)
@@ -211,6 +213,7 @@ def _timestamp(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)) and isfinite(value) and value >= 0:
+        # Current Unix timestamps are ~1e9 seconds or ~1e12 milliseconds.
         return float(value) / 1000 if value >= _MILLISECOND_EPOCH_THRESHOLD else float(value)
     if isinstance(value, str):
         try:
@@ -224,6 +227,8 @@ def _timestamp(value: Any) -> float | None:
 def _model_visible_tool_calls(
     conversation: Iterable[NeMoGymResponseInputItem],
 ) -> list[tuple[str, str | None]]:
+    """Return model-visible call IDs and tool names."""
+
     def field(item: Any, name: str) -> Any:
         return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
 
