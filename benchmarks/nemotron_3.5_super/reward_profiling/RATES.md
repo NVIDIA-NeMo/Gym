@@ -160,6 +160,38 @@ That is roughly twice the 16,540 GPU-hours estimated from the 16-GPU run (186 vs
 2.5x the GPUs bought about 1.25x the throughput. **Fix the router and the sandbox tier before
 adding decode nodes**; until those move, extra decode nodes are idle capacity.
 
+## P2D8 after the router and sandbox fixes (job 7061265, 2026-09-10)
+
+Same shape and same input as 6706202 above, resumed from its 25,494 rollouts, with the
+`vllm_router` block and the multi-node sandbox tier in place. Measured over a 553 s steady-state
+window about 25 min into collection:
+
+| | old (6706202) | fixed (7061265) |
+|---|---|---|
+| rollouts/hr | 7,431 | **45,452** |
+| per GPU-hr | 186 | **1,136** |
+| MB/hr | 505 | **2,048** |
+| `ClientOSError` (the `Hit N global` counter) | **483,000** | **0** |
+| GPU KV cache usage | 4.5% | 3.3% |
+| sandbox concurrency | 32 (1 node) | 640 (10 nodes x 64) |
+
+Rollouts/hr is 6.1x and MB/hr is 4.1x; the difference between those two is composition, because the
+environments in flight during this window average 45.1 KB/rollout against the old run's 67.9. **Take
+the 4.1x as the throughput result**, and treat both as early-phase: the old figure is an average
+over 3.43 h including tail decay, this one is a window before any decay.
+
+The connection errors are gone outright rather than reduced. Note this did not reproduce at small
+scale -- the P1D2 smoke (job 7060112) still logged 39,300 with the identical router settings -- so
+the error mechanism is still not fully understood, and the counter is worth watching on every run.
+
+Still **6 of 36 environments** in flight at a time, the same as before: the driver works a handful
+of contiguous regions of the input concurrently, and that is unchanged by these fixes. It now moves
+through them roughly six times faster. `stem_mcqa_tools_ultra_0` is among them at 3,268 rollouts,
+against zero for every sandbox environment in the old run -- the clearest single sign the sandbox
+tier was the binding constraint for that lane.
+
+KV cache usage did *not* rise, so the GPUs are still not the limit even at 6x the rollout rate.
+
 ## Caveats
 
 - **Every rate is a floor, but the client semaphore is no longer the reason.** Each decode engine
