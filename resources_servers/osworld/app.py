@@ -88,7 +88,7 @@ _MAXIMIZE_OFFICE_SCRIPT = (
     "export DISPLAY=:0; "
     "fit() { wmctrl -lG 2>/dev/null | grep -iE 'libreoffice|calc|writer|impress|draw|gimp' | "
     "while read wid rest; do "
-    "wmctrl -i -r \"$wid\" -b add,maximized_vert,maximized_horz 2>/dev/null; done; }; "
+    'wmctrl -i -r "$wid" -b add,maximized_vert,maximized_horz 2>/dev/null; done; }; '
     "sleep 4; fit; sleep 3; fit; sleep 2; "
     "echo WINDOW_FITTED; wmctrl -lG 2>/dev/null | grep -iE 'libreoffice|calc|writer|impress|draw|gimp'"
 )
@@ -104,12 +104,12 @@ _SAVE_CONFIG_SCRIPT = (
     "export DISPLAY=:0; "
     "XCU=$HOME/.config/libreoffice/4/user/registrymodifications.xcu; "
     'mkdir -p "$(dirname "$XCU")"; '
-    "[ -f \"$XCU\" ] || printf '<?xml version=\"1.0\" encoding=\"UTF-8\"?>\\n"
+    '[ -f "$XCU" ] || printf \'<?xml version="1.0" encoding="UTF-8"?>\\n'
     '<oor:items xmlns:oor="http://openoffice.org/2001/registry">\\n</oor:items>\\n\' > "$XCU"; '
-    "grep -q WarnAlienFormat \"$XCU\" || sed -i "
-    "'s#</oor:items>#<item oor:path=\"/org.openoffice.Office.Common/Save/Document\">"
+    'grep -q WarnAlienFormat "$XCU" || sed -i '
+    '\'s#</oor:items>#<item oor:path="/org.openoffice.Office.Common/Save/Document">'
     '<prop oor:name="WarnAlienFormat" oor:op="fuse"><value>false</value></prop></item>'
-    "</oor:items>#' \"$XCU\"; "
+    '</oor:items>#\' "$XCU"; '
     # LibreOffice reads registrymodifications only at process start. A boot-time quickstarter
     # (or any soffice already up) would keep the warning ON in memory, so kill it — the task's
     # own open_file then launches a fresh instance that picks up WarnAlienFormat=false.
@@ -129,15 +129,15 @@ _GUEST_PREP_SCRIPT = (
     # to the existing registrymodifications so other settings are preserved.
     "XCU=$HOME/.config/libreoffice/4/user/registrymodifications.xcu; "
     'mkdir -p "$(dirname "$XCU")"; '
-    "[ -f \"$XCU\" ] || printf '<?xml version=\"1.0\" encoding=\"UTF-8\"?>\\n"
+    '[ -f "$XCU" ] || printf \'<?xml version="1.0" encoding="UTF-8"?>\\n'
     '<oor:items xmlns:oor="http://openoffice.org/2001/registry">\\n</oor:items>\\n\' > "$XCU"; '
     # FirstRun/TipOfTheDay do NOT control the "Get Involved" / "Donate" info bars (live-verified
     # in calc-v10: bars present with FirstRun=false written). Those are governed by the
     # LastTimeGetInvolvedShown / LastTimeDonateShown epochs — set them far in the future
     # (2100-01-01) so the bars never fire. The bars animate in a few seconds after the document
     # opens, shifting the grid ~80px mid-think and desyncing the agent's click coordinates.
-    "grep -q '\"FirstRun\"' \"$XCU\" || sed -i "
-    "'s#</oor:items>#<item oor:path=\"/org.openoffice.Office.Common/Misc\">"
+    'grep -q \'"FirstRun"\' "$XCU" || sed -i '
+    '\'s#</oor:items>#<item oor:path="/org.openoffice.Office.Common/Misc">'
     '<prop oor:name="FirstRun" oor:op="fuse"><value>false</value></prop></item>'
     '<item oor:path="/org.openoffice.Office.Common/Misc"><prop oor:name="ShowTipOfTheDay" '
     'oor:op="fuse"><value>false</value></prop></item>'
@@ -145,7 +145,7 @@ _GUEST_PREP_SCRIPT = (
     'oor:op="fuse"><value>4102444800</value></prop></item>'
     '<item oor:path="/org.openoffice.Office.Common/Misc"><prop oor:name="LastTimeDonateShown" '
     'oor:op="fuse"><value>4102444800</value></prop></item>'
-    "</oor:items>#' \"$XCU\"; "
+    '</oor:items>#\' "$XCU"; '
     "python3 -c \"import pyautogui; pyautogui.FAILSAFE=False; pyautogui.press('escape')\" 2>/dev/null; "
     "echo GUEST_PREPPED"
 )
@@ -423,7 +423,9 @@ class OSWorldResourcesServer(SimpleResourcesServer):
                 pass
             await asyncio.sleep(self.config.poll_interval_s)
         if not rendered:
-            logger.warning("OSWorld desktop did not exceed %d bytes; proceeding anyway", self.config.screenshot_min_bytes)
+            logger.warning(
+                "OSWorld desktop did not exceed %d bytes; proceeding anyway", self.config.screenshot_min_bytes
+            )
 
         # 3) Always: make xlsx saves silent so the agent's formatting persists (see
         #    _SAVE_CONFIG_SCRIPT). Independent of the OOD popup/window prep below.
@@ -629,9 +631,7 @@ class OSWorldResourcesServer(SimpleResourcesServer):
             res = await self._guest_request(sandbox_state, "GET", "/screenshot")
             is_png = res.content.startswith(b"\x89PNG\r\n\x1a\n")
             if res.status == 200 and is_png:
-                return ScreenshotResponse(
-                    image_base64=base64.b64encode(res.content).decode()
-                )
+                return ScreenshotResponse(image_base64=base64.b64encode(res.content).decode())
             last_error = (
                 f"status={res.status} content_type={res.content_type!r} "
                 f"bytes={len(res.content)} png_signature={is_png}"
@@ -644,10 +644,7 @@ class OSWorldResourcesServer(SimpleResourcesServer):
             )
             if attempt + 1 < retries:
                 await asyncio.sleep(min(2.0 * (attempt + 1), 8.0))
-        raise RuntimeError(
-            f"OSWorld guest returned no valid PNG screenshot after {retries} attempts: "
-            f"{last_error}"
-        )
+        raise RuntimeError(f"OSWorld guest returned no valid PNG screenshot after {retries} attempts: {last_error}")
 
     async def execute(self, request: Request, body: ExecuteToolRequest) -> Dict[str, Any]:
         sandbox_state = self._get_session_sandbox(request)

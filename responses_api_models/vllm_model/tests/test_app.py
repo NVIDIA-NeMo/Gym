@@ -5169,6 +5169,7 @@ class TestTopLogprobsHandling:
         # The tokenize endpoint must not be reached once the contract check fails.
         mock_client.create_tokenize.assert_not_called()
 
+
 class TestSamplingOverrides:
     """Forcing the sampling params on every request.
 
@@ -5873,6 +5874,7 @@ class TestGenerationProofAcceptsBundleShape:
                     }
                 ],
             }
+
         mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
         mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
         mock_client.create_tokenize = AsyncMock()

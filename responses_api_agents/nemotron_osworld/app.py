@@ -265,7 +265,10 @@ class NemotronOSWorldAgent(SimpleResponsesAPIAgent):
                 with open(os.path.join(debug_dir, f"step_{step_idx:03d}.png"), "wb") as f:
                     f.write(obs["screenshot"])
                 with open(os.path.join(debug_dir, "trace.jsonl"), "a") as f:
-                    f.write(json.dumps({"step": step_idx, "actions": actions, "message": _message_to_text(message)[:4000]}) + "\n")
+                    f.write(
+                        json.dumps({"step": step_idx, "actions": actions, "message": _message_to_text(message)[:4000]})
+                        + "\n"
+                    )
             output_item = {
                 "id": f"msg_{step_idx + 1}",
                 "type": "message",

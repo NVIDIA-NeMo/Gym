@@ -150,10 +150,7 @@ def _extract_model_text(output_items: list[Any]) -> dict[str, str]:
                 if isinstance(part, dict) and part.get("text"):
                     text_parts.append(str(part["text"]))
     if not any(part.strip() for part in text_parts):
-        logger.warning(
-            "Nemotron Responses call produced no assistant output text; "
-            "the rollout will be marked as FAIL"
-        )
+        logger.warning("Nemotron Responses call produced no assistant output text; the rollout will be marked as FAIL")
     return {
         "content": "\n".join(text_parts),
         "reasoning_content": "\n".join(reasoning_parts),
@@ -206,9 +203,7 @@ class NemotronOSWorldCCAgent(NemotronOSWorldAgent):
         session_id = request.session[SESSION_ID_KEY]
         rollout_id = request.cookies.get(_CC_ROLLOUT_ID_COOKIE) or str(session_id)
         resources_name = self.config.resources_server.name
-        resources_cookies = {
-            key: value for key, value in request.cookies.items() if key != _CC_ROLLOUT_ID_COOKIE
-        }
+        resources_cookies = {key: value for key, value in request.cookies.items() if key != _CC_ROLLOUT_ID_COOKIE}
         model_cookies = None
         action_history: list[str] = []
         transcript: list[Any] = []
@@ -232,9 +227,7 @@ class NemotronOSWorldCCAgent(NemotronOSWorldAgent):
                     body,
                     request_input=list(call.request_input),
                     required_prefix_token_ids=(
-                        list(call.required_prefix_token_ids)
-                        if call.required_prefix_token_ids is not None
-                        else None
+                        list(call.required_prefix_token_ids) if call.required_prefix_token_ids is not None else None
                     ),
                 )
                 tokenize_response = await self.server_client.post(
@@ -336,9 +329,7 @@ class NemotronOSWorldCCAgent(NemotronOSWorldAgent):
                         measure_context=measure_context,
                     )
                 except RuntimeError as exc:
-                    if not str(exc).startswith(
-                        "Context guard rejected model call at complete action boundary:"
-                    ):
+                    if not str(exc).startswith("Context guard rejected model call at complete action boundary:"):
                         raise
                     # Exhausting the context budget is a policy-trajectory
                     # outcome, not an infrastructure failure. Preserve the

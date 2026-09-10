@@ -1,4 +1,7 @@
 #!/usr/bin/env -S uv run --no-config --script
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # /// script
 # requires-python = ">=3.12"
 # dependencies = []
@@ -15,6 +18,7 @@ and passes the whole config to the complete upstream OSWorld evaluator at verify
 Usage:
   ./build_osworld_dataset.py <osworld_repo_dir> <out.jsonl> [--meta test_all.json]
 """
+
 import argparse
 import json
 import os

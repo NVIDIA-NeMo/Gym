@@ -196,8 +196,7 @@ def _has_materializable_assistant_output(output_items: list[Any]) -> bool:
             return True
         if item_type == "reasoning":
             if any(
-                isinstance(part, dict) and str(part.get("text") or "").strip()
-                for part in payload.get("summary") or []
+                isinstance(part, dict) and str(part.get("text") or "").strip() for part in payload.get("summary") or []
             ):
                 return True
             continue
@@ -207,8 +206,7 @@ def _has_materializable_assistant_output(output_items: list[Any]) -> bool:
         if isinstance(content, str) and content.strip():
             return True
         if isinstance(content, list) and any(
-            isinstance(part, dict) and str(part.get("text") or "").strip()
-            for part in content
+            isinstance(part, dict) and str(part.get("text") or "").strip() for part in content
         ):
             return True
     return False

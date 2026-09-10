@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Create, probe, screenshot, and delete cell-2 OSWorld sandboxes."""
 
 import argparse
@@ -50,8 +53,7 @@ async def wait_for_guest_ready(
                 if response.status == 200:
                     return
                 last_error = RuntimeError(
-                    f"guest readiness returned HTTP {response.status}: "
-                    f"{(await response.text())[:200]}"
+                    f"guest readiness returned HTTP {response.status}: {(await response.text())[:200]}"
                 )
         except (aiohttp.ClientError, asyncio.TimeoutError) as error:
             last_error = error
@@ -89,10 +91,7 @@ async def wait_for_desktop_ready(
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
             pass
         await asyncio.sleep(5)
-    raise TimeoutError(
-        f"desktop did not become non-black within {timeout_s}s; "
-        f"last_nonblack_ratio={last_ratio:.6f}"
-    )
+    raise TimeoutError(f"desktop did not become non-black within {timeout_s}s; last_nonblack_ratio={last_ratio:.6f}")
 
 
 async def smoke_one(
@@ -138,13 +137,8 @@ async def smoke_one(
                     f"output={payload.get('output', '').strip()!r}"
                 )
 
-            screenshot, nonblack_ratio, size = await wait_for_desktop_ready(
-                session, base_url
-            )
-            print(
-                f"[{index}] desktop ready size={size[0]}x{size[1]} "
-                f"nonblack_ratio={nonblack_ratio:.4f}"
-            )
+            screenshot, nonblack_ratio, size = await wait_for_desktop_ready(session, base_url)
+            print(f"[{index}] desktop ready size={size[0]}x{size[1]} nonblack_ratio={nonblack_ratio:.4f}")
             if screenshot_dir is not None:
                 screenshot_path = screenshot_dir / f"cell2-smoke-{index}.png"
                 screenshot_path.write_bytes(screenshot)
@@ -160,13 +154,9 @@ async def main() -> None:
     if args.screenshot_dir is not None:
         args.screenshot_dir.mkdir(parents=True, exist_ok=True)
     domain = os.environ["OPENSANDBOX_DOMAIN"]
-    api_key = os.environ.get("OPENSANDBOX_API_KEY") or os.environ.get(
-        "OPEN_SANDBOX_API_KEY"
-    )
+    api_key = os.environ.get("OPENSANDBOX_API_KEY") or os.environ.get("OPEN_SANDBOX_API_KEY")
     if not api_key:
-        raise RuntimeError(
-            "Set OPENSANDBOX_API_KEY (or OPEN_SANDBOX_API_KEY) before calling cell-2"
-        )
+        raise RuntimeError("Set OPENSANDBOX_API_KEY (or OPEN_SANDBOX_API_KEY) before calling cell-2")
     pool_ref = os.environ.get("OSWORLD_POOL_REF", "osworld-kvm")
     create_timeout_s = float(os.environ.get("OPENSANDBOX_CREATE_TIMEOUT_S", "300"))
     create_retries = int(os.environ.get("OPENSANDBOX_CREATE_RETRIES", "1"))
@@ -189,10 +179,7 @@ async def main() -> None:
         }
     }
     await asyncio.gather(
-        *(
-            smoke_one(index, provider_config, pool_ref, args.screenshot_dir)
-            for index in range(args.concurrency)
-        )
+        *(smoke_one(index, provider_config, pool_ref, args.screenshot_dir) for index in range(args.concurrency))
     )
 
 
