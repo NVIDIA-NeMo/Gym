@@ -11,70 +11,36 @@ rollouts) via `compute_metrics` / `get_key_metrics` — these live on the agent 
 
 ## Token statistics
 
-Each rollout records `response.usage` summed across all generated sub-steps in that
-problem attempt. Output tokens include the provider's reported reasoning tokens;
-input tokens include prior-step code sent again as context. The response text remains
-the final step's generation.
+`response.usage` sums usage across the problem's sub-steps; response text remains
+the final generation. Output includes reported reasoning tokens, and input includes
+prior-step code sent again as context.
 
-The agent exposes six headline metrics in `key_metrics`:
+For each of `input`, `output`, and `total`, `key_metrics` exposes:
 
 | Metric | Definition |
 | --- | --- |
-| `mean/input_tokens_per_problem` | Total input tokens / problem attempts (also `mean/input_tokens`) |
-| `mean/output_tokens_per_problem` | Total output tokens / problem attempts (also `mean/output_tokens`) |
-| `mean/total_tokens_per_problem` | Total input + output tokens / problem attempts (also `mean/total_tokens`) |
-| `mean/input_tokens_per_subproblem` | Total input tokens / benchmark sub-step count across attempts, excluding prefilled steps |
-| `mean/output_tokens_per_subproblem` | Total output tokens / benchmark sub-step count across attempts, excluding prefilled steps |
-| `mean/total_tokens_per_subproblem` | Total input + output tokens / benchmark sub-step count across attempts, excluding prefilled steps |
+| `mean/<type>_tokens_per_problem` | Token sum / problem attempts; also `mean/<type>_tokens` |
+| `mean/<type>_tokens_per_subproblem` | Token sum / non-prefilled benchmark sub-steps across all attempts |
 
-Repeats count as separate attempts. Sub-step usage is pooled across problems, so
-problems with more steps contribute more observations to the subproblem mean.
-The subproblem denominator is fixed by the benchmark, including the final step,
-context-rejected steps, and skipped remaining steps. Only prefilled reference-code
-steps are excluded. A problem that generates no steps uses zero tokens; a
-collection with no non-prefilled subproblems has a null subproblem mean.
-`generation_coverage` reports generated steps / non-prefilled benchmark steps.
-Report it alongside accuracy and token means: early stopping reduces cost but
-also reduces coverage. For three subproblems, generating only one 1,000-token
-response gives 1,000 output tokens per problem, 333.33 per subproblem, and 1/3
-generation coverage.
+Repeats count separately. The subproblem denominator includes final, rejected, and
+skipped steps; only prefilled steps are excluded. `generation_coverage` is generated
+steps / non-prefilled steps. With no eligible sub-steps, the subproblem mean is null.
 
-Generations that reach an output or context limit **are counted**, including all
-reported tokens and the attempt in the subproblem denominator. A pre-generation
-context-window rejection records zero input, output, and total tokens, as do
-prefilled and skipped steps. Prior generations' usage is still counted.
-If a model adapter turns a rejection into an empty response without usage, that
-response is treated as having unknown usage, rather than assuming zero tokens.
+- Count all reported usage, including incorrect or invalid code and generations
+  that hit a token limit. Incorrect or invalid code does not stop later steps.
+- Pre-generation context rejections, prefilled steps, and skipped steps use zero
+  tokens. Earlier generations still count. Aborted rollouts are excluded from
+  completed-rollout metrics.
+- If any generated response lacks usage, suppress all aggregate token statistics,
+  set the named token means to null, and report `token_usage_complete: false`.
+  Accuracy, coverage, and raw rollout records remain available. Missing optional
+  reasoning/cache breakdowns do not invalidate known input/output/total usage.
 
-Correctness does not filter token usage. The agent generates all sub-steps before
-verification, using its prior generated code even if that code is incorrect.
-For example, two models that each generate three 1,000-output-token sub-steps
-both use 3,000 output tokens per problem and 1,000 per subproblem, whether they
-solve one sub-step correctly or all three. These metrics measure tokens per attempted solution,
-not tokens per correct solution.
+`step_usage` records each step's number, status, and usage. Coverage counts are
+`num_subproblems`, `num_generated_steps`, and `num_steps_with_usage`.
 
-Code extraction does not validate Python syntax: it takes the first code block,
-or the raw response if there is no code fence. Empty or invalid code still counts
-as a generated attempt, with all reported tokens, and does not stop later steps.
-An unexpected exception that aborts the rollout is a run failure; its partial
-usage is not represented in completed-rollout metrics.
-
-Compact `step_usage` records retain each `step_number`, its status (`generated`,
-`prefilled`, `context_window_exceeded`, or `skipped`), and its provider usage. A
-generated step with missing usage has `usage: null` and makes its problem's total
-usage unknown. If even one generated response lacks usage, the aggregate endpoint
-suppresses all generic token statistics (including per-task and per-repeat
-statistics), sets the six named token means to null, and reports
-`token_usage_complete: false`. It preserves raw rollout records for diagnosis;
-accuracy and coverage remain available. `num_subproblems`, `num_generated_steps`,
-and `num_steps_with_usage` expose the counts. Missing reasoning/cache breakdowns
-alone do not invalidate known input/output/total usage.
-
-New rollouts and aggregates carry `token_usage_version: scicode-v1`. Older rollouts
-have no version and their `mean/output_tokens` covers only the final step; they
-cannot be backfilled from rollout files alone. Aggregating legacy-only rollouts
-preserves their existing metrics without adding the six new metrics. Mixing old
-and new accounting versions raises an error to prevent misleading comparisons.
+New records carry `token_usage_version: scicode-v1`. Legacy records contain only
+final-step usage and retain their old metrics. Mixing accounting versions is rejected.
 
 ## Configuration
 
