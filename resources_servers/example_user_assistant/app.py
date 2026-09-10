@@ -14,7 +14,7 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.processors.multi_agent import MultiAgentVerifyRequest, MultiAgentVerifyResponse
+from nemo_gym.processors.user_assistant import UserAssistantVerifyRequest, UserAssistantVerifyResponse
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
@@ -72,7 +72,7 @@ class EpisodeStatusResponse(BaseModel):
     state: dict[str, Any]
 
 
-class ExampleUserAssistantVerifyResponse(MultiAgentVerifyResponse):
+class ExampleUserAssistantVerifyResponse(UserAssistantVerifyResponse):
     preference_satisfied: bool
 
 
@@ -133,7 +133,7 @@ class ExampleUserAssistantServer(SimpleResourcesServer):
     async def verify(
         self,
         request: Request,
-        body: MultiAgentVerifyRequest,
+        body: UserAssistantVerifyRequest,
     ) -> ExampleUserAssistantVerifyResponse:
         state = self._state(request)
         recommendation = state.recommendation

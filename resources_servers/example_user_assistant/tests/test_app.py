@@ -54,22 +54,17 @@ def _response(text: str = "Here is a matching meal.") -> dict:
 def _verify_body() -> dict:
     return {
         "responses_create_params": {"input": "Help the customer."},
-        "participant_responses_create_params": {
-            "user": {"input": "Find a vegetarian meal."},
-        },
+        "user_responses_create_params": {"input": "Find a vegetarian meal."},
         "response": _response(),
-        "focal_participant": "assistant",
-        "participant_trajectories": {
-            "assistant": [
-                {
-                    "turn_index": 0,
-                    "participant": "assistant",
-                    "request": {"input": "Help the customer."},
-                    "response": _response(),
-                }
-            ],
-            "user": [],
-        },
+        "assistant_trajectory": [
+            {
+                "turn_index": 0,
+                "participant": "assistant",
+                "request": {"input": "Help the customer."},
+                "response": _response(),
+            }
+        ],
+        "user_trajectory": [],
         "episode_trajectory": [
             {
                 "sequence": 0,
