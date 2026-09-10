@@ -22,6 +22,7 @@ from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
 from collections.abc import Mapping
 from contextlib import nullcontext
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import timedelta
 from difflib import get_close_matches
@@ -29,6 +30,7 @@ from itertools import repeat
 from pathlib import Path
 from time import time
 from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from uuid import uuid4
 
 import orjson
 from aiohttp import ClientError
@@ -180,6 +182,12 @@ def _has_observation_gap(result: dict[str, Any], code: str) -> bool:
 
 
 def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
+    identity = row.get("trajectory_identity")
+    if isinstance(identity, dict):
+        task_id = identity.get("task_id")
+        rollout_id = identity.get("rollout_id")
+        if isinstance(task_id, str) and task_id and isinstance(rollout_id, str) and rollout_id:
+            return task_id, rollout_id
     task_id = next(
         (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
         str(row[TASK_INDEX_KEY_NAME]),
@@ -822,10 +830,22 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
 
 def _rollout_request_debug_summary(row: Dict[str, Any]) -> Dict[str, Any]:
     agent_ref = row.get(AGENT_REF_KEY_NAME) or {}
+    responses_create_params = row.get("responses_create_params") or {}
+    metadata = responses_create_params.get("metadata") if isinstance(responses_create_params, dict) else {}
+    metadata_purpose = metadata.get("nemo_rl_rollout_purpose") if isinstance(metadata, dict) else None
+    trajectory_identity = row.get("trajectory_identity")
+    if not isinstance(trajectory_identity, dict):
+        trajectory_identity = {}
     summary = {
         TASK_INDEX_KEY_NAME: row.get(TASK_INDEX_KEY_NAME),
         ROLLOUT_INDEX_KEY_NAME: row.get(ROLLOUT_INDEX_KEY_NAME),
+        ROLLOUT_ID_KEY_NAME: row.get(ROLLOUT_ID_KEY_NAME),
+        "sampling_event_id": trajectory_identity.get("sampling_event_id"),
+        "group_id": trajectory_identity.get("group_id"),
+        "rollout_id": trajectory_identity.get("rollout_id"),
         "agent_name": agent_ref.get("name") if isinstance(agent_ref, dict) else None,
+        "rollout_purpose": row.get("rollout_purpose"),
+        "metadata_rollout_purpose": metadata_purpose,
     }
     return {k: v for k, v in summary.items() if v is not None}
 
@@ -1403,7 +1423,6 @@ class RolloutCollectionHelper(BaseModel):
                 # Capture readback recomputes the id from the finished record.
                 # Preserve an explicit id on the result just like the indices.
                 result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
-
             no_persist = bool(result.get(NG_NO_PERSIST_KEY))
             failure_class = result.get(NG_FAILURE_CLASS_KEY)
             # No rollout happened, so there is nothing to capture, tokenize or average.
@@ -1912,9 +1931,22 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         self._validate_agent_names(examples, server_client.global_config_dict)
         self._validate_agent_pairings(examples, server_client.global_config_dict)
         semaphore = semaphore or nullcontext()
+        dispatch_rows = []
+        for source_row in examples:
+            row = deepcopy(source_row)
+            # Reuse Gym's existing capture-correlation field. A caller-supplied
+            # value remains authoritative; otherwise each physical dispatch gets
+            # a fresh value without mutating the caller's source row.
+            row.setdefault(ROLLOUT_ID_KEY_NAME, f"rollout-{uuid4().hex}")
+            dispatch_rows.append(row)
 
         async def _post_subroutine(row: Dict) -> _CompletedRollout:
             async with semaphore:
+                print(
+                    "[rollout_collection] /run dispatch "
+                    f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                    flush=True,
+                )
                 started_at = time()
                 res = None
                 try:
@@ -1944,10 +1976,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     )
 
         return tqdm.as_completed(
-            map(_post_subroutine, examples),
+            map(_post_subroutine, dispatch_rows),
             desc="Collecting rollouts",
             miniters=10,
-            total=len(examples),
+            total=len(dispatch_rows),
             maxinterval=60,
         )
 
@@ -1969,8 +2001,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         that ends every rollout still in flight. It defaults off because those rollouts then leave
         the score.
 
-        Every future resolves to exactly the ``(row, result)`` pair Gym's own `/run` endpoint
-        returned — no Gym-private fields are ever added to ``result``.
+        Every future resolves to the dispatched ``(row, result)`` pair. The copied dispatch row
+        receives a fresh ``_ng_rollout_id`` when the caller did not provide one, so captures can be
+        joined without mutating the source row. Internal-only fields such as rollout latency are
+        not added to ``result``.
         """
 
         async def _without_metadata(future: Future) -> Tuple[Dict, Dict]:

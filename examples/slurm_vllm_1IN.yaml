@@ -34,7 +34,7 @@ driver:
   container: python:3.12 # optional, defaults to the service container
   gym_install:
     ref: main
-  # mounts: 
+  # mounts:
   #   - /lustre/datasets:/data
   benchmarks:
     gpqa:
@@ -51,4 +51,3 @@ driver:
           - benchmarks/ifbench/config.yaml
 job:
   output_path: /lustre/fsw/my-path
-
