@@ -28,6 +28,18 @@ LEGACY_AGENT_ALIASES = {
     f"{legacy}_agent": f"{canonical}_agent" for legacy, canonical in LEGACY_ENVIRONMENT_ALIASES.items()
 }
 
+_MIGRATED_HARNESS_AGENTS = (
+    "claude_code",
+    "cline",
+    "codex",
+    "hermes",
+    "kilocode",
+    "openclaw",
+    "pi",
+    "prime",
+    "terminus_2",
+)
+
 LEGACY_CONFIG_PATH_ALIASES = {
     **{
         f"environments/{legacy}/config.yaml": f"environments/{canonical}/config.yaml"
@@ -40,6 +52,12 @@ LEGACY_CONFIG_PATH_ALIASES = {
     "responses_api_agents/verifiers_agent/configs/acereason-math.yaml": (
         "responses_api_agents/verifiers_agent/configs/verifiers_agent.yaml"
     ),
+    **{
+        f"responses_api_agents/{agent}_agent/configs/{agent}_agent.yaml": (
+            f"responses_api_agents/harness_agent/configs/{agent}_agent.yaml"
+        )
+        for agent in _MIGRATED_HARNESS_AGENTS
+    },
 }
 
 
