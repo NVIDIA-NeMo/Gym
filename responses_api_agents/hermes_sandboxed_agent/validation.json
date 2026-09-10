@@ -1,0 +1,44 @@
+{
+  "gym_base": "86e2252f5",
+  "hermes_tag": "v2026.8.31",
+  "hermes_commit": "29112bef099274229cadff79cdff7bf7b99c4b77",
+  "dataset_revision": "7ab5114912baf22bb098818e604c02fe7ad2c11f",
+  "evaluator_commit": "ca10a60a5fcae51e6948ffe1485d4153d421e6c5",
+  "instance_id": "instance_ansible__ansible-a26c325bd8f6e2822d9d7e62f77a424c1db4fbf6-v0f01c69f1e2528b935359cfe578530722bca2c59",
+  "tests": 149,
+  "cpu_validation": {
+    "cpu_job": 1918309,
+    "elapsed": "00:02:55",
+    "cpus": 8,
+    "memory_gib": 32,
+    "gpus": 0,
+    "metrics": {
+      "attempted": 1,
+      "scored": 0,
+      "excluded": 1,
+      "coverage": 0.0,
+      "accuracy": null,
+      "exclusions_by_kind": {
+        "harness_error": 1
+      }
+    },
+    "reference_tests": {
+      "PASSED": 42
+    },
+    "reference_resolved": true
+  },
+  "harness_failure": {
+    "hermes_finished": false,
+    "hermes_return_code": 1,
+    "hermes_error_type": "runner_exit",
+    "failure_kind": "harness_error",
+    "score_valid": false,
+    "verifier_reward": 0.0,
+    "evaluation_completed": true
+  },
+  "image": {
+    "source_uri": "docker://docker.io/jefzda/sweap-images@sha256:1904c85be697666b9ba0a8ce7d7f7b9ab8fd1a008665da3d9ba3612f51267104",
+    "sif_sha256": "ccabe592672510aad7cfa0b709400357c95c3c87df746be34fa4a45755e3911a"
+  },
+  "live_model_validation": "Not run"
+}

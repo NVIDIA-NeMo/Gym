@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
@@ -404,3 +405,86 @@ def test_attempt_budget_takes_the_smaller_of_the_two_ceilings(monkeypatch: Monke
     assert _budget_spent(None) is False
     assert _budget_spent(90.0) is True
     assert _budget_spent(150.0) is False
+
+
+def test_local_image_template_preserves_case() -> None:
+    server = make_server(golden=False, image_template="/sifs/{dockerhub_tag}.sif")
+    body = SWEBenchProInstanceRequest.model_validate(
+        request_body() | {"dockerhub_tag": "org.Repo-ABC", "image_digest": "sha256:" + "a" * 64}
+    )
+    assert server._image(body) == "/sifs/org.Repo-ABC.sif"
+
+
+@pytest.mark.asyncio
+async def test_command_harness_seeds_without_pty_and_receives_reconnect_descriptor() -> None:
+    server = make_server(golden=False)
+    descriptor = {"sandbox_id": "sandbox-id", "workdir": "/app", "staging_dir": "/tmp/shared"}
+    sandbox = SimpleNamespace(
+        _handle=SimpleNamespace(sandbox_id="sandbox-id"),
+        _provider=SimpleNamespace(connect=AsyncMock(), serialize_handle=AsyncMock()),
+        serialize=AsyncMock(return_value=descriptor),
+        pty=fake_pty(),
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
+        upload=AsyncMock(),
+        stop=AsyncMock(),
+    )
+    server._create_sandbox = AsyncMock(return_value=sandbox)
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+    body = SWEBenchProSeedSessionRequest.model_validate(request_body() | {"create_pty": False})
+
+    response = await server.seed_session(request, body)
+
+    sandbox.pty.create.assert_not_awaited()
+    assert response.sandbox_descriptor == descriptor
+    assert "pty_session_id" not in response.model_dump()
+    assert response.cleanup_url_path == "/close_session"
+    assert server._session_id_to_sandbox["session"] is sandbox
+    assert server._session_id_to_pty == {}
+
+    # An agent that fails before verification must still release the benchmark's state.
+    await server.close_session(request)
+    await server.close_session(request)
+    sandbox.stop.assert_awaited_once()
+    assert server._session_id_to_sandbox == {}
+    assert server._session_id_to_pristine_untracked == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("create_pty", [False, True])
+async def test_failed_seed_releases_container_and_optional_terminal(create_pty) -> None:
+    server = make_server(golden=False)
+    sandbox = SimpleNamespace(pty=fake_pty(), upload=AsyncMock(side_effect=OSError("upload failed")), stop=AsyncMock())
+    server._create_sandbox = AsyncMock(return_value=sandbox)
+    request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
+    body = SWEBenchProSeedSessionRequest.model_validate(request_body() | {"create_pty": create_pty})
+
+    with pytest.raises(OSError, match="upload failed"):
+        await server.seed_session(request, body)
+
+    sandbox.stop.assert_awaited_once()
+    if create_pty:
+        sandbox.pty.create.return_value.close.assert_awaited_once()
+    else:
+        sandbox.pty.create.assert_not_awaited()
+    assert server._session_id_to_sandbox == {}
+    assert server._session_id_to_pty == {}
+    assert server._session_id_to_pristine_untracked == {}
+
+
+def test_close_session_endpoint_cleans_up_matching_cookie_only() -> None:
+    server = make_server(golden=False)
+    mine = SimpleNamespace(stop=AsyncMock())
+    other = SimpleNamespace(stop=AsyncMock())
+    app = server.setup_webserver()
+
+    @app.post("/test_seed")
+    async def seed(request: Request):
+        server._session_id_to_sandbox = {request.session[SESSION_ID_KEY]: mine, "other": other}
+        return {"seeded": True}
+
+    client = TestClient(app)
+    assert client.post("/test_seed").status_code == 200
+    response = client.post("/close_session", json={})
+    assert response.status_code == 200 and response.json() == {"closed": True}
+    mine.stop.assert_awaited_once()
+    other.stop.assert_not_awaited()

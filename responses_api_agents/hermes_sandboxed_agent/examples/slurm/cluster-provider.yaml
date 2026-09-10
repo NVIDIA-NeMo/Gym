@@ -1,0 +1,13 @@
+sandbox:
+  apptainer:
+    create:
+      extra_start_args: [--userns, --no-mount, 'home,cwd,tmp,proc']
+      writable_overlay: true
+      overlay_root: ${oc.env:HERMES_OVERLAY_ROOT}
+      apply_resource_limits: false
+    exec:
+      default_timeout_s: 1800
+      timeout_grace_s: 30
+      default_binds:
+        - /proc:/proc
+        - ${oc.env:HERMES_RUNTIME_DIR}:/opt/hermes:ro

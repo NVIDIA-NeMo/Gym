@@ -16,8 +16,10 @@
 import json
 import shlex
 import shutil
+import socket
 from pathlib import Path
 from typing import Any, Callable
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -35,6 +37,92 @@ pytestmark = pytest.mark.sandbox
 
 
 FAKE_BINARY = "/usr/bin/apptainer"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_code", [0, 1])
+async def test_disk_overlay_is_serialized_and_cleaned(fake_binary, monkeypatch, tmp_path, exit_code):
+    provider, rec = _make_provider(
+        monkeypatch,
+        lambda argv: (exit_code, "", "failed"),
+        create={"writable_overlay": True, "overlay_root": str(tmp_path)},
+        probe={"command": None},
+    )
+    if exit_code:
+        with pytest.raises(apptainer_provider.ApptainerCreateError):
+            await provider.create(SandboxSpec(image="test"))
+    else:
+        handle = await provider.create(SandboxSpec(image="test"))
+        descriptor = await provider.serialize_handle(handle)
+        assert descriptor["overlay_dir"] == str(handle.raw.overlay_dir)
+        assert handle.raw.overlay_dir.is_dir()
+        await provider.close(handle)
+    argv = rec.calls[0]["argv"]
+    overlay = Path(argv[argv.index("--overlay") + 1])
+    assert overlay.parent == tmp_path  # Independent of TMPDIR and tempfile's cached default.
+    assert "--writable-tmpfs" not in argv and not overlay.exists()
+
+
+@pytest.mark.parametrize("root", [None, "relative/path"])
+def test_writable_overlay_requires_explicit_absolute_root(root):
+    with pytest.raises(ValueError, match="absolute create.overlay_root"):
+        apptainer_provider.ApptainerCreateConfig(writable_overlay=True, overlay_root=root)
+
+
+@pytest.mark.asyncio
+async def test_failed_readiness_probe_removes_disk_overlay(fake_binary, monkeypatch, tmp_path):
+    provider, rec = _make_provider(
+        monkeypatch,
+        lambda argv: (0, "", ""),
+        create={"writable_overlay": True, "overlay_root": str(tmp_path)},
+    )
+    with pytest.raises(apptainer_provider.ApptainerCreateVerificationError):
+        await provider.create(SandboxSpec(image="test"))
+    start = rec.calls[0]["argv"]
+    assert not Path(start[start.index("--overlay") + 1]).exists()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_preserves_workdir_environment_and_transfers(fake_binary, tmp_path, monkeypatch):
+    import tempfile
+
+    from nemo_gym.sandbox import AsyncSandbox
+
+    staging = Path(tempfile.mkdtemp(prefix="nemo-gym-apptainer-", dir=tmp_path))
+    creator = apptainer_provider.ApptainerProvider()
+    original = AsyncSandbox(creator, SandboxSpec(workdir="/testbed"))
+    original._handle = _make_handle(staging, name="nemo-gym-" + "a" * 32, env={"OMP_NUM_THREADS": "2"})
+    original._stopped = False
+    descriptor = json.loads(json.dumps(await original.serialize()))
+    receiver = apptainer_provider.ApptainerProvider()
+    monkeypatch.setattr(receiver, "status", AsyncMock(return_value=SandboxStatus.RUNNING))
+    received = await AsyncSandbox.connect(descriptor, provider=receiver)
+    calls = []
+
+    async def run(argv, **kwargs):
+        calls.append(argv)
+        assert shlex.split(_env_file_path(argv).read_text()) == ["OMP_NUM_THREADS=2"]
+        return 0, "ok", ""
+
+    monkeypatch.setattr(receiver, "_run", run)
+    await received.exec("pwd")
+    assert _contains_seq(calls[0], ["--pwd", "/testbed"])
+    source = tmp_path / "source"
+    source.write_text("payload")
+    await received.upload(source, "/sandbox/transferred")
+    await original.download("/sandbox/transferred", tmp_path / "download")
+    assert (tmp_path / "download").read_text() == "payload"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_rejects_bare_id_or_other_host(fake_binary, tmp_path):
+    provider = apptainer_provider.ApptainerProvider()
+    with pytest.raises(ValueError, match="full serialized descriptor"):
+        await provider.connect({"sandbox_id": "name"})
+    descriptor = await provider.serialize_handle(_make_handle(tmp_path))
+    descriptor["hostname"] = socket.gethostname() + "-other"
+    with pytest.raises(ValueError, match="same host and UID"):
+        await provider.connect(descriptor)
 
 
 # --------------------------------------------------------------------------- #

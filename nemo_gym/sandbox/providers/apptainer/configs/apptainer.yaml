@@ -1,0 +1,12 @@
+# Agent and resources workers must run on the same host, UID and mount namespace.
+sandbox:
+  apptainer:
+    create:
+      extra_start_args: [--fakeroot, --containall]
+      writable_overlay: true
+      overlay_root: ???  # Required: an existing absolute directory on disk, not tmpfs.
+      apply_resource_limits: false  # Slurm bounds the containing CPU allocation.
+    exec:
+      default_timeout_s: 1800
+      timeout_grace_s: 30
+      default_binds: []  # Set to ["/host/hermes-runtime:/opt/hermes:ro"].
