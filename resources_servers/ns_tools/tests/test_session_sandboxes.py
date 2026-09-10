@@ -261,6 +261,36 @@ class TestRouting:
         asyncio.run(main())
         assert len(_FakeSandbox.instances) == 1
 
+    def test_first_call_waits_a_bounded_time_for_the_create_and_the_next_call_reuses_it(self):
+        sessions = _sessions(create_wait_timeout_s=0.02)
+        _FakeSandbox.start_delay_s = 0.08
+
+        async def main():
+            current_session_id.set("rollout-A")
+            with pytest.raises(httpx.TimeoutException, match="still being created"):
+                await sessions.route("ipy-1")
+            # the create was not abandoned: it is still tracked and finishes on its own
+            assert sessions.live_count == 1
+            await asyncio.sleep(0.1)
+            sandbox = await sessions.route("ipy-1")
+            assert sandbox is _FakeSandbox.instances[0] and sandbox.stops == 0
+
+        asyncio.run(main())
+        assert len(_FakeSandbox.instances) == 1
+
+    def test_first_request_on_a_fresh_sandbox_gets_the_longer_timeout_then_the_caller_timeout(self):
+        sessions = _sessions(first_request_timeout_s=60.0)
+
+        async def main():
+            current_session_id.set("rollout-A")
+            await sessions.request("ipy-1", "POST", "/execute", timeout_s=15.0)
+            await sessions.request("ipy-1", "POST", "/execute", timeout_s=15.0)
+            sandbox = _FakeSandbox.instances[0]
+            first, second = sandbox.commands[-2], sandbox.commands[-1]
+            assert "--max-time 60" in first[0] and "--max-time 15" in second[0]
+
+        asyncio.run(main())
+
     def test_create_failure_keeps_the_timeout_contract_and_allows_retry(self):
         sessions = _sessions()
 

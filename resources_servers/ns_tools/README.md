@@ -81,7 +81,12 @@ extendable in the yaml; the provider adds its `nemo-gym.nvidia.com/*` attributio
 labels); the first one exempts the
 pod from the request-clamping admission policy on the NeMo cells so the requests
 are honoured. `NS_SANDBOX_CREATE_CONCURRENCY` (64) bounds concurrent creates at a
-batch start; `NS_SANDBOX_POOL_SIZE` is rejected in this mode. `NS_SANDBOX_POOL_REF`
+batch start; `NS_SANDBOX_POOL_SIZE` is rejected in this mode. The first tool call of a
+rollout also creates its sandbox: `NS_SANDBOX_CREATE_WAIT_TIMEOUT_S` (270) bounds how
+long that call waits for the create (keep it below the agent-to-server HTTP timeout,
+300 s by default; on expiry the model gets an ordinary tool timeout while the create
+finishes and the next call reuses it) and `NS_SANDBOX_FIRST_REQUEST_TIMEOUT_S` (60)
+is the HTTP timeout of the first request on a fresh sandbox (IPython kernel spawn). `NS_SANDBOX_POOL_REF`
 may still name a prewarmed pool to claim (one claim per session).
 
 `NS_SANDBOX_TRANSPORT` selects how tool requests reach the sandbox's NeMo-Skills

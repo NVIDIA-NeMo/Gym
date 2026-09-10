@@ -33,6 +33,12 @@ ns_tools:
         # Concurrent creates/deletes against the sandbox API (a batch start creates one per session).
         create_concurrency: ${oc.decode:${oc.env:NS_SANDBOX_CREATE_CONCURRENCY,64}}
         delete_concurrency: 64
+        # The FIRST tool call of a rollout also creates the sandbox: how long that call waits for the
+        # create (kept below the agent->server HTTP timeout, 300 s default, so a slow create is a
+        # retryable tool timeout for the model while the create finishes in the background), and the
+        # HTTP timeout of the first request on a fresh sandbox (IPython kernel spawn).
+        create_wait_timeout_s: ${oc.decode:${oc.env:NS_SANDBOX_CREATE_WAIT_TIMEOUT_S,270}}
+        first_request_timeout_s: ${oc.decode:${oc.env:NS_SANDBOX_FIRST_REQUEST_TIMEOUT_S,60}}
         # Sessions that never reach /verify are deleted after this much inactivity.
         session_idle_timeout_s: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_IDLE_TIMEOUT_S,3600}}
         # Sized for ONE Python session (requests are honoured thanks to the custom label below).

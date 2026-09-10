@@ -98,6 +98,7 @@ class _Session:
     created_at: float
     last_used: float
     ipython_sessions: set[str] = field(default_factory=set)
+    served: bool = False  # a request has completed on this sandbox (first-request timeout bump no longer applies)
 
     @property
     def failed(self) -> bool:
@@ -145,6 +146,8 @@ class SessionSandboxes:
         sweep_interval_s: float = 60.0,
         transport: str = "exec",
         http_max_connections: int = 2048,
+        create_wait_timeout_s: float = 270.0,
+        first_request_timeout_s: float = 60.0,
         size: int | None = None,
     ) -> None:
         if size is not None:
@@ -202,6 +205,13 @@ class SessionSandboxes:
         self._sweep_interval_s = float(sweep_interval_s)
         self._transport = transport
         self._http_max_connections = int(http_max_connections)
+        # The first tool call of a rollout also creates its sandbox: wait up to this long for the
+        # create (keep it below the agent->server HTTP client timeout, 300 s by default, so a slow
+        # create surfaces to the model as a tool timeout it can retry instead of a dropped request;
+        # the create keeps running and the next call reuses it) ...
+        self._create_wait_timeout_s = float(create_wait_timeout_s)
+        # ... and give the first request on a fresh sandbox (IPython kernel spawn) a longer HTTP timeout.
+        self._first_request_timeout_s = float(first_request_timeout_s)
         self._http: aiohttp.ClientSession | None = None
 
         self._sessions: dict[str, _Session] = {}
@@ -335,7 +345,18 @@ class SessionSandboxes:
         try:
             # shield: a cancelled tool request must not cancel the creation other
             # requests of the same session are waiting on.
-            ready = await asyncio.shield(entry.task)
+            ready = await asyncio.wait_for(asyncio.shield(entry.task), timeout=self._create_wait_timeout_s)
+        except (asyncio.TimeoutError, TimeoutError):
+            if self._sessions.get(key) is entry and not entry.task.done():
+                LOGGER.warning(
+                    "session sandbox %s still being created after %.0f s; returning a tool timeout, "
+                    "the create continues and the next call reuses it",
+                    key[:8],
+                    self._create_wait_timeout_s,
+                )
+            raise httpx.TimeoutException(
+                f"session sandbox for {key[:8]} still being created after {self._create_wait_timeout_s:.0f}s"
+            )
         except asyncio.CancelledError:
             if entry.task.cancelled():
                 raise httpx.TimeoutException(f"session sandbox for {key[:8]} was ended during creation")
@@ -370,8 +391,13 @@ class SessionSandboxes:
         payload: str | None = None,
     ) -> tuple[int, str]:
         """Send one NS-protocol request to the session's sandbox over the configured transport."""
-        _, ready = await self._route_entry(session_id)
-        return await self._send(ready, method, path, timeout_s=timeout_s, headers=headers, payload=payload)
+        entry, ready = await self._route_entry(session_id)
+        if not entry.served:
+            # First request on a fresh sandbox also spawns the IPython kernel: allow more time.
+            timeout_s = max(float(timeout_s), self._first_request_timeout_s)
+        result = await self._send(ready, method, path, timeout_s=timeout_s, headers=headers, payload=payload)
+        entry.served = True
+        return result
 
     async def request_existing(
         self,
