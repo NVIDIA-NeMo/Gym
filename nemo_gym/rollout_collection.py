@@ -64,7 +64,6 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     allowed_agents_for,
-    dataset_agent_pins,
     get_global_config_dict,
     pairing_override_enabled,
     resolve_dataset_agent,
@@ -1756,9 +1755,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         task_source names the config instance that declared the row's dataset. Resolution is
         :func:`~nemo_gym.global_config.resolve_dataset_agent` — the same rules benchmark
-        discovery uses, so dispatch can never disagree with the listing. Conflicting `agent:`
-        pins across one instance's datasets are a hard error (rows carry only the instance
-        name), as are unknown/non-routable instances; +agent_map is the disambiguator.
+        discovery uses, so dispatch can never disagree with the listing. Unknown or
+        non-routable instances are a hard error, as is a resources server shared by several
+        agents (rows carry only the instance name); +agent_map is the run-time disambiguator.
 
         Rows that already have an agent_ref are left untouched, so this is a no-op on legacy
         datasets and on already-resolved (materialized) rows. Runs before any dispatch.
@@ -1798,15 +1797,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             elif not isinstance(block, DictConfig):
                 errors.append(f"{ts!r}: not a server instance")
             elif "responses_api_agents" in block or "resources_servers" in block:
-                pins = dataset_agent_pins(global_config_dict, ts)
-                if len(pins) > 1:
-                    errors.append(
-                        f"{ts!r}: its datasets pin conflicting agents ({sorted(pins)}), which task_source "
-                        f"alone cannot tell apart; pass +agent_map={{{ts}: <agent>}} to pick one"
-                    )
-                    continue
                 try:
-                    resolution[ts] = resolve_dataset_agent(global_config_dict, ts, pin=pins[0] if pins else None)
+                    resolution[ts] = resolve_dataset_agent(global_config_dict, ts)
                 except ConfigError as e:
                     errors.append(f"{ts!r}: {e}")
             else:

@@ -1633,58 +1633,24 @@ def agents_by_resources_server(global_config_dict: DictConfig) -> Dict[str, List
     return result
 
 
-def dataset_agent_pins(global_config_dict: DictConfig, instance_name: str) -> List[str]:
-    """Distinct dataset-level ``agent:`` pins declared by one server instance, in declaration order."""
-    try:
-        inner = get_first_server_config_dict(global_config_dict, instance_name)
-    except Exception:
-        return []
-    pins: List[str] = []
-    for dataset in inner.get("datasets") or []:
-        if not isinstance(dataset, (dict, DictConfig)):
-            continue
-        pin = dataset.get("agent")
-        if isinstance(pin, str) and pin not in pins:
-            pins.append(pin)
-    return pins
-
-
-def resolve_dataset_agent(
-    global_config_dict: DictConfig, declaring_instance_name: str, pin: Optional[str] = None
-) -> str:
+def resolve_dataset_agent(global_config_dict: DictConfig, declaring_instance_name: str) -> str:
     """Resolve the agent that runs a dataset declared by ``declaring_instance_name``.
 
     Single source of truth for dataset -> agent routing, shared by benchmark discovery,
     preparation, manifest validation, and rollout dispatch, so they can never disagree.
-    First hit wins:
 
-    1. ``pin`` (the dataset's ``agent:`` key) — validated: it must name the declaring agent
-       itself, or an agent referencing the declaring resources server. Anything else is a hard
-       error, never a silent re-route (rows carry only the declaring instance name).
-    2. The declaring agent block itself.
-    3. The unique agent referencing the declaring resources server; zero or 2+ is a hard error.
+    1. A dataset declared on an agent block runs on that agent.
+    2. A dataset declared on a resources server runs on the unique agent referencing it.
+       Zero or 2+ referencing agents is a hard error: the config has to say which harness
+       runs the rows (``fan_out`` to run all of them, ``agent_map`` for a one-off, or declare
+       the dataset on the agent). Rows carry only the declaring instance name, so nothing
+       downstream can disambiguate silently.
     """
     block = global_config_dict.get(declaring_instance_name)
-    is_agent = isinstance(block, DictConfig) and "responses_api_agents" in block
-
-    if is_agent:
-        if pin is not None and pin != declaring_instance_name:
-            raise ConfigError(
-                f"dataset declared by agent {declaring_instance_name!r} pins agent {pin!r}, but rows are "
-                f"dispatched to the declaring agent, so the pin would silently not apply. Drop the `agent:` "
-                "key, or declare the dataset on the resources server and pin there."
-            )
+    if isinstance(block, DictConfig) and "responses_api_agents" in block:
         return str(declaring_instance_name)
 
     candidates = agents_by_resources_server(global_config_dict).get(str(declaring_instance_name), [])
-    if pin is not None:
-        if pin not in candidates:
-            raise ConfigError(
-                f"the dataset pins agent {pin!r}, but no agent of that name references resources server "
-                f"{declaring_instance_name!r} (rows are dispatched along the agent -> resources server edge). "
-                f"Agents referencing it: {sorted(candidates) if candidates else 'none'}."
-            )
-        return pin
     if not candidates:
         raise ConfigError(
             f"no agent in the running config references resources server {declaring_instance_name!r}. "
@@ -1692,9 +1658,9 @@ def resolve_dataset_agent(
         )
     if len(candidates) > 1:
         raise ConfigError(
-            f"{len(candidates)} agents reference this resources server ({sorted(candidates)}). "
-            "Pin the harness with an `agent:` key on the dataset declaration, or pass "
-            f"+agent_map={{{declaring_instance_name}: <agent>}} to pick one at run time."
+            f"{len(candidates)} agents reference this resources server ({sorted(candidates)}), so the rows "
+            f"have no single harness. Pass +agent_map={{{declaring_instance_name}: <agent>}} to pick one at "
+            f"run time, add a `fan_out` entry to run all of them, or declare the dataset on the agent."
         )
     return candidates[0]
 
