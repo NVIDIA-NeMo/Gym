@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional
 
 import yaml
 from fastapi import FastAPI
@@ -155,10 +155,6 @@ class OmniscienceConfig(BaseResourcesServerConfig):
 
 class OmniscienceRunRequest(TaskData, BaseRunRequest):
     model_config = ConfigDict(extra="allow")
-
-    id: Optional[Union[int, str]] = None
-    question: Optional[str] = None
-    expected_answer: Optional[str] = None
 
 
 class OmniscienceVerifyRequest(OmniscienceRunRequest, BaseVerifyRequest):

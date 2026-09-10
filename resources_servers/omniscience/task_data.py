@@ -2,20 +2,40 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-data schema for the omniscience server.
 
-Judge-QA family heir: extends simpleqa's ``TaskData`` (optional id/question/expected_answer,
-all read defensively by the LLM-judge ``verify()``) with ``domain``/``topic`` provenance
-columns. Required-ness mirrors ``OmniscienceRunRequest`` (app.py): every task field is Optional
-on the wire with ``extra="allow"``.
+An optional id/question/expected_answer, all read defensively by the LLM-judge ``verify()``, plus
+``domain``/``topic`` provenance columns. Required-ness mirrors ``OmniscienceRunRequest`` (app.py):
+every task field is Optional on the wire with ``extra="allow"``.
 """
 
-from typing import Optional
+from typing import Optional, Union
 
-from pydantic import Field
-
-from resources_servers.simpleqa.task_data import TaskData as SimpleQATaskData
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class TaskData(SimpleQATaskData):
+class TaskData(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: Optional[Union[int, str]] = Field(
+        default=None,
+        description="Ride-along task identifier; never read by verify() or metrics.",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
+    question: Optional[str] = Field(
+        default=None,
+        description=(
+            "Question text interpolated into the LLM-judge prompt ({question} placeholder); "
+            "verify() falls back to '' when absent."
+        ),
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
+    expected_answer: Optional[str] = Field(
+        default=None,
+        description=(
+            "Ground-truth answer interpolated into the judge prompt ({expected_answer} placeholder) and "
+            "echoed on the verify response; verify() falls back to '' when absent."
+        ),
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
     domain: Optional[str] = Field(
         default=None,
         description=(

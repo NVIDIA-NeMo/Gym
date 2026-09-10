@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import List, Literal, Optional, Union
+from typing import List, Literal, Optional
 
 import yaml
 from pydantic import ConfigDict, Field
@@ -211,10 +211,6 @@ class FrontierScienceJudgeConfig(BaseResourcesServerConfig):
 
 class FrontierScienceJudgeRunRequest(TaskData, BaseRunRequest):
     model_config = ConfigDict(extra="allow")
-
-    id: Optional[Union[int, str]] = None
-    question: Optional[str] = None
-    expected_answer: Optional[str] = None
 
 
 class FrontierScienceJudgeVerifyRequest(FrontierScienceJudgeRunRequest, BaseVerifyRequest):

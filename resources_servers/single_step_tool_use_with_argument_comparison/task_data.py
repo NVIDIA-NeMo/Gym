@@ -7,10 +7,6 @@ message / function_call / function_call_batch actions that verify() compares the
 against. The action models mirror ``common/verification_utils.py`` field-for-field (including the
 ``min_length=1`` constraint on batch calls) but are redeclared here so this module stays a
 dependency-light leaf importable without the server's requirements.
-
-This file is the parent of the expected-action schema family: ``terminal_multi_harness`` imports
-the message/function_call variants (its batch variant differs), and ``swe_pivot``'s untyped
-``expected_action`` dict carries the same function_call shape.
 """
 
 from typing import Annotated, List, Literal, TypeAlias, Union

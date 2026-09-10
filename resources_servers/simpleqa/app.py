@@ -33,7 +33,7 @@ Computes:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional
 
 import yaml
 from pydantic import ConfigDict, Field
@@ -136,9 +136,6 @@ class SimpleQAConfig(BaseResourcesServerConfig):
 
 class SimpleQARunRequest(TaskData, BaseRunRequest):
     model_config = ConfigDict(extra="allow")
-
-    id: Optional[Union[int, str]] = None
-    question: Optional[str] = None
 
 
 class SimpleQAVerifyRequest(SimpleQARunRequest, BaseVerifyRequest):

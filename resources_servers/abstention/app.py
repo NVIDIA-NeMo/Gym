@@ -31,7 +31,7 @@ INCORRECT, or NOT_ATTEMPTED. NOT_ATTEMPTED is treated as implicit abstention.
 from __future__ import annotations
 
 import re
-from typing import List, Optional, Union
+from typing import List, Optional
 
 from fastapi import FastAPI
 from pydantic import ConfigDict, Field
@@ -266,9 +266,6 @@ class AbstentionConfig(BaseResourcesServerConfig):
 
 class AbstentionRunRequest(TaskData, BaseRunRequest):
     model_config = ConfigDict(extra="allow")
-
-    id: Optional[Union[int, str]] = None
-    question: Optional[str] = None
 
 
 class AbstentionVerifyRequest(AbstentionRunRequest, BaseVerifyRequest):
