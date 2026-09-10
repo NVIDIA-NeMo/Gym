@@ -30,10 +30,17 @@ echo "Head node IP address: $HEAD_NODE_IP\""""
 
 ENSURE_RAY_INSTALLED = 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"'
 
+# ray symmetric-run's default node-join wait (RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT) is only 30s,
+# too short once each node has to pull a large container image before Ray can even start there.
+RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S = 600
+
 
 _VLLM_RAY_SYMMETRIC_RUN = (
     """\
 bash -lc '
+    export RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT="""
+    + str(RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S)
+    + """
     """
     + ENSURE_RAY_INSTALLED
     + """

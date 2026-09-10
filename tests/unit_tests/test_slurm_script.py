@@ -237,6 +237,14 @@ def test_build_vllm_ray_command_installs_ray_if_missing(vllm_service):
     assert 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"' in cmd
 
 
+def test_build_vllm_ray_command_raises_symmetric_run_node_wait_timeout(vllm_service):
+    # Regression test: ray symmetric-run's default 30s node-join wait is too short for slow image
+    # pulls, and this must be exported before `ray symmetric-run` runs.
+    cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
+    assert "export RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT=" in cmd
+    assert cmd.index("export RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT=") < cmd.index("ray symmetric-run")
+
+
 # ---------------------------------------------------------------------------
 # _build_vllm_ray_command - multiple instances (data parallel) span nodes
 # ---------------------------------------------------------------------------
