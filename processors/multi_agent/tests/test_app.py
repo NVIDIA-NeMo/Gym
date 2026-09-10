@@ -7,10 +7,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
-from nemo_gym.processors.user_assistant import (
-    UserAssistantProcessor,
-    UserAssistantProcessorConfig,
-    UserAssistantRunRequest,
+from nemo_gym.processors.multi_agent import (
+    MultiAgentProcessor,
+    MultiAgentProcessorConfig,
+    MultiAgentRunRequest,
 )
 from nemo_gym.server_utils import ServerClient
 
@@ -66,24 +66,28 @@ def _user_tool_response() -> dict:
     return response
 
 
-def _processor(*, max_turns: int = 4) -> UserAssistantProcessor:
-    config = UserAssistantProcessorConfig(
+def _processor(*, max_turns: int = 4) -> MultiAgentProcessor:
+    config = MultiAgentProcessorConfig(
         host="127.0.0.1",
         port=12345,
         entrypoint="app.py",
         name="conversation",
-        assistant_agent=AgentServerRef(type="responses_api_agents", name="assistant"),
-        user_agent=AgentServerRef(type="responses_api_agents", name="user"),
+        participants={
+            "assistant": AgentServerRef(type="responses_api_agents", name="assistant"),
+            "user": AgentServerRef(type="responses_api_agents", name="user"),
+        },
+        turn_order=["assistant", "user"],
+        focal_participant="assistant",
         resources_server=ResourcesServerRef(type="resources_servers", name="environment"),
         max_turns=max_turns,
     )
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {"observability_enabled": False}
-    return UserAssistantProcessor(config=config, server_client=client)
+    return MultiAgentProcessor(config=config, server_client=client)
 
 
-def _request() -> UserAssistantRunRequest:
-    return UserAssistantRunRequest(
+def _request() -> MultiAgentRunRequest:
+    return MultiAgentRunRequest(
         responses_create_params={
             "input": [{"role": "developer", "content": "Resolve the user's request."}],
             "tools": [
@@ -96,21 +100,23 @@ def _request() -> UserAssistantRunRequest:
                 }
             ],
         },
-        user_responses_create_params={
-            "input": [{"role": "developer", "content": "Ask for a vegetarian meal."}],
-            "tools": [
-                {
-                    "type": "function",
-                    "name": "save_preference",
-                    "description": "Save a preference.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"diet": {"type": "string"}},
-                        "required": ["diet"],
+        participant_responses_create_params={
+            "user": {
+                "input": [{"role": "developer", "content": "Ask for a vegetarian meal."}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "save_preference",
+                        "description": "Save a preference.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"diet": {"type": "string"}},
+                            "required": ["diet"],
+                        },
+                        "strict": True,
                     },
-                    "strict": True,
-                }
-            ],
+                ],
+            }
         },
     )
 
@@ -161,9 +167,13 @@ async def test_alternates_independent_agents_and_preserves_attribution() -> None
     result = await processor.run(MagicMock(cookies={}), _request())
 
     assert result.reward == 1.0
+    assert result.focal_participant == "assistant"
     assert result.termination_reason == "request_resolved"
-    assert [turn.participant for turn in result.assistant_trajectory] == ["assistant", "assistant"]
-    assert [turn.participant for turn in result.user_trajectory] == ["user"]
+    assert [turn.participant for turn in result.participant_trajectories["assistant"]] == [
+        "assistant",
+        "assistant",
+    ]
+    assert [turn.participant for turn in result.participant_trajectories["user"]] == ["user"]
     assert "What kind of meal would you like?" in result.response.output_text
     assert "vegetarian curry" in result.response.output_text
     assert [event.kind for event in result.episode_trajectory] == [
@@ -254,3 +264,59 @@ async def test_incomplete_agent_response_has_a_structured_termination_reason() -
 
     assert result.termination_reason == "assistant_max_output_tokens"
     assert result.episode_trajectory[-1].data == {"reason": "assistant_max_output_tokens"}
+
+
+@pytest.mark.asyncio
+async def test_round_robins_three_independently_configured_participants() -> None:
+    config = MultiAgentProcessorConfig(
+        host="127.0.0.1",
+        port=12345,
+        entrypoint="app.py",
+        name="conversation",
+        participants={
+            participant: AgentServerRef(type="responses_api_agents", name=participant)
+            for participant in ("planner", "critic", "editor")
+        },
+        turn_order=["planner", "critic", "editor"],
+        focal_participant="planner",
+        resources_server=ResourcesServerRef(type="resources_servers", name="environment"),
+        max_turns=4,
+    )
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"observability_enabled": False}
+    processor = MultiAgentProcessor(config=config, server_client=client)
+    body = MultiAgentRunRequest(
+        responses_create_params={"input": "Plan the answer."},
+        participant_responses_create_params={
+            "critic": {"input": "Critique the plan."},
+            "editor": {"input": "Edit the result."},
+        },
+    )
+    participant_calls = []
+
+    async def post(**kwargs):
+        if kwargs["url_path"] == "/seed_session":
+            return _http_response({}, cookies={"environment": "seeded"})
+        if kwargs["url_path"] == "/episode_status":
+            return _http_response({"terminated": False}, cookies=kwargs["cookies"])
+        if kwargs["url_path"] == "/verify":
+            return _http_response(kwargs["json"] | {"reward": 1.0})
+        participant_calls.append(kwargs)
+        participant = kwargs["server_name"]
+        return _http_response(
+            _model_response(f"{participant}-{len(participant_calls)}", f"{participant} output"),
+            cookies={"environment": participant, f"{participant}_session": "private"},
+        )
+
+    processor.server_client.post = AsyncMock(side_effect=post)
+    result = await processor.run(MagicMock(cookies={}), body)
+
+    assert [call["server_name"] for call in participant_calls] == ["planner", "critic", "editor", "planner"]
+    assert participant_calls[1]["json"].input[-1].content == "planner output"
+    assert participant_calls[2]["json"].input[-1].content == "critic output"
+    assert participant_calls[3]["json"].input[-1].content == "editor output"
+    assert "critic_session" not in participant_calls[2]["cookies"]
+    assert "editor_session" not in participant_calls[3]["cookies"]
+    assert result.focal_participant == "planner"
+    assert set(result.participant_trajectories) == {"planner", "critic", "editor"}
+    assert len(result.participant_trajectories["planner"]) == 2

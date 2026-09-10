@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Multi-turn processing for independently hosted user and assistant agents."""
+"""Round-robin processing for independently hosted Responses API agents."""
 
 from typing import Any, Literal, Optional
 
 from fastapi import Body, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym.agents.responses_api_agent import INTERNAL_TRAJECTORY_KEY
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
@@ -20,7 +20,6 @@ from nemo_gym.processors.base import BaseProcessor, BaseProcessorConfig
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
-Participant = Literal["assistant", "user"]
 EpisodeEventKind = Literal["response_item", "state", "termination"]
 
 
@@ -28,7 +27,7 @@ class ParticipantTurn(BaseModel):
     """One attributed agent invocation, including its exact model-visible input."""
 
     turn_index: int
-    participant: Participant
+    participant: str
     request: NeMoGymResponseCreateParamsNonStreaming
     response: NeMoGymResponse
     agent_trajectory: Optional[dict[str, Any]] = None
@@ -40,7 +39,7 @@ class EpisodeEvent(BaseModel):
     sequence: int
     turn_index: int
     kind: EpisodeEventKind
-    participant: Optional[Participant] = None
+    participant: Optional[str] = None
     data: dict[str, Any]
 
 
@@ -54,38 +53,59 @@ class EpisodeStatus(BaseModel):
     state: dict[str, Any] = Field(default_factory=dict)
 
 
-class UserAssistantRunRequest(BaseRunRequest):
+class MultiAgentRunRequest(BaseRunRequest):
+    """Inputs for the focal participant and every independently configured peer."""
+
     model_config = ConfigDict(extra="allow")
 
-    user_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    participant_responses_create_params: dict[str, NeMoGymResponseCreateParamsNonStreaming] = Field(
+        default_factory=dict
+    )
 
 
-class UserAssistantVerifyRequest(BaseVerifyRequest):
+class MultiAgentVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
 
-    assistant_trajectory: list[ParticipantTurn]
-    user_trajectory: list[ParticipantTurn]
+    focal_participant: str
+    participant_trajectories: dict[str, list[ParticipantTurn]]
     episode_trajectory: list[EpisodeEvent]
     termination_reason: str
     turns_completed: int
 
 
-class UserAssistantVerifyResponse(BaseVerifyResponse):
+class MultiAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
-    assistant_trajectory: list[ParticipantTurn]
-    user_trajectory: list[ParticipantTurn]
+    focal_participant: str
+    participant_trajectories: dict[str, list[ParticipantTurn]]
     episode_trajectory: list[EpisodeEvent]
     termination_reason: str
     turns_completed: int
 
 
-class UserAssistantProcessorConfig(BaseProcessorConfig):
-    assistant_agent: AgentServerRef
-    user_agent: AgentServerRef
+class MultiAgentProcessorConfig(BaseProcessorConfig):
+    participants: dict[str, AgentServerRef] = Field(min_length=2)
+    turn_order: list[str] = Field(min_length=2)
+    focal_participant: str
     resources_server: ResourcesServerRef
     max_turns: int = Field(8, ge=1)
     status_url_path: str = "/episode_status"
+
+    @model_validator(mode="after")
+    def validate_participants(self) -> "MultiAgentProcessorConfig":
+        participant_ids = set(self.participants)
+        turn_ids = set(self.turn_order)
+        unknown = turn_ids - participant_ids
+        if unknown:
+            raise ValueError(f"turn_order references unknown participants: {sorted(unknown)}")
+        missing = participant_ids - turn_ids
+        if missing:
+            raise ValueError(f"turn_order omits configured participants: {sorted(missing)}")
+        if len(turn_ids) != len(self.turn_order):
+            raise ValueError("turn_order must contain each participant exactly once")
+        if self.focal_participant not in participant_ids:
+            raise ValueError(f"focal_participant {self.focal_participant!r} must be present in participants")
+        return self
 
 
 def _input_items(params: NeMoGymResponseCreateParamsNonStreaming) -> list[Any]:
@@ -98,22 +118,42 @@ def _visible_text(response: NeMoGymResponse) -> str:
     return response.output_text.strip()
 
 
-class UserAssistantProcessor(BaseProcessor):
-    """Alternate user and assistant policies over one shared resources-server session."""
+class MultiAgentProcessor(BaseProcessor):
+    """Run independently configured participants in a validated round-robin order."""
 
-    config: UserAssistantProcessorConfig
+    config: MultiAgentProcessorConfig
+
+    def _params_by_participant(
+        self,
+        body: MultiAgentRunRequest,
+    ) -> dict[str, NeMoGymResponseCreateParamsNonStreaming]:
+        if self.config.focal_participant in body.participant_responses_create_params:
+            raise ValueError(
+                "participant_responses_create_params must not contain focal_participant "
+                f"{self.config.focal_participant!r}; use responses_create_params for it"
+            )
+        unknown = set(body.participant_responses_create_params) - set(self.config.participants)
+        if unknown:
+            raise ValueError(f"request contains unknown participants: {sorted(unknown)}")
+        params = {
+            self.config.focal_participant: body.responses_create_params,
+            **body.participant_responses_create_params,
+        }
+        missing = set(self.config.participants) - set(params)
+        if missing:
+            raise ValueError(f"request is missing response parameters for participants: {sorted(missing)}")
+        return params
 
     async def _call_participant(
         self,
         *,
-        participant: Participant,
+        participant: str,
         params: NeMoGymResponseCreateParamsNonStreaming,
-        body: UserAssistantRunRequest,
+        body: MultiAgentRunRequest,
         cookies: Any,
     ) -> tuple[NeMoGymResponse, Optional[dict[str, Any]], dict[str, Any]]:
-        agent_ref = self.config.assistant_agent if participant == "assistant" else self.config.user_agent
         response = await self.server_client.post(
-            server_name=agent_ref.name,
+            server_name=self.config.participants[participant].name,
             url_path=self.url_path_for_run("/v1/responses", body),
             json=params,
             cookies=cookies,
@@ -133,7 +173,8 @@ class UserAssistantProcessor(BaseProcessor):
         await raise_for_status(response)
         return EpisodeStatus.model_validate(await get_response_json(response)), dict(response.cookies)
 
-    async def run(self, request: Request, body: UserAssistantRunRequest) -> UserAssistantVerifyResponse:
+    async def run(self, request: Request, body: MultiAgentRunRequest) -> MultiAgentVerifyResponse:
+        params_by_participant = self._params_by_participant(body)
         environment_cookies = dict(request.cookies)
         seed_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
@@ -144,25 +185,20 @@ class UserAssistantProcessor(BaseProcessor):
         await raise_for_status(seed_response)
         environment_cookies = dict(seed_response.cookies)
         environment_cookie_names = set(environment_cookies)
-        participant_cookies: dict[Participant, dict[str, Any]] = {"assistant": {}, "user": {}}
-
+        participant_cookies: dict[str, dict[str, Any]] = {participant: {} for participant in self.config.participants}
         participant_inputs = {
-            "assistant": _input_items(body.responses_create_params),
-            "user": _input_items(body.user_responses_create_params),
+            participant: _input_items(params) for participant, params in params_by_participant.items()
         }
-        params_by_participant = {
-            "assistant": body.responses_create_params,
-            "user": body.user_responses_create_params,
-        }
-        trajectories: dict[Participant, list[ParticipantTurn]] = {"assistant": [], "user": []}
+        trajectories: dict[str, list[ParticipantTurn]] = {participant: [] for participant in self.config.participants}
         events: list[EpisodeEvent] = []
-        assistant_outputs = []
-        last_assistant_response: Optional[NeMoGymResponse] = None
+        focal_outputs = []
+        last_focal_response: Optional[NeMoGymResponse] = None
         termination_reason = "max_turns"
 
         for turn_index in range(self.config.max_turns):
-            participant: Participant = "assistant" if turn_index % 2 == 0 else "user"
-            counterpart: Participant = "user" if participant == "assistant" else "assistant"
+            order_index = turn_index % len(self.config.turn_order)
+            participant = self.config.turn_order[order_index]
+            next_participant = self.config.turn_order[(order_index + 1) % len(self.config.turn_order)]
             participant_params = params_by_participant[participant].model_copy(
                 deep=True,
                 update={"input": list(participant_inputs[participant])},
@@ -188,9 +224,9 @@ class UserAssistantProcessor(BaseProcessor):
                 )
             )
             participant_inputs[participant].extend(participant_response.output)
-            if participant == "assistant":
-                assistant_outputs.extend(participant_response.output)
-                last_assistant_response = participant_response
+            if participant == self.config.focal_participant:
+                focal_outputs.extend(participant_response.output)
+                last_focal_response = participant_response
 
             for output_item in participant_response.output:
                 events.append(
@@ -205,7 +241,7 @@ class UserAssistantProcessor(BaseProcessor):
 
             visible_text = _visible_text(participant_response)
             if visible_text:
-                participant_inputs[counterpart].append(NeMoGymEasyInputMessage(role="user", content=visible_text))
+                participant_inputs[next_participant].append(NeMoGymEasyInputMessage(role="user", content=visible_text))
             else:
                 incomplete_reason = (
                     participant_response.incomplete_details.reason
@@ -252,25 +288,25 @@ class UserAssistantProcessor(BaseProcessor):
             events.append(
                 EpisodeEvent(
                     sequence=len(events),
-                    turn_index=max(0, len(trajectories["assistant"]) + len(trajectories["user"]) - 1),
+                    turn_index=max(0, sum(len(turns) for turns in trajectories.values()) - 1),
                     kind="termination",
                     data={"reason": termination_reason},
                 )
             )
 
-        if last_assistant_response is None:
-            raise RuntimeError("The assistant did not produce a response.")
+        if last_focal_response is None:
+            raise RuntimeError(f"Focal participant {self.config.focal_participant!r} did not produce a response.")
 
-        assistant_response = last_assistant_response.model_copy(update={"output": assistant_outputs})
-        verify_request = UserAssistantVerifyRequest.model_validate(
+        focal_response = last_focal_response.model_copy(update={"output": focal_outputs})
+        verify_request = MultiAgentVerifyRequest.model_validate(
             body.model_dump(mode="json")
             | {
-                "response": assistant_response.model_dump(mode="json"),
-                "assistant_trajectory": trajectories["assistant"],
-                "user_trajectory": trajectories["user"],
+                "response": focal_response.model_dump(mode="json"),
+                "focal_participant": self.config.focal_participant,
+                "participant_trajectories": trajectories,
                 "episode_trajectory": events,
                 "termination_reason": termination_reason,
-                "turns_completed": len(trajectories["assistant"]) + len(trajectories["user"]),
+                "turns_completed": sum(len(turns) for turns in trajectories.values()),
             }
         )
 
@@ -288,7 +324,7 @@ class UserAssistantProcessor(BaseProcessor):
             )
             await raise_for_status(verify_response)
             result = await get_response_json(verify_response)
-        return UserAssistantVerifyResponse.model_validate(result)
+        return MultiAgentVerifyResponse.model_validate(result)
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         if self.config.skip_verification:

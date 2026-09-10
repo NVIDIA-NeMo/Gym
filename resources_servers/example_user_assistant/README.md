@@ -7,13 +7,13 @@ configured Responses API agents:
 - `example_user` is an isolated NeMo-Sim-backed agent that derives the
   customer's behavioral profile, disclosure style, interaction style, and
   prompt.
-- `example_user_assistant_processor` is dependency-free and owns turn
+- `example_multi_agent_processor` is dependency-free and owns turn
   ordering, termination, and trajectory attribution.
 - `example_user_assistant` owns task-scoped shared state and verification.
 
 The example persona is Morgan Lee, a 42-year-old building inspector whose
 OCEAN traits and demographics are JSON-encoded in
-`user_responses_create_params.metadata.nemo_sim`.
+`participant_responses_create_params.user.metadata.nemo_sim`.
 NeMo-Sim converts those attributes into the simulated user's model-visible
 instructions. Morgan wants a vegetarian meal costing at most $20, persists
 that requirement through `save_preference`, and later accepts a matching
@@ -27,7 +27,7 @@ does not nest NeMo-Sim's complete `ConversationLoop` inside Gym. Instead:
 
 - The `nemo_sim_user` agent owns population-grounded persona formatting,
   behavioral derivation, and the user model/tool loop.
-- The generic `UserAssistantProcessor` owns server routing, the episode loop,
+- The generic `MultiAgentProcessor` owns server routing, the round-robin episode loop,
   trajectories, and verification.
 - The resources server owns shared environment state and task reward.
 
@@ -46,11 +46,11 @@ user-agent environment is first created.
 
 Neither participant owns `/run`. Each agent only handles `/v1/responses` and
 may use its own instructions, tools, model, and tool-call loop. The
-`UserAssistantProcessor` owns the complete episode:
+`MultiAgentProcessor` owns the complete episode:
 
 ```text
 rollout collector
-  → UserAssistantProcessor /run
+  → MultiAgentProcessor /run
       → resources server /seed_session
       → assistant agent /v1/responses
       → resources server /episode_status
@@ -73,7 +73,7 @@ Configure `policy_base_url`, `policy_api_key`, and `policy_model_name` in
 ```bash
 .venv/bin/gym eval run \
   --config resources_servers/example_user_assistant/configs/example_user_assistant.yaml \
-  --agent example_user_assistant_processor \
+  --agent example_multi_agent_processor \
   --split validation \
   --output results/example_user_assistant.jsonl
 ```
@@ -81,10 +81,9 @@ Configure `policy_base_url`, `policy_api_key`, and `policy_model_name` in
 The rollout row contains:
 
 - `response`: assistant-only Responses API output for evaluation and training.
-- `user_responses_create_params.metadata.nemo_sim`: JSON-encoded source
+- `participant_responses_create_params.user.metadata.nemo_sim`: JSON-encoded source
   persona, locale, and private user goal consumed by the user agent.
-- `assistant_trajectory`: exact request/response pairs for assistant turns.
-- `user_trajectory`: exact request/response pairs for simulated-user turns.
+- `participant_trajectories`: exact request/response pairs keyed by participant.
 - `episode_trajectory`: ordered participant outputs, state snapshots, and the
   explicit termination event.
 - `termination_reason` and `turns_completed`.
@@ -92,11 +91,11 @@ The rollout row contains:
 ## Customize the pattern
 
 1. Put a JSON-encoded NeMo-Sim persona, locale, and user goal under
-   `user_responses_create_params.metadata.nemo_sim` in each dataset row.
-2. Point `assistant_agent` and `user_agent` at any independently hosted
-   Responses API agents.
-3. Put assistant tools in `responses_create_params.tools` and user tools in
-   `user_responses_create_params.tools`.
+   `participant_responses_create_params.user.metadata.nemo_sim` in each dataset row.
+2. Configure independently hosted Responses API agents under `participants`,
+   list each participant once in `turn_order`, and choose a `focal_participant`.
+3. Put the focal participant's request in `responses_create_params`; put every
+   other request under `participant_responses_create_params.<participant>`.
 4. Implement `/episode_status` on the resources server. Return
    `{"terminated": bool, "reason": str | null, "state": {...}}`.
 5. Keep shared mutable state on the resources server and access it through
