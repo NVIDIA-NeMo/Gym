@@ -20,7 +20,7 @@ from typing import Any, List, Optional
 from fastapi import Request, Response
 from pydantic import ConfigDict, TypeAdapter, ValidationError
 
-from nemo_gym._checkpoint import RESOURCE_STATE_REVISION_HEADER, AgentBoundaryRecord
+from nemo_gym._checkpoint import AgentBoundaryRecord
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -64,6 +64,7 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 _INPUT_ITEMS_ADAPTER = TypeAdapter(List[NeMoGymResponseInputItem])
+RESOURCE_STATE_REVISION_HEADER = "x-nemo-gym-resource-state-revision"
 
 
 def _cookie_values(cookies: Any) -> dict[str, str]:
@@ -71,6 +72,14 @@ def _cookie_values(cookies: Any) -> dict[str, str]:
         name: str(getattr(cookie, "value", cookie))
         for name, cookie in (cookies.items() if cookies is not None else ())
     }
+
+
+def _merge_cookies(current: Any, updates: Any) -> Any:
+    if current is None or current is updates:
+        return updates
+    merged = _cookie_values(current)
+    merged.update(_cookie_values(updates))
+    return merged
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -172,7 +181,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             # We raise for status here since we expect model calls to always work.
             await raise_for_status(model_response)
             model_response_json = await get_response_json(model_response)
-            model_server_cookies = model_response.cookies
+            model_server_cookies = _merge_cookies(model_server_cookies, model_response.cookies)
             try:
                 model_response = NeMoGymResponse.model_validate(model_response_json)
             except ValidationError as e:
@@ -248,7 +257,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         request=request,
                     )
                     tool_output = (await api_response.content.read()).decode()
-                    resources_server_cookies = api_response.cookies
+                    resources_server_cookies = _merge_cookies(resources_server_cookies, api_response.cookies)
                     headers = getattr(api_response, "headers", None)
                     if isinstance(headers, Mapping) and headers.get(RESOURCE_STATE_REVISION_HEADER) is not None:
                         resource_revision = int(headers[RESOURCE_STATE_REVISION_HEADER])
