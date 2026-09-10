@@ -98,6 +98,7 @@ class ScicodeVerifyResponse(BaseVerifyResponse):
     # Audit fields are aligned with step_results and contain only scored (non-prefilled) steps.
     scored_step_ids: List[str] = Field(default_factory=list)
     step_environment_results: List[Dict[str, bool]] = Field(default_factory=list)
+    step_environment_errors: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class ScicodeResourcesServer(SimpleResourcesServer):
@@ -203,14 +204,15 @@ class ScicodeResourcesServer(SimpleResourcesServer):
         grading_interpreters = self._resolve_grading_interpreters()
         loop = asyncio.get_running_loop()
 
-        async def _run_substep(i: int) -> tuple[bool, Dict[str, bool]]:
+        async def _run_substep(i: int) -> tuple[bool, Dict[str, bool], Dict[str, str]]:
             sub_step = body.sub_steps[i]
             code = solutions[f"{body.problem_id}.{i + 1}"]
             if not code or code == _OUT_OF_CONTEXT:
-                return False, {}
+                return False, {}, {}
             sanitized = [sanitize_test(tc) for tc in sub_step["test_cases"]]
             program = build_test_program(code, h5_path, sub_step["step_number"], sanitized)
             per_environment = {}
+            per_environment_errors = {}
             for name, executable in grading_interpreters:
                 async with self._semaphore:
                     result = await loop.run_in_executor(
@@ -221,13 +223,22 @@ class ScicodeResourcesServer(SimpleResourcesServer):
                         executable,
                     )
                 per_environment[name] = bool(result["passed"])
+                if result["error"]:
+                    per_environment_errors[name] = result["error"]
+                if result.get("infrastructure_error"):
+                    raise RuntimeError(
+                        "SciCode grading infrastructure failure for "
+                        f"problem {body.problem_id}, step {sub_step['step_number']}, "
+                        f"environment {name}:\n{result['error']}"
+                    )
                 if per_environment[name] and not self.config.run_all_grading_interpreters:
                     break
-            return any(per_environment.values()), per_environment
+            return any(per_environment.values()), per_environment, per_environment_errors
 
         evaluated_steps = list(await asyncio.gather(*[_run_substep(i) for i in scored]))
-        step_results = [passed for passed, _ in evaluated_steps]
-        step_environment_results = [per_environment for _, per_environment in evaluated_steps]
+        step_results = [passed for passed, _, _ in evaluated_steps]
+        step_environment_results = [per_environment for _, per_environment, _ in evaluated_steps]
+        step_environment_errors = [per_environment_errors for _, _, per_environment_errors in evaluated_steps]
         scored_step_ids = [body.sub_steps[i]["step_number"] for i in scored]
         num_passed = sum(step_results)
         all_passed = num_passed == len(scored)
@@ -242,6 +253,7 @@ class ScicodeResourcesServer(SimpleResourcesServer):
             subtask_accuracy=num_passed / len(scored),
             scored_step_ids=scored_step_ids,
             step_environment_results=step_environment_results,
+            step_environment_errors=step_environment_errors,
         )
 
 

@@ -195,7 +195,36 @@ def cmp_tuple_or_list(var1, var2):
     return True
 """
 
-_STDERR_TAIL = 2000
+_STDERR_LIMIT = 4000
+_GRADING_THREAD_ENV = {
+    "BLIS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "OMP_THREAD_LIMIT": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1",
+}
+_INFRASTRUCTURE_ERROR_MARKERS = (
+    "OpenBLAS blas_thread_init:",
+    "Resource temporarily unavailable",
+    "PyCapsule_Import could not import module",
+    "Error importing numpy",
+    "numpy.core._multiarray_umath failed to import",
+)
+
+
+def _bounded_stderr(stderr: bytes) -> str:
+    """Decode stderr while retaining both the root cause and the terminal traceback."""
+    decoded = stderr.decode("utf-8", errors="replace")
+    if len(decoded) <= _STDERR_LIMIT:
+        return decoded
+    half = _STDERR_LIMIT // 2
+    return f"{decoded[:half]}\n... stderr truncated ...\n{decoded[-half:]}"
+
+
+def _is_infrastructure_error(error: str) -> bool:
+    return any(marker in error for marker in _INFRASTRUCTURE_ERROR_MARKERS)
 
 
 def sanitize_test(test_case: str) -> str:
@@ -233,15 +262,21 @@ def run_substep(program: str, timeout_secs: float, python_executable: str | None
         ) as source:
             source.write(program)
             source_path = source.name
+        # Numerical libraries otherwise size their native thread pools to the host's CPU count.
+        # Concurrent SciCode subprocesses can then exceed a cluster's process/thread quota before
+        # any model code executes. Pin each isolated grading process to one native thread.
+        child_env = os.environ.copy()
+        child_env.update(_GRADING_THREAD_ENV)
         proc = subprocess.run(
             [python_executable or sys.executable, source_path],
             capture_output=True,
+            env=child_env,
             timeout=timeout_secs,
         )
     except subprocess.TimeoutExpired:
-        return {"passed": False, "error": "timeout"}
+        return {"passed": False, "error": "timeout", "infrastructure_error": False}
     except OSError as error:
-        return {"passed": False, "error": str(error)}
+        return {"passed": False, "error": str(error), "infrastructure_error": True}
     finally:
         if source_path is not None:
             try:
@@ -249,4 +284,9 @@ def run_substep(program: str, timeout_secs: float, python_executable: str | None
             except FileNotFoundError:
                 pass
     passed = proc.returncode == 0
-    return {"passed": passed, "error": "" if passed else proc.stderr.decode("utf-8", errors="replace")[-_STDERR_TAIL:]}
+    error = "" if passed else _bounded_stderr(proc.stderr)
+    return {
+        "passed": passed,
+        "error": error,
+        "infrastructure_error": False if passed else _is_infrastructure_error(error),
+    }

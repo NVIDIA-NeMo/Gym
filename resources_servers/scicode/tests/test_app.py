@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import hashlib
+import subprocess
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -110,7 +111,7 @@ def test_run_substep_fail_returns_stderr():
 
 def test_run_substep_timeout():
     result = run_substep("import time\ntime.sleep(5)", timeout_secs=0.5)
-    assert result == {"passed": False, "error": "timeout"}
+    assert result == {"passed": False, "error": "timeout", "infrastructure_error": False}
 
 
 def test_run_substep_accepts_explicit_python_interpreter():
@@ -121,6 +122,33 @@ def test_run_substep_reports_interpreter_launch_error():
     result = run_substep("assert True", timeout_secs=10.0, python_executable="/does/not/exist/python")
     assert result["passed"] is False
     assert result["error"]
+    assert result["infrastructure_error"] is True
+
+
+def test_run_substep_limits_numerical_library_threads():
+    with patch(
+        "resources_servers.scicode.scicode_integration.runner.subprocess.run",
+        return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b""),
+    ) as mocked_run:
+        result = run_substep("assert True", timeout_secs=10.0)
+
+    assert result["passed"] is True
+    child_env = mocked_run.call_args.kwargs["env"]
+    assert child_env["OPENBLAS_NUM_THREADS"] == "1"
+    assert child_env["OMP_NUM_THREADS"] == "1"
+    assert child_env["MKL_NUM_THREADS"] == "1"
+
+
+def test_run_substep_classifies_openblas_thread_failure_as_infrastructure_error():
+    stderr = b"OpenBLAS blas_thread_init: pthread_create failed: Resource temporarily unavailable"
+    with patch(
+        "resources_servers.scicode.scicode_integration.runner.subprocess.run",
+        return_value=subprocess.CompletedProcess(args=[], returncode=1, stdout=b"", stderr=stderr),
+    ):
+        result = run_substep("assert True", timeout_secs=10.0)
+
+    assert result["passed"] is False
+    assert result["infrastructure_error"] is True
 
 
 # ----------------------------
@@ -255,6 +283,30 @@ class TestApp:
         assert result.step_results == [True]
         assert result.scored_step_ids == ["1.1"]
         assert result.step_environment_results == [{"2024": False, "2025": True}]
+        assert result.step_environment_errors == [{"2024": "old"}]
+
+    @pytest.mark.asyncio
+    async def test_verify_raises_on_grading_infrastructure_error(self, tmp_path):
+        python_path = tmp_path / "python"
+        python_path.write_text("#!/bin/sh\n")
+        python_path.chmod(0o755)
+        targets = tmp_path / "targets.h5"
+        targets.write_bytes(b"fixture")
+        server = _server(
+            test_data_fpath=str(targets),
+            grading_interpreters=[{"name": "2024", "python_executable": str(python_path)}],
+        )
+
+        failure = {
+            "passed": False,
+            "error": "OpenBLAS blas_thread_init: Resource temporarily unavailable",
+            "infrastructure_error": True,
+        }
+        with (
+            patch.object(app, "run_substep", return_value=failure),
+            pytest.raises(RuntimeError, match="grading infrastructure failure"),
+        ):
+            await server.verify(_request(solutions={"1.1": "x = 1"}, n_steps=1))
 
     @pytest.mark.asyncio
     async def test_verify_multi_environment_short_circuits_after_pass(self, tmp_path):
