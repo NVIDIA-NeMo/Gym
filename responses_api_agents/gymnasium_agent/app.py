@@ -23,7 +23,14 @@ from typing import Any, Optional
 from fastapi import Body, Request, Response
 from pydantic import ConfigDict, Field, TypeAdapter
 
-from nemo_gym._checkpoint import AgentBoundaryRecord
+from nemo_gym._checkpoint import (
+    EXPECTED_RESOURCE_STATE_REVISION_HEADER,
+    RESOURCE_REQUEST_ID_HEADER,
+    RESOURCE_STATE_REVISION_HEADER,
+    AgentBoundaryKind,
+    AgentBoundaryRecord,
+    PendingModelPayload,
+)
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
@@ -61,9 +68,6 @@ def _merge_cookies(current: Any, updates: Any) -> Any:
     merged = _cookie_values(current)
     merged.update(_cookie_values(updates))
     return merged
-
-
-RESOURCE_STATE_REVISION_HEADER = "x-nemo-gym-resource-state-revision"
 
 
 class GymnasiumAgentConfig(BaseResponsesAPIAgentConfig):
@@ -113,14 +117,19 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         continuation = self.checkpoint_continuation(body)
 
         supports_explicit_close = False
+        resource_revision = 0
         try:
             if continuation is None:
+                reset_headers = (
+                    {RESOURCE_REQUEST_ID_HEADER: uuid.uuid4().hex} if self.checkpoint_execution() is not None else None
+                )
                 reset_resp = await self.retry_checkpoint_refusal(
                     lambda: self.server_client.post(
                         server_name=self.config.resources_server.name,
                         url_path="/reset",
                         json=body.model_dump(),
                         cookies=env_cookies,
+                        **({"headers": reset_headers} if reset_headers is not None else {}),
                     )
                 )
                 await raise_for_status(reset_resp)
@@ -132,9 +141,37 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                 if isinstance(reset_payload, dict) and isinstance(reset_payload.get("info"), dict):
                     supports_explicit_close = reset_payload["info"].get("supports_explicit_close") is True
                 reset_data = EnvResetResponse.model_validate(reset_payload)
+                reset_headers = getattr(reset_resp, "headers", None)
+                if (
+                    isinstance(reset_headers, Mapping)
+                    and reset_headers.get(RESOURCE_STATE_REVISION_HEADER) is not None
+                ):
+                    resource_revision = int(reset_headers[RESOURCE_STATE_REVISION_HEADER])
+                logical_rollout_id = current_logical_rollout_id()
+                attempt_index = current_attempt_index()
+                execution = self.checkpoint_execution()
+                if logical_rollout_id is not None and attempt_index is not None and execution is not None:
+                    await self.checkpoint_participant().commit_boundary(
+                        execution,
+                        AgentBoundaryRecord(
+                            rollout_id=logical_rollout_id,
+                            attempt_index=attempt_index,
+                            boundary_index=0,
+                            turn_index=0,
+                            boundary_kind=AgentBoundaryKind.TURN_COMPLETE,
+                            output_items=[],
+                            resource_state_revisions={self.config.resources_server.name: resource_revision},
+                            agent_state={
+                                "reset_data": reset_data.model_dump(mode="json"),
+                                "total_reward": 0.0,
+                                "env_cookies": _cookie_values(env_cookies),
+                            },
+                        ),
+                    )
             else:
                 reset_data = EnvResetResponse.model_validate(continuation.agent_state["reset_data"])
                 env_cookies = dict(continuation.agent_state.get("env_cookies") or env_cookies)
+                resource_revision = continuation.resource_state_revisions.get(self.config.resources_server.name, 0)
             supports_explicit_close = supports_explicit_close or (
                 (reset_data.info or {}).get("supports_explicit_close") is True
             )
@@ -144,6 +181,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                 reset_data,
                 env_cookies,
                 continuation=continuation,
+                initial_resource_revision=resource_revision,
             )
         except BaseException:
             if supports_explicit_close:
@@ -177,11 +215,15 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
     async def _close_environment(self, env_cookies) -> None:
         """Close an environment that advertised the optional endpoint."""
 
+        close_headers = (
+            {RESOURCE_REQUEST_ID_HEADER: uuid.uuid4().hex} if self.checkpoint_execution() is not None else None
+        )
         close_resp = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/close",
             json={},
             cookies=env_cookies,
+            **({"headers": close_headers} if close_headers is not None else {}),
         )
         await raise_for_status(close_resp)
 
@@ -193,6 +235,7 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         env_cookies,
         *,
         continuation: Optional[AgentBoundaryRecord] = None,
+        initial_resource_revision: int = 0,
     ) -> GymnasiumRunResponse:
         """Drive an already-reset episode; :meth:`run` owns its cleanup."""
 
@@ -204,129 +247,231 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                 NeMoGymEasyInputMessage(role="user", content=reset_data.observation)
             ]
 
-        new_outputs = []
+        new_outputs: list[NeMoGymResponseInputItem] = []
         total_reward = 0.0
         usage = None
         model_server_cookies = None
         step_data = EnvStepResponse(terminated=False, truncated=True, reward=0.0)
-        last_model_response = None
+        last_model_response: Optional[NeMoGymResponse] = None
         finished = False
-        start_step = 0
-        resource_revision = 0
+        turn_index = 0
+        boundary_index = 0
+        resource_revision = initial_resource_revision
+        model_call_id: Optional[str] = None
+        pending_cursor = 0
+        resource_request_id: Optional[str] = None
+        pending_response_usage: Optional[dict[str, Any]] = None
         if continuation is not None:
             new_outputs.extend(_INPUT_ITEMS_ADAPTER.validate_python(continuation.output_items))
             total_reward = float(continuation.agent_state.get("total_reward", 0.0))
             usage = NeMoGymResponseUsage.model_validate(continuation.usage) if continuation.usage is not None else None
-            model_server_cookies = continuation.agent_state.get("model_server_cookies") or None
-            step_data = EnvStepResponse.model_validate(continuation.agent_state["step_data"])
-            start_step = continuation.boundary_index
+            turn_index = continuation.turn_index
+            boundary_index = continuation.boundary_index
             resource_revision = continuation.resource_state_revisions.get(self.config.resources_server.name, 0)
-            restored_response = continuation.agent_state.get("last_model_response")
-            if restored_response is not None:
-                last_model_response = NeMoGymResponse.model_validate(restored_response)
+            restored_step = continuation.agent_state.get("step_data")
+            if restored_step is not None:
+                step_data = EnvStepResponse.model_validate(restored_step)
+            if continuation.pending_model is not None:
+                pending = continuation.pending_model
+                last_model_response = NeMoGymResponse.model_validate(pending.response)
+                last_model_response.usage = None
+                model_call_id = pending.model_call_id
+                model_server_cookies = pending.model_server_cookies or None
+                pending_cursor = pending.pending_action_cursor
+                resource_request_id = pending.resource_request_id
+                pending_response_usage = pending.usage
             else:
-                last_model_response = NeMoGymResponse(
-                    id=continuation.last_committed_model_call_id or "restored-checkpoint-boundary",
-                    created_at=continuation.created_at,
-                    model=base_body.model or self.config.model_server.name,
-                    object="response",
-                    output=[],
-                    parallel_tool_calls=True,
-                    tool_choice="auto",
-                    tools=[],
-                )
-
-        for step in range(start_step + 1, self.config.max_steps + 1):
-            new_body = base_body.model_copy(update={"input": base_body.input + new_outputs})
-
-            model_resp = await self.retry_checkpoint_refusal(
-                lambda: self.server_client.post(
-                    server_name=self.config.model_server.name,
-                    url_path=model_url_path,
-                    json=new_body,
-                    cookies=model_server_cookies,
-                )
-            )
-            model_call_id = None
-            headers = getattr(model_resp, "headers", None)
-            if self._checkpoint_participant is not None and isinstance(headers, Mapping):
-                model_call_id = headers.get(MODEL_CALL_ID_HEADER)
-            await raise_for_status(model_resp)
-            model_response = NeMoGymResponse.model_validate(await get_response_json(model_resp))
-            model_server_cookies = _merge_cookies(model_server_cookies, model_resp.cookies)
-            last_model_response = model_response
-
-            new_outputs.extend(model_response.output)
-
-            usage = accumulate_response_usage(usage, model_response.usage)
-
-            step_body = body.model_dump() | {"response": model_response.model_dump()}
-            if (reset_data.info or {}).get("supports_step_idempotency") is True:
-                step_body["_ng_step_request_id"] = uuid.uuid4().hex
-            step_resp = await self.retry_checkpoint_refusal(
-                lambda: self.server_client.post(
-                    server_name=self.config.resources_server.name,
-                    url_path="/step",
-                    json=step_body,
-                    cookies=env_cookies,
-                )
-            )
-            await raise_for_status(step_resp)
-            step_data = EnvStepResponse.model_validate(await get_response_json(step_resp))
-            step_headers = getattr(step_resp, "headers", None)
-            if isinstance(step_headers, Mapping) and step_headers.get(RESOURCE_STATE_REVISION_HEADER) is not None:
-                resource_revision = int(step_headers[RESOURCE_STATE_REVISION_HEADER])
-            total_reward += step_data.reward
-            if step_resp.cookies:
-                env_cookies.update(step_resp.cookies)
-
-            for tool_output in (step_data.info or {}).get("tool_outputs", []):
-                new_outputs.append(
-                    NeMoGymFunctionCallOutput(
-                        type="function_call_output",
-                        call_id=tool_output["call_id"],
-                        output=tool_output["output"],
+                model_server_cookies = continuation.agent_state.get("model_server_cookies") or None
+                restored_response = continuation.agent_state.get("last_model_response")
+                if restored_response is not None:
+                    last_model_response = NeMoGymResponse.model_validate(restored_response)
+                else:
+                    last_model_response = NeMoGymResponse(
+                        id=continuation.last_committed_model_call_id or "restored-checkpoint-boundary",
+                        created_at=continuation.created_at,
+                        model=base_body.model or self.config.model_server.name,
+                        object="response",
+                        output=[],
+                        parallel_tool_calls=True,
+                        tool_choice="auto",
+                        tools=[],
                     )
-                )
 
-            if step_data.observation:
-                new_outputs.append(NeMoGymEasyInputMessage(role="user", content=step_data.observation))
-
+        async def commit_boundary(
+            kind: AgentBoundaryKind,
+            *,
+            pending_model: Optional[PendingModelPayload] = None,
+        ) -> None:
+            logical_rollout_id = current_logical_rollout_id()
+            attempt_index = current_attempt_index()
+            execution = self.checkpoint_execution()
             if (
-                self._checkpoint_participant is not None
-                and not (step_data.terminated or step_data.truncated)
-                and step < self.config.max_steps
+                self._checkpoint_participant is None
+                or logical_rollout_id is None
+                or attempt_index is None
+                or execution is None
             ):
-                logical_rollout_id = current_logical_rollout_id()
-                attempt_index = current_attempt_index()
-                execution = self.checkpoint_execution()
-                if logical_rollout_id is not None and attempt_index is not None and execution is not None:
-                    await self.checkpoint_participant().commit_boundary(
-                        execution,
-                        AgentBoundaryRecord(
-                            rollout_id=logical_rollout_id,
-                            attempt_index=attempt_index,
-                            boundary_index=step,
-                            output_items=[item.model_dump(mode="json") for item in new_outputs],
-                            usage=usage.model_dump(mode="json") if usage is not None else None,
-                            last_committed_model_call_id=model_call_id,
-                            resource_state_revisions={self.config.resources_server.name: resource_revision},
-                            agent_state={
-                                "reset_data": reset_data.model_dump(mode="json"),
-                                "step_data": step_data.model_dump(mode="json"),
-                                "total_reward": total_reward,
-                                "model_server_cookies": _cookie_values(model_server_cookies),
-                                "env_cookies": _cookie_values(env_cookies),
-                                "last_model_response": model_response.model_copy(
-                                    update={"output": new_outputs, "usage": usage}
-                                ).model_dump(mode="json"),
-                            },
+                return
+            await self.checkpoint_participant().commit_boundary(
+                execution,
+                AgentBoundaryRecord(
+                    rollout_id=logical_rollout_id,
+                    attempt_index=attempt_index,
+                    boundary_index=boundary_index,
+                    turn_index=turn_index,
+                    boundary_kind=kind,
+                    pending_model=pending_model,
+                    output_items=[item.model_dump(mode="json") for item in new_outputs],
+                    usage=usage.model_dump(mode="json") if usage is not None else None,
+                    last_committed_model_call_id=model_call_id,
+                    resource_state_revisions={self.config.resources_server.name: resource_revision},
+                    agent_state={
+                        "reset_data": reset_data.model_dump(mode="json"),
+                        "step_data": step_data.model_dump(mode="json"),
+                        "total_reward": total_reward,
+                        "model_server_cookies": _cookie_values(model_server_cookies),
+                        "env_cookies": _cookie_values(env_cookies),
+                        "last_model_response": (
+                            last_model_response.model_copy(update={"output": new_outputs, "usage": usage}).model_dump(
+                                mode="json"
+                            )
+                            if last_model_response is not None
+                            else None
                         ),
-                    )
+                    },
+                ),
+            )
 
-            if step_data.terminated or step_data.truncated:
-                finished = True
-                break
+        while turn_index < self.config.max_steps:
+            if resource_request_id is None:
+                turn_index += 1
+                new_body = base_body.model_copy(update={"input": base_body.input + new_outputs})
+
+                model_resp = await self.retry_checkpoint_refusal(
+                    lambda: self.server_client.post(
+                        server_name=self.config.model_server.name,
+                        url_path=model_url_path,
+                        json=new_body,
+                        cookies=model_server_cookies,
+                    )
+                )
+                model_call_id = None
+                headers = getattr(model_resp, "headers", None)
+                if self._checkpoint_participant is not None and isinstance(headers, Mapping):
+                    model_call_id = headers.get(MODEL_CALL_ID_HEADER)
+                await raise_for_status(model_resp)
+                model_response = NeMoGymResponse.model_validate(await get_response_json(model_resp))
+                model_server_cookies = _merge_cookies(model_server_cookies, model_resp.cookies)
+                full_model_response = model_response.model_dump(mode="json")
+                pending_response_usage = (
+                    model_response.usage.model_dump(mode="json") if model_response.usage is not None else None
+                )
+                usage = accumulate_response_usage(usage, model_response.usage)
+                model_response.usage = None
+                last_model_response = model_response
+                new_outputs.extend(model_response.output)
+                model_call_id = model_call_id or model_response.id or f"turn-{turn_index}"
+                pending_cursor = 0
+                resource_request_id = uuid.uuid4().hex
+                boundary_index += 1
+                pending_model = None
+                if self._checkpoint_participant is not None and self.checkpoint_execution() is not None:
+                    pending_model = PendingModelPayload(
+                        model_call_id=model_call_id,
+                        response=full_model_response,
+                        model_server_cookies=_cookie_values(model_server_cookies),
+                        usage=pending_response_usage,
+                        pending_action_cursor=0,
+                        resource_request_id=resource_request_id,
+                    )
+                await commit_boundary(
+                    AgentBoundaryKind.PENDING_MODEL,
+                    pending_model=pending_model,
+                )
+
+            assert last_model_response is not None
+            if pending_cursor == 0:
+                step_body = body.model_dump() | {
+                    "response": last_model_response.model_copy(
+                        update={
+                            "usage": (
+                                NeMoGymResponseUsage.model_validate(pending_response_usage)
+                                if pending_response_usage is not None
+                                else None
+                            )
+                        }
+                    ).model_dump()
+                }
+                if (reset_data.info or {}).get("supports_step_idempotency") is True:
+                    step_body["_ng_step_request_id"] = resource_request_id
+                step_resp = await self.retry_checkpoint_refusal(
+                    lambda: self.server_client.post(
+                        server_name=self.config.resources_server.name,
+                        url_path="/step",
+                        json=step_body,
+                        cookies=env_cookies,
+                        headers={
+                            EXPECTED_RESOURCE_STATE_REVISION_HEADER: str(resource_revision),
+                            RESOURCE_REQUEST_ID_HEADER: resource_request_id,
+                        },
+                    )
+                )
+                await raise_for_status(step_resp)
+                step_data = EnvStepResponse.model_validate(await get_response_json(step_resp))
+                step_headers = getattr(step_resp, "headers", None)
+                if isinstance(step_headers, Mapping) and step_headers.get(RESOURCE_STATE_REVISION_HEADER) is not None:
+                    resource_revision = int(step_headers[RESOURCE_STATE_REVISION_HEADER])
+                total_reward += step_data.reward
+                if step_resp.cookies:
+                    env_cookies.update(step_resp.cookies)
+
+                for tool_output in (step_data.info or {}).get("tool_outputs", []):
+                    new_outputs.append(
+                        NeMoGymFunctionCallOutput(
+                            type="function_call_output",
+                            call_id=tool_output["call_id"],
+                            output=tool_output["output"],
+                        )
+                    )
+                if step_data.observation:
+                    new_outputs.append(NeMoGymEasyInputMessage(role="user", content=step_data.observation))
+
+                if step_data.terminated or step_data.truncated:
+                    # The resources middleware has retired terminal state.
+                    # The retained completed result, not a stale boundary,
+                    # protects delivery until the caller acknowledges it.
+                    resource_request_id = None
+                    finished = True
+                    break
+
+                pending_cursor = 1
+                boundary_index += 1
+                pending_model = None
+                if self._checkpoint_participant is not None and self.checkpoint_execution() is not None:
+                    pending_model = PendingModelPayload(
+                        model_call_id=model_call_id or last_model_response.id or f"turn-{turn_index}",
+                        response=last_model_response.model_copy(
+                            update={
+                                "usage": (
+                                    NeMoGymResponseUsage.model_validate(pending_response_usage)
+                                    if pending_response_usage is not None
+                                    else None
+                                )
+                            }
+                        ).model_dump(mode="json"),
+                        model_server_cookies=_cookie_values(model_server_cookies),
+                        usage=pending_response_usage,
+                        pending_action_cursor=1,
+                        resource_request_id=resource_request_id,
+                    )
+                await commit_boundary(
+                    AgentBoundaryKind.PENDING_MODEL,
+                    pending_model=pending_model,
+                )
+
+            resource_request_id = None
+            boundary_index += 1
+            await commit_boundary(AgentBoundaryKind.TURN_COMPLETE)
 
         if not finished:
             step_data = step_data.model_copy(update={"truncated": True})

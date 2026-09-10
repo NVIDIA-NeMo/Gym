@@ -14,16 +14,26 @@
 # limitations under the License.
 import asyncio
 import json
+import time
 from http.cookies import SimpleCookie
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 
-from nemo_gym._checkpoint import AgentBoundaryRecord
+from nemo_gym._checkpoint import (
+    EXPECTED_RESOURCE_STATE_REVISION_HEADER,
+    RESOURCE_REQUEST_ID_HEADER,
+    AgentAcknowledgeRequest,
+    AgentBoundaryKind,
+    AgentBoundaryRecord,
+    PendingModelPayload,
+)
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import ServerClient
+from resources_servers.gymnasium import EnvResetResponse
 from responses_api_agents.gymnasium_agent.app import (
     GymnasiumAgent,
     GymnasiumAgentConfig,
@@ -273,6 +283,229 @@ class TestRun:
         assert result.reward == 1.25
         assert result.response.id == "call-2"
         agent.server_client.post.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pending_step_restore_reuses_generation_and_stable_request_id(self):
+        agent = _make_agent(max_steps=2)
+        pending_response = _model_response("turn-1", input_toks=3, output_toks=4)
+        continuation = AgentBoundaryRecord(
+            rollout_id="2-0",
+            attempt_index=0,
+            boundary_index=1,
+            turn_index=1,
+            boundary_kind=AgentBoundaryKind.PENDING_MODEL,
+            pending_model=PendingModelPayload(
+                model_call_id="model-call-1",
+                response=pending_response,
+                model_server_cookies={"model": "saved"},
+                usage=pending_response["usage"],
+                pending_action_cursor=0,
+                resource_request_id="step-request-1",
+            ),
+            output_items=pending_response["output"],
+            usage=pending_response["usage"],
+            resource_state_revisions={"my_env": 1},
+            agent_state={
+                "reset_data": {"observation": "start", "info": {"supports_step_idempotency": True}},
+                "total_reward": 0.0,
+                "env_cookies": {"env": "saved"},
+            },
+        )
+        calls = []
+
+        async def post(server_name, url_path, json=None, cookies=None, headers=None, **kwargs):
+            calls.append((server_name, url_path, json, cookies, headers))
+            assert url_path == "/step"
+            response = _FakeHttpResp(
+                {
+                    "observation": None,
+                    "reward": 1.0,
+                    "terminated": True,
+                    "truncated": False,
+                    "info": {},
+                }
+            )
+            response.headers = {"x-nemo-gym-resource-state-revision": "2"}
+            response.cookies = {"env": "updated"}
+            return response
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "play"}]})
+
+        result = await agent._run_open_episode(
+            body,
+            "/v1/responses",
+            EnvResetResponse.model_validate(continuation.agent_state["reset_data"]),
+            {"env": "saved"},
+            continuation=continuation,
+            initial_resource_revision=1,
+        )
+
+        assert result.reward == 1.0
+        assert result.response.usage.total_tokens == 7
+        assert len(result.response.output) == 1
+        assert len(calls) == 1
+        assert calls[0][2]["_ng_step_request_id"] == "step-request-1"
+        assert calls[0][4] == {
+            EXPECTED_RESOURCE_STATE_REVISION_HEADER: "1",
+            RESOURCE_REQUEST_ID_HEADER: "step-request-1",
+        }
+
+    @pytest.mark.asyncio
+    async def test_multiturn_boundaries_track_current_model_call_and_merge_cookies(self, monkeypatch):
+        agent = _make_agent(max_steps=2)
+        participant = agent.checkpoint_participant()
+        execution = await participant.begin("2-0", 0, task=asyncio.current_task())
+        boundaries = []
+        original_commit = type(participant).commit_boundary
+
+        async def capture_boundary(self, current_execution, record):
+            boundaries.append(record.model_copy(deep=True))
+            await original_commit(self, current_execution, record)
+
+        monkeypatch.setattr(type(participant), "commit_boundary", capture_boundary)
+        model_payloads = [
+            _model_response("turn-1") | {"id": "response-turn-1"},
+            _model_response("turn-2") | {"id": "response-turn-2"},
+        ]
+        model_cookies = [{"model-sticky": "one"}, {"model-rotated": "two"}]
+        model_call_ids = ["capture-turn-1", "capture-turn-2"]
+        step_payloads = [
+            {
+                "observation": "observation-1",
+                "reward": 0.25,
+                "terminated": False,
+                "truncated": False,
+                "info": {},
+            },
+            {
+                "observation": None,
+                "reward": 0.75,
+                "terminated": True,
+                "truncated": False,
+                "info": {},
+            },
+        ]
+        revisions = ["1", "2"]
+
+        async def post(server_name, url_path, json=None, cookies=None, headers=None, **kwargs):
+            if server_name == "policy_model":
+                response = _FakeHttpResp(model_payloads.pop(0))
+                response.cookies = model_cookies.pop(0)
+                response.headers = {"x-nemo-gym-model-call-id": model_call_ids.pop(0)}
+                return response
+            response = _FakeHttpResp(step_payloads.pop(0))
+            response.headers = {"x-nemo-gym-resource-state-revision": revisions.pop(0)}
+            response.cookies = {"env-rotated": "two"}
+            return response
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "play"}]})
+        reset_data = EnvResetResponse(observation="start", info={"supports_step_idempotency": True})
+        env_cookies = {"env-sticky": "one"}
+        token = participant.bind(execution)
+        try:
+            with rollout_context("2-0", attempt_index=0, logical_rollout_id="2-0"):
+                result = await agent._run_open_episode(
+                    body,
+                    "/v1/responses",
+                    reset_data,
+                    env_cookies,
+                )
+        finally:
+            participant.unbind(token)
+
+        assert [
+            (
+                boundary.boundary_index,
+                boundary.turn_index,
+                boundary.boundary_kind,
+                boundary.last_committed_model_call_id,
+            )
+            for boundary in boundaries
+        ] == [
+            (1, 1, AgentBoundaryKind.PENDING_MODEL, "capture-turn-1"),
+            (2, 1, AgentBoundaryKind.PENDING_MODEL, "capture-turn-1"),
+            (3, 1, AgentBoundaryKind.TURN_COMPLETE, "capture-turn-1"),
+            (4, 2, AgentBoundaryKind.PENDING_MODEL, "capture-turn-2"),
+        ]
+        assert [boundary.pending_model.model_call_id for boundary in boundaries if boundary.pending_model] == [
+            "capture-turn-1",
+            "capture-turn-1",
+            "capture-turn-2",
+        ]
+        assert [boundary.resource_state_revisions["my_env"] for boundary in boundaries] == [0, 1, 1, 1]
+        assert boundaries[-1].agent_state["model_server_cookies"] == {
+            "model-sticky": "one",
+            "model-rotated": "two",
+        }
+        assert boundaries[-1].agent_state["env_cookies"] == {
+            "env-sticky": "one",
+            "env-rotated": "two",
+        }
+        assert result.response.usage.total_tokens == 4
+        assert result.reward == 1.0
+        await participant.finish(execution, outcome="completed", result=result)
+
+    @pytest.mark.asyncio
+    async def test_terminal_step_race_blocks_prepare_until_completed_result_acknowledged(self):
+        agent = _make_agent(max_steps=1)
+        participant = agent.checkpoint_participant()
+        step_decode_started = asyncio.Event()
+        release_step_decode = asyncio.Event()
+
+        class DelayedStepResponse(_FakeHttpResp):
+            async def read(self):
+                step_decode_started.set()
+                await release_step_decode.wait()
+                return json.dumps(self._payload).encode()
+
+        responses = {
+            "/reset": [_FakeHttpResp({"observation": "start", "info": {}})],
+            "/ng-rollout/2-0/v1/responses": [_FakeHttpResp(_model_response("act"))],
+            "/step": [
+                DelayedStepResponse(
+                    {
+                        "observation": None,
+                        "reward": 1.0,
+                        "terminated": True,
+                        "truncated": False,
+                        "info": {},
+                    }
+                )
+            ],
+        }
+
+        async def post(server_name, url_path, **kwargs):
+            return responses[url_path].pop(0)
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        app = agent.setup_webserver()
+        body = {
+            "responses_create_params": {"input": [{"role": "user", "content": "play"}]},
+            TASK_INDEX_KEY_NAME: 2,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            ATTEMPT_INDEX_KEY_NAME: 0,
+        }
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://agent") as client:
+            run_task = asyncio.create_task(client.post("/run", json=body))
+            await step_decode_started.wait()
+            prepare_task = asyncio.create_task(participant.prepare(time.time() + 2))
+            await asyncio.sleep(0)
+            release_step_decode.set()
+            run_response, prepare_report = await asyncio.gather(run_task, prepare_task)
+
+        assert run_response.status_code == 200
+        assert prepare_report["ready_to_commit"] is False
+        assert prepare_report["completed_unacknowledged"] == 1
+        assert prepare_report["selected_boundaries"] == []
+        receipt = participant.status()["completed_unacknowledged_attempts"][0]["completion_receipt"]
+        assert await participant.acknowledge(AgentAcknowledgeRequest.model_validate(receipt)) == {
+            "acknowledged": True,
+            "idempotent": False,
+        }
+        assert (await participant.prepare(time.time() + 2))["ready_to_commit"] is True
 
     @pytest.mark.asyncio
     async def test_run_parks_and_retries_refused_step_without_recording_error(self):

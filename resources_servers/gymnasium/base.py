@@ -131,6 +131,8 @@ class GymnasiumServer(SimpleResourcesServer):
             return "start"
         if method == "POST" and path == "/step":
             return "mutation"
+        if method == "POST" and path == "/close":
+            return "terminal"
         return super().checkpoint_route_kind(path, method)
 
     def serialize_session_state(self, state: Any) -> dict[str, Any]:

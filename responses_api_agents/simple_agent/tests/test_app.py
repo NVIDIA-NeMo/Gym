@@ -26,7 +26,15 @@ from fastapi import Response
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym._checkpoint import AgentBoundaryRecord
+from nemo_gym._checkpoint import (
+    EXPECTED_RESOURCE_STATE_REVISION_HEADER,
+    RESOURCE_REQUEST_ID_HEADER,
+    RESOURCE_STATE_REVISION_HEADER,
+    AgentAcknowledgeRequest,
+    AgentBoundaryKind,
+    AgentBoundaryRecord,
+    PendingModelPayload,
+)
 from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -997,6 +1005,65 @@ class TestApp:
         assert post_call_kwargs[1]["server_name"] == "simple_agent"
         assert post_call_kwargs[1]["cookies"] == {"session": "seeded"}
 
+    async def test_terminal_verify_blocks_prepare_until_completed_result_acknowledged(self) -> None:
+        server, server_client = _make_agent(observability_enabled=False)
+        participant = server.checkpoint_participant()
+        verify_decode_started = asyncio.Event()
+        release_verify_decode = asyncio.Event()
+        model_payload = {
+            "id": "response-1",
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        }
+
+        async def post(server_name, url_path, **kwargs):
+            if url_path == "/seed_session":
+                response = _mock_response({"ok": True})
+                response.headers = {RESOURCE_STATE_REVISION_HEADER: "1"}
+                return response
+            if url_path.endswith("/v1/responses"):
+                return _mock_response(model_payload)
+            assert url_path == "/verify"
+            result = kwargs["json"] | {"reward": 1.0}
+            response = _mock_response(result)
+
+            async def delayed_read():
+                verify_decode_started.set()
+                await release_verify_decode.wait()
+                return json.dumps(result).encode()
+
+            response.read = delayed_read
+            return response
+
+        server_client.post = AsyncMock(side_effect=post)
+        app = server.setup_webserver()
+        body = {
+            "responses_create_params": {"input": [{"role": "user", "content": "question"}]},
+            TASK_INDEX_KEY_NAME: 4,
+            ROLLOUT_INDEX_KEY_NAME: 1,
+            ATTEMPT_INDEX_KEY_NAME: 0,
+        }
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://agent") as client:
+            run_task = asyncio.create_task(client.post("/run", json=body))
+            await verify_decode_started.wait()
+            prepare_task = asyncio.create_task(participant.prepare(time.time() + 2))
+            await asyncio.sleep(0)
+            release_verify_decode.set()
+            run_response, prepare_report = await asyncio.gather(run_task, prepare_task)
+
+        assert run_response.status_code == 200
+        assert prepare_report["ready_to_commit"] is False
+        assert prepare_report["completed_unacknowledged"] == 1
+        assert prepare_report["selected_boundaries"] == []
+        receipt = participant.status()["completed_unacknowledged_attempts"][0]["completion_receipt"]
+        await participant.acknowledge(AgentAcknowledgeRequest.model_validate(receipt))
+        assert (await participant.prepare(time.time() + 2))["ready_to_commit"] is True
+
     async def test_legacy_boundary_at_step_budget_does_not_generate_an_extra_turn(self) -> None:
         server, client = _make_agent(observability_enabled=False)
         server.config.max_steps = 2
@@ -1016,6 +1083,232 @@ class TestApp:
 
         assert response.id == "call-2"
         client.post.assert_not_awaited()
+
+    async def test_multiturn_boundaries_track_current_model_call_and_merge_cookies(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        server, client = _make_agent(observability_enabled=False)
+        participant = server.checkpoint_participant()
+        execution = await participant.begin("4-1", 0, task=asyncio.current_task())
+        boundaries = []
+        original_commit = type(participant).commit_boundary
+
+        async def capture_boundary(self, current_execution, record):
+            boundaries.append(record.model_copy(deep=True))
+            await original_commit(self, current_execution, record)
+
+        monkeypatch.setattr(type(participant), "commit_boundary", capture_boundary)
+        usage = {
+            "input_tokens": 2,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 1,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 3,
+        }
+        model_payloads = [
+            {
+                "id": "response-turn-1",
+                "created_at": 1.0,
+                "model": "model",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "fc-1",
+                        "call_id": "tool-1",
+                        "name": "lookup",
+                        "arguments": "{}",
+                        "type": "function_call",
+                        "status": "completed",
+                    }
+                ],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+                "usage": usage,
+            },
+            {
+                "id": "response-turn-2",
+                "created_at": 2.0,
+                "model": "model",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "message-1",
+                        "content": [{"annotations": [], "text": "done", "type": "output_text"}],
+                        "role": "assistant",
+                        "status": "completed",
+                        "type": "message",
+                    }
+                ],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+                "usage": usage,
+            },
+        ]
+        model_cookies = [{"model-sticky": "one"}, {"model-rotated": "two"}]
+        model_call_ids = ["capture-turn-1", "capture-turn-2"]
+
+        async def post(server_name, url_path, **kwargs):
+            if server_name == "model":
+                response = _mock_response(model_payloads.pop(0))
+                response.cookies = model_cookies.pop(0)
+                response.headers = {"x-nemo-gym-model-call-id": model_call_ids.pop(0)}
+                return response
+            response = _mock_response(content="tool-result")
+            response.cookies = {"resource-rotated": "two"}
+            response.headers = {"x-nemo-gym-resource-state-revision": "1"}
+            return response
+
+        client.post = AsyncMock(side_effect=post)
+        token = participant.bind(execution)
+        try:
+            with rollout_context("4-1", attempt_index=0, logical_rollout_id="4-1"):
+                response, _trajectory, saved_model_cookies, saved_resource_cookies = await server._create_episode(
+                    NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+                    model_url_path="/v1/responses",
+                    resources_server_cookies={"resource-sticky": "one"},
+                )
+        finally:
+            participant.unbind(token)
+
+        assert [
+            (
+                boundary.boundary_index,
+                boundary.turn_index,
+                boundary.boundary_kind,
+                boundary.last_committed_model_call_id,
+            )
+            for boundary in boundaries
+        ] == [
+            (1, 1, AgentBoundaryKind.PENDING_MODEL, "capture-turn-1"),
+            (2, 1, AgentBoundaryKind.PENDING_MODEL, "capture-turn-1"),
+            (3, 1, AgentBoundaryKind.TURN_COMPLETE, "capture-turn-1"),
+            (4, 2, AgentBoundaryKind.PENDING_MODEL, "capture-turn-2"),
+            (5, 2, AgentBoundaryKind.TURN_COMPLETE, "capture-turn-2"),
+        ]
+        assert [boundary.pending_model.model_call_id for boundary in boundaries if boundary.pending_model] == [
+            "capture-turn-1",
+            "capture-turn-1",
+            "capture-turn-2",
+        ]
+        assert [boundary.resource_state_revisions["resources"] for boundary in boundaries] == [0, 1, 1, 1, 1]
+        assert boundaries[-1].agent_state["model_server_cookies"] == {
+            "model-sticky": "one",
+            "model-rotated": "two",
+        }
+        assert boundaries[-1].agent_state["resources_server_cookies"] == {
+            "resource-sticky": "one",
+            "resource-rotated": "two",
+        }
+        assert saved_model_cookies == boundaries[-1].agent_state["model_server_cookies"]
+        assert saved_resource_cookies == boundaries[-1].agent_state["resources_server_cookies"]
+        assert response.usage.total_tokens == 6
+        await participant.finish(execution, outcome="completed", result=response)
+
+    async def test_pending_action_restore_does_not_repeat_model_output_or_usage(self) -> None:
+        server, client = _make_agent(observability_enabled=False)
+        tool_call = {
+            "id": "fc-1",
+            "call_id": "tool-1",
+            "name": "lookup",
+            "arguments": "{}",
+            "type": "function_call",
+            "status": "completed",
+        }
+        pending_response = {
+            "id": "response-tool",
+            "created_at": 1.0,
+            "model": "model",
+            "object": "response",
+            "output": [tool_call],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "usage": {
+                "input_tokens": 2,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 1,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 3,
+            },
+        }
+        continuation = AgentBoundaryRecord(
+            rollout_id="4-1",
+            attempt_index=0,
+            boundary_index=1,
+            turn_index=1,
+            boundary_kind=AgentBoundaryKind.PENDING_MODEL,
+            pending_model=PendingModelPayload(
+                model_call_id="model-call-1",
+                response=pending_response,
+                model_server_cookies={"model": "saved"},
+                usage=pending_response["usage"],
+                pending_action_cursor=0,
+                resource_request_id="resource-request-1",
+            ),
+            output_items=[tool_call],
+            usage=pending_response["usage"],
+            resource_state_revisions={"resources": 1},
+            agent_state={"resources_server_cookies": {"resource": "saved"}},
+        )
+        final_response = {
+            "id": "response-final",
+            "created_at": 2.0,
+            "model": "model",
+            "object": "response",
+            "output": [
+                {
+                    "id": "message-1",
+                    "content": [{"annotations": [], "text": "done", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "usage": {
+                "input_tokens": 3,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 2,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 5,
+            },
+        }
+        calls = []
+
+        async def post(server_name, url_path, **kwargs):
+            calls.append((server_name, url_path, kwargs))
+            if server_name == "resources":
+                response = _mock_response(content="tool-result")
+                response.cookies = {"resource": "updated"}
+                response.headers = {"x-nemo-gym-resource-state-revision": "2"}
+                return response
+            response = _mock_response(final_response)
+            response.cookies = {"model": "updated"}
+            return response
+
+        client.post = AsyncMock(side_effect=post)
+
+        response, _trajectory, model_cookies, resource_cookies = await server._create_episode(
+            NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+            model_url_path="/v1/responses",
+            continuation=continuation,
+        )
+
+        assert [item.type for item in response.output] == ["function_call", "function_call_output", "message"]
+        assert response.usage.total_tokens == 8
+        assert [server_name for server_name, _url, _kwargs in calls].count("model") == 1
+        assert [url for _server_name, url, _kwargs in calls].count("/lookup") == 1
+        tool_headers = calls[0][2]["headers"]
+        assert tool_headers == {
+            EXPECTED_RESOURCE_STATE_REVISION_HEADER: "1",
+            RESOURCE_REQUEST_ID_HEADER: "resource-request-1",
+        }
+        assert model_cookies == {"model": "updated"}
+        assert resource_cookies == {"resource": "updated"}
 
     async def test_refused_tool_call_parks_and_retries_without_entering_history(self) -> None:
         server, client = _make_agent(observability_enabled=False)
@@ -1189,4 +1482,4 @@ class TestApp:
 
         await asyncio.sleep(0)
         assert sum(server_name == "model" for server_name, _url_path in calls) == 1
-        assert calls.count(("resources", "/my_tool")) == 1
+        assert calls.count(("resources", "/my_tool")) == 0
