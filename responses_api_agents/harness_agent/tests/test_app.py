@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,6 +21,7 @@ import pytest
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox.providers.local import LocalProvider
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.sandbox_agent.app import SandboxAgent, SandboxAgentConfig, stage_and_run_eval
 
@@ -134,7 +136,24 @@ def test_runner_config_carries_harness_symbols():
     assert "runner_config.json" in script
     assert "model_base_url=harness.config.model.base_url" in script
     compile(script, "<agent_runner>", "exec")
-    assert cmd == "/deps/bin/python3 /work/runner.py"
+    assert cmd == "/deps/bin/python3 runner.py"
+
+
+async def test_local_provider_provisions_in_its_workspace(tmp_path):
+    server = await asyncio.start_server(lambda *_: None, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    agent = _make_agent()
+    agent._provider = LocalProvider(workspace_root=str(tmp_path))
+    agent._gym_tar = None
+
+    try:
+        handle = await agent._provision_box("", {"/work/request.json": "{}"}, f"http://127.0.0.1:{port}")
+        assert (handle.raw["workspace"] / "work" / "request.json").read_text() == "{}"
+        await agent._close_box(handle)
+        assert not handle.raw["workspace"].exists()
+    finally:
+        server.close()
+        await server.wait_closed()
 
 
 def test_sandbox_model_url_preserves_remote_hostname_and_port():
@@ -175,6 +194,15 @@ def test_sandbox_model_url_keeps_loopback_on_dns_failure():
     ):
         url = agent._sandbox_model_url(MagicMock())
     assert url == "http://localhost:8000"
+
+
+def test_sandbox_model_url_uses_direct_harness_endpoint_without_model_server():
+    agent = _make_agent(
+        model_server=None,
+        harness_config={"model": {"model": "direct", "base_url": "https://provider.example/v1"}},
+    )
+
+    assert agent._sandbox_model_url(MagicMock()) == "https://provider.example"
 
 
 async def test_grading_command_failure_is_not_reward_zero():
