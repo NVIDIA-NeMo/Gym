@@ -6,9 +6,7 @@ anyswe_hermes:
       description: SWE-bench run by Hermes Agent natively inside the task container.
       value: Eval software engineering capabilities on SWE-bench with any Gym agent.
 
-      agent_server_module: nemo_gym.agents.hermes
-      agent_server_class: HermesHarness
-      agent_config_class: AgentHarnessConfig
+      agent: hermes
       agent_kwargs:
         model:
           model: model

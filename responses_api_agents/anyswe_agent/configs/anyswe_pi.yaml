@@ -6,9 +6,7 @@ anyswe_pi:
       description: SWE-bench run by Pi inside the task container.
       value: Eval software engineering capabilities on SWE-bench with any Gym agent.
 
-      agent_server_module: nemo_gym.agents.pi
-      agent_server_class: PiHarness
-      agent_config_class: AgentHarnessConfig
+      agent: pi
       agent_kwargs:
         model: {model: model, provider: nemo}
         timeout_seconds: 3600

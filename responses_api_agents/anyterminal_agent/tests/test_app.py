@@ -66,9 +66,7 @@ def _config(**overrides) -> AnyTerminalAgentConfig:
         entrypoint="app.py",
         name="anyterminal_agent",
         model_server={"type": "responses_api_models", "name": "policy_model"},
-        agent_server_module="nemo_gym.agents.hermes",
-        agent_server_class="HermesHarness",
-        agent_config_class="AgentHarnessConfig",
+        agent="hermes",
     )
     base.update(overrides)
     return AnyTerminalAgentConfig(**base)
@@ -116,9 +114,7 @@ class TestAgentKey:
     def test_key_for_claude(self) -> None:
         proc = GymAgentHarnessProcessor(
             config=_config(
-                agent_server_module="nemo_gym.agents.claude_code",
-                agent_server_class="ClaudeCodeHarness",
-                agent_config_class="AgentHarnessConfig",
+                agent="claude_code",
             )
         )
         assert proc._agent_key == "claude_code_agent"
@@ -194,9 +190,7 @@ def _make_instance_config(tmp_path: Path, **overrides) -> AnyTerminalInstanceCon
         entrypoint="app.py",
         name="anyterminal_agent",
         model_server=None,
-        agent_server_module="nemo_gym.agents.hermes",
-        agent_server_class="HermesHarness",
-        agent_config_class="AgentHarnessConfig",
+        agent="hermes",
         run_session_id="test_session",
         base_results_dir=tmp_path / "results",
         model_server_url="",
@@ -580,19 +574,13 @@ class TestRayResourceOpts:
 
 class TestHarnessProcessorSetup:
     def _proc_no_script(self) -> GymAgentHarnessProcessor:
-        return GymAgentHarnessProcessor(
-            config=_config(
-                agent_server_module="responses_api_agents.no_such_agent.app",
-                agent_server_class="NoSuchAgent",
-                agent_config_class="NoSuchAgentConfig",
-            )
-        )
+        return GymAgentHarnessProcessor(config=_config(agent="prime"))
 
     def test_no_script_creates_empty_deps(self, tmp_path: Path) -> None:
         proc = self._proc_no_script()
         with patch.object(type(proc), "_parent", new_callable=PropertyMock, return_value=tmp_path):
             result = proc.setup()
-        expected = tmp_path / "deps" / "anyterminal_no_such_agent_deps"
+        expected = tmp_path / "deps" / "anyterminal_prime_agent_deps"
         assert result == expected
         assert expected.exists()
         assert (expected / ".installed").exists()
@@ -606,7 +594,7 @@ class TestHarnessProcessorSetup:
 
     def test_rechecks_sentinel_after_acquiring_lock(self, tmp_path: Path) -> None:
         proc = self._proc_no_script()
-        deps_dir = tmp_path / "deps" / "anyterminal_no_such_agent_deps"
+        deps_dir = tmp_path / "deps" / "anyterminal_prime_agent_deps"
         lock_path = deps_dir.parent / f".{deps_dir.name}.lockdir"
         lock_path.mkdir(parents=True)
 
@@ -685,9 +673,7 @@ class TestGetRunCommand:
         persistent_dir = tmp_path / "persistent"
         persistent_dir.mkdir()
         cfg = AnyTerminalInstanceConfig.model_construct(
-            agent_server_module="nemo_gym.agents.hermes",
-            agent_server_class="HermesHarness",
-            agent_config_class="AgentHarnessConfig",
+            agent="hermes",
             body=SimpleNamespace(input=[SimpleNamespace(content="the task")]),
             persistent_dir=persistent_dir,
         )

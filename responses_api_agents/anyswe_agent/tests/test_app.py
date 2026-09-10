@@ -44,9 +44,7 @@ def _config(**overrides) -> AnySweAgentConfig:
         entrypoint="app.py",
         name="anyswe_agent",
         model_server={"type": "responses_api_models", "name": "policy_model"},
-        agent_server_module="nemo_gym.agents.hermes",
-        agent_server_class="HermesHarness",
-        agent_config_class="AgentHarnessConfig",
+        agent="hermes",
         container_formatter="swebench/sweb.eval.x86_64.{instance_id}",
         sandbox_provider={"opensandbox": {}},
     )
@@ -125,9 +123,7 @@ class TestSandboxAPI:
             port=8080,
             entrypoint="app.py",
             name="anyswe_agent",
-            agent_server_module="nemo_gym.agents.hermes",
-            agent_server_class="HermesHarness",
-            agent_config_class="AgentHarnessConfig",
+            agent="hermes",
             container_formatter="registry.example.com/anyswe:{instance_id}",
         )
         assert config.sandbox_provider == "sandbox"
@@ -169,9 +165,7 @@ class TestSandboxAPI:
             body=SimpleNamespace(model="model", temperature=1.0, top_p=0.95, max_output_tokens=None),
             agent_kwargs={"model": "configured-model", "custom": {"enabled": True}},
             model_server_url="http://model-host:8000/v1",
-            agent_server_module="example.agent",
-            agent_server_class="ExampleAgent",
-            agent_config_class="ExampleAgentConfig",
+            agent="hermes",
         )
         env = AnySweAgent._sandbox_agent_env(params)
         kwargs = json.loads(base64.b64decode(env["NGSWE_AGENT_KWARGS_B64"]))

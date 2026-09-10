@@ -6,9 +6,7 @@ anyterminal_hermes:
       description: Terminal Bench run by the Hermes agent inside the task container.
       value: Evaluate terminal-task capabilities on Terminal Bench with any Gym agent.
 
-      agent_server_module: nemo_gym.agents.hermes
-      agent_server_class: HermesHarness
-      agent_config_class: AgentHarnessConfig
+      agent: hermes
       agent_kwargs:
         model:
           model: ${policy_model_name}

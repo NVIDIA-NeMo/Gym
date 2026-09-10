@@ -6,9 +6,7 @@ anyterminal_claude_code:
       description: Terminal Bench run by claude-code natively inside the task container.
       value: Evaluate terminal-task capabilities on Terminal Bench with any Gym agent.
 
-      agent_server_module: nemo_gym.agents.claude_code
-      agent_server_class: ClaudeCodeHarness
-      agent_config_class: AgentHarnessConfig
+      agent: claude_code
       agent_kwargs:
         model:
           model: ${policy_model_name}

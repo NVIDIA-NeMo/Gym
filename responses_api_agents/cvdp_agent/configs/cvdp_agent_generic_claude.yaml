@@ -14,9 +14,7 @@ cvdp_agent_generic_claude:
         jsonl_fpath: resources_servers/cvdp/data/example_agentic.jsonl
 
       # the harness: swap these three + setup_scripts/<key>_deps.sh to change agent
-      agent_server_module: nemo_gym.agents.claude_code
-      agent_server_class: ClaudeCodeHarness
-      agent_config_class: AgentHarnessConfig
+      agent: claude_code
       agent_kwargs:
         model:
           model: ${anthropic_model_name}

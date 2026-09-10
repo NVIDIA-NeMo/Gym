@@ -6,9 +6,7 @@ anyterminal_openclaw:
       description: Terminal Bench run by OpenClaw natively inside the task container.
       value: Evaluate terminal-task capabilities on Terminal Bench with any Gym agent.
 
-      agent_server_module: nemo_gym.agents.openclaw
-      agent_server_class: OpenClawHarness
-      agent_config_class: AgentHarnessConfig
+      agent: openclaw
       agent_kwargs:
         model: {model: model, provider: nemo}
         timeout_seconds: 3600
