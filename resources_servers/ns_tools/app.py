@@ -30,6 +30,7 @@ import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
 
 import httpx
@@ -52,6 +53,15 @@ from nemo_gym.server_utils import SESSION_ID_KEY
 
 if TYPE_CHECKING:
     from sandbox_pool import SandboxPool
+    from session_sandboxes import SessionSandboxes
+
+# Rollout session id published to the sandbox backends (see session_context.py). The
+# server runs with this directory on sys.path (like the lazy sandbox_pool imports below).
+try:
+    from session_context import current_session_id
+except ModuleNotFoundError:  # imported from elsewhere: make the flat module importable
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from session_context import current_session_id
 
 
 logger = logging.getLogger(__name__)
@@ -82,12 +92,17 @@ class NSToolsConfig(BaseResourcesServerConfig):
     sandbox_host: str = "127.0.0.1"
     sandbox_port: str = "6000"
 
-    # Sandbox backend: "local" (default — today's colocated server) or "sandbox_pool"
-    # (disaggregated pods on OpenSandbox; requires the sandbox_pool block below).
-    sandbox_type: Literal["local", "sandbox_pool"] = "local"
+    # Sandbox backend: "local" (default — today's colocated server), "sandbox_pool"
+    # (shared disaggregated pods on OpenSandbox; requires the sandbox_pool block below) or
+    # "sandbox_per_session" (one OpenSandbox sandbox per rollout session, created on the
+    # first tool call and deleted when the rollout is verified; requires sandbox_per_session).
+    sandbox_type: Literal["local", "sandbox_pool", "sandbox_per_session"] = "local"
     # SandboxPool constructor kwargs (see sandbox_pool.py). Only read when
     # sandbox_type == "sandbox_pool"; the default backend never touches it.
     sandbox_pool: Dict[str, Any] = Field(default_factory=dict)
+    # SessionSandboxes constructor kwargs (see session_sandboxes.py). Only read when
+    # sandbox_type == "sandbox_per_session".
+    sandbox_per_session: Dict[str, Any] = Field(default_factory=dict)
 
     # Legacy python_tool HTTP server port (only used for pre-main HTTP PythonTool variants)
     python_tool_port: int = 8765
@@ -143,7 +158,8 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     _python_tool_process: Optional[subprocess.Popen] = None
     _timing_by_session: Dict[str, list] = {}  # session_id -> list of timing records
     _uses_python_tool_sidecar: bool = False
-    _sandbox_pool: Optional["SandboxPool"] = None
+    # Both backends expose start()/aclose()/end_session().
+    _sandbox_pool: Optional["SandboxPool | SessionSandboxes"] = None
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -281,13 +297,21 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             "port": self.config.sandbox_port,
             "disable_session_restore": self.config.disable_session_restore,
         }
-        if self.config.sandbox_type == "sandbox_pool":
+        if self.config.sandbox_type in ("sandbox_pool", "sandbox_per_session"):
             from gym_sandbox import GymSandbox
             from nemo_skills.code_execution.sandbox import sandboxes
-            from sandbox_pool import SandboxPool
 
-            sandboxes["sandbox_pool"] = GymSandbox
-            self._sandbox_pool = SandboxPool(**self.config.sandbox_pool)
+            # nemo_skills instantiates sandboxes[sandbox_type](**sandbox_context minus sandbox_type),
+            # so one GymSandbox class serves both backends; only the owner differs.
+            sandboxes[self.config.sandbox_type] = GymSandbox
+            if self.config.sandbox_type == "sandbox_pool":
+                from sandbox_pool import SandboxPool
+
+                self._sandbox_pool = SandboxPool(**self.config.sandbox_pool)
+            else:
+                from session_sandboxes import SessionSandboxes
+
+                self._sandbox_pool = SessionSandboxes(**self.config.sandbox_per_session)
             sandbox_context["pool"] = self._sandbox_pool
 
         context = {"sandbox": sandbox_context}
@@ -348,6 +372,8 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         is_internal_timeout = False
         is_request_timeout = False
         result = None
+        # Sandbox backends key sandboxes by rollout session (see session_context.py).
+        session_token = current_session_id.set(session_id)
 
         try:
             body = await request.json()
@@ -379,6 +405,8 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         except Exception as e:
             logger.exception(f"Error executing tool {tool_name}: {e}")
             result = {"error": str(e)}
+        finally:
+            current_session_id.reset(session_token)
 
         elapsed = time.perf_counter() - start_time
         self._timing_by_session[session_id].append(
@@ -436,6 +464,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         Detailed per-call and summary logging is controlled by verbose_tool_logging.
         """
         session_id = request.session.get(SESSION_ID_KEY) if request else None
+        session_token = current_session_id.set(session_id)
         try:
             metrics = self._aggregate_timing_metrics(session_id)
             if self.config.verbose_tool_logging:
@@ -476,8 +505,18 @@ class NSToolsResourcesServer(SimpleResourcesServer):
                 **metrics,
             )
         finally:
-            if self.tool_manager is not None and session_id:
-                await self.tool_manager.cleanup_request(session_id)
+            try:
+                if self.tool_manager is not None and session_id:
+                    await self.tool_manager.cleanup_request(session_id)
+            finally:
+                current_session_id.reset(session_token)
+                # /verify is the end of the rollout: a per-session sandbox backend deletes
+                # the session's sandbox here (shared pool: no-op). Never fail the reward.
+                if self._sandbox_pool is not None and session_id:
+                    try:
+                        await self._sandbox_pool.end_session(session_id)
+                    except Exception as exc:
+                        logger.warning(f"Ending sandbox session {session_id[:8]}... failed: {exc}")
 
     # --------------------------------------------------------
     # Cleanup

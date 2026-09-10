@@ -1,0 +1,45 @@
+config_paths:
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+- resources_servers/ns_tools/configs/ns_tools.yaml
+ns_tools:
+  resources_servers:
+    ns_tools:
+      # One OpenSandbox sandbox per rollout session: created on the session's first tool
+      # call, deleted when the rollout is verified (see session_sandboxes.py).
+      sandbox_type: sandbox_per_session
+      sandbox_per_session:
+        provider:
+          opensandbox: ${sandbox.opensandbox}
+        image: ${oc.env:NS_SANDBOX_IMAGE}
+        entrypoint:
+        - /start-with-nginx.sh
+        env:
+          EXECD_API_GRACE_SHUTDOWN: 50ms
+        port: 6000
+        # Cluster-side backstop only (expireTime): a sandbox normally lives for one rollout.
+        ttl_s: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_TTL_S,7200}}
+        # Optional: claim from a prewarmed Pool CRD instead of a direct create (still one per session).
+        pool_ref: ${oc.env:NS_SANDBOX_POOL_REF,""}
+        pool_fallback: ${oc.decode:${oc.env:NS_SANDBOX_POOL_FALLBACK,true}}
+        ready_timeout_s: ${oc.decode:${oc.env:NS_SANDBOX_READY_TIMEOUT_S,120}}
+        health_budget_s: 300
+        # Concurrent creates/deletes against the sandbox API (a batch start creates one per session).
+        create_concurrency: ${oc.decode:${oc.env:NS_SANDBOX_CREATE_CONCURRENCY,64}}
+        delete_concurrency: 64
+        # Sessions that never reach /verify are deleted after this much inactivity.
+        session_idle_timeout_s: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_IDLE_TIMEOUT_S,3600}}
+        # Sized for ONE Python session (requests are honoured thanks to the custom label below).
+        resources:
+          cpu: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_CPU_LIMIT,4}}
+          memory_mib: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_MEM_LIMIT_MIB,8192}}
+          disk_gib: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_DISK_LIMIT_GIB,10}}
+        resource_requests:
+          cpu: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_CPU_REQUEST,2}}
+          memory_mib: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_MEM_REQUEST_MIB,4096}}
+          disk_gib: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_DISK_REQUEST_GIB,5}}
+        # Pod labels (OpenSandbox propagates metadata as labels). nemo.nvidia.com/resources=custom
+        # exempts the pod from the request-clamping admission policy on the NeMo cells.
+        metadata:
+          "nemo.nvidia.com/resources": custom
+          "nemo-gym.nvidia.com/purpose": ns-tools-per-session
+      verified: false

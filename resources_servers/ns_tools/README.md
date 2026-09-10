@@ -56,6 +56,31 @@ server-side pool. `NS_SANDBOX_POOL_FALLBACK=false` disables direct fallback.
 A prewarmed template must already run the NeMo Skills service and set the same
 execution grace. The ordinary `ns_tools.yaml` keeps colocated execution.
 
+### One sandbox per rollout session
+
+`resources_servers/ns_tools/configs/ns_tools_session_sandbox.yaml` selects
+`sandbox_type: sandbox_per_session` (`session_sandboxes.py`): nothing is shared
+between rollouts. The first tool call of a rollout creates its own sandbox, every
+later call of that rollout reuses it, and the sandbox is deleted as soon as the
+rollout is verified (`/verify` -> nemo_skills `cleanup_request` -> `end_session`).
+Rollouts that never reach `/verify` are deleted after
+`NS_SANDBOX_SESSION_IDLE_TIMEOUT_S` (default 3600) of inactivity, every live
+sandbox is deleted at server shutdown, and `NS_SANDBOX_SESSION_TTL_S` (default
+7200) is the cluster-side backstop. Sandboxes are keyed by the nemo-gym session
+of the rollout (published through `session_context.current_session_id`), so an
+IPython session restarted by an execution timeout stays on the same sandbox.
+
+Size the pod for ONE Python session: limits `NS_SANDBOX_SESSION_CPU_LIMIT` /
+`NS_SANDBOX_SESSION_MEM_LIMIT_MIB` / `NS_SANDBOX_SESSION_DISK_LIMIT_GIB` (4 / 8192 /
+10) and requests `NS_SANDBOX_SESSION_CPU_REQUEST` / `..._MEM_REQUEST_MIB` /
+`..._DISK_REQUEST_GIB` (2 / 4096 / 5). Every sandbox carries the pod labels
+`nemo.nvidia.com/resources: custom` and `nemo-gym.nvidia.com/purpose:
+ns-tools-per-session` (`metadata`, extendable in the yaml); the first one exempts the
+pod from the request-clamping admission policy on the NeMo cells so the requests
+are honoured. `NS_SANDBOX_CREATE_CONCURRENCY` (64) bounds concurrent creates at a
+batch start; `NS_SANDBOX_POOL_SIZE` is rejected in this mode. `NS_SANDBOX_POOL_REF`
+may still name a prewarmed pool to claim (one claim per session).
+
 ## Sample data format
 Each sample requires:
 - `question`: The math question being asked

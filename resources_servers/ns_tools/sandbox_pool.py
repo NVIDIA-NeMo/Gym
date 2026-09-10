@@ -459,6 +459,30 @@ class SandboxPool:
         if index is not None:
             self._slots[index].sessions.discard(session_id)
 
+    # ------------------------------------------------------------------ backend surface shared with SessionSandboxes
+
+    @property
+    def port(self) -> int:
+        return self._port
+
+    def has_session(self, session_id: str) -> bool:
+        return str(session_id) in self._session_to_slot
+
+    async def sandbox_for(self, session_id: str) -> AsyncSandbox | None:
+        """The healthy pod a session is pinned to, or None (never pins a new session)."""
+        index = self._session_to_slot.get(str(session_id))
+        if index is None or not self._slots[index].healthy:
+            return None
+        return self._slots[index].sandbox
+
+    async def report_failure(self, session_id: str | None) -> None:
+        """Shared pods are health-checked and healed by the maintenance loop; nothing to do per call."""
+        return None
+
+    async def end_session(self, key: str | None) -> None:
+        """Rollout end: shared pods stay up; the IPython session was already deleted via delete_session."""
+        return None
+
     @property
     def ready_count(self) -> int:
         return sum(1 for slot in self._slots if slot.healthy)
