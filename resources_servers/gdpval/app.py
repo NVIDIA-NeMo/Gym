@@ -269,6 +269,8 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     judge_pdf_include_text: bool = True
     # Exact request-wide image cap for raster and PDF-overflow transports.
     judge_max_images_per_request: int = 450
+    # Read nested reference inputs while leaving submission directories shallow.
+    judge_reference_files_recursive: bool = False
     # Whether the (single) local judge natively reads audio / video, tracked
     # SEPARATELY because MiniMax-M3 — the reference self-hosted judge — reads video
     # but NOT audio (its config has an image + video tower but no audio config). So
@@ -911,6 +913,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     include_text=self.config.judge_pdf_include_text,
                     audio_capable=audio_capable,
                     video_capable=video_capable,
+                    recursive=bool(
+                        self.config.judge_reference_files_recursive and path and path.name == "reference_files"
+                    ),
                 )
             return section_cache[key]
 
