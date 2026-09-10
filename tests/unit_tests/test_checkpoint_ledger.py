@@ -30,6 +30,13 @@ from nemo_gym._checkpoint import (
     CaptureLedgerCheckpointer,
     ControlCapabilities,
     ControlFence,
+    GenerationCutCoordinatorProof,
+    GenerationCutFrozenTicket,
+    GenerationCutInventory,
+    GenerationCutPrefix,
+    GenerationCutPrefixAck,
+    GenerationCutReceipt,
+    GenerationCutWorkerProof,
     LedgerMismatchError,
     MultiProcessCapability,
     StaleAttemptError,
@@ -102,6 +109,242 @@ def test_restore_validates_all_files_before_installing_any(tmp_path) -> None:
     assert not restored.exists()
 
 
+def test_generation_cut_receipt_is_bound_to_ledger_commit_and_restore(tmp_path) -> None:
+    source = tmp_path / "source"
+    _write_custody(source, "rollout-a")
+    checkpoint = tmp_path / "checkpoint"
+    inventory = GenerationCutInventory.build(
+        checkpoint_id="checkpoint-1",
+        server_name="policy",
+        active_prefixes=[],
+    )
+    receipt = GenerationCutReceipt(
+        checkpoint_id="checkpoint-1",
+        cut_id="cut-1",
+        inventory_digest=inventory.inventory_digest,
+        inventory=inventory,
+        backend_snapshot_id="snapshot-1",
+    )
+    checkpointer = CaptureLedgerCheckpointer(source)
+
+    committed = checkpointer.commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+        generation_cut_receipt=receipt,
+    )
+    manifest = json.loads((checkpoint / MODEL_LEDGER_SUBDIR / LEDGER_MANIFEST_NAME).read_text())
+    assert manifest["schema_version"] == 2
+    assert "generation_cut_receipt" in manifest
+    assert "generation_cut_ack" not in manifest
+    assert committed["generation_cut_receipt"] == receipt.model_dump(mode="json")
+    restored = CaptureLedgerCheckpointer(tmp_path / "restored").restore(checkpoint)
+    assert restored["generation_cut_receipt"] == receipt.model_dump(mode="json")
+
+    changed = receipt.model_copy(update={"cut_id": "cut-2"})
+    with pytest.raises(LedgerMismatchError, match="generation cut changed"):
+        checkpointer.commit(
+            checkpoint,
+            checkpoint_id="checkpoint-1",
+            tombstones=[],
+            generation_cut_receipt=changed,
+        )
+
+
+def test_restore_rejects_legacy_generation_cut_ack_manifest_with_migration_guidance(tmp_path) -> None:
+    checkpoint = tmp_path / "checkpoint"
+    CaptureLedgerCheckpointer(tmp_path / "source").commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+    )
+    manifest_path = checkpoint / MODEL_LEDGER_SUBDIR / LEDGER_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest["schema_version"] = 1
+    manifest["generation_cut_ack"] = {"checkpoint_id": "checkpoint-1", "cut_id": "legacy-cut"}
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(
+        LedgerMismatchError,
+        match=r"cannot be migrated safely.*recreate the checkpoint with schema_version 2",
+    ):
+        CaptureLedgerCheckpointer(tmp_path / "restored").restore(checkpoint)
+
+
+def test_restore_rejects_legacy_generation_cut_sidecar_with_migration_guidance(tmp_path) -> None:
+    checkpoint = tmp_path / "checkpoint"
+    CaptureLedgerCheckpointer(tmp_path / "source").commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+    )
+    ledger_dir = checkpoint / MODEL_LEDGER_SUBDIR
+    manifest_path = ledger_dir / LEDGER_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest["schema_version"] = 1
+    manifest_path.write_text(json.dumps(manifest))
+    (ledger_dir / "generation-cut.json").write_text(
+        json.dumps({"ack": {"cut_id": "legacy-cut"}, "receipt": {"backend_snapshot_id": "legacy-snapshot"}})
+    )
+
+    with pytest.raises(
+        LedgerMismatchError,
+        match=r"cannot be migrated safely.*recreate the checkpoint with schema_version 2",
+    ):
+        CaptureLedgerCheckpointer(tmp_path / "restored").restore(checkpoint)
+
+
+def test_restore_keeps_legacy_cut_free_ledger_compatibility(tmp_path) -> None:
+    source = tmp_path / "source"
+    _write_custody(source, "rollout-a")
+    checkpoint = tmp_path / "checkpoint"
+    CaptureLedgerCheckpointer(source).commit(checkpoint, checkpoint_id="checkpoint-1", tombstones=[])
+    manifest_path = checkpoint / MODEL_LEDGER_SUBDIR / LEDGER_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest["schema_version"] = 1
+    manifest_path.write_text(json.dumps(manifest))
+
+    restored = CaptureLedgerCheckpointer(tmp_path / "restored").restore(checkpoint)
+    assert restored["checkpoint_id"] == "checkpoint-1"
+
+
+def test_multi_worker_generation_cut_proof_is_persisted_and_validated(tmp_path) -> None:
+    workers = []
+    for index in range(2):
+        frozen_ticket = GenerationCutFrozenTicket(
+            ticket_id=f"ticket-{index}",
+            rollout_id=f"rollout-{index}",
+            attempt_index=0,
+            model_call_id=f"call-{index}",
+            generation_started=True,
+            response_started=False,
+        )
+        inventory = GenerationCutInventory.build(
+            checkpoint_id="checkpoint-1",
+            server_name="policy",
+            active_prefixes=[
+                GenerationCutPrefix(
+                    ticket_id=frozen_ticket.ticket_id,
+                    rollout_id=frozen_ticket.rollout_id,
+                    attempt_index=frozen_ticket.attempt_index,
+                    model_call_id=frozen_ticket.model_call_id,
+                    admitted_at=float(index),
+                )
+            ],
+        )
+        receipt = GenerationCutReceipt(
+            checkpoint_id="checkpoint-1",
+            cut_id=f"cut-{index}",
+            inventory_digest=inventory.inventory_digest,
+            inventory=inventory,
+            backend_snapshot_id=f"snapshot-{index}",
+            prefixes=(
+                GenerationCutPrefixAck(
+                    ticket_id=frozen_ticket.ticket_id,
+                    rollout_id=frozen_ticket.rollout_id,
+                    attempt_index=frozen_ticket.attempt_index,
+                    model_call_id=frozen_ticket.model_call_id,
+                    admitted_at=float(index),
+                    disposition="durable_prefix",
+                    frozen_buffer_id=f"buffer-{index}",
+                    staging_key=f"staging-{index}",
+                    prefix_token_count=1,
+                    prefix_digest=f"{index}" * 64,
+                ),
+            ),
+        )
+        workers.append(
+            GenerationCutWorkerProof.build(
+                checkpoint_id="checkpoint-1",
+                coordinator_sequence=4,
+                worker_id=f"w{index}",
+                frozen_tickets=[frozen_ticket],
+                ready_ticket_ids=[frozen_ticket.ticket_id],
+                generation_cut_receipt=receipt,
+            )
+        )
+    proof = GenerationCutCoordinatorProof.build(
+        checkpoint_id="checkpoint-1",
+        coordinator_sequence=4,
+        expected_workers=2,
+        frozen_worker_ids=("w0", "w1"),
+        workers=workers,
+    )
+    source = tmp_path / "source"
+    checkpointer = CaptureLedgerCheckpointer(source)
+    checkpoint = tmp_path / "checkpoint"
+
+    committed = checkpointer.commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+        generation_cut_proof=proof,
+    )
+    assert committed["generation_cut_proof"] == proof.model_dump(mode="json")
+    restored = CaptureLedgerCheckpointer(tmp_path / "restored").restore(checkpoint)
+    assert restored["generation_cut_proof"] == proof.model_dump(mode="json")
+
+    omitted = proof.model_copy(update={"workers": (workers[0],)})
+    with pytest.raises(ValueError, match="does not match frozen worker IDs"):
+        CaptureLedgerCheckpointer(source).commit(
+            tmp_path / "omitted",
+            checkpoint_id="checkpoint-1",
+            tombstones=[],
+            generation_cut_proof=omitted,
+        )
+
+    mismatched_worker = GenerationCutWorkerProof.build(
+        checkpoint_id=workers[1].checkpoint_id,
+        coordinator_sequence=5,
+        worker_id=workers[1].worker_id,
+        frozen_tickets=list(workers[1].frozen_tickets),
+        ready_ticket_ids=list(workers[1].ready_ticket_ids),
+        generation_cut_receipt=workers[1].generation_cut_receipt,
+    )
+    mismatched = proof.model_copy(update={"workers": (workers[0], mismatched_worker)})
+    with pytest.raises(ValueError, match="mismatched checkpoint or coordinator sequence"):
+        CaptureLedgerCheckpointer(source).commit(
+            tmp_path / "mismatched",
+            checkpoint_id="checkpoint-1",
+            tombstones=[],
+            generation_cut_proof=mismatched,
+        )
+
+    replacement_worker = GenerationCutWorkerProof.build(
+        checkpoint_id=workers[1].checkpoint_id,
+        coordinator_sequence=workers[1].coordinator_sequence,
+        worker_id="w2",
+        frozen_tickets=list(workers[1].frozen_tickets),
+        ready_ticket_ids=list(workers[1].ready_ticket_ids),
+        generation_cut_receipt=workers[1].generation_cut_receipt,
+    )
+    replaced = proof.model_copy(update={"workers": (workers[0], replacement_worker)})
+    with pytest.raises(ValueError, match="does not match frozen worker IDs"):
+        CaptureLedgerCheckpointer(source).commit(
+            tmp_path / "replaced",
+            checkpoint_id="checkpoint-1",
+            tombstones=[],
+            generation_cut_proof=replaced,
+        )
+
+    client, _ = _participant(
+        tmp_path / "route-ledger",
+        generation_cut_proof_provider=lambda: proof,
+        expected_workers=2,
+    )
+    control = {"checkpoint_id": "checkpoint-1", "deadline_ts": 4e9}
+    assert client.post(f"{MODEL_ADMISSION_URL_PREFIX}/pause", json=control, headers=AUTH_HEADERS).status_code == 200
+    route_checkpoint = tmp_path / "route-checkpoint"
+    committed = client.post(
+        f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
+        json={**control, "checkpoint_dir": str(route_checkpoint)},
+        headers=AUTH_HEADERS,
+    )
+    assert committed.status_code == 200
+    assert committed.json()["generation_cut_proof"] == proof.model_dump(mode="json")
+    assert (route_checkpoint / MODEL_LEDGER_SUBDIR / "policy" / "generation-cut-workers.json").exists()
+
+
 def test_restore_rejects_uncommitted_and_nonfresh_namespaces(tmp_path) -> None:
     checkpoint = tmp_path / "checkpoint"
     ledger_dir = checkpoint / MODEL_LEDGER_SUBDIR
@@ -119,9 +362,15 @@ def test_restore_rejects_uncommitted_and_nonfresh_namespaces(tmp_path) -> None:
         CaptureLedgerCheckpointer(restored).restore(checkpoint)
 
 
-def _participant(root) -> tuple[TestClient, AdmissionLimiter]:
+def _participant(
+    root,
+    *,
+    generation_cut_backend=None,
+    generation_cut_proof_provider=None,
+    expected_workers: int = 1,
+) -> tuple[TestClient, AdmissionLimiter]:
     app = FastAPI()
-    limiter = AdmissionLimiter()
+    limiter = AdmissionLimiter(generation_cut_backend)
     fence = ControlFence()
     ledger = FileLineageStore(root)
     install_control_plane(
@@ -150,8 +399,79 @@ def _participant(root) -> tuple[TestClient, AdmissionLimiter]:
         instance_role="policy",
         server_name="policy",
         auth_token=AUTH_TOKEN,
+        generation_cut_proof_provider=generation_cut_proof_provider,
+        expected_workers=expected_workers,
     )
     return TestClient(app), limiter
+
+
+def test_multi_worker_commit_without_coordinator_proof_fails_closed(tmp_path) -> None:
+    client, _ = _participant(tmp_path / "ledger", expected_workers=2)
+    control = {"checkpoint_id": "checkpoint-1", "deadline_ts": 4e9}
+    pause = client.post(f"{MODEL_ADMISSION_URL_PREFIX}/pause", json=control, headers=AUTH_HEADERS)
+    assert pause.json()["state"] == "paused"
+
+    commit = client.post(
+        f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
+        json={**control, "checkpoint_dir": str(tmp_path / "checkpoint")},
+        headers=AUTH_HEADERS,
+    )
+    assert commit.status_code == 409
+    assert commit.json()["error"]["code"] == "ledger_not_quiescent"
+
+
+def test_generation_cut_receipt_is_final_before_ledger_commit(tmp_path) -> None:
+    class DurableReceiptBackend:
+        def __init__(self) -> None:
+            self.checkpoint_calls = 0
+
+        async def checkpoint_generation_cut(self, inventory):
+            self.checkpoint_calls += 1
+            return GenerationCutReceipt(
+                checkpoint_id=inventory.checkpoint_id,
+                cut_id="cut-1",
+                inventory_digest=inventory.inventory_digest,
+                inventory=inventory,
+                backend_snapshot_id="snapshot-1",
+                prefixes=tuple(
+                    GenerationCutPrefixAck(
+                        ticket_id=prefix.ticket_id,
+                        rollout_id=prefix.rollout_id,
+                        attempt_index=prefix.attempt_index,
+                        model_call_id=prefix.model_call_id,
+                        admitted_at=prefix.admitted_at,
+                        disposition="durable_prefix",
+                        frozen_buffer_id=f"buffer/{prefix.ticket_id}",
+                        staging_key=f"staging/{prefix.ticket_id}",
+                        prefix_token_count=2,
+                        prefix_digest="d" * 64,
+                    )
+                    for prefix in inventory.active_prefixes
+                ),
+            )
+
+        async def restore_generation_cut(self, receipt):
+            return receipt
+
+    backend = DurableReceiptBackend()
+    client, limiter = _participant(tmp_path / "ledger", generation_cut_backend=backend)
+    ticket = limiter.admit(rollout_id="rollout-a", attempt_index=0)
+    ticket.generation_started = True
+    ticket.model_call_id = "call-1"
+    pause_body = {"checkpoint_id": "checkpoint-1", "deadline_ts": 4e9}
+    pause = client.post(f"{MODEL_ADMISSION_URL_PREFIX}/pause", json=pause_body, headers=AUTH_HEADERS)
+    assert pause.json()["state"] == "paused"
+    assert backend.checkpoint_calls == 1
+
+    committed = client.post(
+        f"{MODEL_CHECKPOINT_URL_PREFIX}/commit",
+        json={**pause_body, "checkpoint_dir": str(tmp_path / "checkpoint")},
+        headers=AUTH_HEADERS,
+    )
+    assert committed.status_code == 200
+    assert committed.json()["generation_cut_receipt"]["backend_snapshot_id"] == "snapshot-1"
+    assert backend.checkpoint_calls == 1
+    limiter.release(ticket)
 
 
 def test_commit_requires_completed_drain_and_restore_stays_paused(tmp_path) -> None:

@@ -59,6 +59,7 @@ def install_model_admission(
     limiter: AdmissionLimiter,
     fence: ControlFence,
     instance_role: Literal["policy", "auxiliary"],
+    server_name: str = "policy",
     auth_token: str,
 ) -> None:
     """Register ``/ng-control/v1/model-admission`` on a model-server app.
@@ -88,7 +89,16 @@ def install_model_admission(
         _require_policy()
 
         async def run() -> dict[str, Any]:
-            limiter.close()
+            limiter.close(body.checkpoint_id)
+            try:
+                await limiter.prepare_generation_cut(
+                    body.checkpoint_id,
+                    server_name=server_name,
+                    timeout_s=body.remaining(),
+                )
+            except BaseException:
+                limiter.resume()
+                raise
             counts = limiter.counts()
             return {
                 "state": counts["state"],
@@ -144,6 +154,8 @@ def install_model_admission(
             "state": counts["state"],
             "per_worker": {"0": {"state": counts["state"], "inflight": counts["inflight_total"]}},
             "inflight_total": counts["inflight_total"],
+            "response_inflight_total": counts["response_inflight_total"],
+            "generation_pending_total": counts["generation_pending_total"],
             "waiters_total": counts["waiters_total"],
             "inflight": counts["inflight"],
             "tombstones": [
