@@ -110,7 +110,11 @@ async def test_blackjack_restores_rng_position() -> None:
 
 
 def test_gymnasium_checkpoint_continuation_is_per_subclass_opt_in() -> None:
-    assert _server(BlackjackEnv, BaseResourcesServerConfig).checkpoint_state_enabled()
+    server = _server(BlackjackEnv, BaseResourcesServerConfig)
+    assert server.checkpoint_state_enabled()
+    assert server.checkpoint_route_kind("/reset", "POST") == "start"
+    assert server.checkpoint_route_kind("/step", "POST") == "mutation"
+    assert server.checkpoint_route_kind("/close", "POST") == "terminal"
     assert not _server(ExampleMultiTurnEnv, BaseResourcesServerConfig).checkpoint_state_enabled()
 
 
