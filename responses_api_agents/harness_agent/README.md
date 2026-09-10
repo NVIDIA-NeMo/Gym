@@ -1,16 +1,7 @@
-# sandbox_agent
+# harness_agent
 
-Runs any Gym environment inside a sandbox.
-
-## Modes
-
-- agent_only_runner: imports the configured agent's `responses()` inside the sandbox via
-  a small runner. The harness code executes unchanged, only its model base URL is patched
-  to a sandbox-reachable address. No Gym servers in the sandbox.
-- gym_runner: starts full NeMo Gym inside the sandbox (`nested_config_paths`) and runs
-  the task e2e with `ng_collect_rollouts` against `nested_agent_name`. `run()` returns
-  the in-box verify result directly, so no external resources server is needed. For
-  wrapping environments without a clean responses/verify split.
+Runs a configured agent harness through a sandbox provider. LocalProvider runs the same
+path without container isolation.
 
 ## Per-task metadata keys
 
