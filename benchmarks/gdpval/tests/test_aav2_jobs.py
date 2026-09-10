@@ -218,8 +218,7 @@ exec sleep 120
             agent_max_turns=32,
         )
         snapshot.prepare(args)
-        write(args.run_dir / "prepared/manifest.json", "{}")
-        write(args.run_dir / "prepared/judge.yaml", "{}")
+        write(args.run_dir / "prepared/candidate/task_a/repeat_0/finish_params.json", "{}")
         env = {
             **os.environ,
             "AAV2_RUN_DIR": str(args.run_dir),
@@ -262,11 +261,12 @@ def run_job(job, phase, **environment):
 
 
 @pytest.mark.parametrize("mode,trials,concurrency", [("smoke", 1, 4), ("pilot", 2, 8), ("full", 4, 16)])
-def test_judge_modes_use_native_resume_and_prepared_views(job, mode, trials, concurrency):
+def test_judge_modes_use_prepared_candidate_and_frozen_references(job, mode, trials, concurrency):
     result = run_job(job, "judge", AAV2_MODE=mode, GDPVAL_MAX_FILE_BYTES_FOR_JUDGE="1")
     assert result.returncode == 0, (result.stdout, result.stderr)
     entries = records(job)
-    assert any(item.get("check", [""])[0].endswith("/preconvert.py") for item in entries)
+    assert not any(item.get("check", [""])[0].endswith("/preconvert.py") for item in entries)
+    assert any(item.get("check", [""])[0].endswith("/rollout_runtime.py") for item in entries)
     call = next(item for item in entries if "target" in item)
     assert call["target"] == "nemo_gym.cli.eval:e2e_rollout_collection"
     assert call["file_limit"] == json.loads((job.run / "run.json").read_text())["GDPVAL_MAX_FILE_BYTES_FOR_JUDGE"]
@@ -282,6 +282,12 @@ def test_judge_modes_use_native_resume_and_prepared_views(job, mode, trials, con
     assert prefix + "strict_comparison_trials" not in values
     assert values[prefix + "judge_reference_files_recursive"] == "true"
     assert "benchmarks/gdpval/config.yaml" in values["config_paths"]
+    staged_judge = Path(call["cwd"]).parent / "judge.yaml"
+    assert str(staged_judge) in values["config_paths"]
+    assert str(job.run / "prepared/judge.yaml") not in values["config_paths"]
+    frozen_judge = Path(json.loads((job.run / "run.json").read_text())["JUDGE_CONFIG"])
+    assert staged_judge.read_bytes() == frozen_judge.read_bytes()
+    assert not (job.run / "prepared/manifest.json").exists()
     assert "true3_transport" not in values["config_paths"]
     assert not any(key.startswith(prefix + "judge_panel") or key == prefix + "judge_media_mode" for key in values)
     assert values["output_jsonl_fpath"] == str(job.run / f"judge_{mode}/rollouts.jsonl")
@@ -294,6 +300,14 @@ def test_judge_modes_use_native_resume_and_prepared_views(job, mode, trials, con
         "jsonl_fpath"
     ] == str(expected)
     assert not list(job.local.rglob("agent.sif"))
+
+
+def test_judge_requires_a_prepared_candidate(job):
+    shutil.rmtree(job.run / "prepared/candidate")
+    result = run_job(job, "judge")
+    assert result.returncode == 64
+    assert "prepared candidate directory is missing" in result.stderr
+    assert not any("target" in item for item in records(job))
 
 
 def test_rollout_preserves_quoted_serving_args_and_uses_fresh_resume_environments(job):

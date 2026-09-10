@@ -27,12 +27,11 @@ AAV2_MODE=${AAV2_MODE:-full}
 gdpval_prepare judge
 "$GYM_PYTHON" "$LOCAL_PACKAGE/rollout_runtime.py" verify --without-sandbox \
     --gym-root "$GYM_ROOT" --component-venvs "$COMPONENT_VENVS" --module nemo_gym --module nemo_gym.cli.main
-[[ -f $RUN_DIR/prepared/manifest.json ]] || gdpval_fail "run preconvert before judging"
-"$GYM_PYTHON" "$LOCAL_PACKAGE/preconvert.py" "$RUN_DIR"
+[[ -d $RUN_DIR/prepared/candidate ]] || gdpval_fail "prepared candidate directory is missing"
 export EXECUTE_ONLY=false JUDGE_ONLY=true RERUN_INCOMPLETE=true
 export PERSIST_DELIVERABLES_DIR=$RUN_DIR/prepared/candidate
 gdpval_run_gym --config "$JOB_ROOT/judge.yaml" \
-    --config "$RUN_DIR/prepared/judge.yaml" --config "$JOB_ROOT/dataset.yaml" \
+    --config "$JOB_ROOT/dataset.yaml" \
     --model-url http://127.0.0.1:9/v1 --model-api-key dummy --model judge-only \
     ++model_endpoint_readiness_timeout_seconds=0 \
     ++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.execute_only=false \
