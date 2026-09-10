@@ -18,7 +18,7 @@ import json
 from pathlib import Path
 
 
-VF_ENV_ID = "automationbench_zapier_env"
+VF_ENV_ID = "automationbench_env"
 TOOLSET = "api"
 
 
@@ -32,11 +32,11 @@ def main() -> None:
 
     try:
         import verifiers as vf  # noqa: F401
-        from automationbench_zapier_env import load_environment
+        from automationbench_env import load_environment
     except ImportError as exc:  # pragma: no cover
         raise SystemExit(
-            "automationbench_zapier_env is not installed. Install this environment first:\n"
-            "    uv pip install -e environments/ab_zapier"
+            "automationbench_env is not installed. Install this environment first:\n"
+            "    uv pip install -e environments/automationbench"
         ) from exc
 
     env = load_environment(domains=args.domains, max_turns=args.max_turns, toolset=TOOLSET)

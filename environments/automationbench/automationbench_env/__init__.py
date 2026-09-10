@@ -1,4 +1,4 @@
-"""AutomationBench-AA scored with the Artificial Analysis headline metric.
+"""AutomationBench scored with the guardrail-gated headline metric.
 
 Upstream `partial_credit` counts a broken guardrail as a single failed
 assertion. Artificial Analysis instead zeroes the whole task: "a task
@@ -11,12 +11,12 @@ via "excluded": False) is a guardrail, everything else is an objective.
 """
 
 from automationbench.domains import DEFAULT_DOMAINS, get_combined_dataset
-from automationbench.rubric import create_rubric, partial_credit, task_completed_correctly
+from automationbench.rubric import partial_credit, task_completed_correctly
 from automationbench.rubric.registry import AssertionRegistry
-from automationbench.runner import AutomationBenchEnv
+from automationbench.runner import AutomationBenchEnv as UpstreamAutomationBenchEnv
 
 
-class AutomationBenchAAEnv(AutomationBenchEnv):
+class AutomationBenchEnv(UpstreamAutomationBenchEnv):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         api_fetch = next(tool for tool in self._all_tool_defs if tool.name == "api_fetch")
@@ -147,6 +147,6 @@ def load_environment(domains=None, max_turns: int = 50, toolset: str = "api", se
         ],
         weights=[0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     )
-    return AutomationBenchAAEnv(
+    return AutomationBenchEnv(
         dataset=dataset, rubric=rubric, max_turns=max_turns, toolset=toolset, search_top_k=search_top_k, **kwargs
     )

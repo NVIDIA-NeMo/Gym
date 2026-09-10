@@ -1,4 +1,4 @@
-ab_aa:
+automationbench:
   responses_api_agents:
     verifiers_agent:
       entrypoint: app.py
@@ -9,7 +9,7 @@ ab_aa:
         type: responses_api_models
         name: policy_model
       model_name: ""
-      vf_env_id: automationbench_aa_gated_env
+      vf_env_id: automationbench_env
       vf_env_args:
         max_turns: 50
         toolset: api
@@ -22,9 +22,9 @@ ab_aa:
       datasets:
         - name: example
           type: example
-          jsonl_fpath: environments/ab_aa/data/example.jsonl
+          jsonl_fpath: environments/automationbench/data/example.jsonl
           license: MIT
         - name: validation
           type: validation
-          jsonl_fpath: environments/ab_aa/data/automationbench-600.jsonl
+          jsonl_fpath: environments/automationbench/data/automationbench-600.jsonl
           license: MIT

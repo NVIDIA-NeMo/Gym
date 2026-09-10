@@ -1,6 +1,6 @@
-# AutomationBench-AA
+# AutomationBench
 
-AutomationBench scored with the Artificial Analysis headline metric.
+AutomationBench scored with the Artificial Analysis headline metric by default.
 
 ## Metric
 
@@ -23,7 +23,7 @@ Alongside the score the env reports `guardrails_violated`, `guardrails_total`,
 directly comparable to the AA leaderboard column.
 
 - Toolset: `api`, matching the AA harness
-- Scoring code: `automationbench_aa_gated_env/` (imports upstream
+- Scoring code: `automationbench_env/` (imports upstream
   `automationbench`; vendors nothing)
 
 ## Install
@@ -32,7 +32,7 @@ The env package is not on PyPI, install it into the agent's venv for data prep.
 Running environment will create its own venv.
 
 ```bash
-uv pip install -e environments/ab_aa
+uv pip install -e environments/automationbench
 ```
 
 This pulls `automation-bench` from the upstream repo. Note upstream declares
@@ -41,7 +41,7 @@ This pulls `automation-bench` from the upstream repo. Note upstream declares
 ## Data
 
 ```bash
-python environments/ab_aa/prepare.py
+python environments/automationbench/prepare.py
 ```
 
 Pulls the public taskset from the installed `automation-bench` package (600 tasks: 6 domains x 100). 
