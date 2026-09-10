@@ -42,6 +42,33 @@ sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
 sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
 ```
 
+## Disaggregated compilation with OpenSandbox
+
+Use `resources_servers/math_formal_lean/configs/math_formal_lean_sandbox.yaml`
+to opt in. Set `OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`, and
+`NS_SANDBOX_IMAGE` to a sandbox image with the Lean toolchain and project at
+`/lean4/my_project`:
+
+```bash
+gym env start \
+  --config resources_servers/math_formal_lean/configs/math_formal_lean_sandbox.yaml \
+  --model-type vllm_model
+```
+
+The config composes Gym's shipped OpenSandbox provider settings. Compilation
+uses `sandbox.exec` to run `lake env ... lean` and preserves the existing
+`process_status`, `stdout`, `stderr`, timeout and output-truncation contract.
+Each sandbox sets `EXECD_API_GRACE_SHUTDOWN=50ms`.
+
+The default creates a fresh sandbox per verification with bounded concurrency.
+Set `LEAN_SANDBOX_POOL_SIZE` to reuse prepared sandboxes; warmup reads the Lean
+and Mathlib files before admission, and failed sandboxes are replaced. Set
+`LEAN_SANDBOX_MAX_CONCURRENT` for fresh-sandbox concurrency and
+`NS_SANDBOX_TTL_S` for lifetime. `NS_SANDBOX_POOL_REF` optionally claims a
+prewarmed server-side pool, falling back to direct creation when unavailable.
+An empty value selects direct creation. Prewarmed templates must set the same
+execution grace. The ordinary configs retain the existing local HTTP backend.
+
 ## License
 
 - **Code**: Apache-2.0

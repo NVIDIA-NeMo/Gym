@@ -40,6 +40,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
+from nemo_gym.sandbox.utils import await_cleanup
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1179,8 +1180,11 @@ class OpenSandboxProvider:
             if self._create.skip_health_check:
                 handle = await self._connect_after_create(created_handle, spec)
             await self._verify_created_handle(handle)
-        except Exception:
-            await self._cleanup_failed_create_handle(created_handle)
+        except BaseException:
+            # Once create returns an id, cancellation must not strand its
+            # remote sandbox. close() applies the configured cleanup bounds.
+            cleanup = asyncio.create_task(self._cleanup_failed_create_handle(created_handle))
+            await await_cleanup(cleanup)
             raise
         return handle
 
@@ -1658,7 +1662,7 @@ class OpenSandboxProvider:
                     raise
                 LOGGER.debug("OpenSandbox sandbox %r already gone; treating terminate as success", handle.sandbox_id)
 
-        stop_error: Exception | None = None
+        stop_error: BaseException | None = None
         try:
             await self._await_sdk_operation(
                 kill_ignore_missing,
@@ -1666,7 +1670,7 @@ class OpenSandboxProvider:
                 sandbox_id=handle.sandbox_id,
                 timeout_s=self._operations.close_timeout_s,
             )
-        except Exception as e:
+        except BaseException as e:
             stop_error = e
 
         close_error: Exception | None = None
@@ -1684,8 +1688,9 @@ class OpenSandboxProvider:
                 handle.sandbox_id,
                 e,
             )
-
         if stop_error is not None:
+            if not isinstance(stop_error, Exception):
+                raise stop_error
             if close_error is not None:
                 raise RuntimeError(
                     "Failed to stop and close OpenSandbox sandbox "

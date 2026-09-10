@@ -16,6 +16,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -52,6 +53,18 @@ class TestMathFormalLeanApp:
     @pytest.fixture
     def server(self, config) -> MathFormalLeanResourcesServer:
         return MathFormalLeanResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def test_unknown_sandbox_backend_is_rejected(self, config):
+        values = config.model_dump()
+        values["sandbox_backend"] = "gym_sandox"
+        with pytest.raises(ValueError, match="sandbox_backend"):
+            MathFormalLeanResourcesServerConfig.model_validate(values)
+
+    def test_lifespan_closes_sandbox_client(self, server):
+        server._sandbox_client.close = AsyncMock()
+        with TestClient(server.setup_webserver()):
+            pass
+        server._sandbox_client.close.assert_awaited_once()
 
     def _create_response(self, text: str, msg_id: str = "test_msg") -> NeMoGymResponse:
         return NeMoGymResponse(
