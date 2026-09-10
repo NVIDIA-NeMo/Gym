@@ -12,8 +12,8 @@ Part I covers 1-categories; the authors flag higher categories as future work.
 
 Each row hands the model one self-contained Lean file — imports, an `open`/`variable` preamble, any auxiliary
 definitions the problem needs, and a target theorem whose proof is `sorry` — and asks for the same file back with the
-holes filled. The prompt is upstream's `prompts/static_passk.md`, unmodified — kept here as
-`prompts/static-passk.md`, hyphenated only because Gym's `no-underscore-md` hook rejects the original name.
+holes filled. The prompt is the paper's Appendix D.1 template, applied at run time from
+`benchmarks/prompts/eval/leancat/paper.yaml` — see **Prompt** below.
 
 This is a **whole-file** task, which is what separates this server from `math_formal_lean`. There, the model writes a
 proof body and the harness reassembles the file around it. Here the model returns the entire file, because many
@@ -45,8 +45,9 @@ The fifth upstream criterion, "maintained mathematical intent", is a human judge
 the closest mechanical proxy: the reference file is split on `sorry`, and every remaining fragment must appear in the
 submission, in order, modulo whitespace and comments. That is exactly the condition "you filled the holes and changed
 nothing else", and it generalises to the nine problems that carry more than one `sorry`. Preamble lines are matched
-individually rather than as a block, so the model stays free to add imports and to insert auxiliary declarations —
-which the prompt explicitly permits.
+individually rather than as a block, so the model stays free to add imports and to insert auxiliary declarations.
+The paper's prompt neither permits nor forbids those explicitly, and upstream's own scorer allows them, so the guard
+must not treat them as tampering.
 
 Check 3 exists because the whole-file format lets a model weaken the theorem it was asked to prove, and the weakened
 version compiles. `require_statement_preserved: false` disables the rejection while still reporting
@@ -129,43 +130,62 @@ Three things that were caveats against v1 are **not** problems against v2:
   `pass@4/accuracy` directly.
 - **Sampling settings are published**, in Appendix D.3 rather than the body.
 
-Two real divergences remain:
+One real divergence remains:
 
-1. **The paper's Appendix D.1 prompt is not the repo's `prompts/static_passk.md`.** Both open identically, but the
-   fourth line differs:
+- **This server's statement guard is stricter than upstream's scorer.** `verify_lean` is `has_invalid_tokens(code)`
+  then compile; it never compares against the reference statement, even though `configs/evaluation_protocol.json`
+  sets `"statement_changes_allowed": false`. Set `require_statement_preserved: false` to match upstream exactly;
+  `statement_preserved` reports the difference either way. Running both is the informative thing to do.
 
-   | Source | Fourth line |
-   |---|---|
-   | repo (what our rows use) | "You may introduce auxiliary definitions, instances, and lemmas before the target statement if needed. The target statement and all auxiliary code must contain no `sorry`, `admit`, `axiom`, or `unsafe` declarations." |
-   | paper D.1 | "Please solve the statement step by step and provide your complete Lean4 code between ```` ```lean4 ```` and ```` ``` ```` after careful reasoning." |
+## Prompt
 
-   Both are shipped. `prompts/static-passk.md` is the default; `prompts/paper-d1.md` is the paper's. Which one
-   produced the published numbers is genuinely unclear — the repo is a release mirror synced from a private
-   development repo, so its prompt may post-date the paper. See **Prompt variants** below.
+The repo and the paper do not ship the same prompt, so both are here, side by side:
 
-2. **This server's statement guard is stricter than upstream's scorer.** `verify_lean` is `has_invalid_tokens(code)`
-   then compile; it never compares against the reference statement, even though `configs/evaluation_protocol.json`
-   sets `"statement_changes_allowed": false`. Set `require_statement_preserved: false` to match upstream exactly;
-   `statement_preserved` reports the difference either way. Running both is the informative thing to do.
-
-## Prompt variants
-
-| Variant | Template | Dataset | Config | Fidelity |
-|---|---|---|---|---|
-| `repo` (default) | `prompts/static-passk.md` | `data/train.jsonl` | `configs/leancat.yaml` | byte-exact vs upstream |
-| `paper-d1` | `prompts/paper-d1.md` | `data/paper_d1_train.jsonl` | `configs/leancat_paper_d1.yaml` | reconstruction, see below |
+| Template | Source | Runs by |
+|---|---|---|
+| `benchmarks/prompts/eval/leancat/paper.yaml` | the paper's Appendix D.1 | **default** — set in `benchmarks/leancat/config.yaml` |
+| `benchmarks/prompts/eval/leancat/upstream-repo.yaml` | upstream's `prompts/static_passk.md` | `--prompt-config` |
 
 ```bash
-python prepare_leancat.py                            # repo prompt
-python prepare_leancat.py --prompt-variant paper-d1  # paper's Appendix D.1 prompt
+gym eval run --benchmark leancat                                           # the paper's
+gym eval run --benchmark leancat \
+    --prompt-config benchmarks/prompts/eval/leancat/upstream-repo.yaml     # upstream's
 ```
 
-Both render the same 100 problems with identical `verifier_metadata`; only the prompt differs, so a per-problem diff
-of the two runs isolates the prompt's contribution exactly.
+**One dataset serves both.** Rows are flat (`formal_statement`, `level`, `problem_id`, …) with no
+`responses_create_params`, the same shape `benchmarks/minif2f` uses, and the prompt is applied at run time by
+`fill_prompt`. So switching templates is a flag, not a second dataset, and a per-problem diff of the two runs
+isolates the prompt's contribution exactly. `{formal_statement}` is substituted from the row's top-level field,
+which carries the pinned `CAT_statement/*.lean` bytes verbatim — trailing newline included — so the rendered prompt
+is byte-identical to the reference harness's.
+
+They live under `benchmarks/prompts/eval/` because they are benchmark-specific rather than reusable — contrast
+`benchmarks/prompts/lean4/`, whose one template is shared by minif2f, proofnet and putnam_bench. Several variants in
+one `eval/<benchmark>/` directory follows `benchmarks/prompts/eval/aai/`, which ships three.
+
+### Why the paper's is the default
+
+The two open identically; the fourth line differs:
+
+| Source | Fourth line |
+|---|---|
+| upstream repo | "You may introduce auxiliary definitions, instances, and lemmas before the target statement if needed. The target statement and all auxiliary code must contain no `sorry`, `admit`, `axiom`, or `unsafe` declarations." |
+| paper D.1 | "Please solve the statement step by step and provide your complete Lean4 code between ```` ```lean4 ```` and ```` ``` ```` after careful reasoning." |
+
+We ran both with Goedel-Prover-V2-32B at pass@32. Upstream's prompt is not what Table 3's numbers were produced
+under: 26% of submissions omitted `import Mathlib` entirely despite the instruction to include the complete header,
+median output ran to 3015 tokens with visible degeneration, and Easy sat at 1/10 against a published 20.0%. The
+paper's reproduces Table 3 — Easy 5/20, Medium 1/40, High 0/40, so 6.0% pass@32 against a published 5.0%. The repo
+is a release mirror synced from a private development repo, so its prompt most likely post-dates the paper.
+
+`upstream-repo.yaml` is a verbatim transcription of the pinned `prompts/static_passk.md` into Gym's prompt-config
+form. `tests/test_app.py::TestPrompt::test_upstream_template_still_matches_upstream` refetches the pinned file and
+compares, so the transcription is checked against the source itself rather than against a committed copy that could
+drift with it. That test skips when there is no network.
 
 ### The paper's prompt cannot be transcribed byte-exactly — read this before quoting a number from it
 
-`prompts/paper-d1.md` is a **reconstruction**, not a copy. The paper prints its prompt inside a LaTeX `lstlisting`,
+`benchmarks/prompts/eval/leancat/paper.yaml` is a **reconstruction**, not a copy. The paper prints its prompt inside a LaTeX `lstlisting`,
 and recovering a string from typeset output requires judgement. Taken from the arXiv v2 LaTeX source
 (`main.tex`, Appendix D.1), the decisions were:
 
@@ -185,13 +205,18 @@ substantive instruction difference, and it is what a comparison between the two 
 
 ## Data
 
-`prepare_leancat.py` fetches a pinned upstream revision and writes `data/train.jsonl` (100 rows) and
-`data/example.jsonl` (5 rows). The pin is deliberate: another revision can change statements, difficulty labels, or
-the prompt, none of which are detectable from the JSONL alone.
+LeanCat is 100 held-out evaluation problems with **no train split**, so this server declares only an `example`
+dataset — matching `scicode`, `polymath` and `critpt`. `prepare.py` fetches a pinned upstream revision and writes
+`data/example.jsonl` (5 rows, committed, what the environment gate requires); `benchmarks/leancat/prepare.py` writes
+the 100-row benchmark JSONL from the same `build_rows`, gitignored and regenerated. The pin is deliberate: another
+revision can change statements or difficulty labels, neither of which is detectable from the JSONL alone.
+
+Tests read the committed 5 rows, as the repo's other server tests do. Nothing gates on the gitignored 100, which a
+CI checkout never has — such a test would skip on every PR and report green without running.
 
 ```bash
-python prepare_leancat.py                    # fetch pinned revision, write data/
-python prepare_leancat.py --records local.jsonl --prompt prompts/static-passk.md
+python prepare.py                    # fetch pinned revision, write data/
+python prepare.py --records local.jsonl
 ```
 
 ## License
@@ -249,14 +274,13 @@ Compiles all 100 reference statements **unmodified**. Each still contains its `s
 ### 3. Prepare and run
 
 ```bash
-gym eval prepare --benchmark leancat            # or leancat-paper-d1
+gym eval prepare --benchmark leancat
 gym eval submit --config examples/slurm_leancat_goedel_prover.yaml --dry-run
 gym eval submit --config examples/slurm_leancat_goedel_prover.yaml
 ```
 
-`benchmarks/leancat/` and `benchmarks/leancat-paper-d1/` are registered, so `gym list benchmarks` shows both and
-either works with `--benchmark`. `num_repeats: 4` matches the paper's generalist budget; raise it to 32 to compare
-against Table 3's specialized provers.
+`benchmarks/leancat/` is registered, so `gym list benchmarks` shows it and `--benchmark leancat` works.
+`num_repeats: 32` matches Table 3's specialized-prover budget; drop it to 4 for the generalist protocol of Table 1.
 
 The submit config cannot start the sandbox — `services:` accepts only `type: vllm` and `type: ray`, so the sandbox
 must already be reachable at `NEMO_SKILLS_SANDBOX_HOST:PORT`, launched into the same allocation with
