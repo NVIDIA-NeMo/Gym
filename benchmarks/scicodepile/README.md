@@ -90,8 +90,11 @@ Verified against all 200 released rows:
   `verifier_metadata` for provenance. They are the reason each task runs in a fresh
   process.
 - The `prompt` field is display text, not valid Python — its docstring is not
-  indented under the `def` line. The model is therefore asked for a complete
-  function definition; see the resources server README.
+  indented under the `def` line. It therefore cannot be prepended to the model's
+  output as a BigCodeBench-style calibration prefix, so the verifier requires the
+  model's own code to define `entry_point`. Nothing in the prompt asks for that
+  (see [Prompting](#prompting)); a bare function body scores
+  `entry_point_missing`. See the resources server README.
 
 ## Metrics
 

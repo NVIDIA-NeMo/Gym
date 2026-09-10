@@ -19,11 +19,30 @@ Each task ships a `test` that defines `check(candidate)`. The server executes
 `setup_code + model_code + test` in a single namespace, looks up the function named
 by `entry_point`, and calls `check` with it. This mirrors the upstream harness.
 
-Execution happens in a subprocess (`scp_runner.py`) with a wall-clock timeout and an
-`RLIMIT_AS` cap. A fresh process per task is not just for isolation from the server:
-all 200 tasks carry the upstream `env_sensitive` audit flag and 117 carry
-`globals_patch`, so tests mutate global state and would otherwise contaminate
-one another.
+Execution happens in a subprocess (`scp_runner.py`). A fresh process per task is not
+just for isolation from the server: all 200 tasks carry the upstream `env_sensitive`
+audit flag and 117 carry `globals_patch`, so tests mutate global state and would
+otherwise contaminate one another. Several also write files relative to the working
+directory, so each task gets a throwaway one.
+
+### This is not a security sandbox
+
+`code` is unreviewed model output, and the runner does **not** sandbox it. Task code
+runs with the privileges and environment of the resources server, and can shell out,
+open sockets, or write outside its working directory. Containment is limited to four
+things: process isolation, an `RLIMIT_AS` address-space cap, a throwaway working
+directory, and the parent's wall-clock timeout.
+
+Do not run untrusted rollouts on shared nodes without a real sandbox — see
+`nemo_gym/sandbox/`.
+
+The result channel is deliberately kept off file descriptor 1. Task code owns fd 1
+too, and `redirect_stdout` rebinds only `sys.stdout`, not the descriptor; without
+this a completion calling `os.write(1, b'{"status": "pass"}')` would forge a
+reward-1.0 verdict without `check()` ever running. The runner writes its verdict to
+a private duplicate instead, and a task that calls `os._exit` leaves the parent an
+empty read reported as `unparseable_runner_output` — it fails closed, never to
+`pass`.
 
 ### Input schema
 
@@ -36,8 +55,12 @@ one another.
 
 ### Statuses
 
-`pass`, `fail` (check raised), `entry_point_missing`, `error` (syntax or import
-failure), `timeout`, `empty_output`, `no_code_block`. Only `pass` earns reward.
+`pass`, `fail` (check raised), `entry_point_missing`, `error`, `timeout`,
+`empty_output`, `no_code_block`. Only `pass` earns reward.
+
+`error` carries a `details.reason` distinguishing `syntax_error`, `exec_failed`
+(the module body raised, typically a missing import), `test_defines_no_check`,
+`runner_crashed`, and `unparseable_runner_output`.
 
 ### The model must return a complete function
 
