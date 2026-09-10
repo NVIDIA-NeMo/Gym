@@ -54,6 +54,19 @@ async def main() -> None:
             )
         )
         config_values["mcp_config"] = str(mcp_path)
+    if "extra_config" in config_class.model_fields and settings.get("exa_api_key"):
+        config_values.setdefault("extra_config", {}).setdefault("mcp_servers", {})["exa"] = {
+            "command": "npx",
+            "args": ["-y", "exa-mcp-server"],
+            "env": {"EXA_API_KEY": settings["exa_api_key"]},
+        }
+    if "opencode_config" in config_class.model_fields and settings.get("exa_api_key"):
+        config_values.setdefault("opencode_config", {}).setdefault("mcp", {})["exa"] = {
+            "type": "local",
+            "command": ["npx", "-y", "exa-mcp-server"],
+            "environment": {"EXA_API_KEY": settings["exa_api_key"]},
+            "enabled": True,
+        }
     config = config_class(**config_values)
     body = NeMoGymResponseCreateParamsNonStreaming.model_validate_json(Path(settings["input_path"]).read_text())
     agent = agent_class(config=config, server_client=client)
