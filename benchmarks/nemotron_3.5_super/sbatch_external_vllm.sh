@@ -235,7 +235,18 @@ if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
             --api-server-count 1 \
             &
         prefill_pid=\$!
-        trap 'kill "\$prefill_pid" 2>/dev/null || true' EXIT
+        coupled_pids=("\$prefill_pid")
+        cleanup_coupled_head() {
+            local status=\$?
+            trap - EXIT INT TERM
+            # Signal both local services without delaying failure propagation;
+            # the enclosing srun tears down the remaining distributed workers.
+            kill "\${coupled_pids[@]}" 2>/dev/null || true
+            exit "\$status"
+        }
+        trap cleanup_coupled_head EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
 
         wait_for_vllm_health "prefill" "http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT/health" "\$prefill_pid"
         # Keep watching the local prefill process while the remote decode API
@@ -254,7 +265,27 @@ if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
             --port $ROUTER_SERVER_PORT \
             --intra-node-data-parallel-size 1 \
             --request-timeout-secs 86400 \
-            --log-level error
+            --log-level error &
+        router_pid=\$!
+        coupled_pids+=("\$router_pid")
+
+        # Keep monitoring after readiness. Polling also catches children that
+        # exited before monitoring started, which wait -n can otherwise miss.
+        while kill -0 "\$prefill_pid" 2>/dev/null && kill -0 "\$router_pid" 2>/dev/null; do
+            sleep 1
+        done
+        failed_role=prefill
+        failed_pid=\$prefill_pid
+        if kill -0 "\$prefill_pid" 2>/dev/null; then
+            failed_role=router
+            failed_pid=\$router_pid
+        fi
+        failed_status=0
+        wait "\$failed_pid" || failed_status=\$?
+        # Neither service should exit by itself, even with a zero exit status.
+        (( failed_status != 0 )) || failed_status=1
+        echo "ERROR: \$failed_role process exited after startup (status=\$failed_status)." >&2
+        exit "\$failed_status"
     elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
         VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
         VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
