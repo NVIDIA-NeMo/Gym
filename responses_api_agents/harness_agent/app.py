@@ -117,11 +117,10 @@ class SandboxAgentConfig(BaseResponsesAPIAgentConfig):
 
     @model_validator(mode="after")
     def validate_mode_config(self):
-        required = ["model_server"]
         if self.mode == "agent_only_runner":
-            required += ["resources_server", "harness_module", "harness_class", "harness_config"]
+            required = ["resources_server", "harness_module", "harness_class", "harness_config"]
         else:
-            required += ["nested_config_paths", "nested_agent_name"]
+            required = ["model_server", "nested_config_paths", "nested_agent_name"]
         missing = [name for name in required if not getattr(self, name)]
         if missing:
             raise ValueError(f"{self.mode} requires: {', '.join(missing)}")
@@ -181,6 +180,9 @@ class SandboxAgent(SimpleResponsesAPIAgent):
 
     def _sandbox_model_url(self, request: Request) -> str:
         """Model endpoint URL, host rewritten to an IP reachable from sandboxes, no /v1 suffix."""
+        if self.config.model_server is None:
+            assert self.config.harness_config is not None
+            return (self.config.harness_config.model.base_url or "").removesuffix("/v1")
         cfg = get_first_server_config_dict(self.server_client.global_config_dict, self.config.model_server.name)
         base = cfg.get("base_url") or self.server_client._build_server_base_url(cfg)
         if isinstance(base, (list, ListConfig)):
@@ -188,7 +190,7 @@ class SandboxAgent(SimpleResponsesAPIAgent):
         base = re.sub(r"/v1/?$", "", str(base))
         parsed = urlsplit(base if "://" in base else f"http://{base}")
         host = parsed.hostname or ""
-        if host in ("127.0.0.1", "localhost", "0.0.0.0"):
+        if host in ("127.0.0.1", "localhost", "0.0.0.0") and self._provider.name != "local":
             try:
                 # loopback binds are unreachable from a sandbox
                 host = socket.gethostbyname(socket.gethostname())
@@ -213,7 +215,11 @@ class SandboxAgent(SimpleResponsesAPIAgent):
                 "agent_port": self.config.nested_agent_port,
                 "timeout": self.config.rollout_timeout,
             }
-        return script, runner_config, f"{self.config.sandbox_python} /work/runner.py"
+        return script, runner_config, f"{self.config.sandbox_python} runner.py"
+
+    @staticmethod
+    def _box_path(handle, path: str) -> str:
+        return path.lstrip("/") if handle.provider_name == "local" else path
 
     async def run(self, request: Request, body: SandboxAgentRunRequest) -> BaseVerifyResponse:
         if self.config.mode == "gym_runner":
@@ -266,25 +272,30 @@ class SandboxAgent(SimpleResponsesAPIAgent):
         spec = SandboxSpec(image=image, **sandbox_spec)
         handle = await self._provider.create(spec)
         try:
-            await self._provider.exec(handle, "mkdir -p /work", timeout_s=60)
+            work_dir = self._box_path(handle, "/work")
+            await self._provider.exec(handle, f"mkdir -p {shlex.quote(work_dir)}", timeout_s=60)
             with tempfile.TemporaryDirectory() as td:
                 for i, (target, content) in enumerate(files.items()):
                     local = Path(td) / str(i)
                     local.write_text(content)
-                    await self._provider.upload_file(handle, local, target)
+                    await self._provider.upload_file(handle, local, self._box_path(handle, target))
             if self._gym_tar is not None or self._gym_source_url is not None:
+                archive = self._box_path(handle, "/work/gym_src.tar.gz")
+                gym_mount = self._box_path(handle, "/work/gym_mount")
                 if self._gym_tar is not None:
-                    await self._provider.upload_file(handle, self._gym_tar, "/work/gym_src.tar.gz")
+                    await self._provider.upload_file(handle, self._gym_tar, archive)
                 else:
                     r = await self._provider.exec(
                         handle,
-                        f"curl -fsSL -o /work/gym_src.tar.gz {shlex.quote(self._gym_source_url)}",
+                        f"curl -fsSL -o {shlex.quote(archive)} {shlex.quote(self._gym_source_url)}",
                         timeout_s=600,
                     )
                     if r.return_code != 0:
                         raise RuntimeError(f"gym source fetch failed: {(r.stderr or '')[:300]}")
                 r = await self._provider.exec(
-                    handle, "mkdir -p /gym_mount && tar xzf /work/gym_src.tar.gz -C /gym_mount", timeout_s=300
+                    handle,
+                    f"mkdir -p {shlex.quote(gym_mount)} && tar xzf {shlex.quote(archive)} -C {shlex.quote(gym_mount)}",
+                    timeout_s=300,
                 )
                 if r.return_code != 0:
                     raise RuntimeError(f"gym source extraction failed: {(r.stderr or '')[:300]}")
@@ -297,10 +308,10 @@ class SandboxAgent(SimpleResponsesAPIAgent):
             if pm:
                 net = await self._provider.exec(
                     handle,
-                    f"timeout 5 bash -c 'echo > /dev/tcp/{pm.group(1)}/{pm.group(2)}' && echo NET_OK || echo NET_FAIL",
-                    timeout_s=30,
+                    f"bash -c 'echo > /dev/tcp/{pm.group(1)}/{pm.group(2)}'",
+                    timeout_s=5,
                 )
-                if "NET_FAIL" in (net.stdout or ""):
+                if net.return_code != 0:
                     raise RuntimeError(f"model endpoint {pm.group(1)}:{pm.group(2)} unreachable from sandbox")
             return handle
         except Exception:
@@ -337,8 +348,12 @@ class SandboxAgent(SimpleResponsesAPIAgent):
         }
         handle = await self._provision_box(image, files, model_url)
         try:
+            work_dir = self._box_path(handle, "/work")
             await self._provider.exec(
-                handle, f"nohup {runner_cmd} > /work/runner.out 2>&1 & echo $! > /work/runner.pid", timeout_s=60
+                handle,
+                f"nohup {runner_cmd} > runner.out 2>&1 & echo $! > runner.pid",
+                cwd=work_dir,
+                timeout_s=60,
             )
             deadline = self.config.rollout_timeout
             waited = 0
@@ -348,7 +363,8 @@ class SandboxAgent(SimpleResponsesAPIAgent):
                 waited += 20
                 r = await self._provider.exec(
                     handle,
-                    "test -f /work/done && echo DONE || kill -0 $(cat /work/runner.pid) 2>/dev/null || echo EXITED",
+                    "test -f done && echo DONE || kill -0 $(cat runner.pid) 2>/dev/null || echo EXITED",
+                    cwd=work_dir,
                     timeout_s=30,
                 )
                 if "DONE" in (r.stdout or ""):
@@ -357,10 +373,10 @@ class SandboxAgent(SimpleResponsesAPIAgent):
                 if "EXITED" in (r.stdout or ""):
                     status = "exited"
                     break
-            r = await self._provider.exec(handle, "tail -c 6000 /work/runner.out", timeout_s=30)
+            r = await self._provider.exec(handle, "tail -c 6000 runner.out", cwd=work_dir, timeout_s=30)
             if status != "done" or "RUNNER_DONE" not in (r.stdout or ""):
                 raise RuntimeError(f"runner {status} without completion: {(r.stdout or '')[-6000:]}")
-            rows = await self._download_json(handle, "/work/rollouts.jsonl")
+            rows = await self._download_json(handle, self._box_path(handle, "/work/rollouts.jsonl"))
             return BaseVerifyResponse.model_validate(rows)
         finally:
             await self._close_box(handle)
@@ -391,16 +407,22 @@ class SandboxAgent(SimpleResponsesAPIAgent):
         }
         handle = await self._provision_box(image, files, model_url)
         try:
+            work_dir = self._box_path(handle, "/work")
             r = await self._provider.exec(
-                handle, f"{runner_cmd} > /work/runner.out 2>&1", timeout_s=self.config.rollout_timeout
+                handle,
+                f"{runner_cmd} > runner.out 2>&1",
+                cwd=work_dir,
+                timeout_s=self.config.rollout_timeout,
             )
-            logs = await self._provider.exec(handle, "tail -c 6000 /work/runner.out", timeout_s=30)
+            logs = await self._provider.exec(handle, "tail -c 6000 runner.out", cwd=work_dir, timeout_s=30)
             if r.return_code != 0 or "RUNNER_DONE" not in (logs.stdout or ""):
                 raise RuntimeError(
                     f"runner failed ({r.return_code}): {(logs.stdout or logs.stderr or r.stderr or '')[-6000:]}"
                 )
 
-            resp = NeMoGymResponse.model_validate(await self._download_json(handle, "/work/response.json"))
+            resp = NeMoGymResponse.model_validate(
+                await self._download_json(handle, self._box_path(handle, "/work/response.json"))
+            )
 
             grade_raw = meta.get("sandbox_eval")
             grade_spec = json.loads(grade_raw) if isinstance(grade_raw, str) else grade_raw
