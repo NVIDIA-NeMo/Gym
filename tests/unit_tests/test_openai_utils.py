@@ -34,6 +34,7 @@ import pytest
 from openai.types.chat.completion_create_params import CompletionCreateParamsNonStreaming
 from openai.types.responses import (
     EasyInputMessage,
+    FunctionTool,
     ResponseCodeInterpreterToolCall,
     ResponseComputerToolCall,
     ResponseCustomToolCall,
@@ -155,6 +156,21 @@ class TestNeMoGymResponseCreateParamsNonStreaming:
     def test_unknown_field_still_forbidden(self) -> None:
         with pytest.raises(ValidationError):
             NeMoGymResponseCreateParamsNonStreaming(input="hello", not_a_real_field=1)
+
+    def test_response_tool_null_defer_loading_normalized_for_replay(self) -> None:
+        response_tool = FunctionTool(
+            name="get_weather",
+            parameters={"type": "object", "properties": {}},
+            strict=None,
+            type="function",
+        )
+        response_tool_dump = response_tool.model_dump()
+        assert response_tool_dump["defer_loading"] is None
+
+        replay = NeMoGymResponseCreateParamsNonStreaming(input="hello", tools=[response_tool_dump])
+
+        assert replay.tools[0]["defer_loading"] is False
+        assert replay.tools[0]["strict"] is None
 
     @pytest.mark.parametrize(
         "role",
