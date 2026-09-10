@@ -78,9 +78,8 @@ _ARCHES = {
 
 
 def agent_key(agent_server_module: str) -> str:
-    """responses_api_agents.hermes_agent.app maps to hermes_agent, the deps-script key."""
     parts = agent_server_module.split(".")
-    return parts[-2] if len(parts) >= 2 else agent_server_module
+    return f"{parts[-1]}_agent" if len(parts) >= 2 and parts[-2] == "agents" else parts[-2]
 
 
 def load_runner_source() -> str:
@@ -202,9 +201,9 @@ class CVDPAgentConfig(BaseResponsesAPIAgentConfig):
     system_prompt: Optional[str] = None
     timeout: int = 1800
 
-    agent_server_module: str = "responses_api_agents.claude_code_agent.app"
-    agent_server_class: str = "ClaudeCodeAgent"
-    agent_config_class: str = "ClaudeCodeAgentConfig"
+    agent_server_module: str = "nemo_gym.agents.claude_code"
+    agent_server_class: str = "ClaudeCodeHarness"
+    agent_config_class: str = "AgentHarnessConfig"
     agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
 
     image: str = "nvidia/cvdp-sim:v1.0.0"

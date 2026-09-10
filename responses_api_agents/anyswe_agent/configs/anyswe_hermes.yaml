@@ -6,16 +6,20 @@ anyswe_hermes:
       description: SWE-bench run by Hermes Agent natively inside the task container.
       value: Eval software engineering capabilities on SWE-bench with any Gym agent.
 
-      agent_server_module: responses_api_agents.hermes_agent.app
-      agent_server_class: HermesAgent
-      agent_config_class: HermesAgentConfig
+      agent_server_module: nemo_gym.agents.hermes
+      agent_server_class: HermesHarness
+      agent_config_class: AgentHarnessConfig
       agent_kwargs:
-        model: model
+        model:
+          model: model
+          settings: {temperature: 1.0}
         max_turns: 30
-        temperature: 1.0
-        terminal_backend: local
-        enabled_toolsets: null
+        timeout_seconds: 1800
         system_prompt: "You are an expert software engineer. The source code repository is at /testbed. Explore the code, reproduce the bug, fix the root cause, and verify the fix. You MUST actually use terminal and file tools to explore, edit, and test the code; do not just describe what to do."
+        workspace: /testbed
+        settings:
+          terminal_backend: local
+          enabled_toolsets: null
 
       container_formatter: ${oc.env:ANYSWE_CONTAINER_FORMATTER}
       sandbox_provider: sandbox

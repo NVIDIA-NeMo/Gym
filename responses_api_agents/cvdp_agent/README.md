@@ -84,7 +84,7 @@ CVDPAgent._run_agentic()
 be a real field on `<agent_config_class>`. (e.g. for `ClaudeCodeAgentConfig`: `model`,
 `anthropic_base_url`, `anthropic_api_key`, `max_turns`, ...). These are **harness-specific**.
 - **A deps script must exist** for the harness: `setup_scripts/<key>_deps.sh`, where `<key>`
-is derived from the module (`responses_api_agents.hermes_agent.app` → `hermes_agent`). It
+is derived from the module (`nemo_gym.agents.hermes` maps to `hermes_agent`). It
 builds a self-contained prefix (portable Python + nemo_gym + the harness CLI) that is
 packaged once and uploaded into each sandbox.
 - The data format **never changes** when you swap harnesses, and grading always goes through
