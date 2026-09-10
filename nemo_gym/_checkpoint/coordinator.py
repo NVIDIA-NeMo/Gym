@@ -29,9 +29,9 @@ service's. The coordinator fixes this by owning the service-level truth:
 - Workers report their local in-flight count whenever it changes. The
   coordinator reports ``paused`` only when every live worker has
   acknowledged the closed state AND the summed in-flight count is zero.
-- A worker that is expected but not connected (crashed, still starting) is
-  an error in the status report, never an implicit zero: a missing worker
-  may hold in-flight requests the coordinator cannot see.
+- Close freezes the exact connected worker IDs. Missing or excess workers
+  reject close, and registrations remain closed until resume so replacement
+  processes cannot substitute for frozen membership.
 
 The message protocol is newline-delimited JSON, chosen for debuggability:
 ``register``, ``ack``, ``counters`` upstream; ``state`` downstream. The
@@ -58,6 +58,8 @@ from nemo_gym._checkpoint.control import (
 )
 from nemo_gym._checkpoint.model_control_contracts import (
     MODEL_ADMISSION_URL_PREFIX,
+    GenerationCutCoordinatorProof,
+    GenerationCutWorkerProof,
     ModelAbortInflightRequest,
     ModelAdmissionPauseRequest,
     ModelAdmissionResumeRequest,
@@ -75,14 +77,33 @@ class MissingWorkersError(ControlError):
     code = "missing_workers"
 
 
+class WorkerRegistrationError(ControlError):
+    """A worker attempted to join while checkpoint membership was frozen."""
+
+    code = "worker_registration_rejected"
+
+
 class WorkerRecord:
-    __slots__ = ("worker_id", "pid", "acked_seq", "inflight", "writer", "connected")
+    __slots__ = (
+        "worker_id",
+        "pid",
+        "acked_seq",
+        "inflight",
+        "generation_pending",
+        "cut_proof",
+        "proof_error",
+        "writer",
+        "connected",
+    )
 
     def __init__(self, worker_id: str, pid: int, writer: asyncio.StreamWriter) -> None:
         self.worker_id = worker_id
         self.pid = pid
         self.acked_seq = 0
         self.inflight = 0
+        self.generation_pending = 0
+        self.cut_proof: GenerationCutWorkerProof | None = None
+        self.proof_error: str | None = None
         self.writer = writer
         self.connected = True
 
@@ -101,6 +122,7 @@ class AdmissionCoordinator:
         self._workers: dict[str, WorkerRecord] = {}
         self._state = AdmissionState.ACCEPTING
         self._checkpoint_id: Optional[str] = None
+        self._frozen_worker_ids: tuple[str, ...] = ()
         self._seq = 0
         self._tombstones: list[dict[str, Any]] = []
         self._server: Optional[asyncio.base_events.Server] = None
@@ -133,7 +155,29 @@ class AdmissionCoordinator:
             async for message in _read_messages(reader):
                 kind = message.get("type")
                 if kind == "register":
-                    record = WorkerRecord(str(message["worker_id"]), int(message.get("pid", 0)), writer)
+                    worker_id = str(message["worker_id"])
+                    existing = self._workers.get(worker_id)
+                    if existing is not None and existing.connected:
+                        await _write_message(
+                            writer,
+                            {
+                                "type": "registration_rejected",
+                                "checkpoint_id": self._checkpoint_id,
+                                "reason": f"connected worker ID {worker_id!r} is already registered",
+                            },
+                        )
+                        break
+                    if self._state != AdmissionState.ACCEPTING:
+                        await _write_message(
+                            writer,
+                            {
+                                "type": "registration_rejected",
+                                "checkpoint_id": self._checkpoint_id,
+                                "reason": "worker registration is closed for the active checkpoint cut",
+                            },
+                        )
+                        break
+                    record = WorkerRecord(worker_id, int(message.get("pid", 0)), writer)
                     self._workers[record.worker_id] = record
                     # A late-joining worker immediately receives the current
                     # state so it can never serve traffic against a stale one.
@@ -142,11 +186,28 @@ class AdmissionCoordinator:
                 elif record is None:
                     continue
                 elif kind == "ack":
-                    record.acked_seq = int(message["seq"])
+                    message_seq = int(message["seq"])
+                    if message_seq < self._seq:
+                        continue
                     record.inflight = int(message.get("inflight", record.inflight))
+                    record.generation_pending = int(message.get("generation_pending", record.inflight))
+                    if self._state != AdmissionState.ACCEPTING:
+                        if not self._accept_cut_proof(record, message, message_seq):
+                            await self._notify()
+                            continue
+                    else:
+                        record.cut_proof = None
+                        record.proof_error = None
+                    record.acked_seq = message_seq
                     await self._notify()
                 elif kind == "counters":
+                    message_seq = int(message.get("seq", -1))
+                    if self._state != AdmissionState.ACCEPTING and message_seq < self._seq:
+                        continue
                     record.inflight = int(message["inflight"])
+                    record.generation_pending = int(message.get("generation_pending", record.inflight))
+                    if self._state != AdmissionState.ACCEPTING:
+                        self._accept_cut_proof(record, message, message_seq)
                     await self._notify()
         except (ConnectionResetError, asyncio.IncompleteReadError):
             pass
@@ -155,6 +216,24 @@ class AdmissionCoordinator:
                 record.connected = False
                 await self._notify()
             writer.close()
+
+    def _accept_cut_proof(self, record: WorkerRecord, message: dict[str, Any], message_seq: int) -> bool:
+        try:
+            proof = GenerationCutWorkerProof.model_validate(message.get("generation_cut_proof"))
+            if (
+                message_seq != self._seq
+                or proof.coordinator_sequence != self._seq
+                or proof.worker_id != record.worker_id
+                or proof.checkpoint_id != self._checkpoint_id
+            ):
+                raise ValueError("worker generation-cut proof identity does not match coordinator state")
+        except (TypeError, ValueError) as error:
+            record.cut_proof = None
+            record.proof_error = str(error)
+            return False
+        record.cut_proof = proof
+        record.proof_error = None
+        return True
 
     async def _notify(self) -> None:
         async with self._changed:
@@ -168,6 +247,7 @@ class AdmissionCoordinator:
             "seq": self._seq,
             "state": self._state.value,
             "checkpoint_id": self._checkpoint_id,
+            "frozen_worker_ids": self._frozen_worker_ids,
             "tombstones": self._tombstones,
         }
 
@@ -182,13 +262,27 @@ class AdmissionCoordinator:
                     record.connected = False
 
     async def close_admission(self, checkpoint_id: str) -> None:
+        connected = tuple(sorted(record.worker_id for record in self._workers.values() if record.connected))
+        if len(connected) != self.expected_workers:
+            raise MissingWorkersError(
+                f"cannot freeze checkpoint worker membership: expected {self.expected_workers}, "
+                f"found {len(connected)} connected workers"
+            )
         self._state = AdmissionState.DRAINING
         self._checkpoint_id = checkpoint_id
+        self._frozen_worker_ids = connected
+        for record in self._workers.values():
+            record.cut_proof = None
+            record.proof_error = None
         await self._broadcast()
 
     async def resume_admission(self) -> None:
         self._state = AdmissionState.ACCEPTING
         self._checkpoint_id = None
+        self._frozen_worker_ids = ()
+        for record in self._workers.values():
+            record.cut_proof = None
+            record.proof_error = None
         await self._broadcast()
 
     async def add_tombstone(self, rollout_id: str, attempt_index: int) -> None:
@@ -202,8 +296,15 @@ class AdmissionCoordinator:
         missing = self.expected_workers - len(live)
         acknowledged = sum(1 for record in live if record.acked_seq >= self._seq)
         inflight_total = sum(record.inflight for record in live)
+        generation_pending_total = sum(record.generation_pending for record in live)
         all_acked = missing == 0 and acknowledged == len(live)
-        drained = all_acked and inflight_total == 0
+        all_proofs_complete = all(
+            record.cut_proof is not None
+            and record.cut_proof.coordinator_sequence == self._seq
+            and record.cut_proof.generation_pending == 0
+            for record in live
+        )
+        drained = all_acked and generation_pending_total == 0 and all_proofs_complete
         if self._state == AdmissionState.DRAINING and drained:
             state = AdmissionState.PAUSED.value
         else:
@@ -215,16 +316,40 @@ class AdmissionCoordinator:
             # hold in-flight requests the coordinator cannot see.
             "missing_workers": missing,
             "inflight_total": inflight_total,
+            "response_inflight_total": inflight_total,
+            "generation_pending_total": generation_pending_total,
             "waiters_total": 0,
             "per_worker": {
                 record.worker_id: {
                     "acked_seq": record.acked_seq,
                     "inflight": record.inflight,
+                    "generation_pending": record.generation_pending,
+                    "generation_cut_proof": (
+                        record.cut_proof.model_dump(mode="json") if record.cut_proof is not None else None
+                    ),
+                    "proof_error": record.proof_error,
                     "connected": record.connected,
                 }
                 for record in self._workers.values()
             },
         }
+
+    def generation_cut_proof(self) -> GenerationCutCoordinatorProof:
+        """Return the complete proof for the current frozen worker sequence."""
+        if self._checkpoint_id is None:
+            raise ValueError("coordinator has no active checkpoint")
+        live = [record for record in self._workers.values() if record.connected]
+        if len(live) != self.expected_workers or any(
+            record.acked_seq < self._seq or record.cut_proof is None for record in live
+        ):
+            raise ValueError("coordinator generation-cut proof omits frozen worker membership")
+        return GenerationCutCoordinatorProof.build(
+            checkpoint_id=self._checkpoint_id,
+            coordinator_sequence=self._seq,
+            expected_workers=self.expected_workers,
+            frozen_worker_ids=self._frozen_worker_ids,
+            workers=[record.cut_proof for record in live if record.cut_proof is not None],
+        )
 
     async def wait_until(self, predicate: Callable[[dict[str, Any]], bool], timeout_s: float) -> dict[str, Any]:
         """Wait for the aggregated status to satisfy ``predicate``; return the last status."""
@@ -252,19 +377,47 @@ class WorkerAdmissionAgent:
     the local in-flight count whenever it changes.
     """
 
-    def __init__(self, socket_path: Path, worker_id: str, limiter: AdmissionLimiter, *, pid: int = 0) -> None:
+    def __init__(
+        self,
+        socket_path: Path,
+        worker_id: str,
+        limiter: AdmissionLimiter,
+        *,
+        pid: int = 0,
+        server_name: str = "policy",
+        cut_timeout_s: float = 10.0,
+    ) -> None:
         self.socket_path = Path(socket_path)
         self.worker_id = worker_id
         self.limiter = limiter
         self.pid = pid
+        self.server_name = server_name
+        self.cut_timeout_s = cut_timeout_s
         self._writer: Optional[asyncio.StreamWriter] = None
         self._listener: Optional[asyncio.Task] = None
+        self._coordinator_sequence = 0
+        self._checkpoint_id: str | None = None
 
     async def start(self) -> None:
         reader, writer = await asyncio.open_unix_connection(path=str(self.socket_path))
         self._writer = writer
-        await _write_message(writer, {"type": "register", "worker_id": self.worker_id, "pid": self.pid})
         self.limiter.add_listener(self._on_limiter_change)
+        await _write_message(writer, {"type": "register", "worker_id": self.worker_id, "pid": self.pid})
+        line = await reader.readline()
+        if not line:
+            self.limiter.remove_listener(self._on_limiter_change)
+            self._writer = None
+            writer.close()
+            raise WorkerRegistrationError("coordinator closed the worker registration connection")
+        first_message = json.loads(line)
+        if first_message.get("type") == "registration_rejected":
+            self._checkpoint_id = first_message.get("checkpoint_id")
+            self.limiter.close(self._checkpoint_id)
+            self.limiter.remove_listener(self._on_limiter_change)
+            self._writer = None
+            writer.close()
+            raise WorkerRegistrationError(str(first_message.get("reason", "worker registration rejected")))
+        await self._apply_state_message(first_message)
         self._listener = asyncio.create_task(self._listen(reader))
 
     async def stop(self) -> None:
@@ -282,33 +435,64 @@ class WorkerAdmissionAgent:
 
     async def _listen(self, reader: asyncio.StreamReader) -> None:
         async for message in _read_messages(reader):
-            if message.get("type") != "state":
-                continue
-            state = AdmissionState(message["state"])
-            if state == AdmissionState.ACCEPTING:
-                self.limiter.resume()
-            else:
-                self.limiter.close()
-            for tombstone in message.get("tombstones", ()):
-                self.limiter.abort_inflight(tombstone["rollout_id"], tombstone["attempt_index"])
-            assert self._writer is not None
-            await _write_message(
-                self._writer,
-                {
-                    "type": "ack",
-                    "seq": message["seq"],
-                    "inflight": self.limiter.counts()["inflight_total"],
-                },
+            await self._apply_state_message(message)
+
+    async def _apply_state_message(self, message: dict[str, Any]) -> None:
+        if message.get("type") != "state":
+            return
+        state = AdmissionState(message["state"])
+        self._coordinator_sequence = int(message["seq"])
+        self._checkpoint_id = message.get("checkpoint_id")
+        if state == AdmissionState.ACCEPTING:
+            self.limiter.resume()
+        else:
+            checkpoint_id = message.get("checkpoint_id")
+            self.limiter.close(checkpoint_id)
+        for tombstone in message.get("tombstones", ()):
+            self.limiter.abort_inflight(tombstone["rollout_id"], tombstone["attempt_index"])
+        if state != AdmissionState.ACCEPTING and checkpoint_id is not None:
+            await self.limiter.prepare_generation_cut(
+                checkpoint_id,
+                server_name=self.server_name,
+                timeout_s=self.cut_timeout_s,
             )
+        assert self._writer is not None
+        await _write_message(
+            self._writer,
+            {
+                "type": "ack",
+                "seq": message["seq"],
+                "inflight": self.limiter.counts()["inflight_total"],
+                "generation_pending": self.limiter.counts()["generation_pending_total"],
+                **self._generation_cut_proof_payload(),
+            },
+        )
 
     def _on_limiter_change(self) -> None:
         writer = self._writer
         if writer is None or writer.is_closing():
             return
-        payload = {"type": "counters", "inflight": self.limiter.counts()["inflight_total"]}
+        counts = self.limiter.counts()
+        payload = {
+            "type": "counters",
+            "seq": self._coordinator_sequence,
+            "inflight": counts["inflight_total"],
+            "generation_pending": counts["generation_pending_total"],
+            **self._generation_cut_proof_payload(),
+        }
         # Fire-and-forget: counter reports are monotone-refreshed, so a lost
         # one is corrected by the next change or the next ack.
         asyncio.get_running_loop().create_task(_write_message(writer, payload))
+
+    def _generation_cut_proof_payload(self) -> dict[str, Any]:
+        if self._checkpoint_id is None or self._coordinator_sequence <= 0:
+            return {}
+        proof = self.limiter.generation_cut_worker_proof(
+            self._checkpoint_id,
+            coordinator_sequence=self._coordinator_sequence,
+            worker_id=self.worker_id,
+        )
+        return {"generation_cut_proof": proof.model_dump(mode="json")}
 
 
 def build_coordinator_control_app(
@@ -367,6 +551,13 @@ def build_coordinator_control_app(
                     "expected": coordinator.expected_workers,
                 },
                 "inflight_total": status["inflight_total"],
+                "response_inflight_total": status["response_inflight_total"],
+                "generation_pending_total": status["generation_pending_total"],
+                "generation_cut_proof": (
+                    coordinator.generation_cut_proof().model_dump(mode="json")
+                    if status["state"] == AdmissionState.PAUSED.value
+                    else None
+                ),
                 "waiters_total": status["waiters_total"],
             }
 
@@ -411,6 +602,8 @@ def build_coordinator_control_app(
             status = coordinator.status()
         if status["state"] == AdmissionState.PAUSED.value and fence.phase == CheckpointPhase.PREPARING:
             fence.mark_prepared(checkpoint_id)
+        if status["state"] == AdmissionState.PAUSED.value:
+            status["generation_cut_proof"] = coordinator.generation_cut_proof().model_dump(mode="json")
         return status
 
     @app.post(f"{MODEL_ADMISSION_URL_PREFIX}/resume")
