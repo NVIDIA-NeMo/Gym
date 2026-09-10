@@ -5,10 +5,12 @@
 import base64
 import shutil
 import zipfile
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import fitz
 import pytest
+from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym.server_utils import ServerClient
@@ -33,6 +35,59 @@ def _section(root, **kwargs):
     finally:
         for path in cleanup:
             shutil.rmtree(path)
+
+
+async def test_benchmark_panel_prepares_pdf_comparison_before_dispatch(tmp_path, monkeypatch):
+    candidate = tmp_path / "candidate"
+    reference = tmp_path / "reference/task_task/repeat_0"
+    for directory in (candidate, reference):
+        directory.mkdir(parents=True)
+        (directory / "finish_params.json").write_text("{}")
+        (directory / "submission.txt").write_text("A completed submission")
+    with fitz.open() as document:
+        document.new_page().insert_text((40, 40), "Candidate report")
+        document.save(candidate / "report.pdf")
+    benchmark = OmegaConf.load(Path(__file__).resolve().parents[3] / "benchmarks/gdpval/config.yaml")
+    fields = OmegaConf.to_container(benchmark.gdpval_resources_server.resources_servers.gdpval, resolve=True)
+    fields.update(
+        reward_mode="comparison",
+        reference_models={"ref": {"deliverables_dir": str(tmp_path / "reference"), "elo": 1000}},
+        preconvert_office_to_pdf=False,
+    )
+    server = app.GDPValResourcesServer(
+        config=app.GDPValResourcesServerConfig(name="resources", host="127.0.0.1", port=8080, **fields),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    body = app.GDPValVerifyRequest(
+        task_id="task",
+        prompt="Compare the completed reports",
+        deliverables_dir=str(candidate),
+        responses_create_params={"input": []},
+        response={
+            "id": "response",
+            "created_at": 0,
+            "model": "test",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+        },
+    )
+    client = MagicMock()
+    client.chat.completions.create.return_value = MagicMock(choices=[MagicMock(message=MagicMock(content="BOXED[B]"))])
+    monkeypatch.setattr("openai.OpenAI", lambda **_: client)
+    monkeypatch.setattr(app, "get_server_url", lambda _: "http://localhost:9999")
+    planner = MagicMock(wraps=comparison.plan_native_pdf_overflow)
+    monkeypatch.setattr(comparison, "plan_native_pdf_overflow", planner)
+
+    result = await server._verify_comparison(body)
+
+    assert result.judge_response["total_judged"] == 4
+    assert client.chat.completions.create.call_count == 4
+    planner.assert_called_once()
+    assert planner.call_args.kwargs["native_pdf_bytes_per_document"] == 50_000_000
+    assert any(block.get("type") == "image_url" for block in planner.call_args.args[0]["submission_b"])
 
 
 def test_recursive_inputs_keep_paths_and_pdf_provenance(tmp_path):

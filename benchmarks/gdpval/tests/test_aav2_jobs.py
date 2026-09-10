@@ -100,7 +100,8 @@ if args[:2] == ['-c', 'from nemo_gym.cli.main import main; main()']:
         output = Path(values['output_jsonl_fpath'])
         judge = output.parent.name.startswith('judge_')
         record({'target': target, 'values': values, 'cwd': os.getcwd(), 'pid': os.getpid(),
-                'file_limit': os.environ['GDPVAL_MAX_FILE_BYTES_FOR_JUDGE']})
+                'file_limit': os.environ['GDPVAL_MAX_FILE_BYTES_FOR_JUDGE'],
+                'judge_request_timeout': os.environ.get('GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS')})
         if os.environ.get('FIXTURE_HOLD'):
             time.sleep(120)
         if os.environ.get('FIXTURE_GYM_RC'):
@@ -268,9 +269,13 @@ def run_job(job, phase, **environment):
     )
 
 
-@pytest.mark.parametrize("mode,trials,concurrency", [("smoke", 1, 4), ("pilot", 2, 8), ("full", 4, 16)])
-def test_judge_modes_use_prepared_candidate_and_frozen_references(job, mode, trials, concurrency):
-    result = run_job(job, "judge", AAV2_MODE=mode, GDPVAL_MAX_FILE_BYTES_FOR_JUDGE="1")
+@pytest.mark.parametrize(
+    "mode,trials,concurrency,request_timeout", [("smoke", 1, 4, None), ("pilot", 2, 8, "1200"), ("full", 4, 16, None)]
+)
+def test_judge_modes_use_prepared_candidate_and_frozen_references(job, mode, trials, concurrency, request_timeout):
+    job.env.pop("GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS", None)
+    overrides = {} if request_timeout is None else {"GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS": request_timeout}
+    result = run_job(job, "judge", AAV2_MODE=mode, GDPVAL_MAX_FILE_BYTES_FOR_JUDGE="1", **overrides)
     assert result.returncode == 0, (result.stdout, result.stderr)
     entries = records(job)
     assert not any(item.get("check", [""])[0].endswith("/preconvert.py") for item in entries)
@@ -278,6 +283,7 @@ def test_judge_modes_use_prepared_candidate_and_frozen_references(job, mode, tri
     call = next(item for item in entries if "target" in item)
     assert call["target"] == "nemo_gym.cli.eval:e2e_rollout_collection"
     assert call["file_limit"] == json.loads((job.run / "run.json").read_text())["GDPVAL_MAX_FILE_BYTES_FOR_JUDGE"]
+    assert call["judge_request_timeout"] == (request_timeout or "900")
     values = call["values"]
     assert values["resume_from_cache"] == "true"
     assert values["num_samples_in_parallel"] == str(concurrency)

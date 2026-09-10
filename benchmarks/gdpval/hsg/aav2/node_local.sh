@@ -41,6 +41,7 @@ gdpval_prepare() {
     PHASE_DIR=$RUN_DIR
     [[ $phase != preconvert ]] || PHASE_DIR=$RUN_DIR/preconvert
     if [[ $phase == judge ]]; then
+        export GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS=${GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS:-900}
         case ${AAV2_MODE:-full} in
             smoke) DATASET=$SMOKE_DATASET; CONCURRENCY=4; NUM_COMPARISON_TRIALS=1; count=4 ;;
             pilot) CONCURRENCY=8; NUM_COMPARISON_TRIALS=2; count=12 ;;

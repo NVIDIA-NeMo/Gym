@@ -123,6 +123,7 @@ gdpval_resources_server:
           max_video_files: 10
           max_native_pdf_pages: 1000
           max_native_pdf_bytes: 50000000
+          max_native_pdf_bytes_per_document: 50000000
           max_serialized_request_bytes: 495000000
         - name: claude-opus-4.8
           # Served via NVIDIA inference (Bedrock). The proxy exposes it on the
