@@ -259,6 +259,8 @@ EOF
 )
 
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
+SEGMENT=${SEGMENT:-$NUM_NODES}
+
 submit_dir=$(pwd -P)
 # An exported connection is sent as arguments; otherwise env.yaml is read.
 if [[ -n "$OPENSANDBOX_DOMAIN" ]]; then
@@ -281,7 +283,7 @@ main_job_id=$(
         --ntasks-per-node=1 \
         --comment="$SLURM_COMMENT" \
         --exclusive \
-        --segment=$NUM_NODES \
+        --segment=$SEGMENT \
         --wrap 'exec bash -c "$batch_command"'
 )
 main_job_id=${main_job_id%%;*}
