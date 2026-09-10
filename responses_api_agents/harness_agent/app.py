@@ -51,17 +51,7 @@ LOG = logging.getLogger(__name__)
 
 # registry to be removed in pr 2 of stack
 _AGENTS = {
-    "claude_code": ("responses_api_agents.claude_code_agent.app", "ClaudeCodeAgent", "ClaudeCodeAgentConfig"),
-    "cline": ("responses_api_agents.cline_agent.app", "ClineAgent", "ClineAgentConfig"),
-    "codex": ("responses_api_agents.codex_agent.app", "CodexAgent", "CodexAgentConfig"),
-    "hermes": ("responses_api_agents.hermes_agent.app", "HermesAgent", "HermesAgentConfig"),
-    "kilocode": ("responses_api_agents.kilocode_agent.app", "KiloCodeAgent", "KiloCodeAgentConfig"),
-    "nemo_fabric": ("responses_api_agents.nemo_fabric_agent.app", "NeMoFabricAgent", "NeMoFabricAgentConfig"),
-    "openclaw": ("responses_api_agents.openclaw_agent.app", "OpenClawAgent", "OpenClawAgentConfig"),
     "opencode": ("responses_api_agents.opencode_agent.app", "OpenCodeAgent", "OpenCodeAgentConfig"),
-    "pi": ("responses_api_agents.pi_agent.app", "PiAgent", "PiAgentConfig"),
-    "prime": ("responses_api_agents.prime_agent.app", "PrimeAgent", "PrimeAgentConfig"),
-    "terminus_2": ("responses_api_agents.terminus_2_agent.app", "Terminus2Agent", "Terminus2AgentConfig"),
 }
 
 
@@ -81,6 +71,12 @@ async def stage_and_run_eval(
     timeout_s: int,
 ) -> float:
     """Stage eval files into the sandbox, run them and get the reward."""
+    if handle.provider_name == "local":
+        paths = {str(parent) for path in [*eval_files, reward_file] for parent in [Path(path), *Path(path).parents]}
+        for path in sorted(paths - {"/", "."}, key=len, reverse=True):
+            eval_command = eval_command.replace(path, path.lstrip("/"))
+        eval_files = {path.lstrip("/"): content for path, content in eval_files.items()}
+        reward_file = reward_file.lstrip("/")
     with tempfile.TemporaryDirectory() as td:
         for target, content in eval_files.items():
             local = Path(td) / uuid4().hex
@@ -120,6 +116,10 @@ class HarnessAgentConfig(BaseResponsesAPIAgentConfig):
 
 
 class HarnessAgentRunRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
+
+
+class HarnessAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
@@ -186,7 +186,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             except OSError:
                 pass
         netloc = f"{host}:{parsed.port}" if parsed.port else host
-        return urlunsplit((parsed.scheme or "http", netloc, parsed.path, parsed.query, parsed.fragment))
+        base_url = urlunsplit((parsed.scheme or "http", netloc, parsed.path, parsed.query, parsed.fragment))
+        return f"{base_url.rstrip('/')}{self.url_path_for_request('', request)}"
 
     def _runner(self) -> tuple[str, dict, str]:
         script = (Path(__file__).parent / "agent_runner.py").read_text()
@@ -196,7 +197,11 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             "agent_class": agent_class,
             "agent_config_class": agent_config_class,
         }
-        return script, runner_config, f"{self.config.sandbox_python} /work/runner.py"
+        return script, runner_config, f"{self.config.sandbox_python} runner.py"
+
+    @staticmethod
+    def _box_path(handle, path: str) -> str:
+        return path.lstrip("/") if handle.provider_name == "local" else path
 
     async def run(self, request: Request, body: HarnessAgentRunRequest) -> BaseVerifyResponse:
         async with self.sem:
@@ -213,7 +218,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
 
             agent_resp = await self.server_client.post(
                 server_name=self.config.name,
-                url_path="/v1/responses",
+                url_path=self.url_path_for_run("/v1/responses", body),
                 json=body.responses_create_params,
                 cookies=cookies,
             )
@@ -228,7 +233,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 cookies=cookies,
             )
             await raise_for_status(verify_resp)
-            return BaseVerifyResponse.model_validate(await get_response_json(verify_resp))
+            return HarnessAgentVerifyResponse.model_validate(await get_response_json(verify_resp))
 
     async def _grade_in_box(self, handle, grade_spec: dict) -> float:
         return await stage_and_run_eval(
@@ -244,25 +249,30 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         spec = SandboxSpec(image=image, **dict(self.config.sandbox_spec))
         handle = await self._provider.create(spec)
         try:
-            await self._provider.exec(handle, "mkdir -p /work", timeout_s=60)
+            work_dir = self._box_path(handle, "/work")
+            await self._provider.exec(handle, f"mkdir -p {shlex.quote(work_dir)}", timeout_s=60)
             with tempfile.TemporaryDirectory() as td:
                 for i, (target, content) in enumerate(files.items()):
                     local = Path(td) / str(i)
                     local.write_text(content)
-                    await self._provider.upload_file(handle, local, target)
+                    await self._provider.upload_file(handle, local, self._box_path(handle, target))
             if self._gym_tar is not None or self._gym_source_url is not None:
+                archive = self._box_path(handle, "/work/gym_src.tar.gz")
+                gym_mount = self._box_path(handle, "/work/gym_mount")
                 if self._gym_tar is not None:
-                    await self._provider.upload_file(handle, self._gym_tar, "/work/gym_src.tar.gz")
+                    await self._provider.upload_file(handle, self._gym_tar, archive)
                 else:
                     r = await self._provider.exec(
                         handle,
-                        f"curl -fsSL -o /work/gym_src.tar.gz {shlex.quote(self._gym_source_url)}",
+                        f"curl -fsSL -o {shlex.quote(archive)} {shlex.quote(self._gym_source_url)}",
                         timeout_s=600,
                     )
                     if r.return_code != 0:
                         raise RuntimeError(f"gym source fetch failed: {(r.stderr or '')[:300]}")
                 r = await self._provider.exec(
-                    handle, "mkdir -p /gym_mount && tar xzf /work/gym_src.tar.gz -C /gym_mount", timeout_s=300
+                    handle,
+                    f"mkdir -p {shlex.quote(gym_mount)} && tar xzf {shlex.quote(archive)} -C {shlex.quote(gym_mount)}",
+                    timeout_s=300,
                 )
                 if r.return_code != 0:
                     raise RuntimeError(f"gym source extraction failed: {(r.stderr or '')[:300]}")
@@ -275,10 +285,10 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             if pm:
                 net = await self._provider.exec(
                     handle,
-                    f"timeout 5 bash -c 'echo > /dev/tcp/{pm.group(1)}/{pm.group(2)}' && echo NET_OK || echo NET_FAIL",
-                    timeout_s=30,
+                    f"bash -c 'echo > /dev/tcp/{pm.group(1)}/{pm.group(2)}'",
+                    timeout_s=5,
                 )
-                if "NET_FAIL" in (net.stdout or ""):
+                if net.return_code != 0:
                     raise RuntimeError(f"model endpoint {pm.group(1)}:{pm.group(2)} unreachable from sandbox")
             return handle
         except Exception:
@@ -325,11 +335,22 @@ class HarnessAgent(SimpleResponsesAPIAgent):
         }
         handle = await self._provision_box(image, files, model_url)
         try:
-            r = await self._provider.exec(handle, runner_cmd, timeout_s=self.config.rollout_timeout)
-            if "RUNNER_DONE" not in (r.stdout or ""):
-                LOG.warning("runner incomplete: %s", (r.stderr or r.stdout or "")[-6000:])
+            work_dir = self._box_path(handle, "/work")
+            r = await self._provider.exec(
+                handle,
+                f"{runner_cmd} > runner.out 2>&1",
+                cwd=work_dir,
+                timeout_s=self.config.rollout_timeout,
+            )
+            logs = await self._provider.exec(handle, "tail -c 6000 runner.out", cwd=work_dir, timeout_s=30)
+            if r.return_code != 0 or "RUNNER_DONE" not in (logs.stdout or ""):
+                raise RuntimeError(
+                    f"runner failed ({r.return_code}): {(logs.stdout or logs.stderr or r.stderr or '')[-6000:]}"
+                )
 
-            resp = NeMoGymResponse.model_validate(await self._download_json(handle, "/work/response.json"))
+            resp = NeMoGymResponse.model_validate(
+                await self._download_json(handle, self._box_path(handle, "/work/response.json"))
+            )
 
             grade_raw = meta.get("sandbox_eval")
             grade_spec = json.loads(grade_raw) if isinstance(grade_raw, str) else grade_raw
