@@ -100,7 +100,7 @@ class TestGymSandboxLean4Client:
             GymSandboxLean4Client(provider=bad, image="img")
 
     def test_completed_maps_rc_zero(self, fake_sandbox):
-        out = asyncio.run(_client().execute_lean4("theorem t : True := trivial", timeout=30.0))
+        out = asyncio.run(_client(ready_timeout_s=600).execute_lean4("theorem t : True := trivial", timeout=30.0))
         assert out == {"process_status": "completed", "stdout": "ok", "stderr": ""}
         box = fake_sandbox.instances[0]
         assert box.stopped, "per-verify pod must be destroyed in finally"
@@ -108,6 +108,7 @@ class TestGymSandboxLean4Client:
         assert box.exec_timeout_s == 90.0, "provider deadline must trail the in-sandbox timeout"
         assert list(box.spec.files.values()) == ["theorem t : True := trivial"]
         assert box.spec.entrypoint == ["sleep", "infinity"]
+        assert box.spec.ready_timeout_s == 600
 
     def test_nonzero_rc_maps_to_failed(self, fake_sandbox):
         fake_sandbox.next_exec_result = SimpleNamespace(return_code=1, stdout="", stderr="error: x")

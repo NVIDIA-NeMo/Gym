@@ -13,4 +13,5 @@ math_formal_lean:
         pool_size: ${oc.decode:${oc.env:LEAN_SANDBOX_POOL_SIZE,0}}
         pool_ref: ${oc.env:NS_SANDBOX_POOL_REF,""}
         create_ttl_s: ${oc.decode:${oc.env:NS_SANDBOX_TTL_S,3600}}
+        ready_timeout_s: ${oc.decode:${oc.env:LEAN_SANDBOX_READY_TIMEOUT_S,1200}}
       verified: false

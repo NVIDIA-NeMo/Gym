@@ -60,6 +60,10 @@ uses `sandbox.exec` to run `lake env ... lean` and preserves the existing
 `process_status`, `stdout`, `stderr`, timeout and output-truncation contract.
 Each sandbox sets `EXECD_API_GRACE_SHUTDOWN=50ms`.
 
+The example allows 1,200 seconds for image startup via
+`LEAN_SANDBOX_READY_TIMEOUT_S`, within the shipped provider's 1,500-second
+create budget. This is separate from the Lean compilation timeout.
+
 The default creates a fresh sandbox per verification with bounded concurrency.
 Set `LEAN_SANDBOX_POOL_SIZE` to reuse prepared sandboxes; warmup reads the Lean
 and Mathlib files before admission, and failed sandboxes are replaced. Set

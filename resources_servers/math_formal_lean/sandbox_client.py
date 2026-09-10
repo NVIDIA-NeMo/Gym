@@ -164,6 +164,7 @@ class GymSandboxLean4Client:
         pool_size: int = 0,
         prefetch_paths: str = "/root/.elan /lean4",
         pool_ref: str = "",
+        ready_timeout_s: float | None = None,
     ):
         if not image:
             raise ValueError("sandbox_backend=gym_sandbox requires a non-empty image")
@@ -177,6 +178,7 @@ class GymSandboxLean4Client:
         self._image = image
         self._project_dir = project_dir.rstrip("/")
         self._create_ttl_s = create_ttl_s
+        self._ready_timeout_s = ready_timeout_s
         self._resources = dict(resources or {})
         self.max_output_characters = max_output_characters
         self._acquire_timeout_s = acquire_timeout_s
@@ -203,6 +205,7 @@ class GymSandboxLean4Client:
                 entrypoint=["sleep", "infinity"],
                 env={"EXECD_API_GRACE_SHUTDOWN": "50ms"},
                 ttl_s=self._create_ttl_s,
+                ready_timeout_s=self._ready_timeout_s,
                 files=files or {},
                 resources=self._resources,
                 metadata={"purpose": "math-formal-lean-verify"},
