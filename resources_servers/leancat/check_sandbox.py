@@ -26,18 +26,15 @@ score that looks like a model result and is not one.
 
 No model and no GPU needed.
 
-Three ways to reach Lean, matching the three ways the server can be configured:
+Two ways to reach Lean, matching the two ways the server can be configured:
 
     --lean-prefix DIR   Run `lake env lean` directly, no sandbox at all. Use this first,
                         right after setup_lean.sh: it isolates "is Mathlib correct?" from
                         "is my sandbox wiring correct?", so a failure has one meaning.
-    --enroot-image IMG  Go through nemo_gym.sandbox's enroot provider, exercising the same
-                        path configs/leancat_enroot.yaml uses. Needs --lean-prefix too.
     --host/--port       Talk to a NeMo-Skills HTTP sandbox (the default backend).
 
 Usage:
     python check_sandbox.py --lean-prefix /lustre/<...>/lean4-mathlib-v4.19.0
-    python check_sandbox.py --lean-prefix /lustre/<...> --enroot-image base.sqsh
     python check_sandbox.py --host h --port 6000 --limit 5
 """
 
@@ -51,7 +48,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
-from resources_servers.leancat.sandbox_client import GymSandboxLean4Client, Lean4SandboxClient
+from resources_servers.leancat.sandbox_client import Lean4SandboxClient
 
 
 DATA_DIR = Path(__file__).absolute().parent / "data"
@@ -146,36 +143,6 @@ class LocalLeanClient:
 
 
 def build_client(args: argparse.Namespace):
-    if args.enroot_image:
-        # remap_root because the NeMo-Skills image ships elan under /root, which is 0700.
-        # bypass_entrypoint (the provider default) keeps the image's uwsgi/nginx entrypoint
-        # from hijacking the exec.
-        spec: Dict[str, Any] = {
-            "image": args.enroot_image,
-            "env": {
-                "ELAN_HOME": "/root/.elan",
-                "PATH": "/root/.elan/bin:/usr/local/bin:/usr/bin:/bin",
-            },
-        }
-        if args.lean_prefix:
-            # Lean lives on the host and is mounted in; otherwise it is baked into the image.
-            prefix = Path(args.lean_prefix).absolute()
-            spec["provider_options"] = {"mounts": [f"{prefix}:/lean4:none:ro,rbind"]}
-            spec["env"]["ELAN_HOME"] = "/lean4/elan"
-            spec["env"]["PATH"] = "/lean4/elan/bin:/usr/local/bin:/usr/bin:/bin"
-        return GymSandboxLean4Client(
-            provider={
-                "enroot": {
-                    # bypass_entrypoint=False avoids the provider's `--rc /dev/null`, which
-                    # this enroot rejects ("No such file or directory: /dev/null"). With
-                    # --rw the image's entrypoint does not block the exec anyway.
-                    "create": {"remap_root": True, "bypass_entrypoint": False},
-                    "exec": {"concurrency": args.concurrency, "default_timeout_s": args.timeout + 30},
-                }
-            },
-            spec=spec,
-            lean_project_dir=args.lean_project_dir,
-        )
     if args.lean_prefix:
         return LocalLeanClient(Path(args.lean_prefix).absolute())
     return Lean4SandboxClient(host=args.host, port=args.port, max_output_characters=4000)
@@ -189,14 +156,6 @@ async def main() -> int:
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--concurrency", type=int, default=8)
     parser.add_argument("--lean-prefix", help="Directory produced by setup_lean.sh; runs lake directly.")
-    parser.add_argument(
-        "--enroot-image", help="Image to run in via nemo_gym.sandbox. Lean may be baked in or mounted."
-    )
-    parser.add_argument(
-        "--lean-project-dir",
-        default="/lean4/my_project",
-        help="Lean project inside the sandbox (the dir holding lean-toolchain).",
-    )
     args = parser.parse_args()
 
     client = build_client(args)

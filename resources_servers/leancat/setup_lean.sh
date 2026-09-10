@@ -11,9 +11,8 @@
 # a model result. Building a correct image needs Docker, which HPC login nodes typically do
 # not have.
 #
-# elan installs entirely in user space, so none of that is necessary. Point the sandbox at
-# the resulting directory as a bind mount instead, and any base image with `sh` will do --
-# see configs/leancat_enroot.yaml.
+# elan installs entirely in user space, so none of that is necessary. Bind-mount the
+# resulting directory into whatever sandbox image you already have.
 #
 # `lake exe cache get` downloads prebuilt Mathlib oleans because v4.19.0 is a tagged
 # release, so expect a large download rather than a multi-hour source build.
