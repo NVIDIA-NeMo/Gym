@@ -76,9 +76,9 @@ benchmark's own expectation.
 
 The benchmark deliberately does **not** instruct the model to do this — it passes
 the upstream prompt through unmodified, because upstream publishes no prompt to
-match and a wrapper measurably changes the result. See
+match and a wrapper would change what is measured. See
 [`benchmarks/scicodepile/README.md`](../../benchmarks/scicodepile/README.md#prompting)
-for the A/B evidence and the non-attempt rate that choice costs.
+for that reasoning and the non-attempt rate it costs.
 
 ### Code extraction
 
