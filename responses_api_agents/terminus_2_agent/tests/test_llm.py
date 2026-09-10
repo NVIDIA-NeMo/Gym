@@ -335,6 +335,18 @@ async def test_api_key_is_sent_as_bearer_token():
 
 
 @pytest.mark.asyncio
+async def test_empty_api_key_sends_mutable_headers():
+    llm = _make_llm()
+    response = MagicMock(status=200, cookies={})
+    response.json = AsyncMock(return_value={})
+
+    with patch("nemo_gym.agents.terminus_2_llm.request", new=AsyncMock(return_value=response)) as post:
+        await llm._post_chat_completions({})
+
+    assert post.await_args.kwargs["headers"] == {}
+
+
+@pytest.mark.asyncio
 async def test_session_cookie_is_forwarded_between_turns():
     llm = _make_llm()
     first = MagicMock(status=200, cookies={"route": MagicMock(value="engine-1")})
