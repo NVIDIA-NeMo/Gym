@@ -30,7 +30,7 @@ from typing import Any, Dict
 
 import httpx
 
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, await_cleanup
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 
 
 LOG = logging.getLogger(__name__)
@@ -391,4 +391,14 @@ class GymSandboxLean4Client:
                 self._pool = None
 
             self._close_task = asyncio.create_task(cleanup())
-        await await_cleanup(self._close_task)
+        cancellation = None
+        while True:
+            try:
+                await asyncio.shield(self._close_task)
+                break
+            except asyncio.CancelledError as exc:
+                if self._close_task.cancelled():
+                    raise
+                cancellation = exc
+        if cancellation is not None:
+            raise cancellation

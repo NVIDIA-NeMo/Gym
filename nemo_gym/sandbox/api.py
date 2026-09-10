@@ -40,7 +40,6 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxPtyAttach,
     create_provider,
 )
-from nemo_gym.sandbox.utils import await_cleanup
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
@@ -387,7 +386,6 @@ class AsyncSandbox:
         self._stopped = True
         self._closed = False
         self.pty = SandboxPty(self)
-        self._stop_task: asyncio.Task[None] | None = None
 
     def _telemetry_provider_name(self) -> str:
         """Provider name for span attributes (`docker`, `daytona`, `opensandbox`, ...)."""
@@ -410,19 +408,15 @@ class AsyncSandbox:
         if requested_spec is None:
             raise ValueError("Sandbox.start() requires a SandboxSpec")
 
-        try:
-            if is_span_group_enabled(GymSpanGroup.SANDBOX):
-                with managed_span(
-                    GymSpanGroup.SANDBOX,
-                    "gym.sandbox.start",
-                    **{"nemo.gym.sandbox.provider": self._telemetry_provider_name()},
-                ):
-                    handle = await self._provider.create(requested_spec)
-            else:
+        if is_span_group_enabled(GymSpanGroup.SANDBOX):
+            with managed_span(
+                GymSpanGroup.SANDBOX,
+                "gym.sandbox.start",
+                **{"nemo.gym.sandbox.provider": self._telemetry_provider_name()},
+            ):
                 handle = await self._provider.create(requested_spec)
-        except BaseException:
-            await self._provider.aclose()
-            raise
+        else:
+            handle = await self._provider.create(requested_spec)
         try:
             if requested_spec.files:
                 with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
@@ -431,18 +425,15 @@ class AsyncSandbox:
                         source_path = tmp_path / f"file-{index}"
                         source_path.write_text(contents, encoding="utf-8")
                         await self._provider.upload_file(handle, source_path, target_path)
-        except BaseException:
-            try:
-                await self._provider.close(handle)
-            finally:
-                await self._provider.aclose()
-                self._closed = True
+        except Exception:
+            await self._provider.close(handle)
+            await self._provider.aclose()
+            self._closed = True
             raise
 
         self._spec = requested_spec
         self._handle = handle
         self._stopped = False
-
         return self
 
     async def exec(
@@ -528,19 +519,15 @@ class AsyncSandbox:
         return resolved
 
     async def stop(self) -> None:
-        if self._stop_task is None:
+        if self._closed:
+            return
+        try:
+            if self._handle is not None and not self._stopped:
+                self._stopped = True
+                await self._provider.close(self._handle)
+        finally:
+            await self._provider.aclose()
             self._closed = True
-
-            async def cleanup() -> None:
-                try:
-                    if self._handle is not None and not self._stopped:
-                        self._stopped = True
-                        await self._provider.close(self._handle)
-                finally:
-                    await self._provider.aclose()
-
-            self._stop_task = asyncio.create_task(cleanup())
-        await await_cleanup(self._stop_task)
 
     async def serialize(self, *, scope: str | None = None) -> dict[str, Any]:
         """Return a JSON descriptor another process can rebuild this box from.

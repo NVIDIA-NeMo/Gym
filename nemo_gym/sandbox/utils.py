@@ -14,9 +14,6 @@
 
 """Sandbox utility helpers."""
 
-import asyncio
-
-
 # Parallelism caps for CPU-limited sandboxes, each set by cpu_cap_env() to the
 # floored CPU limit (min 1). Tools size worker pools by host core count, not
 # the cgroup limit — Python's multiprocessing.cpu_count(), BLAS/OpenMP thread
@@ -56,21 +53,6 @@ def cpu_cap_env(cpu: float | int | None) -> dict[str, str]:
         return {}
     cores = str(max(1, int(cpu)))
     return {name: cores for name in CPU_CAP_ENV_VARS}
-
-
-async def await_cleanup(task: asyncio.Task[None]) -> None:
-    """Finish owned cleanup before propagating caller cancellation."""
-    cancellation: asyncio.CancelledError | None = None
-    while True:
-        try:
-            await asyncio.shield(task)
-            break
-        except asyncio.CancelledError as exc:
-            if task.cancelled():
-                raise
-            cancellation = exc
-    if cancellation is not None:
-        raise cancellation
 
 
 def rewrite_image(image: str | None, rewrites: list[dict[str, str]]) -> str | None:

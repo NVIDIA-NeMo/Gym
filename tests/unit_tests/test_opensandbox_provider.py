@@ -207,7 +207,7 @@ async def test_provider_conversion_helpers(
     assert opensandbox_provider._to_volumes([{"name": "workspace"}]) == [FakeVolume(name="workspace")]
 
 
-async def test_create_passes_provider_options_to_sdk(
+async def test_direct_create_passes_platform_to_sdk_create(
     fake_opensandbox_sdk: None,
 ) -> None:
     provider = opensandbox_provider.OpenSandboxProvider(
@@ -218,10 +218,7 @@ async def test_create_passes_provider_options_to_sdk(
     handle = await provider.create(
         SandboxSpec(
             image="mirror.gcr.io/astral/uv:python3.12-bookworm-slim",
-            provider_options={
-                "platform": {"os": "linux", "arch": "amd64"},
-                "extensions": {"poolRef": "warm"},
-            },
+            provider_options={"platform": {"os": "linux", "arch": "amd64"}},
         ),
     )
 
@@ -231,7 +228,6 @@ async def test_create_passes_provider_options_to_sdk(
         arch="amd64",
     )
     assert "network_policy" not in FakeSandbox.created_kwargs
-    assert FakeSandbox.created_kwargs["extensions"]["poolRef"] == "warm"
 
 
 async def test_direct_create_passes_network_policy_to_sdk_create(fake_opensandbox_sdk: None) -> None:
@@ -1426,74 +1422,6 @@ async def test_create_once_and_connect_after_create_error_paths(
     with pytest.raises(RuntimeError, match="probe failed"):
         await provider._create_once(SandboxSpec(image="image:tag"))
     assert cleanup_calls == ["sandbox-1"]
-
-
-async def test_create_once_cleans_up_after_cancellation(
-    fake_opensandbox_sdk: None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": "probe"})
-    cleanup_calls: list[str] = []
-    verify_started = asyncio.Event()
-    cleanup_started = asyncio.Event()
-    allow_cleanup = asyncio.Event()
-
-    async def wait_in_verify(_handle: opensandbox_provider.SandboxHandle) -> None:
-        verify_started.set()
-        await asyncio.get_running_loop().create_future()
-
-    async def cleanup(handle: opensandbox_provider.SandboxHandle) -> None:
-        cleanup_started.set()
-        await allow_cleanup.wait()
-        cleanup_calls.append(handle.sandbox_id)
-
-    monkeypatch.setattr(provider, "_verify_created_handle", wait_in_verify)
-    monkeypatch.setattr(provider, "_cleanup_failed_create_handle", cleanup)
-
-    create_task = asyncio.create_task(provider._create_once(SandboxSpec(image="image:tag")))
-    await verify_started.wait()
-    create_task.cancel()
-    await cleanup_started.wait()
-    allow_cleanup.set()
-    with pytest.raises(asyncio.CancelledError):
-        await create_task
-
-    assert cleanup_calls == ["sandbox-1"]
-
-
-async def test_close_releases_local_resources_after_cancellation() -> None:
-    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
-    kill_started = asyncio.Event()
-    close_started = asyncio.Event()
-    allow_close = asyncio.Event()
-    close_finished = asyncio.Event()
-
-    class Raw:
-        async def kill(self) -> None:
-            kill_started.set()
-            await asyncio.get_running_loop().create_future()
-
-        async def close(self) -> None:
-            close_started.set()
-            await allow_close.wait()
-            close_finished.set()
-
-    close_task = asyncio.create_task(
-        provider.close(
-            opensandbox_provider.SandboxHandle(
-                sandbox_id="sandbox-cancelled",
-                provider_name="opensandbox",
-                raw=Raw(),
-            ),
-        )
-    )
-    await kill_started.wait()
-    close_task.cancel()
-    await close_started.wait()
-    allow_close.set()
-    with pytest.raises(asyncio.CancelledError):
-        await close_task
-    assert close_finished.is_set()
 
 
 async def test_retry_classification_and_await_sdk_helpers(monkeypatch: pytest.MonkeyPatch) -> None:

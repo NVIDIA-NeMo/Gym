@@ -32,7 +32,7 @@ from typing import Any
 
 import httpx  # exception types only: the nemo_skills client contract catches httpx errors
 
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, await_cleanup
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 
 
 LOGGER = logging.getLogger(__name__)
@@ -204,7 +204,17 @@ class SandboxPool:
                     slot.healthy = False
 
             self._close_task = asyncio.create_task(cleanup())
-        await await_cleanup(self._close_task)
+        cancellation = None
+        while True:
+            try:
+                await asyncio.shield(self._close_task)
+                break
+            except asyncio.CancelledError as exc:
+                if self._close_task.cancelled():
+                    raise
+                cancellation = exc
+        if cancellation is not None:
+            raise cancellation
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox, slot_index: int) -> None:
         try:
