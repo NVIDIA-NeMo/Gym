@@ -192,6 +192,33 @@ tier was the binding constraint for that lane.
 
 KV cache usage did *not* rise, so the GPUs are still not the limit even at 6x the rollout rate.
 
+## Concurrency has a ceiling, and it is not a capacity limit (job 7062901)
+
+Raising `NUM_SAMPLES_IN_PARALLEL` from the derived 4,096 to **8,192** on the same P2D8 shape killed
+a decode engine about 30 min into collection:
+
+```
+vllm/v1/core/sched/scheduler.py:914 in schedule
+    assert num_new_tokens > 0
+AssertionError  ->  EngineDeadError
+                ->  NIXL_ERR_REMOTE_DISCONNECT on the surviving engines
+                ->  router graceful shutdown
+```
+
+It produced 12,640 rollouts, then nothing for the remaining 1 h 40 m while the driver retried
+against a dead router: **6,454,400 `ClientOSError`s**, `retry=11993` on a single request,
+`elapsed_s` p50 3,130 s. The identical shape at 4,096 ran 1 h 37 m clean, ~45k rollouts/hr, zero
+connection errors.
+
+So the practical ceiling is a vLLM scheduler edge case, reached long before engine capacity
+(8,192 sequences), the sandbox tier (640), or the aiohttp connector (~63k). **Leave the derived
+default alone unless you are prepared to re-test.**
+
+The 1 h 40 m of dead time was our own bug, not vLLM's: the vLLM `srun` had no
+`--kill-on-bad-exit`, so one dead task left the step alive waiting on the other nine and the
+launcher's `wait -n` never fired. Fixed; a dead engine now ends the job so the watcher can
+resubmit and `--resume` carries the collected work forward.
+
 ## Caveats
 
 - **Every rate is a floor, but the client semaphore is no longer the reason.** Each decode engine

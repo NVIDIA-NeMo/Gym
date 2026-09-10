@@ -158,6 +158,13 @@ fi
 # moments the driver has real work queued. Raising it to 1024 to match the engines is harmless
 # but unsupported -- P2D8 requested 4,096 and never had more than ~264 in flight.
 #
+# Do NOT raise NUM_SAMPLES_IN_PARALLEL above this derived default without re-testing: 8192 (2x)
+# on P2D8 killed a decode engine ~30 min into collection with `assert num_new_tokens > 0` in
+# vllm/v1/core/sched/scheduler.py:914, which cascaded to NIXL_ERR_REMOTE_DISCONNECT on the other
+# engines (job 7062901). The same shape at 4096 ran 1 h 37 m clean at ~45k rollouts/hr with zero
+# connection errors (job 7061265). More in-flight work reaches a vLLM scheduler edge case long
+# before it reaches any capacity limit.
+#
 # GLOBAL_AIOHTTP_CONNECTOR_LIMIT_PER_HOST is *not* the ceiling here, despite looking like one.
 # Gym defaults it to 1024 / num_workers (server_utils.py:96,163) and aiohttp keys limit_per_host on
 # (host, port), but the client that talks to the router lives in each Gym agent server process --
@@ -538,7 +545,12 @@ unset PYTHONPATH
 nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
 
 ALL_NODES="\${nodes[*]}" \
-srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
+# --kill-on-bad-exit=1 so one dead engine ends the step. Without it srun keeps the step alive
+# waiting on the surviving tasks, the `wait -n` below never fires, and the job runs on with no
+# endpoint: job 7062901 lost an engine to a vLLM scheduler assertion and then burned 1 h 40 m of
+# 10 nodes retrying against a router that had already shut down (6.45M ClientOSErrors, zero
+# rollouts). Failing fast lets 03_run_sharded.sh's watcher resubmit and --resume carry the work.
+srun --kill-on-bad-exit=1 --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
     --container-image=$CONTAINER \
     --container-name=container-on-node \
     --container-mounts=$MOUNTS \
