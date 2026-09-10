@@ -222,7 +222,7 @@ class NemoGymLLM(BaseLLM):
     ) -> dict[str, Any]:
         endpoint = self._chat_completions_endpoint()
         timeout = timeout_sec if timeout_sec is not None else self._timeout_sec
-        headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else None
+        headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
         response = await request(
             "POST",
             endpoint,
