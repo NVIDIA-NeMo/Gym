@@ -23,6 +23,7 @@ from nemo_gym.token_id_capture.sink import (
     CaptureContext,
     current_capture_context,
     mark_external_staging_committed,
+    mark_external_staging_failed,
 )
 from nemo_gym.token_id_capture.staging.records import (
     INVALID_COMMIT_COORDS_REASON,
@@ -161,6 +162,10 @@ class _BaseExternalCaptureHandler(ABC):
                     context.model_call_id,
                     self._INVALID_CAPTURE_REASON,
                 )
+                mark_external_staging_failed(
+                    rollout_id=context.rollout_id,
+                    model_call_id=context.model_call_id,
+                )
             except Exception:
                 LOGGER.exception(
                     f"Could not poison rollout %s call %s after a failed {self._BACKEND_LABEL} worker acknowledgement",
@@ -196,6 +201,10 @@ class _BaseExternalCaptureHandler(ABC):
                 context.model_call_id,
                 WORKER_MISSING_COMMIT_COORDS_REASON,
             )
+            mark_external_staging_failed(
+                rollout_id=context.rollout_id,
+                model_call_id=context.model_call_id,
+            )
             return
         coords = CommitCoords.model_validate(coords_payload)
         if coords.rollout_id != context.rollout_id or coords.model_call_id != context.model_call_id:
@@ -208,6 +217,10 @@ class _BaseExternalCaptureHandler(ABC):
                 context.rollout_id,
                 context.model_call_id,
                 WORKER_CAPTURE_FAILED_REASON,
+            )
+            mark_external_staging_failed(
+                rollout_id=context.rollout_id,
+                model_call_id=context.model_call_id,
             )
             return
         if coords.parent_call_id != admission.parent_call_id or coords.prev_len != admission.prev_len:
