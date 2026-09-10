@@ -212,7 +212,9 @@ if [[ "$VLLM_PD_DEPLOYMENT_MODE" == coupled ]]; then
                 echo "ERROR: \$local_role vLLM process exited while waiting for \$role health (status=\$status)." >&2
                 return "\$status"
             fi
-            if curl -fs "\$url" >/dev/null; then
+            # Bound each probe so a stalled endpoint cannot block process checks.
+            # Timeouts retry below; they do not limit overall model startup time.
+            if curl -fs --connect-timeout 5 --max-time 10 "\$url" >/dev/null; then
                 return 0
             fi
             sleep 5
