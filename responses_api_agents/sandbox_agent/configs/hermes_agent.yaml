@@ -1,0 +1,32 @@
+hermes_agent:
+  responses_api_agents:
+    hermes_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      concurrency: 32
+      harness_module: nemo_gym.agents.hermes
+      harness_class: HermesHarness
+      harness_config:
+        model:
+          model: ${policy_model_name}
+          api_key: local
+          base_url: __SANDBOX_MODEL_URL__/v1
+          settings:
+            temperature: 1.0
+        timeout_seconds: 300
+        max_turns: 30
+        settings:
+          enabled_toolsets: null
+          terminal_backend: local
+          terminal_timeout: 60
+      sandbox_provider:
+        local: {}
+      sandbox_image: ""
+      setup_commands:
+        - python3 -c 'import run_agent' || python3 -m pip install 'hermes-agent @ git+https://github.com/cmunley1/hermes-agent@26bb847a'
+      rollout_timeout: 900
