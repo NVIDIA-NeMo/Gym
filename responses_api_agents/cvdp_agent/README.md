@@ -159,8 +159,8 @@ download/conversion steps and report-output details.
 `harvest()` (collects produced files by glob, skipping files unchanged from what was seeded),
 and `deps_recipe_key()` (fingerprints the deps cache).
 - `**sandbox_entrypoint.py**` — the guest entrypoint copied verbatim into the sandbox and run as
-`python agent_runner.py`. Reads the agent module/class and task inputs from `NV_*` env vars set
-by the agent, imports the named harness, calls `responses()`, and writes the trajectory out.
+`python agent_runner.py`. Reads the resolved agent and task inputs from `NV_*` env vars set
+by the agent, imports the named harness, calls `run()`, and writes the trajectory out.
 Kept as a plain, lintable module rather than a string template.
 - `**setup_scripts/**`
   - `_portable_python.sh` — shared base: downloads a relocatable CPython and `pip install`s

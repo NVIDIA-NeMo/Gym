@@ -694,6 +694,11 @@ class TestRunAgentEnv:
         assert env["NGTB_MODEL_NAME"] == "my-model"
         assert json.loads(env["NGTB_AGENT_KWARGS"]) == {"model": "my-model"}
 
+    def test_nested_model_name_is_forwarded(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path, agent_kwargs={"model": {"model": "my-model"}})
+        env = RunTerminalAgent(config=cfg)._agent_env(cfg)
+        assert env["NGTB_MODEL_NAME"] == "my-model"
+
 
 class TestProcessSingleDatapoint:
     @pytest.fixture(autouse=True)

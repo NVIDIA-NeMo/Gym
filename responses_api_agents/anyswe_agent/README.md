@@ -52,8 +52,12 @@ with the same sandbox and grading path. Configure another Gym agent with:
 ```yaml
 agent: hermes
 agent_kwargs:
+  model:
+    model: ${policy_model_name}
+    base_url: __SANDBOX_MODEL_URL__/v1
   max_turns: 100
-  terminal_backend: local
+  settings:
+    terminal_backend: local
 ```
 
 For large runs, bake `/agent_deps_mount/bin/python`, NeMo Gym, and the selected

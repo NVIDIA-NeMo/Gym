@@ -22,6 +22,7 @@ import tempfile
 import time
 import uuid
 from asyncio import Semaphore
+from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from subprocess import Popen
@@ -569,7 +570,9 @@ class RunTerminalAgent(BaseModel):
             for k in ("temperature", "top_p", "max_output_tokens")
             if getattr(cfg.body, k, None) is not None
         }
-        model_name = cfg.agent_kwargs.get("model") or cfg.body.model or "model"
+        model = cfg.agent_kwargs.get("model")
+        model_name = model.get("model") if isinstance(model, Mapping) else model
+        model_name = model_name or cfg.body.model or "model"
         env = {
             "NGTB_MODEL_NAME": model_name,
             "NGTB_AGENT_KWARGS": json.dumps(cfg.agent_kwargs),
