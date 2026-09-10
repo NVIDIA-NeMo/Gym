@@ -297,6 +297,49 @@ def test_build_vllm_ray_serve_command_installs_git_if_missing(vllm_service):
     assert cmd.index("command -v git") < cmd.index("git clone")
 
 
+def test_build_vllm_ray_serve_command_single_node_ensures_ray_installed(vllm_service):
+    # Regression test for a real bug seen on a cluster run: the single-node path invokes
+    # `python3 nemo_gym/orchestration/ray_serve_gateway.py` directly (unlike the multi-node path,
+    # which only reaches the gateway via `ray symmetric-run`/`ray start`, themselves gated on ray
+    # being installed). vllm/vllm-openai containers don't guarantee `ray` is importable by plain
+    # `python3`, so the single-node path needs its own explicit guard - previously it only ensured
+    # `aiohttp`, and the gateway failed with `ModuleNotFoundError: No module named 'ray'`.
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gym_install=_GYM_INSTALL, gpus_per_node_values=[])
+    # Escaped for embedding in the outer bash -lc "..." wrapper (see _escape_for_double_quoted_bash).
+    assert 'command -v ray >/dev/null 2>&1 || pip install -q \\"ray[default]\\"' in cmd
+    # The guard must run before the gateway is launched.
+    assert cmd.index("command -v ray") < cmd.index("ray_serve_gateway.py")
+
+
+def test_build_vllm_ray_serve_command_single_node_ray_guard_does_not_bypass_earlier_failure(vllm_service):
+    # Behavioral regression test: `&&` and `||` share precedence and associate left-to-right, so
+    # `checkout && pip install aiohttp && command -v ray || pip install ray && python3 gateway.py`
+    # (without the parens this fix wraps around the ray guard) would parse as
+    # `((checkout && pip install aiohttp && command -v ray) || pip install ray) && python3 gateway.py`
+    # - if an *earlier* step (e.g. the aiohttp install) fails, that makes the left side of `||`
+    # false, which would then trigger the ray-install fallback anyway, and since that install
+    # normally succeeds, the gateway would still launch even though an earlier required step
+    # failed. A naive substring assertion on the guard text can't tell a correct precedence-safe
+    # guard from this subtly broken one, since both contain the same literal text. Runs the actual
+    # generated bash with the aiohttp install failing to prove the whole chain still fails fast
+    # (the gateway must NOT launch), the same way it would if the git checkout itself failed.
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gym_install=_GYM_INSTALL, gpus_per_node_values=[])
+
+    checkout = render_repo_checkout(_GYM_INSTALL.repo, _GYM_INSTALL.ref)
+    inner = (
+        cmd.replace(checkout, "true")
+        .replace("pip install --quiet aiohttp", "false")
+        .replace("python3 nemo_gym/orchestration/ray_serve_gateway.py", "echo GATEWAY_LAUNCHED")
+    )
+    # inner is itself a nested `bash -lc "..."` invocation (a separate shell process), so the
+    # stand-in must be exported to be visible there.
+    script = 'command() { [ "$2" = ray ] && return 1 || builtin command "$@"; }\nexport -f command\n' + inner + "\n"
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+
+    assert result.returncode != 0
+    assert "GATEWAY_LAUNCHED" not in result.stdout
+
+
 def test_build_vllm_ray_serve_command_single_node_model_with_space_survives_quoting():
     # Regression test for a real bug: shlex.quote() wraps a model name needing escaping (e.g.
     # containing a space) in literal single quotes. Naively embedding that inside a Python-level

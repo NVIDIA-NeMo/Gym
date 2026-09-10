@@ -29,6 +29,7 @@ from nemo_gym.orchestration.api import (
     gym_install_required_message,
 )
 from nemo_gym.orchestration.executors.script_templates import (
+    ENSURE_RAY_INSTALLED,
     bash_var,
     render_driver_entrypoint,
     render_gym_cmd,
@@ -245,6 +246,7 @@ def _build_vllm_ray_serve_command(
     fetch_and_run = (
         f"{render_repo_checkout(gym_install.repo, gym_install.ref)}"
         " && pip install --quiet aiohttp"
+        f" && ({ENSURE_RAY_INSTALLED})"
         f" && python3 nemo_gym/orchestration/ray_serve_gateway.py {gateway_args}"
     )
     if total_nodes <= 1:

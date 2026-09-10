@@ -28,9 +28,15 @@ export RAY_HEAD_NODE_IP="$head_node_ip:6379"
 echo "Head node IP address: $HEAD_NODE_IP\""""
 
 
-_VLLM_RAY_SYMMETRIC_RUN = """\
+ENSURE_RAY_INSTALLED = 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"'
+
+
+_VLLM_RAY_SYMMETRIC_RUN = (
+    """\
 bash -lc '
-    command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"
+    """
+    + ENSURE_RAY_INSTALLED
+    + """
     if ray symmetric-run --help >/dev/null 2>&1; then
         ray symmetric-run \\
             --address "$RAY_HEAD_NODE_IP" \\
@@ -44,6 +50,7 @@ bash -lc '
         ray start --address="$RAY_HEAD_NODE_IP" {resource_flags} --block
     fi
 '"""
+)
 
 
 _HEALTH_WAIT_MULTI = """\
