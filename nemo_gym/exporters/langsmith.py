@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, ClassVar, Optional
 
 from langsmith import Client
@@ -65,6 +66,8 @@ class LangSmithExporter(BaseExporter):
         super().__init__(global_config_dict)
         self.config = LangSmithConfig.model_validate(global_config_dict)
         self.client: Optional[Client] = None
+        self.dataset_id: Optional[str] = None
+        self.experiment_id: Optional[str] = None
 
     def setup(self) -> None:
         self.client = Client(
@@ -72,11 +75,47 @@ class LangSmithExporter(BaseExporter):
             api_key=self.config.langsmith_api_key,
             workspace_id=self.config.langsmith_workspace_id,
         )
+        dataset_name = self.config.langsmith_dataset_name
+
+        if self.client.has_dataset(dataset_name=dataset_name):
+            dataset = self.client.read_dataset(dataset_name=dataset_name)
+        else:
+            dataset = self.client.create_dataset(
+                dataset_name,
+                description="Evaluation dataset exported by NeMo Gym.",
+                metadata=_LANGSMITH_RUNNER_METADATA,
+            )
+
+        self.dataset_id = str(dataset.id)
+
+        # LangSmith's SDK calls evaluation experiments projects.
+        experiment = self.client.create_project(
+            self.config.langsmith_experiment_name,
+            upsert=True,
+            reference_dataset_id=self.dataset_id,
+            metadata=_LANGSMITH_RUNNER_METADATA,
+        )
+        self.experiment_id = str(experiment.id)
 
     def teardown(self) -> None:
-        if self.client is not None:
-            self.client.close()
-            self.client = None
+        if self.client is None:
+            return
+
+        client = self.client
+
+        try:
+            if self.experiment_id is not None:
+                client.update_project(
+                    self.experiment_id,
+                    end_time=datetime.now(timezone.utc),
+                )
+        finally:
+            try:
+                client.close()
+            finally:
+                self.client = None
+                self.dataset_id = None
+                self.experiment_id = None
 
     def _log_config(self, _config_dict: DictConfig) -> None:
         pass

@@ -15,7 +15,7 @@
 import math
 from pathlib import Path
 from typing import Any, ClassVar, Optional
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import orjson
 import pytest
@@ -684,13 +684,97 @@ class TestLangSmithExporter:
         )
         assert exporter.client is client_constructor.return_value
 
-    def test_teardown_closes_client_and_is_idempotent(
+    def test_setup_creates_dataset_and_linked_experiment_when_missing(
+        self,
+        monkeypatch: MonkeyPatch,
+        langsmith_config: DictConfig,
+    ) -> None:
+        pytest.importorskip("langsmith")
+        import nemo_gym.exporters.langsmith as langsmith_module
+
+        client = MagicMock()
+        client.has_dataset.return_value = False
+        client.create_dataset.return_value.id = "dataset-1"
+        client.create_project.return_value.id = "experiment-1"
+        monkeypatch.setattr(
+            langsmith_module,
+            "Client",
+            MagicMock(return_value=client),
+        )
+
+        exporter = langsmith_module.LangSmithExporter(langsmith_config)
+        exporter.setup()
+
+        client.has_dataset.assert_called_once_with(
+            dataset_name="gym-dataset",
+        )
+        client.create_dataset.assert_called_once_with(
+            "gym-dataset",
+            description="Evaluation dataset exported by NeMo Gym.",
+            metadata={
+                "ls_runner": "nemo-gym",
+                "source": "nemo-gym",
+            },
+        )
+        client.create_project.assert_called_once_with(
+            "gym-experiment",
+            upsert=True,
+            reference_dataset_id="dataset-1",
+            metadata={
+                "ls_runner": "nemo-gym",
+                "source": "nemo-gym",
+            },
+        )
+        assert exporter.dataset_id == "dataset-1"
+        assert exporter.experiment_id == "experiment-1"
+
+    def test_setup_reuses_existing_dataset(
+        self,
+        monkeypatch: MonkeyPatch,
+        langsmith_config: DictConfig,
+    ) -> None:
+        pytest.importorskip("langsmith")
+        import nemo_gym.exporters.langsmith as langsmith_module
+
+        client = MagicMock()
+        client.has_dataset.return_value = True
+        client.read_dataset.return_value.id = "dataset-1"
+        client.create_project.return_value.id = "experiment-1"
+        monkeypatch.setattr(
+            langsmith_module,
+            "Client",
+            MagicMock(return_value=client),
+        )
+
+        exporter = langsmith_module.LangSmithExporter(langsmith_config)
+        exporter.setup()
+
+        client.read_dataset.assert_called_once_with(
+            dataset_name="gym-dataset",
+        )
+        client.create_dataset.assert_not_called()
+        client.create_project.assert_called_once_with(
+            "gym-experiment",
+            upsert=True,
+            reference_dataset_id="dataset-1",
+            metadata={
+                "ls_runner": "nemo-gym",
+                "source": "nemo-gym",
+            },
+        )
+        assert exporter.dataset_id == "dataset-1"
+        assert exporter.experiment_id == "experiment-1"
+
+    def test_teardown_ends_experiment_closes_client_and_is_idempotent(
         self, monkeypatch: MonkeyPatch, langsmith_config: DictConfig
     ) -> None:
         pytest.importorskip("langsmith")
         import nemo_gym.exporters.langsmith as langsmith_module
 
         client = MagicMock()
+        client.has_dataset.return_value = False
+        client.create_dataset.return_value.id = "dataset-1"
+        client.create_project.return_value.id = "experiment-1"
         monkeypatch.setattr(langsmith_module, "Client", MagicMock(return_value=client))
         exporter = langsmith_module.LangSmithExporter(langsmith_config)
         exporter.setup()
@@ -698,5 +782,11 @@ class TestLangSmithExporter:
         exporter.teardown()
         exporter.teardown()
 
+        client.update_project.assert_called_once_with(
+            "experiment-1",
+            end_time=ANY,
+        )
         client.close.assert_called_once_with()
         assert exporter.client is None
+        assert exporter.dataset_id is None
+        assert exporter.experiment_id is None
