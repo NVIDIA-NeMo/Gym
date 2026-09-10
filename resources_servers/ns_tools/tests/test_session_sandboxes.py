@@ -356,10 +356,55 @@ class TestLifecycle:
             sandbox = await sessions.route("ipy-1")
             await sessions.report_failure("ipy-1")
             assert sandbox.stops == 0
+            # One failed probe is tolerated (a pod briefly starved by the user's own code).
             sandbox.responses = [RuntimeError("exec unavailable")]
+            await sessions.report_failure("ipy-1")
+            assert sandbox.stops == 0
+            assert sessions.live_count == 1
+            # Two consecutive failed probes: dead -> deleted.
+            sandbox.responses = [RuntimeError("exec unavailable"), SandboxExecResult("\n503", "", 0)]
             await sessions.report_failure("ipy-1")
             assert sandbox.stops == 1
             assert sessions.live_count == 0
+
+        asyncio.run(main())
+
+    def test_report_failure_never_touches_a_newer_sandbox_under_the_same_key(self):
+        sessions = _sessions(health_timeout_s=0.01)
+
+        async def main():
+            current_session_id.set("rollout-A")
+            old = await sessions.route("ipy-1")
+            old.responses = [RuntimeError("dead"), RuntimeError("dead")]
+            probe = asyncio.create_task(sessions.report_failure("ipy-1"))
+            await asyncio.sleep(0.005)  # probe is sleeping between attempts
+            await sessions.end_session("rollout-A")
+            new = await sessions.route("ipy-2")
+            await probe
+            assert old.stops == 1
+            assert new.stops == 0
+            assert sessions.live_count == 1
+
+        asyncio.run(main())
+
+    def test_creates_queued_behind_the_semaphore_do_not_start_after_close(self):
+        sessions = _sessions(create_concurrency=1)
+        _FakeSandbox.start_delay_s = 0.05
+
+        async def main():
+            current_session_id.set("rollout-A")
+            first = asyncio.create_task(sessions.route("ipy-1"))
+            current_session_id.set("rollout-B")
+            queued = asyncio.create_task(sessions.route("ipy-2"))
+            await asyncio.sleep(0.01)
+            await sessions.aclose()
+            with pytest.raises(httpx.TimeoutException):
+                await first
+            with pytest.raises(httpx.TimeoutException):
+                await queued
+            # Only the in-flight create produced a sandbox, and it was deleted.
+            assert len(_FakeSandbox.instances) == 1
+            assert _FakeSandbox.instances[0].stops == 1
 
         asyncio.run(main())
 

@@ -265,17 +265,22 @@ class TestSandboxBackend:
 
         asyncio.run(main())
 
-    def test_cancelled_delete_while_routing_releases_pin_and_history(self):
+    def test_cancelled_delete_while_resolving_the_sandbox_releases_pin_and_history(self):
         async def main():
             async with _http_backend([]) as (backend, calls):
                 await backend._pool.route("s")
                 backend.session_histories["s"] = ["x = 1"]
-                async with backend._pool._lock:
-                    task = asyncio.create_task(backend.delete_session("s"))
-                    await asyncio.sleep(0)
-                    task.cancel()
-                    with pytest.raises(asyncio.CancelledError):
-                        await task
+                gate = asyncio.get_running_loop().create_future()
+
+                async def blocked(_session_id):
+                    await gate  # never resolves: delete_session is cancelled while looking up the sandbox
+
+                backend._pool.sandbox_for = blocked
+                task = asyncio.create_task(backend.delete_session("s"))
+                await asyncio.sleep(0)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
                 assert not backend._pool._session_to_slot
                 assert not backend.session_histories
                 assert not calls

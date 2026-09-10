@@ -78,8 +78,11 @@ class _Session:
     task: "asyncio.Task[AsyncSandbox]"
     created_at: float
     last_used: float
-    sandbox: AsyncSandbox | None = None
     ipython_sessions: set[str] = field(default_factory=set)
+
+    @property
+    def failed(self) -> bool:
+        return self.task.done() and (self.task.cancelled() or self.task.exception() is not None)
 
 
 class SessionSandboxes:
@@ -122,7 +125,7 @@ class SessionSandboxes:
         if size is not None:
             raise ValueError(
                 "sandbox_per_session creates one sandbox per session; there is no fixed pool — remove 'size' "
-                "(NS_SANDBOX_POOL_SIZE) or use sandbox_type: sandbox_pool"
+                "or use sandbox_type: sandbox_pool"
             )
         if not isinstance(provider, dict) or set(provider) != {"opensandbox"}:
             raise ValueError("sandbox_per_session.provider must contain exactly one 'opensandbox' provider")
@@ -252,7 +255,7 @@ class SessionSandboxes:
         if key is None:
             return None
         entry = self._sessions.get(key)
-        if entry is None or not entry.task.done() or entry.task.cancelled() or entry.task.exception() is not None:
+        if entry is None or not entry.task.done() or entry.failed:
             return None
         return entry.task.result()
 
@@ -280,6 +283,10 @@ class SessionSandboxes:
         key = self._key_for(session_id)
         now = time.monotonic()
         entry = self._sessions.get(key)
+        if entry is not None and entry.failed:
+            # A create that failed after its only waiter went away: retry, don't replay the failure.
+            self._forget(entry)
+            entry = None
         if entry is None:
             entry = _Session(
                 key=key,
@@ -307,35 +314,40 @@ class SessionSandboxes:
         if self._sessions.get(key) is not entry:
             # end_session()/aclose() ran while we were waiting: the sandbox is gone or going.
             raise httpx.TimeoutException(f"session sandbox for {key[:8]} was ended during creation")
-        entry.sandbox = sandbox
         return sandbox
 
     async def report_failure(self, session_id: str | None) -> None:
-        """After a transport failure: probe the sandbox and delete it if it is dead, so
-        the next tool call gets a fresh one (state is lost; nemo_skills replays history
-        unless disable_session_restore)."""
+        """After a transport failure: probe the sandbox and delete it only if it is dead
+        (two consecutive failed probes), so the next tool call gets a fresh one (state is
+        lost; nemo_skills replays history unless disable_session_restore). A single
+        failed probe is tolerated: a pod briefly starved by the user's own code must not
+        lose its state."""
         key = self._key_for(session_id)
         entry = self._sessions.get(key)
-        if entry is None or not entry.task.done() or entry.task.cancelled() or entry.task.exception() is not None:
+        if entry is None or not entry.task.done() or entry.failed:
             return
         sandbox = entry.task.result()
-        try:
-            status, _ = await sandbox_request(
-                sandbox, self._port, "GET", self._health_path, timeout_s=self._health_timeout_s
-            )
-            healthy = status == 200
-        except httpx.TimeoutException:
-            healthy = False
-        if healthy:
-            return
-        LOGGER.warning("session sandbox %s unhealthy after a transport failure — deleting it", key[:8])
-        await self._end(key, reason="unhealthy")
+        for attempt in range(2):
+            try:
+                status, _ = await sandbox_request(
+                    sandbox, self._port, "GET", self._health_path, timeout_s=self._health_timeout_s
+                )
+                if status == 200:
+                    return
+            except httpx.TimeoutException:
+                pass
+            if attempt == 0:
+                await asyncio.sleep(1.0)
+        LOGGER.warning("session sandbox %s failed two health probes after a transport failure — deleting it", key[:8])
+        await self._end_entry(entry, reason="unhealthy")
 
     async def end_session(self, key: str | None) -> None:
         """Delete the sandbox of a finished rollout. Unknown keys are a no-op."""
         if key is None:
             return
-        await self._end(str(key), reason="session end")
+        entry = self._sessions.get(str(key))
+        if entry is not None:
+            await self._end_entry(entry, reason="session end")
 
     # ------------------------------------------------------------------ create / delete
 
@@ -378,6 +390,9 @@ class SessionSandboxes:
     async def _create(self, key: str) -> AsyncSandbox:
         started = time.monotonic()
         async with self._create_slots:
+            if self._closed:
+                # Queued behind the semaphore while aclose() ran: never start a sandbox nobody will delete.
+                raise RuntimeError("session sandboxes are closed")
             queued_s = time.monotonic() - started
             try:
                 sandbox, from_pool = await self._acquire_sandbox()
@@ -446,21 +461,36 @@ class SessionSandboxes:
 
     async def _end(self, key: str, *, reason: str) -> None:
         entry = self._sessions.get(key)
-        if entry is None:
+        if entry is not None:
+            await self._end_entry(entry, reason=reason)
+
+    async def _end_entry(self, entry: _Session, *, reason: str) -> None:
+        """Delete exactly this session's sandbox (a newer entry under the same key is left alone)."""
+        if self._sessions.get(entry.key) is not entry:
             return
+        key = entry.key
         self._forget(entry)
         if not entry.task.done():
-            # In-flight create: let it finish (bounded) so the sandbox it produces is
-            # deleted rather than leaked by a cancelled API call; cancel only if it hangs.
+            # In-flight create: let it finish so the sandbox it produces is deleted rather
+            # than leaked by cancelling the provider mid-API-call (AsyncSandbox.start does
+            # not clean up on CancelledError). The provider bounds the create itself
+            # (ready_timeout_s) and we bound the health wait (health_budget_s); cancel only
+            # past both, as a last resort.
+            budget = self._ready_timeout_s + self._health_budget_s + self._stop_timeout_s
             try:
-                sandbox = await asyncio.wait_for(asyncio.shield(entry.task), timeout=self._stop_timeout_s)
+                sandbox = await asyncio.wait_for(asyncio.shield(entry.task), timeout=budget)
             except (asyncio.TimeoutError, TimeoutError):
+                LOGGER.warning(
+                    "session sandbox %s create still running after %.0f s — cancelling (may leak until TTL)",
+                    key[:8],
+                    budget,
+                )
                 entry.task.cancel()
                 await asyncio.gather(entry.task, return_exceptions=True)
                 return
             except Exception:
                 return  # the create failed on its own; nothing to delete
-        elif entry.task.cancelled() or entry.task.exception() is not None:
+        elif entry.failed:
             return
         else:
             sandbox = entry.task.result()

@@ -525,12 +525,15 @@ class NSToolsResourcesServer(SimpleResourcesServer):
     async def shutdown(self):
         """Cleanup resources on server shutdown."""
         try:
-            if self.tool_manager:
-                await self.tool_manager.shutdown()
+            # Sandboxes first: afterwards GymSandbox.delete_session finds no sandbox and
+            # returns immediately, so nemo_skills' per-session DELETEs are not sent to
+            # pods that are being (or already were) destroyed.
+            if self._sandbox_pool is not None:
+                await self._sandbox_pool.aclose()
         finally:
             try:
-                if self._sandbox_pool is not None:
-                    await self._sandbox_pool.aclose()
+                if self.tool_manager:
+                    await self.tool_manager.shutdown()
             finally:
                 # Terminate the python_tool subprocess if one was started.
                 if self._python_tool_process:

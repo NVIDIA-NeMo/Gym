@@ -37,9 +37,9 @@ ns_tools:
           cpu: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_CPU_REQUEST,2}}
           memory_mib: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_MEM_REQUEST_MIB,4096}}
           disk_gib: ${oc.decode:${oc.env:NS_SANDBOX_SESSION_DISK_REQUEST_GIB,5}}
-        # Pod labels (OpenSandbox propagates metadata as labels). nemo.nvidia.com/resources=custom
-        # exempts the pod from the request-clamping admission policy on the NeMo cells.
+        # Pod labels (OpenSandbox propagates metadata as labels), merged over the backend's
+        # defaults (purpose=ns-tools-per-session). nemo.nvidia.com/resources=custom exempts the
+        # pod from the request-clamping admission policy on the NeMo cells.
         metadata:
           "nemo.nvidia.com/resources": custom
-          "nemo-gym.nvidia.com/purpose": ns-tools-per-session
       verified: false
