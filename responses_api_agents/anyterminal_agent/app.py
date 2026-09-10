@@ -33,7 +33,6 @@ import ray
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.agents import resolve_agent
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef
@@ -44,6 +43,7 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_me
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.docker import DockerCreateConfig, DockerProvider
 from nemo_gym.server_utils import apply_rollout_prefix
+from responses_api_agents.agent_registry import resolve_agent
 
 
 def _format_container(container_formatter: str | list[str], task_name: str, docker_image: str) -> str:

@@ -13,7 +13,6 @@ cvdp_agent_generic_hermes:
         type: example
         jsonl_fpath: resources_servers/cvdp/data/example_agentic.jsonl
 
-      # Change agent, agent_kwargs, and setup_scripts/<key>_deps.sh together.
       agent: hermes
       agent_kwargs:
         model:
