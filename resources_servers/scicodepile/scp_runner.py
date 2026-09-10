@@ -28,9 +28,13 @@ sandbox: task code runs with the privileges and environment of the resources
 server, and can shell out, open sockets, or write outside its CWD. Containment is
 limited to process isolation, an address-space cap, a throwaway CWD, and the
 parent's timeout. Do not run untrusted rollouts on shared nodes without a real
-sandbox (see ``nemo_gym/sandbox/``). The result channel is kept off fd 1 so that
-stdout writes from task code can neither forge nor corrupt the verdict; see
-``main``.
+sandbox (see ``nemo_gym/sandbox/``).
+
+**The verdict is not tamper-proof.** The result channel is kept off fd 1 so that
+incidental stdout writes from an honest task cannot corrupt its own verdict, but
+that is a robustness property only: task code can still reach the channel through
+another descriptor, or replace ``json.dumps`` before the runner serialises. Treat a
+verdict as trustworthy only to the extent the executed code is.
 """
 
 import contextlib
@@ -177,10 +181,9 @@ def main() -> None:
 
     # Move the result channel off fd 1 before any task code runs, then point fd 1
     # at /dev/null. Task code owns fd 1 too, and `redirect_stdout` below only
-    # rebinds `sys.stdout` — it does not protect the descriptor. Without this, a
-    # completion doing `os.write(1, b'{"status": "pass"}')` forges a reward-1.0
-    # verdict without `check()` ever running, and incidental C-level writes to
-    # fd 1 corrupt the JSON of an honest one.
+    # rebinds `sys.stdout` — it does not protect the descriptor, so incidental
+    # C-level writes to fd 1 would otherwise corrupt an honest task's JSON.
+    # This does not make the verdict unforgeable; see the module docstring.
     result_fd = os.dup(1)
     devnull_fd = os.open(os.devnull, os.O_WRONLY)
     os.dup2(devnull_fd, 1)
@@ -195,8 +198,10 @@ def main() -> None:
         result = {"status": "error", "details": {"reason": "runner_crashed", "message": str(exc)[:500]}}
 
     # Written to the private duplicate, not fd 1. A task that calls `os._exit`
-    # skips this entirely, leaving the parent an empty read that it reports as
-    # `unparseable_runner_output` — the runner fails closed, never to `pass`.
+    # skips this entirely; if it wrote nothing to the channel first, the parent
+    # gets an empty read and reports `unparseable_runner_output`. That is not a
+    # guarantee — a task that writes to the channel before exiting decides the
+    # verdict. See the module docstring.
     os.write(result_fd, json.dumps(result).encode())
     os.close(result_fd)
 

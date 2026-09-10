@@ -36,13 +36,18 @@ directory, and the parent's wall-clock timeout.
 Do not run untrusted rollouts on shared nodes without a real sandbox — see
 `nemo_gym/sandbox/`.
 
-The result channel is deliberately kept off file descriptor 1. Task code owns fd 1
-too, and `redirect_stdout` rebinds only `sys.stdout`, not the descriptor; without
-this a completion calling `os.write(1, b'{"status": "pass"}')` would forge a
-reward-1.0 verdict without `check()` ever running. The runner writes its verdict to
-a private duplicate instead, and a task that calls `os._exit` leaves the parent an
-empty read reported as `unparseable_runner_output` — it fails closed, never to
-`pass`.
+The result channel is kept off file descriptor 1: the runner reports its verdict on
+a private duplicate and points fd 1 at `/dev/null`. Task code owns fd 1 too, and
+`redirect_stdout` rebinds only `sys.stdout`, not the descriptor, so without this an
+honest task's incidental output would corrupt its own verdict.
+
+**That is a robustness property, not a security one — the verdict is not
+tamper-proof.** Task code can still reach the result channel through another
+descriptor, or replace `json.dumps` before the runner serialises. Closing that off
+would need a parent-generated nonce, and even then frame introspection defeats it.
+Since the runner is explicitly not a sandbox and task code may shell out or open
+sockets regardless, a determined completion has cheaper options than forging a
+verdict. Trust a verdict only to the extent you trust the code that produced it.
 
 ### Input schema
 

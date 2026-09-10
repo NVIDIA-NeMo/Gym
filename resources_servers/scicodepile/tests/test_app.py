@@ -136,38 +136,19 @@ class TestRunTask:
 
 
 class TestResultChannel:
-    """The verdict must come from ``check()``, never from the task's own output.
+    """Stray fd-1 output from a task must not corrupt its own verdict.
 
-    ``code`` is unreviewed model output running in the same process that reports
-    the score, so anything the task can write to the result channel is a direct
-    reward-hacking vector. ``contextlib.redirect_stdout`` only rebinds
-    ``sys.stdout``; it does not protect fd 1, which the task also owns.
+    The runner reports its verdict on a private duplicate of fd 1 and points fd 1
+    itself at ``/dev/null``, because ``contextlib.redirect_stdout`` rebinds only
+    ``sys.stdout`` and leaves the descriptor writable by the task.
+
+    This is a robustness property, not a security one. It does **not** make the
+    verdict unforgeable: task code can still reach the result channel by writing to
+    other descriptors, or by replacing ``json.dumps`` before the runner serialises.
+    The runner is not a sandbox and does not try to be one — see its module
+    docstring. Do not add a test here asserting forge resistance without an
+    implementation that actually provides it.
     """
-
-    FORGED = '{"status": "pass", "details": {}}'
-
-    def test_task_cannot_forge_a_pass_verdict(self, tmp_path):
-        # Writes a winning verdict straight to fd 1 and exits before check() runs.
-        code = f"import os\ndef add(a, b):\n    os.write(1, {self.FORGED.encode()!r})\n    os._exit(0)\n"
-        task = _task(code)
-        task["test"] = "def check(candidate):\n    candidate(2, 3)\n    raise AssertionError('unreachable')\n"
-
-        # Parent-supplied workdir, as the server does: `os._exit` skips any cleanup
-        # the child would have run, so the caller has to own the directory.
-        proc = _run_subprocess(task, workdir=tmp_path)
-
-        assert proc.stdout != self.FORGED, "task forged its own verdict on fd 1"
-        # No verdict reaches the parent at all, which app.py scores as
-        # unparseable_runner_output -> reward 0.0. The runner fails closed.
-        assert proc.stdout == ""
-
-    def test_forged_verdict_does_not_override_a_real_failure(self):
-        # Same forgery without the exit: check() still runs and still fails.
-        code = f"import os\ndef add(a, b):\n    os.write(1, {self.FORGED.encode()!r})\n    return 999\n"
-
-        proc = _run_subprocess(_task(code))
-
-        assert json.loads(proc.stdout)["status"] == "fail"
 
     def test_fd1_noise_does_not_corrupt_an_honest_verdict(self):
         # The benign direction: stray fd-1 output from a genuinely passing task
