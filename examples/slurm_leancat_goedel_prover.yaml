@@ -4,12 +4,10 @@
 #
 #   gym eval submit --config examples/slurm_leancat_goedel_prover.yaml --dry-run
 #
-# The Lean sandbox needs no separate launch: leancat_enroot.yaml routes verification through
-# nemo_gym.sandbox's enroot provider, so the resources server starts its own sandbox from the
-# Mathlib v4.19.0 image. Verified with check_sandbox.py at 100/100.
-#
-# NOTE before upstreaming: leancat_enroot.yaml hardcodes a personal Lustre image path. That
-# wants parameterising (oc.env) before this goes anywhere near a PR.
+# The Lean sandbox is NOT started by this config. `services:` accepts only `type: vllm` and
+# `type: ray`, so a NeMo-Skills sandbox on Mathlib v4.19.0 must already be reachable at
+# NEMO_SKILLS_SANDBOX_HOST:PORT -- launch it into the same allocation with `srun --overlap`.
+# Verify it with check_sandbox.py (expects 100/100) before spending anything on inference.
 
 compute:
   cluster:
@@ -45,20 +43,19 @@ driver:
   env:
     # Ray's AF_UNIX socket paths blow past the 107-byte limit under long Lustre paths.
     RAY_TMPDIR: /tmp
-    # Node-local scratch for the enroot rootfs; Lustre would be far too slow here.
-    ENROOT_DATA_PATH: /tmp/leancat-enroot/data
-    ENROOT_RUNTIME_PATH: /tmp/leancat-enroot/rt
-    ENROOT_CACHE_PATH: /tmp/leancat-enroot/cache
+    # Where the externally-launched Lean sandbox is listening.
+    NEMO_SKILLS_SANDBOX_HOST: localhost
+    NEMO_SKILLS_SANDBOX_PORT: "6000"
   benchmarks:
     leancat:
       prepare:
         config_paths:
-          - resources_servers/leancat/configs/leancat_enroot.yaml
+          - resources_servers/leancat/configs/leancat.yaml
           - benchmarks/leancat/config.yaml
       run:
         split: benchmark
         config_paths:
-          - resources_servers/leancat/configs/leancat_enroot.yaml
+          - resources_servers/leancat/configs/leancat.yaml
           - benchmarks/leancat/config.yaml
         responses_create_params:
           # Appendix D.3, Table 5. top_p is deliberately unset: eval_common.chat_completion

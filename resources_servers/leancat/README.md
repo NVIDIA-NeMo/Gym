@@ -286,20 +286,19 @@ The submit config cannot start the sandbox — `services:` accepts only `type: v
 must already be reachable at `NEMO_SKILLS_SANDBOX_HOST:PORT`, launched into the same allocation with
 `srun --overlap`.
 
-## Two verification backends
+## Verification backend
 
-| | HTTP sandbox (default) | Gym sandbox (`configs/leancat_enroot.yaml`) |
-|---|---|---|
-| Selected by | `sandbox_host`/`sandbox_port` | presence of `sandbox_provider` |
-| Runs | NeMo-Skills `/execute` | `lake env lean <file>`, as upstream does |
-| Who starts it | you, out of band | this server, lazily |
-| On Slurm | a second `srun --overlap` | nothing extra |
-| Parity | matches `math_formal_lean` | matches `swebench`/`deepswe`/`litmus_agent` |
+Verification goes through a NeMo-Skills HTTP sandbox at `sandbox_host:sandbox_port`, the same backend
+`math_formal_lean` uses. You start it out of band; on Slurm that is a second `srun --overlap` into the same
+allocation, as `benchmarks/leancat.sub` does.
 
-The Gym backend exists because `gym eval submit` cannot start an HTTP sandbox: `ServiceConfig` is a closed union of
-`vllm` and `ray`, with no generic container service. Routing through `nemo_gym.sandbox` lets the resources server own
-its sandbox, which is what makes a one-command Slurm run possible. Providers available: `enroot` (HPC-native),
-`apptainer`, `local`, `docker`, `e2b`, and others under `nemo_gym/sandbox/providers/`.
+This server deliberately ships **one** backend. An earlier revision also routed verification through
+`nemo_gym.sandbox` (the enroot/apptainer/docker providers that `swebench`, `deepswe` and `litmus_agent` use), so that
+`gym eval submit` could start its own sandbox — `ServiceConfig` is a closed union of `vllm` and `ray`, with no
+generic container service, so that is the only way to make a one-command Slurm run work. It was dropped because it
+was never exercised end to end: every run of this benchmark, including the reproduction of Table 3, used the HTTP
+path, and shipping a second, untested way to compute the score is worse than not offering it. The cost is that
+`gym eval submit` needs the sandbox launched separately; `examples/slurm_leancat_goedel_prover.yaml` documents that.
 
 The Lean file is shipped into the sandbox base64-encoded rather than interpolated into a shell command — Lean sources
 routinely contain quotes, backslashes and unicode, and a heredoc delimiter can appear inside a proof.
