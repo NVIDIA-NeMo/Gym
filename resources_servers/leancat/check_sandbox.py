@@ -55,22 +55,32 @@ from resources_servers.leancat.sandbox_client import GymSandboxLean4Client, Lean
 
 
 DATA_DIR = Path(__file__).absolute().parent / "data"
+REPO_ROOT = Path(__file__).absolute().parents[2]
+# All 100 problems first -- the point of this script is to prove a Mathlib build states every
+# one of them, and the 5-row example set cannot answer that. It is gitignored, so fall back to
+# the committed examples for a smoke test rather than refusing to run.
+DATASET_CANDIDATES = (
+    REPO_ROOT / "benchmarks/leancat/data/leancat_benchmark.jsonl",
+    DATA_DIR / "example.jsonl",
+)
 
 
 def load_statements(limit: int | None) -> list[tuple[str, str, str]]:
-    for name in ("train.jsonl", "example.jsonl"):
-        path = DATA_DIR / name
+    for path in DATASET_CANDIDATES:
         if path.exists():
             break
     else:
-        raise SystemExit("No dataset found. Run prepare_leancat.py first.")
+        raise SystemExit("No dataset found. Run benchmarks/leancat/prepare.py first.")
+    if path != DATASET_CANDIDATES[0]:
+        print(f"WARNING: {DATASET_CANDIDATES[0]} is missing; checking only the {path.name} rows.")
 
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    # Rows are flat (see prepare.py); tolerate the nested form so a hand-written file still works.
     out = [
         (
-            r["verifier_metadata"]["problem_id"],
-            r["verifier_metadata"]["level"],
-            r["verifier_metadata"]["formal_statement"],
+            (r.get("verifier_metadata") or r)["problem_id"],
+            (r.get("verifier_metadata") or r)["level"],
+            (r.get("verifier_metadata") or r)["formal_statement"],
         )
         for r in rows
     ]

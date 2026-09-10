@@ -1,0 +1,28 @@
+# LeanCat's prompt as printed in the paper's Appendix D.1 (arXiv:2512.24796v2), used by the
+# `leancat` benchmark.
+#
+# This is the paper's template, not the upstream repo's. The repo's `prompts/static_passk.md`
+# opens identically but then permits auxiliary declarations and names the banned tokens instead
+# of asking for step-by-step reasoning, and it is not what Table 3's numbers were reported
+# under: running it had 26% of Goedel-Prover-V2-32B submissions omit `import Mathlib` outright
+# and put Easy at 1/10 against a published 20.0%.
+#
+# The template is a RECONSTRUCTION, not a copy: the paper prints it inside a LaTeX `lstlisting`,
+# so the listing indent and the `"""` delimiters are dropped and the printed line breaks are
+# kept verbatim -- including the two that fall mid-sentence. Read the "Prompt" section of
+# resources_servers/leancat/README.md before quoting a number produced with it.
+#
+# `{formal_statement}` is filled from the row's top-level field, which carries the pinned
+# `CAT_statement/*.lean` bytes verbatim, trailing newline included -- that is what makes the
+# rendered prompt byte-identical to the reference harness's.
+user: |-
+  You are an expert in Lean 4 and Mathematics. Please finish the following proof in Lean4 code.
+  Do not change the original statement. Copy the final statement to prove exactly.
+  Please include the complete header (including imports and namespaces) so that your code can
+  pass the Lean4 compiler. Please solve the statement step by step and provide your complete
+  Lean4 code between ```lean4 and ``` after careful reasoning.
+  The statement for you to complete is:
+
+  ```lean4
+  {formal_statement}
+  ```
