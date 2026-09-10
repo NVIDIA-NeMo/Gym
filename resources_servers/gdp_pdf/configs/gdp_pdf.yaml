@@ -1,0 +1,47 @@
+gdp_pdf:
+  resources_servers:
+    gdp_pdf:
+      allowed_agents:
+      - gdp_pdf_agent
+      entrypoint: app.py
+      domain: other
+      description: 'GDP.pdf: professional multimodal reasoning over real-world PDFs
+        (contracts, filings, records) across ten domains, graded per atomic rubric
+        criterion by an LLM judge'
+      value: Measure document reasoning on the dense professional documents the economy
+        runs on
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_chat_create_params:
+        messages: []
+        max_tokens: 1024
+      judge_prompt_template_fpath: prompt_templates/judge.txt
+      judge_max_attempts: 5
+      judge_endpoint_max_concurrency: 64
+      verified: false
+gdp_pdf_simple_agent:
+  responses_api_agents:
+    gdp_pdf_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: gdp_pdf
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      media_base_dir: resources_servers/gdp_pdf/data
+      dpi: 150
+      min_dpi: 72
+      max_images: null  # compositing only kicks in reactively, on an actual server-reported image-count limit
+      max_pages: null
+      include_text: true
+      include_images: true
+      strip_images_from_output: true
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/gdp_pdf/data/example.jsonl
+        num_repeats: 1
+        license: MIT
