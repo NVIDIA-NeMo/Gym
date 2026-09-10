@@ -31,7 +31,7 @@ from pytest import MonkeyPatch
 import nemo_gym.exporters as exporters_module
 import nemo_gym.exporters.mlflow as mlflow_module
 import nemo_gym.exporters.wandb as wandb_module
-from nemo_gym.config_types import ExporterConfig, MLFlowConfig, WANDBConfig
+from nemo_gym.config_types import ExporterConfig, LangSmithConfig, MLFlowConfig, WANDBConfig
 from nemo_gym.exporters import (
     export_metrics,
     export_rollouts,
@@ -114,6 +114,19 @@ def mlflow_config() -> DictConfig:
     )
 
 
+@pytest.fixture
+def langsmith_config() -> DictConfig:
+    return DictConfig(
+        {
+            "langsmith_api_key": "secret-key",  # pragma: allowlist secret
+            "langsmith_endpoint": "https://langsmith.example",
+            "langsmith_workspace_id": "workspace-1",
+            "langsmith_dataset_name": "gym-dataset",
+            "langsmith_experiment_name": "gym-experiment",
+        }
+    )
+
+
 def _register_recording(monkeypatch: MonkeyPatch) -> MagicMock:
     """Point the registry at RecordingExporter and hand back the (spied) lazy loader."""
     loader = MagicMock(return_value=RecordingExporter)
@@ -133,6 +146,28 @@ def _open_mlflow_exporter(monkeypatch: MonkeyPatch, config: DictConfig) -> tuple
 
 
 class TestRegistry:
+    def test_setup_loads_langsmith_when_configured(self, monkeypatch: MonkeyPatch) -> None:
+        """Tests to make sure Langsmith exporter is loaded via lazy loader when configured.
+        Tests the registry functionality of the exporters and doesn't actually run any
+        LangSmith code. test_setup_creates_client_from_config tests the actual LangSmith code."""
+
+        loader = MagicMock(return_value=RecordingExporter)  # create fake lazy loader
+
+        # Mock the lazy loader to avoid importing the real LangSmith implementation (test isolation)
+        monkeypatch.setattr(exporters_module, "_load_exporter_class", loader)
+        config = DictConfig(
+            {
+                "langsmith_api_key": "secret-key",  # pragma: allowlist secret
+                "langsmith_dataset_name": "gym-dataset",
+                "langsmith_experiment_name": "gym-experiment",
+            }
+        )
+
+        opened = setup_exporters(config)
+
+        loader.assert_called_once_with("nemo_gym.exporters.langsmith:LangSmithExporter")
+        assert len(opened) == 1  # only 1 exporter should be opened bc other exporters were not configured
+
     def test_setup_skips_backends_that_are_not_configured(
         self, monkeypatch: MonkeyPatch, wandb_config: DictConfig
     ) -> None:
@@ -539,3 +574,73 @@ class TestMLflowExporter:
 
     def test_teardown_without_setup_is_a_noop(self, mlflow_config: DictConfig) -> None:
         MLflowExporter(mlflow_config).teardown()
+
+
+class TestLangSmithConfigAvailability:
+    def test_requires_api_key_dataset_and_experiment(self) -> None:
+        configured = {
+            "langsmith_api_key": "secret-key",  # pragma: allowlist secret
+            "langsmith_dataset_name": "gym-dataset",
+            "langsmith_experiment_name": "gym-experiment",
+        }
+
+        assert LangSmithConfig.model_validate(configured).is_available
+
+        for required_field in configured:
+            incomplete = {**configured, required_field: None}
+            assert not LangSmithConfig.model_validate(incomplete).is_available
+
+    def test_workspace_is_optional_and_endpoint_has_a_default(self) -> None:
+        config = LangSmithConfig(
+            langsmith_api_key="secret-key",  # pragma: allowlist secret
+            langsmith_dataset_name="gym-dataset",
+            langsmith_experiment_name="gym-experiment",
+        )
+
+        assert config.langsmith_endpoint == "https://api.smith.langchain.com"
+        assert config.langsmith_workspace_id is None
+
+    def test_a_masked_key_does_not_count_as_configured(self) -> None:
+        config = LangSmithConfig(
+            langsmith_api_key="****",
+            langsmith_dataset_name="gym-dataset",
+            langsmith_experiment_name="gym-experiment",
+        )
+
+        assert not config.is_available
+
+
+class TestLangSmithExporter:
+    def test_setup_creates_client_from_config(self, monkeypatch: MonkeyPatch, langsmith_config: DictConfig) -> None:
+        pytest.importorskip("langsmith")
+        import nemo_gym.exporters.langsmith as langsmith_module
+
+        client_constructor = MagicMock()
+        monkeypatch.setattr(langsmith_module, "Client", client_constructor)
+
+        exporter = langsmith_module.LangSmithExporter(langsmith_config)
+        exporter.setup()
+
+        client_constructor.assert_called_once_with(
+            api_url="https://langsmith.example",
+            api_key="secret-key",  # pragma: allowlist secret
+            workspace_id="workspace-1",
+        )
+        assert exporter.client is client_constructor.return_value
+
+    def test_teardown_closes_client_and_is_idempotent(
+        self, monkeypatch: MonkeyPatch, langsmith_config: DictConfig
+    ) -> None:
+        pytest.importorskip("langsmith")
+        import nemo_gym.exporters.langsmith as langsmith_module
+
+        client = MagicMock()
+        monkeypatch.setattr(langsmith_module, "Client", MagicMock(return_value=client))
+        exporter = langsmith_module.LangSmithExporter(langsmith_config)
+        exporter.setup()
+
+        exporter.teardown()
+        exporter.teardown()
+
+        client.close.assert_called_once_with()
+        assert exporter.client is None

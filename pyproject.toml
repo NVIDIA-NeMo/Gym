@@ -253,7 +253,14 @@ dependencies = [
 
 [project.optional-dependencies]
 all = [
-    "nemo-gym[dev,sandbox]",
+    "nemo-gym[dev,langsmith,sandbox]",
+]
+
+langsmith = [
+    # LangSmith: export Gym rollouts as dataset-linked experiment runs and feedback.
+    # Updated: Wed Sep 09, 2026 with langsmith==0.12.4
+    # License: MIT https://github.com/langchain-ai/langsmith-sdk/blob/v0.12.4/LICENSE
+    "langsmith>=0.12.4",
 ]
 
 vllm = [
