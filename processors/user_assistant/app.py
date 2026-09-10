@@ -1,9 +1,86 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Discoverable entrypoint for the core user-assistant processor."""
+"""User-assistant specialization of the reusable multi-agent processor."""
 
-from nemo_gym.processors.user_assistant import UserAssistantProcessor
+from typing import Any, cast
+
+from fastapi import Request
+
+from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.processors.multi_agent import (
+    EpisodeEvent,
+    MultiAgentEpisodeSpec,
+    MultiAgentProcessor,
+    ParticipantTurn,
+)
+from nemo_gym.processors.user_assistant import (
+    UserAssistantProcessorConfig,
+    UserAssistantRunRequest,
+    UserAssistantVerifyRequest,
+    UserAssistantVerifyResponse,
+)
+
+
+class UserAssistantProcessor(MultiAgentProcessor):
+    """Preserve the user-assistant interface over the generic episode engine."""
+
+    config: UserAssistantProcessorConfig
+
+    def _episode_spec(self) -> MultiAgentEpisodeSpec:
+        return MultiAgentEpisodeSpec(
+            participants={
+                "assistant": self.config.assistant_agent,
+                "user": self.config.user_agent,
+            },
+            turn_order=["assistant", "user"],
+            focal_participant="assistant",
+            resources_server=self.config.resources_server,
+            max_turns=self.config.max_turns,
+            status_url_path=self.config.status_url_path,
+        )
+
+    def _params_by_participant(
+        self,
+        body: UserAssistantRunRequest,
+    ) -> dict[str, NeMoGymResponseCreateParamsNonStreaming]:
+        return {
+            "assistant": body.responses_create_params,
+            "user": body.user_responses_create_params,
+        }
+
+    def _build_verify_request(
+        self,
+        *,
+        body: BaseRunRequest,
+        focal_response: NeMoGymResponse,
+        trajectories: dict[str, list[ParticipantTurn]],
+        events: list[EpisodeEvent],
+        termination_reason: str,
+        turns_completed: int,
+    ) -> BaseVerifyRequest:
+        return UserAssistantVerifyRequest.model_validate(
+            body.model_dump(mode="json")
+            | {
+                "response": focal_response.model_dump(mode="json"),
+                "assistant_trajectory": [turn.model_dump(mode="json") for turn in trajectories["assistant"]],
+                "user_trajectory": [turn.model_dump(mode="json") for turn in trajectories["user"]],
+                "episode_trajectory": [event.model_dump(mode="json") for event in events],
+                "termination_reason": termination_reason,
+                "turns_completed": turns_completed,
+            }
+        )
+
+    def _build_verify_response(self, result: dict[str, Any]) -> BaseVerifyResponse:
+        return UserAssistantVerifyResponse.model_validate(result)
+
+    async def run(
+        self,
+        request: Request,
+        body: UserAssistantRunRequest,
+    ) -> UserAssistantVerifyResponse:
+        return cast(UserAssistantVerifyResponse, await super().run(request, body))
 
 
 if __name__ == "__main__":

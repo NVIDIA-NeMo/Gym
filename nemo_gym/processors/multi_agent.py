@@ -108,6 +108,17 @@ class MultiAgentProcessorConfig(BaseProcessorConfig):
         return self
 
 
+class MultiAgentEpisodeSpec(BaseModel):
+    """Static routing and turn policy used by the reusable episode engine."""
+
+    participants: dict[str, AgentServerRef]
+    turn_order: list[str]
+    focal_participant: str
+    resources_server: ResourcesServerRef
+    max_turns: int
+    status_url_path: str
+
+
 def _input_items(params: NeMoGymResponseCreateParamsNonStreaming) -> list[Any]:
     if isinstance(params.input, str):
         return [NeMoGymEasyInputMessage(role="user", content=params.input)]
@@ -123,23 +134,42 @@ class MultiAgentProcessor(BaseProcessor):
 
     config: MultiAgentProcessorConfig
 
+    def _episode_spec(self) -> MultiAgentEpisodeSpec:
+        return MultiAgentEpisodeSpec(
+            participants=self.config.participants,
+            turn_order=self.config.turn_order,
+            focal_participant=self.config.focal_participant,
+            resources_server=self.config.resources_server,
+            max_turns=self.config.max_turns,
+            status_url_path=self.config.status_url_path,
+        )
+
+    def _resolve_seeded_body(
+        self,
+        body: BaseRunRequest,
+        seed_result: dict[str, Any],
+    ) -> BaseRunRequest:
+        del seed_result
+        return body
+
     def _params_by_participant(
         self,
         body: MultiAgentRunRequest,
     ) -> dict[str, NeMoGymResponseCreateParamsNonStreaming]:
-        if self.config.focal_participant in body.participant_responses_create_params:
+        spec = self._episode_spec()
+        if spec.focal_participant in body.participant_responses_create_params:
             raise ValueError(
                 "participant_responses_create_params must not contain focal_participant "
-                f"{self.config.focal_participant!r}; use responses_create_params for it"
+                f"{spec.focal_participant!r}; use responses_create_params for it"
             )
-        unknown = set(body.participant_responses_create_params) - set(self.config.participants)
+        unknown = set(body.participant_responses_create_params) - set(spec.participants)
         if unknown:
             raise ValueError(f"request contains unknown participants: {sorted(unknown)}")
         params = {
-            self.config.focal_participant: body.responses_create_params,
+            spec.focal_participant: body.responses_create_params,
             **body.participant_responses_create_params,
         }
-        missing = set(self.config.participants) - set(params)
+        missing = set(spec.participants) - set(params)
         if missing:
             raise ValueError(f"request is missing response parameters for participants: {sorted(missing)}")
         return params
@@ -149,11 +179,12 @@ class MultiAgentProcessor(BaseProcessor):
         *,
         participant: str,
         params: NeMoGymResponseCreateParamsNonStreaming,
-        body: MultiAgentRunRequest,
+        body: BaseRunRequest,
         cookies: Any,
     ) -> tuple[NeMoGymResponse, Optional[dict[str, Any]], dict[str, Any]]:
+        spec = self._episode_spec()
         response = await self.server_client.post(
-            server_name=self.config.participants[participant].name,
+            server_name=spec.participants[participant].name,
             url_path=self.url_path_for_run("/v1/responses", body),
             json=params,
             cookies=cookies,
@@ -164,41 +195,69 @@ class MultiAgentProcessor(BaseProcessor):
         return NeMoGymResponse.model_validate(response_json), agent_trajectory, dict(response.cookies)
 
     async def _episode_status(self, cookies: Any) -> tuple[EpisodeStatus, dict[str, Any]]:
+        spec = self._episode_spec()
         response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path=self.config.status_url_path,
+            server_name=spec.resources_server.name,
+            url_path=spec.status_url_path,
             json={},
             cookies=dict(cookies),
         )
         await raise_for_status(response)
         return EpisodeStatus.model_validate(await get_response_json(response)), dict(response.cookies)
 
+    def _build_verify_request(
+        self,
+        *,
+        body: BaseRunRequest,
+        focal_response: NeMoGymResponse,
+        trajectories: dict[str, list[ParticipantTurn]],
+        events: list[EpisodeEvent],
+        termination_reason: str,
+        turns_completed: int,
+    ) -> BaseVerifyRequest:
+        return MultiAgentVerifyRequest.model_validate(
+            body.model_dump(mode="json")
+            | {
+                "response": focal_response.model_dump(mode="json"),
+                "focal_participant": self._episode_spec().focal_participant,
+                "participant_trajectories": trajectories,
+                "episode_trajectory": events,
+                "termination_reason": termination_reason,
+                "turns_completed": turns_completed,
+            }
+        )
+
+    def _build_verify_response(self, result: dict[str, Any]) -> BaseVerifyResponse:
+        return MultiAgentVerifyResponse.model_validate(result)
+
     async def run(self, request: Request, body: MultiAgentRunRequest) -> MultiAgentVerifyResponse:
-        params_by_participant = self._params_by_participant(body)
+        spec = self._episode_spec()
         environment_cookies = dict(request.cookies)
         seed_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
+            server_name=spec.resources_server.name,
             url_path="/seed_session",
             json=body.model_dump(mode="json"),
             cookies=environment_cookies,
         )
         await raise_for_status(seed_response)
+        body = self._resolve_seeded_body(body, await get_response_json(seed_response))
+        params_by_participant = self._params_by_participant(body)
         environment_cookies = dict(seed_response.cookies)
         environment_cookie_names = set(environment_cookies)
-        participant_cookies: dict[str, dict[str, Any]] = {participant: {} for participant in self.config.participants}
+        participant_cookies: dict[str, dict[str, Any]] = {participant: {} for participant in spec.participants}
         participant_inputs = {
             participant: _input_items(params) for participant, params in params_by_participant.items()
         }
-        trajectories: dict[str, list[ParticipantTurn]] = {participant: [] for participant in self.config.participants}
+        trajectories: dict[str, list[ParticipantTurn]] = {participant: [] for participant in spec.participants}
         events: list[EpisodeEvent] = []
         focal_outputs = []
         last_focal_response: Optional[NeMoGymResponse] = None
         termination_reason = "max_turns"
 
-        for turn_index in range(self.config.max_turns):
-            order_index = turn_index % len(self.config.turn_order)
-            participant = self.config.turn_order[order_index]
-            next_participant = self.config.turn_order[(order_index + 1) % len(self.config.turn_order)]
+        for turn_index in range(spec.max_turns):
+            order_index = turn_index % len(spec.turn_order)
+            participant = spec.turn_order[order_index]
+            next_participant = spec.turn_order[(order_index + 1) % len(spec.turn_order)]
             participant_params = params_by_participant[participant].model_copy(
                 deep=True,
                 update={"input": list(participant_inputs[participant])},
@@ -224,7 +283,7 @@ class MultiAgentProcessor(BaseProcessor):
                 )
             )
             participant_inputs[participant].extend(participant_response.output)
-            if participant == self.config.focal_participant:
+            if participant == spec.focal_participant:
                 focal_outputs.extend(participant_response.output)
                 last_focal_response = participant_response
 
@@ -295,19 +354,16 @@ class MultiAgentProcessor(BaseProcessor):
             )
 
         if last_focal_response is None:
-            raise RuntimeError(f"Focal participant {self.config.focal_participant!r} did not produce a response.")
+            raise RuntimeError(f"Focal participant {spec.focal_participant!r} did not produce a response.")
 
         focal_response = last_focal_response.model_copy(update={"output": focal_outputs})
-        verify_request = MultiAgentVerifyRequest.model_validate(
-            body.model_dump(mode="json")
-            | {
-                "response": focal_response.model_dump(mode="json"),
-                "focal_participant": self.config.focal_participant,
-                "participant_trajectories": trajectories,
-                "episode_trajectory": events,
-                "termination_reason": termination_reason,
-                "turns_completed": sum(len(turns) for turns in trajectories.values()),
-            }
+        verify_request = self._build_verify_request(
+            body=body,
+            focal_response=focal_response,
+            trajectories=trajectories,
+            events=events,
+            termination_reason=termination_reason,
+            turns_completed=sum(len(turns) for turns in trajectories.values()),
         )
 
         if self.config.skip_verification:
@@ -317,20 +373,20 @@ class MultiAgentProcessor(BaseProcessor):
             }
         else:
             verify_response = await self.server_client.post(
-                server_name=self.config.resources_server.name,
+                server_name=spec.resources_server.name,
                 url_path="/verify",
                 json=verify_request.model_dump(mode="json"),
                 cookies=dict(environment_cookies),
             )
             await raise_for_status(verify_response)
             result = await get_response_json(verify_response)
-        return MultiAgentVerifyResponse.model_validate(result)
+        return self._build_verify_response(result)
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         if self.config.skip_verification:
             return await super().aggregate_metrics(body)
         response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
+            server_name=self._episode_spec().resources_server.name,
             url_path="/aggregate_metrics",
             json=body,
         )
