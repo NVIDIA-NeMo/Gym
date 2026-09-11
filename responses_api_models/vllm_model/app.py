@@ -1011,9 +1011,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         if self._external_capture_enabled:
-            await self._finalize_external_capture(
-                chat_completion_dict, as_responses=request.url.path in {"/v1/responses", "/v1/messages"}
-            )
+            self._prepare_external_capture(chat_completion_dict)
 
         if self.config.return_token_id_information:
             message_dict = choice_dict["message"]
@@ -1081,13 +1079,26 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
-    async def _finalize_external_capture(self, payload: Dict[str, Any], *, as_responses: bool = False) -> None:
+    def _prepare_external_capture(self, payload: Dict[str, Any]) -> None:
+        """Strip transport fields and retain acknowledgement until API conversion finishes."""
+        context = current_capture_context()
+        if context is None or not context.external_staging:
+            return
+        context.external_commit_coords = payload.pop(NG_COMMIT_COORDS_FIELD, None)
+        self._strip_capture_transport_fields(payload)
+
+    async def _finalize_served_response(self, response: Any) -> None:
+        """Publish lineage using the final Chat, Responses, or Messages representation."""
+        context = current_capture_context()
+        if context is not None and context.external_staging:
+            await self._finalize_external_capture(_jsonable(response))
+
+    async def _finalize_external_capture(self, payload: Dict[str, Any]) -> None:
         """Validate and record a response staged by the inference worker.
 
         The worker returns commit coordinates only after ``StagingSink.stage`` succeeds.
         This method validates those coordinates against the active call.
-        It then records the call in the lineage store.
-        Finally, it removes token data and commit coordinates from the served response.
+        It records fingerprints from the final API response in the lineage store.
         """
         context = current_capture_context()
         if context is None or not context.external_staging or context.lineage_store is None:
@@ -1095,11 +1106,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         ledger = context.lineage_store
         if not isinstance(ledger, CaptureLedger):
             raise ValueError("external staging requires a CaptureLedger on the capture context")
-        coords_payload = payload.pop(NG_COMMIT_COORDS_FIELD, None)
+        coords_payload = context.external_commit_coords
         admission = context.capture_admission
         if admission is None:
             # UNRESOLVED — the ledger already carries this call's poison row.
-            self._strip_capture_transport_fields(payload)
             return
         try:
             if coords_payload is None:
@@ -1132,14 +1142,6 @@ class VLLMModel(SimpleResponsesAPIModel):
                 raise ValueError(f"served response for {coords.model_call_id} carries no envelope id")
             child_staging_chain = list(context.parent_staging_chain) + [str(coords.staging_key)]
             response_items, _ = strip_token_fields(response_to_output_items(payload))
-            if as_responses:
-                # Match the representation served by responses(), including separate
-                # reasoning items. Chat callers instead echo the wrapped assistant text.
-                response_items = [
-                    item.model_dump()
-                    for message in response_items
-                    for item in self._converter.postprocess_assistant_message_dict(message)
-                ]
             # Compute one fingerprint for the response items.
             # Compute another for the request and response items together.
             # If either input cannot be fingerprinted, store no fingerprints and continue recording the call.
@@ -1207,8 +1209,6 @@ class VLLMModel(SimpleResponsesAPIModel):
                     context.rollout_id,
                     context.model_call_id,
                 )
-        finally:
-            self._strip_capture_transport_fields(payload)
 
     @staticmethod
     def _strip_capture_transport_fields(payload: Dict[str, Any]) -> None:
