@@ -1,6 +1,6 @@
 ---
 name: nemo-gym-pr-checks-and-labels
-description: Inspect and prepare NVIDIA-NeMo/Gym pull requests by selecting repository-specific local and CI checks, diagnosing missing or failed checks, and choosing current type, area, and state labels. Use for PR readiness, check selection, CI handoff, or PR labeling. Do not use for general code review or issue-triage sweeps.
+description: Inspect and prepare NVIDIA-NeMo/Gym pull requests by reviewing relevant file history, selecting repository-specific local and CI checks, diagnosing missing or failed checks, and choosing current type, area, and state labels. Use for PR readiness, check selection, CI handoff, or PR labeling. Do not use for general code review or issue-triage sweeps.
 ---
 
 # NeMo Gym PR Checks and Labels
@@ -39,6 +39,46 @@ authoritative:
 
 When those files disagree with this skill, follow the repository files and
 report the drift.
+
+## Review Relevant History
+
+Before implementing or approving a non-trivial change to established behavior,
+do a bounded history pass over the affected code. Inspect behavior-owning source
+files even when the diff changes only tests; a new test can accidentally encode
+behavior that an earlier PR deliberately excluded or kept compatible.
+
+Start with recent commits and narrow blame where the behavior is not obvious:
+
+```bash
+git log --oneline -n 10 -- <path>
+git blame -L <start>,<end> -- <path>
+```
+
+For a relevant commit, follow a PR number in its subject or ask GitHub which PR
+contained it. Read both the PR-level discussion and inline review threads,
+because important constraints are often recorded only in review comments:
+
+```bash
+gh api repos/NVIDIA-NeMo/Gym/commits/<sha>/pulls \
+  -H 'Accept: application/vnd.github+json' \
+  --jq '.[] | [.number, .title, .html_url] | @tsv'
+gh pr view <PR> --repo NVIDIA-NeMo/Gym \
+  --json body,comments,reviews,files
+gh api --paginate repos/NVIDIA-NeMo/Gym/pulls/<PR>/comments \
+  --jq '.[] | [.user.login, .path, .body, .html_url] | @tsv'
+```
+
+Look specifically for intentional omissions or reversions, compatibility
+behavior, downstream consumers, unresolved dependency gates, and comments that
+explain counterintuitive code. Check whether the constraint still applies by
+inspecting the current callers and the state of linked issues; do not preserve a
+stale decision blindly. Deepen the search only when the recent history or code
+points to a material risk.
+
+If a historical corner case still applies, preserve it in a regression test,
+documentation, or a focused code comment, and cite the prior PR or issue in the
+current PR description. If it cannot be preserved within scope, report it as a
+review finding rather than silently changing the behavior.
 
 ## Check PR Metadata
 
