@@ -161,6 +161,9 @@ from nemo_gym.server_utils import (
 # (e.g. NeMo-RL's "nrlre1:<dtype>:<SxLxK>:<base64>"). Gym never inspects the value; the
 # string form keeps multi-MB payloads cheap to validate and re-serialize at every hop.
 RoutedExperts: TypeAlias = Union[str, List[List[List[int]]]]
+# JSON-serializable multimodal inputs used to reconstruct the policy forward
+# pass during training (for example, OSWorld's screenshot window).
+MultimodalInputs: TypeAlias = Dict[str, Any]
 
 
 class TokenIDLogProbMixin(BaseModel):
@@ -168,6 +171,7 @@ class TokenIDLogProbMixin(BaseModel):
     generation_token_ids: List[int]
     generation_log_probs: List[float]
     routed_experts: Optional[RoutedExperts] = None
+    multimodal_inputs: Optional[MultimodalInputs] = None
 
 
 class TokenIDLogProbTypedDictMixin(TypedDict):
@@ -175,6 +179,7 @@ class TokenIDLogProbTypedDictMixin(TypedDict):
     generation_token_ids: List[int]
     generation_log_probs: List[float]
     routed_experts: NotRequired[RoutedExperts]
+    multimodal_inputs: NotRequired[MultimodalInputs]
 
 
 REQUIRED_TOKEN_METADATA_FIELDS = frozenset(
@@ -830,6 +835,12 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     user: Optional[str] = None
     stream: Optional[Literal[False]] = None
 
+    # NeMo-RL training extension. When supplied, the serving worker replaces
+    # the re-rendered prefix through the latest assistant turn with these exact
+    # generation-observed IDs. This field is transport control, not semantic
+    # conversation content.
+    required_prefix_token_ids: Optional[List[int]] = None
+
 
 ########################################
 # Responses API outputs
@@ -997,6 +1008,8 @@ NeMoGymChatCompletionMessageToolCallUnion = Annotated[
 
 class NeMoGymChatCompletionMessage(ChatCompletionMessage):
     tool_calls: Optional[List[NeMoGymChatCompletionMessageToolCallUnion]] = None
+    reasoning_content: Optional[str] = None
+    reasoning: Optional[str] = None
 
 
 class NeMoGymChatCompletionMessageForTraining(NeMoGymChatCompletionMessage, TokenIDLogProbMixin):
@@ -1208,6 +1221,9 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     verbosity: Optional[Literal["low", "medium", "high"]] = None
     web_search_options: Optional[WebSearchOptions] = None
     stream: Optional[Literal[False]] = None
+
+    # Private NeMo-RL serving extension; see the Responses counterpart above.
+    required_prefix_token_ids: Optional[List[int]] = None
 
     # Disallow deprecated args
     # function_call: FunctionCall

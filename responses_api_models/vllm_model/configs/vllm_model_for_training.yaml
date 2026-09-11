@@ -8,3 +8,6 @@ policy_model:
       return_token_id_information: true
       request_prompt_and_generation_token_ids: false
       uses_reasoning_parser: true
+      chat_template_kwargs:
+        enable_thinking: true
+        truncate_history_thinking: false
