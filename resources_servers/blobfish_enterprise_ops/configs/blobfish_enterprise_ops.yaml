@@ -1,0 +1,54 @@
+blobfish_enterprise_ops:
+  resources_servers:
+    blobfish_enterprise_ops:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: >-
+        Blobfish enterprise-operations suites: stateful tasks in isolated business systems, graded by deterministic state-and-trace verifiers with no LLM judge. This default instance serves ERPBench-100; each suite has its own entry under environments/blobfish_*.
+      value: >-
+        Improve long-horizon, multi-system tool use in back-office work: investigate before writing, keep unrelated records unchanged, read writes back, and submit exact answers.
+      # Task packages come from the Harbor Hub (one command, no source repos):
+      #   harbor datasets download blobfishai/erpbench-100-suite -o data/suites/erpbench-100-suite
+      # They are executable code run in-process; suite_manifest pins every package to the reviewed
+      # SHA-256 and the server refuses anything else.
+      suite_dir: ${oc.env:BLOBFISH_ERPBENCH_100_DIR,data/suites/erpbench-100-suite/erpbench-100-suite}
+      suite_manifest: resources_servers/blobfish_enterprise_ops/data/suite_manifest.json
+      # fraction (criterion fraction), strict (all criteria), or gated (fraction x earned share of the
+      # suite's outcome families: a wrong final write then loses most of the reward). Use gated for RL.
+      reward_mode: fraction
+      max_open_episodes: 4096
+      episode_ttl_seconds: 7200
+blobfish_enterprise_ops_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      # Longest oracle plan in this suite: 32 tool calls; the cap ends runaway loops (simple_agent has none by default).
+      max_steps: 120
+      resources_server:
+        type: resources_servers
+        name: blobfish_enterprise_ops
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/blobfish_enterprise_ops/data/train.jsonl
+        source:
+          type: huggingface
+          repo_id: johnnychien/blobfish-nemo-gym-enterprise-ops
+          artifact_fpath: erpbench_100/train.jsonl
+        license: Creative Commons Attribution 4.0 International
+      - name: validation
+        type: validation
+        jsonl_fpath: resources_servers/blobfish_enterprise_ops/data/validation.jsonl
+        source:
+          type: huggingface
+          repo_id: johnnychien/blobfish-nemo-gym-enterprise-ops
+          artifact_fpath: erpbench_100/validation.jsonl
+        license: Creative Commons Attribution 4.0 International
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/blobfish_enterprise_ops/data/example.jsonl
+        license: Creative Commons Attribution 4.0 International

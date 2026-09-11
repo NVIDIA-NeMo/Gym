@@ -1,0 +1,36 @@
+name: blobfish_erpbench_100
+version: 1.0.0
+kind: environment
+integration_profile: custom-gym-verifier
+domain: agent
+description: >-
+  ERPBench-100: 100 stateful enterprise-operations tasks over 52 tools; SQLite-backed business systems with transactional writes and a full call trace; graded by a deterministic state-and-trace verifier with no LLM judge.
+modality: text
+licensing: Apache-2.0 AND CC-BY-4.0
+authors:
+- blobfishai
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: seeded
+resources_server: blobfish_enterprise_ops
+agent_server: simple_agent
+datasets:
+- name: train
+  type: train
+  jsonl_fpath: environments/blobfish_erpbench_100/data/train.jsonl
+  num_repeats: 1
+- name: validation
+  type: validation
+  jsonl_fpath: environments/blobfish_erpbench_100/data/validation.jsonl
+  num_repeats: 1
+- name: example
+  type: example
+  jsonl_fpath: environments/blobfish_erpbench_100/data/example.jsonl
+  num_repeats: 1
+model_server: policy_model
+session_model: episode
+state: per_session
+lifecycle: active

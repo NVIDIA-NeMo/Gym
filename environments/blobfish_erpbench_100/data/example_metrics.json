@@ -1,0 +1,73 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "environments/blobfish_erpbench_100/data/example.jsonl",
+    "num_repeats": 1,
+    "source": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 52.0,
+        "Min": 52.0,
+        "Max": 52.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 2634.4,
+        "Min": 2622.0,
+        "Max": 2644.0,
+        "Standard deviation": 9.84
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "benchmark": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "category": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "difficulty": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "metric": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "suite": {
+        "unique_count": 1,
+        "total_count": 5
+    },
+    "task_id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "world_id": {
+        "unique_count": 1,
+        "total_count": 5
+    }
+}
