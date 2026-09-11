@@ -16,6 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
     "component",
     [
         "resources_servers/visual_browser",
+        "resources_servers/webarena_browser",
         "resources_servers/webvoyager_judge",
     ],
 )
