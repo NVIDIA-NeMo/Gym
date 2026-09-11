@@ -37,4 +37,6 @@ terminus_2_agent:
       sandbox_provider:
         local: {}
       sandbox_image: ""
+      setup_commands:
+        - python3 -c 'import harbor, tenacity' || python3 -m pip install 'harbor==0.1.42' 'tenacity>=9.1.4'
       rollout_timeout: 10800

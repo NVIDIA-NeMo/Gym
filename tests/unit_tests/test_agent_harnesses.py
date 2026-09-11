@@ -25,6 +25,7 @@ from nemo_gym.agents import (
     PrimeAgentHarness,
 )
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from responses_api_agents.agent_registry import resolve_agent
 
 
 def test_harnesses_share_one_public_config() -> None:
@@ -87,6 +88,16 @@ def test_normalized_config_rejects_unknown_fields() -> None:
 def test_normalized_limits_must_be_positive(field) -> None:
     with pytest.raises(ValidationError):
         AgentHarnessConfig.model_validate({"model": {"model": "test-model"}, field: 0})
+
+
+@pytest.mark.parametrize("name", ["codex", "nemo_fabric", "opencode"])
+def test_agent_server_registry_resolves_core_and_legacy_agents(name) -> None:
+    module, agent_class, config_class, dependency_key = resolve_agent(name)
+
+    assert module
+    assert agent_class
+    assert config_class
+    assert dependency_key == f"{name}_agent"
 
 
 async def test_pi_preserves_state_in_caller_workspace(tmp_path) -> None:

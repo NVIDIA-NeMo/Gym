@@ -22,6 +22,7 @@ import tempfile
 import time
 import uuid
 from asyncio import Semaphore
+from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from subprocess import Popen
@@ -42,6 +43,7 @@ from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_me
 from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
 from nemo_gym.sandbox.providers.docker import DockerCreateConfig, DockerProvider
 from nemo_gym.server_utils import apply_rollout_prefix
+from responses_api_agents.agent_registry import resolve_agent
 
 
 def _format_container(container_formatter: str | list[str], task_name: str, docker_image: str) -> str:
@@ -221,42 +223,44 @@ if openclaw_defaults.get("workspace") == ".":
     openclaw_defaults["workspace"] = str(Path.cwd())
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymEasyInputMessage
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.server_utils import ServerClient
 from {agent_module} import {agent_class}, {agent_cfg_class}
-
-_mock_client = ServerClient.model_construct(global_config_dict={{}})
-_mock_client._build_server_base_url = lambda cfg: MODEL_URL
-
-_cfg_sampling = {{k: v for k, v in SAMPLING.items() if k in {agent_cfg_class}.model_fields}}
-
-_model_server = ModelServerRef(name="policy_model", type="responses_api_models") if MODEL_URL else None
-config = {agent_cfg_class}(
-    host="0.0.0.0",
-    port=0,
-    name="{agent_class_lower}",
-    entrypoint="app.py",
-    model_server=_model_server,
-    resources_server=ResourcesServerRef(name="anyterminal", type="resources_servers"),
-    **{{**_cfg_sampling, **AGENT_KWARGS}},
-)
-agent = {agent_class}(config=config, server_client=_mock_client)
-
-if MODEL_URL:
-    _v1 = MODEL_URL if MODEL_URL.endswith("/v1") else MODEL_URL + "/v1"
-    if hasattr(agent, "resolve_model_base_url"):
-        object.__setattr__(agent, "resolve_model_base_url", lambda *args, **kwargs: _v1)
-    if hasattr(agent, "_resolve_model_base_url"):
-        agent._resolve_model_base_url = lambda *args, **kwargs: _v1
-    if hasattr(agent, "_resolve_base_url"):
-        agent._resolve_base_url = lambda *args, **kwargs: MODEL_URL
 
 body = NeMoGymResponseCreateParamsNonStreaming(
     input=[NeMoGymEasyInputMessage(role="user", content=INSTRUCTION)],
     model=MODEL_NAME,
     **SAMPLING,
 )
-response = asyncio.run(agent.responses(request=Request({{"type": "http", "path_params": {{}}}}), body=body))
+if {agent_cfg_class}.__name__ == "AgentHarnessConfig":
+    agent = {agent_class}(config={agent_cfg_class}(**AGENT_KWARGS))
+    base_url = MODEL_URL if not MODEL_URL or MODEL_URL.endswith("/v1") else f"{{MODEL_URL}}/v1"
+    response = asyncio.run(agent.run(body, model_base_url=base_url or None))
+else:
+    from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+    from nemo_gym.server_utils import ServerClient
+
+    client = ServerClient.model_construct(global_config_dict={{}})
+    client._build_server_base_url = lambda cfg: MODEL_URL
+    cfg_sampling = {{k: v for k, v in SAMPLING.items() if k in {agent_cfg_class}.model_fields}}
+    model_server = ModelServerRef(name="policy_model", type="responses_api_models") if MODEL_URL else None
+    config = {agent_cfg_class}(
+        host="0.0.0.0",
+        port=0,
+        name="{agent_class_lower}",
+        entrypoint="app.py",
+        model_server=model_server,
+        resources_server=ResourcesServerRef(name="anyterminal", type="resources_servers"),
+        **{{**cfg_sampling, **AGENT_KWARGS}},
+    )
+    agent = {agent_class}(config=config, server_client=client)
+    if MODEL_URL:
+        v1 = MODEL_URL if MODEL_URL.endswith("/v1") else MODEL_URL + "/v1"
+        if hasattr(agent, "resolve_model_base_url"):
+            object.__setattr__(agent, "resolve_model_base_url", lambda *args, **kwargs: v1)
+        if hasattr(agent, "_resolve_model_base_url"):
+            agent._resolve_model_base_url = lambda *args, **kwargs: v1
+        if hasattr(agent, "_resolve_base_url"):
+            agent._resolve_base_url = lambda *args, **kwargs: MODEL_URL
+    response = asyncio.run(agent.responses(request=Request({{"type": "http", "path_params": {{}}}}), body=body))
 Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
 print(f"agent finished: {{len(response.output)}} output items", flush=True)
 """
@@ -276,8 +280,7 @@ class GymAgentHarnessProcessor(BaseModel):
 
     @property
     def _agent_key(self) -> str:
-        # responses_api_agents.hermes_agent.app -> hermes_agent
-        return self.config.agent_server_module.split(".")[-2]
+        return resolve_agent(self.config.agent)[3]
 
     def setup(self) -> Path:
         """Install agent deps into a portable prefix (idempotent, hash-keyed)."""
@@ -319,11 +322,12 @@ class GymAgentHarnessProcessor(BaseModel):
         cfg: AnyTerminalInstanceConfig = self.config
         instruction = _instruction_from_input(cfg.body)
         (cfg.persistent_dir / "instruction.txt").write_text(instruction)
+        module, agent_class, config_class, _ = resolve_agent(cfg.agent)
         runner = _RUNNER_TEMPLATE.format(
-            agent_module=cfg.agent_server_module,
-            agent_class=cfg.agent_server_class,
-            agent_cfg_class=cfg.agent_config_class,
-            agent_class_lower=cfg.agent_server_class.lower(),
+            agent_module=module,
+            agent_class=agent_class,
+            agent_cfg_class=config_class,
+            agent_class_lower=agent_class.lower(),
         )
         (cfg.persistent_dir / "agent_runner.py").write_text(runner)
         return "/agent_deps_mount/bin/python /trajectories_mount/agent_runner.py"
@@ -335,9 +339,7 @@ class GymAgentHarnessProcessor(BaseModel):
 class AnyTerminalAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: Optional[ModelServerRef] = None
 
-    agent_server_module: str = Field(description="Import path to the agent module")
-    agent_server_class: str = Field(description="Agent class name")
-    agent_config_class: str = Field(description="Agent config class name")
+    agent: str
     agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
 
     container_formatter: str | list[str] = Field(
@@ -568,7 +570,9 @@ class RunTerminalAgent(BaseModel):
             for k in ("temperature", "top_p", "max_output_tokens")
             if getattr(cfg.body, k, None) is not None
         }
-        model_name = cfg.agent_kwargs.get("model") or cfg.body.model or "model"
+        model = cfg.agent_kwargs.get("model")
+        model_name = model.get("model") if isinstance(model, Mapping) else model
+        model_name = model_name or cfg.body.model or "model"
         env = {
             "NGTB_MODEL_NAME": model_name,
             "NGTB_AGENT_KWARGS": json.dumps(cfg.agent_kwargs),

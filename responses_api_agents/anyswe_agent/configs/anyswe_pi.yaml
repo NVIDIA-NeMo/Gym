@@ -6,17 +6,15 @@ anyswe_pi:
       description: SWE-bench run by Pi inside the task container.
       value: Eval software engineering capabilities on SWE-bench with any Gym agent.
 
-      agent_server_module: responses_api_agents.pi_agent.app
-      agent_server_class: PiAgent
-      agent_config_class: PiAgentConfig
+      agent: pi
       agent_kwargs:
-        model: model
-        workspace_root: /tmp/pi-agent
-        thinking: high
-        timeout: 3600
-        pi_version: 0.80.2
+        model: {model: model, provider: nemo}
+        timeout_seconds: 3600
         system_prompt: Fix the bug in the repository at /testbed. Inspect and edit the source, run relevant checks, and leave the final fix applied.
-        models_config: {}
+        settings:
+          workspace_root: /tmp/pi-agent
+          thinking: high
+          models_config: {}
 
       container_formatter: ${oc.env:ANYSWE_CONTAINER_FORMATTER}
       sandbox_provider: sandbox

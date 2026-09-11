@@ -65,9 +65,7 @@ def _config(**overrides) -> AnyTerminalAgentConfig:
         entrypoint="app.py",
         name="anyterminal_agent",
         model_server={"type": "responses_api_models", "name": "policy_model"},
-        agent_server_module="responses_api_agents.hermes_agent.app",
-        agent_server_class="HermesAgent",
-        agent_config_class="HermesAgentConfig",
+        agent="hermes",
     )
     base.update(overrides)
     return AnyTerminalAgentConfig(**base)
@@ -76,25 +74,24 @@ def _config(**overrides) -> AnyTerminalAgentConfig:
 def test_hermes_config_uses_full_anyterminal_budget() -> None:
     config_path = Path(__file__).parent.parent / "configs" / "anyterminal_hermes.yaml"
     config = yaml.safe_load(config_path.read_text())["anyterminal_hermes"]["responses_api_agents"]["anyterminal_agent"]
-    assert config["agent_kwargs"]["timeout"] == 1800
+    assert config["agent_kwargs"]["timeout_seconds"] == 1800
 
 
 class TestRunnerTemplate:
     def _render(self) -> str:
         return _RUNNER_TEMPLATE.format(
-            agent_module="responses_api_agents.hermes_agent.app",
-            agent_class="HermesAgent",
-            agent_cfg_class="HermesAgentConfig",
-            agent_class_lower="hermesagent",
+            agent_module="nemo_gym.agents.hermes",
+            agent_class="HermesHarness",
+            agent_cfg_class="AgentHarnessConfig",
+            agent_class_lower="hermesharness",
         )
 
     def test_renders_valid_python(self) -> None:
         rendered = self._render()
         # Must be syntactically valid Python and reference the agent class.
         compile(rendered, "<runner>", "exec")
-        assert "HermesAgent(config=config" in rendered
-        assert 'Request({"type": "http", "path_params": {}})' in rendered
-        assert 'object.__setattr__(agent, "resolve_model_base_url"' in rendered
+        assert "HermesHarness(config=AgentHarnessConfig" in rendered
+        assert "agent.run(body, model_base_url=base_url or None)" in rendered
 
     def test_response_is_written_back(self) -> None:
         # The runner's agent-agnostic contract is to persist the response where the host reads it.
@@ -104,10 +101,8 @@ class TestRunnerTemplate:
     def test_sampling_is_forwarded(self) -> None:
         rendered = self._render()
         compile(rendered, "<runner>", "exec")
-        # Read from env, forwarded onto the body, and filtered to the agent config's fields.
         assert "NGTB_SAMPLING" in rendered
         assert "**SAMPLING," in rendered
-        assert "HermesAgentConfig.model_fields" in rendered
 
 
 class TestAgentKey:
@@ -118,9 +113,7 @@ class TestAgentKey:
     def test_key_for_claude(self) -> None:
         proc = GymAgentHarnessProcessor(
             config=_config(
-                agent_server_module="responses_api_agents.claude_code_agent.app",
-                agent_server_class="ClaudeCodeAgent",
-                agent_config_class="ClaudeCodeAgentConfig",
+                agent="claude_code",
             )
         )
         assert proc._agent_key == "claude_code_agent"
@@ -196,9 +189,7 @@ def _make_instance_config(tmp_path: Path, **overrides) -> AnyTerminalInstanceCon
         entrypoint="app.py",
         name="anyterminal_agent",
         model_server=None,
-        agent_server_module="responses_api_agents.hermes_agent.app",
-        agent_server_class="HermesAgent",
-        agent_config_class="HermesAgentConfig",
+        agent="hermes",
         run_session_id="test_session",
         base_results_dir=tmp_path / "results",
         model_server_url="",
@@ -564,19 +555,13 @@ class TestRayResourceOpts:
 
 class TestHarnessProcessorSetup:
     def _proc_no_script(self) -> GymAgentHarnessProcessor:
-        return GymAgentHarnessProcessor(
-            config=_config(
-                agent_server_module="responses_api_agents.no_such_agent.app",
-                agent_server_class="NoSuchAgent",
-                agent_config_class="NoSuchAgentConfig",
-            )
-        )
+        return GymAgentHarnessProcessor(config=_config(agent="prime"))
 
     def test_no_script_creates_empty_deps(self, tmp_path: Path) -> None:
         proc = self._proc_no_script()
         with patch.object(type(proc), "_parent", new_callable=PropertyMock, return_value=tmp_path):
             result = proc.setup()
-        expected = tmp_path / "deps" / "anyterminal_no_such_agent_deps"
+        expected = tmp_path / "deps" / "anyterminal_prime_agent_deps"
         assert result == expected
         assert expected.exists()
         assert (expected / ".installed").exists()
@@ -590,7 +575,7 @@ class TestHarnessProcessorSetup:
 
     def test_rechecks_sentinel_after_acquiring_lock(self, tmp_path: Path) -> None:
         proc = self._proc_no_script()
-        deps_dir = tmp_path / "deps" / "anyterminal_no_such_agent_deps"
+        deps_dir = tmp_path / "deps" / "anyterminal_prime_agent_deps"
         lock_path = deps_dir.parent / f".{deps_dir.name}.lockdir"
         lock_path.mkdir(parents=True)
 
@@ -669,17 +654,15 @@ class TestGetRunCommand:
         persistent_dir = tmp_path / "persistent"
         persistent_dir.mkdir()
         cfg = AnyTerminalInstanceConfig.model_construct(
-            agent_server_module="responses_api_agents.hermes_agent.app",
-            agent_server_class="HermesAgent",
-            agent_config_class="HermesAgentConfig",
+            agent="hermes",
             body=SimpleNamespace(input=[SimpleNamespace(content="the task")]),
             persistent_dir=persistent_dir,
         )
         cmd = GymAgentHarnessProcessor(config=cfg).get_run_command()
         assert (persistent_dir / "instruction.txt").read_text() == "the task"
         runner = (persistent_dir / "agent_runner.py").read_text()
-        assert "HermesAgent" in runner
-        assert "HermesAgentConfig" in runner
+        assert "HermesHarness" in runner
+        assert "AgentHarnessConfig" in runner
         assert cmd == "/agent_deps_mount/bin/python /trajectories_mount/agent_runner.py"
 
 
@@ -710,6 +693,11 @@ class TestRunAgentEnv:
         env = RunTerminalAgent(config=cfg)._agent_env(cfg)
         assert env["NGTB_MODEL_NAME"] == "my-model"
         assert json.loads(env["NGTB_AGENT_KWARGS"]) == {"model": "my-model"}
+
+    def test_nested_model_name_is_forwarded(self, tmp_path: Path) -> None:
+        cfg = _make_instance_config(tmp_path, agent_kwargs={"model": {"model": "my-model"}})
+        env = RunTerminalAgent(config=cfg)._agent_env(cfg)
+        assert env["NGTB_MODEL_NAME"] == "my-model"
 
 
 class TestProcessSingleDatapoint:

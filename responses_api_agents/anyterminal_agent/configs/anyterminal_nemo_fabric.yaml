@@ -6,9 +6,7 @@ anyterminal_nemo_fabric:
       description: Terminal Bench run by a NeMo Fabric harness inside the task sandbox.
       value: Evaluate terminal-task agents through a harness-neutral Fabric lifecycle.
 
-      agent_server_module: responses_api_agents.nemo_fabric_agent.app
-      agent_server_class: NeMoFabricAgent
-      agent_config_class: NeMoFabricAgentConfig
+      agent: nemo_fabric
       agent_kwargs:
         adapter_id: nvidia.fabric.mini-swe-agent
         model_provider: openai

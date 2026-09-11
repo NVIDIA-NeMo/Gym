@@ -6,14 +6,13 @@ anyswe_claude_code:
       description: SWE-bench run by Claude Code natively inside the task container.
       value: Eval software engineering capabilities on SWE-bench with any Gym agent.
 
-      agent_server_module: responses_api_agents.claude_code_agent.app
-      agent_server_class: ClaudeCodeAgent
-      agent_config_class: ClaudeCodeAgentConfig
+      agent: claude_code
       agent_kwargs:
-        model: model
+        model: {model: model}
         max_turns: 100
-        timeout: 1800
+        timeout_seconds: 1800
         system_prompt: "You are fixing a bug in the repository at /testbed. Edit the source files to fix the root cause, then verify. You MUST actually apply the fix with your file-editing tools; do not just describe it."
+        workspace: /testbed
 
       container_formatter: ${oc.env:ANYSWE_CONTAINER_FORMATTER}
       sandbox_provider: sandbox

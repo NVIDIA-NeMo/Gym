@@ -52,16 +52,14 @@ eda_sim_image: cvdp-cadence-verif:latest
 Both flavors are the **same agent class — `CVDPAgent`** (`responses_api_agents/cvdp_agent/app.py`); you pick the flavor with the **`simple_agent`** config flag. They differ only in **how the candidate RTL is produced and graded**:
 
 - **`simple_agent: true` — direct generation** (`cvdp_agent`, config `configs/cvdp_agent.yaml`): the model emits the RTL inline in its response; the server parses it out (`_parse_model_response`) and runs the harness. A single completion — no tools, no file editing.
-- **`simple_agent: false` — sandboxed harness** (`cvdp_agent_generic_*`, configs `configs/cvdp_agent_generic_*.yaml`): a coding **harness** runs **inside** the EDA sim container, editing files on disk and self-testing with the in-container EDA tools; the server grades the files it wrote back (`rtl_files`). The harness is a config-selected unit — `agent_server_module`/`class`/`config_class` name any Gym `responses()` agent. Claude Code is the default; Hermes ships as a second example (`configs/cvdp_agent_generic_hermes.yaml`), and any other harness drops in via config + a deps script. See [`responses_api_agents/cvdp_agent/`](../../responses_api_agents/cvdp_agent/).
+- **`simple_agent: false`, sandboxed harness** (`cvdp_agent_generic_*`, configs `configs/cvdp_agent_generic_*.yaml`): a coding **harness** runs **inside** the EDA sim container, edits files on disk, and self-tests with the in-container EDA tools. The server grades the files it wrote back (`rtl_files`). Select it with `agent` and configure it with `agent_kwargs`. Claude Code and Hermes examples are included. See [`responses_api_agents/cvdp_agent/`](../../responses_api_agents/cvdp_agent/).
 
 ### Sandboxed harness settings (`configs/cvdp_agent_generic_claude.yaml`)
 
 | Field                 | Default                                       | Description                                                                                          |
 | --------------------- | --------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `agent_server_module` | `responses_api_agents.claude_code_agent.app`  | Python module of the Gym harness agent booted inside the sandbox                                     |
-| `agent_server_class`  | `ClaudeCodeAgent`                             | Harness agent class                                                                                  |
-| `agent_config_class`  | `ClaudeCodeAgentConfig`                       | Harness agent config class                                                                           |
-| `agent_kwargs`        | `{}`                                          | Passed straight into the harness config class; keys must be valid fields on it (Claude: `model`, `anthropic_base_url`, `anthropic_api_key`, `max_turns`) |
+| `agent`               | `claude_code`                                 | Registered harness name |
+| `agent_kwargs`        | `{}`                                          | Normalized harness configuration |
 | `image`               | `${cvdp_sim_image}`                           | OCI image reference used by the selected provider. Local `.sif` paths are Apptainer-only |
 | `sandbox_provider`    | `{apptainer: {...}}`                          | Inline provider config or named top-level sandbox config |
 | `deps_provision`      | `archive`                                     | `archive` uploads the runtime. `baked` expects it in the image |
@@ -70,7 +68,9 @@ Both flavors are the **same agent class — `CVDPAgent`** (`responses_api_agents
 | `timeout`             | `900`                                         | Per-task wall-clock budget (seconds)                                                                 |
 | `concurrency`         | `4`                                           | Max concurrent agent runs                                                                            |
 
-The `agent_server_*` block selects **which** harness to boot; `agent_kwargs` are the knobs for **that specific harness** (so the valid keys depend on the harness's config class). To swap harnesses, change the `agent_server_*` block + `agent_kwargs` and provide a matching `setup_scripts/<key>_deps.sh`. A Hermes example is shipped at `configs/cvdp_agent_generic_hermes.yaml`.
+To swap harnesses, change `agent` and `agent_kwargs`, then provide the matching
+`setup_scripts/<key>_deps.sh`. A Hermes example is shipped at
+`configs/cvdp_agent_generic_hermes.yaml`.
 
 The first run caches the harness runtime. `archive` uploads it into each sandbox. Use a
 registry OCI image for provider-portable configs. Local `.sif` images require Apptainer.
