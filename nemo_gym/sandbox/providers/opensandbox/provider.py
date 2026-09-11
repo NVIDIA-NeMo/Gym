@@ -15,13 +15,15 @@
 """OpenSandbox provider implementation."""
 
 import asyncio
+import hashlib
+import ipaddress
 import logging
 import re
 import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit
 
@@ -548,6 +550,7 @@ class OpenSandboxProbeConfig:
     deadline_s: float | None = None
     stable_count: int = 1
     stable_delay_s: float = 0.0
+    user: str | int | None = None
 
     def __post_init__(self) -> None:
         if self.command is not None and self.timeout_s <= 0:
@@ -672,6 +675,32 @@ class OpenSandboxProviderOptions:
         )
 
 
+@dataclass
+class OpenSandboxNetworkingConfig:
+    """Operator assertion that direct sandbox IPs are mutually reachable."""
+
+    enabled: bool = False
+    loopback_forwarding: bool = False
+    python_executable: str = "python3"
+    setup_command: str | None = None
+
+
+@dataclass
+class OpenSandboxRuntimeRequirementsConfig:
+    """Operator-supplied capability probes and permission to resize shared memory."""
+
+    capability_probes: dict[str, str] = field(default_factory=dict)
+    resize_shared_memory: bool = False
+
+
+@dataclass
+class OpenSandboxSharedStorageConfig:
+    """Shared host mount and optional deployment-specific placement metadata."""
+
+    host_path: str | None = None
+    metadata: dict[str, str] = field(default_factory=dict)
+
+
 class OpenSandboxProvider:
     """Provider backed by the OpenSandbox SDK/server API."""
 
@@ -685,12 +714,18 @@ class OpenSandboxProvider:
         probe: OpenSandboxProbeConfig | Mapping[str, Any] | None = None,
         operations: OpenSandboxOperationConfig | Mapping[str, Any] | None = None,
         attribution: OpenSandboxAttributionConfig | Mapping[str, Any] | None = None,
+        networking: OpenSandboxNetworkingConfig | Mapping[str, Any] | None = None,
+        shared_storage: OpenSandboxSharedStorageConfig | Mapping[str, Any] | None = None,
+        runtime_requirements: OpenSandboxRuntimeRequirementsConfig | Mapping[str, Any] | None = None,
     ) -> None:
         self._connection = _coerce_config(connection, OpenSandboxConnectionConfig)
         self._create = _coerce_config(create, OpenSandboxCreateConfig)
         self._probe = _coerce_config(probe, OpenSandboxProbeConfig)
         self._operations = _coerce_config(operations, OpenSandboxOperationConfig)
         self._attribution = _coerce_config(attribution, OpenSandboxAttributionConfig)
+        self._networking = _coerce_config(networking, OpenSandboxNetworkingConfig)
+        self._shared_storage = _coerce_config(shared_storage, OpenSandboxSharedStorageConfig)
+        self._runtime_requirements = _coerce_config(runtime_requirements, OpenSandboxRuntimeRequirementsConfig)
         # Shared injected transport. The SDK never closes transports it did not
         # create, so the provider owns this one: built once, reused by every
         # ConnectionConfig, closed in aclose().
@@ -698,6 +733,172 @@ class OpenSandboxProvider:
         # Sessions own aiohttp clients that only close() releases: aclose()
         # sweeps any still open; ended ones are retired on the next create/attach.
         self._pty_sessions: set[Any] = set()
+
+    def validate_runtime_requirements(self, *, cap_add: tuple[str, ...], shm_size: int | None) -> None:
+        """Reject requirements without an operator-configured implementation."""
+        for capability in cap_add:
+            if not self._runtime_requirements.capability_probes.get(capability, "").strip():
+                raise NotImplementedError(f"OpenSandbox requires a capability probe for {capability!r}")
+        if shm_size is not None:
+            if isinstance(shm_size, bool) or not isinstance(shm_size, int) or shm_size <= 0:
+                raise ValueError("shm_size must be a positive number of bytes")
+            if not self._runtime_requirements.resize_shared_memory:
+                raise NotImplementedError(
+                    "OpenSandbox shm_size requires runtime_requirements.resize_shared_memory=true"
+                )
+
+    async def configure_runtime(
+        self, handle: SandboxHandle, *, cap_add: tuple[str, ...], shm_size: int | None
+    ) -> None:
+        """Probe capabilities and apply shared memory limits before starting services."""
+        self.validate_runtime_requirements(cap_add=cap_add, shm_size=shm_size)
+        commands = [(capability, self._runtime_requirements.capability_probes[capability]) for capability in cap_add]
+        if shm_size is not None:
+            size_check = (
+                "set -- $(stat -fc '%S %b' /dev/shm); "
+                f"expected=$((({shm_size} + $1 - 1) / $1 * $1)); "
+                '[ "$(($1 * $2))" -eq "$expected" ]'
+            )
+            current = await self.exec(handle, size_check, user=None, timeout_s=60)
+            if current.return_code != 0:
+                commands.append(("shm_size", f"mount -o remount,size={shm_size} /dev/shm && {size_check}"))
+        for requirement, command in commands:
+            result = await self.exec(handle, command, user="root", timeout_s=60)
+            if result.return_code != 0:
+                raise RuntimeError(
+                    f"Sandbox {handle.sandbox_id!r} cannot satisfy {requirement}: "
+                    f"stdout={result.stdout!r}; stderr={result.stderr!r}"
+                )
+
+    def validate_port_forwarding(self) -> None:
+        """Require explicit deployment support for loopback TCP listeners."""
+        if not self._networking.loopback_forwarding:
+            raise NotImplementedError("OpenSandbox port forwarding requires networking.loopback_forwarding=true")
+        if not self._operations.background_exec:
+            raise NotImplementedError("OpenSandbox port forwarding requires operations.background_exec=true")
+
+    async def forward_ports(
+        self, handle: SandboxHandle, target_address: str, ports: tuple[int, ...], *, ready_file: str
+    ) -> None:
+        """Run loopback listeners in a foreground command owned by the collection."""
+        self.validate_port_forwarding()
+        from nemo_gym.sandbox.providers.opensandbox import _port_forward
+
+        address = str(ipaddress.ip_address(target_address))
+        validated_ports = SandboxSpec(ports=ports).ports
+        if self._networking.setup_command:
+            setup = await self.exec(handle, self._networking.setup_command, user="root", timeout_s=180)
+            if setup.return_code != 0:
+                raise RuntimeError(
+                    f"Sandbox {handle.sandbox_id!r} port forwarding setup failed: "
+                    f"stdout={setup.stdout!r}; stderr={setup.stderr!r}"
+                )
+        command = shlex.join(
+            [
+                self._networking.python_executable,
+                "-u",
+                "-c",
+                Path(_port_forward.__file__).read_text(),
+                address,
+                ready_file,
+                *(str(port) for port in validated_ports),
+            ]
+        )
+        result = await self.exec(handle, command, user="root", timeout_s=None)
+        raise RuntimeError(
+            f"Sandbox {handle.sandbox_id!r} port forwarding exited ({result.return_code}): "
+            f"stdout={result.stdout!r}; stderr={result.stderr!r}"
+        )
+
+    def validate_networking(self) -> None:
+        """Require explicit deployment support for inter-sandbox networking."""
+        if not self._networking.enabled:
+            raise NotImplementedError("OpenSandbox networking requires networking.enabled=true")
+
+    async def network_address(self, handle: SandboxHandle) -> str:
+        """Resolve a direct container IP, independently of client proxy mode."""
+        from opensandbox.constants import DEFAULT_EXECD_PORT
+
+        self.validate_networking()
+        # Sandbox.get_endpoint follows use_server_proxy; its service adapter
+        # exposes the explicit direct lookup needed for peer connections.
+        resolved = await self._await_sdk_operation(
+            lambda: handle.raw._sandbox_service.get_sandbox_endpoint(handle.sandbox_id, DEFAULT_EXECD_PORT, False),
+            operation="get_network_address",
+            sandbox_id=handle.sandbox_id,
+            timeout_s=self._connection.request_timeout_s,
+        )
+        endpoint = str(resolved.endpoint or "")
+        parsed = urlsplit(endpoint if "://" in endpoint else f"http://{endpoint}")
+        if (
+            resolved.headers
+            or parsed.port != DEFAULT_EXECD_PORT
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+            or parsed.username
+            or parsed.password
+            or parsed.scheme not in ("http", "https")
+        ):
+            raise ValueError("OpenSandbox networking requires a direct, unmapped IP endpoint without routing headers")
+        address = ipaddress.ip_address(parsed.hostname or "")
+        if address.is_loopback or address.is_unspecified or address.is_multicast:
+            raise ValueError("OpenSandbox networking requires a peer-reachable IP address")
+        return str(address)
+
+    async def set_hosts(self, handle: SandboxHandle, hosts: Mapping[str, str]) -> None:
+        """Append validated peer aliases to the sandbox hosts file."""
+        self.validate_networking()
+        entries = []
+        for name, address in hosts.items():
+            if len(name) > 253 or not all(
+                re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?", label) for label in name.split(".")
+            ):
+                raise ValueError(f"Invalid sandbox hostname: {name!r}")
+            entries.append(shlex.quote(f"{ipaddress.ip_address(address)} {name}\n"))
+        if entries:
+            result = await self.exec(handle, "printf '%s' " + " ".join(entries) + " >> /etc/hosts", user="root")
+            if result.return_code != 0:
+                raise RuntimeError(
+                    f"Could not configure sandbox hosts for {handle.sandbox_id!r}: "
+                    f"stdout={result.stdout!r}; stderr={result.stderr!r}"
+                )
+
+    def shared_volume_metadata(self) -> dict[str, str]:
+        """Return placement metadata required by the configured shared storage."""
+        if not self._shared_storage.host_path:
+            raise NotImplementedError("OpenSandbox shared storage requires shared_storage.host_path")
+        return dict(self._shared_storage.metadata)
+
+    def shared_volume_options(self, source: str | None, target: str, *, read_only: bool = False) -> dict[str, Any]:
+        """Mount a project directory, or the shared root for bootstrap when source is None."""
+        self.shared_volume_metadata()
+        base = self._shared_storage.host_path
+        if not PurePosixPath(base).is_absolute():
+            raise ValueError("Shared storage host_path must be absolute")
+        if source is not None and (
+            not source
+            or not PurePosixPath(source).parts
+            or PurePosixPath(source).is_absolute()
+            or ".." in source.split("/")
+            or "\\" in source
+            or "\x00" in source
+        ):
+            raise ValueError("Shared storage source must be a safe project-relative path")
+        if not PurePosixPath(target).is_absolute() or ".." in target.split("/") or "\x00" in target:
+            raise ValueError("Shared storage target must be an absolute container path without traversal")
+        name = "shared-" + hashlib.sha256(f"{source}:{target}".encode()).hexdigest()[:16]
+        return {
+            "volumes": [
+                {
+                    "name": name,
+                    "host": {"path": base},
+                    **({"subPath": str(PurePosixPath(source))} if source is not None else {}),
+                    "mountPath": target,
+                    "readOnly": read_only,
+                }
+            ]
+        }
 
     def _resolve_extensions(self, extensions: Mapping[str, str]) -> dict[str, str]:
         """Add the configured default image pull policy to SDK create extensions."""
@@ -988,7 +1189,7 @@ class OpenSandboxProvider:
                         handle,
                         self._probe.command,
                         timeout_s=command_timeout_s,
-                        user="root",
+                        user=self._probe.user,
                     ),
                     timeout=command_timeout_s,
                 )
@@ -1272,7 +1473,9 @@ class OpenSandboxProvider:
         effective_command = command
         if isinstance(user, int):
             opts_kwargs["uid"] = user
-        elif isinstance(user, str) and user != "root":
+        elif user == "root":
+            opts_kwargs["uid"] = 0
+        elif isinstance(user, str):
             effective_command = f"su -s /bin/sh -c {shlex.quote(command)} {shlex.quote(user)}"
 
         sdk_timeout_s = (
