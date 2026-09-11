@@ -135,6 +135,8 @@ def _vllm_base_flags(service: VllmServiceConfig) -> str:
         f" --port {service.port}"
         f" --tensor-parallel-size {service.tensor_parallel_size}"
     )
+    if service.served_model_name:
+        cmd += f" --served-model-name {shlex.quote(service.served_model_name)}"
     if service.pipeline_parallel_size > 1:
         cmd += f" --pipeline-parallel-size {service.pipeline_parallel_size}"
     if service.extra_args:

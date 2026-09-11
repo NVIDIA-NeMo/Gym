@@ -55,6 +55,15 @@ class BaseModelServiceConfig(BaseServiceConfig):
 
     model: str
     port: int = 8000
+    # The name clients should address this model by, if different from `model`
+    # (e.g. `model` is a local checkpoint path like /checkpoint, but the engine
+    # is told to serve it under a human-readable name). Defaults to `model`
+    # when unset -- both the engine's own serving flag (vLLM:
+    # _vllm_base_flags's --served-model-name) and driver.policy_model's
+    # auto-wiring of policy_model_name (SubmitConfig.
+    # _resolve_and_validate_placements) read this field, so the two always
+    # agree on what name a request actually has to use.
+    served_model_name: str | None = None
 
 
 class VllmServiceConfig(BaseModelServiceConfig):
@@ -217,7 +226,7 @@ class SubmitConfig(_StrictModel):
                             f"but driver.policy_model is also set. Remove one."
                         )
                     benchmark.run["policy_base_url"] = f"http://localhost:{service.port}/v1"
-                    benchmark.run["policy_model_name"] = service.model
+                    benchmark.run["policy_model_name"] = service.served_model_name or service.model
                     # vLLM doesn't require auth; dummy key satisfies clients that require the header.
                     benchmark.run["policy_api_key"] = "dummy"  # pragma: allowlist secret
 
