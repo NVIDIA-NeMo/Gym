@@ -580,8 +580,9 @@ async def test_runner_cancellation_closes_requests_before_return(runner_config, 
 
 
 @pytest.mark.parametrize("route_failures", [False, True])
+@pytest.mark.parametrize("legacy", [False, True])
 async def test_runner_accepts_explicit_failures_independently_of_exception_policy(
-    runner_config, monkeypatch, route_failures
+    runner_config, monkeypatch, route_failures, legacy
 ):
     runner_config.route_failures_to_sidecar = route_failures
 
@@ -589,6 +590,8 @@ async def test_runner_accepts_explicit_failures_independently_of_exception_polic
         row = kwargs["json"]
         if row["task"] == 0:
             return FakeResponse(200, {"reward": 0, "response": {}})
+        if legacy:
+            return FakeResponse(200, {"_ng_failure_class": "judge_failed", "error": "Judge unavailable"})
         return FakeResponse(
             200,
             RolloutFailure(
@@ -605,3 +608,6 @@ async def test_runner_accepts_explicit_failures_independently_of_exception_polic
     assert len(list(read_records(output))) == 1
     failures = list(read_records(collection.failures_path_for(output)))
     assert len(failures) == 2 and all("reward" not in row for row in failures)
+    for row in failures:
+        assert row["error"] == "Judge unavailable"
+        assert row["_ng_failure_message"] == row["_ng_failure_record"]["failure_reason"] == row["error"]

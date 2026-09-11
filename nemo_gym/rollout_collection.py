@@ -947,7 +947,7 @@ def _judge_failure_response(result: Any) -> Optional[Dict]:
 
 
 def _failure_compatibility_row(failure: RolloutFailure, verification_response: Optional[Dict] = None) -> Dict:
-    """Keep existing sidecar routing keys while exposing the canonical failure.
+    """Keep existing sidecar routing keys and diagnostics alongside the canonical failure.
 
     Remove these aliases when row-oriented consumers and #3180 producers migrate.
     The canonical record never carries generation. The sidecar envelope retains
@@ -959,6 +959,7 @@ def _failure_compatibility_row(failure: RolloutFailure, verification_response: O
         NG_FAILURE_CLASS_KEY: failure.failure_kind,
         "_ng_failure_type": failure.exception_type,
         "_ng_failure_message": failure.failure_reason,
+        "error": failure.failure_reason,
         "_ng_failure_http_status": failure.http_status,
         "_ng_failure_response_body": failure.response_body,
     }
