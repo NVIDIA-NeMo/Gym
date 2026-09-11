@@ -32,7 +32,7 @@ from nemo_gym.config_types import ConfigError
 from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.rollout_recovery import RunManifest, _digest, atomic_write_json
+from nemo_gym.rollout_recovery import RunManifest, _digest
 
 
 RUN_ID_KEY = "_ng_run_id"
@@ -172,19 +172,24 @@ class RolloutJournal:
             self._event(key, "dispatched")
             self._dispatch(key)
 
-    def _payload(self, row: dict, *, legacy: bool = False) -> None:
+    def check_outcome(self, row: dict, *, legacy: bool = False) -> tuple[str, int]:
+        """Validate without mutation, before a writer appends the payload."""
         key = self._key(row)
         if row.get(RUN_ID_KEY) != self.manifest.run_id and not (legacy and RUN_ID_KEY not in row):
             raise ConfigError("Saved outcome belongs to a different run.")
         if not legacy and key not in self.dispatched:
             raise ConfigError(f"Saved outcome {key!r} has no dispatch in this run's attempt history.")
-        if legacy:
-            self._dispatch(key)
         previous = self.payloads.get(key)
         if previous is not None and previous != row:
             raise ConfigError(f"Conflicting outcomes for rollout attempt {key!r}.")
         if key in self.omitted:
             raise ConfigError(f"Omitted rollout attempt {key!r} also has an outcome.")
+        return key
+
+    def _payload(self, row: dict, *, legacy: bool = False) -> None:
+        key = self.check_outcome(row, legacy=legacy)
+        if legacy:
+            self._dispatch(key)
         self.payloads[key] = row
 
     def outcome(self, row: dict) -> None:
@@ -288,6 +293,7 @@ class RolloutJournal:
         expected = len(self.expected)
         return {
             "schema_version": 1,
+            "selection_policy": self.manifest.selection_policy,
             "run_id": self.manifest.run_id,
             "expected": expected,
             "successful": counts["success"],
@@ -301,6 +307,3 @@ class RolloutJournal:
             "reconciled": counts["unknown"] == 0,
             "identity_verified": not (self.manifest.legacy_import or self.manifest.identity_overridden),
         }
-
-    def write_coverage(self, output: Path) -> None:
-        atomic_write_json(coverage_path_for(output), self.coverage())

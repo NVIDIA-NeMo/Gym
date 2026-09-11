@@ -75,13 +75,8 @@ from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_pr
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_journal import (
     RUN_ID_KEY,
-    RolloutJournal,
     coverage_path_for,
     journal_path_for,
-    logical_rollout_id,
-    materialized_path_for,
-    prepare_append,
-    read_records,
 )
 from nemo_gym.rollout_observability import (
     AgentInvocation,
@@ -96,7 +91,8 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
 )
 from nemo_gym.rollout_outcomes import InvalidRolloutResult, RolloutFailure
-from nemo_gym.rollout_recovery import RunManifest, atomic_write_json, manifest_path_for, validate_resume
+from nemo_gym.rollout_recovery import RunManifest, atomic_write_json, manifest_path_for
+from nemo_gym.rollout_store import RolloutStore
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
@@ -175,6 +171,8 @@ class _CompletedRollout:
     row: Dict[str, Any]
     result: Dict[str, Any] | RolloutFailure
     rollout_latency_ms: Optional[float]
+    # Actual generation retained for judge-only recovery, outside RolloutFailure.
+    verification_response: Optional[Dict[str, Any]] = None
 
 
 def _nonnegative_int(value: Any) -> Optional[int]:
@@ -938,11 +936,22 @@ def _normalize_rollout_outcome(row: Dict, result: Any) -> Dict | RolloutFailure:
     return result
 
 
-def _failure_compatibility_row(failure: RolloutFailure) -> Dict:
+def _judge_failure_response(result: Any) -> Optional[Dict]:
+    """Legacy judge_failsafe carries real generation that can be judged again."""
+    if isinstance(result, dict) and result.get(NG_FAILURE_CLASS_KEY) == "judge_failed":
+        response = result.get("response")
+        if isinstance(response, dict):
+            return response
+    return None
+
+
+def _failure_compatibility_row(failure: RolloutFailure, verification_response: Optional[Dict] = None) -> Dict:
     """Keep existing sidecar routing keys while exposing the canonical failure.
 
     Remove these aliases when row-oriented consumers and #3180 producers migrate.
-    The explicit adapter never carries legacy reward/response placeholders.
+    The canonical record never carries generation. The sidecar envelope retains
+    actual judge input for existing --judge-failed-only readers, without a reward.
+    Other legacy response placeholders are discarded.
     """
     row = {
         "_ng_failure_record": failure.model_dump(mode="json"),
@@ -954,6 +963,8 @@ def _failure_compatibility_row(failure: RolloutFailure) -> Dict:
     }
     if failure.terminal:
         row[NG_TERMINAL_KEY] = True
+    if failure.failure_kind == "judge_failed" and verification_response is not None:
+        row["response"] = verification_response
     return row
 
 
@@ -1277,11 +1288,10 @@ class RolloutCollectionHelper(BaseModel):
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
         output = Path(config.output_jsonl_fpath)
         if manifest_path_for(output).exists() and journal_path_for(output).exists():
-            manifest = RunManifest.model_validate_json(manifest_path_for(output).read_bytes())
-            history = RolloutJournal.load(output, manifest, import_legacy=manifest.legacy_import)
-            results = history.selected("success")
-            rows = [history.expected[logical_rollout_id(result)] for result in results]
-            return history.pending(_get_max_rollout_attempts()), rows, results, [[orjson.dumps(r)] for r in results]
+            store = RolloutStore.read(output)
+            results = store.selected("success")
+            rows = store.inputs_for(results)
+            return store.pending(_get_max_rollout_attempts()), rows, results, [[orjson.dumps(r)] for r in results]
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
         with Path(config.output_jsonl_fpath).open("rb") as f:
@@ -1358,118 +1368,35 @@ class RolloutCollectionHelper(BaseModel):
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
         failures_fpath = failures_path_for(output_fpath)
-        manifest_fpath = manifest_path_for(output_fpath)
-        history_fpath = journal_path_for(output_fpath)
-        import_history = False
         global_config = get_global_config_dict()
         resolved_config = OmegaConf.to_container(OmegaConf.create(global_config), resolve=True)
 
-        # Create the output directory up front: every artifact this run writes (materialized inputs,
-        # rollouts, failures sidecar, aggregate metrics) is derived from output_fpath and keeps its
-        # parent, and the materialized-inputs write below is the first one. Keep this above that
-        # write -- a user pointing --output at a not-yet-existing directory is the common case
-        # outside a git clone.
-        output_fpath.parent.mkdir(parents=True, exist_ok=True)
-
-        saved_artifacts = (
-            config.materialized_jsonl_fpath,
-            output_fpath,
-            manifest_fpath,
-            failures_fpath,
-            history_fpath,
-        )
-        if config.resume_from_cache and any(path.exists() for path in saved_artifacts):
-            if not config.materialized_jsonl_fpath.exists() or not output_fpath.exists():
-                raise ConfigError("Cannot resume: saved materialized inputs or rollout output are missing.")
-            current_manifest = None
-            if manifest_fpath.exists():
-                try:
-                    current_rows = self._preprocess_rows_from_config(config)
-                    if any(
-                        (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is None
-                        and row.get(TASK_SOURCE_KEY_NAME) is not None
-                        for row in current_rows
-                    ):
-                        self.resolve_task_sources(current_rows, self.setup_server_client().global_config_dict)
-                    current_manifest = RunManifest.create(
-                        _resolve_under_cwd_or_install(config.input_jsonl_fpath),
-                        current_rows,
-                        config.model_dump(mode="json"),
-                        resolved_config,
-                    )
-                except (ConfigError, OSError):
-                    if not config.allow_unsafe_resume:
-                        raise
-            manifest = validate_resume(
-                manifest_fpath,
-                current_manifest,
-                config.materialized_jsonl_fpath,
-                allow_unsafe=config.allow_unsafe_resume,
-            )
-            if manifest is None:
-                manifest = RunManifest.import_legacy(list(read_records(config.materialized_jsonl_fpath)))
-                import_history = True
-            elif not history_fpath.exists():
-                if not config.allow_unsafe_resume:
-                    raise ConfigError(f"Cannot resume without attempt history: {history_fpath}.")
-                manifest = manifest.model_copy(update={"legacy_import": True})
-                import_history = True
-            history = RolloutJournal.load(output_fpath, manifest, import_legacy=manifest.legacy_import)
-            input_rows = history.pending(_get_max_rollout_attempts())
-            results = history.selected("success")
-            rows = [history.expected[logical_rollout_id(result)] for result in results]
-            if import_history or manifest.identity_overridden:
-                manifest.write(manifest_fpath)
-            persisted_rows = list(rows)
-            persisted_results = list(results)
-        else:
-            if config.resume_from_cache:
-                if not output_fpath.exists():
-                    print(f"Skipping resume_from_cache because output_fpath {output_fpath} doesn't exist!")
-                if not config.materialized_jsonl_fpath.exists():
-                    print(
-                        f"Skipping resume_from_cache because materialized_jsonl_fpath {config.materialized_jsonl_fpath} doesn't exist!"
-                    )
-            else:
-                print("Clearing output fpath since `resume_from_cache=False`!")
-
-            rows: List[Dict] = []
-            results: List[Dict] = []
-            persisted_rows: List[Dict] = []
-            persisted_results: List[Dict] = []
-
+        def prepare_inputs() -> tuple[list[dict], RunManifest]:
             input_rows = self._preprocess_rows_from_config(config)
-            # Returned rows are sorted by (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
-
-            # Resolve task_source rows to agents BEFORE the materialized write: materialized
-            # inputs are the run-scoped artifact and must carry the resolved agent_ref (custom
-            # drivers, e.g. gdpval's multistage orchestrator, read it from there). Guarded so
-            # legacy agent_ref-only runs never need the head server at this point.
+            # Materialized inputs must contain resolved agent routing for custom
+            # drivers and for reproducible identity checks on resume.
             if any(
-                (r.get(AGENT_REF_KEY_NAME) or {}).get("name") is None and r.get(TASK_SOURCE_KEY_NAME) is not None
-                for r in input_rows
+                (row.get(AGENT_REF_KEY_NAME) or {}).get("name") is None and row.get(TASK_SOURCE_KEY_NAME) is not None
+                for row in input_rows
             ):
                 self.resolve_task_sources(input_rows, self.setup_server_client().global_config_dict)
-
-            with config.materialized_jsonl_fpath.open("wb") as f:
-                for row in tqdm(input_rows, desc="Writing materialized rows"):
-                    f.write(orjson.dumps(row) + b"\n")
-
             manifest = RunManifest.create(
                 _resolve_under_cwd_or_install(config.input_jsonl_fpath),
                 input_rows,
                 config.model_dump(mode="json"),
                 resolved_config,
             )
-            history = RolloutJournal(manifest, input_rows)
-            # Invalidate old outputs before publishing the new run's identity.
-            output_fpath.unlink(missing_ok=True)
-            failures_fpath.unlink(missing_ok=True)
-            history_fpath.unlink(missing_ok=True)
-            coverage_path_for(output_fpath).unlink(missing_ok=True)
-            manifest.write(manifest_fpath)
+            return input_rows, manifest
 
-        input_rows = [dict(row, **{RUN_ID_KEY: manifest.run_id}) for row in input_rows]
+        store = RolloutStore.start_or_resume(
+            output_fpath,
+            prepare_inputs,
+            resume=config.resume_from_cache,
+            allow_unsafe=config.allow_unsafe_resume,
+        )
+        input_rows = store.pending(_get_max_rollout_attempts())
+        results = store.selected("success")
+        rows = store.inputs_for(results)
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
             print(f"Querying with {config.num_samples_in_parallel} concurrent requests")
@@ -1543,24 +1470,14 @@ class RolloutCollectionHelper(BaseModel):
         async with AsyncExitStack() as output_files:
             if owned_token_source is not None:
                 output_files.push_async_callback(owned_token_source.close)
-            for path in (output_fpath, failures_fpath, history_fpath):
-                prepare_append(path)
-            # Register first: this runs after the output files close, including on
-            # cancellation. The journal remains the source of truth after SIGKILL.
-            output_files.callback(history.write_coverage, output_fpath)
-            history.file = output_files.enter_context(history_fpath.open("ab"))
-            results_file = output_files.enter_context(output_fpath.open("ab"))
-            failures_file = output_files.enter_context(failures_fpath.open("ab"))
-            if import_history:
-                history.seed_legacy_history()
-            history.write_coverage(output_fpath)
+            output_files.enter_context(store)
             failure_counts: Counter = Counter()
             dispatches = self._run_examples_with_metadata(
                 input_rows,
                 semaphore=semaphore,
                 route_failures_to_sidecar=config.route_failures_to_sidecar,
                 typed_outcomes=config.route_failures_to_sidecar,
-                on_dispatch=history.dispatch,
+                on_dispatch=store.record_dispatch,
             )
             if hasattr(dispatches, "aclose"):
                 output_files.push_async_callback(dispatches.aclose)
@@ -1569,10 +1486,13 @@ class RolloutCollectionHelper(BaseModel):
             for future in dispatches:
                 completed = await future
                 row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
+                verification_response = completed.verification_response
+                if verification_response is None:
+                    verification_response = _judge_failure_response(result)
                 # Custom dispatch implementations may return an already-completed
                 # future. Associate those outcomes too; normal HTTP dispatch records
                 # its event before the request through on_dispatch above.
-                history.dispatch(row)
+                store.record_dispatch(row)
                 if isinstance(result, dict):
                     if result.get("type") == "failure":
                         result = _normalize_rollout_outcome(row, result)
@@ -1580,12 +1500,12 @@ class RolloutCollectionHelper(BaseModel):
                         result = _failure_outcome(row, result, "agent")
                 structured_failure = isinstance(result, RolloutFailure)
                 if structured_failure:
-                    result = _failure_compatibility_row(result)
+                    result = _failure_compatibility_row(result, verification_response)
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
                 result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
-                result[RUN_ID_KEY] = manifest.run_id
+                result[RUN_ID_KEY] = store.manifest.run_id
                 if TASK_SOURCE_KEY_NAME in row:
                     result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
                 if SKILLS_REF_KEY_NAME in row:
@@ -1662,12 +1582,11 @@ class RolloutCollectionHelper(BaseModel):
 
                 rows.append(row)
                 results.append(result)
-                serialized = orjson.dumps(result)
 
                 if no_persist:
                     # A returned suppression without a failure is an intentional
                     # omission. Known kill-shaped failures were converted above.
-                    history.omit(row, str(result.get("error") or "Producer requested no result persistence"))
+                    store.record_omission(row, str(result.get("error") or "Producer requested no result persistence"))
                 elif failure_class is not None:
                     # Failures remain separate from completed generation data.
                     failure_counts[failure_class] += 1
@@ -1679,16 +1598,10 @@ class RolloutCollectionHelper(BaseModel):
                         f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "
                         f"class={failure_class} error={detail}"
                     )
-                    failures_file.write(serialized + b"\n")
-                    failures_file.flush()
-                    history.outcome(result)
+                    store.record_outcome(result)
                 else:
                     # Success → main jsonl.
-                    results_file.write(serialized + b"\n")
-                    results_file.flush()
-                    history.outcome(result)
-                    persisted_rows.append(row)
-                    persisted_results.append(result)
+                    store.record_outcome(result, sync=capture_build_can_retire(token_capture_build))
                     try:
                         rollout_id = maybe_rollout_id_from_run_body(result)
                     except (TypeError, ValueError) as error:
@@ -1702,7 +1615,6 @@ class RolloutCollectionHelper(BaseModel):
                                 stacklevel=2,
                             )
                     if rollout_id is not None and capture_build_can_retire(token_capture_build):
-                        os.fsync(results_file.fileno())
                         await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
 
                 counts_left[row[AGENT_REF_KEY_NAME]["name"]] -= 1
@@ -1757,9 +1669,9 @@ class RolloutCollectionHelper(BaseModel):
 
                         export_metrics(step_metrics, step=int(current_pct))
 
-        persisted_results = history.selected("success")
-        persisted_rows = [history.expected[logical_rollout_id(result)] for result in persisted_results]
-        completion = history.coverage()
+        persisted_results = store.selected("success")
+        persisted_rows = store.inputs_for(persisted_results)
+        completion = store.coverage()
         print(
             f"Rollout coverage: {completion['successful']}/{completion['expected']} completed, "
             f"{completion['failed']} failed, {completion['intentionally_omitted']} intentionally omitted, "
@@ -1792,7 +1704,7 @@ class RolloutCollectionHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            counted[:] = _counted_failure_rows(history.selected("failure"), config.count_failure_classes_as_zero)
+            counted[:] = _counted_failure_rows(store.selected("failure"), config.count_failure_classes_as_zero)
             if config.count_failure_classes_as_zero:
                 print(
                     f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}"
@@ -1803,9 +1715,7 @@ class RolloutCollectionHelper(BaseModel):
 
         expected_rollouts = completion["expected"]
         scored_rollouts = len(persisted_results) + len(counted)
-        completion["scored"] = scored_rollouts
-        completion["failures_counted_as_zero"] = len(counted)
-        atomic_write_json(coverage_path_for(output_fpath), completion)
+        store.write_coverage(scored=scored_rollouts, failures_counted_as_zero=len(counted))
         coverage = _coverage_report(expected_rollouts, scored_rollouts, failure_counts, failures_fpath)
         if get_exporters():  # pragma: no cover
             export_metrics(
@@ -2125,13 +2035,19 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     await raise_for_status(res)
                     stage = "response"
                     result = await get_response_json(res)
+                    verification_response = _judge_failure_response(result)
                     if typed_outcomes:
                         stage = "result"
                         result = _normalize_rollout_outcome(row, result)
                     # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
                     # from summed model-call/tool latencies to account for additional overhead.
                     rollout_latency_ms = (time() - started_at) * 1000
-                    return _CompletedRollout(row=row, result=result, rollout_latency_ms=rollout_latency_ms)
+                    return _CompletedRollout(
+                        row=row,
+                        result=result,
+                        rollout_latency_ms=rollout_latency_ms,
+                        verification_response=verification_response,
+                    )
                 except Exception as e:
                     print(
                         "[rollout_collection] /run failed "
@@ -2366,24 +2282,16 @@ class RolloutAggregationHelper(BaseModel):
             print(f"  - {p}")
 
         results: List[Dict] = []
-        histories: List[RolloutJournal] = []
+        histories: List[RolloutStore] = []
         legacy_paths: List[Path] = []
         run_ids: set[str] = set()
         for shard_path in input_paths:
             shard = Path(shard_path)
-            manifest_path = manifest_path_for(shard)
-            if manifest_path.exists():
-                manifest = RunManifest.model_validate_json(manifest_path.read_bytes())
-                if manifest.run_id in run_ids:
+            history = RolloutStore.read(shard)
+            if history is not None:
+                if history.manifest.run_id in run_ids:
                     raise ConfigError("The same run was supplied through multiple shard paths.")
-                run_ids.add(manifest.run_id)
-                history = RolloutJournal.load(shard, manifest, import_legacy=manifest.legacy_import)
-                histories.append(history)
-                results.extend(history.selected("success"))
-                continue
-            if materialized_path_for(shard).exists():
-                manifest = RunManifest.import_legacy(list(read_records(materialized_path_for(shard))))
-                history = RolloutJournal.load(shard, manifest, import_legacy=True)
+                run_ids.add(history.manifest.run_id)
                 histories.append(history)
                 results.extend(history.selected("success"))
                 continue

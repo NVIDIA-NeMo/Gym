@@ -26,9 +26,16 @@ import pytest
 from pydantic import ValidationError
 
 import nemo_gym.rollout_collection as collection
+import nemo_gym.rollout_reverification as reverification
 from nemo_gym.config_types import ConfigError
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
-from nemo_gym.rollout_journal import RolloutJournal, coverage_path_for, journal_path_for, read_records
+from nemo_gym.rollout_journal import (
+    RolloutJournal,
+    coverage_path_for,
+    journal_path_for,
+    logical_rollout_id,
+    read_records,
+)
 from nemo_gym.rollout_outcomes import RolloutFailure
 from nemo_gym.rollout_recovery import RunManifest, manifest_path_for, validate_resume
 from tests.unit_tests.test_rollout_collection import FakeResponse, failing_row, http_error, install_fake_server_client
@@ -256,6 +263,20 @@ def test_unknown_manifest_version_is_rejected_even_with_override(saved_manifest)
         validate_resume(path, None, materialized, allow_unsafe=True)
 
 
+def test_older_manifest_defaults_to_existing_attempt_selection_policy(saved_manifest):
+    _, _, _, _, _, saved, _ = saved_manifest
+    payload = saved.model_dump()
+    del payload["selection_policy"]
+    assert RunManifest.model_validate(payload).selection_policy == "latest_dispatched"
+
+
+def test_unknown_selection_policy_is_rejected_even_with_override(saved_manifest):
+    _, _, materialized, _, _, saved, path = saved_manifest
+    path.write_text(json.dumps(saved.model_dump() | {"selection_policy": "any_success"}))
+    with pytest.raises(ConfigError, match="Cannot read"):
+        validate_resume(path, None, materialized, allow_unsafe=True)
+
+
 @pytest.mark.parametrize("interruption", [asyncio.CancelledError, RuntimeError])
 async def test_interrupted_runner_closes_files_and_reuses_saved_zero(tmp_path, monkeypatch, interruption):
     monkeypatch.setattr(collection, "get_global_config_dict", lambda: {})
@@ -394,6 +415,66 @@ def runner_config(tmp_path, monkeypatch):
     )
 
 
+@pytest.mark.parametrize("route_failures", [False, True])
+async def test_collected_judge_failure_can_be_reverified_without_inference(runner_config, monkeypatch, route_failures):
+    runner_config.route_failures_to_sidecar = route_failures
+    generated_response = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "42"}]}]}
+
+    async def post(**kwargs):
+        row = kwargs["json"]
+        if kwargs["url_path"] == "/verify":
+            assert row["task"] == 1 and row["response"] == generated_response
+            return FakeResponse(200, {"reward": 1.0, "response": row["response"]})
+        assert kwargs["url_path"] == "/run"
+        if row["task"] == 1:
+            return FakeResponse(
+                200,
+                {
+                    "_ng_failure_class": "judge_failed",
+                    "failure_reason": "Judge unavailable",
+                    "reward": 0.0,
+                    "response": generated_response,
+                },
+            )
+        if row["task"] == 2:
+            return FakeResponse(200, {"_ng_failure_class": "agent_request_failed", "reward": 0, "response": {}})
+        return FakeResponse(200, {"reward": 0.0, "response": {"output": []}})
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    await RolloutCollectionHelper().run_from_config(runner_config)
+    output = Path(runner_config.output_jsonl_fpath)
+    successes = list(read_records(output))
+    failures = {row["_ng_task_index"]: row for row in read_records(collection.failures_path_for(output))}
+    assert failures[1]["response"] == generated_response
+    assert "reward" not in failures[1]
+    assert "response" not in failures[2]
+    for row in failures.values():
+        failure = RolloutFailure.model_validate(row["_ng_failure_record"])
+        assert "response" not in failure.model_dump() and "reward" not in failure.model_dump()
+
+    # Exercise the real sidecar reader, materialized-input join, payload builder,
+    # verifier dispatch, and output writer; only the HTTP boundary is replaced.
+    monkeypatch.setattr(reverification, "setup_server_client", lambda: client)
+    monkeypatch.setattr(reverification, "_build_agent_to_resources_server_mapping", lambda _: {"my_agent": "rs"})
+    monkeypatch.setattr(reverification, "raise_for_status", collection.raise_for_status)
+    monkeypatch.setattr(reverification, "get_response_json", collection.get_response_json)
+    monkeypatch.setattr(reverification, "get_exporters", list)
+    config = reverification.RolloutReverificationConfig(
+        materialized_inputs_jsonl_fpath=str(runner_config.materialized_jsonl_fpath),
+        rollouts_jsonl_fpath=str(output),
+        output_jsonl_fpath=str(output.with_name("reverified.jsonl")),
+        judge_failed_only=True,
+        disable_aggregation=True,
+    )
+    returned = await reverification.RolloutReverificationHelper().run_from_config(config)
+    by_task = {row["_ng_task_index"]: row for row in returned}
+    assert by_task[0] == successes[0]
+    assert by_task[1]["reward"] == 1.0 and by_task[1]["response"] == generated_response
+    assert set(by_task) == {0, 1}
+    assert [call.kwargs["url_path"] for call in client.post.await_args_list].count("/run") == 3
+    assert [call.kwargs["url_path"] for call in client.post.await_args_list].count("/verify") == 1
+
+
 async def test_runner_journals_before_request_and_resumes_only_failed_work(runner_config, monkeypatch):
     output = Path(runner_config.output_jsonl_fpath)
     calls = []
@@ -402,7 +483,7 @@ async def test_runner_journals_before_request_and_resumes_only_failed_work(runne
         row = kwargs["json"]
         calls.append(row)
         history = RolloutJournal.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
-        identity = collection.logical_rollout_id(row)
+        identity = logical_rollout_id(row)
         assert history.latest[identity] == row.get("_ng_attempt_index", 0)
         assert history.disposition(identity) == "unknown"
         if row["task"] == 1 and row.get("_ng_attempt_index", 0) == 0:
@@ -474,7 +555,7 @@ async def test_runner_accepts_explicit_failures_independently_of_exception_polic
         return FakeResponse(
             200,
             RolloutFailure(
-                rollout_id=collection.logical_rollout_id(row),
+                rollout_id=logical_rollout_id(row),
                 failure_kind="judge_failed",
                 stage="verifier",
                 failure_reason="Judge unavailable",

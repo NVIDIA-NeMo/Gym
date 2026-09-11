@@ -112,6 +112,8 @@ class RunManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: Literal[1] = 1
+    # Selection is a run policy, not an inference from payload arrival order.
+    selection_policy: Literal["latest_dispatched"] = "latest_dispatched"
     run_id: str
     source_digest: str
     materialized_digest: str

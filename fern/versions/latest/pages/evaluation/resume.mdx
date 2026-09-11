@@ -44,7 +44,8 @@ attempts per logical rollout (default: 3); reaching that limit does not create a
 The **greatest dispatched attempt index** determines the current outcome. A late result from an older attempt remains
 in the append-only artifacts but cannot replace the newer attempt or count as an extra sample. A newer attempt with no
 saved outcome remains unknown, even if an older success arrives afterward. Recovery and `gym eval aggregate` use this
-same selection rule.
+same selection rule, recorded as `selection_policy: "latest_dispatched"` in the manifest and coverage report.
+Earlier manifests without this field use the same rule; an unrecognized policy is rejected.
 
 Gym writes `<output_stem>_coverage.json` with an exact inventory:
 
@@ -111,3 +112,8 @@ not copied into the failure record. Completed masked results remain completed di
 The evaluation runner uses structured outcomes when `route_failures_to_sidecar=true`. Its sidecar retains the existing
 `_ng_failure_*` routing aliases for row-oriented consumers and stores the canonical record under `_ng_failure_record`. Those aliases can be removed after
 the consumers and the producer migration in [#3180](https://github.com/NVIDIA-NeMo/Gym/issues/3180) adopt the new contract.
+
+For a legacy `judge_failed` result that includes the actual generated response, the sidecar also preserves that
+`response` outside the canonical failure record, without a reward. This keeps `gym eval reverify --judge-failed-only`
+working: it submits the saved response to the verifier again without rerunning inference. A structured failure that
+never included a response cannot reconstruct one. Other legacy response placeholders are discarded.
