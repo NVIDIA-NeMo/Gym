@@ -55,7 +55,7 @@ bc_v4_7_rs:
               word_count_max_unmatched_actual_words: 4
               # v4 used 3. At 4 the relaxed miss/extra branch only fires when the
               # golden holds >= 4 queries; 3-query goldens fall back to exact set
-              # match. On mercor goldens this moves ~12.4% of search calls from
+              # match. On our golden set this moves ~12.4% of search calls from
               # the relaxed branch to strict.
               list_f1_relaxed_min_expected_len: 4
               list_f1_max_unmatched_expected: 0

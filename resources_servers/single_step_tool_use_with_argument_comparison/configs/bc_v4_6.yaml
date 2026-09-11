@@ -51,7 +51,7 @@ bc_v4_6_rs:
               # token of ten leaves sim at 0.45, above both thresholds. See
               # test_wrong_year_still_scores_one_under_both.
               #
-              # Copied from venkats' 2026-08-15 change to his own search_pivot
+              # Copied from a 2026-08-15 change to the search_pivot
               # config (0.3 -> 0.4) in the env23 run, where the same arithmetic
               # applies to a comparator that has no floors at all.
               word_count_similarity_threshold: 0.4
@@ -61,7 +61,7 @@ bc_v4_6_rs:
               word_count_max_unmatched_actual_words: 4
               # v4 used 3. At 4 the relaxed miss/extra branch only fires when the
               # golden holds >= 4 queries; 3-query goldens fall back to exact set
-              # match. On mercor goldens this moves ~12.4% of search calls from
+              # match. On our golden set this moves ~12.4% of search calls from
               # the relaxed branch to strict.
               list_f1_relaxed_min_expected_len: 4
               list_f1_max_unmatched_expected: 0
