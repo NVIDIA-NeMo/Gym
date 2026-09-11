@@ -114,8 +114,10 @@ class ConversationalToolUseAgentVerifyResponse(BaseVerifyResponse):
 
     @model_validator(mode="after")
     def require_result_for_scored_rollout(self) -> "ConversationalToolUseAgentVerifyResponse":
-        failure_class = (self.model_extra or {}).get(NG_FAILURE_CLASS_KEY)
-        if failure_class != TRANSIENT_FAILURE_CLASS and self.result is None:
+        extra = self.model_extra or {}
+        failure_class = extra.get(NG_FAILURE_CLASS_KEY)
+        # skip_verification returns the request echoed back with a fixed reward and no typed result.
+        if failure_class != TRANSIENT_FAILURE_CLASS and self.result is None and not extra.get("verification_skipped"):
             raise ValueError("scored conversational tool-use responses require a typed result")
         return self
 
@@ -358,6 +360,12 @@ class ConversationalToolUseAgent(SimpleResponsesAPIAgent):
                     "response": response_payload,
                 }
             )
+            if self.config.skip_verification:
+                session_needs_discard = False
+                return ConversationalToolUseAgentVerifyResponse.model_validate(
+                    verify_request.model_dump()
+                    | {"reward": float(self.config.skip_verification_reward), "verification_skipped": True}
+                )
             try:
                 verify_response = await self.server_client.post(
                     server_name=self.config.resources_server.name,

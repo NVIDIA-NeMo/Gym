@@ -801,14 +801,21 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 AgentObservationBundle.model_validate(raw_observations) if isinstance(raw_observations, dict) else None
             )
 
-            verify_resp = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=body.model_dump() | {"response": agent_resp_json},
-                cookies=cookies,
-            )
-            await raise_for_status(verify_resp)
-            verify_json = await get_response_json(verify_resp)
+            if self.config.skip_verification:
+                verify_json = body.model_dump() | {
+                    "response": agent_resp_json,
+                    "reward": float(self.config.skip_verification_reward),
+                    "verification_skipped": True,
+                }
+            else:
+                verify_resp = await self.server_client.post(
+                    server_name=self.config.resources_server.name,
+                    url_path="/verify",
+                    json=body.model_dump() | {"response": agent_resp_json},
+                    cookies=cookies,
+                )
+                await raise_for_status(verify_resp)
+                verify_json = await get_response_json(verify_resp)
 
             gym_resp = NeMoGymResponse.model_validate(agent_resp_json)
             turns = sum(

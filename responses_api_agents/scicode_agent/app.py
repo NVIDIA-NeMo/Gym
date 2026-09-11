@@ -224,6 +224,11 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         verify_request_data["solutions"] = solutions
         # /verify requires a response; record the last sub-step's generation (empty if none ran).
         verify_request_data["response"] = last_response_json if last_response_json is not None else _empty_response()
+        if self.config.skip_verification:
+            return verify_request_data | {
+                "reward": float(self.config.skip_verification_reward),
+                "verification_skipped": True,
+            }
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
