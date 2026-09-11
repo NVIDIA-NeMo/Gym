@@ -93,6 +93,17 @@ multiple agent harnesses, or so its implementation can be versioned/tested along
 a supported alternative, not the default. See other resources servers (e.g. `tavily_search`'s own
 tool-call endpoints when used with non-deepagents agents) for that pattern.
 
+## Resources server compatibility
+
+Works with any resources server based verifier, but does not work for resources server tools or other
+endpoints out of the box. DeepAgents Agent ships its own toolset directly on the agent — a subclass of
+`DeepAgentsAgent` (e.g. `reasoning_search_agent.py`'s `ReasoningSearchDeepAgent`) declares its tools by
+passing them into `create_deep_agent(tools=[...])` inside `build_agent()`, so it does not rely on tools
+defined in the dataset. It may work with Gymnasium style resources servers, though. In testing, only the
+resources server's task data and `verify` are used. This means existing benchmarks (math, code,
+reasoning_gym, mcqa, instruction_following, ...) can be used as-is by pointing `resources_server` at them in
+`configs/langchain_deepagents_agent.yaml`. However, tools in the resource server will be ignored. 
+
 ## Config fields
 
 - `resources_server`: the resources server this agent interacts with for tools, state, and verification
