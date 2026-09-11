@@ -19,6 +19,7 @@ user message's content to:
 
 ```
 [{"type": "input_text",  "text": "<prompt>"},
+ {"type": "input_text",  "text": "<document_delivery>...compositing/coverage notice...</document_delivery>"}, # when needed
  {"type": "input_text",  "text": "<document>...extracted text...</document>"},   # include_text
  {"type": "input_image", "image_url": "data:image/png;base64,..."},              # one per page/batch
  ...]
@@ -64,10 +65,16 @@ problem, the agent reacts and retries:
   library assertion) is treated as a terminal, per-document failure: the row scores 0 (an empty
   answer earns no rubric credit) instead of crashing the whole evaluation run.
 
+When compositing is active, the agent adds a `document_delivery` notice to the model input stating
+how many labeled pages each image may contain. If the four-pages-per-image ceiling cannot fit every
+page within the endpoint's image cap, the notice also gives the last page covered by images and
+explains that later pages remain in the extracted text.
+
 `document_delivery` in each rollout row records the DPI/compositing actually used, plus every
-rejected attempt along the way, so a degraded or failed delivery is visible rather than silently
-mistaken for a model failure. `strip_images_from_output` keeps rollout JSONL readable; redaction is
-recorded as a `multimodal_history_redacted` gap on the trajectory.
+rejected attempt along the way. It includes `image_pages_covered`, `image_pages_omitted`, and
+`image_coverage_end_page`, so a degraded or failed delivery is visible rather than silently mistaken
+for a model failure. `strip_images_from_output` keeps rollout JSONL readable; redaction is recorded
+as a `multimodal_history_redacted` gap on the trajectory.
 
 ## Text-only models
 

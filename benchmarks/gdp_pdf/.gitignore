@@ -1,9 +1,0 @@
-# Local cluster launch scripts. These hardcode site-specific paths (Slurm
-# accounts, .sqsh containers, checkpoint and venv locations under other users'
-# directories), so they are kept out of the PR -- they would not run anywhere
-# else and would rot quickly. Delete these lines if you do want to ship them.
-sbatch_gdp_pdf_qwen38.sh
-sbatch_gdp_pdf_muse_glimmer.sh
-sbatch_gdp_pdf_kimi_k3.sh
-sbatch_gdp_pdf_super_omni.sh
-sbatch_gdp_pdf_ultra.sh

@@ -35,6 +35,7 @@ from responses_api_agents.gdp_pdf_agent.app import (
     GdpPdfAgent,
     GdpPdfAgentConfig,
     _compose_pages,
+    _delivery_notice_blocks,
     _input_limit,
     _load_manifest,
     _manifest_text_blocks,
@@ -353,6 +354,50 @@ class TestRenderManifestImages:
             manifest, self.manifest_path.parent, delivery=reduced_delivery, max_pages=1, source_dpi=150
         )
         assert len(reduced_blocks[0]["image_url"]) < len(full_blocks[0]["image_url"])
+
+
+class TestDeliveryMetadataAndNotice:
+    def test_image_cap_records_leading_page_coverage(self) -> None:
+        manifest = {
+            "pages": [
+                {"page_number": page_number, "image": f"page_{page_number:04d}.png"} for page_number in range(1, 11)
+            ]
+        }
+        delivery = DocumentDelivery(150, 2)
+        with patch.object(gdp_pdf_agent_app, "_open_page_image", return_value=Image.new("RGB", (8, 10), "white")):
+            blocks, pages_truncated = _render_manifest_images(
+                manifest, Path("unused"), delivery=delivery, max_pages=None, source_dpi=150
+            )
+
+        assert pages_truncated == 0
+        assert len(blocks) == 2
+        assert delivery.pages_per_image == 4
+        assert delivery.image_pages_covered == 8
+        assert delivery.image_pages_omitted == 2
+        assert delivery.image_coverage_end_page == 8
+
+    def test_describes_composites_and_partial_image_coverage(self) -> None:
+        delivery = DocumentDelivery(150, 2)
+        delivery.pages_per_image = 4
+        delivery.image_pages_covered = 8
+        delivery.image_pages_omitted = 2
+        delivery.image_coverage_end_page = 8
+
+        blocks = _delivery_notice_blocks(delivery)
+
+        assert len(blocks) == 1
+        text = blocks[0]["text"]
+        assert "up to 4 pages per image" in text
+        assert "each cell is labeled with its original page number" in text
+        assert "coverage stops after page 8" in text
+        assert "2 later page image(s) were omitted" in text
+        assert "remain available in the complete extracted document text" in text
+
+    def test_is_empty_for_unmodified_full_image_coverage(self) -> None:
+        delivery = DocumentDelivery(150, None)
+        delivery.image_pages_covered = 10
+        delivery.image_coverage_end_page = 10
+        assert _delivery_notice_blocks(delivery) == []
 
 
 class TestRun:

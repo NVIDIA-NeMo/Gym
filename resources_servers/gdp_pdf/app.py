@@ -100,7 +100,7 @@ class GdpPdfConfig(BaseResourcesServerConfig):
     judge_max_attempts: int = 5
 
     # Bounds concurrent judge calls. A single task can fan out to 30 criteria.
-    judge_endpoint_max_concurrency: Optional[int] = 64
+    judge_endpoint_max_concurrency: Optional[int] = 16
 
 
 # ---------------------------------------------------------------------------

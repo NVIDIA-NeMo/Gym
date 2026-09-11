@@ -121,6 +121,9 @@ class DocumentDelivery:
         self.pages_per_image = 1
         self.page_count = 0
         self.image_count = 0
+        self.image_pages_covered = 0
+        self.image_pages_omitted = 0
+        self.image_coverage_end_page: Optional[int] = None
         self.attempts: list[dict[str, Any]] = []
 
     def record(self, limit: Optional[str] = None) -> dict[str, Any]:
@@ -129,6 +132,9 @@ class DocumentDelivery:
             "pages_per_image": self.pages_per_image,
             "image_count": self.image_count,
             "page_count": self.page_count,
+            "image_pages_covered": self.image_pages_covered,
+            "image_pages_omitted": self.image_pages_omitted,
+            "image_coverage_end_page": self.image_coverage_end_page,
             "limit": limit,
         }
 
@@ -309,6 +315,10 @@ def _render_manifest_images(
     pages_truncated = total_pages - page_limit
     delivery.page_count = page_limit
     if not page_limit:
+        delivery.image_count = 0
+        delivery.image_pages_covered = 0
+        delivery.image_pages_omitted = 0
+        delivery.image_coverage_end_page = None
         return [], pages_truncated
 
     # Recomputed fresh each attempt from the current max_images -- not carried over --
@@ -326,6 +336,9 @@ def _render_manifest_images(
 
     batches = [selected[i : i + delivery.pages_per_image] for i in range(0, len(selected), delivery.pages_per_image)]
     delivery.image_count = len(batches)
+    delivery.image_pages_covered = len(selected)
+    delivery.image_pages_omitted = page_limit - len(selected)
+    delivery.image_coverage_end_page = selected[-1]["page_number"] if selected else None
 
     blocks: list[dict[str, Any]] = []
     for batch in batches:
@@ -345,6 +358,25 @@ def _render_manifest_images(
             )
         )
     return blocks, pages_truncated
+
+
+def _delivery_notice_blocks(delivery: DocumentDelivery) -> list[dict[str, Any]]:
+    """Describe composite images and partial image coverage to the policy model."""
+    notices = []
+    if delivery.pages_per_image > 1:
+        notices.append(
+            f"The page images below are composites containing up to {delivery.pages_per_image} pages per image; "
+            "each cell is labeled with its original page number."
+        )
+    if delivery.image_pages_omitted:
+        notices.append(
+            f"Image coverage stops after page {delivery.image_coverage_end_page}; "
+            f"{delivery.image_pages_omitted} later page image(s) were omitted because of the endpoint image limit."
+        )
+        notices.append("Those later pages remain available in the complete extracted document text.")
+    if not notices:
+        return []
+    return [{"type": "input_text", "text": f"<document_delivery>\n{' '.join(notices)}\n</document_delivery>"}]
 
 
 def _prompt_blocks(row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -454,7 +486,8 @@ class GdpPdfAgent(SimpleAgent):
                         jpeg_quality=self.config.jpeg_quality,
                     )
                     pages_truncated = max(pages_truncated, image_pages_truncated)
-                content = [*prompt_blocks, *text_blocks, *image_blocks]
+                delivery_notice_blocks = _delivery_notice_blocks(delivery)
+                content = [*prompt_blocks, *delivery_notice_blocks, *text_blocks, *image_blocks]
                 params_dict = body.responses_create_params.model_dump(exclude_unset=True)
                 params_dict["input"] = [{"role": "user", "content": content}]
                 params = NeMoGymResponseCreateParamsNonStreaming.model_validate(params_dict)
