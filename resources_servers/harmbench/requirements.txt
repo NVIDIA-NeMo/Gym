@@ -1,1 +1,1 @@
-# No additional runtime dependencies.
+-e nemo-gym[dev] @ ../../
