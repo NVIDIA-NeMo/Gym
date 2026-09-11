@@ -106,6 +106,11 @@ def test_nano_omni_runner_overlay() -> None:
 
     server_config = config["osworld_nano_omni_agent"]["responses_api_agents"]["osworld_agent"]
     assert server_config["runner_name"] == "nemotron_v3_nano_omni_agent"
+    assert server_config["model_protocol_id"] == "nano-omni-v3-osworld-v1"
+    assert server_config["history_policy"] == {
+        "name": "fixed",
+        "params": {"keep_images": 3},
+    }
     assert server_config["max_steps"] == 100
     assert server_config["max_tokens"] == 4096
     assert server_config["task_timeout"] == 7200

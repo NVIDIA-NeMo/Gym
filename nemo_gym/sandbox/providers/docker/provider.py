@@ -59,6 +59,21 @@ DOCKER_RUNTIME_ERROR_MARKERS = (
     "error response from daemon",
 )
 DOCKER_MISSING_CONTAINER_MARKERS = ("no such container", "no such object")
+DOCKER_CREATE_TRANSPORT_ERROR_MARKERS = (
+    "cannot connect to the docker daemon",
+    "error during connect",
+    "connection refused",
+    "connection reset by peer",
+    "broken pipe",
+    "unexpected eof",
+    "i/o timeout",
+    "client timeout exceeded",
+)
+DOCKER_NAME_CONFLICT_MARKERS = (
+    "the container name",
+    "is already in use by container",
+)
+DOCKER_RECONCILE_FORMAT = '{{index .Config.Labels "nemo-gym.sandbox"}}\t{{.Config.Image}}\t{{.State.Status}}'
 
 
 class DockerCreateError(SandboxCreateError):
@@ -126,12 +141,18 @@ class DockerCreateConfig:
     extra_run_args: list[str] = field(default_factory=list)
     apply_resource_limits: bool = True
     publish_host: str = "127.0.0.1"
+    transport_retries: int = 2
+    transport_retry_delay_s: float = 1.0
 
     def __post_init__(self) -> None:
         if self.start_timeout_s is not None and self.start_timeout_s <= 0:
             raise ValueError("create.start_timeout_s must be > 0")
         if self.pids_limit is not None and self.pids_limit <= 0:
             raise ValueError("create.pids_limit must be > 0")
+        if self.transport_retries < 0:
+            raise ValueError("create.transport_retries must be >= 0")
+        if self.transport_retry_delay_s < 0:
+            raise ValueError("create.transport_retry_delay_s must be >= 0")
         try:
             ipaddress.ip_address(self.publish_host)
         except ValueError as exc:
@@ -250,6 +271,16 @@ def _is_missing_container(stderr: str) -> bool:
     return any(marker in low for marker in DOCKER_MISSING_CONTAINER_MARKERS)
 
 
+def _is_create_transport_failure(stderr: str) -> bool:
+    low = stderr.lower()
+    return any(marker in low for marker in DOCKER_CREATE_TRANSPORT_ERROR_MARKERS)
+
+
+def _is_name_conflict(stderr: str) -> bool:
+    low = stderr.lower()
+    return all(marker in low for marker in DOCKER_NAME_CONFLICT_MARKERS)
+
+
 class DockerProvider:
     """Sandbox provider backed by the local Docker CLI / daemon."""
 
@@ -345,14 +376,7 @@ class DockerProvider:
             keepalive_cmd = f"sleep {max(1, math.ceil(spec.ttl_s))}" if enforce_ttl else cfg.keepalive_cmd
             argv += ["--entrypoint", cfg.keepalive_shell, image, "-c", keepalive_cmd]
 
-        try:
-            code, _out, err = await self._run(argv, timeout_s=cfg.start_timeout_s)
-        except TimeoutError as e:
-            await self._force_remove(name)
-            raise DockerCreateError(f"docker run timed out for image={image!r}: {e}") from e
-        if code != 0:
-            await self._force_remove(name)
-            raise DockerCreateError(f"docker run failed (code={code}) for image={image!r}: {err.strip()}")
+        await self._run_create_with_reconciliation(argv, name=name, image=image)
 
         handle = SandboxHandle(
             sandbox_id=name,
@@ -371,6 +395,167 @@ class DockerProvider:
             await self._cleanup_failed_create_handle(handle)
             raise
         return handle
+
+    async def _run_create_with_reconciliation(self, argv: list[str], *, name: str, image: str) -> None:
+        """Run ``docker run`` without leaking a container when its response is lost.
+
+        A fixed, random name makes retry idempotent. After a timeout, transport
+        error, or same-name conflict, inspect that exact name before retrying.
+        Reuse it only when both the Sandbox ownership label and requested image
+        match; never remove an unrelated collision.
+        """
+        cfg = self._create_config
+        last_detail = "docker run did not complete"
+        last_cause: BaseException | None = None
+        for attempt in range(cfg.transport_retries + 1):
+            try:
+                code, _out, err = await self._run(argv, timeout_s=cfg.start_timeout_s)
+            except TimeoutError as exc:
+                last_cause = exc
+                last_detail = f"docker run timed out for image={image!r}: {exc}"
+            else:
+                if code == 0:
+                    return
+                last_detail = f"docker run failed (code={code}) for image={image!r}: {err.strip()}"
+                if not (_is_create_transport_failure(err) or _is_name_conflict(err)):
+                    await self._force_remove(name)
+                    raise DockerCreateError(last_detail)
+
+            if await self._reconcile_created_container(name=name, image=image):
+                LOGGER.warning(
+                    "Recovered Docker sandbox %s after an ambiguous create response (attempt %d/%d).",
+                    name,
+                    attempt + 1,
+                    cfg.transport_retries + 1,
+                )
+                return
+
+            if attempt >= cfg.transport_retries:
+                await self._force_remove(name)
+                error = DockerCreateError(
+                    f"{last_detail}; exact-name reconciliation did not find an owned container "
+                    f"after {cfg.transport_retries + 1} attempt(s)"
+                )
+                if last_cause is not None:
+                    raise error from last_cause
+                raise error
+
+            delay = cfg.transport_retry_delay_s * (2**attempt)
+            LOGGER.warning(
+                "Retrying Docker sandbox create after an ambiguous transport result: "
+                "name=%s attempt=%d/%d delay=%.3fs",
+                name,
+                attempt + 1,
+                cfg.transport_retries + 1,
+                delay,
+            )
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+    async def _reconcile_created_container(self, *, name: str, image: str) -> bool:
+        """Recover the exact Sandbox-owned container after an ambiguous ``docker run``."""
+        state = await self._inspect_owned_container(name=name, image=image)
+        if state is None:
+            return False
+        if state in {"running", "restarting"}:
+            LOGGER.info("Reconciled Docker sandbox name=%s image=%s state=%s", name, image, state)
+            return True
+        if state == "created":
+            if await self._start_reconciled_container(name=name, image=image):
+                return True
+            # Ownership was authenticated above. Remove the unusable partial
+            # create so the fixed-name retry can make a fresh attempt.
+            await self._force_remove(name)
+            return False
+
+        LOGGER.warning(
+            "Removing owned Docker sandbox %s after reconciliation found unusable state=%s",
+            name,
+            state,
+        )
+        await self._force_remove(name)
+        return False
+
+    async def _inspect_owned_container(self, *, name: str, image: str) -> str | None:
+        """Return state for an exact owned container, ``None`` when it cannot be resolved."""
+        try:
+            code, out, err = await self._run(
+                [self._binary, "inspect", "--format", DOCKER_RECONCILE_FORMAT, name],
+                timeout_s=self._exec_config.default_timeout_s,
+            )
+        except TimeoutError:
+            return None
+        if code != 0:
+            if not (_is_missing_container(err) or _is_create_transport_failure(err)):
+                LOGGER.warning("Docker reconciliation inspect failed for %s: %s", name, err.strip())
+            return None
+
+        fields = out.strip().split("\t")
+        if len(fields) != 3:
+            raise DockerCreateError(
+                f"refusing to reconcile Docker container {name!r}: malformed inspect output {out!r}"
+            )
+        label, actual_image, state = fields
+        if label != "1" or actual_image != image:
+            raise DockerCreateError(
+                f"refusing to reconcile Docker container {name!r}: ownership/image mismatch "
+                f"(label={label!r}, image={actual_image!r}, expected_image={image!r})"
+            )
+        return state
+
+    async def _start_reconciled_container(self, *, name: str, image: str) -> bool:
+        """Finish a ``docker run`` that created its container but lost the start response."""
+        cfg = self._create_config
+        for attempt in range(cfg.transport_retries + 1):
+            start_error: str | None = None
+            try:
+                code, _out, err = await self._run(
+                    [self._binary, "start", name],
+                    timeout_s=cfg.start_timeout_s,
+                )
+            except TimeoutError as exc:
+                code = None
+                err = ""
+                start_error = f"docker start timed out: {exc}"
+            else:
+                if code != 0:
+                    start_error = f"docker start failed (code={code}): {err.strip()}"
+
+            state = await self._inspect_owned_container(name=name, image=image)
+            if state in {"running", "restarting"}:
+                LOGGER.warning(
+                    "Recovered Docker sandbox %s by finishing its start (attempt %d/%d).",
+                    name,
+                    attempt + 1,
+                    cfg.transport_retries + 1,
+                )
+                return True
+            if state not in {None, "created"}:
+                LOGGER.warning(
+                    "Docker sandbox %s entered unusable state=%s while reconciling start",
+                    name,
+                    state,
+                )
+                return False
+            if code not in {None, 0} and not _is_create_transport_failure(err):
+                LOGGER.warning("%s", start_error)
+                return False
+            if attempt >= cfg.transport_retries:
+                if start_error is not None:
+                    LOGGER.warning("%s", start_error)
+                return False
+
+            delay = cfg.transport_retry_delay_s * (2**attempt)
+            LOGGER.warning(
+                "Retrying Docker sandbox start after an ambiguous transport result: name=%s attempt=%d/%d delay=%.3fs",
+                name,
+                attempt + 1,
+                cfg.transport_retries + 1,
+                delay,
+            )
+            if delay > 0:
+                await asyncio.sleep(delay)
+        return False
 
     async def _resolve_shell(self, name: str) -> str:
         """Configured exec shell, else bash when the image has it (for conda `source`), else sh."""
