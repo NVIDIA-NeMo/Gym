@@ -43,6 +43,7 @@ gym env packages              # list packages in a server's virtual environment
 gym env test                  # run resources-server tests
 gym env publish               # finalize readiness and confirm registry discovery
 gym env start                 # start the servers
+gym env prefetch              # pre-warm per-server venvs without starting servers
 gym env status                # show running servers
 
 # Evaluation
@@ -629,6 +630,34 @@ gym env start \
 gym env start \
     --benchmark gpqa \
     --model-type vllm_model
+```
+
+### `gym env prefetch`
+
+Pre-warm each configured server's isolated virtual environment without starting Ray or any server process. It accepts the same config selection as [`gym env start`](#gym-env-start) (`--config`, `--benchmark`, `--environment`, `--resources-server`, `--model-type`, `--agent-type`). For every server in the resolved config it creates the venv and installs dependencies serially, then exits.
+
+Use this in image builds or air-gapped runs so `gym env start` does not need network access to install packages. It is not a substitute for `gym env start`: nothing is listening when prefetch finishes.
+
+| Option | Description |
+| --- | --- |
+| `--config PATH` | Config file to load. Repeatable. Maps to `+config_paths=[...]`. |
+| `--benchmark NAME` | Load the named benchmark config. |
+| `--environment NAME` | Load the named environment config. |
+| `--resources-server NAME` | Load the named resources-server config. |
+| `--model-type NAME` | Load the named model-type config. |
+| `--agent-type NAME` | Agent (`NAME` or `NAME/FLAVOR`) for the selected environment or benchmark. |
+| `--allow-unsupported-pairing` | Continue even if the environment's resources server does not declare support for the selected agent. |
+| `--search-dir DIR` | Extra root directory to search for components. Repeatable. |
+| `-v`, `--verbose` | Set logging level to DEBUG. |
+
+```bash
+# Same selectors as gym env start; no servers are launched
+gym env prefetch \
+    --resources-server example_single_tool_call \
+    --model-type openai_model
+
+# Hydra form, useful in Dockerfiles
+gym env prefetch "+config_paths=[resources_servers/math/configs/math.yaml]"
 ```
 
 ### `gym env status`
