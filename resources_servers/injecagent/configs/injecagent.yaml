@@ -7,6 +7,9 @@ injecagent:
       description: Faithful tool-simulation environment for the InjecAgent indirect prompt injection benchmark
       value: Measure direct-harm and two-stage data-stealing attack success from auditable tool-call trajectories
       simulated_responses_path: benchmarks/injecagent/data/attacker_simulated_responses.json
+      sandbox_provider: ${oc.decode:${oc.env:INJECAGENT_SANDBOX_PROVIDER,null}}
+      sandbox_spec: ${oc.decode:${oc.env:INJECAGENT_SANDBOX_SPEC,null}}
+      sandbox_exec_timeout_s: ${oc.decode:${oc.env:INJECAGENT_SANDBOX_EXEC_TIMEOUT_S,30}}
 
 injecagent_simple_agent:
   responses_api_agents:

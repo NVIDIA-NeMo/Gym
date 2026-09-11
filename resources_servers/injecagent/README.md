@@ -32,9 +32,12 @@ gym eval run --config benchmarks/injecagent/config.yaml \
   --output results/injecagent.jsonl
 ```
 
-The resource server itself is provider-neutral and runs without a sandbox because all tools are inert fixtures. A
-sandbox provider may still be used by the selected agent harness or deployment topology; it does not change benchmark
-semantics and is intentionally not required merely to return static fixture data.
+By default, `injecagent_benchmark` runs without a sandbox because all tools are inert fixtures. Set
+`INJECAGENT_SANDBOX_PROVIDER` to a YAML/JSON provider block and optionally set `INJECAGENT_SANDBOX_SPEC` to route each
+fixture response through NeMo Gym's provider-neutral `AsyncSandbox` facade. For example, the built-in local provider
+can exercise this path with `INJECAGENT_SANDBOX_PROVIDER='{local: {}}'`; replace that block with Docker, OpenSandbox,
+Modal, or another registered provider. The sandbox receives only a base64-encoded predetermined fixture and never
+receives credentials or attacker-selected executable content, so both modes preserve identical benchmark semantics.
 
 ## Provenance and license
 

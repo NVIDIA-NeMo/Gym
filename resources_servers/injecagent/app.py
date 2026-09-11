@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import ast
+import base64
 import json
 from collections import defaultdict
 from pathlib import Path
@@ -12,7 +13,7 @@ from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -22,11 +23,22 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.server_utils import SESSION_ID_KEY
+
+
+_SANDBOX_RESPONSE_ENV = "INJECAGENT_RESPONSE_B64"
+_SANDBOX_RESPONSE_COMMAND = (
+    "python3 -c 'import base64,os,sys; "
+    'sys.stdout.write(base64.b64decode(os.environ["INJECAGENT_RESPONSE_B64"]).decode("utf-8"))\''
+)
 
 
 class InjecAgentConfig(BaseResourcesServerConfig):
     simulated_responses_path: str = "benchmarks/injecagent/data/attacker_simulated_responses.json"
+    sandbox_provider: dict[str, Any] | None = None
+    sandbox_spec: dict[str, Any] | None = None
+    sandbox_exec_timeout_s: float = 30.0
 
 
 class InjecAgentSeedRequest(BaseSeedSessionRequest):
@@ -62,6 +74,7 @@ class InjecAgentResourcesServer(SimpleResourcesServer):
     config: InjecAgentConfig
     session_id_to_task: dict[str, InjecAgentSeedRequest] = Field(default_factory=dict)
     _simulated_responses: dict[str, str] | None = None
+    _session_sandboxes: dict[str, AsyncSandbox] = PrivateAttr(default_factory=dict)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -117,6 +130,30 @@ class InjecAgentResourcesServer(SimpleResourcesServer):
                 return response
         return fallback or json.dumps({"status": "success"})
 
+    async def _sandbox_response(self, session_id: str, response: str) -> str:
+        if self.config.sandbox_provider is None:
+            return response
+        sandbox = self._session_sandboxes.get(session_id)
+        if sandbox is None:
+            spec = SandboxSpec(**(self.config.sandbox_spec or {}))
+            sandbox = await AsyncSandbox(self.config.sandbox_provider, spec).start()
+            self._session_sandboxes[session_id] = sandbox
+        encoded = base64.b64encode(response.encode("utf-8")).decode("ascii")
+        result = await sandbox.exec(
+            _SANDBOX_RESPONSE_COMMAND,
+            env={_SANDBOX_RESPONSE_ENV: encoded},
+            timeout_s=self.config.sandbox_exec_timeout_s,
+        )
+        if result.return_code != 0 or result.error_type:
+            detail = result.stderr or result.error_type or f"exit code {result.return_code}"
+            raise HTTPException(status_code=502, detail=f"Sandbox fixture responder failed: {detail}")
+        return result.stdout or ""
+
+    async def _close_sandbox(self, session_id: str) -> None:
+        sandbox = self._session_sandboxes.pop(session_id, None)
+        if sandbox is not None:
+            await sandbox.stop()
+
     async def route_tool_call(self, tool_name: str, request: Request) -> PlainTextResponse:
         session_id = request.session[SESSION_ID_KEY]
         task = self.session_id_to_task.get(session_id)
@@ -127,8 +164,10 @@ class InjecAgentResourcesServer(SimpleResourcesServer):
 
         arguments = await request.json()
         if tool_name == task.user_tool and arguments == task.user_tool_arguments:
-            return PlainTextResponse(task.user_tool_response)
-        return PlainTextResponse(self._response_for(tool_name, arguments))
+            response = task.user_tool_response
+        else:
+            response = self._response_for(tool_name, arguments)
+        return PlainTextResponse(await self._sandbox_response(session_id, response))
 
     def _function_calls(self, body: InjecAgentVerifyRequest) -> list[str]:
         calls: list[str] = []
@@ -162,7 +201,9 @@ class InjecAgentResourcesServer(SimpleResourcesServer):
                 called_tools=calls,
             )
         finally:
-            self.session_id_to_task.pop(request.session[SESSION_ID_KEY], None)
+            session_id = request.session[SESSION_ID_KEY]
+            self.session_id_to_task.pop(session_id, None)
+            await self._close_sandbox(session_id)
 
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
         rollouts = [rollout for task in tasks for rollout in task]
