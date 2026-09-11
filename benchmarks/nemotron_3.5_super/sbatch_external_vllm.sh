@@ -11,10 +11,6 @@ CONTAINER=$CONTAINER
 MOUNTS=$MOUNTS
 VLLM_CONFIG=$VLLM_CONFIG
 SBATCH_TIME="${SBATCH_TIME:-04:00:00}"
-NUM_SAMPLES_IN_PARALLEL="${NUM_SAMPLES_IN_PARALLEL:-}"
-NUM_SAMPLES_IN_PARALLEL_ARG=""
-RESUME_EVAL_ON_REQUEUE="${RESUME_EVAL_ON_REQUEUE:-0}"
-RESUME_FROM_CACHE_ARG=""
 # Independent mode starts one complete TP model replica per node. Coupled mode
 # forms one multi-node DP/EP engine per tier for models that cannot fit per node.
 VLLM_PD_DEPLOYMENT_MODE="${VLLM_PD_DEPLOYMENT_MODE:-independent}"
@@ -25,39 +21,6 @@ SLURM_COMMENT="${SLURM_COMMENT:-}"
 OPENSANDBOX_DOMAIN="${OPENSANDBOX_DOMAIN:-}"
 OPENSANDBOX_API_KEY="${OPENSANDBOX_API_KEY:-}"
 OPENSANDBOX_PROTOCOL="${OPENSANDBOX_PROTOCOL:-http}"
-
-if [[ -n "$NUM_SAMPLES_IN_PARALLEL" ]]; then
-    if [[ ! "$NUM_SAMPLES_IN_PARALLEL" =~ ^[1-9][0-9]*$ ]]; then
-        echo "ERROR: NUM_SAMPLES_IN_PARALLEL must be a positive integer; got '$NUM_SAMPLES_IN_PARALLEL'." >&2
-        exit 1
-    fi
-    NUM_SAMPLES_IN_PARALLEL_ARG="++num_samples_in_parallel=$NUM_SAMPLES_IN_PARALLEL"
-fi
-
-case "$RESUME_EVAL_ON_REQUEUE" in
-    0)
-        ;;
-    1)
-        RESUME_FROM_CACHE_ARG="++resume_from_cache=true"
-        ;;
-    *)
-        echo "ERROR: RESUME_EVAL_ON_REQUEUE must be 0 or 1; got '$RESUME_EVAL_ON_REQUEUE'." >&2
-        exit 1
-        ;;
-esac
-
-# Environment controls are defaults; explicit Hydra overrides belong to Gym.
-# Avoid adding a duplicate setting that could overwrite the caller's value.
-for eval_arg in "$@"; do
-    case "$eval_arg" in
-        num_samples_in_parallel=* | +num_samples_in_parallel=* | ++num_samples_in_parallel=*)
-            NUM_SAMPLES_IN_PARALLEL_ARG=""
-            ;;
-        resume_from_cache=* | +resume_from_cache=* | ++resume_from_cache=*)
-            RESUME_FROM_CACHE_ARG=""
-            ;;
-    esac
-done
 
 case "$VLLM_PD_DEPLOYMENT_MODE" in
     independent | coupled)
@@ -112,11 +75,7 @@ source "$VLLM_CONFIG"
 
 gym eval prepare $@ +use_cached_prepared_benchmarks=true
 
-if (( $RESUME_EVAL_ON_REQUEUE )); then
-    experiment_name=$EXPERIMENT_NAME/resumable
-else
-    experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
-fi
+experiment_name=$EXPERIMENT_NAME/slurm_job_id_\$SLURM_JOB_ID/date_\$(date +%Y%m%d_%H%M%S)
 # export_to_csv.py derives <base>_aggregate_metrics.json from this, so the
 # default timestamped name makes the aggregate unfindable to anything that
 # did not watch the job run. Override it when results/ is already per-run.
@@ -142,7 +101,6 @@ gym eval run \
     ++split=benchmark \
     ++use_absolute_ip=true \
     ++reuse_existing_data_preparation=true \
-    $RESUME_FROM_CACHE_ARG \
     ++policy_base_url=http://\$(getent hosts "\$ROUTER_NODE" | awk 'NR == 1 {print \$1}'):$ROUTER_SERVER_PORT/v1 \
     ++policy_api_key=dummy_api_key \
     ++policy_model_name=$MODEL_NAME \
@@ -150,7 +108,6 @@ gym eval run \
     ++global_aiohttp_connector_limit_per_host=16384 \
     ++port_range_low=63000 \
     ++port_range_high=64000 \
-    $NUM_SAMPLES_IN_PARALLEL_ARG \
     "\${GYM_MODEL_PARAMS[@]}"
 
 

@@ -84,7 +84,7 @@ source "$launcher_script" "$@"
 gym() {
     if [[ "$2" == run ]]; then printf '%s\0' "$@"; fi
 }
-date() { printf '20260909_120000\n'; }
+date() { printf '%s\n' "${TEST_DATE:-20260909_120000}"; }
 getent() { printf '10.0.0.1 node0\n'; }
 """
         status, stdout, stderr = self.run_shell(stubs + command, env=env)
@@ -361,10 +361,9 @@ sleep() { printf 'startup-delay=%s\n' "$1"; wait "$router_pid" || true; }
         self.assertFalse(any(arg.startswith("--segment=") for arg in calls[1]))
 
     def test_invalid_launcher_controls_are_rejected_before_submission(self):
-        """Reject invalid concurrency, deployment modes, and segment sizes without submitting any job."""
+        """Reject invalid deployment modes and segment sizes without submitting any job."""
         stub = 'sbatch() { printf "unexpected-submission\\n"; }; source "$@"'
         cases = {
-            "NUM_SAMPLES_IN_PARALLEL": (("0", "-1", "1.5", "bad"), 1),
             "VLLM_PD_DEPLOYMENT_MODE": (("bad", "COUPLED"), 1),
             "VLLM_SLURM_SEGMENT": (("0", "-1", "1.5", "bad"), 2),
         }
@@ -411,81 +410,60 @@ srun() { printf '%s\0' "$@"; printf '\0'; return "$TEST_SERVER_STATUS"; }
                     self.assertIn("fake-serving-command", args)
                     self.assertNotIn("--overlap", args)
 
-    def test_environment_fallbacks_are_preserved(self):
-        """Apply concurrency and resume environment defaults, including the stable results path."""
-        args = self.eval_arguments(env={"NUM_SAMPLES_IN_PARALLEL": "16", "RESUME_EVAL_ON_REQUEUE": "1"})
-        self.assertEqual(self.settings(args, "num_samples_in_parallel"), ["++num_samples_in_parallel=16"])
-        self.assertEqual(self.settings(args, "resume_from_cache"), ["++resume_from_cache=true"])
-        self.assertIn("++output_jsonl_fpath=results/launcher-test/resumable.jsonl", args)
-
-    def test_no_environment_defaults_leave_gym_settings_untouched(self):
-        """Preserve Gym settings and timestamped output naming when environment overrides are unset."""
+    def test_default_evaluation_settings_are_unchanged(self):
+        """Leave concurrency and resume to Gym and preserve timestamped output naming by default."""
         args = self.eval_arguments()
         self.assertEqual(self.settings(args, "num_samples_in_parallel"), [])
         self.assertEqual(self.settings(args, "resume_from_cache"), [])
         self.assertIn("++output_jsonl_fpath=results/launcher-test/slurm_job_id_12345/date_20260909_120000.jsonl", args)
 
-    def test_explicit_concurrency_overrides_environment(self):
-        """Let explicit concurrency arguments override the environment without duplicate settings."""
+    def test_explicit_concurrency_arguments_are_preserved(self):
+        """Pass explicit concurrency values through to Gym without replacing or duplicating them."""
         for prefix in ("", "+", "++"):
-            with self.subTest(prefix=prefix):
-                override = prefix + "num_samples_in_parallel=512"
-                args = self.eval_arguments(override, env={"NUM_SAMPLES_IN_PARALLEL": "16"})
-                self.assertEqual(self.settings(args, "num_samples_in_parallel"), [override])
+            for value in (16, 32, 512):
+                with self.subTest(prefix=prefix, value=value):
+                    override = f"{prefix}num_samples_in_parallel={value}"
+                    args = self.eval_arguments(override)
+                    self.assertEqual(self.settings(args, "num_samples_in_parallel"), [override])
 
-    def test_explicit_resume_overrides_environment(self):
-        """Honor explicit resume arguments while retaining the switch's stable output naming."""
+    def test_explicit_resume_arguments_are_preserved(self):
+        """Pass explicit resume values through to Gym without changing the supplied output path."""
         for prefix in ("", "+", "++"):
             for value in ("true", "false"):
                 with self.subTest(prefix=prefix, value=value):
                     override = prefix + "resume_from_cache=" + value
-                    args = self.eval_arguments(override, env={"RESUME_EVAL_ON_REQUEUE": "1"})
+                    args = self.eval_arguments(override, env={"ROLLOUTS_FPATH": "results/existing/resumable.jsonl"})
                     self.assertEqual(self.settings(args, "resume_from_cache"), [override])
-                    self.assertIn("++output_jsonl_fpath=results/launcher-test/resumable.jsonl", args)
+                    self.assertIn("++output_jsonl_fpath=results/existing/resumable.jsonl", args)
 
-    def test_resume_switch_keeps_output_path_across_job_ids(self):
-        """Keep resumable output and W&B names stable when the Slurm job ID changes."""
-        for job_id in ("12345", "12346"):
-            with self.subTest(job_id=job_id):
-                args = self.eval_arguments(env={"RESUME_EVAL_ON_REQUEUE": "1", "SLURM_JOB_ID": job_id})
+    def test_resume_without_fixed_path_uses_restart_timestamp(self):
+        """Show that enabling resume alone still selects a new output path when the same job restarts."""
+        for timestamp in ("20260909_120000", "20260909_180000"):
+            with self.subTest(timestamp=timestamp):
+                args = self.eval_arguments("++resume_from_cache=true", env={"TEST_DATE": timestamp})
                 self.assertEqual(self.settings(args, "resume_from_cache"), ["++resume_from_cache=true"])
-                self.assertIn("++output_jsonl_fpath=results/launcher-test/resumable.jsonl", args)
-                self.assertIn("+wandb_name=launcher-test/resumable", args)
-
-    def test_invalid_resume_switch_is_rejected_before_submission(self):
-        """Reject an invalid resume switch before any Slurm job is submitted."""
-        stub = r"""
-sbatch() { printf 'unexpected-submission\n'; }
-source "$@"
-"""
-        status, stdout, stderr = self.run_shell(stub, str(SCRIPT), env={"RESUME_EVAL_ON_REQUEUE": "invalid"})
-        self.assertNotEqual(status, 0)
-        self.assertNotIn("unexpected-submission", stdout)
-        self.assertIn("RESUME_EVAL_ON_REQUEUE must be 0 or 1", stderr)
-
-    def test_explicit_resume_keeps_output_path_across_job_ids(self):
-        """Preserve a manually supplied resume path while keeping the default per-job run naming."""
-        for job_id in ("12345", "12346"):
-            with self.subTest(job_id=job_id):
-                args = self.eval_arguments(
-                    "++resume_from_cache=true",
-                    env={"ROLLOUTS_FPATH": "results/existing/resumable.jsonl", "SLURM_JOB_ID": job_id},
+                self.assertIn(
+                    f"++output_jsonl_fpath=results/launcher-test/slurm_job_id_12345/date_{timestamp}.jsonl", args
                 )
-                self.assertEqual(self.settings(args, "resume_from_cache"), ["++resume_from_cache=true"])
-                self.assertIn("++output_jsonl_fpath=results/existing/resumable.jsonl", args)
-                self.assertIn(f"+wandb_name=launcher-test/slurm_job_id_{job_id}/date_20260909_120000", args)
 
-    def test_unrelated_override_does_not_suppress_concurrency_default(self):
-        """Keep global environment defaults when overrides only target nested agent settings."""
-        args = self.eval_arguments(
-            "++agent.num_samples_in_parallel=8",
-            "++agent.resume_from_cache=false",
-            env={"NUM_SAMPLES_IN_PARALLEL": "16", "RESUME_EVAL_ON_REQUEUE": "1"},
-        )
-        self.assertEqual(self.settings(args, "num_samples_in_parallel"), ["++num_samples_in_parallel=16"])
-        self.assertEqual(self.settings(args, "resume_from_cache"), ["++resume_from_cache=true"])
-        self.assertIn("++agent.num_samples_in_parallel=8", args)
-        self.assertIn("++agent.resume_from_cache=false", args)
+    def test_explicit_resume_keeps_output_path_across_restarts(self):
+        """Keep the supplied resume path across requeues and new job IDs, with timestamped logs and W&B names."""
+        for job_id in ("12345", "12346"):
+            for timestamp in ("20260909_120000", "20260909_180000"):
+                with self.subTest(job_id=job_id, timestamp=timestamp):
+                    args = self.eval_arguments(
+                        "++resume_from_cache=true",
+                        env={
+                            "ROLLOUTS_FPATH": "results/existing/resumable.jsonl",
+                            "SLURM_JOB_ID": job_id,
+                            "TEST_DATE": timestamp,
+                        },
+                    )
+                    self.assertEqual(self.settings(args, "resume_from_cache"), ["++resume_from_cache=true"])
+                    self.assertIn("++output_jsonl_fpath=results/existing/resumable.jsonl", args)
+                    experiment_name = f"launcher-test/slurm_job_id_{job_id}/date_{timestamp}"
+                    self.assertIn(f"+wandb_name={experiment_name}", args)
+                    self.assertIn(f"+nemo_gym_log_dir=results/{experiment_name}/logs", args)
 
     def test_prefill_exit_is_detected_during_both_health_checks(self):
         """Detect prefill exits during either startup health check, including after request timeouts."""
