@@ -118,14 +118,38 @@ def render_driver_entrypoint(
     preamble: list[str] = []
 
     if repo and ref:
-        repo_name = repo.rstrip("/").split("/")[-1].removesuffix(".git")
+        # Clone outside the working directory, and never `cd` into it. Both
+        # matter, and both were learned from a failed run:
+        #
+        # * The driver's cwd is the job directory, so cloning here would put a
+        #   second copy of every built-in asset under it. Gym resolves named
+        #   assets against cwd AND the install root, so `--model-type
+        #   openai_model` then matches twice and the run aborts as ambiguous.
+        # * `cd`-ing into the clone and staying there would silently redirect
+        #   every relative output path -- `+output_jsonl_fpath=artifacts/...` --
+        #   into the clone instead of the job directory, which is the same
+        #   artifact loss the container workdir exists to prevent.
+        #
+        # `uv pip install -e <path>` installs from a path, so no `cd` is needed.
         preamble += [
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
             'source "$HOME/.local/bin/env"',
-            f"git clone {shlex.quote(repo)}",
-            f"cd {shlex.quote(repo_name)}",
-            f"git checkout {shlex.quote(ref)}",
-            "uv pip install -e . --system",
+            'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
+            f'git clone {shlex.quote(repo)} "$GYM_SRC/gym"',
+            f'git -C "$GYM_SRC/gym" checkout {shlex.quote(ref)}',
+            'uv pip install -e "$GYM_SRC/gym" --system',
+            # Run from the install root. A benchmark's prepare_script and
+            # jsonl_fpath are relative and resolved against cwd, not through the
+            # install-root search that config_paths gets, so from anywhere else
+            # `gym eval prepare` reports the benchmark as "missing a valid
+            # prepare script" for a file that is right there. A runtime image
+            # bakes no Gym, so without this there is no cwd where it resolves.
+            #
+            # Safe only because the clone is OUTSIDE the job directory and the
+            # driver's output path is absolute: cwd and the install root are now
+            # the same directory, so named assets resolve once rather than
+            # ambiguously, and artifacts still land in the job directory.
+            'cd "$GYM_SRC/gym"',
         ]
 
     if prepare_cmd:
@@ -136,4 +160,14 @@ def render_driver_entrypoint(
 
     preamble.append('exec "$@"')
     body = "\n    ".join(preamble)
+    # The body goes inside a single-quoted `bash -c '...'`, and POSIX shells do
+    # not nest single quotes: an inner quote ENDS the outer string rather than
+    # nesting in it. So every argument shlex.quote() had to quote -- which is
+    # every value containing a space -- would break out and word-split. A real
+    # run died exactly here: gdpval's prepare passes
+    # `+multistage.stages=[{num_tasks: 45, ...}]`, the shell handed Hydra just
+    # `+multistage.stages=[{num_tasks:`, and Hydra reported "no viable
+    # alternative at input '[{num_tasks:'". The replacement below is the
+    # standard end-quote / literal-quote / reopen-quote dance.
+    body = body.replace("'", "'\"'\"'")
     return f"bash -c '\n    {body}\n' -- \"${{GYM_CMD[@]}}\""
