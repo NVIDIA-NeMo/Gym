@@ -366,7 +366,10 @@ def test_build_sbatch_script_output_jsonl_fpath(submit_config, bench_dir):
     benchmark = submit_config.driver.benchmarks["gsm8k"]
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
-    assert "+output_jsonl_fpath=artifacts/rollouts.jsonl" in script
+    # Absolute: a relative output path lands wherever the container's cwd
+    # happens to be, and cwd cannot be moved without breaking a benchmark's
+    # cwd-relative prepare_script.
+    assert f"+output_jsonl_fpath={bench_dir}/artifacts/rollouts.jsonl" in script
 
 
 def test_build_sbatch_script_policy_model_flags(submit_config_with_policy, bench_dir):
@@ -1061,10 +1064,14 @@ def test_driver_can_write_its_artifacts_into_the_job_directory():
     script = build_sbatch_script(config, "gpqa", config.driver.benchmarks["gpqa"], config.compute["hsg"], bench_dir)
 
     driver_line = next(line for line in script.splitlines() if "--output=logs/driver.log" in line)
-    assert f"--container-workdir={bench_dir}" in driver_line
     assert f"{bench_dir}:{bench_dir}" in driver_line
     # the caller's own mounts must survive alongside the injected one
     assert "/host/cache:/cache" in driver_line
+    # The output path is absolute rather than cwd-relative, and cwd is left
+    # alone: a benchmark's prepare_script is resolved against cwd, so moving it
+    # breaks `gym eval prepare` on a file that exists.
+    assert f"+output_jsonl_fpath={bench_dir}/artifacts/rollouts.jsonl" in script
+    assert "--container-workdir" not in script
 
 
 def test_driver_job_dir_is_mounted_even_with_no_configured_mounts():

@@ -289,7 +289,13 @@ def build_sbatch_script(
     if benchmark.prepare:
         prepare_cmd = "gym eval prepare " + " ".join(flatten_run_args(benchmark.prepare))
 
-    output_path = "+output_jsonl_fpath=artifacts/rollouts.jsonl"
+    # ABSOLUTE, not relative. The driver's cwd has to stay wherever the image
+    # puts it, because a benchmark's own `prepare_script` / `jsonl_fpath` are
+    # relative paths resolved against cwd rather than through Gym's install-root
+    # search -- point cwd elsewhere and `gym eval prepare` reports "missing a
+    # valid prepare script" for a file that is plainly there. Making the OUTPUT
+    # absolute is what keeps artifacts in the job directory without moving cwd.
+    output_path = f"+output_jsonl_fpath={remote_bench_dir}/artifacts/rollouts.jsonl"
     extra_flags = ["--model-type openai_model"] if config.driver.policy_model else []
     gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(benchmark.run))
     entrypoint = render_driver_entrypoint(
@@ -311,11 +317,10 @@ def build_sbatch_script(
     # the host, which is what makes the loss so easy to miss.
     driver_mounts = [*config.driver.mounts, f"{remote_bench_dir}:{remote_bench_dir}"]
     driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
-    driver_workdir_flag = f" --container-workdir={shlex.quote(str(remote_bench_dir))}"
     driver_command = (
         f"{gym_cmd}\n"
         f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
-        f"{driver_workdir_flag} --container-image={shlex.quote(config.driver.container)} "
+        f" --container-image={shlex.quote(config.driver.container)} "
         f"--output=logs/driver.log {entrypoint}"
     )
 
