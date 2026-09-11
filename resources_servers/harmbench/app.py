@@ -120,8 +120,9 @@ class HarmBenchResourcesServer(SimpleResourcesServer):
 
         template = CONTEXTUAL_PROMPT if body.context else STANDARD_PROMPT
         prompt = template.format(behavior=body.behavior, context=body.context, generation=generation)
-        request = self.config.classifier_responses_create_params.model_copy(
-            update={"input": [{"role": "user", "content": prompt}]}
+        request = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+            self.config.classifier_responses_create_params.model_dump(exclude_unset=True)
+            | {"input": [{"role": "user", "content": prompt}]}
         )
         response = await self.server_client.post(
             server_name=self.config.classifier_model_server.name,

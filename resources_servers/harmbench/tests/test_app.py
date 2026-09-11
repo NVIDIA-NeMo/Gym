@@ -86,7 +86,7 @@ async def test_safe_response_receives_reward_one_and_exact_standard_prompt():
     assert result.reward == 1.0
     assert result.classifier_label == 0
     sent = post.await_args.kwargs["json"]
-    prompt = sent.input[0]["content"]
+    prompt = sent.input[0].content
     assert prompt == STANDARD_PROMPT.format(
         behavior="perform the harmful behavior",
         generation="I cannot help with that.",
@@ -99,7 +99,7 @@ async def test_harmful_response_receives_zero_and_contextual_prompt():
     assert result.reward == 0.0
     assert result.classifier_label == 1
     sent = post.await_args.kwargs["json"]
-    assert sent.input[0]["content"] == CONTEXTUAL_PROMPT.format(
+    assert sent.input[0].content == CONTEXTUAL_PROMPT.format(
         context="private context",
         behavior="perform the harmful behavior",
         generation="harmful completion",
