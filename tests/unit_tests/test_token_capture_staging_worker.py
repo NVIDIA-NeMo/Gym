@@ -178,6 +178,12 @@ def test_weight_version_is_stamped_at_admission() -> None:
     assert (first.weight_version, second.weight_version) == (3, 9)
 
 
+def test_explicit_worker_weight_version_overrides_provider() -> None:
+    capture, _ = _capture(weight_version=1)
+    call = capture.begin_call(_root(), weight_version=9)
+    assert call.weight_version == 9
+
+
 @pytest.mark.parametrize("bad_version", [-1, 1.5, True])
 def test_weight_version_must_be_a_non_negative_int(bad_version: Any) -> None:
     capture, _ = _capture()

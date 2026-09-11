@@ -93,6 +93,7 @@ class RolloutTokenCapture:
         *,
         prefix_token_ids: list[int] | None = None,
         stream: bool = False,
+        weight_version: int | None = None,
     ) -> ActiveCall:
         """Admit a typed gate contract and stamp its generation weight version.
 
@@ -103,6 +104,10 @@ class RolloutTokenCapture:
         When the admission carries the prefix inline the argument may be omitted;
         if given it must match. A text root accepts no prefix.
         Violations are caller bugs and raise ``CaptureError``; they never poison the call.
+
+        ``weight_version`` is supplied when engine-finished metadata owns the
+        authoritative per-call epoch. Other worker capture paths leave it unset
+        and read the serving worker's current version provider instead.
         """
         if not isinstance(admission, CaptureAdmission):
             raise TypeError("admission must be a CaptureAdmission")
@@ -112,9 +117,10 @@ class RolloutTokenCapture:
                 "token capture does not support streaming responses"
             )
         resolved_prefix = self._resolve_prefix(admission, prefix_token_ids)
-        weight_version = self._weight_version_fn()
+        if weight_version is None:
+            weight_version = self._weight_version_fn()
         if type(weight_version) is not int or weight_version < 0:
-            raise CaptureError(f"weight_version_fn must return a non-negative int, got {weight_version!r}")
+            raise CaptureError(f"weight_version must be a non-negative int, got {weight_version!r}")
         return ActiveCall(admission=admission, weight_version=weight_version, prefix_token_ids=resolved_prefix)
 
     @staticmethod

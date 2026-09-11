@@ -51,26 +51,12 @@ from nemo_gym.responses_converter import (
 )
 from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
-    NG_CAPTURE_FIELD,
-    NG_COMMIT_COORDS_FIELD,
     current_capture_context,
-    mark_external_staging_committed,
 )
 from nemo_gym.token_id_capture.config import token_id_capture_config
-from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
-from nemo_gym.token_id_capture.protocols import CaptureLedger
-from nemo_gym.token_id_capture.records import (
-    TOKEN_FIELDS,
-    response_to_output_items,
-    strip_token_fields,
-)
-from nemo_gym.token_id_capture.staging.records import (
-    INVALID_COMMIT_COORDS_REASON,
-    WORKER_CAPTURE_FAILED_REASON,
-    WORKER_MISSING_COMMIT_COORDS_REASON,
-    CallRecord,
-    CaptureLedgerCommit,
-    CommitCoords,
+from nemo_gym.token_id_capture.external_capture import (
+    ExternalCaptureHandler,
+    make_external_capture_handler,
 )
 
 
@@ -301,7 +287,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         "mm_processor_kwargs",
         "required_prefix_token_ids",
     )
-    _external_capture_enabled: bool = PrivateAttr(default=False)
+    _external_capture_handler: ExternalCaptureHandler | None = PrivateAttr(default=None)
 
     def setup_exception_middleware(self, app) -> None:
         @app.middleware("http")
@@ -363,10 +349,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         global_config = getattr(self.server_client, "global_config_dict", None)
         capture_config = token_id_capture_config(global_config) if global_config is not None else None
-        self._external_capture_enabled = bool(
-            capture_config is not None and capture_config.token_id_capture.external_staging
-        )
-        if self._external_capture_enabled:
+        self._external_capture_handler = None
+        if capture_config is not None and capture_config.token_id_capture.external_staging:
             if self.config.use_completions_api:
                 raise ValueError("token_id_capture.external_staging does not support use_completions_api=true")
             if self.config.is_responses_native:
@@ -376,6 +360,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                     "token_id_capture.external_staging requires return_token_id_information=false; "
                     "worker custody replaces the token echo"
                 )
+            self._external_capture_handler = make_external_capture_handler(
+                capture_config.token_id_capture.external_staging_backend
+            )
 
         self._chat_template_tokenizer = None
         if self.config.use_completions_api and self.config.render_chat_template:
@@ -731,8 +718,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         self._apply_sampling_overrides(body_dict)
         self._validate_single_choice_token_request(body_dict)
-        if self._external_capture_enabled:
-            body_dict = self._apply_external_capture(body_dict)
+        if self._external_capture_handler is not None:
+            body_dict = self._external_capture_handler.prepare_request(body_dict)
         else:
             body_dict = self._apply_prefix_supply(body_dict)
 
@@ -742,29 +729,6 @@ class VLLMModel(SimpleResponsesAPIModel):
         """Keep the backend envelope id only for requests with an active external-capture context."""
         context = current_capture_context()
         return context is not None and context.external_staging
-
-    def _apply_external_capture(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Add worker capture metadata to an admitted chat request.
-
-        If parent resolution did not admit the call, forward the request without capture metadata.
-        The lineage store has already recorded that capture failure.
-        The worker returns the completion without staging token data.
-        """
-        context = current_capture_context()
-        if context is None or not context.external_staging:
-            return body_dict
-        admission = context.capture_admission
-        if admission is None:
-            return body_dict
-        body_dict[NG_CAPTURE_FIELD] = admission.model_dump(mode="json")
-        body_dict.update(
-            logprobs=True,
-            top_logprobs=0,
-            return_tokens_as_token_ids=True,
-        )
-        if admission.mode == "token_in":
-            body_dict["required_prefix_token_ids"] = list(admission.required_prefix_token_ids)
-        return body_dict
 
     # Protect the ``[supplied, eligible, total]`` diagnostic counts.
     # Eligible calls have a resolved parent.
@@ -1010,8 +974,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 f"NeMo Gym server `{self.config.name}` config has explicitly been set to not use a reasoning parser i.e. `uses_reasoning_parser: false`. Please do not use a reasoning parser in your vLLM endpoint, or fix the `{self.config.name}` server config!"
             )
 
-        if self._external_capture_enabled:
-            await self._finalize_external_capture(chat_completion_dict)
+        if self._external_capture_handler is not None:
+            await self._external_capture_handler.finalize_response(chat_completion_dict)
 
         if self.config.return_token_id_information:
             message_dict = choice_dict["message"]
@@ -1078,142 +1042,6 @@ class VLLMModel(SimpleResponsesAPIModel):
             choice_dict["message"] = NeMoGymChatCompletionMessageForTraining.model_validate(message_dict)
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
-
-    async def _finalize_external_capture(self, payload: Dict[str, Any]) -> None:
-        """Validate and record a response staged by the inference worker.
-
-        The worker returns commit coordinates only after ``StagingSink.stage`` succeeds.
-        This method validates those coordinates against the active call.
-        It then records the call in the lineage store.
-        Finally, it removes token data and commit coordinates from the served response.
-        """
-        context = current_capture_context()
-        if context is None or not context.external_staging or context.lineage_store is None:
-            return
-        ledger = context.lineage_store
-        if not isinstance(ledger, CaptureLedger):
-            raise ValueError("external staging requires a CaptureLedger on the capture context")
-        coords_payload = payload.pop(NG_COMMIT_COORDS_FIELD, None)
-        admission = context.capture_admission
-        if admission is None:
-            # UNRESOLVED — the ledger already carries this call's poison row.
-            self._strip_capture_transport_fields(payload)
-            return
-        try:
-            if coords_payload is None:
-                await ledger.record_failure(
-                    context.rollout_id,
-                    context.model_call_id,
-                    WORKER_MISSING_COMMIT_COORDS_REASON,
-                )
-                return
-            coords = CommitCoords.model_validate(coords_payload)
-            if coords.rollout_id != context.rollout_id or coords.model_call_id != context.model_call_id:
-                raise ValueError(
-                    f"coordinates for {coords.rollout_id}/{coords.model_call_id} do not match the "
-                    f"active capture context {context.rollout_id}/{context.model_call_id}"
-                )
-            if coords.disposition == "capture_failed":
-                await ledger.record_failure(
-                    context.rollout_id,
-                    context.model_call_id,
-                    WORKER_CAPTURE_FAILED_REASON,
-                )
-                return
-            if coords.parent_call_id != admission.parent_call_id or coords.prev_len != admission.prev_len:
-                raise ValueError(f"coordinates for {coords.model_call_id} diverge from admission")
-            # Store the response ID returned to the agent with the corresponding lineage row.
-            # A missing ID makes that association impossible.
-            # Treat a missing ID as a capture failure.
-            response_id = str(payload.get("id") or "")
-            if not response_id:
-                raise ValueError(f"served response for {coords.model_call_id} carries no envelope id")
-            child_staging_chain = list(context.parent_staging_chain) + [str(coords.staging_key)]
-            response_items, _ = strip_token_fields(response_to_output_items(payload))
-            # Compute one fingerprint for the response items.
-            # Compute another for the request and response items together.
-            # If either input cannot be fingerprinted, store no fingerprints and continue recording the call.
-            try:
-                output_fingerprint = assistant_fingerprint(list(response_items)) or None
-                continuation_fingerprint = (
-                    assistant_fingerprint(list(context.request_items or []) + list(response_items)) or None
-                )
-            except (TypeError, ValueError):
-                output_fingerprint = None
-                continuation_fingerprint = None
-            # The lineage row omits token arrays because the worker stores token deltas separately.
-            # Finalization verifies both hashes against those staged token deltas.
-            # ``CallRecord`` re-validates the manifest-row invariants (contiguous
-            # lengths, root/child mode); a ValidationError poisons the call below.
-            record = CallRecord(
-                model_call_id=coords.model_call_id,
-                parent_call_id=coords.parent_call_id,
-                prev_len=coords.prev_len,
-                delta_len=coords.delta_len,
-                cum_len=coords.cum_len,
-                weight_version=coords.weight_version,
-                digest=coords.digest,
-                extras_digest=coords.extras_digest,
-                staging_key=coords.staging_key,
-                mode=admission.mode,
-                chain_hash=coords.chain_hash,
-                cumulative_hash=coords.cumulative_hash,
-                response_id=response_id,
-                admitted_at=context.admitted_at,
-                output_fingerprint=output_fingerprint,
-                continuation_fingerprint=continuation_fingerprint,
-                fingerprint_version=FINGERPRINT_VERSION,
-            )
-            commit = CaptureLedgerCommit(
-                rollout_id=context.rollout_id,
-                record=record,
-                staging_chain=tuple(child_staging_chain),
-                request_items=list(context.request_items or []),
-                response_items=response_items,
-            )
-            await ledger.record(commit)
-            mark_external_staging_committed(
-                rollout_id=coords.rollout_id,
-                model_call_id=coords.model_call_id,
-            )
-        except Exception:
-            # Worker/framework payloads are an external integrity boundary.
-            # Poison capture without turning a valid model completion into a
-            # harness failure.
-            LOG.exception(
-                "Worker capture acknowledgement failed for rollout %s call %s",
-                context.rollout_id,
-                context.model_call_id,
-            )
-            try:
-                await ledger.record_failure(
-                    context.rollout_id,
-                    context.model_call_id,
-                    INVALID_COMMIT_COORDS_REASON,
-                )
-            except Exception:
-                LOG.exception(
-                    "Could not poison rollout %s call %s after a failed acknowledgement",
-                    context.rollout_id,
-                    context.model_call_id,
-                )
-        finally:
-            self._strip_capture_transport_fields(payload)
-
-    @staticmethod
-    def _strip_capture_transport_fields(payload: Dict[str, Any]) -> None:
-        """Keep token IDs, logprobs, routes, and coordinates off the agent hop."""
-        payload.pop(NG_COMMIT_COORDS_FIELD, None)
-        payload.pop("prompt_token_ids", None)
-        for choice in payload.get("choices") or []:
-            if not isinstance(choice, dict):
-                continue
-            choice.pop("logprobs", None)
-            choice.pop("token_ids", None)
-            message = choice.get("message")
-            if isinstance(message, dict):
-                for field_name in TOKEN_FIELDS:
-                    message.pop(field_name, None)
 
     @staticmethod
     def _require_token_id_list(value: Any, field_name: str) -> List[Any]:
