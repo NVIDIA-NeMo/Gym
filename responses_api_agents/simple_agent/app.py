@@ -277,15 +277,16 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         cookies = request.cookies
 
-        seed_session_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(seed_session_response)
-        cookies = seed_session_response.cookies
+        # `session_scope` pairs /seed_session with /close_session in a finally, so an
+        # environment gets its teardown call even when this rollout raises below.
+        async with self.session_scope(
+            self.config.resources_server.name, body.model_dump(), cookies=cookies
+        ) as cookies:
+            return await self._run_episode(request, body, cookies)
 
+    async def _run_episode(
+        self, request: Request, body: SimpleAgentRunRequest, cookies: Any
+    ) -> SimpleAgentVerifyResponse:
         response = await self.server_client.post(
             server_name=self.config.name,
             url_path=self.url_path_for_run("/v1/responses", body),
