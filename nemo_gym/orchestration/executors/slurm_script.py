@@ -296,7 +296,8 @@ def build_sbatch_script(
     # valid prepare script" for a file that is plainly there. Making the OUTPUT
     # absolute is what keeps artifacts in the job directory without moving cwd.
     output_path = f"+output_jsonl_fpath={remote_bench_dir}/artifacts/rollouts.jsonl"
-    extra_flags = ["--model-type openai_model"] if config.driver.policy_model else []
+    policy_type = config.driver.policy_model_type
+    extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
     gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(benchmark.run))
     entrypoint = render_driver_entrypoint(
         repo=gi.repo if gi else None,

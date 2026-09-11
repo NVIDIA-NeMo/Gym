@@ -306,6 +306,36 @@ def test_render_gym_cmd_prepare():
 # ---------------------------------------------------------------------------
 
 
+def test_driver_policy_model_type_defaults_to_openai_model(submit_config, bench_dir):
+    submit_config.driver.policy_model = "vllm_model"
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "--model-type openai_model" in script
+
+
+def test_driver_policy_model_type_is_configurable(submit_config, bench_dir):
+    # Every certified NEL run of these benchmarks serves the policy as
+    # vllm_model, and lmarena_v3 ships its own vllm_model policy that a second
+    # composed server would collide with.
+    submit_config.driver.policy_model = "vllm_model"
+    submit_config.driver.policy_model_type = "vllm_model"
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "--model-type vllm_model" in script
+    assert "--model-type openai_model" not in script
+
+
+def test_driver_policy_model_type_empty_composes_nothing(submit_config, bench_dir):
+    submit_config.driver.policy_model = "vllm_model"
+    submit_config.driver.policy_model_type = ""
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "--model-type" not in script
+
+
 def test_render_driver_entrypoint_no_install_no_prepare():
     out = render_driver_entrypoint(None, None, None)
     assert out == '"${GYM_CMD[@]}"'

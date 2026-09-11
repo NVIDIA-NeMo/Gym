@@ -143,6 +143,15 @@ class DriverConfig(_StrictModel):
     # Name of a service in `services:` to use as the policy model. When set, injects
     # policy_base_url/policy_model_name/policy_api_key into each benchmark's run config.
     policy_model: str | None = None
+    # Which responses_api_models asset serves as the policy, passed as
+    # `--model-type`. Not every benchmark wants the same one: Gym permits exactly
+    # one entry under `policy_model.responses_api_models`, so composing
+    # openai_model against a benchmark that ships its own vllm_model policy (e.g.
+    # lmarena_v3) fails validation with "Dictionary should have at most 1 item
+    # after validation, not 2", and overrides keyed on `vllm_model.*` land on a
+    # server that was never composed. Set to "" to compose no policy model config
+    # at all, for a benchmark whose own config already declares a complete one.
+    policy_model_type: str = "openai_model"
     benchmarks: dict[str, BenchmarkRunConfig]
     env: dict[str, str] = {}
     # Pyxis-style bind mounts passed as --container-mounts.
