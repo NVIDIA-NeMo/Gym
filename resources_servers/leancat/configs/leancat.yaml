@@ -1,0 +1,33 @@
+leancat:
+  resources_servers:
+    leancat:
+      entrypoint: app.py
+      sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
+      sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
+      compilation_timeout: 300.0
+      # Deliberately NOT setting num_workers: >1 makes Gym launch uvicorn by import string
+      # (server_utils: uvicorn_kwargs["app"] = f"{module}:app"), which needs a module-level
+      # `app` object. This server builds its app inside run_webserver(), so every forked
+      # worker dies with 'Attribute "app" not found' and the server never comes up.
+      domain: math
+      description: LeanCat -- formal 1-category-theory proofs in Lean 4 / Mathlib
+        v4.19.0
+      value: Measures library-grounded abstraction in formal theorem proving, where
+        current models score near zero
+      verified: false
+leancat_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: leancat
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/leancat/data/example.jsonl
+        prompt_config: benchmarks/prompts/eval/leancat/paper.yaml
+        license: CC-BY-4.0

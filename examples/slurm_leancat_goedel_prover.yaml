@@ -1,0 +1,67 @@
+# LeanCat on Slurm with Goedel-Prover-V2-32B.
+#
+# Fill in the four <PLACEHOLDER> values before submitting. Dry-run first:
+#
+#   gym eval submit --config examples/slurm_leancat_goedel_prover.yaml --dry-run
+#
+# The Lean sandbox is NOT started by this config. `services:` accepts only `type: vllm` and
+# `type: ray`, so a NeMo-Skills sandbox on Mathlib v4.19.0 must already be reachable at
+# NEMO_SKILLS_SANDBOX_HOST:PORT -- launch it into the same allocation with `srun --overlap`.
+# Verify it with check_sandbox.py (expects 100/100) before spending anything on inference.
+
+compute:
+  cluster:
+    type: slurm
+    account: nemotron_n4_post
+    walltime: "08:00:00"
+    node_pools:
+      compute:
+        partition: batch
+        nodes: 1
+        ntasks_per_node: 1
+        gpus_per_node: 8
+
+services:
+  vllm_model:
+    type: vllm
+    # Local sqsh; swap for a registry ref if you would rather pull.
+    container: /lustre/fsw/portfolios/convai/projects/convai_convaird_nemo-speech/users/lgrigoryan/reasoning_science/containers/vllm+vllm-openai+v0.19.1-cu130.sqsh
+    model: Goedel-LM/Goedel-Prover-V2-32B
+    tensor_parallel_size: 8
+    port: 8000
+    health_check:
+      # A 32B model over a cold NFS/Lustre read is slow to load; do not tighten this.
+      timeout_seconds: 2400
+    mounts:
+      - /lustre/fsw/portfolios/convai/projects/convai_convaird_nemo-speech/users/lgrigoryan/huggingface_home:/hf
+    env:
+      HF_HOME: /hf
+
+driver:
+  policy_model: vllm_model
+  container: /lustre/fsw/portfolios/convai/projects/convai_convaird_nemo-speech/users/lgrigoryan/reasoning_science/containers/nvidia+eval-factory+nemo-gym:26.05.sqsh
+  env:
+    # Ray's AF_UNIX socket paths blow past the 107-byte limit under long Lustre paths.
+    RAY_TMPDIR: /tmp
+    # Where the externally-launched Lean sandbox is listening.
+    NEMO_SKILLS_SANDBOX_HOST: localhost
+    NEMO_SKILLS_SANDBOX_PORT: "6000"
+  benchmarks:
+    leancat:
+      prepare:
+        config_paths:
+          - resources_servers/leancat/configs/leancat.yaml
+          - benchmarks/leancat/config.yaml
+      run:
+        split: benchmark
+        config_paths:
+          - resources_servers/leancat/configs/leancat.yaml
+          - benchmarks/leancat/config.yaml
+        responses_create_params:
+          # Appendix D.3, Table 5. top_p is deliberately unset: eval_common.chat_completion
+          # sends none, so sending one would be a deviation from the reference harness.
+          temperature: 1.0
+          max_output_tokens: 50000
+
+job:
+  output_path: /lustre/fsw/portfolios/convai/projects/convai_convaird_nemo-speech/users/lgrigoryan/reasoning_science/leancat_results
