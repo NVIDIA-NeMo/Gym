@@ -182,7 +182,7 @@ elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
         "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
         --headless \
         --data-parallel-size $((NUM_PREFILL_NODES * 4)) \
-        --data-parallel-start-rank \$SLURM_PROCID \
+        --data-parallel-start-rank \$(( SLURM_PROCID * 4)) \
         --data-parallel-address \$PREFILL_HEAD \
         --data-parallel-rpc-port $PREFILL_DP_RPC_PORT
 elif (( SLURM_PROCID == $NUM_PREFILL_NODES )); then
@@ -207,7 +207,7 @@ else
         "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
         --headless \
         --data-parallel-size $((NUM_DECODE_NODES * 4)) \
-        --data-parallel-start-rank \$(( SLURM_PROCID - $NUM_PREFILL_NODES )) \
+        --data-parallel-start-rank \$(( (SLURM_PROCID - $NUM_PREFILL_NODES) * 4 )) \
         --data-parallel-address \$DECODE_HEAD \
         --data-parallel-rpc-port $DECODE_DP_RPC_PORT
 fi
