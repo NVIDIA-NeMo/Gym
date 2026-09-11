@@ -27,8 +27,8 @@ def execution_health(
     context_limit = error.get("name") == "ContextOverflowError" or (
         status_code == 400 and re.search(r"maximum context length|context window|too many tokens", message, re.I)
     )
-    timeout = "timeout" in str(error_type or exception_type or "").lower() or return_code == 124
-    budget_expired = budget_s > 0 and elapsed_s >= budget_s and timeout
+    timeout = "timeout" in str(error_type or "").lower() or return_code == 124
+    budget_expired = exception_type is None and budget_s > 0 and elapsed_s >= budget_s and timeout
     reason = None
     outcome = "completed"
     if error and not context_limit:

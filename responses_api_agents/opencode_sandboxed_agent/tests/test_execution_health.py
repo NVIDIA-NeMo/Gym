@@ -28,6 +28,8 @@ def test_exception_preserved_even_when_partial_export_exists():
     result = classify(exception_type="ConnectionError", return_code=None, finished=False)
     assert result["outcome"] == "infrastructure_error"
     assert result["reason"] == "agent_execution_error"
+    late = classify(exception_type="TimeoutError", return_code=None, finished=False, elapsed_s=28890)
+    assert late["outcome"] == "infrastructure_error"
 
 
 def test_missing_terminal_evidence_is_retryable():
