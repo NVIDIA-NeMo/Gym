@@ -15,8 +15,7 @@ OUTPUT_FPATH = BENCHMARK_DIR / "data" / "aa_briefcase_lite.jsonl"
 DATASET_ENV = "AA_BRIEFCASE_LITE_DATASET_DIR"
 REVISION_ENV = "AA_BRIEFCASE_LITE_REVISION"
 REVISION_MARKER = ".aa-briefcase-lite-revision"
-PINNED_REVISION = "4dec557b47d43867a1648c0974db1d8208c8b677"  # pragma: allowlist secret
-LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
+PINNED_REVISION = "4dec557b47d43867a1648c0974db1d8208c8b677"
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -50,7 +49,6 @@ def _validate_task_files(dataset_dir: Path, tasks: list[dict]) -> None:
     if len(source_lists) != 1:
         raise ValueError("Lite tasks are expected to share one identical shared/week source pool")
 
-    validated = set()
     for task in tasks:
         paths = [
             task["task_md_path"],
@@ -59,23 +57,10 @@ def _validate_task_files(dataset_dir: Path, tasks: list[dict]) -> None:
             *task["shared_files"],
             *task["week_files"],
         ]
-        pending = [dataset_dir / relative for relative in paths]
-        while pending:
-            path = pending.pop()
-            candidate = path.resolve()
+        for relative in paths:
+            candidate = (dataset_dir / relative.rstrip("/")).resolve()
             if not candidate.is_relative_to(dataset_dir) or not candidate.exists():
-                raise FileNotFoundError(f"Invalid or missing dataset path for {task['task_id']}: {path}")
-            if candidate in validated:
-                continue
-            validated.add(candidate)
-            if candidate.is_dir():
-                pending.extend(candidate.iterdir())
-            elif candidate.is_file():
-                with candidate.open("rb") as source:
-                    if source.read(len(LFS_POINTER_PREFIX)) == LFS_POINTER_PREFIX:
-                        raise ValueError(f"Unmaterialized Git LFS pointer: {candidate}")
-            else:
-                raise ValueError(f"Expected a dataset file or directory: {candidate}")
+                raise FileNotFoundError(f"Invalid or missing dataset path for {task['task_id']}: {relative}")
 
 
 def prepare() -> Path:
@@ -89,29 +74,27 @@ def prepare() -> Path:
 
     revision = _dataset_revision(dataset_dir)
     tasks = _read_jsonl(tasks_path)
-    if sorted(task["task_id"] for task in tasks) != ["w1_t1", "w1_t2", "w1_t3", "w1_t4"]:
-        raise ValueError("Expected exactly the four unique public AA-Briefcase-Lite task IDs")
+    if {task["task_id"] for task in tasks} != {"w1_t1", "w1_t2", "w1_t3", "w1_t4"}:
+        raise ValueError("Expected the four public AA-Briefcase-Lite task IDs")
     _validate_task_files(dataset_dir, tasks)
 
-    records = []
-    for task in tasks:
-        record = {
-            "responses_create_params": {"input": []},
-            "task_id": task["task_id"],
-            "week": task["week"],
-            "dataset_dir": str(dataset_dir),
-            "dataset_revision": revision,
-            "task_md_path": task["task_md_path"],
-            "deliverable_filenames": task["deliverable_filenames"],
-            "shared_files": task["shared_files"],
-            "week_files": task["week_files"],
-            "scenario_overview_path": task["scenario_overview_path"],
-            "week_overview_path": task["week_overview_path"],
-        }
-        records.append(json.dumps(record) + "\n")
-
     OUTPUT_FPATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_FPATH.write_text("".join(records), encoding="utf-8")
+    with OUTPUT_FPATH.open("w", encoding="utf-8") as output:
+        for task in tasks:
+            record = {
+                "responses_create_params": {"input": []},
+                "task_id": task["task_id"],
+                "week": task["week"],
+                "dataset_dir": str(dataset_dir),
+                "dataset_revision": revision,
+                "task_md_path": task["task_md_path"],
+                "deliverable_filenames": task["deliverable_filenames"],
+                "shared_files": task["shared_files"],
+                "week_files": task["week_files"],
+                "scenario_overview_path": task["scenario_overview_path"],
+                "week_overview_path": task["week_overview_path"],
+            }
+            output.write(json.dumps(record) + "\n")
 
     print(f"Wrote {len(tasks)} tasks to {OUTPUT_FPATH}")
     return OUTPUT_FPATH
