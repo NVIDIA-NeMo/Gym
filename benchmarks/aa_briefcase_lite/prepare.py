@@ -15,7 +15,7 @@ OUTPUT_FPATH = BENCHMARK_DIR / "data" / "aa_briefcase_lite.jsonl"
 DATASET_ENV = "AA_BRIEFCASE_LITE_DATASET_DIR"
 REVISION_ENV = "AA_BRIEFCASE_LITE_REVISION"
 REVISION_MARKER = ".aa-briefcase-lite-revision"
-PINNED_REVISION = "4dec557b47d43867a1648c0974db1d8208c8b677"
+PINNED_REVISION = "4dec557b47d43867a1648c0974db1d8208c8b677"  # pragma: allowlist secret
 LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
 
 
