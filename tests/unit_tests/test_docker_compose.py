@@ -22,7 +22,8 @@ def make_compose(provider, document, *, image_configs=None, **kwargs):
 
     from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
 
-    group = AsyncSandboxCompose(provider, "compose.yaml", image_configs=image_configs, **kwargs)
+    group = AsyncSandboxCompose(provider, "compose.yaml", **kwargs)
+    group._image_configs = dict(image_configs or {})
     group.document = document
     group._normalize = AsyncMock(return_value=document)
     return group
@@ -483,31 +484,6 @@ async def test_invalid_yaml_fails_before_provisioning(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_healthcheck_override_inherits_image_test_and_defaults():
-    compose = make_compose(
-        SimpleNamespace(),
-        {"services": {"app": {"image": "image", "healthcheck": {"interval": "1s"}}}},
-        image_configs={
-            "image": {
-                "Cmd": ["sleep", "60"],
-                "Healthcheck": {
-                    "Test": ["CMD", "true"],
-                    "Timeout": 2_000_000_000,
-                    "Retries": 5,
-                },
-            }
-        },
-    )
-    await compose._prepare()
-    assert compose._plans["app"]["health"] == {
-        "test": ["CMD", "true"],
-        "interval": "1s",
-        "timeout": 2.0,
-        "retries": 5,
-    }
-
-
-@pytest.mark.asyncio
 async def test_compose_cli_normalization_decodes_literal_dollars_and_empty_ipam(tmp_path, monkeypatch):
     path = tmp_path / "compose.yaml"
     normalized = {
@@ -877,52 +853,10 @@ async def test_invalid_project_and_volumes_never_provision(document, message):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("unset, disabled", [(True, False), (False, True)])
-async def test_image_environment_unset_and_health_disable(tmp_path, unset, disabled):
-    provider = ShellProvider()
-    output = tmp_path / "output"
-    group = make_compose(
-        provider,
-        {
-            "services": {
-                "app": {
-                    "image": "image",
-                    "environment": {"IMAGE_VALUE": None} if unset else {"ABSENT": None},
-                    "healthcheck": {"disable": disabled},
-                }
-            }
-        },
-        image_configs={
-            "image": {
-                "Cmd": ["sh", "-c", f'printf "$IMAGE_VALUE" > {output}'],
-                "Env": ["IMAGE_VALUE=inherited"],
-                "Healthcheck": {"Test": ["CMD", "false"]},
-            }
-        },
-        poll_interval_s=0.01,
-    )
-    if unset:
-        with pytest.raises(NotImplementedError, match="unsetting inherited"):
-            await group.start()
-        assert not provider.created
-    else:
-        async with group:
-            await group._wait("app", "service_completed_successfully")
-            assert output.read_text() == "inherited"
-        assert provider.closed == ["1"]
-
-
-@pytest.mark.asyncio
-async def test_image_inspection_resources_and_environment(tmp_path):
+async def test_service_resources_environment_and_workdir(tmp_path):
     from nemo_gym.sandbox.providers.base import SandboxSpec
 
     output = tmp_path / "output"
-    config = {
-        "User": "1000",
-        "WorkingDir": str(tmp_path),
-        "Env": ["IMAGE=from-image", "OVERRIDE=old"],
-        "Shell": ["/bin/bash", "-c"],
-    }
 
     class UserProvider(ShellProvider):
         users = None
@@ -942,22 +876,20 @@ async def test_image_inspection_resources_and_environment(tmp_path):
                     "image": "original-image",
                     "user": "1000",
                     "entrypoint": "sh -c",
-                    "command": shlex.quote(
-                        f'printf "%s|%s|%s|%s" "$IMAGE" "$OVERRIDE" "$SPEC" "$PWD" > {output}; sleep 1'
-                    ),
-                    "environment": {"OVERRIDE": "new"},
+                    "command": shlex.quote(f'printf "%s|%s|%s" "$OVERRIDE" "$SPEC" "$PWD" > {output}; sleep 1'),
+                    "environment": {"OVERRIDE": "new", "UNSET": None},
+                    "working_dir": str(tmp_path),
                     "cpus": "1.5",
                     "mem_limit": 1048577,
-                    "healthcheck": {"test": ["CMD-SHELL", f"[[ -f {output} ]]"], "interval": "1ms"},
+                    "healthcheck": {"test": ["CMD-SHELL", f"test -f {output}"], "interval": "1ms"},
                 }
             }
         },
-        image_configs={"original-image": config},
         service_specs={"app": SandboxSpec(env={"SPEC": "from-spec"}, ttl_s=30)},
         poll_interval_s=0.01,
     )
     async with group:
-        assert output.read_text() == f"from-image|new|from-spec|{tmp_path}"
+        assert output.read_text() == f"new|from-spec|{tmp_path}"
         spec = provider.created[0]
         assert spec.image == "original-image"
         assert spec.ttl_s == 30
@@ -1378,7 +1310,7 @@ async def test_compose_start_requires_yaml():
 
 
 @pytest.mark.asyncio
-async def test_default_registry_inspection_preserves_image_startup_and_health(monkeypatch):
+async def test_registry_inspection_supplies_startup_directory_and_ports(monkeypatch):
     from unittest.mock import Mock
 
     config = {
@@ -1398,12 +1330,11 @@ async def test_default_registry_inspection_preserves_image_startup_and_health(mo
     inspect.assert_called_once_with("example/app:1")
     plan = group._plans["app"]
     assert plan["command"] == "/entrypoint.sh serve"
-    assert plan["spec"].env["MODE"] == "production"
+    assert plan["spec"].env == {}
     assert plan["spec"].workdir == "/app"
     assert plan["spec"].ports == (8080,)
-    assert plan["health"]["test"] == ["CMD-SHELL", "check-health"]
-    assert plan["health"]["interval"] == 1
-    assert plan["shell"] == ["/bin/bash", "-c"]
+    assert plan["health"]["test"] == ["NONE"]
+    assert plan["shell"] == ["/bin/sh", "-c"]
 
 
 @pytest.mark.asyncio
@@ -1486,27 +1417,26 @@ def test_registry_failures_close_session(monkeypatch, failure):
 
 
 @pytest.mark.asyncio
-async def test_supplied_image_config_skips_registry_and_preserves_defaults(monkeypatch):
+async def test_explicit_entrypoint_needs_no_registry(tmp_path, monkeypatch):
     from unittest.mock import Mock
 
     inspect = Mock(side_effect=AssertionError("registry access must not occur"))
     monkeypatch.setattr(AsyncSandboxCompose, "_inspect_image", inspect)
-    config = {
-        "Entrypoint": ["/start"],
-        "Cmd": ["serve"],
-        "Env": ["MODE=cached"],
-        "Healthcheck": {"Test": ["CMD", "check"]},
-        "WorkingDir": "/app",
-    }
+    output = tmp_path / "output"
     group = make_compose(
-        Provider(),
-        {"services": {"app": {"image": "example.org/app@sha256:abc"}}},
-        image_configs={"example.org/app@sha256:abc": config},
+        ShellProvider(),
+        {
+            "services": {
+                "app": {
+                    "image": "example/app:1",
+                    "entrypoint": ["sh", "-c"],
+                    "command": [f"printf started > {output}"],
+                    "working_dir": str(tmp_path),
+                }
+            }
+        },
     )
-    await group._prepare()
+    async with group:
+        await group._wait("app", "service_completed_successfully")
+        assert output.read_text() == "started"
     inspect.assert_not_called()
-    plan = group._plans["app"]
-    assert plan["command"] == "/start serve"
-    assert plan["spec"].env["MODE"] == "cached"
-    assert plan["spec"].workdir == "/app"
-    assert plan["health"]["test"] == ["CMD", "check"]

@@ -75,7 +75,6 @@ class AsyncSandboxCompose:
         *,
         compose_command: Sequence[str] = ("docker-compose",),
         image_platform: str = "linux/amd64",
-        image_configs: Mapping[str, Mapping[str, Any]] | None = None,
         registry_options: Mapping[str, Any] | None = None,
         service_specs: Mapping[str, SandboxSpec] | None = None,
         timeout_s: float = 1200,
@@ -87,7 +86,7 @@ class AsyncSandboxCompose:
         self.compose_file = Path(compose_file).resolve() if compose_file is not None else None
         self.compose_command = tuple(compose_command)
         self.document: dict[str, Any] = {}
-        self._image_configs = dict(image_configs or {})
+        self._image_configs: dict[str, Any] = {}
         self.image_platform = image_platform
         if len(image_platform.split("/")) not in (2, 3) or not all(image_platform.split("/")):
             raise ValueError("image_platform must be os/architecture[/variant]")
@@ -297,10 +296,12 @@ class AsyncSandboxCompose:
     async def _prepare(self):
         for name, service in self.document["services"].items():
             image = service["image"]
-            if image not in self._image_configs:
-                self._image_configs[image] = await asyncio.to_thread(self._inspect_image, image)
-            image_config = self._image_configs[image]
             entrypoint = service.get("entrypoint")
+            image_config = {}
+            if entrypoint is None:
+                if image not in self._image_configs:
+                    self._image_configs[image] = await asyncio.to_thread(self._inspect_image, image)
+                image_config = self._image_configs[image]
             command = service.get("command")
             if entrypoint is None:
                 entrypoint = image_config.get("Entrypoint") or []
@@ -315,38 +316,14 @@ class AsyncSandboxCompose:
             argv = list(entrypoint) + list(command or [])
             if not argv:
                 raise ValueError(f"Service {name!r}: image and Compose specify no command")
-            env = dict(item.split("=", 1) for item in image_config.get("Env", []) if "=" in item)
-            configured_env = service.get("environment") or {}
-            for key, value in configured_env.items():
-                if value is None:
-                    if key in env:
-                        raise NotImplementedError(
-                            f"Service {name!r}: unsetting inherited image environment is unsupported"
-                        )
-                    env.pop(key, None)
-                else:
-                    env[key] = str(value)
+            env = {key: str(value) for key, value in (service.get("environment") or {}).items() if value is not None}
             for key in (service.get("x-sandbox") or {}).get("resolve_environment", []):
                 url = urlsplit(env.get(key, ""))
                 if not url.scheme or url.hostname not in self.document["services"]:
                     raise ValueError(f"Service {name!r}: environment {key!r} must be a URL naming a Compose service")
                 # Validate the port before provisioning any sandboxes.
                 _ = url.port
-            health = {}
-            if image_config.get("Healthcheck"):
-                original = image_config["Healthcheck"]
-                health = {"test": original["Test"]}
-                for src, dest in (
-                    ("Interval", "interval"),
-                    ("Timeout", "timeout"),
-                    ("StartPeriod", "start_period"),
-                    ("StartInterval", "start_interval"),
-                ):
-                    if original.get(src):
-                        health[dest] = original[src] / 1e9
-                if original.get("Retries"):
-                    health["retries"] = original["Retries"]
-            health.update(service.get("healthcheck") or {})
+            health = service.get("healthcheck") or {}
             if set(health) - {"test", "disable", "interval", "timeout", "retries", "start_period", "start_interval"}:
                 raise NotImplementedError(f"Service {name!r}: unsupported healthcheck options")
             test = health.get("test") or ["NONE"]
@@ -384,13 +361,13 @@ class AsyncSandboxCompose:
                 "command": shlex.join(argv),
                 "user": user,
                 "health": {**health, "test": test},
-                "shell": image_config.get("Shell") or ["/bin/sh", "-c"],
+                "shell": ["/bin/sh", "-c"],
                 "runtime": runtime,
                 "spec": replace(
                     spec,
                     image=image,
                     env={**spec.env, **env},
-                    workdir=service.get("working_dir", image_config.get("WorkingDir") or "/"),
+                    workdir=service.get("working_dir", image_config.get("WorkingDir") or spec.workdir),
                     resources=resources,
                     ports=tuple(dict.fromkeys(ports)),
                     entrypoint=["/bin/sh", "-c", "while :; do sleep 3600; done"],

@@ -29,7 +29,7 @@ Save this as `compose.yaml`:
 services:
   peer:
     image: python:3.13-slim
-    command: [python3, -m, http.server, "8000"]
+    entrypoint: [python3, -m, http.server, "8000"]
     expose: ["8000"]
     healthcheck:
       test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000')"]
@@ -37,7 +37,7 @@ services:
       retries: 30
   main:
     image: python:3.13-slim
-    command: [sleep, infinity]
+    entrypoint: [sleep, infinity]
     working_dir: /tmp
     depends_on:
       peer:
@@ -82,6 +82,7 @@ async def main():
 asyncio.run(main())
 ```
 
+The explicit entrypoints in this example avoid registry lookup.
 The adapter waits for `peer` to become healthy before starting `main`.
 `main` reaches `peer` directly by service name; this example needs no port
 forwarding. Leaving the context stops both services and closes the provider.
@@ -137,11 +138,21 @@ its schema. YAML output retains `x-sandbox` extensions that the JSON formatter
 omits; the adapter only deserializes this normalized output. It rejects requirements the sandbox API cannot honor
 before creating services. It does not invoke `docker compose up`.
 
-The YAML must reference prebuilt images and contain no `build` entries. The
-adapter reads each image's OCI command, entrypoint, environment, working directory,
-user and health check, then applies the Compose values. Images need a POSIX shell
-and basic utilities. Lifecycle and health commands use the image's default user unless Compose
-overrides the service user. Host-file configuration requires root access by default.
+The YAML must reference prebuilt images and contain no `build` entries. This is
+an adapter for launching task services through the sandbox API, with a supported
+subset of Compose behavior.
+
+When `entrypoint` is omitted, ORAS reads the image's entrypoint, command, working
+directory and exposed ports. OpenSandbox otherwise defaults to an idle command,
+so this lookup is needed for services whose startup command is only in the image.
+An explicit YAML `entrypoint` skips registry access; specify its `command`,
+`working_dir` and ports in YAML as needed.
+
+Health checks come from YAML and `CMD-SHELL` uses `/bin/sh`. Image environment
+variables remain the sandbox runtime's responsibility; YAML environment values
+are passed to the API. Images need a POSIX shell and basic utilities. Lifecycle
+and health commands use the image's default user unless YAML overrides it.
+Host-file configuration requires root access by default.
 
 Deployment-specific settings remain configurable:
 
@@ -151,17 +162,10 @@ Deployment-specific settings remain configurable:
   adapter uses the official executable for interpolation and normalization.
 - `image_platform` selects registry metadata for the sandbox platform, defaulting
   to `"linux/amd64"`. Set it to match your deployment, for example `"linux/arm64/v8"`.
-- `image_configs={image_reference: config}` supplies complete image config objects
-  from a deployment-managed cache. Matching images require no registry access. Use
-  the raw `config` object from the image configuration blob, including command,
-  environment and health defaults, and key it by the exact Compose image reference.
-  Prefer digest-pinned references to keep cached defaults aligned with the image;
-  the cache must match `image_platform`. Missing images are resolved through ORAS.
 - `registry_options` passes options to ORAS's `Registry`, for example
   `{"tls_verify": "/path/to/registry-ca.pem"}`. ORAS reads registry credentials from
   the creator's Docker credential configuration; a daemon is not required.
   Configure credentials independently on the sandbox provider so it can pull images.
-  The raw config preserves Docker defaults such as `Healthcheck` and `Shell`.
   Receiving servers using `connect()` need neither Compose nor registry access.
 - `service_specs={name: SandboxSpec(...)}` supplies sandbox TTL, resources and
   provider options. Compose values override corresponding spec fields.
