@@ -1,0 +1,233 @@
+---
+title: "Native benchmark onboarding"
+description: "Scaffold, validate, and exercise a one-question Gym benchmark before a bounded model smoke test."
+position: 6
+---
+
+# Native benchmark onboarding
+
+This is a control recipe for a benchmark you own: one arithmetic question, Gym's
+`simple_agent`, and the generated exact-answer verifier. It exercises the native
+authoring path before you add a real dataset or a custom agent loop. There is no
+Harbor or Prime dependency, sandbox, GPU, or model call in the local checks.
+
+## Start from the pinned source setup
+
+Complete [Onboarding setup](/main/get-started/onboarding-setup), including Python
+3.13.14, the frozen Gym dependencies, and exported `GYM_ONBOARDING_CONSTRAINTS`
+and `UV_CONSTRAINT` from that checkout's lockfile. Run this recipe from that source
+checkout's root with its virtual environment activated. Do not scaffold into an
+unrelated project: the source checkout makes the generated verifier's dependency
+resolve to the same Gym code you are testing.
+
+Gym creates a separate Python environment for the verifier. An activated parent
+environment alone is not sufficient: `uv` must also be able to find that exact
+Python version when it launches a child process.
+
+```bash title="native-python-check"
+python --version
+uv python find 3.13.14
+test -f "${GYM_ONBOARDING_CONSTRAINTS:?Complete the frozen child-dependency setup first}"
+test "${UV_CONSTRAINT:?Export UV_CONSTRAINT from the setup page}" = "$GYM_ONBOARDING_CONSTRAINTS"
+```
+
+Both should identify Python 3.13.14. If `uv python find` fails, run
+`uv python install 3.13.14` using the setup page's supported `uv` version. If you
+use a custom managed-Python installation directory, **export
+`UV_PYTHON_INSTALL_DIR` in this same shell** before both installation and this
+recipe. Child verifier processes inherit that environment variable; passing a
+Gym config override for Python does not configure the fixture runner's isolated
+setup. Do not substitute a different Python version inside a server environment.
+
+The final two checks require the setup page's existing constraints file. Keep
+`UV_CONSTRAINT` exported through fixture, publication, and model execution so
+Gym's child `uv pip install` processes use the core versions from this same
+`uv.lock`; activating the frozen parent environment does not pin child installs
+by itself. Re-export constraints when intentionally changing the Gym revision.
+
+<Note>
+"Model-free" does not mean "no dependency downloads": the first `gym env test`
+or `gym env publish` may install the verifier's dependencies. Subsequent local
+checks can reuse the installed environment. No model service is started by these
+commands.
+</Note>
+
+## Discover and scaffold
+
+Inspect an existing benchmark to see its composition, then generate a separate
+native benchmark. If you already have `native_exact_answer` from this recipe,
+keep it or choose a new name consistently; initialization does not overwrite
+existing edited files.
+
+```bash title="native-discover"
+gym list benchmarks aime24
+```
+
+```bash title="native-scaffold"
+gym env init --benchmark native_exact_answer --profile custom-gym-verifier
+```
+
+The scaffold creates `benchmarks/native_exact_answer/` (manifest, composition,
+source data, preparation script, and prompt), and
+`resources_servers/native_exact_answer/` (scorer, dependencies, and verifier
+fixtures). The single source row asks `What is 6 x 7?` and expects `42`.
+The scorer strips surrounding whitespace and compares the answer exactly;
+explanations or additional text do not earn credit.
+
+## Describe the local example
+
+The generated manifest intentionally has publication placeholders. This command
+updates only its descriptive metadata, leaving Gym's generated runtime wiring
+unchanged. `example` names this tiny control's canonical source split; its Gym
+execution dataset type remains `benchmark`.
+
+```bash title="native-metadata"
+python - <<'PY'
+import getpass
+from pathlib import Path
+
+import yaml
+
+path = Path("benchmarks/native_exact_answer/manifest.yaml")
+manifest = yaml.safe_load(path.read_text())
+manifest.update(
+    description="One-question exact-answer control for native Gym onboarding.",
+    authors=[getpass.getuser()],
+    licensing="Apache-2.0",
+    canonical_split="example",
+)
+path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+PY
+```
+
+These values describe the repository's tutorial scaffold, not a claim about your
+future dataset. Before sharing a real benchmark, replace the example data,
+document its source and allowed use, and set the actual authors, license, split,
+prompt, and reward contract. Do not mark it baselined or supported just because
+the fixture passes.
+
+## Validate, test the scorer, and check local publication
+
+```bash title="native-validate"
+gym env validate native_exact_answer --json
+```
+
+Expect a successful static report for `native_exact_answer`: the manifest,
+composition, prompt, preparation contract, and sample row agree. This is not
+model authentication or a rollout test.
+
+```bash title="native-fixture"
+gym env test native_exact_answer --json
+```
+
+Expect three passing fixture cases: a correct answer with reward `1`, an
+incorrect answer with reward `0`, and a malformed request rejected with the
+expected error. This executes the actual verifier in its child dependency
+environment, without starting the model, agent, or resources HTTP services.
+
+```bash title="native-publish"
+gym env publish native_exact_answer --json
+gym list benchmarks native_exact_answer
+```
+
+Expect publication status `experimental` and three verifier cases. This is a
+**local readiness check**: it does not upload anything, open a pull request, or
+publish to a hosted registry. To share the benchmark later, submit the generated
+files, real data provenance, and model-run evidence for normal review.
+
+## Require model configuration before a smoke test
+
+On the fresh checkout, before you configure a model, the following negative
+check must exit nonzero and name the missing `policy_base_url` value:
+
+```bash title="native-missing-model"
+gym env validate --benchmark native_exact_answer --model-type vllm_model --strict
+```
+
+Skip that intentional failure if this checkout already has valid model settings.
+An unconfigured non-strict validation may emit warnings and still exit zero;
+use `--strict` for the model configuration check.
+
+Now use the setup page to create a private model config outside the checkout and
+export its absolute path as `GYM_MODEL_CONFIG`. The `vllm_model` adapter here
+targets the configured OpenAI-compatible Chat Completions endpoint; it does not
+launch an inference engine. Do not put API keys in shell arguments or committed
+files.
+
+```bash title="native-model-preflight"
+gym env validate --benchmark native_exact_answer --model-type vllm_model \
+  --config "${GYM_MODEL_CONFIG:?Set the private model config path first}" --strict
+```
+
+A passing strict check establishes that the configuration resolves, **not** that
+the server accepts credentials, supports the model, or produces valid responses.
+Only the next step establishes that behavior.
+
+## Run one bounded model sample
+
+<Warning>
+This step sends a real model request. Use an approved endpoint and budget, and
+monitor the run. The flags cap selected rows, repeats, concurrency, and output
+tokens, but they are not a hard request-count or wall-clock cap: transport retries
+can add attempts. For a strict spending or request budget, use an endpoint-side
+quota or a request-limited gateway before running. Do not run a full benchmark as
+an onboarding check.
+</Warning>
+
+```bash title="native-model-run"
+export GYM_NATIVE_RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gym-native-run.XXXXXX")"
+gym eval run --benchmark native_exact_answer --model-type vllm_model \
+  --config "${GYM_MODEL_CONFIG:?Set the private model config path first}" \
+  --split benchmark --limit 1 --num-repeats 1 --concurrency 1 \
+  --max-output-tokens 128 --output "$GYM_NATIVE_RUN_DIR/rollouts.jsonl"
+```
+
+This command prepares the dataset, starts Gym's local model adapter, agent, and
+verifier services automatically, collects the one sample, and shuts the services
+down on the normal completion path. Do not start a second `gym env start` process
+or add `--no-serve` for this recipe. A fresh output directory prevents accidental
+mixing with an earlier attempt.
+
+## Inspect the result before calling it validated
+
+```bash title="native-inspect"
+python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+run = Path(os.environ["GYM_NATIVE_RUN_DIR"])
+inputs = run / "rollouts_materialized_inputs.jsonl"
+print("materialized inputs:", inputs.read_text())
+rollouts = run / "rollouts.jsonl"
+rows = [json.loads(line) for line in rollouts.read_text().splitlines() if line.strip()]
+assert len(rows) == 1, f"Expected one completed rollout, found {len(rows)}"
+row = rows[0]
+print("reward:", row.get("reward"))
+print("response:", json.dumps(row.get("response"), indent=2))
+metrics = run / "rollouts_aggregate_metrics.json"
+print("aggregate metrics:", metrics.read_text() if metrics.exists() else "MISSING")
+failures = run / "rollouts_failures.jsonl"
+if failures.exists() and failures.read_text().strip():
+    print("Failure sidecar is nonempty; inspect it before accepting the run:", failures)
+print("artifacts:", run)
+PY
+gym eval health-check "$GYM_NATIVE_RUN_DIR" --workers 1
+```
+
+Inspect the actual model output and the saved materialized inputs: the prompt
+should ask the one arithmetic question, and the reward must agree with the
+exact-answer rule. A valid model answer of `41` is a genuine zero score, not an
+infrastructure failure. A truncated response, missing output, nonempty failure
+sidecar, or missing metrics requires investigation even if a command exits zero.
+The health report is diagnostic evidence, not a replacement for checking these
+artifacts and not a policy gate.
+
+Record the Gym revision, Python version, model identifier, sampling limits,
+artifact path, response inspection, and health findings with your benchmark
+review. Do not include credentials. Keep model validation marked **pending** until
+you have inspected a real completed run; fixture and configuration checks alone
+do not satisfy that acceptance criterion.
+
+For real authoring beyond this control, continue with
+[Create a new environment](/main/contribute/environments/new-environment).

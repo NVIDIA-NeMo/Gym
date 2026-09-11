@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+verifiers_onboarding:
+  responses_api_agents:
+    verifiers_agent:
+      entrypoint: app.py
+      domain: math
+      description: One local exact-answer task for checking legacy Verifiers onboarding.
+      datasets:
+        - name: verifiers_onboarding
+          type: validation
+          jsonl_fpath: responses_api_agents/verifiers_agent/examples/onboarding/gym_legacy_verifiers_onboarding/input.jsonl
+          license: Apache 2.0
+          num_repeats: 1
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ${policy_model_name}
+      vf_env_id: gym-legacy-verifiers-onboarding
+      vf_env_args: {}
+      max_tokens: 256
+      temperature: 0.0
+      top_p: 1.0

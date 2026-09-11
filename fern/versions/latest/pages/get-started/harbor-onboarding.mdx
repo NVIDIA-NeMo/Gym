@@ -1,0 +1,240 @@
+---
+title: "Harbor onboarding"
+description: "Bring one local Harbor task through NeMo Gym, with offline verifier controls and bounded runtime checks."
+position: 7
+---
+
+# Harbor onboarding
+
+Use this recipe when the task already follows Harbor's `instruction.md`, `task.toml`,
+`environment/`, `solution/`, and `tests/` layout. Keep that task and its verifier intact;
+the existing Gym `harbor_agent` bridge supplies the integration. A native Gym resources
+server or a new benchmark registry is not required.
+
+Start with [onboarding recipe setup](/main/get-started/onboarding-setup). This walkthrough uses
+the [tracked write-answer task](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/harbor_agent/example/onboarding),
+which asks the agent to write exactly `42` and a newline to `/app/answer.txt`.
+It is a plumbing control, not a model-quality benchmark.
+
+<Warning>
+The offline fixture, pinned Harbor task/job schema and Gym collation checks have been exercised.
+Applying the entire root development lock to Harbor is incompatible: Harbor `0.1.42` requires
+`uvicorn >= 0.38.0`, while Gym's root lock at commit
+`71d46901d9969ce7d81bed6d5fa6de08fd541ab5` selects `uvicorn == 0.37.0`.
+This is not a conflict with Gym's declared dependency requirements. The independent server
+installation below preserves those requirements and the parent/child protocol pins.
+The Docker build, end-to-end model rollout, artifact round trip and runtime cleanup also remain
+pending on a Docker-capable host. The independent server installation and offline tests passed
+on macOS arm64 with Python 3.13.14, but do not establish a completed live acceptance run or
+support for every optional provider. Dependency-check exceptions are recorded below.
+</Warning>
+
+## Check the task offline
+
+Run from the source checkout root with its development environment activated:
+
+```bash
+python -m pytest tests/unit_tests/test_harbor_onboarding_recipe.py -q
+```
+
+The tests execute the actual task shell scripts against temporary files. The oracle earns `1.0`;
+a wrong, empty or missing answer earns `0.0`. Two additional checks use Harbor's actual task/job
+classes when the pinned Harbor package is installed; otherwise those checks are explicitly skipped.
+The Gym validation-split collation test does not start servers, download a dataset or call a model.
+
+The verifier has no Python or network dependency: Harbor invokes `bash /tests/test.sh`, which
+writes `/logs/verifier/reward.txt`. The scripts accept optional paths so the same oracle and
+verifier can run offline. Harbor uses their standard container paths without arguments.
+
+## Prepare the runtime
+
+The runtime needs Git, `uv`, Bash, `jq`, a working Docker daemon and Docker Compose v2.
+Use your approved Docker-capable host; this recipe does not install a container daemon.
+The model endpoint is accessed by the host-side Gym services, not from inside the task container.
+Check the prerequisites before provisioning or using model quota:
+
+```bash
+git --version
+uv --version
+bash --version
+jq --version
+docker version
+docker compose version
+docker info
+test -f "$GYM_MODEL_CONFIG"
+```
+
+Stop if any required check fails. Confirm separately that the private model configuration names
+the approved endpoint and exact model ID, the credential is valid, and a sample-limited allowance
+is available. Structural validation below cannot prove model access.
+
+Create a fresh results directory and expose absolute task/artifact paths to the bridge and its
+Ray worker. Do not reuse a previous failed run's directory:
+
+```bash
+export GYM_REPO_ROOT="$PWD"
+mkdir -p "$GYM_REPO_ROOT/results"
+export GYM_HARBOR_RUN_DIR="$(mktemp -d "$GYM_REPO_ROOT/results/harbor-onboarding.XXXXXX")"
+export GYM_HARBOR_CONFIG="$GYM_REPO_ROOT/responses_api_agents/harbor_agent/example/onboarding/harbor_onboarding.yaml"
+
+gym env validate --strict \
+  --config "$GYM_HARBOR_CONFIG" \
+  --config "$GYM_MODEL_CONFIG" \
+  --model-type vllm_model
+```
+
+The adapter's [requirements](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/harbor_agent/requirements.txt)
+pin Harbor `0.1.42` at commit `9dddd797b57ab8a0f9d6352a20fce73abbb29573`. Provision it separately
+under Gym's declared `dev` and `sandbox` requirements, matching the root's **exact Ray version**.
+Gym's declared `openai==2.44.0` pin stays unchanged. Scope the root-constraint exception to this
+installation only; do not unset `UV_CONSTRAINT` globally or change the root lock.
+
+```bash
+export GYM_ONBOARDING_RAY_VERSION="$(python -c 'from importlib.metadata import version; print(version("ray"))')"
+export GYM_HARBOR_PYTHON="$GYM_HARBOR_RUN_DIR/venvs/responses_api_agents/harbor_agent/.venv/bin/python"
+uv venv --python 3.13.14 "$GYM_HARBOR_RUN_DIR/venvs/responses_api_agents/harbor_agent/.venv"
+(
+  cd "$GYM_REPO_ROOT/responses_api_agents/harbor_agent"
+  UV_CONSTRAINT= uv pip install --python "$GYM_HARBOR_PYTHON" \
+    -r requirements.txt "ray[default]==$GYM_ONBOARDING_RAY_VERSION"
+)
+uv pip check --python "$GYM_HARBOR_PYTHON" \
+  > "$GYM_HARBOR_RUN_DIR/harbor-dependency-check.txt" 2>&1
+uv pip freeze --python "$GYM_HARBOR_PYTHON" --exclude-editable \
+  > "$GYM_HARBOR_RUN_DIR/harbor-constraints.txt"
+"$GYM_HARBOR_PYTHON" -c 'import platform; from importlib.metadata import version; print(platform.platform(), platform.python_version()); print({p: version(p) for p in ("nemo-gym", "harbor", "ray", "openai", "uvicorn", "litellm")})' \
+  > "$GYM_HARBOR_RUN_DIR/harbor-versions.txt"
+```
+
+The first independent resolution is not globally reproducible until frozen. Retain
+`harbor-constraints.txt`, the platform/version record and the Gym commit together. To reproduce
+on the same platform/Python, add `--constraint /path/to/retained/harbor-constraints.txt` to the
+scoped installation command; also require the same parent Ray version. A different platform
+needs its own resolution and validation. Do not override conflicting pins to force reuse.
+
+<Note>
+`uv pip check` is not globally clean for this installation: it exits nonzero because Gym's
+`[tool.uv].exclude-dependencies` intentionally omits `alembic`, `cryptography`, `flask`,
+`flask-cors`, `graphene`, `gunicorn`, `huey`, `skops`, and `sqlalchemy`. The checked environment
+reported nine MLflow dependency warnings for these names and one additional Google Auth warning
+for `cryptography`. Retain and review `harbor-dependency-check.txt`; these audited exclusions are
+an exception to the normal stop-on-dependency-failure rule, not proof those optional paths work.
+Any other missing package or version conflict is a blocker. Do not reinstall excluded dependencies
+ad hoc. The local-task checks do not validate MLflow server or Google-authenticated provider paths.
+</Note>
+
+Now prefetch the remaining model server under shared setup's root constraints. The explicit
+skip flag preserves the independently installed Harbor environment; a missing model environment
+is still installed. If installation failed or the dependency check has an unaudited failure,
+stop instead of skipping it.
+
+```bash
+gym env prefetch \
+  --config "$GYM_HARBOR_CONFIG" \
+  --config "$GYM_MODEL_CONFIG" \
+  --model-type vllm_model \
+  "+uv_venv_dir=$GYM_HARBOR_RUN_DIR/venvs" \
+  +skip_venv_if_present=true
+
+"$GYM_HARBOR_PYTHON" -m pytest tests/unit_tests/test_harbor_onboarding_recipe.py -q
+```
+
+Prefetch downloads Python dependencies but does not start a model evaluation or build the task image.
+The two Harbor checks should now run rather than skip. Do not upgrade the Harbor pin independently
+to work around an installation problem; retain the error and dependency versions for diagnosis.
+The root and model environments continue to use shared setup's `UV_CONSTRAINT`; only the Harbor
+server uses its separately resolved/frozen dependency set.
+
+The task image pins the official multi-architecture Ubuntu `24.04` manifest to
+`sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254`
+(verified on 10 September 2026). Its Dockerfile installs `tmux` and `asciinema`, which Terminus2
+needs. The image build requires registry and Ubuntu package access; the task's runtime has
+`allow_internet = false`. Apt packages are not version-locked, so the base digest does not make
+the complete build reproducible. Record the built image ID during live acceptance.
+
+## Run one task with automatic startup
+
+This uses the existing `gym eval run` lifecycle: prepare the declared validation split, start
+Gym's services, collect the one task, and shut the services down. Do not start a separate
+`gym env start` session or add `--no-serve` to this command:
+
+```bash
+gym eval run \
+  --config "$GYM_HARBOR_CONFIG" \
+  --config "$GYM_MODEL_CONFIG" \
+  --model-type vllm_model \
+  --agent harbor_onboarding \
+  --split validation \
+  --output "$GYM_HARBOR_RUN_DIR/rollouts.jsonl" \
+  --limit 1 --num-repeats 1 --concurrency 1 \
+  --temperature 0 --max-output-tokens 512 \
+  "+uv_venv_dir=$GYM_HARBOR_RUN_DIR/venvs" \
+  +skip_venv_if_present=true
+```
+
+The tracked config caps the agent at three turns and 180 seconds, each model-server call at
+60 seconds, and verification at 10 seconds. Task image building is capped at 300 seconds.
+Those are component limits, not a hard end-to-end time or spending limit: dependency installation,
+startup, transport retries and cleanup add work. The underlying model client can retry calls.
+Use the external request/token allowance described in [setup](/main/get-started/onboarding-setup),
+and investigate the first setup/transport failure before considering another attempt.
+The explicit `skip_venv_if_present` override reuses the fresh server environments checked above;
+do not use it to bypass a failed prefetch or an unaudited dependency-check failure.
+The current Harbor-to-Gym model client reports `cost_usd=0.0` as a placeholder, not measured
+provider billing. It does not mean a hosted-model run was free; use provider/gateway accounting
+to verify the approved allowance.
+
+The config sets `harbor_no_delete: false`, so Harbor requests deletion of its trial container
+after execution while retaining native job files. Verify cleanup on the real host; an interrupted
+or failed cleanup must not be assumed successful. Dataset collation also creates preparation and
+metrics sidecars alongside the input file in the checkout; these are generated artifacts, not new
+source data.
+
+## Inspect the result and native evidence
+
+Start with the Gym row and its preserved Harbor metadata:
+
+```bash
+jq -c '{instance_id, reward, native_exception: .metadata.exception_info,
+  native_verifier: .metadata.verifier_result,
+  output_items: (.response.output | length)}' "$GYM_HARBOR_RUN_DIR/rollouts.jsonl"
+
+find "$GYM_HARBOR_RUN_DIR/native-jobs" -type f \
+  \( -name result.json -o -name trajectory.json -o -name reward.txt \
+     -o -name test-stdout.txt -o -name agent.log \)
+```
+
+Harbor groups these files under `native-jobs/<date>/onboarding/<model>/<job>/<trial>/`.
+The job directory also has a `result.json`; inspect the **trial** result when matching the verifier
+and trajectory. For this single-task control, retain all files in the fresh run directory.
+
+| Evidence | What to inspect |
+| --- | --- |
+| `rollouts.jsonl` | The expected instance, Gym reward, non-empty conversation and native metadata. |
+| `<trial>/result.json` | `verifier_result.rewards` and `exception_info`; a missing result is incomplete evidence. |
+| `<trial>/verifier/reward.txt` and `test-stdout.txt` | Actual verifier output and execution diagnostics. |
+| `<trial>/agent/trajectory.json` and `agent.log` | Commands, observations, parse problems and model/agent errors. |
+| Gym's printed aggregate and health paths | Summary of the rows and evidence collected, not proof all work completed. |
+
+The oracle's expected score is `1.0`, but a model may legitimately fail this task. A Gym reward
+of zero alone is not enough to distinguish a wrong answer from an adapter or runtime failure:
+the existing bridge can return zero after a job/conversion error, and some agent errors are retained
+in logs while verification proceeds. Cross-check the native exception, verifier and trajectory.
+Missing, partial or contradictory artifacts leave the result unverified. A health-check exit code
+or missing health findings does not certify completion or training-ready token coverage.
+
+Before accepting this route, retain the checkout/Harbor/Python versions, built image ID, one model
+rollout, matching native score and artifacts, observed network isolation and container cleanup.
+Record any blocked item explicitly; do not replace a missing runtime check with a fabricated result.
+
+## Substitute your own local task
+
+Copy the example config, set `harbor_datasets.onboarding.local_dataset_path` to the parent of your
+task directory, and replace the single input's `instance_id` with `onboarding::<task-directory-name>`.
+Keep a one-row declared validation dataset and the same run limits for the first attempt. Use your
+task's actual license and verifier expectations, and set a suitable working directory if it is not
+`/app`. Run the task's oracle and deliberate wrong-answer controls before spending model quota.
+
+Do not reuse the historical smoketest config for this walkthrough: this recipe supplies its own
+tracked task and explicit cleanup/time limits. After one successful acceptance run, a larger dataset
+or different sandbox requires its own runtime/resource review and separate run budget.

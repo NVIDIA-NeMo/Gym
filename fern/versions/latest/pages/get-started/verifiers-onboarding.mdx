@@ -1,0 +1,169 @@
+---
+title: "Legacy Verifiers onboarding"
+description: "Install and check one local Verifiers v0 task, then run a bounded Gym smoke test."
+position: 8
+---
+
+# Legacy Verifiers onboarding
+
+Use this recipe to check Gym's existing Prime Intellect Verifiers adapter with a
+local, one-question environment. It does not require a Prime Hub account, a Hub
+package, or a sandbox. Dependency installation can require network access; the
+fixture tests themselves make no model calls.
+
+This is the **legacy Verifiers v0** path, pinned to `v0.1.14`. It is not a Verifiers
+v1 migration or a claim that current Hub environments work with the adapter.
+Check each additional environment's Python, Verifiers and runtime requirements
+before trying it with this pinned adapter.
+
+## Prepare the checkout and isolated server environment
+
+Complete [Onboarding recipe setup](/main/get-started/onboarding-setup) first. Run
+the following commands from that source checkout's root with its root `.venv`
+activated. Keep Python 3.13.14 and the checkout's frozen dependency versions.
+
+Gym launches this agent in
+`responses_api_agents/verifiers_agent/.venv`, independently of the root `.venv`.
+Install the local example in that server environment, not only in the shell's
+active environment. Use a fresh checkout or a dedicated worktree if that server
+environment already contains another project's dependencies.
+
+```bash title="verifiers-install"
+test -f "${GYM_ONBOARDING_CONSTRAINTS:?Complete the shared setup first}"
+uv venv --python 3.13.14 responses_api_agents/verifiers_agent/.venv
+uv pip install --python responses_api_agents/verifiers_agent/.venv/bin/python \
+  --constraint "$GYM_ONBOARDING_CONSTRAINTS" \
+  -e '.[dev]' \
+  'verifiers @ git+https://github.com/PrimeIntellect-ai/verifiers.git@v0.1.14' \
+  -e responses_api_agents/verifiers_agent/examples/onboarding
+```
+
+The setup page's constraints preserve Gym's locked dependencies, including OpenAI. The local
+package supplies its own bundled data and `load_environment` function. This
+recipe deliberately does not install the adapter's default `acereason-math` Hub
+example. The run command below reuses the explicitly provisioned server
+environment with `+skip_venv_if_present=true`.
+
+## Discover and test the local task
+
+```bash title="verifiers-load"
+responses_api_agents/verifiers_agent/.venv/bin/python - <<'PY'
+from importlib.metadata import version
+import verifiers as vf
+
+environment = vf.load_environment("gym-legacy-verifiers-onboarding")
+print("verifiers:", version("verifiers"))
+print("environment:", type(environment).__name__)
+print("tasks:", len(environment.get_dataset()))
+print("answer:", environment.get_dataset()[0]["answer"])
+PY
+```
+
+Expect Verifiers `0.1.14`, `SingleTurnEnv`, one task and the answer `42`. The task
+asks `What is 6 * 7? Reply with only the integer.` It uses an exact final-assistant
+answer rubric: whitespace around `42` and one balanced leading reasoning block
+in `<think>...</think>` tags are accepted. A wrong final answer, extra answer
+prose, an empty completion or malformed message earns zero.
+
+```bash title="verifiers-fixtures"
+responses_api_agents/verifiers_agent/.venv/bin/python -m pytest \
+  tests/unit_tests/test_verifiers_onboarding_recipe.py -q -o addopts=
+```
+
+These checks cover correct, incorrect and malformed completions, the actual
+pinned Verifiers environment and rubric, and the agreement between task data,
+package loader and Gym configuration. The exact-answer rubric accepts plain
+assistant text or one balanced leading `<think>...</think>` block added by the
+model bridge, then compares only the final text. Wrong answers, extra answer
+prose, unfinished reasoning and nested reasoning blocks still score zero.
+Run them in the server environment: the real Verifiers test is skipped when that
+optional dependency is absent.
+
+The recipe files are under
+`responses_api_agents/verifiers_agent/examples/onboarding/`: `config.yaml`
+selects the adapter and its model server, while
+`gym_legacy_verifiers_onboarding/input.jsonl` is the single source used by both
+Gym and the Verifiers dataset loader. The Python package contains the rubric.
+This self-contained adapter does not need a dummy native resources server or a
+`gym env init` scaffold.
+
+## Validate model configuration
+
+Set `GYM_MODEL_CONFIG` as described in the setup page. It must point to your
+private configuration outside the checkout. The `vllm_model` bridge connects to
+that approved Chat Completions endpoint; it does not start an inference engine.
+
+```bash title="verifiers-preflight"
+gym env validate \
+  --config "${GYM_MODEL_CONFIG:?Set the private model config path first}" \
+  --config responses_api_agents/verifiers_agent/examples/onboarding/config.yaml \
+  --model-type vllm_model --strict
+```
+
+This is a configuration check, not an authentication check or a model rollout.
+
+## Run one bounded model sample
+
+<Warning>
+This step makes a real model request. Use an approved endpoint and a separate
+request/token allowance as described in the setup page. The limits below do not
+bound transport retries. Stop on setup or connection failures; do not turn this
+control into a full benchmark run while debugging.
+</Warning>
+
+```bash title="verifiers-model-run"
+export GYM_VERIFIERS_RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gym-verifiers-run.XXXXXX")"
+gym eval run \
+  --config "${GYM_MODEL_CONFIG:?Set the private model config path first}" \
+  --config responses_api_agents/verifiers_agent/examples/onboarding/config.yaml \
+  --model-type vllm_model --agent verifiers_onboarding \
+  --split validation \
+  --output "$GYM_VERIFIERS_RUN_DIR/rollouts.jsonl" \
+  --limit 1 --num-repeats 1 --concurrency 1 --max-output-tokens 256 \
+  +skip_venv_if_present=true
+```
+
+This single command starts the Gym model bridge and Verifiers agent, collects
+one rollout, and shuts down the services on normal completion. Do not start a
+separate `gym env start` or add `--no-serve` for this recipe. The recipe's agent
+configuration declares the bundled one-row validation dataset and also caps
+Verifiers generation at 256 tokens. Automatic serving prepares that split;
+`--input` is only supported with `--no-serve` against already-running services.
+
+## Inspect execution and reward separately
+
+```bash title="verifiers-inspect"
+python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+run = Path(os.environ["GYM_VERIFIERS_RUN_DIR"])
+rows = [json.loads(line) for line in (run / "rollouts.jsonl").read_text().splitlines() if line.strip()]
+assert len(rows) == 1, f"Expected one rollout, found {len(rows)}"
+row = rows[0]
+print("reward:", row.get("reward"))
+print("response:", json.dumps(row.get("response"), indent=2))
+for name in ("rollouts_aggregate_metrics.json", "rollouts_failures.jsonl"):
+    path = run / name
+    print(name, path.read_text() if path.exists() else "MISSING")
+PY
+```
+
+For an actual final answer of `42`, expect reward `1`; a genuine wrong answer
+should earn `0`. Confirm the model call and completed response before treating
+the reward as a model-quality result. Preserve and review the terminal/server
+logs alongside the rollout, after checking them for secrets.
+
+<Warning>
+The existing adapter can lose upstream structured error information and can
+emit a `msg_empty` placeholder when usable token metadata is absent. A zero
+reward with `response.error` unset is therefore not proof of a legitimate wrong
+answer, and a placeholder is not complete training-token or trace evidence.
+This recipe does not change those adapter behaviors. Record model execution,
+scoring parity and trace coverage separately; do not claim full benchmark or
+training compatibility from these local checks.
+</Warning>
+
+Return to the [recipe index](/main/get-started/benchmark-onboarding) to compare
+this legacy adapter path with native and Harbor onboarding.

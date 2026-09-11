@@ -1,0 +1,1 @@
+{"task_idx":0,"example_id":0,"vf_env_id":"gym-legacy-verifiers-onboarding","answer":"42","responses_create_params":{"input":[{"role":"user","content":"What is 6 * 7? Reply with only the integer."}]}}

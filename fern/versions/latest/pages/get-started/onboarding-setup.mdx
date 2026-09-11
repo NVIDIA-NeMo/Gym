@@ -1,0 +1,134 @@
+---
+title: "Onboarding recipe setup"
+description: "Prepare a reproducible source checkout, private model configuration and tightly limited smoke runs."
+position: 5
+---
+
+# Onboarding recipe setup
+
+Start with the [recipe index](/main/get-started/benchmark-onboarding), then choose the native,
+Harbor or legacy Verifiers route. These are small authoring controls, not full benchmark runs.
+Native manifests and self-contained adapters use different setup paths; do not add a dummy
+resources server just to make an adapter fit the native manifest contract.
+
+## Pin the checkout and Python
+
+Use a source checkout containing the recipe and keep its revision throughout validation:
+
+```bash
+git clone https://github.com/NVIDIA-NeMo/Gym.git
+cd Gym
+git rev-parse HEAD
+uv --version
+uv python install 3.13.14
+uv sync --frozen --extra dev --python 3.13.14
+source .venv/bin/activate
+python --version
+gym --version
+```
+
+Record the printed commit and `uv` version alongside your run. Reuse that checkout and its
+`uv.lock`, not a later `main`, to reproduce results. Python 3.13.14 satisfies both Gym and the
+pinned legacy Verifiers Python range; Python 3.14 does not satisfy that adapter's upper bound.
+Do not relax Gym's OpenAI pin to make an adapter installation resolve.
+
+If an older `uv` says Python 3.13.14 has no available download, update `uv` through your approved
+installation method or use its official metadata override, then repeat `uv sync`:
+
+```bash
+uv python install 3.13.14 \
+  --python-downloads-json-url https://raw.githubusercontent.com/astral-sh/uv/main/crates/uv-python/download-metadata.json
+```
+
+This changes interpreter discovery, not Gym's dependency contract. The adapter recipes explicitly
+provision their own server environments. A package installed only in the root `.venv` is not
+automatically installed in a server's isolated environment. For a custom interpreter location,
+export `UV_PYTHON_INSTALL_DIR` in the shell that starts Gym so child provisioning can find it.
+
+Export the frozen checkout's dependency constraints for the native, Verifiers and model-server
+child installations too:
+
+```bash
+export GYM_ONBOARDING_CONSTRAINTS="$(mktemp "${TMPDIR:-/tmp}/gym-onboarding-constraints.XXXXXX")"
+uv export --frozen --extra dev --no-emit-project --no-hashes \
+  --output-file "$GYM_ONBOARDING_CONSTRAINTS" --quiet > /dev/null
+export UV_CONSTRAINT="$GYM_ONBOARDING_CONSTRAINTS"
+```
+
+Keep this shell and constraints file for the recipe's setup and run. A frozen root sync alone
+does not constrain a later child `uv pip install`. The Verifiers recipe reuses this file explicitly.
+Harbor needs a separate dependency set: its pinned version requires a newer Uvicorn than the root
+lock. Its recipe scopes an independent installation to the Harbor server, preserves Gym's declared
+pins and the parent Ray version, and freezes the result with platform/version evidence. Do not
+apply that exception to the root or model environments, or silently override a declared conflict.
+
+## Configure model access privately
+
+Obtain an approved OpenAI-compatible endpoint, exact model ID and credential through your normal
+access route. A model ID is not an endpoint URL. Keep your model configuration outside the checkout;
+create it with your editor and restrict its permissions. The YAML shape is:
+
+```yaml
+policy_base_url: "https://<approved-endpoint>/v1"
+policy_api_key: "<local-secret>"
+policy_model_name: "<approved-model-id>"
+```
+
+Set the absolute filename in the shell, without putting the key in a command line:
+
+```bash
+export GYM_MODEL_CONFIG="/absolute/private/path/onboarding-model.yaml"
+test -f "$GYM_MODEL_CONFIG"
+chmod 600 "$GYM_MODEL_CONFIG"
+```
+
+Each recipe loads this file with `--config "$GYM_MODEL_CONFIG"` and adds
+`--model-type vllm_model`. The `vllm_model` bridge supports compatible Chat Completions endpoints;
+you do not need to host a local vLLM server when using an approved compatible remote endpoint.
+
+<Warning>
+Private input storage does not make generated artifacts safe to publish. Resolved configurations,
+server output and captures can contain credentials or sensitive prompts. Inspect and redact artifacts
+before sharing them. Do not commit the private model file or paste its contents into an issue.
+</Warning>
+
+## Keep every smoke run small
+
+The recipes explicitly use **one input sample, one rollout and concurrency one**. Their commands
+also cap output tokens; the Harbor agent has a finite turn limit. Do not remove these caps or
+switch to a full dataset while debugging setup. Any larger run needs a separate sample/token budget.
+
+```text
+--limit 1 --num-repeats 1 --concurrency 1
+```
+
+Use a new output directory for each attempt, and inspect the result before considering another run.
+The native and Verifiers controls ask a single exact-answer question. Harbor additionally runs a
+small local task in a container; its oracle/verifier tests do not require a model.
+
+<Warning>
+A sample/token limit is not a hard limit on HTTP retries or cost. Current connection-error paths
+can retry beyond those counts. For a strict budget, use an approved endpoint or gateway with a
+request/token allowance and a wall-clock limit, stop on the first transport/setup failure, and
+inspect the retained artifacts. Do not automatically retry a smoke run until the cause is understood.
+</Warning>
+
+## Interpret validation correctly
+
+`gym env validate` without `--strict` may warn about missing model settings and still exit zero.
+The recipe preflight uses strict configuration validation. This checks configuration, not whether
+credentials, model access, container images or capacity actually work.
+
+Keep four independent records: structural/fixture checks, actual model/runtime execution, scoring
+parity, and trace coverage. `gym env publish` is a local structural/verifier readiness operation,
+not a package upload or proof of benchmark accuracy. Health checks describe the evidence present;
+they do not account for all missing work or certify that an evaluation completed successfully.
+
+Inspect shutdown logs and confirm that the processes or containers created by your run have
+terminated. A zero CLI exit code does not prove graceful cleanup: one-sample acceptance exposed
+shutdown-time warnings and required cleanup of owned child processes. Do not stop unrelated
+Ray clusters or services. Record any external cleanup separately from Gym's normal shutdown.
+
+Proceed to [native onboarding](/main/get-started/native-onboarding),
+[Harbor onboarding](/main/get-started/harbor-onboarding), or
+[legacy Verifiers onboarding](/main/get-started/verifiers-onboarding).
