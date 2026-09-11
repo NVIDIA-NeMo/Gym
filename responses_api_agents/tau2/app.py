@@ -22,7 +22,7 @@ from pathlib import Path
 from time import time
 from typing import Any, Dict, List, Literal, Optional
 
-from responses_api_agents.tau2.source import ensure_tau2_data_dir
+from responses_api_agents.tau2.source import ensure_tau2_data_dir, get_tau2_bench_ref
 
 
 DATA_DIR = Path(__file__).parent / "tau2_data"
@@ -30,8 +30,15 @@ environ["TAU2_DATA_DIR"] = str(DATA_DIR)
 
 from fastapi import Body
 from loguru import logger
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
+from nemo_gym.adapters.turn_counter_proxy import (
+    TurnConstraintConfig,
+    TurnConstraintMetadata,
+    TurnCounterProxy,
+    start_turn_counter_proxy,
+    turn_constraint_metadata,
+)
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
@@ -59,6 +66,8 @@ from tau2.utils.llm_utils import to_litellm_messages
 
 TAU2_MALFORMED_TOOL_CALL_FAILURE_CLASS = "tau2_malformed_tool_call"
 TAU2_AGENT_FAILURE_CLASS = "tau2_agent_error"
+TURN_BUDGET_EXHAUSTED_FAILURE_CLASS = "turn_budget_exhausted"
+TURN_BUDGET_EXHAUSTED_TERMINATION_REASON = "turn_budget_exhausted"
 
 _RESERVED_RESULT_KEYS = (
     "reward",
@@ -177,6 +186,16 @@ class Tau2Config(BaseResponsesAPIAgentConfig):
     max_agent_steps: Optional[int] = None
     turns_remaining_interval: int = 1
     malformed_tool_call_max_retries: int = Field(default=0, ge=0)
+    turn_constraint: Optional[TurnConstraintConfig] = None
+
+    @model_validator(mode="after")
+    def _validate_turn_constraint_backend(self) -> "Tau2Config":
+        if self.turn_constraint is not None and self.max_agent_steps is not None:
+            raise ValueError(
+                "proxy turn_constraint cannot be combined with Tau2 max_agent_steps; "
+                "disable the native limit to avoid two independent budgets"
+            )
+        return self
 
 
 class Tau2RunRequest(BaseRunRequest):
@@ -210,10 +229,13 @@ class Tau2VerifyResponse(Tau2RunRequest, BaseVerifyResponse):
     mean_completion_tokens: Optional[float]
     max_prompt_tokens: Optional[float]
     max_completion_tokens: Optional[float]
+    turn_constraint: Optional[TurnConstraintMetadata] = None
 
 
 class Tau2FailureResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+    turn_constraint: Optional[TurnConstraintMetadata] = None
 
 
 class Tau2Agent(SimpleResponsesAPIAgent):
@@ -246,24 +268,63 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
     async def run(self, body: Tau2RunRequest) -> Tau2VerifyResponse | Tau2FailureResponse:
         record = self._sanitized_record(body)
+        proxy = await self._start_turn_proxy(body)
+        response: Tau2VerifyResponse | Tau2FailureResponse
         try:
-            return await self._run(body)
+            response = await self._run(body, policy_base_url=proxy.base_url if proxy is not None else None)
         except Exception as error:  # noqa: BLE001 -- one bad rollout must not abort the full collection
             malformed_error = _find_nested_exception(error, Tau2MalformedToolCallError)
             if malformed_error is not None:
                 failure_class = TAU2_MALFORMED_TOOL_CALL_FAILURE_CLASS
                 detail = malformed_error
+            elif proxy is not None and proxy.turns_used > proxy.max_turns:
+                failure_class = TURN_BUDGET_EXHAUSTED_FAILURE_CLASS
+                detail = _first_nested_exception(error)
             else:
                 failure_class = TAU2_AGENT_FAILURE_CLASS
                 detail = _first_nested_exception(error)
-            return self._failure_response(
+            response = self._failure_response(
                 body,
                 record,
                 failure_class,
                 f"{type(detail).__name__}: {detail}",
+                terminal=failure_class == TURN_BUDGET_EXHAUSTED_FAILURE_CLASS,
             )
+        finally:
+            if proxy is not None:
+                constraint = self.config.turn_constraint
+                assert constraint is not None
+                metadata = turn_constraint_metadata(
+                    constraint,
+                    proxy,
+                    harness_version=get_tau2_bench_ref(),
+                )
+                logger.info(
+                    "turn_counter {}: rollout finished after {}/{} policy-model POST attempts",
+                    body.task.id,
+                    proxy.turns_used,
+                    proxy.max_turns,
+                )
+                await proxy.stop()
+        if proxy is not None:
+            response.turn_constraint = metadata
+        return response
 
-    async def _run(self, body: Tau2RunRequest) -> Tau2VerifyResponse:
+    async def _start_turn_proxy(self, body: Tau2RunRequest) -> Optional[TurnCounterProxy]:
+        constraint = self.config.turn_constraint
+        if constraint is None:
+            return None
+        upstream_base_url = f"{self.base_url_for_run(get_server_url(self.config.model_server.name), body)}/v1"
+        return await start_turn_counter_proxy(
+            upstream_base_url=upstream_base_url,
+            api_key="dummy api key",  # pragma: allowlist secret
+            max_turns=constraint.limit,
+            position=constraint.reminder.position,
+            trigger=constraint.reminder.trigger,
+            label=str(body.task.id),
+        )
+
+    async def _run(self, body: Tau2RunRequest, *, policy_base_url: Optional[str] = None) -> Tau2VerifyResponse:
         # Gym-internal request fields (e.g. `capture_rollout_id`) are marked `exclude=True`;
         # skip them so only tau2-bench arguments reach `run_single_task`.
         body_dict = {
@@ -288,7 +349,8 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         # Need `openai/` provider prefix for LiteLLM
         config.llm_agent = "openai/dummy agent model"
         config.llm_args_agent = {
-            "api_base": f"{self.base_url_for_run(get_server_url(self.config.model_server.name), body)}/v1",
+            "api_base": policy_base_url
+            or f"{self.base_url_for_run(get_server_url(self.config.model_server.name), body)}/v1",
             "api_key": "dummy api key",  # pragma: allowlist secret
         } | extra_agent_args
 
@@ -391,17 +453,23 @@ class Tau2Agent(SimpleResponsesAPIAgent):
         record: Dict[str, Any],
         failure_class: str,
         error: str,
+        *,
+        terminal: bool = False,
     ) -> Tau2FailureResponse:
         print(f"[tau2] rollout failed: {error}", flush=True)
-        return Tau2FailureResponse.model_validate(
-            record
-            | {
-                "reward": 0.0,
-                "response": self._empty_response(body).model_dump(mode="json"),
-                NG_FAILURE_CLASS_KEY: failure_class,
-                "error": error[:500],
+        failure: Dict[str, Any] = {
+            "reward": 0.0,
+            "response": self._empty_response(body).model_dump(mode="json"),
+            NG_FAILURE_CLASS_KEY: failure_class,
+            "error": error[:500],
+        }
+        if terminal:
+            failure[NG_TERMINAL_KEY] = True
+            failure["result"] = {
+                "termination_reason": TURN_BUDGET_EXHAUSTED_TERMINATION_REASON,
+                "messages": [],
             }
-        )
+        return Tau2FailureResponse.model_validate(record | failure)
 
     def _empty_response(self, body: Tau2RunRequest) -> NeMoGymResponse:
         """Return a minimal valid response so the failure path itself never emits HTTP 500."""
@@ -468,7 +536,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
                 this_task_transfer_to_human_agents = False
                 has_tool_call = False
-                for message in task["result"]["messages"]:
+                for message in task["result"].get("messages", []):
                     if message["role"] == "tool":
                         # e.g. `Error: Tool 'run_speed_test' not found.`
                         if "Error: Tool" and "not found" in message["content"]:
@@ -502,10 +570,14 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             domain_to_unique_samples[f"{domain}/num_samples_unique"] += 1
 
         total_num_assistant_messages = sum(finish_reasons_count.values())
-        finish_reasons_pct = {
-            f"{k.removesuffix('/count')}/pct": v / total_num_assistant_messages
-            for k, v in finish_reasons_count.items()
-        }
+        finish_reasons_pct = (
+            {
+                f"{k.removesuffix('/count')}/pct": v / total_num_assistant_messages
+                for k, v in finish_reasons_count.items()
+            }
+            if total_num_assistant_messages
+            else {}
+        )
 
         telecom_subtask_avg_reward = {k: sum(v) / len(v) for k, v in telecom_subtask_rewards.items()}
 
@@ -548,7 +620,9 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             "trajectory_missing_tool_call/count": missing_tool_call,
             "trajectory_missing_tool_call/pct": missing_tool_call / total_count,
             "messages_with_incomplete_reasoning/count": incomplete_reasoning,
-            "messages_with_incomplete_reasoning/pct": incomplete_reasoning / total_num_assistant_messages,
+            "messages_with_incomplete_reasoning/pct": (
+                incomplete_reasoning / total_num_assistant_messages if total_num_assistant_messages else 0.0
+            ),
         }
         self.__key_metrics = list(res.keys())
         return res

@@ -19,8 +19,10 @@ import json
 
 import pytest
 from aiohttp import ClientSession, web
+from pydantic import ValidationError
 
 from nemo_gym.adapters.turn_counter_proxy import (
+    TurnConstraintConfig,
     inject_turn_reminder,
     resolve_reminder_trigger,
     start_turn_counter_proxy,
@@ -79,6 +81,28 @@ def test_explicit_trigger_overrides_the_budget_heuristic(trigger):
 def test_invalid_trigger_is_rejected():
     with pytest.raises(ValueError, match="invalid trigger"):
         resolve_reminder_trigger("periodic", 10)
+
+
+def test_canonical_proxy_constraint_defaults_to_supported_session_capabilities():
+    constraint = TurnConstraintConfig.model_validate({"enforcement": "proxy", "limit": 5})
+
+    assert constraint.scope == "session"
+    assert constraint.reminder.trigger == "auto"
+    assert constraint.reminder.position == "system_message"
+
+
+@pytest.mark.parametrize(
+    "constraint",
+    [
+        {"enforcement": "native", "limit": 5},
+        {"enforcement": "proxy", "limit": 0},
+        {"enforcement": "proxy", "limit": 5, "scope": "subagent"},
+        {"enforcement": "proxy", "limit": 5, "exclude_compaction": True},
+    ],
+)
+def test_canonical_proxy_constraint_rejects_unsupported_capabilities(constraint):
+    with pytest.raises(ValidationError):
+        TurnConstraintConfig.model_validate(constraint)
 
 
 def test_per_turn_reminds_every_turn_and_escalates_on_the_last():
