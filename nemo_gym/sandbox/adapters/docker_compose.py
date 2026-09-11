@@ -71,7 +71,7 @@ class AsyncSandboxCompose:
     def __init__(
         self,
         provider,
-        compose_file: str | Path,
+        compose_file: str | Path | None,
         *,
         compose_command: Sequence[str] = ("docker", "compose"),
         image_config_command: Sequence[str] = ("crane", "config", "--platform", "linux/amd64", "{image}"),
@@ -82,7 +82,7 @@ class AsyncSandboxCompose:
         volume_sources: Mapping[str, str] | None = None,
     ):
         self.provider = create_provider(provider) if isinstance(provider, Mapping) else provider
-        self.compose_file = Path(compose_file).resolve()
+        self.compose_file = Path(compose_file).resolve() if compose_file is not None else None
         self.compose_command = tuple(compose_command)
         self.document: dict[str, Any] = {}
         self._image_configs: dict[str, Any] = {}
@@ -98,6 +98,7 @@ class AsyncSandboxCompose:
         self.services: dict[str, AsyncSandbox] = {}
         self._plans: dict[str, dict[str, Any]] = {}
         self._started = False
+        self._ready = False
         self._closed = False
         self._volume_helper: AsyncSandbox | None = None
         self._stop_task: asyncio.Task | None = None
@@ -483,6 +484,8 @@ class AsyncSandboxCompose:
     async def start(self):
         if self._started or self._closed:
             raise RuntimeError("Compose collection already started or closed")
+        if self.compose_file is None:
+            raise ValueError("Starting a Compose collection requires a YAML file")
         self._started = True
         try:
             async with asyncio.timeout(self.timeout_s):
@@ -496,13 +499,15 @@ class AsyncSandboxCompose:
                     await self.services[name].start()
                     service = self.document["services"][name]
                     if service.get("cap_add") or service.get("shm_size") is not None:
-                        await self.services[name].configure_runtime(
-                            cap_add=tuple(service.get("cap_add") or ()), shm_size=service.get("shm_size")
+                        await self.provider.configure_runtime(
+                            self.services[name]._require_handle(),
+                            cap_add=tuple(service.get("cap_add") or ()),
+                            shm_size=service.get("shm_size"),
                         )
                 if self.services:
                     hosts = {}
                     for name, sandbox in self.services.items():
-                        address = await sandbox.network_address()
+                        address = await self.provider.network_address(sandbox._require_handle())
                         service = self.document["services"][name]
                         aliases = ((service.get("networks") or {}).get("default") or {}).get("aliases", [])
                         for alias in [name, *aliases]:
@@ -521,7 +526,7 @@ class AsyncSandboxCompose:
                                 authority = url.netloc.rsplit("@", 1)[0] + "@" + authority
                             plan["resolved_env"][key] = url._replace(netloc=authority).geturl()
                         if options.get("hosts") != []:
-                            await sandbox.set_hosts(hosts)
+                            await self.provider.set_hosts(sandbox._require_handle(), hosts)
                 for name in order:
                     service = self.document["services"][name]
                     for dep, options in (service.get("depends_on") or {}).items():
@@ -536,7 +541,9 @@ class AsyncSandboxCompose:
                         ports = self._plans[target]["spec"].ports
                         ready = runtime + "/forwarding-ready"
                         relay = asyncio.create_task(
-                            self.services[name].forward_ports(hosts[target], ports, ready_file=ready)
+                            self.provider.forward_ports(
+                                self.services[name]._require_handle(), hosts[target], ports, ready_file=ready
+                            )
                         )
                         self._processes[name + ":forwarding"] = relay
                         while (await self.services[name].exec(f"test -f {ready}")).return_code:
@@ -580,7 +587,51 @@ class AsyncSandboxCompose:
         except BaseException:
             await self.stop()
             raise
+        self._ready = True
         return self
+
+    async def serialize(self, *, scope: str | None = None) -> dict[str, Any]:
+        """Describe a running collection using provider connection descriptors.
+
+        The creating process must keep the collection alive: it owns service
+        and forwarding tasks and managed-volume cleanup. Provider configuration
+        and YAML are not included.
+        """
+        if not self._ready or self._closed:
+            raise RuntimeError("Serializing requires a running Compose collection")
+        return {
+            "services": {name: await sandbox.serialize(scope=scope) for name, sandbox in self.services.items()},
+        }
+
+    @classmethod
+    async def connect(cls, descriptor: Mapping[str, Any], *, provider) -> "AsyncSandboxCompose":
+        """Connect to all members without provisioning or restarting services.
+
+        Like AsyncSandbox.connect, stop() closes the connected sandboxes using
+        provider semantics. The creator retains ownership of managed-volume
+        cleanup and running service/forwarding tasks and must also call stop().
+        """
+        if not isinstance(descriptor, Mapping) or set(descriptor) != {"services"}:
+            raise ValueError("Invalid Compose connection descriptor")
+        services = descriptor["services"]
+        if (
+            not isinstance(services, Mapping)
+            or not services
+            or any(not isinstance(name, str) or not isinstance(value, Mapping) for name, value in services.items())
+        ):
+            raise ValueError("Invalid Compose connection members")
+        collection = cls(provider, None)
+        try:
+            for name, member in services.items():
+                collection.services[name] = await AsyncSandbox.connect(
+                    member, provider=collection.provider, owns_provider=False
+                )
+        except BaseException:
+            # A partial attach must not destroy a collection owned by another server.
+            await collection.provider.aclose()
+            raise
+        collection._started = collection._ready = True
+        return collection
 
     async def stop(self):
         if self._closed:
@@ -615,6 +666,8 @@ class AsyncSandboxCompose:
         self._closed = True
 
     async def __aenter__(self):
+        if self._ready and not self._closed:
+            return self
         return await self.start()
 
     async def __aexit__(self, *exc):

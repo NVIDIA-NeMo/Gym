@@ -385,7 +385,7 @@ async def test_single_service_receives_its_name_and_alias():
     ],
 )
 async def test_volume_preflight_prevents_unsafe_or_unmapped_mounts(volume):
-    class VolumeProvider(ShellProvider):
+    class VolumeProvider(ConnectableShellProvider):
         def shared_volume_options(self, source, target, *, read_only=False):
             return {}
 
@@ -757,7 +757,7 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
     image_data.mkdir()
     (image_data / "seed").write_text("image data")
 
-    class VolumeProvider(ShellProvider):
+    class VolumeProvider(ConnectableShellProvider):
         def shared_volume_metadata(self):
             return {"placement": "shared-disk"}
 
@@ -808,6 +808,15 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
         second_spec = provider.created[-1]
         assert second_spec.metadata["placement"] == "shared-disk"
         assert second_spec.provider_options["volumes"][-1]["read_only"] is True
+        assert group._seeds and all(seed._stopped for seed in group._seeds)
+        descriptor = json.loads(json.dumps(await group.serialize()))
+        receiver = VolumeProvider()
+        receiver.created = provider.created.copy()
+        receiver.create = AsyncMock(side_effect=AssertionError("must not provision"))
+        async with await AsyncSandboxCompose.connect(descriptor, provider=receiver) as connected:
+            assert (await connected.services["second"].exec("cat /data/seed")).stdout == "image data"
+        assert group._volume_helper._handle.sandbox_id not in receiver.closed
+        assert (shared / group.project / "data" / "seed").read_text() == "image data"
     assert not (shared / group.project).exists()
     assert (external / "existing").read_text() == "external data"
     assert len(provider.closed) == len(provider.created)
@@ -1263,3 +1272,114 @@ async def test_process_finishing_during_marker_probe_is_not_startup_failure(monk
         await group._wait("app", "service_completed_successfully")
         assert marker_reads == 2
     assert provider.closed == ["1"]
+
+
+class ConnectableShellProvider(ShellProvider):
+    async def serialize_handle(self, handle, *, scope=None):
+        return {"sandbox_id": handle.sandbox_id, "scope": scope}
+
+    async def connect(self, descriptor):
+        return SandboxHandle(descriptor["sandbox_id"], self.name, None)
+
+
+@pytest.mark.asyncio
+async def test_compose_connect_round_trip_without_yaml_or_provisioning(tmp_path):
+    original = ConnectableShellProvider()
+    owner = make_compose(
+        original,
+        {
+            "services": {
+                "main": {"image": "image", "command": ["sleep", "60"], "working_dir": str(tmp_path)},
+                "db": {"image": "image", "command": ["sleep", "60"]},
+            }
+        },
+        image_configs={"image": {}},
+        poll_interval_s=0.01,
+    )
+    async with owner:
+        descriptor = json.loads(json.dumps(await owner.serialize(scope="operate")))
+        assert set(descriptor["services"]) == {"main", "db"}
+        assert descriptor["services"]["main"]["scope"] == "operate"
+        receiver = ConnectableShellProvider()
+        receiver.created = original.created.copy()  # backing store shared by independent clients
+        receiver.create = AsyncMock(side_effect=AssertionError("must not provision"))
+        receiver.aclose = AsyncMock()
+        connected = await AsyncSandboxCompose.connect(descriptor, provider=receiver)
+        async with connected:
+            assert (await connected.services["main"].exec("pwd")).stdout.strip() == str(tmp_path)
+            assert await connected.serialize(scope="operate") == descriptor
+        assert receiver.closed == ["2", "1"]
+        receiver.aclose.assert_awaited_once()
+        await connected.stop()
+        receiver.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_compose_partial_connect_failure_does_not_destroy_services(cancel):
+    import asyncio
+
+    error = asyncio.CancelledError() if cancel else RuntimeError("attach failed")
+    provider = ConnectableShellProvider()
+    provider.connect = AsyncMock(side_effect=[SandboxHandle("one", provider.name, None), error])
+    provider.aclose = AsyncMock()
+    descriptor = {
+        "services": {"main": {"sandbox_id": "one"}, "db": {"sandbox_id": "two"}},
+    }
+    with pytest.raises(type(error)):
+        await AsyncSandboxCompose.connect(descriptor, provider=provider)
+    assert provider.closed == []
+    provider.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "descriptor",
+    [
+        None,
+        {},
+        {"project": "../../x", "services": {"main": {}}},
+        {"services": {"main": "bad"}},
+        {"project": "compose-" + "a" * 32, "services": {"main": {}}, "volume_helper": "bad"},
+        {"project": "compose-" + "a" * 32, "services": {"main": {}}, "seeds": ["bad"]},
+    ],
+)
+async def test_compose_connect_validates_descriptor_before_attaching(descriptor):
+    provider = ConnectableShellProvider()
+    provider.connect = AsyncMock()
+    with pytest.raises(ValueError):
+        await AsyncSandboxCompose.connect(descriptor, provider=provider)
+    provider.connect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compose_serialize_requires_running_collection():
+    group = AsyncSandboxCompose(ConnectableShellProvider(), "compose.yaml")
+    with pytest.raises(RuntimeError, match="running"):
+        await group.serialize()
+
+
+@pytest.mark.asyncio
+async def test_compose_connect_without_helpers_and_closed_serialize():
+    provider = ConnectableShellProvider()
+    descriptor = {"services": {"main": {"sandbox_id": "one"}}}
+    connected = await AsyncSandboxCompose.connect(descriptor, provider=provider)
+    assert set(await connected.serialize()) == {"services"}
+    await connected.stop()
+    with pytest.raises(RuntimeError, match="running"):
+        await connected.serialize()
+    with pytest.raises(RuntimeError, match="closed"):
+        await connected.__aenter__()
+
+
+@pytest.mark.asyncio
+async def test_compose_connect_requires_provider_capability():
+    descriptor = {"services": {"main": {"sandbox_id": "one"}}}
+    with pytest.raises(RuntimeError, match="does not support"):
+        await AsyncSandboxCompose.connect(descriptor, provider=Provider())
+
+
+@pytest.mark.asyncio
+async def test_compose_start_requires_yaml():
+    with pytest.raises(ValueError, match="YAML"):
+        await AsyncSandboxCompose(Provider(), None).start()
