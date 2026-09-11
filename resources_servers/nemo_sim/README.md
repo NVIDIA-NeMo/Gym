@@ -1,9 +1,44 @@
 # NeMo-Sim Resources Server
 
 This environment initializes one deterministic NeMo-Sim scenario at the
-beginning of each `UserAssistantProcessor` episode. It samples from an existing
-Nemotron persona dataset; it does not generate a persona with an LLM or run a
-complete Data Designer pipeline.
+beginning of each `UserAssistantProcessor` episode. The Resources Server
+prepares a versioned Nemotron persona panel once at startup; it does not
+generate personas with an LLM or run a complete Data Designer pipeline.
+
+## Environment initialization
+
+The default configuration pins the NGC resource version to `0.0.2` and uses:
+
+```text
+~/.cache/nemo-gym/nemo-sim/personas/
+└── 0.0.2/
+    ├── source/
+    │   ├── en_US.parquet
+    │   └── en_US.manifest.json
+    ├── panels/
+    │   ├── en_US-n1000-seed42.parquet
+    │   └── en_US-n1000-seed42.manifest.json
+    └── locks/
+```
+
+For every configured locale, server startup:
+
+1. Reuses the pinned source Parquet when it already exists in the cache.
+2. On a cache miss, downloads the explicit NGC resource version, for example
+   `nvidia/nemotron-personas/nemotron-personas-dataset-en_us:0.0.2`.
+3. Validates the Parquet and records its row count, size, and SHA-256.
+4. Reuses a matching deterministic panel when present; otherwise streams the
+   source dataset once and materializes a bounded panel.
+5. Loads only the panel into memory for episode sampling.
+
+File locks and atomic replacement prevent concurrent server processes sharing
+the cache from publishing partial artifacts. A cache hit does not invoke NGC
+and does not hash or scan the full source again.
+
+The NGC CLI and its authentication are required only when a pinned source is
+absent. Set `NGC_CLI_API_KEY` and `NGC_CLI_ORG`, or configure NGC once with
+`ngc config set`. Set `download_missing_personas: false` for air-gapped runs;
+startup will then fail clearly if the pinned artifact was not pre-populated.
 
 ## Episode initialization
 
@@ -25,10 +60,10 @@ persona, probe, and theme for an unchanged persona dataset and server config.
 
 At `/seed_session`, the server:
 
-1. Reads `~/.data-designer/managed-assets/datasets/<locale>.parquet` by
-   default.
-2. Selects one persona, probe, and theme deterministically.
-3. Stores the resolved context in task-scoped session state.
+1. Selects one persona from the prepared panel, plus one probe and theme,
+   deterministically.
+2. Stores the resolved context in task-scoped session state.
+3. Records the source version, SHA-256, and panel seed for replay.
 4. Adds a JSON-encoded `metadata.nemo_sim` value to the existing
    `user_responses_create_params`.
 5. Returns those resolved user parameters to the processor before its first
@@ -41,7 +76,11 @@ verifier includes `nemo_sim_context` for replay and auditing.
 
 The YAML config owns static population and probe policy:
 
-- `personas_dir`
+- `personas_cache_dir`
+- `personas_dataset_version`
+- `personas_locales`
+- `personas_panel_size` and `personas_panel_seed`
+- `download_missing_personas`
 - `probe_mix`
 - `probe_themes`
 - agent, model, and resources-server references
@@ -54,8 +93,8 @@ Each dataset row owns dynamic task identity:
 - optional `nemo_sim_sampling.probe_type`
 - assistant and user Responses API inputs
 
-Set `personas_dir` in the resources-server YAML when the managed Data Designer
-assets are installed somewhere other than the default path.
+Changing the dataset version or panel configuration creates a different cache
+path rather than silently overwriting an existing panel.
 
 ## Supported probes
 
@@ -74,8 +113,9 @@ not an assistant-quality benchmark score.
 
 ## Run
 
-Configure `policy_base_url`, `policy_api_key`, and `policy_model_name`, ensure
-the `en_US.parquet` managed persona asset exists, then run:
+Configure `policy_base_url`, `policy_api_key`, and `policy_model_name`. On the
+first run, also make the NGC CLI and credentials available so initialization
+can fill the pinned cache:
 
 ```bash
 .venv/bin/gym eval run \

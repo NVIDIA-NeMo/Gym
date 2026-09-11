@@ -13,6 +13,13 @@ nemo_sim:
       domain: agent
       verified: false
       description: Deterministic NeMo-Sim persona and general-probe initialization.
+      personas_cache_dir: ~/.cache/nemo-gym/nemo-sim/personas
+      personas_dataset_version: 0.0.2
+      personas_locales:
+      - en_US
+      personas_panel_size: 1000
+      personas_panel_seed: 42
+      download_missing_personas: true
       probe_mix:
         general_open_ended: 0.5
         general_educational: 0.5
