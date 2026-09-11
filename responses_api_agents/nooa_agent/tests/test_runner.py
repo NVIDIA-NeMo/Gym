@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
-from responses_api_agents.nooa_agent.runner import EmbeddedNOOARunner, NOOARunRequest
+from responses_api_agents.nooa_agent.runner import ArgumentMappingError, EmbeddedNOOARunner, NOOARunRequest
 
 
 class ValidAgent(Agent):
@@ -131,8 +131,6 @@ async def test_embedded_runner_maps_full_row_and_attaches_resource_methods() -> 
     result = await runner.run(
         NOOARunRequest(
             row=row("Paris"),
-            rollout_id="rollout-1",
-            task_id="task-1",
             model_url_path="/ng-rollout/rollout-1/v1/responses",
             resource_cookies={"session": "one"},
         )
@@ -146,6 +144,22 @@ async def test_embedded_runner_maps_full_row_and_attaches_resource_methods() -> 
 
 
 @pytest.mark.asyncio
+async def test_embedded_runner_classifies_argument_mapping_errors() -> None:
+    runner, _ = make_runner()
+    incomplete_row = row("Paris").model_copy(update={"agent_inputs": {}})
+
+    with pytest.raises(ArgumentMappingError, match="customer_id") as error:
+        await runner.run(
+            NOOARunRequest(
+                row=incomplete_row,
+                model_url_path="/v1/responses",
+            )
+        )
+
+    assert isinstance(error.value.__cause__, ValueError)
+
+
+@pytest.mark.asyncio
 async def test_constructs_a_fresh_agent_for_every_rollout() -> None:
     runner, _ = make_runner()
     FakeAgent.instances = 0
@@ -153,16 +167,12 @@ async def test_constructs_a_fresh_agent_for_every_rollout() -> None:
     first = await runner.run(
         NOOARunRequest(
             row=row("Paris"),
-            rollout_id="one",
-            task_id="task",
             model_url_path="/one/v1/responses",
         )
     )
     second = await runner.run(
         NOOARunRequest(
             row=row("Berlin"),
-            rollout_id="two",
-            task_id="task",
             model_url_path="/two/v1/responses",
         )
     )

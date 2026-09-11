@@ -25,7 +25,7 @@ from nooa.atif import atif_scope
 from nemo_gym.rollout_observability import AgentEpisode, ModelCallRef
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
-from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM
+from responses_api_agents.nooa_agent.gym_llm import GymResponsesLLM, PolicyCallBudgetExceeded
 from responses_api_agents.nooa_agent.mapping import materialize_arguments
 from responses_api_agents.nooa_agent.observability import project_nooa_episode
 from responses_api_agents.nooa_agent.resource_tools import (
@@ -38,8 +38,6 @@ from responses_api_agents.nooa_agent.resource_tools import (
 @dataclass(slots=True)
 class NOOARunRequest:
     row: Any
-    rollout_id: str
-    task_id: str
     model_url_path: str
     model_cookies: dict[str, str] = field(default_factory=dict)
     resource_cookies: dict[str, str] = field(default_factory=dict)
@@ -51,10 +49,16 @@ class NOOARunResult:
     return_value: Any
     model_cookies: dict[str, str]
     resource_cookies: dict[str, str]
+    termination_reason: str | None = None
+    termination_error: str | None = None
 
 
 class NOOARunner(Protocol):
     async def run(self, request: NOOARunRequest) -> NOOARunResult: ...
+
+
+class ArgumentMappingError(ValueError):
+    """Raised when a Gym row cannot supply the configured NOOA entrypoint arguments."""
 
 
 class EmbeddedNOOARunner:
@@ -99,12 +103,29 @@ class EmbeddedNOOARunner:
         agent = agent_class(llm=llm, **self._invocation.init_kwargs)
         validate_agent_resource_method_bindings(agent)
 
-        arguments = materialize_arguments(request.row, self._invocation.arguments)
+        try:
+            arguments = materialize_arguments(request.row, self._invocation.arguments)
+        except ValueError as error:
+            raise ArgumentMappingError(str(error)) from error
         entrypoint = getattr(agent, self._invocation.entrypoint)
+        termination_reason = None
+        termination_error = None
+        return_value = None
         with TemporaryDirectory(prefix="nemo-gym-nooa-") as directory:
             path = Path(directory) / "trajectory.json"
             async with atif_scope(agent, path=path) as exporter:
-                return_value = await entrypoint(**arguments)
+                try:
+                    return_value = await entrypoint(**arguments)
+                except PolicyCallBudgetExceeded as error:
+                    termination_reason = "policy_budget_exceeded"
+                    termination_error = str(error)
+                except ValueError as error:
+                    message = str(error)
+                    if "Gym model returned invalid" in message:
+                        termination_reason = "invalid_policy_output"
+                        termination_error = message
+                    else:
+                        raise
             trajectory = exporter.get_trajectory()
 
         episode = project_nooa_episode(
@@ -117,4 +138,6 @@ class EmbeddedNOOARunner:
             return_value=return_value,
             model_cookies=request.model_cookies,
             resource_cookies=request.resource_cookies,
+            termination_reason=termination_reason,
+            termination_error=termination_error,
         )
