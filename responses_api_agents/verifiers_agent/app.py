@@ -21,7 +21,9 @@ from typing import Any
 
 import verifiers as vf
 from fastapi import Body, Request, Response
-from openai import AsyncOpenAI, Timeout
+from http.cookiejar import CookieJar
+
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient, Timeout
 from pydantic import ConfigDict, Field
 from verifiers.clients import NeMoRLChatCompletionsClient
 
@@ -154,6 +156,18 @@ class VerifiersAgentVerifyResponse(BaseVerifyResponse):
     reward: float
 
 
+class _NoStoreCookieJar(CookieJar):
+    """A cookie jar that drops every Set-Cookie, so no request ever carries one.
+
+    See VerifiersAgent._get_client: the policy server's session cookie decides
+    which vLLM engine serves a request, and a jar that remembers it would pin
+    every rollout in this process to one engine.
+    """
+
+    def set_cookie(self, cookie) -> None:  # noqa: D401 - CookieJar hook
+        return None
+
+
 class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     model_name: str = Field(default="", description="Model name")
@@ -204,6 +218,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
     config: VerifiersAgentConfig
 
     envs_cache: dict[str, Any] = Field(default_factory=dict)
+    client_cache: dict[str, NeMoRLChatCompletionsClient] = Field(default_factory=dict)
 
     def _get_env(self, vf_env_id: str) -> vf.Environment:
         if vf_env_id not in self.envs_cache:
@@ -220,37 +235,53 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             model_server_url = model_server_url.rstrip("/") + "/v1"
         return model_server_url
 
-    def _make_openai_client(self) -> AsyncOpenAI:
-        """Build a policy client for ONE rollout. Never share it across rollouts.
+    def _get_client(self) -> NeMoRLChatCompletionsClient:
+        """One shared policy client per process, with a cookie jar that never stores.
 
         The vllm_model server picks a vLLM engine per session
         (``sha256(session_id) % len(base_urls)`` in
         responses_api_models/vllm_model/app.py ``_resolve_client``) and mints the
         session id per cookie jar (nemo_gym/server_utils.py
         ``setup_session_middleware``). openai's AsyncOpenAI sits on an httpx client
-        that persists cookies, so one client shared by every rollout in this
-        process is one session and therefore one engine: on CMH job 3670120
-        (2026-09-10) 512 concurrent rollouts ran on 6 of 48 engines while 42 sat
-        idle. Gym's own aiohttp client sidesteps this with a DummyCookieJar.
+        that persists cookies, so a plain shared client is one session and
+        therefore one engine: on CMH job 3670120 (2026-09-10) 512 concurrent
+        rollouts ran on 6 of 48 engines while 42 sat idle. Gym's own aiohttp
+        client avoids exactly this with a DummyCookieJar; ``_NoStoreCookieJar``
+        is the httpx equivalent. Every request is then a fresh session and the
+        router spreads them over every engine.
 
-        A client per rollout gives each rollout its own session, so all of its
-        turns stay on one engine (the prefix-cache affinity the router is built
-        for) and the rollouts as a whole spread over every engine. The caller
-        closes it when the rollout ends.
+        Why not a client per rollout (19bfe2505): each rollout's single pooled
+        connection sat idle through its tool phases, the router's uvicorn closes
+        idle connections after 30 s, and the next turn raced that close --
+        CMH 3670792 aborted 468 of 512 rollouts with
+        ``APIConnectionError -> ReadError(BrokenResourceError)`` while the
+        shared-client runs before it had zero. One shared pool keeps connections
+        hot. The price is per-turn engine affinity, which Gym's own client does
+        not have either.
         """
-        client_kwargs: dict[str, Any] = {}
-        if self.config.client_timeout_s is not None or self.config.client_connect_timeout_s is not None:
-            # Unset fields keep the SDK defaults (5s connect, 600s read/write/pool).
-            connect = self.config.client_connect_timeout_s if self.config.client_connect_timeout_s is not None else 5.0
-            other = self.config.client_timeout_s if self.config.client_timeout_s is not None else 600.0
-            client_kwargs["timeout"] = Timeout(connect=connect, read=other, write=other, pool=other)
-        if self.config.client_max_retries is not None:
-            client_kwargs["max_retries"] = self.config.client_max_retries
-        return AsyncOpenAI(
-            base_url=self._policy_model_server_url(),
-            api_key="EMPTY",  # pragma: allowlist secret
-            **client_kwargs,
-        )
+        cache_key = self.config.model_server.name
+        if cache_key not in self.client_cache:
+            client_kwargs: dict[str, Any] = {}
+            if self.config.client_timeout_s is not None or self.config.client_connect_timeout_s is not None:
+                # Unset fields keep the SDK defaults (5s connect, 600s read/write/pool).
+                connect = self.config.client_connect_timeout_s if self.config.client_connect_timeout_s is not None else 5.0
+                other = self.config.client_timeout_s if self.config.client_timeout_s is not None else 600.0
+                client_kwargs["timeout"] = Timeout(connect=connect, read=other, write=other, pool=other)
+            if self.config.client_max_retries is not None:
+                client_kwargs["max_retries"] = self.config.client_max_retries
+            openai_client = AsyncOpenAI(
+                base_url=self._policy_model_server_url(),
+                api_key="EMPTY",  # pragma: allowlist secret
+                # DefaultAsyncHttpxClient keeps the SDK's pool limits and redirect
+                # policy. Pass the bare CookieJar: httpx.Cookies adopts a CookieJar
+                # instance as-is but COPIES an httpx.Cookies into a fresh stdlib
+                # jar, which would silently discard the no-store behaviour.
+                http_client=DefaultAsyncHttpxClient(cookies=_NoStoreCookieJar()),
+                **client_kwargs,
+            )
+            self.client_cache[cache_key] = NeMoRLChatCompletionsClient(openai_client)
+
+        return self.client_cache[cache_key]
 
     def _convert_trajectory_to_output(self, rollout_output: dict) -> list:
         assistant_tokens = self._collect_assistant_tokens(rollout_output.get("trajectory") or [])
@@ -336,19 +367,13 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 "temperature": getattr(body.responses_create_params, "temperature", None) or self.config.temperature,
                 "top_p": getattr(body.responses_create_params, "top_p", None) or self.config.top_p,
             }
-            # One client per rollout; see _make_openai_client for why sharing one
-            # pins every rollout in this process to a single vLLM engine.
-            openai_client = self._make_openai_client()
-            try:
-                outputs = await vf_env.run_group(
-                    group_inputs=[rollout_input],
-                    client=NeMoRLChatCompletionsClient(openai_client),
-                    model=self.config.model_name,
-                    sampling_args=sampling_args,
-                    state_columns=["trajectory"],
-                )
-            finally:
-                await openai_client.close()
+            outputs = await vf_env.run_group(
+                group_inputs=[rollout_input],
+                client=self._get_client(),
+                model=self.config.model_name,
+                sampling_args=sampling_args,
+                state_columns=["trajectory"],
+            )
 
             rollout_output = outputs[0]
             reward = rollout_output.get("reward", 0.0) or 0.0
