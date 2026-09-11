@@ -331,13 +331,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 "verification_skipped": True,
             }
         else:
-            verify_request = SimpleAgentVerifyRequest.model_validate(
-                body.model_dump() | {"response": model_response_json}
-            )
+            verify_payload = body.model_dump() | {"response": model_response_json}
             verify_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=verify_request.model_dump(),
+                json=verify_payload,
                 cookies=cookies,
             )
             await raise_for_status(verify_response)
