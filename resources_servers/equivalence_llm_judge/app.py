@@ -20,6 +20,7 @@ import asyncio
 import re
 from collections import Counter
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
@@ -38,6 +39,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.verifier_fixture import VerifierFixture
+from resources_servers.equivalence_llm_judge.verifier_fixture import create_hle_verified_server, invoke_hle_verified
 
 
 # Aggregate parsing metric, also included in key_metrics.
@@ -547,6 +550,14 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         if JUDGEMENT_PARSING_ISSUE_RATE in agent_metrics:
             key[JUDGEMENT_PARSING_ISSUE_RATE] = agent_metrics[JUDGEMENT_PARSING_ISSUE_RATE]
         return key
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=create_hle_verified_server,
+    request_model=LLMJudgeVerifyRequest,
+    cases_path=Path(__file__).parent / "tests/hle_verified_verifier_cases.jsonl",
+    invoke=invoke_hle_verified,
+)
 
 
 if __name__ == "__main__":

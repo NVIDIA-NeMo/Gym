@@ -28,12 +28,25 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.verifier_fixture import exercise_verifier_fixture
 from resources_servers.equivalence_llm_judge.app import (
+    VERIFIER_FIXTURE,
     LLMJudgeResourcesServer,
     LLMJudgeResourcesServerConfig,
     LLMJudgeVerifyRequest,
     _extract_question_text,
 )
+
+
+async def test_hle_verified_fixture() -> None:
+    results = await exercise_verifier_fixture(
+        VERIFIER_FIXTURE, reward_range=(0.0, 1.0), higher_is_better=True, determinism="stochastic"
+    )
+    assert [(result.kind, result.observed_rewards) for result in results] == [
+        ("full_reward", (1.0,)),
+        ("zero_reward", (0.0,)),
+        ("malformed", ()),
+    ]
 
 
 class TestApp:
