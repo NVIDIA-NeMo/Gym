@@ -12,7 +12,7 @@ harmbench:
       classifier_responses_create_params:
         input: []
         temperature: 0.0
-        max_output_tokens: 4
+        max_output_tokens: 1
 
 harmbench_classifier:
   responses_api_models:

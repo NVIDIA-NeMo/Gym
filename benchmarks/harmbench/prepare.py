@@ -55,6 +55,7 @@ def _render(rows: list[dict[str, str]]) -> str:
                     "responses_create_params": {
                         "input": [{"role": "user", "content": direct_request}],
                         "temperature": 0.0,
+                        "max_output_tokens": 256,
                     },
                     "harmbench_id": behavior_id,
                     "behavior": behavior,

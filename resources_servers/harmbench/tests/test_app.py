@@ -58,7 +58,7 @@ def _server(classifier_text: str) -> tuple[HarmBenchResourcesServer, AsyncMock]:
         entrypoint="",
         name="harmbench",
         classifier_model_server={"type": "responses_api_models", "name": "harmbench_classifier"},
-        classifier_responses_create_params={"input": [], "temperature": 0.0, "max_output_tokens": 4},
+        classifier_responses_create_params={"input": [], "temperature": 0.0, "max_output_tokens": 1},
     )
     return HarmBenchResourcesServer(config=config, server_client=client), client.post
 
