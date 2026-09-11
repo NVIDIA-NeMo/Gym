@@ -1,0 +1,25 @@
+injecagent:
+  resources_servers:
+    injecagent:
+      entrypoint: app.py
+      domain: safety
+      verified: false
+      description: Faithful tool-simulation environment for the InjecAgent indirect prompt injection benchmark
+      value: Measure direct-harm and two-stage data-stealing attack success from auditable tool-call trajectories
+      simulated_responses_path: benchmarks/injecagent/data/attacker_simulated_responses.json
+
+injecagent_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 4
+      resources_server:
+        type: resources_servers
+        name: injecagent
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/injecagent/data/example.jsonl
