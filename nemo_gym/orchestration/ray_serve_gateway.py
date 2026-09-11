@@ -221,12 +221,19 @@ class VLLMInstance:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
+    # Serve's own replica-routing RPC (asking a replica for its current queue length, to pick the
+    # less-loaded of two candidates - see module docstring) defaults to a 0.1s deadline, tight
+    # enough that cross-node hops on a Slurm cluster - especially while a replica's node is busy
+    # doing GPU inference - routinely miss it and fall back to less-informed routing. Passed as a
+    # job-level runtime_env so it reaches Serve's own controller/proxy/replica actors, which are
+    # only created once serve.start()/serve.run() runs below, as part of this same job.
+    runtime_env = {"env_vars": {"RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S": "1.0"}}
     try:
-        ray.init(address="auto")
+        ray.init(address="auto", runtime_env=runtime_env)
     except ConnectionError:
         # No existing cluster to join (e.g. the single-node opt-in case, where the sbatch script
         # skips the multi-node Ray bootstrap entirely) - start a local one.
-        ray.init()
+        ray.init(runtime_env=runtime_env)
 
     deployment = VLLMInstance.options(
         num_replicas=args.number_of_instances,
