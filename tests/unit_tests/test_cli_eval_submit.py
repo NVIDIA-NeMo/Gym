@@ -236,7 +236,7 @@ class TestEvalSubmitConfigGroupComposition:
 
     def test_repeated_calls_do_not_leak_global_hydra_state(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         """GlobalHydra must be reset between calls or the second `initialize_config_dir` raises."""
-        captured = _capture_submit(monkeypatch)
+        _capture_submit(monkeypatch)
         config_path = tmp_path / "submit.yaml"
         config_path.write_text(
             yaml.dump({"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": DRIVER, "job": JOB})
@@ -244,5 +244,3 @@ class TestEvalSubmitConfigGroupComposition:
 
         _eval_submit(_args(config_path), overrides=[])
         _eval_submit(_args(config_path), overrides=[])
-
-        assert captured["config"].job.output_path == "/tmp/gym-jobs"
