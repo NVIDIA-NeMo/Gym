@@ -21,6 +21,8 @@ from fastapi import Response
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
+from nemo_gym.agents.responses_api_agent import ResponsesAPIAgent, ResponsesAPIAgentConfig
+from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -30,16 +32,14 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
+from nemo_gym.processors.single_agent_turn import (
+    SingleAgentTurnProcessor,
+    SingleAgentTurnProcessorConfig,
+)
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_observability import TrajectoryRecord
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.simple_agent.app import (
-    ModelServerRef,
-    ResourcesServerRef,
-    SimpleAgent,
-    SimpleAgentConfig,
-    SimpleAgentRunRequest,
-)
+from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, SimpleAgentRunRequest
 
 
 def _drop_nulls(value):
@@ -57,9 +57,9 @@ def _drop_nulls(value):
 
 
 def _make_agent(
-    observability_enabled: bool, agent_type: type[SimpleAgent] = SimpleAgent
-) -> tuple[SimpleAgent, MagicMock]:
-    config = SimpleAgentConfig(
+    observability_enabled: bool, agent_type: type[ResponsesAPIAgent] = ResponsesAPIAgent
+) -> tuple[ResponsesAPIAgent, MagicMock]:
+    config = ResponsesAPIAgentConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
@@ -72,6 +72,19 @@ def _make_agent(
     return agent_type(config=config, server_client=server_client), server_client
 
 
+def _make_processor(observability_enabled: bool, server_client: MagicMock) -> SingleAgentTurnProcessor:
+    server_client.global_config_dict = {"observability_enabled": observability_enabled}
+    config = SingleAgentTurnProcessorConfig(
+        host="0.0.0.0",
+        port=8081,
+        entrypoint="",
+        name="simple__processor",
+        agent_server=AgentServerRef(type="responses_api_agents", name="simple"),
+        resources_server=ResourcesServerRef(type="resources_servers", name="resources"),
+    )
+    return SingleAgentTurnProcessor(config=config, server_client=server_client)
+
+
 def _mock_response(payload=None, *, status=200, content="") -> MagicMock:
     response = MagicMock(status=status, cookies={}, ok=status < 400)
     response.read = AsyncMock(return_value=json.dumps(payload or {}))
@@ -81,7 +94,7 @@ def _mock_response(payload=None, *, status=200, content="") -> MagicMock:
 
 class TestApp:
     def test_sanity(self) -> None:
-        config = SimpleAgentConfig(
+        config = ResponsesAPIAgentConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
@@ -95,7 +108,11 @@ class TestApp:
                 name="",
             ),
         )
-        SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server = ResponsesAPIAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        paths = {route.path for route in server.setup_webserver().routes}
+        assert "/v1/responses" in paths
+        assert "/run" not in paths
+        assert "/aggregate_metrics" not in paths
 
     async def test_responses(self, monkeypatch: MonkeyPatch) -> None:
         config = SimpleAgentConfig(
@@ -218,6 +235,7 @@ class TestApp:
     @pytest.mark.parametrize("resolved", [False, None])
     async def test_run_emits_standard_turns_and_tool_observation(self, resolved: bool | None) -> None:
         server, server_client = _make_agent(True)
+        processor = _make_processor(True, server_client)
         response_base = {
             "created_at": 1.0,
             "model": "model",
@@ -266,6 +284,8 @@ class TestApp:
         )
 
         async def post(*, server_name, url_path, **kwargs):
+            if url_path == "/sandbox_spec":
+                return _mock_response(status=204)
             if url_path == "/seed_session":
                 return _mock_response()
             if server_name == "simple":
@@ -293,11 +313,12 @@ class TestApp:
         )
         request = MagicMock()
         request.cookies = {}
-        result = await server.run(request, body)
+        result = await processor.run(request, body)
 
         assert [
             (item.kwargs["server_name"], item.kwargs["url_path"]) for item in server_client.post.await_args_list
         ] == [
+            ("resources", "/sandbox_spec"),
             ("resources", "/seed_session"),
             ("simple", "/ng-rollout/4-1/v1/responses"),
             ("model", "/ng-rollout/4-1/v1/responses"),
@@ -355,14 +376,15 @@ class TestApp:
 
     @pytest.mark.parametrize(("capture_enabled", "override_responses"), ((False, False), (True, False), (True, True)))
     async def test_run_preserves_self_dispatch(self, capture_enabled: bool, override_responses: bool) -> None:
-        agent_type = SimpleAgent
+        agent_type = ResponsesAPIAgent
         if override_responses:
 
             async def overridden_responses(*args, **kwargs):
                 raise AssertionError("run must preserve self-dispatch for responses overrides")
 
-            agent_type = type("OverriddenSimpleAgent", (SimpleAgent,), {"responses": overridden_responses})
+            agent_type = type("OverriddenResponsesAPIAgent", (ResponsesAPIAgent,), {"responses": overridden_responses})
         server, server_client = _make_agent(capture_enabled, agent_type)
+        processor = _make_processor(capture_enabled, server_client)
 
         model_response = {
             "id": "response-1",
@@ -376,6 +398,8 @@ class TestApp:
         }
 
         async def post(*, url_path, **kwargs):
+            if url_path == "/sandbox_spec":
+                return _mock_response(status=204)
             if url_path == "/seed_session":
                 return _mock_response()
             if url_path.endswith("/v1/responses"):
@@ -393,9 +417,10 @@ class TestApp:
         )
         request = MagicMock(cookies={})
 
-        result = await server.run(request, body)
+        result = await processor.run(request, body)
 
         assert [call.kwargs["url_path"] for call in server_client.post.await_args_list] == [
+            "/sandbox_spec",
             "/seed_session",
             "/ng-rollout/0-0/v1/responses" if capture_enabled else "/v1/responses",
             "/verify",
@@ -914,15 +939,12 @@ class TestApp:
         assert _drop_nulls(expected_responses_dict) == _drop_nulls(actual_responses_dict)
 
     async def test_run_skip_verification_uses_configured_reward(self) -> None:
-        config = SimpleAgentConfig(
+        config = SingleAgentTurnProcessorConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
-            name="simple_agent",
-            model_server=ModelServerRef(
-                type="responses_api_models",
-                name="my model server",
-            ),
+            name="simple_agent__processor",
+            agent_server=AgentServerRef(type="responses_api_agents", name="simple_agent"),
             resources_server=ResourcesServerRef(
                 type="resources_servers",
                 name="my resources server",
@@ -930,7 +952,7 @@ class TestApp:
             skip_verification=True,
             skip_verification_reward=0.25,
         )
-        server = SimpleAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        server = SingleAgentTurnProcessor(config=config, server_client=MagicMock(spec=ServerClient))
         app = server.setup_webserver()
         client = TestClient(app)
 
@@ -953,7 +975,12 @@ class TestApp:
         model_response.cookies = {"session": "model"}
         model_response.read.return_value = json.dumps(model_response_payload).encode()
 
-        server.server_client.post.side_effect = [seed_response, model_response]
+        no_runtime = AsyncMock()
+        no_runtime.ok = True
+        no_runtime.status = 204
+        no_runtime.cookies = {}
+
+        server.server_client.post.side_effect = [no_runtime, seed_response, model_response]
 
         response = client.post(
             "/run",
@@ -968,9 +995,11 @@ class TestApp:
 
         post_call_kwargs = [post_call.kwargs for post_call in server.server_client.post.call_args_list]
         assert [kwargs["url_path"] for kwargs in post_call_kwargs] == [
+            "/sandbox_spec",
             "/seed_session",
             "/v1/responses",
         ]
         assert post_call_kwargs[0]["server_name"] == "my resources server"
-        assert post_call_kwargs[1]["server_name"] == "simple_agent"
-        assert post_call_kwargs[1]["cookies"] == {"session": "seeded"}
+        assert post_call_kwargs[1]["server_name"] == "my resources server"
+        assert post_call_kwargs[2]["server_name"] == "simple_agent"
+        assert post_call_kwargs[2]["cookies"] == {"session": "seeded"}

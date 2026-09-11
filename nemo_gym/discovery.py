@@ -68,7 +68,12 @@ _UNSET_VALUE_PLACEHOLDER = "__unset_for_listing__"
 
 # Server groups a component's `domain`/`description` may be declared on. `domain` can sit on a
 # resources server (e.g. `aime24`), an agent (e.g. `tau2`), or in principle a model server.
-_SERVER_GROUP_KEYS = ("resources_servers", "responses_api_agents", "responses_api_models")
+_SERVER_GROUP_KEYS = (
+    "resources_servers",
+    "responses_api_agents",
+    "responses_api_models",
+    "processors",
+)
 
 
 def _parse_no_environment_tolerating_unset_values(initial_config_dict: DictConfig) -> DictConfig:

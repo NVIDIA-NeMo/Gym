@@ -913,7 +913,8 @@ def test_leading_rollout_prefix_round_trips_with_server_parser():
 
 
 def test_base_agent_resolve_model_base_url(monkeypatch):
-    import nemo_gym.base_responses_api_agent as base_agent
+    # `resolve_model_base_url` moved onto `BaseResponsesAPIAgent`; patch where it now resolves.
+    import nemo_gym.agents.base as base_agent
 
     monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _config, _name: {"host": "h", "port": 1})
     agent = SimpleNamespace(
