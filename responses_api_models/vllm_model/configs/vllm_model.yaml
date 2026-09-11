@@ -8,6 +8,7 @@ policy_model:
       return_token_id_information: false
       uses_reasoning_parser: true
       uses_interleaved_reasoning: true
+      replace_developer_role_with_system: false
       chat_template_kwargs: null
       sampling_overrides: null
       extra_body: null
