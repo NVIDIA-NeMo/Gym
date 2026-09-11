@@ -138,6 +138,18 @@ def render_driver_entrypoint(
             f'git clone {shlex.quote(repo)} "$GYM_SRC/gym"',
             f'git -C "$GYM_SRC/gym" checkout {shlex.quote(ref)}',
             'uv pip install -e "$GYM_SRC/gym" --system',
+            # Run from the install root. A benchmark's prepare_script and
+            # jsonl_fpath are relative and resolved against cwd, not through the
+            # install-root search that config_paths gets, so from anywhere else
+            # `gym eval prepare` reports the benchmark as "missing a valid
+            # prepare script" for a file that is right there. A runtime image
+            # bakes no Gym, so without this there is no cwd where it resolves.
+            #
+            # Safe only because the clone is OUTSIDE the job directory and the
+            # driver's output path is absolute: cwd and the install root are now
+            # the same directory, so named assets resolve once rather than
+            # ambiguously, and artifacts still land in the job directory.
+            'cd "$GYM_SRC/gym"',
         ]
 
     if prepare_cmd:

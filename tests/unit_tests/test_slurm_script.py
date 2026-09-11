@@ -1101,11 +1101,14 @@ def test_gym_install_does_not_clone_into_the_job_directory():
     assert 'git clone https://github.com/NVIDIA-NeMo/gym "$GYM_SRC/gym"' in entrypoint
 
 
-def test_gym_install_never_changes_the_working_directory():
-    """`cd` into the clone would redirect every relative output path -- the
-    driver writes `artifacts/rollouts.jsonl` relative to cwd -- into the clone,
-    losing the artifacts exactly as an unmounted job dir does."""
+def test_gym_install_runs_from_the_install_root():
+    """A benchmark's prepare_script is relative to cwd, and a runtime image bakes no
+    Gym, so the driver has to run from the clone or `gym eval prepare` cannot find
+    its own script. Safe because the clone is outside the job directory and the
+    driver's output path is absolute."""
     entrypoint = render_driver_entrypoint(repo="https://github.com/NVIDIA-NeMo/gym", ref="abc123", prepare_cmd=None)
 
-    assert "\n    cd " not in entrypoint
-    assert not any(line.strip().startswith("cd ") for line in entrypoint.splitlines())
+    cd_lines = [line.strip() for line in entrypoint.splitlines() if line.strip().startswith("cd ")]
+    assert cd_lines == ['cd "$GYM_SRC/gym"']
+    # and it must happen before the run, not after
+    assert entrypoint.index('cd "$GYM_SRC/gym"') < entrypoint.index('exec "$@"')
