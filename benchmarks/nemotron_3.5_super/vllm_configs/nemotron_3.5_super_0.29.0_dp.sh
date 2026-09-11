@@ -27,6 +27,7 @@ VLLM_COMMON_ARGS=(
     --enable-expert-parallel
     --skip-mm-profiling
     --prefix-cache-retention-interval None
+    --data-parallel-size-local 1
 )
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
