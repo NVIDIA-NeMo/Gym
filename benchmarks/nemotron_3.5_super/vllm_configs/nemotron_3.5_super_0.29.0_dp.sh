@@ -27,18 +27,20 @@ VLLM_COMMON_ARGS=(
     --enable-expert-parallel
     --skip-mm-profiling
     --prefix-cache-retention-interval None
-    --data-parallel-size-local 1
+    --data-parallel-size-local 4
 )
 VLLM_PREFILL_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
     --max-num-batched-tokens 67840
     --max-num-seqs 1024
-    --tensor-parallel-size 4
+    --tensor-parallel-size 1
+    --all2all-backend deepep_high_throughput
 )
 VLLM_DECODE_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     --max-num-batched-tokens 33920
     --max-num-seqs 1024
-    --tensor-parallel-size 4
+    --tensor-parallel-size 1
+    --all2all-backend deepep_low_latency
 )
