@@ -205,6 +205,9 @@ KV cache usage did *not* rise, so the GPUs are still not the limit even at 6x th
 
 This supersedes the *Sizing* section near the top of the file.
 
+> **Still optimistic — read the decay note below before sizing from this.** 29,941/hr is itself a
+> first-69-minutes figure, and throughput falls steadily as the fast environments drain.
+
 Plan from the **sustained** rate, not the window figure: job 7061265 collected 34,432 rollouts in
 69 min of collection = **29,941 rollouts/hr**, i.e. **749 per GPU-hr** on 40 GPUs.
 
@@ -223,6 +226,29 @@ Plan from the **sustained** rate, not the window figure: job 7061265 collected 3
 So the fixes moved this from *twice the cost of the small shape* to *half of it*. Two things this
 does not include: each job pays a ~20 min driver preflight (~12% of a 4 h walltime, and much less
 per shard), and the rate above is measured before any tail decay.
+
+### Throughput decays through a run — do not size from a short window
+
+Job 7086601 (P2D8, full data, all fixes in place), three consecutive windows measured as the run
+progressed:
+
+| into collection | rate | per GPU-hr |
+|---|---|---|
+| ~10 min | 17,481/hr | 437 |
+| ~30 min | 11,778/hr | 294 |
+| ~50 min | ~7,171/hr | 179 |
+
+Each window is lower than the last. This is the same tail effect the whole-manifest runs show
+(151 -> 55 -> 18 -> ... rollouts per 30 s window): fast environments finish early and the residue is
+slow work, so **any estimate taken from the first hour is an overestimate**, including the
+29,941/hr above and every ETA derived from it.
+
+What follows is that a single P2D8 cannot finish this input. At 11,778/hr the remaining 5.7M
+rollouts need ~486 h — 20 days of continuous 10-node allocation, i.e. 120 sequential 4 h jobs, each
+paying the ~20 min preflight. Sharding is not an optimisation here, it is the only viable shape.
+
+The honest sustained number is still unmeasured: no run with the fixes has yet completed a full
+walltime. Until one does, treat every figure in this file as an upper bound on throughput.
 
 ## Concurrency has a ceiling, and it is not a capacity limit (job 7062901)
 

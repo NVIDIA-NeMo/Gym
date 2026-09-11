@@ -263,6 +263,12 @@ resubmits independently and several will pile up jobs against the node limit:
 setsid nohup bash -lc "... bash $R/scripts/03_run_sharded.sh" > watcher.log 2>&1 &
 ```
 
+The watcher is a plain process, not a Slurm job. If it dies — node reboot, closed session, kill —
+the shard jobs it already submitted keep running, but **nothing resubmits them when they finish and
+nothing merges or splits at the end**, silently. Check `pgrep -f 03_run_sharded.sh` if a sharded run
+stops making progress, and for a multi-day run put the watcher inside a small Slurm job so it
+outlives the login node.
+
 Resume is automatic and requires nothing: `--resume` reads the rollouts already written and
 collects only what is missing. A killed job restarted against the same SWEEP_DIR reports
 
