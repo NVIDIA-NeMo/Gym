@@ -1433,7 +1433,10 @@ class RolloutCollectionHelper(BaseModel):
                 global_config,
                 (row.get(AGENT_REF_KEY_NAME) or {}).get("name"),
             ):
-                token_capture_build = await finalize_rollout_token_capture(result, token_source)
+                settings = token_capture_config.token_id_capture
+                token_capture_build = await finalize_rollout_token_capture(
+                    result, token_source, builder=settings.builder, delivery=settings.delivery
+                )
                 if token_capture_build is not None:
                     finalized_count += 1
                     if token_capture_build.get(MASK_SAMPLE_KEY):
