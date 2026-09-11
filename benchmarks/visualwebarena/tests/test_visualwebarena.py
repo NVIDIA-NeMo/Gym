@@ -9,8 +9,10 @@ import stat
 from pathlib import Path
 
 import pytest
+from omegaconf import DictConfig, OmegaConf
 
 from benchmarks.visualwebarena import prepare as visualwebarena_prepare
+from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
 
 def _write_source(root: Path, count: int) -> tuple[Path, str]:
@@ -63,6 +65,40 @@ def test_prepare_rejects_missing_reference_images(tmp_path, monkeypatch) -> None
 
     with pytest.raises(FileNotFoundError, match="missing 1 referenced image"):
         visualwebarena_prepare.prepare(source, tmp_path / "prepared.jsonl", tmp_path)
+
+
+def test_nano_omni_profile_composes_without_output_repair(tmp_path) -> None:
+    source_root = str(tmp_path / "source")
+    resolved = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.merge(
+                GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+                DictConfig(
+                    {
+                        "config_paths": [str(visualwebarena_prepare.BENCHMARK_DIR / "configs/nano_omni.yaml")],
+                        "policy_base_url": "http://127.0.0.1:8000/v1",
+                        "visualwebarena_source_root": source_root,
+                    }
+                ),
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+
+    agent = resolved.visualwebarena_benchmark_agent.responses_api_agents.web_agent
+    assert agent.resources_server.name == "visualwebarena_environment"
+    assert agent.policy_protocol == "nano_omni_toolcall"
+    assert "nano_omni_action_recovery" not in agent
+    assert "nano_omni_tool_alias_recovery" not in agent
+    assert agent.max_parse_retries == 2
+    assert agent.datasets[0].jsonl_fpath == "benchmarks/visualwebarena/data/visualwebarena.jsonl"
+    assert agent.task_image_root == source_root
+    assert resolved.visualwebarena_environment.resources_servers.webarena_browser.task_image_root == source_root
+    model = resolved.policy_model.responses_api_models.vllm_model
+    assert model.base_url == "http://127.0.0.1:8000/v1"
+    assert model.chat_template_kwargs == {"truncate_history_thinking": False}
 
 
 def test_write_env_is_private_and_rejects_display_sharing(tmp_path) -> None:
