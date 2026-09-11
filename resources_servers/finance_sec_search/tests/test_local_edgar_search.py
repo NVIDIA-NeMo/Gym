@@ -31,6 +31,7 @@ from resources_servers.finance_sec_search.app import (
 )
 from resources_servers.finance_sec_search.local_edgar_search import (
     LocalEdgarSearch,
+    canonical_url_key,
     default_sidecar_path,
     normalize_request,
     translate_query,
@@ -41,6 +42,10 @@ from resources_servers.finance_sec_search.scripts.convert_questions import (
     PROMPT,
     convert_entry,
 )
+
+
+# Indexed paths are container-absolute; only the part below data/ is portable.
+DUMP_PREFIX = "/workspace/outputs/finance/demo/workflow-2-download-sec/step-0-download/data"
 
 
 def _index(path: Path) -> Path:
@@ -58,8 +63,11 @@ def _index(path: Path) -> Path:
             document_type TEXT NOT NULL,
             filing_date TEXT NOT NULL,
             url TEXT NOT NULL,
+            canonical_url_key TEXT NOT NULL,
+            source_path TEXT NOT NULL,
             body TEXT NOT NULL
         );
+        CREATE UNIQUE INDEX documents_url_key ON documents(canonical_url_key);
         CREATE VIRTUAL TABLE documents_fts USING fts5(
             body,
             content='documents',
@@ -79,6 +87,8 @@ def _index(path: Path) -> Path:
             "10-K",
             "2024-11-01",
             "https://www.sec.gov/Archives/edgar/data/320193/000032019324000001/aapl.htm",
+            "320193:000032019324000001:aapl.htm",
+            f"{DUMP_PREFIX}/AAPL/10-K/2024/0000320193-24-000001/primary-document.html",
             "quantum pineapple net income",
         ),
         (
@@ -92,6 +102,8 @@ def _index(path: Path) -> Path:
             "EX-99.1",
             "2025-04-08",
             "https://www.sec.gov/Archives/edgar/data/789019/000078901925000001/msft-ex991.htm",
+            "789019:000078901925000001:msft-ex991.htm",
+            f"{DUMP_PREFIX}/MSFT/8-K/2025/0000789019-25-000001/exhibits/EX-99.1.html",
             "quantum pineapple guidance",
         ),
     ]
@@ -99,8 +111,9 @@ def _index(path: Path) -> Path:
         """
         INSERT INTO documents (
             id, accession_number, cik, company_name, ticker, description,
-            form_type, document_type, filing_date, url, body
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            form_type, document_type, filing_date, url, canonical_url_key,
+            source_path, body
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
@@ -252,6 +265,50 @@ async def test_server_routes_edgar_search_to_local_index(tmp_path: Path) -> None
     metric = json.loads(metric_files[0].read_text(encoding="utf-8"))
     assert metric["result_count"] == 1
     assert "completed_at_unix_seconds" in metric
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "https://www.sec.gov/Archives/edgar/data/0000066740/000006674026000246/MMM-20260630.htm",
+            "66740:000006674026000246:mmm-20260630.htm",
+        ),
+        (
+            "https://www.sec.gov/Archives/edgar/data/66740/000006674026000246/ex%2010-1.htm",
+            "66740:000006674026000246:ex 10-1.htm",
+        ),
+        ("https://example.test/not-edgar.htm", None),
+        ("https://www.sec.gov/Archives/edgar/data/66740/000006674026000246/", None),
+    ],
+)
+def test_canonical_url_key_normalizes_cik_and_filename(url: str, expected: str | None) -> None:
+    assert canonical_url_key(url) == expected
+
+
+def test_dump_paths_cover_primary_documents_and_exhibits(tmp_path: Path) -> None:
+    search = LocalEdgarSearch(_index(tmp_path / "index.sqlite"))
+
+    resolved = search.dump_paths_for_urls(
+        [
+            "https://www.sec.gov/Archives/edgar/data/320193/000032019324000001/aapl.htm",
+            "https://www.sec.gov/Archives/edgar/data/789019/000078901925000001/msft-ex991.htm",
+            "https://www.sec.gov/Archives/edgar/data/1/000000000000000001/absent.htm",
+        ]
+    )
+
+    assert resolved == {
+        "320193:000032019324000001:aapl.htm": "AAPL/10-K/2024/0000320193-24-000001/primary-document.html",
+        "789019:000078901925000001:msft-ex991.htm": "MSFT/8-K/2025/0000789019-25-000001/exhibits/EX-99.1.html",
+    }
+
+
+def test_dump_paths_are_unavailable_without_the_columns(tmp_path: Path) -> None:
+    """An index built before source_path existed degrades instead of erroring."""
+    search = LocalEdgarSearch(_varied_index(tmp_path / "legacy.sqlite", documents=4))
+
+    assert search.supports_dump_paths is False
+    assert search.dump_paths_for_urls(["https://www.sec.gov/Archives/edgar/data/1/2/a.htm"]) == {}
 
 
 def _varied_index(path: Path, documents: int = 400) -> Path:

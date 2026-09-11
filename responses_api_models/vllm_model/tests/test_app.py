@@ -18,6 +18,7 @@ import logging
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
+from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch, mark, raises
 
@@ -82,6 +83,32 @@ _TEST_LINEAGE = InMemoryLineageStore()
 
 def lineage_index():
     return _TEST_LINEAGE.index
+
+
+def test_strip_hosted_only_tool_fields_pops_strict() -> None:
+    body_dict = {
+        "tools": [
+            {"type": "function", "function": {"name": "get_weather", "strict": True}},
+            {"type": "custom", "custom": {"name": "not_a_function"}},
+        ]
+    }
+    VLLMModel._strip_hosted_only_tool_fields(body_dict)
+    assert "strict" not in body_dict["tools"][0]["function"]
+    assert body_dict["tools"][0]["function"]["name"] == "get_weather"
+    assert body_dict["tools"][1] == {"type": "custom", "custom": {"name": "not_a_function"}}
+
+    # Tolerates absent tools.
+    VLLMModel._strip_hosted_only_tool_fields({})
+
+
+def test_preprocess_chat_completion_create_params_strips_strict(monkeypatch: MonkeyPatch) -> None:
+    server = TestApp()._setup_server(monkeypatch)
+    body_dict = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [{"type": "function", "function": {"name": "get_weather", "strict": True}}],
+    }
+    body_dict = server._preprocess_chat_completion_create_params(MagicMock(), body_dict)
+    assert "strict" not in body_dict["tools"][0]["function"]
 
 
 def test_transport_io_writer_keeps_full_payload(monkeypatch: MonkeyPatch, tmp_path) -> None:
@@ -735,7 +762,7 @@ PARAMETERIZE_DATA = [
 
 
 class TestApp:
-    def _setup_server(self, monkeypatch: MonkeyPatch):
+    def _setup_server(self, monkeypatch: MonkeyPatch, *, propagate_context_overflow_errors: bool = False):
         config = VLLMModelConfig(
             host="0.0.0.0",
             port=8081,
@@ -746,6 +773,7 @@ class TestApp:
             name="",
             return_token_id_information=False,
             uses_reasoning_parser=False,
+            propagate_context_overflow_errors=propagate_context_overflow_errors,
         )
 
         get_global_config_dict_mock = MagicMock()
@@ -755,7 +783,31 @@ class TestApp:
         return VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
 
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
-        self._setup_server(monkeypatch)
+        assert not self._setup_server(monkeypatch).config.propagate_context_overflow_errors
+
+    @mark.parametrize("propagate", [False, True])
+    def test_context_overflow_propagation_flag(self, monkeypatch: MonkeyPatch, propagate: bool) -> None:
+        server = self._setup_server(monkeypatch, propagate_context_overflow_errors=propagate)
+        request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
+        error = ClientResponseError(request_info, (), status=400, message="Bad Request")
+        error.response_content = b'{"error":{"message":"maximum context length","code":400}}'
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=error)
+        server._clients = [mock_client]
+
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post(
+            "/v1/chat/completions",
+            json={"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+        )
+
+        if propagate:
+            assert response.status_code == 400
+            assert response.json() == {"error": {"message": "maximum context length", "code": 400}}
+        else:
+            assert response.status_code == 200
+            assert '"finish_reason": "length"' in response.text
 
     def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
         workers = [self._setup_server(monkeypatch) for _ in range(2)]
@@ -5835,3 +5887,39 @@ class TestPrefixSupplyRejectsResponsesNative:
                 supply_prefix_token_ids=True,
                 is_responses_native=True,
             )
+
+
+class TestPreserveEnvelopeIdFollowsCaptureContext:
+    """The served envelope id is kept per request, not per server."""
+
+    def test_uncaptured_request_on_external_staging_server_mints_resp_id(self) -> None:
+        model = TestPrefixSupplyReachesTokenize._model()
+        model._external_capture_enabled = True
+
+        assert model._preserve_envelope_id() is False
+
+        captured = CaptureContext(
+            rollout_id="env-0",
+            model_call_id="call-a",
+            token_sink=None,
+            lineage_store=_TEST_LINEAGE,
+            external_staging=True,
+        )
+        token = set_token_sink(captured)
+        try:
+            assert model._preserve_envelope_id() is True
+        finally:
+            reset_token_sink(token)
+
+        local = CaptureContext(
+            rollout_id="env-0",
+            model_call_id="call-b",
+            token_sink=None,
+            lineage_store=_TEST_LINEAGE,
+            external_staging=False,
+        )
+        token = set_token_sink(local)
+        try:
+            assert model._preserve_envelope_id() is False
+        finally:
+            reset_token_sink(token)

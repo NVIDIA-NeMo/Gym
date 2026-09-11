@@ -20,7 +20,9 @@ import os
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from contextlib import nullcontext
+from dataclasses import dataclass
 from datetime import timedelta
 from difflib import get_close_matches
 from itertools import repeat
@@ -67,7 +69,7 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
-from nemo_gym.path_utils import failures_path_for
+from nemo_gym.path_utils import aggregate_metrics_path_for, failures_path_for
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
@@ -90,7 +92,6 @@ _failures_path_for = failures_path_for  # Backwards-compatible alias
 from nemo_gym.server_utils import (
     ServerClient,
     get_response_json,
-    is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
 )
 from nemo_gym.server_utils import (
@@ -151,10 +152,18 @@ AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
 _NO_RESULT_FAILURE_CLASSES = frozenset({AGENT_REQUEST_FAILED_FAILURE_CLASS, AGENT_RUN_ERROR_FAILURE_CLASS})
 NG_TRAJECTORY_KEY = "ng_trajectory"
 NG_PERF_KEY = "ng_perf"
-_NG_ROLLOUT_LATENCY_MS_KEY = "_ng_rollout_latency_ms"
 _MODEL_CALL_PAYLOAD_KEYS = ("request", "response", "request_raw", "response_raw")
 
 _DEFAULT_MAX_ROLLOUT_ATTEMPTS = 3
+
+
+@dataclass(frozen=True)
+class _CompletedRollout:
+    """A finished ``/run`` dispatch, with timing carried alongside (not inside) the raw result."""
+
+    row: Dict[str, Any]
+    result: Dict[str, Any]
+    rollout_latency_ms: Optional[float]
 
 
 def _nonnegative_int(value: Any) -> Optional[int]:
@@ -407,8 +416,9 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
     observed: per-turn evidence is needed rather than just raw model-call capture,
     so a rollout collected with observability disabled produces no ``ng_perf`` at all.
 
-    Token fields are summed only over model calls owned by a reasoning-turn ``AgentInvocation``,
-    excluding compaction calls -- mixing in compaction overhead would skew the token efficiency signal.
+    Token fields are summed over every model call referenced by a reasoning-turn
+    ``AgentInvocation``. This includes compaction calls whenever the harness also lists
+    them in ``AgentInvocation.model_calls``.
 
     ``num_turns`` counts reasoning turns summed across all invocations (an ``AgentInvocation``
     is one root-agent or subagent conversation that may span many turns). Each invocation
@@ -520,8 +530,9 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
     return ng_perf
 
 
-def _attach_ng_perf(result: dict[str, Any], *, observability_enabled: bool) -> None:
-    rollout_latency_ms = result.pop(_NG_ROLLOUT_LATENCY_MS_KEY, None)
+def _attach_ng_perf(
+    result: dict[str, Any], *, observability_enabled: bool, rollout_latency_ms: Optional[float] = None
+) -> None:
     if not observability_enabled:
         # ng_perf stays absent entirely when observability is off (OQ4): a caller who
         # disabled it only wants the final score, not partial/best-effort perf evidence.
@@ -605,6 +616,14 @@ class SharedRolloutCollectionConfig(UploadRolloutsConfigMixin, BaseNeMoGymCLICon
         ),
     )
 
+    route_failures_to_sidecar: bool = Field(
+        default=False,
+        description=(
+            "Record a failed agent /run as a failures-sidecar row and keep going, instead of ending "
+            "the run. The failed rollouts are then absent from the rollouts jsonl and from the "
+            "score, which is reported over fewer rollouts than were dispatched."
+        ),
+    )
     rollout_collection_driver: Optional[str] = Field(
         default=None,
         description=(
@@ -638,13 +657,33 @@ class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
     def _reject_input_jsonl_fpath(cls, data):
         # This config has no input_jsonl_fpath field, so pydantic would silently drop it and
         # e2e collection would overwrite it with the prepared split path — the user's file
-        # would be ignored without any indication.
-        if isinstance(data, dict) and "input_jsonl_fpath" in data:
+        # would be ignored without any indication. Match on Mapping, not dict: the CLI passes
+        # an OmegaConf DictConfig, which is a Mapping but not a dict.
+        if isinstance(data, Mapping) and "input_jsonl_fpath" in data:
             raise ConfigError(
                 "`input_jsonl_fpath` (-i/--input) is not supported when serving end-to-end: the input is "
                 "always the prepared dataset for the requested split. Either add --no-serve to collect "
                 "rollouts from your own input file against already-running servers, or drop -i/--input "
                 "to use the prepared data."
+            )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_example_split(cls, data):
+        # `example` is a real dataset type but deliberately not a runnable split: example
+        # datasets are the committed smoke-test samples the PR data gate validates, and they
+        # are excluded from prepared splits so they never leak into training or eval data.
+        # Catch it before the Literal check so the user gets the documented recipe instead of
+        # a bare "Input should be 'train'".
+        if isinstance(data, Mapping) and data.get("split") == "example":
+            raise ConfigError(
+                "`--split example` is not runnable end-to-end: example datasets are committed "
+                "smoke-test samples, not prepared train/validation/benchmark splits. To run one, "
+                "start the servers and point at the example file directly:\n"
+                "  gym env start --resources-server <server> ...\n"
+                "  gym eval run --no-serve --agent <agent> --input <server_dir>/data/example.jsonl --output <out>.jsonl\n"
+                "See the Quickstart: https://docs.nvidia.com/nemo/gym/latest/get-started/quickstart"
             )
         return data
 
@@ -828,6 +867,22 @@ def _truncated_body(body: Optional[bytes]) -> Optional[str]:
     return text[:_MAX_FAILURE_BODY_CHARS] + ("…" if len(body) > _MAX_FAILURE_BODY_CHARS else "")
 
 
+def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], Dict[str, Any]]:
+    """The last attempt recorded for each rollout across the failures sidecars."""
+    latest_by_key: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
+    for fpath in failures_fpaths:
+        if not fpath.exists():
+            continue
+        with fpath.open("rb") as f:
+            for line_no, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                row = loads_jsonl_line(line, fpath, line_no)
+                latest_by_key[(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))] = row
+    return latest_by_key
+
+
 def _failure_rows_counted_as_zero(
     failures_fpaths: List[Path], failure_classes: List[str], scored_keys: set
 ) -> List[Dict[str, Any]]:
@@ -845,18 +900,7 @@ def _failure_rows_counted_as_zero(
     if not failure_classes:
         return []
 
-    latest_by_key: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
-    for fpath in failures_fpaths:
-        if not fpath.exists():
-            continue
-        with fpath.open("rb") as f:
-            for line_no, line in enumerate(f, 1):
-                line = line.strip()
-                if not line:
-                    continue
-                row = loads_jsonl_line(line, fpath, line_no)
-                latest_by_key[(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))] = row
-
+    latest_by_key = _latest_failure_rows(failures_fpaths)
     wanted = set(failure_classes)
     counted = []
     for key, row in latest_by_key.items():
@@ -868,6 +912,23 @@ def _failure_rows_counted_as_zero(
         scored.setdefault("reward", 0.0)
         counted.append(scored)
     return counted
+
+
+def _coverage_report(expected: int, scored: int, failure_counts: Counter, failures_hint: Any) -> str:
+    """State how much of the input the score covers, for the runs where it is not all of it.
+
+    Silence here is what makes a partial run look complete, so this reports against the
+    materialized input rather than the rollouts one hop happened to dispatch.
+    """
+    missing = expected - scored
+    if missing <= 0:
+        return ""
+    routed = ", ".join(f"{count} {name}" for name, count in sorted(failure_counts.items()))
+    routed = f"{routed} routed this run; " if routed else ""
+    return (
+        f"\nRollouts missing from the score: {missing} of {expected} materialized ({routed}see {failures_hint})"
+        f"\nMetrics cover: {scored} of {expected} rollouts"
+    )
 
 
 class RolloutCollectionHelper(BaseModel):
@@ -1311,11 +1372,23 @@ class RolloutCollectionHelper(BaseModel):
         dispatched_per_agent = Counter(counts_left)
         start_time = time()
 
+        if config.route_failures_to_sidecar:
+            print(
+                "route_failures_to_sidecar is on: a failed agent /run becomes a sidecar row instead of "
+                "ending the run, and its rollout leaves the score.",
+                flush=True,
+            )
+
         results_file = output_fpath.open("ab")
         failures_file = failures_fpath.open("ab")
         failure_counts: Counter = Counter()
-        for future in self.run_examples(input_rows, semaphore=semaphore, route_failures_to_sidecar=True):
-            row, result = await future
+        for future in self._run_examples_with_metadata(
+            input_rows,
+            semaphore=semaphore,
+            route_failures_to_sidecar=config.route_failures_to_sidecar,
+        ):
+            completed = await future
+            row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
 
             result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
             result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -1348,10 +1421,8 @@ class RolloutCollectionHelper(BaseModel):
             if "ng_model_call_capture" in result or "ng_agent_observations" in result or NG_TRAJECTORY_KEY in result:
                 _attach_trajectory_record(row, result)
 
-            # Assembles ng_perf from ng_trajectory when observability is enabled;
-            # additionally drops the internal wall-clock timer key so it never
-            # leaks into a persisted rollout.
-            _attach_ng_perf(result, observability_enabled=observability_enabled)
+            # Assembles ng_perf from ng_trajectory when observability is enabled.
+            _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
 
             # Freeze and rebuild tokens only for participating agents.
             # This step does not retire the frozen snapshot.
@@ -1402,6 +1473,14 @@ class RolloutCollectionHelper(BaseModel):
                 # Non-kill_shaped failure → sidecar. The aggregator only reads
                 # the main jsonl, so this keeps win-rate uncontaminated.
                 failure_counts[failure_class] += 1
+                # Every dropped rollout says so as it happens, whichever layer classified it.
+                # tqdm.write keeps the line off the progress bar it would otherwise collide with.
+                detail = str(result.get("_ng_failure_message") or result.get("error") or "")[:200]
+                tqdm.write(
+                    "🚨 [rollout_collection] rollout dropped from the score: "
+                    f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)} "
+                    f"class={failure_class} error={detail}"
+                )
                 failures_file.write(serialized + b"\n")
                 failures_file.flush()
             else:
@@ -1480,18 +1559,11 @@ class RolloutCollectionHelper(BaseModel):
         results_file.close()
         failures_file.close()
 
-        coverage = ""
-        if failure_counts:
-            coverage = (
-                f"\nCoverage: {sum(failure_counts.values())} of {len(input_rows)} dispatched rollouts failed "
-                f"{dict(failure_counts)}, {len(persisted_results)} completed in total. "
-                f"Failure rows: {failures_fpath}"
+        if input_rows and not persisted_results:
+            raise RuntimeError(
+                f"None of the {len(input_rows)} dispatched rollouts produced a result "
+                f"{dict(failure_counts)}. Inspect {failures_fpath}; the run has no score to report."
             )
-            if input_rows and not persisted_results:
-                raise RuntimeError(
-                    f"None of the {len(input_rows)} dispatched rollouts produced a result "
-                    f"{dict(failure_counts)}. Inspect {failures_fpath}; the run has no score to report."
-                )
         if owned_token_source is not None:
             await owned_token_source.close()
 
@@ -1508,6 +1580,7 @@ class RolloutCollectionHelper(BaseModel):
         # Compute and write aggregate metrics via /aggregate_metrics using only the
         # rows written to the main rollouts jsonl so runtime aggregation matches
         # `gym eval aggregate`.
+        counted: List[Dict] = []
         if config.disable_aggregation:
             print(
                 "Skipping aggregate-metrics computation because disable_aggregation=True. "
@@ -1516,7 +1589,7 @@ class RolloutCollectionHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            counted = _failure_rows_counted_as_zero(
+            counted[:] = _failure_rows_counted_as_zero(
                 [failures_fpath],
                 config.count_failure_classes_as_zero,
                 {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in persisted_results},
@@ -1527,6 +1600,22 @@ class RolloutCollectionHelper(BaseModel):
                 )
             aggregate_metrics_fpath = await self._call_aggregate_metrics(
                 persisted_results + counted, persisted_rows + counted, output_fpath
+            )
+
+        expected_rollouts = (
+            sum(1 for _ in config.materialized_jsonl_fpath.open("rb"))
+            if config.materialized_jsonl_fpath.exists()
+            else len(input_rows) + len(persisted_results)
+        )
+        scored_rollouts = len(persisted_results) + len(counted)
+        coverage = _coverage_report(expected_rollouts, scored_rollouts, failure_counts, failures_fpath)
+        if get_exporters():  # pragma: no cover
+            export_metrics(
+                {
+                    "coverage/expected": expected_rollouts,
+                    "coverage/scored": scored_rollouts,
+                    "coverage/missing": expected_rollouts - scored_rollouts,
+                }
             )
 
         print(f"""Finished rollout collection! View results at:
@@ -1578,7 +1667,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         server_client = self.setup_server_client()
 
         async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
-            # Strip heavyweight fields before sending, but preserve response.usage
+            # Strip heavyweight fields before sending, but preserve response.usage and response.incomplete_details if present.
             stripped = []
             for r in agent_result_list:
                 entry = {
@@ -1593,9 +1682,16 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         NG_TRAJECTORY_KEY,
                     )
                 }
-                usage = (r.get("response") or {}).get("usage")
-                if usage:
-                    entry["response"] = {"usage": usage}
+                response = r.get("response") or {}
+                response_metadata = {}
+                usage = response.get("usage")
+                if usage is not None:
+                    response_metadata["usage"] = usage
+                incomplete_details = response.get("incomplete_details")
+                if incomplete_details is not None:
+                    response_metadata["incomplete_details"] = incomplete_details
+                if response_metadata:
+                    entry["response"] = response_metadata
                 stripped.append(entry)
 
             agg_request = AggregateMetricsRequest(verify_responses=stripped)
@@ -1650,7 +1746,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         export_metrics(metrics_to_log)
 
         # Write single file with all agents
-        metrics_fpath = output_fpath.with_stem(output_fpath.stem + "_aggregate_metrics").with_suffix(".json")
+        metrics_fpath = aggregate_metrics_path_for(output_fpath)
         metrics_fpath.write_bytes(orjson.dumps(all_agent_metrics, option=orjson.OPT_INDENT_2))
 
         return metrics_fpath
@@ -1796,6 +1892,65 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             f"--allow-unsupported-pairing (or set {ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME}=1) to bypass the check."
         )
 
+    def _run_examples_with_metadata(
+        self,
+        examples: List[Dict],
+        head_server_config: Optional[BaseServerConfig] = None,
+        semaphore: Optional[Semaphore] = None,
+        route_failures_to_sidecar: bool = False,
+    ) -> Iterator[Future]:  # pragma: no cover
+        """
+        Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
+
+        Identical contract to ``run_examples``, but each future resolves to a ``_CompletedRollout``
+        that carries ``rollout_latency_ms`` alongside the raw ``/run`` result instead of inside it,
+        so internal-only timing never has to be smuggled through (and stripped back out of) a dict
+        that a direct caller of ``run_examples`` could also observe.
+        """
+        server_client = self.setup_server_client(head_server_config)
+        self.resolve_task_sources(examples, server_client.global_config_dict)
+        self._validate_agent_names(examples, server_client.global_config_dict)
+        self._validate_agent_pairings(examples, server_client.global_config_dict)
+        semaphore = semaphore or nullcontext()
+
+        async def _post_subroutine(row: Dict) -> _CompletedRollout:
+            async with semaphore:
+                started_at = time()
+                res = None
+                try:
+                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
+                    await raise_for_status(res)
+                    result = await get_response_json(res)
+                    # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
+                    # from summed model-call/tool latencies to account for additional overhead.
+                    rollout_latency_ms = (time() - started_at) * 1000
+                    return _CompletedRollout(row=row, result=result, rollout_latency_ms=rollout_latency_ms)
+                except Exception as e:
+                    print(
+                        "[rollout_collection] /run failed "
+                        f"status={getattr(res, 'status', None)} "
+                        f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
+                        flush=True,
+                    )
+                    if not route_failures_to_sidecar or not isinstance(e, _RUN_FAILURE_ERRORS):
+                        raise
+                    if res is not None:
+                        res.release()
+                    # The status comes from the error when it carries one, and from the response
+                    # when the body was the part that failed.
+                    status = getattr(e, "status", None) or getattr(res, "status", None)
+                    return _CompletedRollout(
+                        row=row, result=_agent_request_failure_row(e, status), rollout_latency_ms=None
+                    )
+
+        return tqdm.as_completed(
+            map(_post_subroutine, examples),
+            desc="Collecting rollouts",
+            miniters=10,
+            total=len(examples),
+            maxinterval=60,
+        )
+
     def run_examples(
         self,
         examples: List[Dict],
@@ -1810,51 +1965,26 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         but run-level knobs (``agent_map``, ``fan_out``, ``num_repeats``) are NOT applied — call
         ``preprocess_examples`` first if you need them.
 
-        ``route_failures_to_sidecar`` is set by managed collection (``run_from_config``), where a
-        failed `/run` becomes a failure row instead of ending every rollout still in flight.
-        Direct callers such as NeMo-RL leave it off and keep receiving the exception.
+        ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
+        that ends every rollout still in flight. It defaults off because those rollouts then leave
+        the score.
+
+        Every future resolves to exactly the ``(row, result)`` pair Gym's own `/run` endpoint
+        returned — no Gym-private fields are ever added to ``result``.
         """
-        server_client = self.setup_server_client(head_server_config)
-        self.resolve_task_sources(examples, server_client.global_config_dict)
-        self._validate_agent_names(examples, server_client.global_config_dict)
-        self._validate_agent_pairings(examples, server_client.global_config_dict)
-        semaphore = semaphore or nullcontext()
 
-        async def _post_subroutine(row: Dict) -> Tuple[Dict, Dict]:
-            async with semaphore:
-                started_at = time()
-                res = None
-                try:
-                    res = await server_client.post(server_name=row["agent_ref"]["name"], url_path="/run", json=row)
-                    await raise_for_status(res)
-                    result = await get_response_json(res)
-                    # Independently-measured task wall-clock (ng_perf.total_latency_ms), not derived
-                    # from summed model-call/tool latencies to account for additional overhead.
-                    result[_NG_ROLLOUT_LATENCY_MS_KEY] = (time() - started_at) * 1000
-                    return row, result
-                except Exception as e:
-                    if is_global_aiohttp_client_request_debug_enabled():
-                        print(
-                            "[rollout_collection] /run failed "
-                            f"status={getattr(res, 'status', None)} "
-                            f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
-                            flush=True,
-                        )
-                    if not route_failures_to_sidecar or not isinstance(e, _RUN_FAILURE_ERRORS):
-                        raise
-                    if res is not None:
-                        res.release()
-                    # The status comes from the error when it carries one, and from the response
-                    # when the body was the part that failed.
-                    status = getattr(e, "status", None) or getattr(res, "status", None)
-                    return row, _agent_request_failure_row(e, status)
+        async def _without_metadata(future: Future) -> Tuple[Dict, Dict]:
+            completed = await future
+            return completed.row, completed.result
 
-        return tqdm.as_completed(
-            map(_post_subroutine, examples),
-            desc="Collecting rollouts",
-            miniters=10,
-            total=len(examples),
-            maxinterval=60,
+        return map(
+            _without_metadata,
+            self._run_examples_with_metadata(
+                examples,
+                head_server_config=head_server_config,
+                semaphore=semaphore,
+                route_failures_to_sidecar=route_failures_to_sidecar,
+            ),
         )
 
     def setup_server_client(
@@ -1983,10 +2113,12 @@ class RolloutAggregationHelper(BaseModel):
                 for r in results:
                     out.write(orjson.dumps(r) + b"\n")
 
+        failures_fpaths = [failures_path_for(Path(path)) for path in input_paths]
+        scored_keys = {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in results}
         counted = _failure_rows_counted_as_zero(
-            [failures_path_for(Path(path)) for path in input_paths],
+            failures_fpaths,
             config.count_failure_classes_as_zero,
-            {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in results},
+            scored_keys,
         )
         if config.count_failure_classes_as_zero:
             print(f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}")
@@ -1996,9 +2128,32 @@ class RolloutAggregationHelper(BaseModel):
         scored = results + counted
         aggregate_metrics_fpath = await helper._call_aggregate_metrics(scored, scored, output_fpath)
 
+        # The shards' own sidecars say which rollouts never made it into the files just scored.
+        counted_keys = {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in counted}
+        dropped = Counter(
+            row.get(NG_FAILURE_CLASS_KEY) or "unknown"
+            for key, row in _latest_failure_rows(failures_fpaths).items()
+            if key not in scored_keys and key not in counted_keys
+        )
+        scored_rollouts = len(results) + len(counted)
+        coverage = _coverage_report(
+            scored_rollouts + sum(dropped.values()),
+            scored_rollouts,
+            dropped,
+            "the shards' _failures.jsonl sidecars",
+        )
+        if get_exporters():  # pragma: no cover
+            export_metrics(
+                {
+                    "coverage/expected": scored_rollouts + sum(dropped.values()),
+                    "coverage/scored": scored_rollouts,
+                    "coverage/missing": sum(dropped.values()),
+                }
+            )
+
         print(f"""Finished rollout aggregation! View results at:
 Merged rollouts: {output_fpath if config.merge_shards else "<not merged>"}
-Aggregate metrics: {aggregate_metrics_fpath}""")
+Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         if not config.disable_health_check:
             from nemo_gym.rollout_health import format_health_report, run_health_checks

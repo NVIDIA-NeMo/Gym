@@ -1,0 +1,95 @@
+# Resources server: owns the task data and ViBench-backed grading. It creates no sandbox --
+# the agent copies the built app out and this server grades it in a fresh stack.
+vibench_resources_server:
+  resources_servers:
+    vibench:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: PRD-to-web-app benchmark; apps are graded by seeding and driving them in a browser.
+      value: Eval whether a model can ship a working web app from a spec, judged through the running UI rather than the diff.
+
+      # Absolute path to a ViBench checkout. Grading shells into
+      # _harness/runner/scripts/run-seed.py then run-evaluate-post-seeding.py inside it.
+      # (Not run-seed-then-evaluate.py -- see the comment above SEED_SCRIPT in app.py.)
+      # Defaulted so the config resolves without the variable set: data tooling and CI load
+      # this file without ever starting the server, and a bare ${oc.env:...} makes that fail
+      # with a config interpolation error. Set VIBENCH_REPO_ROOT to a real checkout to run.
+      vibench_repo_root: ${oc.env:VIBENCH_REPO_ROOT,/nonexistent/set-VIBENCH_REPO_ROOT}
+
+      # Shared with the agent: it writes built-app tarballs here, this server unpacks them.
+      # A plain path is enough because grading already needs a local Docker daemon, so both
+      # processes are on one host regardless.
+      artifact_dir: ${oc.env:VIBENCH_ARTIFACT_DIR,/tmp/vibench-artifacts}
+
+      # Supplies AGENT_SEEDING_LLM_* / AGENT_EVALUATION_LLM_* for the grader agents.
+      # These are the verifier's models, deliberately not the policy model under test.
+      vibench_env_file: ${oc.env:VIBENCH_ENV_FILE,null}
+
+      evaluation_timeout_s: 5400
+      # Each test plan stands up postgres + the app + playwright. Two at a time per rollout
+      # is already heavy; raise only on a big host.
+      max_concurrent_test_plans: 2
+      # Set VIBENCH_KEEP_ARTIFACTS=true to retain per-test-plan traces, screenshots,
+      # DB dumps and container logs -- the only way to diagnose a grading failure
+      # after the fact, since the work dir is otherwise removed.
+      keep_evaluation_artifacts: ${oc.env:VIBENCH_KEEP_ARTIFACTS,false}
+
+# Agent: owns the build sandbox, runs OpenCode in it, harvests the app.
+vibench_opencode_agent:
+  responses_api_agents:
+    vibench_agent:
+      entrypoint: app.py
+      num_workers: 4
+
+      resources_server:
+        type: resources_servers
+        name: vibench_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      # Same base image ViBench's own pipeline builds and reuses (see
+      # build_base_image_if_needed in _harness/runner/scripts/common.py), so the build box
+      # and the grading stack share one image:
+      #   docker build -f _harness/runner/docker/Dockerfile.base -t app-bench-base:latest .
+      # Its WORKDIR is /app, which is where the harness lands.
+      build_image: ${oc.env:VIBENCH_BUILD_IMAGE,app-bench-base:latest}
+      app_workdir: /app
+      artifact_dir: ${oc.env:VIBENCH_ARTIFACT_DIR,/tmp/vibench-artifacts}
+      harvest_timeout_s: 900
+
+      debug: false
+      opencode_version: 1.17.11
+      opencode_max_context_window: 262144
+      remote_opencode_install_script_path: null
+      remote_opencode_binary_path: null
+      opencode_config:
+        permission:
+          "*": allow
+          edit:
+            "**": allow
+          bash:
+            "*": allow
+            "*killall*": deny
+            "*pkill*": deny
+            "*rm -rf /": deny
+            "*rm -rf /*": deny
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 14400
+        ready_timeout_s: 600
+        resources:
+          cpu: 4
+          memory_mib: 8192
+          disk_gib: 20
+        metadata:
+          benchmark: vibench
+          harness: opencode
+      sandbox_timeout: 5400.0
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/vibench/data/example.jsonl

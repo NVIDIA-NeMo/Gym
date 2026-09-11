@@ -22,6 +22,7 @@ import tempfile
 import time
 import uuid
 from asyncio import Semaphore
+from contextlib import contextmanager
 from pathlib import Path
 from subprocess import Popen
 from traceback import format_exc
@@ -117,6 +118,52 @@ def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
     existing = {k: v for k, v in json.loads(metrics_fpath.read_text()).items() if v is not None}
     update = {k: v for k, v in update_dict.items() if v is not None}
     metrics_fpath.write_text(json.dumps(existing | update))
+
+
+# A dead process (killed -9, OOM, node loss) can leave a .lockdir behind forever, wedging every
+# future waiter. 2h comfortably exceeds any real deps-setup run, so a lock that old is presumed dead.
+_AGENT_DEPS_LOCK_STALE_AFTER_SECONDS = 7200  # 2 hours
+
+
+@contextmanager
+def _file_lock(file_path: Path, label: str, max_wait: float = 7200.0, poll_interval: float = 5.0):
+    """Cross-node lock using mkdir, which is atomic on Lustre/NFS."""
+    lock_dir = file_path.parent
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f".{file_path.name}.lockdir"
+
+    print(f"Acquiring {label} lock at {lock_path}", flush=True)
+    waited = 0.0
+    while True:
+        try:
+            lock_path.mkdir(exist_ok=False)
+            break
+        except FileExistsError:
+            try:
+                lock_age = time.time() - lock_path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+            if lock_age >= _AGENT_DEPS_LOCK_STALE_AFTER_SECONDS:
+                try:
+                    if time.time() - lock_path.stat().st_mtime >= _AGENT_DEPS_LOCK_STALE_AFTER_SECONDS:
+                        print(f"  Reclaiming stale {label} lock at {lock_path} (age {lock_age:.0f}s)", flush=True)
+                        shutil.rmtree(lock_path, ignore_errors=True)
+                except FileNotFoundError:
+                    pass
+                continue
+            if waited >= max_wait:
+                raise TimeoutError(
+                    f"Timed out waiting for {label} lock at {lock_path} after {max_wait}s; lock age is {lock_age:.0f}s"
+                )
+            if waited % 30 == 0:
+                print(f"  Waiting for {label} lock (held by another process, {waited:.0f}s elapsed)...", flush=True)
+            time.sleep(poll_interval)
+            waited += poll_interval
+
+    try:
+        yield
+    finally:
+        shutil.rmtree(lock_path, ignore_errors=True)
 
 
 def _safe_config_json(params: "AnyTerminalInstanceConfig", indent: Optional[int] = None) -> str:
@@ -246,19 +293,26 @@ class GymAgentHarnessProcessor(BaseModel):
         if sentinel.exists() and sentinel.read_text().strip() == recipe:
             print(f"Agent deps already at {deps_dir}", flush=True)
             return deps_dir
-        if not script.exists():
-            print(f"No setup script for {self._agent_key}, skipping deps install", flush=True)
+
+        with _file_lock(deps_dir, f"{self._agent_key} deps setup"):
+            if sentinel.exists() and sentinel.read_text().strip() == recipe:
+                print(f"Agent deps already at {deps_dir}", flush=True)
+                return deps_dir
+
+            if not script.exists():
+                print(f"No setup script for {self._agent_key}, skipping deps install", flush=True)
+                deps_dir.mkdir(parents=True, exist_ok=True)
+                sentinel.write_text(recipe)
+                return deps_dir
+
             deps_dir.mkdir(parents=True, exist_ok=True)
+            proc = Popen(
+                f"PORTABLE_PYTHON_SH={shared} DEPS_DIR={deps_dir} NEMO_GYM_ROOT={PARENT_DIR} bash {script}",
+                shell=True,
+            )
+            assert proc.wait() == 0, f"Agent deps setup failed ({script})"
             sentinel.write_text(recipe)
             return deps_dir
-
-        deps_dir.mkdir(parents=True, exist_ok=True)
-        proc = Popen(
-            f"PORTABLE_PYTHON_SH={shared} DEPS_DIR={deps_dir} NEMO_GYM_ROOT={PARENT_DIR} bash {script}", shell=True
-        )
-        assert proc.wait() == 0, f"Agent deps setup failed ({script})"
-        sentinel.write_text(recipe)
-        return deps_dir
 
     def get_run_command(self) -> str:
         """Write instruction.txt and agent_runner.py; return the shell command to run the agent."""
@@ -298,6 +352,8 @@ class AnyTerminalAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_model_base_url: Optional[str] = None
     agent_runtime_source: str = "auto"
     tb_agent_timeout: int = 1800
+    # When set, overrides the per-task agent_timeout_sec from the dataset for every task.
+    global_agent_timeout: Optional[int] = Field(default=None, gt=0)
     tb_eval_timeout: int = 300
     tb_sandbox_ttl: int = 7200
     agent_overhead_mb: int = 2048  # extra container memory on top of the task's memory_mb for the
@@ -543,7 +599,7 @@ class RunTerminalAgent(BaseModel):
         if result.return_code != 0:
             detail = result.stderr or result.stdout or ""
             print(f"[{cfg.task_name}] agent exit {result.return_code}: {detail[-2000:]}", flush=True)
-        return time.time() - t0, result.error_type == "timeout"
+        return time.time() - t0, result.error_type in ("timeout", "sandbox")
 
     async def _stage_tests(self, cfg: AnyTerminalInstanceConfig) -> None:
         """Copy the task's test files into the staging dir, visible to the sandbox at /tests."""
@@ -565,7 +621,7 @@ class RunTerminalAgent(BaseModel):
         result = await sandbox.exec(_apt_root_sandbox(cfg) + test_cmd, timeout_s=cfg.tb_eval_timeout, user="root")
         if result.return_code != 0:
             print(f"[{cfg.task_name}] eval exit {result.return_code}: {(result.stderr or '')[-2000:]}", flush=True)
-        return time.time() - t0, result.error_type == "timeout"
+        return time.time() - t0, result.error_type in ("timeout", "sandbox")
 
     async def process_single_datapoint(self) -> bool:
         cfg = self.config
@@ -770,12 +826,23 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
 
         agent_run_id = f"{task_name}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
 
-        # Per-task timeouts override config defaults when available.
+        # Per-task timeouts override config defaults when available, unless global_agent_timeout is set.
         config_overrides = {}
-        if problem_info.get("agent_timeout_sec"):
+        if self.config.global_agent_timeout is not None:
+            config_overrides["tb_agent_timeout"] = self.config.global_agent_timeout
+        elif problem_info.get("agent_timeout_sec"):
             config_overrides["tb_agent_timeout"] = int(float(problem_info["agent_timeout_sec"]))
         if problem_info.get("verifier_timeout_sec"):
             config_overrides["tb_eval_timeout"] = int(float(problem_info["verifier_timeout_sec"]))
+
+        # The container must outlive the task, or it gets torn down mid-run and the task scores as
+        # a real failure instead of the infra issue it is. Mirrors anyswe_agent's derivation
+        # (swebench_agent_timeout + swebench_tests_timeout + 600).
+        effective_agent_timeout = config_overrides.get("tb_agent_timeout", self.config.tb_agent_timeout)
+        effective_eval_timeout = config_overrides.get("tb_eval_timeout", self.config.tb_eval_timeout)
+        required_ttl = effective_agent_timeout + effective_eval_timeout + 600
+        if required_ttl > self.config.tb_sandbox_ttl:
+            config_overrides["tb_sandbox_ttl"] = required_ttl
 
         server_config = self._server.model_dump()
         if not self.config.sandbox_model_base_url and rollout_id and server_config["model_server_url"]:
