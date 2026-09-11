@@ -2710,7 +2710,10 @@ class TestRolloutCollection:
                 TASK_INDEX_KEY_NAME: 0,
                 ROLLOUT_INDEX_KEY_NAME: 0,
                 "reward": 1.0,
-                "response": {"usage": {"tokens": 10}},
+                "response": {
+                    "usage": {"tokens": 10},
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                },
                 "ng_agent_observations": {"invocations": [{"conversation": ["large"]}]},
                 "ng_model_call_capture": {"calls": [{"request": "large"}]},
                 "ng_trajectory": {"model_calls": [{"request": "large"}]},
@@ -2747,6 +2750,7 @@ class TestRolloutCollection:
             assert "ng_model_call_capture" not in item
             assert "ng_trajectory" not in item
             assert "usage" in item["response"]
+        assert sent_data[0]["response"]["incomplete_details"] == {"reason": "max_output_tokens"}
 
     async def test_call_aggregate_metrics_includes_perf_summary_when_present(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

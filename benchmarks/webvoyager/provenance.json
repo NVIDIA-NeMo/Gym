@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "dataset": {
+    "repository": "https://github.com/jayl940712/webarena_benchmarks",
+    "commit": "6a2977939b157b0ab9de7799bb089c721f1ac115",
+    "path": "webvoyager.jsonl",
+    "sha256": "f635a9b27fa1980a63b39bbf64ae8e9e766159cb70fa765451d3d3c0b948ff98",
+    "raw_url": "https://raw.githubusercontent.com/jayl940712/webarena_benchmarks/6a2977939b157b0ab9de7799bb089c721f1ac115/webvoyager.jsonl",
+    "task_count": 552
+  },
+  "reference_recipe": {
+    "repository": "osworld_internal",
+    "branch": "nemotron-v3",
+    "commit": "3b775dc538931ead0cb6b4922349da9c6d493dab"
+  },
+  "policy_profiles": {
+    "nano_omni": {
+      "transport_endpoint": "/v1/chat/completions",
+      "chat_template": {
+        "source": "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16@24e67ea000b7c2837fc8f9488aa2008524fac8ba:chat_template.jinja",
+        "sha256": "41428e0c65e312c359df2495ef5284769a9520b15a693deda4c34a1538208faa",
+        "kwargs": {
+          "truncate_history_thinking": false
+        }
+      },
+      "sampling": {
+        "temperature": 0.1,
+        "top_p": 0.95,
+        "max_output_tokens": 16384
+      },
+      "contract_sha256": {
+        "system_prompt": "8332b42f09c577837b1e50bb5c04c857f8942eda6ea692b32eba38deb8cb0d36",
+        "tool_contract": "12d525341f568cf3638e1b9dc99058fadf59e3bfa3719d9e88cb021e0e192f09",
+        "judge_system_prompt": "d5548ef2bb6f0641bc9ff116fe721bf540d096502e2040890b2bf1c8560d3325"
+      }
+    },
+    "qwen35_122b_a10b": {
+      "model": "Qwen/Qwen3.5-122B-A10B-FP8",
+      "model_revision": "a099dee70ccfcd8d5dda56aaa0b60cb8ecadabc9",
+      "transport_endpoint": "/v1/chat/completions",
+      "chat_template_kwargs": {
+        "enable_thinking": true
+      },
+      "sampling": {
+        "temperature": 0.1,
+        "top_p": 0.9,
+        "max_output_tokens": 32768
+      },
+      "vllm": {
+        "tensor_parallel_size": 8,
+        "max_model_len": 262144,
+        "max_num_seqs": 32,
+        "gpu_memory_utilization": 0.9,
+        "reasoning_parser": "qwen3",
+        "tool_call_parser": "qwen3_coder",
+        "enable_auto_tool_choice": true
+      },
+      "agent": {
+        "max_steps": 100,
+        "max_image_history": 20,
+        "image_fold_size": 10,
+        "history_n": 100,
+        "coordinate_range": "0..999",
+        "outer_parse_attempts": 3,
+        "inner_api_attempts": 5
+      }
+    }
+  }
+}

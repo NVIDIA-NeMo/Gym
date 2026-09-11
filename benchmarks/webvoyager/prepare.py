@@ -21,27 +21,24 @@ REPO_ROOT = BENCHMARK_DIR.parents[1]
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "webvoyager.jsonl"
 DEFAULT_ENV_FPATH = BENCHMARK_DIR / "env.yaml"
 DEFAULT_ROLLOUT_FPATH = REPO_ROOT / "results" / "webvoyager" / "rollouts.jsonl"
-SOURCE_COMMIT = "6a2977939b157b0ab9de7799bb089c721f1ac115"  # pragma: allowlist secret
-SOURCE_URL = f"https://raw.githubusercontent.com/jayl940712/webarena_benchmarks/{SOURCE_COMMIT}/webvoyager.jsonl"
-SOURCE_SHA256 = "f635a9b27fa1980a63b39bbf64ae8e9e766159cb70fa765451d3d3c0b948ff98"  # pragma: allowlist secret
+PROVENANCE_FPATH = BENCHMARK_DIR / "provenance.json"
+PROVENANCE = json.loads(PROVENANCE_FPATH.read_text(encoding="utf-8"))
+DATASET_PROVENANCE = PROVENANCE["dataset"]
+SOURCE_COMMIT = DATASET_PROVENANCE["commit"]
+SOURCE_URL = DATASET_PROVENANCE["raw_url"]
+SOURCE_SHA256 = DATASET_PROVENANCE["sha256"]
+EXPECTED_TASKS = int(DATASET_PROVENANCE["task_count"])
 SOURCE_FPATH = BENCHMARK_DIR / "data" / "webvoyager_source.jsonl"
 
 PROFILE_CONFIGS = {
-    "nano_omni": (
-        BENCHMARK_DIR / "configs" / "nano_omni.yaml",
-        REPO_ROOT / "responses_api_models" / "vllm_model" / "configs" / "vllm_model.yaml",
-        BENCHMARK_DIR / "configs" / "nano_omni_policy.yaml",
-    ),
+    "nano_omni": (BENCHMARK_DIR / "configs" / "nano_omni.yaml",),
     "qwen35_122b_a10b": (BENCHMARK_DIR / "configs" / "qwen35_122b_a10b.yaml",),
 }
 PROFILE_AGENTS = {
     "nano_omni": "nano_omni_webvoyager_agent",
     "qwen35_122b_a10b": "qwen35_webvoyager_agent",
 }
-PROFILE_SAMPLING = {
-    "nano_omni": {"max_output_tokens": 16384, "temperature": 0.1, "top_p": 0.95},
-    "qwen35_122b_a10b": {"max_output_tokens": 32768, "temperature": 0.1, "top_p": 0.9},
-}
+PROFILE_SAMPLING = {profile: dict(config["sampling"]) for profile, config in PROVENANCE["policy_profiles"].items()}
 
 
 def _sha256(path: Path) -> str:
@@ -93,8 +90,8 @@ def prepare(source: str | Path | None = None, output: str | Path = OUTPUT_FPATH)
     if digest != SOURCE_SHA256:
         raise ValueError(f"WebVoyager source hash mismatch: expected {SOURCE_SHA256}, got {digest}")
     rows = [adapt_webvoyager_record(record) for record in load_json_records(source_path)]
-    if len(rows) != 552:
-        raise ValueError(f"maintained WebVoyager requires exactly 552 tasks, got {len(rows)}")
+    if len(rows) != EXPECTED_TASKS:
+        raise ValueError(f"maintained WebVoyager requires exactly {EXPECTED_TASKS} tasks, got {len(rows)}")
     count = write_jsonl(rows, output)
     print(f"Wrote {count} WebVoyager tasks to {output}", flush=True)
     return Path(output)

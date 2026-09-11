@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from fastapi import Request
 from harbor.agents.terminus_2 import Terminus2
-from harbor.llms.base import BaseLLM, LLMResponse
+from harbor.llms.base import BaseLLM, ContextLengthExceededError, LLMResponse
 from harbor.models.agent.context import AgentContext
 from harbor.models.metric.usage_info import UsageInfo
 from harbor.utils.logger import logger as harbor_logger
@@ -60,8 +60,10 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     tmux_pane_height: int
     dump_trajectory: bool = False
     debug: bool = False
-    model_context_limit: int = 1_000_000
-    model_output_limit: int | None = None
+    model_context_limit: int
+    model_output_limit: int | None
+
+    llm_request_timeout: int
 
     sandbox_provider: str
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
@@ -91,7 +93,10 @@ class Terminus2AgentVerifyResponse(BaseVerifyResponse):
     model_call_time_pct: float
     terminus2_time_taken: float
     model_calls_gt_10min: int
+    usages: List[Optional[NeMoGymResponseUsage]]
+    num_proactive_compactions: int
     num_compactions: int
+    error: Optional[str]
 
 
 class NeMoGymSandboxEnvironment:
@@ -153,16 +158,23 @@ class NeMoGymLLM(BaseLLM):
         model_name: str,
         model_context_limit: int,
         model_output_limit: int | None,
+        llm_request_timeout: int,
     ):
         super().__init__()
         self._client = client
         self._model_name = model_name
         self._model_context_limit = model_context_limit
         self._model_output_limit = model_output_limit
+        self._llm_request_timeout = llm_request_timeout
         self.trajectory: list[NeMoGymResponseOutputItem] = []
+        self.usages: list[NeMoGymResponseUsage] = []
         self._times_spent = []
         self._last_input_items = []
         self._model_calls_gt_10min = 0
+        self._num_compactions = 0
+
+        self._is_compacting = False
+        self._just_compacted = False
 
     @staticmethod
     def _input_items(message_history: list[dict[str, Any]], prompt: str) -> list[NeMoGymEasyInputMessage]:
@@ -193,10 +205,10 @@ class NeMoGymLLM(BaseLLM):
         input_items = self._input_items(message_history, prompt)
         response = None
         start_time = perf_counter()
-        max_attempts = 3  # Hardcode 3 attempts for now
-        for attempt in range(max_attempts):
+        max_attempts = 10  # Harbor does 3 by default and Litellm does 3 by default. Hardcode 10 attempts for now.
+        for _ in range(max_attempts):
             try:
-                async with asyncio.timeout(delay=60 * 10):  # Hardcoded to match litellm default timeout
+                async with asyncio.timeout(delay=self._llm_request_timeout):
                     response = NeMoGymResponse.model_validate(
                         await self._client.create_response(
                             model=self._model_name,
@@ -206,19 +218,21 @@ class NeMoGymLLM(BaseLLM):
                     break
             except TimeoutError:
                 self._model_calls_gt_10min += 1
-                print(
-                    f"Hit LiteLLM default 10min timeout on model call, attempt {attempt + 1} / {max_attempts}",
-                    file=sys.stderr,
-                )
+
         self._times_spent.append(perf_counter() - start_time)
         if not response:
             raise TimeoutError(f"Failed to query model endpoint due to timeouts after {max_attempts} attempts!")
 
-        if len(self._last_input_items) >= len(input_items):
-            # Compacted
+        if self._is_compacting:
+            self.trajectory.extend([input_items[-1], *response.output])
+            self._just_compacted = True
+        elif self._just_compacted:
             self.trajectory.extend([*input_items, *response.output])
+            self._just_compacted = False
         else:
             self.trajectory.extend([input_items[-1], *response.output])
+
+        self.usages.append(response.usage)
         self._last_input_items = input_items.copy()
 
         usage = response.usage
@@ -231,6 +245,12 @@ class NeMoGymLLM(BaseLLM):
                 cost_usd=0.0,
             )
         content, reasoning_content = self._response_text(response)
+
+        # @bxyu-nvidia: Gym will return an empty model response when context length is exceeded
+        if not (content or reasoning_content) or response.incomplete_details:
+            self._num_compactions += 1
+            raise ContextLengthExceededError
+
         return LLMResponse(
             content=content,
             reasoning_content=reasoning_content,
@@ -253,14 +273,12 @@ class NeMoGymTerminus2(Terminus2):
         self._nemo_gym_llm = llm
         self._dump_trajectory_enabled = dump_trajectory
         self._times_spent = []
-        self._num_compactions = 0
+        self._num_proactive_compactions = 0
+        self._is_check_proactive_summarization = False
         super().__init__(*args, **kwargs)
 
     def _init_llm(self, *args: Any, **kwargs: Any) -> BaseLLM:
         return self._nemo_gym_llm
-
-    def _count_total_tokens(self, chat: Any) -> int:
-        return sum(len(str(message.get("content", ""))) // 4 for message in chat.messages)
 
     def _dump_trajectory_with_continuation_index(self, continuation_index: int) -> None:
         if self._dump_trajectory_enabled:
@@ -273,10 +291,23 @@ class NeMoGymTerminus2(Terminus2):
 
         return res
 
+    def _count_total_tokens(self, *args, **kwargs):
+        if self._is_check_proactive_summarization and self._nemo_gym_llm.usages:
+            return self._nemo_gym_llm.usages[-1].total_tokens
+        return super()._count_total_tokens(*args, **kwargs)
+
     async def _check_proactive_summarization(self, *args, **kwargs):
+        self._is_check_proactive_summarization = True
         res = await super()._check_proactive_summarization(*args, **kwargs)
+        self._is_check_proactive_summarization = False
         if res:
-            self._num_compactions += 1
+            self._num_proactive_compactions += 1
+        return res
+
+    async def _summarize(self, *args, **kwargs):
+        self._nemo_gym_llm._is_compacting = True
+        res = await super()._summarize(*args, **kwargs)
+        self._nemo_gym_llm._is_compacting = False
         return res
 
 
@@ -313,6 +344,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             model_name=self.config.model_server.name,
             model_context_limit=self.config.model_context_limit,
             model_output_limit=self.config.model_output_limit,
+            llm_request_timeout=self.config.llm_request_timeout,
         )
 
         with tempfile.TemporaryDirectory(prefix="nemo-gym-terminus-2-") as log_dir:
@@ -354,10 +386,13 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 async with asyncio.timeout(self.config.sandbox_timeout):
                     await agent.run(instruction, environment, context)
                 terminus2_completed = True
+                error = None
             except TimeoutError:
                 terminus2_completed = False
+                error = format_exc()
             except:
                 terminus2_completed = False
+                error = format_exc()
                 print(f"Hit exception while running Terminus2: {format_exc()}", file=sys.stderr)
             finally:
                 pass
@@ -396,7 +431,10 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             "model_call_time_pct": 100 * total_model_call_time / total_time,
             "terminus2_time_taken": total_time,
             "model_calls_gt_10min": llm._model_calls_gt_10min,
-            "num_compactions": agent._num_compactions,
+            "num_proactive_compactions": agent._num_proactive_compactions,
+            "num_compactions": llm._num_compactions,
+            "error": error,
+            "usages": llm.usages,
         }
         return response, metrics
 

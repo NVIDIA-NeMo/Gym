@@ -4,6 +4,13 @@ config_paths:
   - resources_servers/webvoyager_judge/configs/gemini.yaml
   - resources_servers/webvoyager_judge/configs/judge_model_gemini.yaml
   - responses_api_agents/web_agent/configs/web_agent.yaml
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      chat_template_kwargs:
+        truncate_history_thinking: false
 
 webvoyager_environment:
   _inherit_from: visual_browser
@@ -28,8 +35,6 @@ nano_omni_webvoyager_agent:
       policy_protocol: nano_omni_toolcall
       max_steps: 100
       max_parse_retries: 2
-      nano_omni_action_recovery: repair_single_closing_bracket
-      nano_omni_tool_alias_recovery: webvoyager_v3
       nano_omni_max_computer_actions: 20
       nano_omni_parse_retry_feedback: false
       nano_omni_parse_retry_temperature: null

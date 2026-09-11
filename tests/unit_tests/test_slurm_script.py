@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import shlex
 from pathlib import Path
 
 import pytest
@@ -196,6 +197,22 @@ def test_build_vllm_command_pipeline_parallel():
 def test_build_vllm_command_pipeline_parallel_1_omits_flag(vllm_service):
     cmd = _build_vllm_command(vllm_service)
     assert "--pipeline-parallel-size" not in cmd
+
+
+def test_build_vllm_command_extra_args():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        extra_args="--max-model-len 8192",
+    )
+    cmd = _build_vllm_command(service)
+    assert "--max-model-len 8192" in cmd
+
+
+def test_build_vllm_command_no_extra_args_by_default(vllm_service):
+    cmd = _build_vllm_command(vllm_service)
+    assert cmd.endswith("--tensor-parallel-size 1")
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +576,61 @@ def test_render_service_command_no_mounts_by_default():
 def test_render_service_command_empty_mounts_omits_flag():
     out = _render_service_command("svc", "img:latest", "cmd", mounts=[])
     assert "--container-mounts" not in out
+
+
+# ---------------------------------------------------------------------------
+# _render_service_command — pre_command
+# ---------------------------------------------------------------------------
+
+
+def test_render_service_command_no_pre_command_by_default():
+    out = _render_service_command("svc", "img:latest", "vllm serve model")
+    assert "bash -c" not in out
+    assert (
+        "srun --overlap --no-container-mount-home --container-image=img:latest --output=logs/svc.log vllm serve model &"
+        in out
+    )
+
+
+def test_render_service_command_pre_command_wraps_in_bash_c():
+    out = _render_service_command("svc", "img:latest", "vllm serve model", pre_command="export FOO=bar")
+    assert "bash -c 'export FOO=bar\nexec vllm serve model'" in out
+
+
+def test_render_service_command_pre_command_still_backgrounded():
+    out = _render_service_command("svc", "img:latest", "vllm serve model", pre_command="export FOO=bar")
+    assert out.rstrip().endswith("&\nSVC_PID=$!")
+
+
+def test_render_service_command_pre_command_multi_statement_round_trips():
+    # Round-trip through shlex, like bash would: the bash -c argument (after
+    # shell-unquoting) must be exactly pre_command + a newline + exec <command>,
+    # regardless of what quote characters pre_command itself contains.
+    pre_command = "export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')\nunset RAY_ADDRESS"
+    out = _render_service_command("svc", "img:latest", "vllm serve model", pre_command=pre_command)
+    tokens = shlex.split(out)
+    assert tokens[tokens.index("bash") + 1] == "-c"
+    assert tokens[tokens.index("bash") + 2] == f"{pre_command}\nexec vllm serve model"
+    assert out.count("&\n") == 1  # one srun invocation, not split by the embedded newline
+
+
+def test_render_service_command_pre_command_quoting_survives_single_quotes():
+    # pre_command containing a single quote must not break out of the bash -c
+    # quoting or split into a second shell word.
+    out = _render_service_command("svc", "img:latest", "cmd", pre_command="echo 'hi'")
+    assert out.count("bash -c") == 1
+    tokens = shlex.split(out)
+    assert tokens[tokens.index("bash") + 2] == "echo 'hi'\nexec cmd"
+
+
+def test_render_service_command_pre_command_and_extra_args_coexist():
+    # extra_args lands inside `command` (already appended by the caller before
+    # _render_service_command is invoked); pre_command wraps the whole thing.
+    out = _render_service_command(
+        "svc", "img:latest", "vllm serve model --max-model-len 8192", pre_command="unset RAY_ADDRESS"
+    )
+    tokens = shlex.split(out)
+    assert tokens[tokens.index("bash") + 2] == "unset RAY_ADDRESS\nexec vllm serve model --max-model-len 8192"
 
 
 def test_build_sbatch_script_service_mounts(bench_dir):

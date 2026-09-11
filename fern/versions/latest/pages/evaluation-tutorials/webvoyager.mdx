@@ -16,17 +16,22 @@ Gemini judge. The earlier BrowserGym-compatible path is not included.
 
 ## Validation evidence
 
-The latest pre-merge full-population runs used the same hash-pinned tasks and
-`visual_browser` runtime:
+Full-population runs used the same hash-pinned tasks and `visual_browser`
+runtime. The current Nano Omni parsing contract was repeated twice from the
+same frozen source and serving recipe:
 
 | Policy | Result | Completeness |
 | --- | ---: | --- |
 | Qwen3.5-122B-A10B-FP8 | 300/552, 54.35% | 552 valid unique; no missing, invalid, or duplicate-valid tasks |
-| Nano Omni tuned checkpoint `iter_0004622` | 398/552, 72.10% | 552 valid unique; no missing, invalid, or duplicate-valid tasks |
+| Nano Omni `iter_0004622`, parser-faithful r1 | 415/552, 75.18% | 552 valid unique; no missing, malformed, or duplicate tasks |
+| Nano Omni `iter_0004622`, parser-faithful r2 | 420/552, 76.09% | 552 valid unique; no missing, malformed, or duplicate tasks |
 
-The runs used a frozen execution snapshot matching this implementation line
-before its PR history was reorganized. Treat the scores as end-to-end
-integration evidence rather than stable live-site leaderboard claims.
+The Nano Omni repetitions trust the model server's configured reasoning and
+tool-call parsers. Gym validates the resulting structured calls, but it does
+not repair malformed payloads, infer aliases, or silently clamp action
+arguments. The repetitions averaged 417.5/552, or 75.63%, and differed by five
+tasks. Treat all scores as end-to-end integration evidence rather than stable
+live-site leaderboard claims.
 
 ## Install and prepare
 
@@ -81,11 +86,16 @@ For Qwen3.5-122B-A10B-FP8, Gym launches the checked-in TP8 local-vLLM profile:
 For Nano Omni, configure `POLICY_BASE_URL`, `POLICY_API_KEY`, and
 `POLICY_MODEL_NAME`, then use `--profile nano_omni`.
 
+The helper writes the private, gitignored
+`benchmarks/webvoyager/env.yaml`. Commands run from that directory load it
+automatically, so no separate `--config` argument is required.
+
 <Note>
 
 Tokenizer, chat template, multimodal processor, reasoning parser, and
 tool-call parser are policy-server assets. They are not loaded by the browser
-or judge, and must match the selected model recipe.
+or judge, and must match the selected model recipe. The configured parsers are
+authoritative: Gym validates their structured output but does not repair it.
 
 </Note>
 
@@ -117,19 +127,46 @@ launch isolated processes or containers; every worker needs a distinct
 DISPLAY, HOME, temporary directory, artifact directory, ports, and rollout
 file. Do not place multiple PyAutoGUI sessions on one display.
 
-Reconcile worker outputs against the pinned denominator:
+The portable sequential command is:
 
 ```bash
-./.venv/bin/python benchmarks/webvoyager/summarize.py \
-  results/webvoyager/full/workers \
-  --dataset benchmarks/webvoyager/data/webvoyager.jsonl \
-  --output results/webvoyager/full/summary.json \
-  --missing-output results/webvoyager/full/retry.jsonl
+../../.venv/bin/gym eval run --no-serve -v \
+  --concurrency 1 \
+  --output ../../results/webvoyager/full/rollouts.jsonl
 ```
 
-A reportable result has all 552 task IDs exactly once and no unresolved
-missing, duplicate, unexpected, masked, or infrastructure rows.
+Merge worker outputs and compute one global result with Gym's standard
+aggregation and health-check commands:
 
-For policy-specific serving parameters, training failure semantics, AgentEnv
-integration, and complete copyable commands, see the
-[repository runbook](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/webvoyager/runbook.md).
+```bash
+../../.venv/bin/gym eval aggregate \
+  --input-glob "../../results/webvoyager/shards/*/rollouts.jsonl" \
+  --output ../../results/webvoyager/full/rollouts.jsonl
+
+../../.venv/bin/gym eval health-check \
+  ../../results/webvoyager/full \
+  --rollouts-file rollouts.jsonl
+```
+
+The aggregate command reports scored and dropped coverage from the worker
+sidecars, and the health check detects malformed and duplicate rollout
+identities. A reportable result has 552 scored rows, no dropped coverage, and
+no unresolved health findings.
+
+## Runtime and training safety
+
+Browser leases are acquired and released asynchronously. Synchronous
+Playwright calls stay on a session-affine thread, while each headed PyAutoGUI
+session remains isolated in its own process or container and X display.
+Provider implementations must release leases idempotently and enforce an
+external TTL for process or node loss.
+
+Browser-provider, proxy/CAPTCHA, model-server, and judge failures produce
+masked retryable samples instead of reward-zero policy examples. Only a
+completed trajectory judged unsuccessful is a valid reward-zero sample.
+
+The checked-in profile YAML files and `provenance.json` are the authoritative
+source for model-specific protocol, serving parameters, and immutable dataset
+identity. Cluster images, scheduler scripts, caches, checkpoint placement, and
+large run artifacts are deployment concerns and are intentionally outside this
+benchmark tutorial.

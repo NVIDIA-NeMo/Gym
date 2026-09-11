@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any, Literal
+from typing import Any
 from urllib.parse import urlparse
 
 from nemo_gym.web.models import WebAction
@@ -42,64 +42,10 @@ CLICK_ACTIONS = frozenset(
     }
 )
 MAX_SCROLL_AMOUNT = 50
-NanoOmniActionRecovery = Literal["strict", "decode_string", "repair_single_closing_bracket"]
-NanoOmniToolAliasRecovery = Literal["strict", "webvoyager_v3"]
 
 
 class ActionParseError(ValueError):
     """Raised when a policy adapter emits an unsafe or unsupported action."""
-
-
-def _json_container_balance(value: str) -> tuple[int, int, bool]:
-    """Return square/curly balance while respecting JSON string literals."""
-
-    square = 0
-    curly = 0
-    in_string = False
-    escaped = False
-    for character in value:
-        if in_string:
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == '"':
-                in_string = False
-            continue
-        if character == '"':
-            in_string = True
-        elif character == "[":
-            square += 1
-        elif character == "]":
-            square -= 1
-        elif character == "{":
-            curly += 1
-        elif character == "}":
-            curly -= 1
-        if square < 0 or curly < 0:
-            return square, curly, in_string
-    return square, curly, in_string
-
-
-def _decode_native_actions(value: Any, recovery: NanoOmniActionRecovery) -> tuple[Any, str]:
-    if not isinstance(value, str):
-        return value, "strict"
-    if recovery == "strict":
-        return value, "strict"
-    try:
-        return json.loads(value), "decoded_inner_string"
-    except json.JSONDecodeError as first_error:
-        if recovery != "repair_single_closing_bracket":
-            raise ActionParseError("native computer actions string is invalid JSON") from first_error
-        square, curly, in_string = _json_container_balance(value)
-        if not value.lstrip().startswith("[") or square != 1 or curly != 0 or in_string:
-            raise ActionParseError(
-                "native computer actions string is not eligible for one-bracket recovery"
-            ) from first_error
-        try:
-            return json.loads(value + "]"), "closed_one_missing_bracket"
-        except json.JSONDecodeError as recovery_error:
-            raise ActionParseError("native computer actions string remains invalid after recovery") from recovery_error
 
 
 def _native_number(value: Any, *, field: str, minimum: float, maximum: float) -> float:
@@ -109,39 +55,6 @@ def _native_number(value: Any, *, field: str, minimum: float, maximum: float) ->
     if not math.isfinite(number) or not minimum <= number <= maximum:
         raise ActionParseError(f"{field} must be in [{minimum:g}, {maximum:g}]")
     return number
-
-
-def _native_clamped_number(
-    value: Any,
-    *,
-    field: str,
-    minimum: float,
-    maximum: float,
-    allow_string: bool = False,
-) -> tuple[float, dict[str, Any] | None]:
-    """Clamp a finite numeric alias while preserving an audit record."""
-
-    decoded = value
-    if allow_string and isinstance(value, str):
-        try:
-            decoded = float(value.strip())
-        except ValueError as exc:
-            raise ActionParseError(f"{field} must be a number") from exc
-    if isinstance(decoded, bool) or not isinstance(decoded, (int, float)):
-        raise ActionParseError(f"{field} must be a number")
-    number = float(decoded)
-    if not math.isfinite(number):
-        raise ActionParseError(f"{field} must be finite")
-    normalized = min(max(number, minimum), maximum)
-    if normalized == number:
-        return normalized, None
-    return normalized, {
-        "field": field,
-        "original": value,
-        "normalized": normalized,
-        "minimum": minimum,
-        "maximum": maximum,
-    }
 
 
 def _native_coordinate(value: Any, *, field: str) -> None:
@@ -154,19 +67,11 @@ def _native_coordinate(value: Any, *, field: str) -> None:
 def _validate_native_computer_action(
     action: Any,
     index: int,
-    *,
-    alias_recovery: NanoOmniToolAliasRecovery,
-) -> tuple[dict[str, Any], list[str], list[dict[str, Any]]]:
+) -> dict[str, Any]:
     if not isinstance(action, dict):
         raise ActionParseError(f"native computer action[{index}] must be an object")
     normalized = dict(action)
     name = action.get("action")
-    alias_modes: list[str] = []
-    alias_details: list[dict[str, Any]] = []
-    if name == "click" and alias_recovery == "webvoyager_v3":
-        name = "left_click"
-        normalized["action"] = name
-        alias_modes.append("computer.click_to_left_click")
     if name not in COMPUTER_ACTIONS:
         raise ActionParseError(f"unsupported native computer action[{index}]: {name!r}")
     prefix = f"native computer action[{index}] ({name})"
@@ -188,19 +93,7 @@ def _validate_native_computer_action(
         if coordinate is not None:
             _native_coordinate(coordinate, field=f"{prefix}.coordinate")
     elif name == "wait":
-        if alias_recovery == "webvoyager_v3":
-            duration, detail = _native_clamped_number(
-                action.get("duration"),
-                field=f"computer.actions[{index}].duration",
-                minimum=0,
-                maximum=30,
-            )
-            if detail is not None:
-                normalized["duration"] = duration
-                alias_modes.append("computer.wait_duration_clamped")
-                alias_details.append(detail)
-        else:
-            _native_number(action.get("duration"), field=f"{prefix}.duration", minimum=0, maximum=30)
+        _native_number(action.get("duration"), field=f"{prefix}.duration", minimum=0, maximum=30)
     elif name == "scroll":
         coordinate = action.get("coordinate")
         if coordinate is not None:
@@ -212,137 +105,29 @@ def _validate_native_computer_action(
         if direction not in {"up", "down", "left", "right"}:
             raise ActionParseError(f"{prefix}.scroll_direction is unsupported")
         amount = parameters.get("scroll_amount")
-        if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
-            raise ActionParseError(f"{prefix}.scroll_amount must be a non-negative integer")
-    return normalized, alias_modes, alias_details
-
-
-def _native_alias_number(value: Any, *, field: str, minimum: float, maximum: float) -> float:
-    decoded = value
-    if isinstance(value, str):
-        try:
-            decoded = float(value.strip())
-        except ValueError as exc:
-            raise ActionParseError(f"{field} must be a number") from exc
-    return _native_number(decoded, field=field, minimum=minimum, maximum=maximum)
-
-
-def _native_alias_coordinate(value: Any, *, field: str) -> list[float]:
-    decoded = value
-    if isinstance(value, str):
-        try:
-            decoded = json.loads(value)
-        except json.JSONDecodeError as exc:
-            raise ActionParseError(f"{field} must be a JSON coordinate array") from exc
-    if not isinstance(decoded, (list, tuple)) or len(decoded) != 2:
-        raise ActionParseError(f"{field} must contain normalized x and y")
-    return [
-        _native_alias_number(decoded[0], field=f"{field}[0]", minimum=0, maximum=1),
-        _native_alias_number(decoded[1], field=f"{field}[1]", minimum=0, maximum=1),
-    ]
-
-
-def _normalize_native_tool_alias(
-    name: Any,
-    arguments: dict[str, Any],
-    *,
-    alias_recovery: NanoOmniToolAliasRecovery,
-) -> tuple[Any, dict[str, Any], list[str], list[dict[str, Any]]]:
-    """Normalize only unambiguous public-v3 tool aliases.
-
-    The native benchmark contract remains strict by default. The opt-in mode
-    accepts shapes observed in the public Nano Omni v3 transport logs and
-    rejects fields whose intended browser semantics cannot be proven.
-    """
-
-    if alias_recovery == "strict":
-        return name, arguments, [], []
-
-    keys = set(arguments)
-    if name in {"click", "left_click"}:
-        coordinate: list[float] | None = None
-        mode: str | None = None
-        if keys == {"x", "y"}:
-            x = _native_alias_number(arguments["x"], field="native click.x", minimum=0, maximum=1)
-            y = _native_alias_number(arguments["y"], field="native click.y", minimum=0, maximum=1)
-            coordinate = [x, y]
-            mode = f"tool.{name}_xy_to_computer_left_click"
-        elif keys <= {"action", "coordinate"} and "coordinate" in arguments:
-            declared_action = arguments.get("action")
-            if declared_action not in {None, "click", "left_click"}:
-                return name, arguments, [], []
-            coordinate = _native_alias_coordinate(arguments["coordinate"], field="native click.coordinate")
-            mode = f"tool.{name}_coordinate_to_computer_left_click"
-        if coordinate is not None and mode is not None:
-            return (
-                "computer",
-                {"actions": [{"action": "left_click", "coordinate": coordinate}]},
-                [mode],
-                [],
-            )
-
-    if name == "type" and keys <= {"action", "text"}:
-        if arguments.get("action") in {None, "type"} and isinstance(arguments.get("text"), str):
-            return (
-                "computer",
-                {"actions": [{"action": "type", "text": arguments["text"]}]},
-                ["tool.type_to_computer_type"],
-                [],
-            )
-
-    if name == "wait" and keys <= {"action", "duration"}:
-        if arguments.get("action") in {None, "wait"}:
-            duration, detail = _native_clamped_number(
-                arguments.get("duration"),
-                field="tool.wait.duration",
-                minimum=0,
-                maximum=30,
-                allow_string=True,
-            )
-            modes = ["tool.wait_to_computer_wait"]
-            details: list[dict[str, Any]] = []
-            if detail is not None:
-                modes.append("tool.wait_duration_clamped")
-                details.append(detail)
-            return (
-                "computer",
-                {"actions": [{"action": "wait", "duration": duration}]},
-                modes,
-                details,
-            )
-
-    return name, arguments, [], []
+        if isinstance(amount, bool) or not isinstance(amount, int) or not 0 <= amount <= MAX_SCROLL_AMOUNT:
+            raise ActionParseError(f"{prefix}.scroll_amount must be an integer in [0, {MAX_SCROLL_AMOUNT}]")
+    return normalized
 
 
 def _validate_native_tool_arguments(
     name: str,
     arguments: dict[str, Any],
     *,
-    recovery: NanoOmniActionRecovery,
-    alias_recovery: NanoOmniToolAliasRecovery,
     max_computer_actions: int,
-) -> tuple[dict[str, Any], str, int, list[str], list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], int]:
     normalized = dict(arguments)
-    alias_modes: list[str] = []
-    alias_details: list[dict[str, Any]] = []
     if name == "computer":
-        actions, recovery_mode = _decode_native_actions(arguments.get("actions"), recovery)
+        actions = arguments.get("actions")
         if not isinstance(actions, list) or not actions:
             raise ActionParseError("native computer tool requires a non-empty actions list")
         if len(actions) > max_computer_actions:
             raise ActionParseError(f"native computer tool exceeded the {max_computer_actions}-action batch limit")
         validated_actions: list[dict[str, Any]] = []
         for index, action in enumerate(actions):
-            validated, action_aliases, action_details = _validate_native_computer_action(
-                action,
-                index,
-                alias_recovery=alias_recovery,
-            )
-            validated_actions.append(validated)
-            alias_modes.extend(action_aliases)
-            alias_details.extend(action_details)
+            validated_actions.append(_validate_native_computer_action(action, index))
         normalized["actions"] = validated_actions
-        return normalized, recovery_mode, len(actions), alias_modes, alias_details
+        return normalized, len(actions)
     if name == "navigate":
         url = arguments.get("url")
         if not isinstance(url, str) or not url:
@@ -366,7 +151,7 @@ def _validate_native_tool_arguments(
         answer = arguments.get("answer")
         if answer is not None and not isinstance(answer, str):
             raise ActionParseError("native terminate.answer must be a string or null")
-    return normalized, "strict", 0, alias_modes, alias_details
+    return normalized, 0
 
 
 def parse_nano_omni_tool_calls(
@@ -374,10 +159,8 @@ def parse_nano_omni_tool_calls(
     *,
     max_calls: int = 8,
     max_computer_actions: int = 20,
-    recovery: NanoOmniActionRecovery = "strict",
-    alias_recovery: NanoOmniToolAliasRecovery = "strict",
 ) -> WebAction:
-    """Validate Nano Omni function calls without executing arbitrary code."""
+    """Validate parser-produced Nano Omni calls without repairing their contents."""
 
     calls: list[dict[str, Any]] = []
     parse_records: list[dict[str, Any]] = []
@@ -396,38 +179,18 @@ def parse_nano_omni_tool_calls(
             arguments = {}
         if not isinstance(arguments, dict):
             raise ActionParseError(f"Nano Omni tool {name!r} arguments must be an object")
-        original_name = name
-        name, arguments, alias_modes, alias_details = _normalize_native_tool_alias(
-            name,
-            arguments,
-            alias_recovery=alias_recovery,
-        )
         if name not in NANO_OMNI_TOOL_NAMES:
             raise ActionParseError(f"unsupported Nano Omni browser tool: {name!r}")
-        (
-            arguments,
-            recovery_mode,
-            computer_actions,
-            action_alias_modes,
-            action_alias_details,
-        ) = _validate_native_tool_arguments(
+        arguments, computer_actions = _validate_native_tool_arguments(
             name,
             arguments,
-            recovery=recovery,
-            alias_recovery=alias_recovery,
             max_computer_actions=max_computer_actions,
         )
-        alias_modes.extend(action_alias_modes)
-        alias_details.extend(action_alias_details)
         calls.append({"id": call_id, "name": name, "arguments": arguments})
         parse_records.append(
             {
                 "call_id": call_id,
                 "tool": name,
-                "original_tool": original_name,
-                "recovery_mode": recovery_mode,
-                "alias_recovery_modes": alias_modes,
-                "alias_recovery_details": alias_details,
                 "computer_actions": computer_actions,
             }
         )
@@ -450,21 +213,12 @@ def parse_nano_omni_tool_calls(
         terminal=terminal,
         answer=None if answer is None else str(answer),
         raw_model_output=json.dumps(calls, ensure_ascii=False),
-        metadata={
-            "nano_omni_parse": {
-                "calls": parse_records,
-                "recovered": any(
-                    record["recovery_mode"] != "strict" or record["alias_recovery_modes"] for record in parse_records
-                ),
-            }
-        },
+        metadata={"nano_omni_parse": {"calls": parse_records}},
     )
 
 
 __all__ = [
     "ActionParseError",
     "MAX_SCROLL_AMOUNT",
-    "NanoOmniActionRecovery",
-    "NanoOmniToolAliasRecovery",
     "parse_nano_omni_tool_calls",
 ]

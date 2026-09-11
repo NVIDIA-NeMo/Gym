@@ -416,8 +416,9 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
     observed: per-turn evidence is needed rather than just raw model-call capture,
     so a rollout collected with observability disabled produces no ``ng_perf`` at all.
 
-    Token fields are summed only over model calls owned by a reasoning-turn ``AgentInvocation``,
-    excluding compaction calls -- mixing in compaction overhead would skew the token efficiency signal.
+    Token fields are summed over every model call referenced by a reasoning-turn
+    ``AgentInvocation``. This includes compaction calls whenever the harness also lists
+    them in ``AgentInvocation.model_calls``.
 
     ``num_turns`` counts reasoning turns summed across all invocations (an ``AgentInvocation``
     is one root-agent or subagent conversation that may span many turns). Each invocation
@@ -1666,7 +1667,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         server_client = self.setup_server_client()
 
         async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
-            # Strip heavyweight fields before sending, but preserve response.usage
+            # Strip heavyweight fields before sending, but preserve response.usage and response.incomplete_details if present.
             stripped = []
             for r in agent_result_list:
                 entry = {
@@ -1681,9 +1682,16 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         NG_TRAJECTORY_KEY,
                     )
                 }
-                usage = (r.get("response") or {}).get("usage")
-                if usage:
-                    entry["response"] = {"usage": usage}
+                response = r.get("response") or {}
+                response_metadata = {}
+                usage = response.get("usage")
+                if usage is not None:
+                    response_metadata["usage"] = usage
+                incomplete_details = response.get("incomplete_details")
+                if incomplete_details is not None:
+                    response_metadata["incomplete_details"] = incomplete_details
+                if response_metadata:
+                    entry["response"] = response_metadata
                 stripped.append(entry)
 
             agg_request = AggregateMetricsRequest(verify_responses=stripped)

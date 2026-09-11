@@ -311,6 +311,43 @@ class TestRunHelperDryRunSpinup:
             runner.wait_for_dry_run_spinup()
 
 
+class TestRunHelperServerReadiness:
+    def test_marks_head_ready_only_after_servers_and_model_endpoints(self) -> None:
+        runner = RunHelper()
+        runner._head_server_instance = MagicMock()
+        events = []
+        runner.wait_for_spinup = MagicMock(side_effect=lambda: events.append("servers"))
+        runner.wait_for_model_endpoints = MagicMock(side_effect=lambda _config: events.append("models"))
+        runner._head_server_instance.mark_ready.side_effect = lambda: events.append("head")
+        config = OmegaConf.create({})
+
+        runner.wait_for_server_readiness(config)
+
+        assert events == ["servers", "models", "head"]
+        runner.wait_for_model_endpoints.assert_called_once_with(config)
+
+    @pytest.mark.parametrize("failing_method", ["wait_for_spinup", "wait_for_model_endpoints"])
+    def test_readiness_failure_leaves_head_health_unready(self, failing_method: str) -> None:
+        from fastapi.testclient import TestClient
+
+        from nemo_gym.config_types import BaseServerConfig
+        from nemo_gym.server_utils import HeadServer
+
+        runner = RunHelper()
+        runner._head_server_instance = HeadServer(config=BaseServerConfig(host="", port=0))
+        runner.wait_for_spinup = MagicMock()
+        runner.wait_for_model_endpoints = MagicMock()
+        getattr(runner, failing_method).side_effect = RuntimeError("readiness failed")
+
+        with TestClient(runner._head_server_instance.setup_webserver()) as client:
+            with raises(RuntimeError, match="readiness failed"):
+                runner.wait_for_server_readiness(OmegaConf.create({}))
+
+            response = client.get("/health")
+            assert response.status_code == 503
+            assert response.json() == {"status": "starting"}
+
+
 class TestRunHelperShutdownReap:
     """RunHelper.shutdown must reap every server subprocess on every exit path."""
 

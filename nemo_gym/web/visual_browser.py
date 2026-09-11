@@ -736,18 +736,10 @@ class VisualBrowserDriver:
             time.sleep(float(self.config.action_delay_seconds if duration is None else duration))
         elif name == "scroll":
             params = spec.get("scroll_parameters") or {}
-            requested_amount = int(params.get("scroll_amount", 1))
-            amount = max(0, min(requested_amount, MAX_SCROLL_AMOUNT))
+            amount = int(params.get("scroll_amount", 1))
+            if not 0 <= amount <= MAX_SCROLL_AMOUNT:
+                raise ValueError(f"scroll_amount must be in [0, {MAX_SCROLL_AMOUNT}]")
             direction = params.get("scroll_direction", "down")
-            if amount != requested_amount:
-                LOG.warning(
-                    "event=visual_browser_scroll_clamped session=%s task=%s step=%d requested=%d applied=%d",
-                    self.session_id,
-                    self._task.task_id if self._task is not None else "unknown",
-                    self._step,
-                    requested_amount,
-                    amount,
-                )
             if point is None:
                 point = (self.config.viewport_width // 2, self.config.viewport_height // 2)
             pyautogui.moveTo(*point)
