@@ -16,9 +16,10 @@ from copy import deepcopy
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-from pytest import approx, fixture
+from fastapi.encoders import jsonable_encoder
+from pytest import approx, fixture, mark
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config_types import AggregateMetricsRequest, ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -27,12 +28,25 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.verifier_fixture import exercise_verifier_fixture
 from resources_servers.equivalence_llm_judge.app import (
+    VERIFIER_FIXTURE,
     LLMJudgeResourcesServer,
     LLMJudgeResourcesServerConfig,
     LLMJudgeVerifyRequest,
     _extract_question_text,
 )
+
+
+async def test_hle_verified_fixture() -> None:
+    results = await exercise_verifier_fixture(
+        VERIFIER_FIXTURE, reward_range=(0.0, 1.0), higher_is_better=True, determinism="stochastic"
+    )
+    assert [(result.kind, result.observed_rewards) for result in results] == [
+        ("full_reward", (1.0,)),
+        ("zero_reward", (0.0,)),
+        ("malformed", ()),
+    ]
 
 
 class TestApp:
@@ -445,3 +459,153 @@ class TestApp:
         )
 
         assert _extract_question_text(params, None) == ""
+
+
+class TestJudgeParsing:
+    @fixture
+    def server(self) -> LLMJudgeResourcesServer:
+        cfg = LLMJudgeResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            judge_prompt_template_fpath=str(
+                Path(__file__).resolve().parents[1] / "prompt_templates/equivalence_llm_judge.txt"
+            ),
+            judge_equal_label="Judgement: yes",
+            judge_not_equal_label="Judgement: no",
+        )
+        return LLMJudgeResourcesServer(config=cfg, server_client=MagicMock(spec=ServerClient))
+
+    async def _judge(self, server, text: str | None, status: str = "completed"):
+        output = []
+        if text is not None:
+            output = [
+                NeMoGymResponseOutputMessage(
+                    id="msg",
+                    content=[NeMoGymResponseOutputText(annotations=[], text=text, type="output_text")],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                )
+            ]
+        response = NeMoGymResponse(
+            id="judge_resp",
+            created_at=0.0,
+            model="judge",
+            object="response",
+            output=output,
+            status=status,
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+        post = MagicMock()
+        post.read = AsyncMock(return_value=response.model_dump_json())
+        server.server_client.post = AsyncMock(return_value=post)
+        return await server._generate_judge_evaluation(question="Q?", expected_answer="B", generated_answer="A")
+
+    @mark.parametrize(
+        "text,status,verdict,issues",
+        [
+            ("Judgement: yes\nConfidence: 95%", "completed", "Judgement: yes", []),
+            ("Judgement: no\nJudgement: yes", "completed", "Judgement: yes", ["conflicting_verdicts"]),
+            ("Judgement: yes\nJudgement: no", "completed", "Judgement: no", ["conflicting_verdicts"]),
+            ("Judgement: yes\nJudgement: yes", "completed", "Judgement: yes", ["repeated_verdict"]),
+            ("Unable to assess.", "completed", None, ["no_verdict"]),
+            ("Reasoning: the answer is", "incomplete", None, ["truncated_judge_output", "no_verdict"]),
+            ("Judgement: yes\nConfid", "incomplete", "Judgement: yes", []),
+            (None, "completed", None, ["unparseable_judge_output"]),
+            (None, "incomplete", None, ["truncated_judge_output", "unparseable_judge_output"]),
+        ],
+    )
+    async def test_verdict_and_parsing_issues(self, server, text, status, verdict, issues) -> None:
+        is_equal, record = await self._judge(server, text, status)
+        assert is_equal is (verdict == "Judgement: yes")
+        assert record.verdict_label == verdict
+        assert record.judgement_parsing_issues == issues
+
+        serialized = jsonable_encoder(record)
+        if issues:
+            assert serialized["judgement_parsing_issues"] == issues
+        else:
+            assert "judgement_parsing_issues" not in serialized
+
+        # Old rollouts have the judge response but no parsing diagnostics.
+        legacy = deepcopy(serialized)
+        legacy.pop("judgement_parsing_issues", None)
+        expected_metrics = {"judgement_parsing_issue_rate": float(bool(issues))}
+        expected_metrics.update({f"judgement_parsing_issue_rate/{issue}": 1.0 for issue in issues})
+        assert server.compute_metrics([[{"judge_evaluations": [legacy]}]]) == expected_metrics
+
+    @mark.parametrize(
+        "text,verdict,issues",
+        [
+            ("The answer is INCORRECT.", "INCORRECT", []),
+            ("Initially INCORRECT, finally CORRECT", "CORRECT", ["conflicting_verdicts"]),
+            ("Initially CORRECT, finally INCORRECT", "INCORRECT", ["conflicting_verdicts"]),
+        ],
+    )
+    async def test_overlapping_labels(self, server, text, verdict, issues) -> None:
+        server.config.judge_equal_label = "CORRECT"
+        server.config.judge_not_equal_label = "INCORRECT"
+        is_equal, record = await self._judge(server, text)
+        assert is_equal is (verdict == "CORRECT")
+        assert record.verdict_label == verdict
+        assert record.judgement_parsing_issues == issues
+
+    @staticmethod
+    def _rollout(*issues: list[str]) -> dict:
+        return {"judge_evaluations": [{"judgement_parsing_issues": value} for value in issues]}
+
+    def test_issue_rates_count_rollouts_and_exclude_unjudged_rows(self, server) -> None:
+        tasks = [
+            [self._rollout(["no_verdict"], ["no_verdict"]), self._rollout([], [])],
+            [self._rollout(["truncated_judge_output", "no_verdict"])],
+            [{"reward": 0.0}, {"reward": 0.0, "judge_evaluations": []}],
+            [{"judge_evaluations": [{"verdict_label": "JUDGE_ERROR", "response": None}]}],
+            [{"judge_evaluations": [{}]}],
+        ]
+        assert server.compute_metrics(tasks) == {
+            "judgement_parsing_issue_rate": approx(2 / 3),
+            "judgement_parsing_issue_rate/no_verdict": approx(2 / 3),
+            "judgement_parsing_issue_rate/truncated_judge_output": approx(1 / 3),
+        }
+
+    @mark.parametrize(
+        "tasks,expected",
+        [
+            ([[{"judge_evaluations": [{"judgement_parsing_issues": []}]}]], {"judgement_parsing_issue_rate": 0.0}),
+            ([[{"judge_evaluations": [{}]}]], {}),
+            ([[{"judge_evaluations": [{"verdict_label": "JUDGE_ERROR", "response": None}]}]], {}),
+            ([[{"reward": 0.0}]], {}),
+            ([], {}),
+        ],
+    )
+    def test_clean_or_unjudged_run_metrics(self, server, tasks, expected) -> None:
+        assert server.compute_metrics(tasks) == expected
+
+    async def test_legacy_aggregation_preserves_saved_scores(self, server) -> None:
+        _, record = await self._judge(server, "Judgement: no\nJudgement: yes")
+        legacy = jsonable_encoder(record)
+        legacy.pop("judgement_parsing_issues")
+        legacy["verdict_label"] = "Judgement: no"
+        rows = [{"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 0.0, "judge_evaluations": [legacy]}]
+        original = deepcopy(rows)
+
+        metrics = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+        assert metrics.agent_metrics["mean/reward"] == 0.0
+        assert metrics.key_metrics["judgement_parsing_issue_rate"] == 1.0
+        assert metrics.agent_metrics["judgement_parsing_issue_rate/conflicting_verdicts"] == 1.0
+        assert rows == original
+
+    @mark.parametrize("include_rate", [False, True])
+    def test_key_metrics(self, server, include_rate) -> None:
+        metrics = {"mean/reward": 0.31, "std/reward": 0.02}
+        expected = {"mean/reward": 0.31}
+        if include_rate:
+            metrics.update({"judgement_parsing_issue_rate": 0.4, "judgement_parsing_issue_rate/no_verdict": 0.4})
+            expected["judgement_parsing_issue_rate"] = 0.4
+        assert server.get_key_metrics(metrics) == expected
