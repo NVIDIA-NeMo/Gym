@@ -20,9 +20,16 @@ Set an OpenAI-compatible classifier endpoint and prepare the pinned dataset:
 export HARMBENCH_CLASSIFIER_BASE_URL=https://your-classifier.example/v1
 export HARMBENCH_CLASSIFIER_API_KEY=...
 gym eval prepare --benchmark harmbench
+gym eval run --benchmark harmbench \
+  --model-type inference_provider \
+  --model "$POLICY_MODEL_NAME" \
+  --model-url "$POLICY_MODEL_BASE_URL" \
+  --model-api-key "$POLICY_MODEL_API_KEY" \
+  --split benchmark \
+  --output results/harmbench.jsonl
 ```
 
-Run with the usual NeMo Gym `policy_model` endpoint configuration. Neither the target-model call nor the classifier
-needs a command-execution sandbox. Both are ordinary model-server references and can be hosted on Modal or elsewhere.
+Neither the target-model call nor the classifier needs a command-execution sandbox. Both are ordinary model-server
+references and can be hosted on Modal or elsewhere.
 
 HarmBench code and data are MIT licensed. NeMo Gym adapter code is Apache-2.0. Prepared data is excluded from Git.
