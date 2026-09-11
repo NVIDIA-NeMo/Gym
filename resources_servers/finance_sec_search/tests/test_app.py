@@ -309,6 +309,53 @@ class TestTickerLoading:
         assert "AAPL" in server._tickers
         mock_urlopen.assert_called_once()
 
+    @patch("resources_servers.finance_sec_search.app.urllib.request.urlopen")
+    def test_overlay_resolves_when_use_cache_false(self, mock_urlopen, tmp_path):
+        """use_cache=false still downloads live SEC and overlays supplementary tickers."""
+        live = {"0": {"ticker": "AAPL", "cik_str": "320193", "title": "APPLE INC."}}
+        overlay = {"35": {"cik_str": "1564408", "ticker": "SNAP", "title": "Snap Inc"}}
+        overlay_path = tmp_path / "supplementary_tickers.json"
+        overlay_path.write_text(json.dumps(overlay))
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(live).encode("utf-8")
+        mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+
+        server = TestUseCacheFlag._make_server(tmp_path / "cache", use_cache=False)
+        server.config.supplementary_tickers_fpath = str(overlay_path)
+        server._load_tickers_or_fail()
+
+        assert "SNAP" in server._tickers
+        assert server._tickers["SNAP"]["cik"] == "0001564408"
+        assert "AAPL" in server._tickers
+        assert not (tmp_path / "cache" / "tickers.json").exists()
+        mock_urlopen.assert_called_once()
+
+    def test_overlay_replaces_matching_live_row(self, server, tmp_path):
+        """A ticker in both sources resolves to the overlay's values."""
+        overlay = {"0": {"cik_str": "21344", "ticker": "KO", "title": "COCA COLA CO"}}
+        overlay_path = tmp_path / "supplementary_tickers.json"
+        overlay_path.write_text(json.dumps(overlay))
+        server.config.supplementary_tickers_fpath = str(overlay_path)
+
+        merged = server._overlay_supplementary_tickers(
+            {
+                "0": {"ticker": "AAPL", "cik_str": "320193", "title": "APPLE INC."},
+                "1": {"ticker": "KO", "cik_str": "21344", "title": "STALE NAME"},
+            }
+        )
+
+        assert sorted(item["ticker"] for item in merged.values()) == ["AAPL", "KO"]
+        assert [item for item in merged.values() if item["ticker"] == "KO"][0]["title"] == "COCA COLA CO"
+
+    def test_missing_overlay_file_fails_fast(self, server, tmp_path):
+        server.config.supplementary_tickers_fpath = str(tmp_path / "absent.json")
+
+        with pytest.raises(RuntimeError, match="supplementary_tickers_fpath not found"):
+            server._overlay_supplementary_tickers({})
+
 
 # ============================================================================
 # Test: Rate Limiter

@@ -166,6 +166,11 @@ class FinanceAgentResourcesServerConfig(BaseResourcesServerConfig):
         "When set, dates beyond this are clamped and omitted end_dates default to this value. "
         "Set to null (default) to disable clamping.",
     )
+    supplementary_tickers_fpath: Optional[str] = Field(
+        default=None,
+        description="Optional JSON overlay of extra ticker mappings in SEC company_tickers.json schema. "
+        "Merged onto the live or cached SEC registry at startup.",
+    )
     judge_call_timeout: Optional[float] = Field(
         default=60.0,
         description="Per-call timeout in seconds for judge LLM requests. "
@@ -667,10 +672,35 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 "Failed to load SEC ticker data after retries. Server cannot start without company_tickers.json."
             )
 
+        raw = self._overlay_supplementary_tickers(raw)
+
         for item in raw.values():
-            self._tickers[item["ticker"]] = {"cik": str(item["cik_str"]).zfill(10), "name": item["title"]}
+            self._tickers[item["ticker"].upper()] = {"cik": str(item["cik_str"]).zfill(10), "name": item["title"]}
         self._initialized = True
         logger.info("Loaded %d ticker mappings", len(self._tickers))
+
+    def _overlay_supplementary_tickers(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge the overlay onto an SEC registry. Overlay wins; one row per ticker.
+
+        Registry keys are positional and carry no meaning, so overlay keys are
+        namespaced to keep them from colliding with SEC's own numbering.
+        """
+        fpath = self.config.supplementary_tickers_fpath
+        if not fpath:
+            return raw
+        path = Path(fpath)
+        if not path.is_file():
+            raise RuntimeError(f"supplementary_tickers_fpath not found: {path}")
+        with open(path, "r") as f:
+            extra = json.load(f)
+        if not isinstance(extra, dict):
+            raise RuntimeError(f"supplementary_tickers_fpath must be a JSON object: {path}")
+        overridden = {item["ticker"].upper() for item in extra.values()}
+        merged = {key: item for key, item in raw.items() if item["ticker"].upper() not in overridden}
+        for key, item in extra.items():
+            merged[f"supplementary-{key}"] = item
+        logger.info("Overlaid %d supplementary ticker mappings from %s", len(extra), path)
+        return merged
 
     async def _resolve_ticker(self, ticker: str) -> Optional[Dict[str, Any]]:
         """Look up a ticker symbol. Returns company info dict or None."""

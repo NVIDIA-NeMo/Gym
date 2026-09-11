@@ -18,6 +18,7 @@ finance_sec_search_resources_server:
       # Latest filing date any date-filtered tool will return. Must match the
       # cutoff the dataset's prompts were written against.
       max_end_date: ${oc.select:max_end_date,null}
+      supplementary_tickers_fpath: ${oc.select:supplementary_tickers_fpath,null}
       # Wrapped in oc.select (Gym convention, cf. labbench2_vlm) so the env resolves
       # standalone (`gym env start` / `+dry_run`); override via env / NVFlow overlay.
       # null default => web search disabled unless a key is supplied.

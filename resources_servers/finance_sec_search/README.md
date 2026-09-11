@@ -2,7 +2,7 @@
 
 Financial information retrieval using SEC EDGAR filings with optional web search via Tavily.
 
-**Only companies listed in the [SEC company tickers file](https://www.sec.gov/files/company_tickers.json) are supported.** Questions about companies not in this list will fail at the ticker lookup step.
+**Companies listed in the [SEC company tickers file](https://www.sec.gov/files/company_tickers.json) are supported.** Set `supplementary_tickers_fpath` (and pass `--supplementary_tickers` to prefetch) to overlay extra ticker→CIK mappings that live SEC has dropped.
 
 ## Tools
 
@@ -131,6 +131,12 @@ python resources_servers/finance_sec_search/scripts/prefetch_sec_metadata.py \
 python resources_servers/finance_sec_search/scripts/prefetch_sec_metadata.py \
     --cache_dir /path/to/cache \
     --ticker_config /path/to/tickers.yaml
+
+# Overlay extra ticker→CIK mappings (Vals v1 / fabv1 names dropped from live SEC):
+python resources_servers/finance_sec_search/scripts/prefetch_sec_metadata.py \
+    --cache_dir /path/to/cache \
+    --ticker_config /path/to/tickers.yaml \
+    --supplementary_tickers benchmarks/finance_sec_search/data/supplementary_tickers.json
 
 # Force refresh (re-fetch even if cached):
 python resources_servers/finance_sec_search/scripts/prefetch_sec_metadata.py \
