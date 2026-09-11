@@ -28,6 +28,7 @@ from nemo_gym.orchestration.executors.slurm_script import (
     _render_pool_directives,
     _render_service_command,
     _resolve_env,
+    _with_default_capture_dir,
     build_sbatch_script,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args as _flatten_run_args
@@ -334,8 +335,83 @@ def test_render_driver_entrypoint_install_and_prepare():
 
 
 # ---------------------------------------------------------------------------
+# _with_default_capture_dir
+# ---------------------------------------------------------------------------
+
+
+def test_with_default_capture_dir_injects_when_observability_on():
+    run = {"observability_enabled": True}
+    out = _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
+    assert out["model_call_capture_dir"] == "/remote/jobs/gym-job-20260729/gsm8k/model-calls"
+
+
+def test_with_default_capture_dir_explicit_value_wins():
+    run = {"observability_enabled": True, "model_call_capture_dir": "/custom/path"}
+    out = _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
+    assert out["model_call_capture_dir"] == "/custom/path"
+
+
+def test_with_default_capture_dir_no_injection_when_observability_off():
+    run = {"split": "benchmark"}
+    out = _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
+    assert "model_call_capture_dir" not in out
+
+
+def test_with_default_capture_dir_does_not_mutate_input():
+    run = {"observability_enabled": True}
+    _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
+    assert "model_call_capture_dir" not in run
+
+
+# ---------------------------------------------------------------------------
 # build_sbatch_script (integration)
 # ---------------------------------------------------------------------------
+
+
+def test_build_sbatch_script_auto_default_capture_dir(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {
+                "container": "python:3.12",
+                "benchmarks": {"gsm8k": {"run": {"observability_enabled": True}}},
+            },
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert f"+model_call_capture_dir={bench_dir / 'model-calls'}" in script
+
+
+def test_build_sbatch_script_explicit_capture_dir_wins(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {
+                "container": "python:3.12",
+                "benchmarks": {
+                    "gsm8k": {"run": {"observability_enabled": True, "model_call_capture_dir": "/custom/path"}}
+                },
+            },
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert "+model_call_capture_dir=/custom/path" in script
+    assert "model-calls" not in script
+
+
+def test_build_sbatch_script_no_capture_dir_when_observability_off(submit_config, bench_dir):
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "model_call_capture_dir" not in script
 
 
 def test_build_sbatch_script_contains_shebang(submit_config, bench_dir):
