@@ -243,7 +243,17 @@ From: debian:trixie
     # `uninstall-no-record-file` and takes the whole build down. Debian's pip
     # resolves the pinned manifest fine, and pinning the resolver to whatever
     # trixie ships is one less thing drifting between builds.
-    PIP="python3 -m pip install --no-cache-dir --break-system-packages"
+    # --ignore-installed is load-bearing, not defensive. Several pins are also
+    # shipped as dpkg-managed python3-* packages pulled in by gdal-bin and yq
+    # (tomlkit, xmltodict, yaml, numpy, argcomplete). Those have no RECORD
+    # file, so pip cannot uninstall them to put its own version on top and
+    # aborts the whole install with uninstall-no-record-file. Installing over
+    # them puts the pinned copy in /usr/local/lib/python3/dist-packages, which
+    # Debian places ahead of /usr/lib/python3/dist-packages on sys.path, so the
+    # pinned version is the one that imports. The published closure has the
+    # same overlap (python3-numpy 2.2.4 alongside the numpy 2.4.4 pin), so this
+    # reproduces the reference layout rather than working around it.
+    PIP="python3 -m pip install --no-cache-dir --break-system-packages --ignore-installed"
     python3 -m pip --version
 
     # Build the effective pin list for this architecture. x86_64 gets the
