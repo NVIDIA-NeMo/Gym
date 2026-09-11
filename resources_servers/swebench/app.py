@@ -241,11 +241,6 @@ class SWEBenchSeedSessionResponse(BaseSeedSessionResponse):
 class SwebenchResourcesServer(SimpleResourcesServer):
     config: SwebenchResourcesServerConfig
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-
-        self._session_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
-
     async def _create_sandbox(self, test_spec: TestSpec) -> AsyncSandbox:
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         global_config_dict = get_global_config_dict()
@@ -298,7 +293,6 @@ class SwebenchResourcesServer(SimpleResourcesServer):
     async def seed_session(self, request: Request, body: SWEBenchSeedSessionRequest) -> SWEBenchSeedSessionResponse:
         test_spec = self._make_test_spec(body)
         eval_sandbox = await self._create_sandbox(test_spec)
-        self._session_id_to_sandbox[request.session[SESSION_ID_KEY]] = eval_sandbox
 
         if self.config.apply_anti_cheating:
             # Remove the current Git repo's future history beyond the current commit to prevent the model from cheating.
@@ -315,7 +309,11 @@ Stdout:
 Stderr:
 {result.stderr}""")
 
-        return SWEBenchSeedSessionResponse(sandbox_handle=eval_sandbox._handle.sandbox_id)
+        workspace = await self.register_sandbox_workspace(request, eval_sandbox, self.config.sandbox_provider)
+        return SWEBenchSeedSessionResponse(
+            sandbox_handle=eval_sandbox._handle.sandbox_id,
+            workspace=workspace,
+        )
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
         """
@@ -349,7 +347,7 @@ Stderr:
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
-            original_sandbox = self._session_id_to_sandbox.pop(request.session[SESSION_ID_KEY])
+            original_sandbox = self.session_sandbox(request)
             try:
                 original_workdir = (await eval_sandbox.exec("pwd")).stdout.strip()
                 model_patch_result = await original_sandbox.exec(f"cd {original_workdir} && git --no-pager diff")
@@ -357,7 +355,7 @@ Stderr:
             except:
                 print("Failed to extract patch from container", format_exc(), file=sys.stderr)
             try:
-                await original_sandbox.stop()
+                await self.cleanup_session(request)
             except:
                 print("Failed to stop original sandbox", format_exc(), file=sys.stderr)
 

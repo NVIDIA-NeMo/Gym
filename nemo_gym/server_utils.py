@@ -613,6 +613,11 @@ class BaseServer(BaseModel):
     config: BaseRunServerInstanceConfig
 
     @classmethod
+    def create_server(cls, config, server_client):
+        """Construct a server, allowing agent bases to select process placement."""
+        return cls(config=config, server_client=server_client)
+
+    @classmethod
     def load_config_from_global_config(cls) -> "BaseRunServerInstanceConfig":
         config_path_str = getenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME)
         global_config_dict = get_global_config_dict()
@@ -1009,7 +1014,7 @@ repr(e): {repr(e)}"""
             head_server_config=ServerClient.load_head_server_config(),
             global_config_dict=global_config_dict,
         )
-        server = cls(config=server_config, server_client=server_client)
+        server = cls.create_server(server_config, server_client)
 
         if global_config_dict[DRY_RUN_KEY_NAME]:
             return

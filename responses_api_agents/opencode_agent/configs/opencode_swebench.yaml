@@ -1,29 +1,37 @@
-# Legacy compatibility config. The unified runtime proof of concept is at
-# responses_api_agents/opencode_agent/configs/opencode_swebench.yaml.
-opencode_sandboxed_agent:
+# Proof of concept: the OpenCode harness borrows SWE-bench's prepared workspace.
+# Compose with resources_servers/swebench/configs/swebench.yaml, a model config,
+# and a connect-capable sandbox provider config (for example OpenSandbox).
+# Use runtime.type: local in the ordinary opencode_agent config for host execution.
+# Sandbox mode requires /run; direct /v1/responses has no environment workspace.
+opencode_agent:
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
       entrypoint: app.py
       num_workers: 4
       resources_server:
         type: resources_servers
-        name: ???
+        name: swebench_resources_server
       model_server:
         type: responses_api_models
         name: policy_model
       token_id_capture: true
-
-      debug: false
-
+      runtime:
+        type: sandbox
+        sandbox_source: environment
+        dependencies:
+          enabled: true
+          python_version: 3.13.14
+        timeout_s: 10800
+        agent_config:
+          repo_dir: /testbed
+          workspace_root: /tmp/opencode-workspaces
+      model: dummy_model
+      command: opencode
+      setup_timeout: 900
+      timeout: 10800
+      context_window: 262144
+      max_output_tokens: 262144
       opencode_version: 1.17.11
-      # @bxyu-nvidia: This needs to be set appropriately for every model!
-      opencode_max_context_window: 262144
-
-      remote_opencode_install_script_path: null
-      remote_opencode_binary_path: null
-      remote_opencode_musl_binary_path: null
-
-      # Taken from https://github.com/sdevare-nv/nv-opencode/blob/f261004b4e4269a6e193fd242e5ec8ced9a7aec0/packages/opencode/src/bench/cli.ts#L198-L325
       opencode_config:
         permission:
           "*": allow
@@ -142,26 +150,4 @@ opencode_sandboxed_agent:
           task: true
           skill: false
           todowrite: true
-
-      sandbox_timeout: 10800  # 3hr default for harness execution
-
-      sandbox_provider: sandbox
-      sandbox_config:
-        ttl_s: 18000
-        ready_timeout_s: 1200
-        env:
-          # execd holds each finished command's response open for this long (default 1s);
-          # a short grace keeps every command and the readiness probe from paying that tail.
-          EXECD_API_GRACE_SHUTDOWN: "50ms"
-        resources:
-          cpu: 0.25
-          memory_mib: 512
-          # 30 GiB works on every provider: within Fargate's 21-200 GiB ephemeral range
-          # (an explicit 20 is rejected there) and fine as an ephemeral request elsewhere.
-          disk_gib: 30
-        provider_options: {}
-        metadata:
-          benchmark: swebench-verified
-          harness: mini-swe-agent
-
       datasets: []

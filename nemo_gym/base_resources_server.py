@@ -16,8 +16,8 @@ from abc import abstractmethod
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
-from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import FastAPI, Request
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 
 if TYPE_CHECKING:
@@ -33,7 +33,9 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_correlation import RolloutContextMiddleware
-from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox.workspace import SandboxWorkspace
+from nemo_gym.server_utils import SESSION_ID_KEY, BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 
 
@@ -66,7 +68,7 @@ def normalize_tool_name(name: str, server_name: Optional[str] = None) -> str:
 
 
 # Tool names that would collide with the resources server's own endpoints if advertised over MCP.
-RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "aggregate_metrics", "mcp"})
+RESERVED_MCP_TOOL_NAMES = frozenset({"verify", "seed_session", "cleanup_session", "aggregate_metrics", "mcp"})
 
 
 class ReverifyMode(str, Enum):
@@ -130,7 +132,7 @@ class BaseSeedSessionRequest(BaseModel):
 
 
 class BaseSeedSessionResponse(BaseModel):
-    pass
+    workspace: Optional[SandboxWorkspace] = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class MCPServerMetadata(BaseModel):
@@ -144,6 +146,35 @@ class MCPServerMetadata(BaseModel):
 
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
+    _session_sandboxes: dict[str, AsyncSandbox] = PrivateAttr(default_factory=dict)
+
+    async def register_sandbox_workspace(
+        self, request: Request, sandbox: AsyncSandbox, provider: str
+    ) -> SandboxWorkspace:
+        """Publish an environment-owned workspace for a runtime-placed agent."""
+        session_id = request.session[SESSION_ID_KEY]
+        if session_id in self._session_sandboxes:
+            if self._session_sandboxes[session_id] is not sandbox:
+                await sandbox.stop()
+            raise ValueError("Session already owns a sandbox workspace")
+        self._session_sandboxes[session_id] = sandbox
+        try:
+            return SandboxWorkspace(provider=provider, descriptor=await sandbox.serialize())
+        except BaseException:
+            await self.cleanup_session(request)
+            raise
+
+    def session_sandbox(self, request: Request) -> AsyncSandbox:
+        return self._session_sandboxes[request.session[SESSION_ID_KEY]]
+
+    async def cleanup_session(self, request: Request) -> BaseSeedSessionResponse:
+        """Idempotent cleanup; retain the handle if stopping fails so callers can retry."""
+        session_id = request.session[SESSION_ID_KEY]
+        sandbox = self._session_sandboxes.get(session_id)
+        if sandbox is not None:
+            await sandbox.stop()
+            self._session_sandboxes.pop(session_id, None)
+        return BaseSeedSessionResponse()
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -152,6 +183,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         app.add_middleware(RolloutContextMiddleware)
 
         app.post("/seed_session")(self.seed_session)
+        app.post("/cleanup_session")(self.cleanup_session)
         # Wrapped outside judge_failsafe so the span covers the failsafe's own handling too.
         app.post("/verify")(
             traced_verify_endpoint(
