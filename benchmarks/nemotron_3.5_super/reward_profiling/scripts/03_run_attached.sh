@@ -1,0 +1,107 @@
+#!/bin/bash
+# 03 - Collect against an already-running vLLM Slurm job. The fast loop when iterating.
+#
+# Starts every Gym server for the sweep inside that job's allocation, then resumes from the
+# materialized inputs. Does not allocate anything itself.
+#
+# USAGE
+#   VLLM_JOBID=<jobid> SWEEP_DIR=<out>/<nickname> POLICY_MODEL_NAME=<ckpt> \
+#     bash $R/scripts/03_run_attached.sh
+#
+# REQUIRED
+#   VLLM_JOBID          a running job serving the policy
+#   SWEEP_DIR           the OUT_DIR/<nickname> directory 01 wrote
+#   POLICY_MODEL_NAME   the served checkpoint path
+#   CONTAINER           sqsh to run the Gym servers in
+#
+# OPTIONAL
+#   GYM_CONFIG    config inside SWEEP_DIR                  (default: sweep_config.yaml)
+#   CONCURRENCY   num_samples_in_parallel                  (default: 128)
+#   ROUTER_PORT   where the vLLM router listens            (default: 8000)
+#   MOUNTS        container mounts                         (default: /lustre:/lustre)
+#   ENV_YAML      mounted so judges resolve their keys     (default: $PWD/env.yaml)
+#   CPUS          --cpus-per-task for the driver           (default: 64)
+#
+# `--resume` is not optional: without it rollout collection clears the output and re-expands from
+# scratch, and a sweep this size will not finish inside one allocation.
+#
+# Secrets reach Gym through env.yaml, auto-loaded from its working directory. The judge lane needs
+# it -- judge bindings interpolate ${nv_inference_api_key}, which env.yaml resolves from the shell.
+# Without the mount the config fails to parse rather than failing at judge time.
+set -euo pipefail
+
+VLLM_JOBID=${VLLM_JOBID:?set VLLM_JOBID to the running vLLM job}
+SWEEP_DIR=${SWEEP_DIR:?set SWEEP_DIR to <out-dir>/<nickname> from 01_materialize.sh}
+# Settings the manifest declared, applied only where this environment leaves them unset, so
+# precedence stays manifest -> env var -> command line as everywhere else.
+while IFS='=' read -r _k _v; do
+    [[ -n "$_k" ]] || continue
+    [[ -n "${!_k:-}" ]] || export "$_k=$_v"
+done < <(python - "$SWEEP_DIR" "srun,vllm,gym_eval_profile" <<'PY_MANIFEST'
+import json, sys
+from pathlib import Path
+try:
+    doc = json.loads((Path(sys.argv[1]) / "sweep_report.json").read_text())
+except OSError:
+    doc = {}
+for block in sys.argv[2].split(","):
+    for key, value in (doc.get(block) or {}).items():
+        print(f"{key}={value}")
+PY_MANIFEST
+)
+
+# vllm.model is the served checkpoint; this script calls the same thing POLICY_MODEL_NAME.
+POLICY_MODEL_NAME=${POLICY_MODEL_NAME:-${MODEL:?set POLICY_MODEL_NAME, or name it as vllm.model in the manifest}}
+CONTAINER=${CONTAINER:?set CONTAINER, or name it in the manifest srun block}
+GYM_CONFIG=${GYM_CONFIG:-sweep_config.yaml}
+CONCURRENCY=${CONCURRENCY:-128}
+ROUTER_PORT=${ROUTER_PORT:-8000}
+MOUNTS=${MOUNTS:-/lustre:/lustre}
+# Secrets reach Gym through env.yaml, which it auto-loads from its working directory. The judge
+# lane needs it: the judge config_overlay interpolates ${nv_inference_api_key}, which env.yaml resolves
+# from the shell. Without the mount the config fails to parse rather than failing at judge time.
+ENV_YAML=${ENV_YAML:-$PWD/env.yaml}
+if [[ -f "$ENV_YAML" ]]; then
+    MOUNTS="$MOUNTS,$ENV_YAML:/opt/Gym/env.yaml"
+else
+    echo "WARNING: no env.yaml at $ENV_YAML; judge environments will fail to resolve their API key." >&2
+fi
+
+mapfile -t NODES < <(scontrol show hostnames "$(squeue -j "$VLLM_JOBID" -h -o '%N')")
+ROUTER_IP=$(getent hosts "${NODES[0]}" | awk 'NR==1 {print $1}')
+# nodes[0] runs prefill plus the router; keep the driver off it.
+DRIVER_NODE=${NODES[1]:-${NODES[0]}}
+
+echo "router : http://$ROUTER_IP:$ROUTER_PORT/v1"
+echo "driver : $DRIVER_NODE"
+echo "sweep  : $SWEEP_DIR"
+
+srun --overlap --jobid="$VLLM_JOBID" --nodes=1 --ntasks=1 \
+     --nodelist="$DRIVER_NODE" --gpus=0 --cpus-per-task="${CPUS:-64}" \
+     --container-image="$CONTAINER" \
+     --container-mounts="$MOUNTS" \
+     --container-workdir=/opt/Gym --no-container-mount-home \
+     bash -lc "
+       set -euo pipefail
+       source /opt/Gym_venv/bin/activate
+       gym env start --config '$SWEEP_DIR/$GYM_CONFIG' \
+           +uv_venv_dir=/opt/uv_venvs +skip_venv_if_present=true \
+           ++policy_base_url=http://$ROUTER_IP:$ROUTER_PORT/v1 \
+           ++policy_api_key=dummy_api_key \
+           ++policy_model_name='$POLICY_MODEL_NAME' &
+       gym_pid=\$!
+       trap 'kill \$gym_pid 2>/dev/null || true' EXIT
+
+       gym eval run --no-serve --resume \
+           --input '$SWEEP_DIR/rollouts_materialized_inputs.jsonl' \
+           --output '$SWEEP_DIR/rollouts.jsonl' \
+           ++num_repeats=1 \
+           ++num_samples_in_parallel=$CONCURRENCY \
+           +nemo_gym_log_dir='$SWEEP_DIR/logs' \
+           +uv_venv_dir=/opt/uv_venvs +skip_venv_if_present=true
+
+       gym eval profile \
+           ++allow_partial_rollouts=True \
+           --inputs '$SWEEP_DIR/rollouts_materialized_inputs.jsonl' \
+           --rollouts '$SWEEP_DIR/rollouts.jsonl'
+     "

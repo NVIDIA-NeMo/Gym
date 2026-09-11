@@ -10,6 +10,10 @@ INPUT_CONTAINER=$INPUT_CONTAINER
 OUTPUT_CONTAINER=$OUTPUT_CONTAINER
 MOUNTS=$MOUNTS
 GYM_CONFIG=$GYM_CONFIG
+# Benchmark data preparation only applies to configs that declare a `benchmark` dataset.
+# Set to 1 for train-split configs (e.g. reward-profiling sweeps), where `gym eval prepare`
+# would abort with "No benchmark config found".
+SKIP_PREPARE=${SKIP_PREPARE:-0}
 VLLM_ROUTER_WHEEL=$VLLM_ROUTER_WHEEL
 NEMO_GYM_GIT_URL=${NEMO_GYM_GIT_URL:-https://github.com/NVIDIA-NeMo/Gym}
 NEMO_GYM_GIT_REF=${NEMO_GYM_GIT_REF:-main}
@@ -85,7 +89,11 @@ fi
 # END Benchmark specific preparation
 ########################################
 
-gym eval prepare +num_prepare_benchmark_processes=4 --config $GYM_CONFIG
+if [[ "$SKIP_PREPARE" == "0" ]]; then
+    gym eval prepare +num_prepare_benchmark_processes=4 --config $GYM_CONFIG
+else
+    echo ">>> SKIP_PREPARE=1: skipping benchmark data preparation."
+fi
 
 gym env start \
     --config $GYM_CONFIG \
