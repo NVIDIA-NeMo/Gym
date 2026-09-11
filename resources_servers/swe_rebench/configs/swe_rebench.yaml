@@ -1,0 +1,79 @@
+# Resources server for nebius/SWE-rebench-V2.
+#
+# Every row carries its own prebuilt image (docker.io/swerebenchv2/...), its install and test
+# commands, and the name of the upstream parser for its test log — so there is no image
+# repository or per-language configuration here. 32,079 rows across 20 languages.
+swe_rebench_resources_server:
+  resources_servers:
+    swe_rebench:
+      allowed_agents: [opencode_sandboxed_agent]
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      evaluation_timeout: 3600
+      is_verifying_golden_patch: false
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        # Limits are the BURST ceiling; requests are the guaranteed floor. cpu_cap_env sizes
+        # build tools to the limit, so a wider limit means faster compiles when a node has room.
+        resources:
+          # Wider than SWE-bench Verified: the set spans Go, Rust, Java, Scala and C++ builds,
+          # which are compile-bound where the Python rows are not.
+          cpu: 8
+          memory_mib: 30720
+          disk_gib: 30
+        provider_options:
+          # Requests well below limits so pods bin-pack on a loaded cluster. At the concurrency
+          # a full-set sweep needs, requests == limits would reserve the cluster up front.
+          #
+          # 1 full vCPU, not less: measured elsewhere on this infra, a 0.25 request left 22% of
+          # rollouts (228/1022) hitting their timeout outright from CPU starvation under
+          # contention. CPU is compressible so bursting is safe; memory is not, hence a 4 GiB
+          # floor with headroom to 30 GiB for the JVM and Go/Rust link steps.
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 30
+        metadata:
+          benchmark: swe-rebench-v2
+
+# Golden-patch validation: grade the dataset's own patch instead of an agent's. A row whose
+# golden patch does not resolve is a broken row, and scoring an agent against it measures noise.
+# Run it with resources_servers/swe_rebench/apply_golden_patch.py.
+swe_rebench_golden_patch_resources_server:
+  resources_servers:
+    swe_rebench:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      # 20 minutes: the pilot averaged ~6 min/task with nothing near the old 60-minute ceiling,
+      # so this caps the tail without truncating honest work.
+      evaluation_timeout: 1200
+      is_verifying_golden_patch: true
+
+      # A full-set sweep runs ~2000 verifications concurrently against this one server. Each is
+      # mostly awaiting a remote sandbox, but the per-task log parse and result encode are real
+      # CPU, and one event loop cannot absorb 2000 of them. Spreading across workers keeps the
+      # accept queue short; the file-based parser cache is shared, so each worker loads it once.
+      num_workers: 8
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 8
+          memory_mib: 30720
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 30
+        metadata:
+          benchmark: swe-rebench-v2-golden-patch
