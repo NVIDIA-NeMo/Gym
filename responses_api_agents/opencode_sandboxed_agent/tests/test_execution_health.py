@@ -24,6 +24,16 @@ def test_early_timeout_is_infrastructure_but_full_agent_budget_is_not():
     assert not full["retryable"]
 
 
+def test_platform_signal_kill_is_budget_limited_only_after_full_budget():
+    short = classify(return_code=-1, control_error="signal: killed", elapsed_s=120, finished=False)
+    assert short["retryable"]
+    full = classify(return_code=-1, control_error="signal: killed", elapsed_s=28801, finished=False)
+    assert full["outcome"] == "agent_timeout"
+    assert full["budget_termination_inferred_from_signal"]
+    unknown = classify(return_code=-1, elapsed_s=28801, finished=False)
+    assert unknown["retryable"]
+
+
 def test_exception_preserved_even_when_partial_export_exists():
     result = classify(exception_type="ConnectionError", return_code=None, finished=False)
     assert result["outcome"] == "infrastructure_error"

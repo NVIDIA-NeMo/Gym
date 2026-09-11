@@ -15,6 +15,7 @@ def execution_health(
     budget_s: float,
     finished: bool,
     export: dict[str, Any],
+    control_error: str | None = None,
 ) -> dict[str, Any]:
     assistants = [
         m.get("info", {}) for m in export.get("messages", []) if m.get("info", {}).get("role") == "assistant"
@@ -27,7 +28,8 @@ def execution_health(
     context_limit = error.get("name") == "ContextOverflowError" or (
         status_code == 400 and re.search(r"maximum context length|context window|too many tokens", message, re.I)
     )
-    timeout = "timeout" in str(error_type or "").lower() or return_code == 124
+    killed = return_code == -1 and (control_error or "").strip() == "signal: killed"
+    timeout = "timeout" in str(error_type or "").lower() or return_code == 124 or killed
     budget_expired = exception_type is None and budget_s > 0 and elapsed_s >= budget_s and timeout
     reason = None
     outcome = "completed"
@@ -63,6 +65,7 @@ def execution_health(
         "exception_type": exception_type,
         "elapsed_s": elapsed_s,
         "budget_s": budget_s,
+        "budget_termination_inferred_from_signal": bool(budget_expired and killed),
         "finished_marker": finished,
         "export_found": bool(export),
         "last_model_finish": last.get("finish"),

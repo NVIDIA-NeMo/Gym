@@ -877,6 +877,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 budget_s=self.config.sandbox_timeout,
                 finished=opencode_finished,
                 export=opencode_export,
+                control_error=getattr(result, "stderr", None),
             ),
         }
         if collect_observations:
