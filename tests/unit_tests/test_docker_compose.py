@@ -22,10 +22,9 @@ def make_compose(provider, document, *, image_configs=None, **kwargs):
 
     from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
 
-    group = AsyncSandboxCompose(provider, "compose.yaml", **kwargs)
+    group = AsyncSandboxCompose(provider, "compose.yaml", image_configs=image_configs, **kwargs)
     group.document = document
     group._normalize = AsyncMock(return_value=document)
-    group._image_configs = dict(image_configs or {})
     return group
 
 
@@ -1484,3 +1483,30 @@ def test_registry_failures_close_session(monkeypatch, failure):
     with pytest.raises(ValueError):
         AsyncSandboxCompose(Provider(), "compose.yaml")._inspect_image("example.org/team/app:1")
     client.session.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_supplied_image_config_skips_registry_and_preserves_defaults(monkeypatch):
+    from unittest.mock import Mock
+
+    inspect = Mock(side_effect=AssertionError("registry access must not occur"))
+    monkeypatch.setattr(AsyncSandboxCompose, "_inspect_image", inspect)
+    config = {
+        "Entrypoint": ["/start"],
+        "Cmd": ["serve"],
+        "Env": ["MODE=cached"],
+        "Healthcheck": {"Test": ["CMD", "check"]},
+        "WorkingDir": "/app",
+    }
+    group = make_compose(
+        Provider(),
+        {"services": {"app": {"image": "example.org/app@sha256:abc"}}},
+        image_configs={"example.org/app@sha256:abc": config},
+    )
+    await group._prepare()
+    inspect.assert_not_called()
+    plan = group._plans["app"]
+    assert plan["command"] == "/start serve"
+    assert plan["spec"].env["MODE"] == "cached"
+    assert plan["spec"].workdir == "/app"
+    assert plan["health"]["test"] == ["CMD", "check"]
