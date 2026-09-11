@@ -22,6 +22,7 @@ import time
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
+from ipaddress import ip_network
 from os import environ, getenv
 from pathlib import Path
 from threading import Thread
@@ -662,6 +663,16 @@ class UvicornProxyHeadersConfig(BaseModel):
             raise ValueError("uvicorn_proxy_headers=True requires a non-empty uvicorn_forwarded_allow_ips allowlist.")
         if "*" in allow_ips:
             raise ValueError("uvicorn_forwarded_allow_ips must not be '*': it trusts forwarded headers from any peer.")
+        for address in allow_ips:
+            try:
+                network = ip_network(address)
+            except ValueError:
+                continue
+            if network.prefixlen == 0:
+                raise ValueError(
+                    "uvicorn_forwarded_allow_ips must not contain an all-address CIDR: "
+                    "it trusts forwarded headers from any peer."
+                )
 
         self.uvicorn_forwarded_allow_ips = allow_ips
         return self
@@ -1158,6 +1169,7 @@ class HeadServer(BaseServer):
     def run_webserver(cls) -> Tuple[uvicorn.Server, Thread, "HeadServer"]:  # pragma: no cover
         config = ServerClient.load_head_server_config()
         server = cls(config=config)
+        uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(get_global_config_dict())
 
         app = server.setup_webserver()
 
@@ -1165,6 +1177,8 @@ class HeadServer(BaseServer):
             app,
             host=server.config.host,
             port=server.config.port,
+            proxy_headers=uvicorn_proxy_cfg.uvicorn_proxy_headers,
+            forwarded_allow_ips=uvicorn_proxy_cfg.uvicorn_forwarded_allow_ips or [],
         )
         uvicorn_server = uvicorn.Server(config=config)
 

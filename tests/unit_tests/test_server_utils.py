@@ -892,6 +892,13 @@ class TestUvicornProxyHeadersConfig:
                 {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": ["10.0.0.1", "*"]}
             )
 
+    def test_all_address_networks_are_rejected(self) -> None:
+        for network in ("0.0.0.0/0", "::/0"):
+            with raises(ValidationError, match="must not contain an all-address CIDR"):
+                UvicornProxyHeadersConfig.model_validate(
+                    {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": [network]}
+                )
+
     def test_allowlist_is_normalized(self) -> None:
         config = UvicornProxyHeadersConfig.model_validate(
             {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": [" 10.0.0.1 ", "", "10.0.0.2"]}
@@ -1026,3 +1033,48 @@ class TestRunWebserverProxyKwargs:
     def test_enabling_without_allowlist_fails_startup(self, monkeypatch: MonkeyPatch) -> None:
         with raises(ValidationError, match="requires a non-empty uvicorn_forwarded_allow_ips"):
             self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_proxy_headers": True}, num_workers=1)
+
+
+class TestHeadServerProxyKwargs:
+    """The independently launched head server must use the same proxy-header policy."""
+
+    @staticmethod
+    def _capture_uvicorn_kwargs(monkeypatch: MonkeyPatch, config_dict: dict) -> dict:
+        monkeypatch.setattr(
+            ServerClient,
+            "load_head_server_config",
+            MagicMock(return_value=BaseServerConfig(host="127.0.0.1", port=11000)),
+        )
+        monkeypatch.setattr(
+            nemo_gym.server_utils,
+            "get_global_config_dict",
+            MagicMock(return_value=DictConfig(config_dict)),
+        )
+
+        captured: dict = {}
+
+        def capture_config(app, **kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr(nemo_gym.server_utils.uvicorn, "Config", capture_config)
+        monkeypatch.setattr(nemo_gym.server_utils.uvicorn, "Server", MagicMock(return_value=MagicMock()))
+        monkeypatch.setattr(nemo_gym.server_utils, "Thread", MagicMock(return_value=MagicMock()))
+
+        HeadServer.run_webserver()
+        return captured
+
+    def test_proxy_headers_are_disabled_by_default(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {})
+
+        assert kwargs["proxy_headers"] is False
+        assert kwargs["forwarded_allow_ips"] == []
+
+    def test_trusted_proxy_opt_in_is_forwarded(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(
+            monkeypatch,
+            {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": ["10.0.0.1"]},
+        )
+
+        assert kwargs["proxy_headers"] is True
+        assert kwargs["forwarded_allow_ips"] == ["10.0.0.1"]
