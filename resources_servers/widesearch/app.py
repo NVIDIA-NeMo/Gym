@@ -89,7 +89,10 @@ def extract_dataframe(text: str) -> pd.DataFrame | None:
             if "|" in line and not set(line.strip()).issubset(set("|- :"))
         ]
         if lines:
-            frame = pd.read_csv(StringIO("\n".join(lines)), sep="|")
+            try:
+                frame = pd.read_csv(StringIO("\n".join(lines)), sep="|")
+            except (pd.errors.EmptyDataError, pd.errors.ParserError):
+                continue
             return frame.loc[:, ~frame.columns.str.startswith("Unnamed")]
     return None
 

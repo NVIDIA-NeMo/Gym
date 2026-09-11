@@ -68,6 +68,10 @@ def test_extract_markdown_table_ignores_earlier_placeholder() -> None:
     assert frame.to_dict(orient="records") == [{"Name": "Alpha", "Rank": 1}]
 
 
+def test_extract_malformed_markdown_table_returns_none() -> None:
+    assert extract_dataframe("| Name | Rank |\n| --- | --- |\n| Alpha | 1 |\n| Beta | 2 | extra | more |") is None
+
+
 async def test_perfect_table_receives_official_strict_score() -> None:
     server = WideSearchServer(
         config=WideSearchConfig(
