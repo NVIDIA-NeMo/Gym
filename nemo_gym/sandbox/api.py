@@ -373,14 +373,21 @@ class SandboxPty:
 
 
 class AsyncSandbox:
-    """Async sandbox object backed by a runtime provider."""
+    """Async sandbox object backed by a runtime provider.
+
+    With ``owns_provider=False``, the caller closes the shared provider after
+    all of its sandboxes have stopped.
+    """
 
     def __init__(
         self,
         provider: Mapping[str, Any] | SandboxProvider,
         spec: SandboxSpec | None = None,
+        *,
+        owns_provider: bool = True,
     ) -> None:
         self._provider = create_provider(provider) if isinstance(provider, Mapping) else provider
+        self._owns_provider = owns_provider
         self._spec = spec
         self._handle: SandboxHandle | None = None
         self._stopped = True
@@ -417,6 +424,9 @@ class AsyncSandbox:
                 handle = await self._provider.create(requested_spec)
         else:
             handle = await self._provider.create(requested_spec)
+        self._handle = handle
+        self._spec = requested_spec
+        self._stopped = False
         try:
             if requested_spec.files:
                 with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
@@ -425,15 +435,10 @@ class AsyncSandbox:
                         source_path = tmp_path / f"file-{index}"
                         source_path.write_text(contents, encoding="utf-8")
                         await self._provider.upload_file(handle, source_path, target_path)
-        except Exception:
-            await self._provider.close(handle)
-            await self._provider.aclose()
-            self._closed = True
+        except BaseException:
+            await self.stop()
             raise
 
-        self._spec = requested_spec
-        self._handle = handle
-        self._stopped = False
         return self
 
     async def exec(
@@ -523,11 +528,13 @@ class AsyncSandbox:
             return
         try:
             if self._handle is not None and not self._stopped:
-                self._stopped = True
                 await self._provider.close(self._handle)
+                self._stopped = True
         finally:
-            await self._provider.aclose()
-            self._closed = True
+            if self._owns_provider:
+                await self._provider.aclose()
+                self._closed = True
+        self._closed = True
 
     async def serialize(self, *, scope: str | None = None) -> dict[str, Any]:
         """Return a JSON descriptor another process can rebuild this box from.
@@ -549,7 +556,9 @@ class AsyncSandbox:
         return descriptor
 
     @classmethod
-    async def connect(cls, descriptor: Mapping[str, Any] | Any, *, provider: SandboxProvider) -> "AsyncSandbox":
+    async def connect(
+        cls, descriptor: Mapping[str, Any] | Any, *, provider: SandboxProvider, owns_provider: bool = True
+    ) -> "AsyncSandbox":
         """Rebuild a sandbox in this process from a descriptor produced by
         :meth:`serialize`, using ``provider`` (which must support connect)."""
         if not isinstance(provider, ConnectableProvider):
@@ -559,7 +568,7 @@ class AsyncSandbox:
             descriptor = descriptor.to_dict()
         handle = await provider.connect(descriptor)
         workdir = descriptor.get("workdir") if isinstance(descriptor, Mapping) else None
-        sandbox = cls(provider, SandboxSpec(workdir=workdir))
+        sandbox = cls(provider, SandboxSpec(workdir=workdir), owns_provider=owns_provider)
         sandbox._handle = handle
         sandbox._stopped = False
         return sandbox

@@ -1,0 +1,245 @@
+---
+title: "Compose Services"
+description: "Run Docker Compose services through the asynchronous sandbox API."
+position: 9
+---
+
+# Compose Services
+
+`AsyncSandboxCompose` takes a Compose YAML file, validates its requirements,
+and starts each service through the sandbox API. It manages dependency order,
+health checks, service aliases, and shared volumes.
+
+## Start two services
+
+Install NeMo Gym's `sandbox` extra for the provider SDKs. The adapter reads YAML
+with Gym's existing PyYAML dependency. No Docker daemon, Compose executable, or
+additional Python packages are required on the creating server, including Slurm
+nodes. The adapter does not inspect images or contact an image registry; the
+sandbox provider pulls the configured images.
+
+Configure an [OpenSandbox provider](/infrastructure/sandbox/opensandbox) whose
+sandbox IPs can reach each other. The example images run as root so the provider
+can install service names in `/etc/hosts`.
+
+Save this as `compose.yaml`:
+
+```yaml
+services:
+  peer:
+    image: python:3.13-slim
+    entrypoint: [python3, -m, http.server, "8000"]
+    expose: ["8000"]
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000')"]
+      interval: 1s
+      retries: 30
+  main:
+    image: python:3.13-slim
+    entrypoint: [sleep, infinity]
+    working_dir: /tmp
+    depends_on:
+      peer:
+        condition: service_healthy
+```
+
+Save this as `run_compose.py`. Set `OPENSANDBOX_DOMAIN` and
+`OPENSANDBOX_API_KEY` for your deployment, then run `python run_compose.py`:
+
+```python
+import asyncio
+import os
+
+from nemo_gym.sandbox import AsyncSandboxCompose
+
+
+provider_config = {
+    "opensandbox": {
+        "connection": {
+            "domain": os.environ["OPENSANDBOX_DOMAIN"],
+            "api_key": os.environ["OPENSANDBOX_API_KEY"],
+            "use_server_proxy": True,
+            "transport_backend": "aiohttp",
+        },
+        "networking": {"enabled": True},
+        "operations": {"background_exec": True},
+    }
+}
+
+
+async def main():
+    async with AsyncSandboxCompose(provider_config, "compose.yaml") as collection:
+        result = await collection.services["main"].exec(
+            'python3 -c "import urllib.request; '
+            "print(urllib.request.urlopen('http://peer:8000').status)\""
+        )
+        if result.return_code:
+            raise RuntimeError(result.stderr or result.stdout)
+        print(result.stdout.strip())  # 200
+
+
+asyncio.run(main())
+```
+
+The adapter waits for `peer` to become healthy before starting `main`.
+`main` reaches `peer` directly by service name; this example needs no port
+forwarding. Leaving the context stops both services and closes the provider.
+Each entry in `collection.services` supports the normal `AsyncSandbox` API,
+including file transfer and `endpoint(port)`.
+
+## Pass the collection to another server
+
+Inside the creating server's active collection context, serialize all named
+services into a JSON-compatible payload:
+
+```python
+payload = await collection.serialize(scope="operate")
+```
+
+Send `payload` in your server request. The receiving server supplies its own
+provider configuration and reconnects without the YAML file or provisioning new sandboxes:
+
+```python
+from nemo_gym.sandbox import AsyncSandboxCompose
+
+
+async def use_collection(payload, provider_config):
+    connected = await AsyncSandboxCompose.connect(payload, provider=provider_config)
+    try:
+        result = await connected.services["main"].exec("pwd")
+        return result.stdout.strip()  # /tmp
+    finally:
+        # Call only after every consumer, including verification, has finished.
+        await connected.stop()
+```
+
+This uses the existing `ConnectableProvider` interface for every service.
+Working directories are preserved. `scope` is forwarded to providers that mint
+leases; OpenSandbox ignores it. Connection configuration is supplied separately.
+
+<Note>
+Keep the creating server's collection context alive until the receiving server
+finishes. The creator owns service processes, forwarding tasks, and managed-volume
+cleanup, and must also stop its collection. A connected collection's `stop()`
+uses the provider's normal sandbox-close semantics; on OpenSandbox, it deletes
+the connected service sandboxes. This is access to a running collection, not
+transfer of lifecycle ownership.
+</Note>
+
+## Input and deployment configuration
+
+On `start()`, the adapter loads the file with `yaml.safe_load` and validates its
+supported runtime requirements before creating services. It does not run Compose
+normalization, interpolate environment variables, read `.env` files, or merge
+Compose files. Resolve these inputs upstream.
+
+Use mappings for `environment` and `depends_on`, and long-form mappings for
+`ports` and `volumes`. Supply byte counts for `mem_limit` and `shm_size`, and
+resolved absolute bind paths. Strings are passed literally, including `$` and
+`$$`; write shell variables as `$VAR` rather than escaping them for Compose.
+
+The YAML must reference prebuilt images and contain no `build` entries. This is
+an adapter for launching task services through the sandbox API, with a supported
+subset of Compose behavior.
+
+Resolve each service's startup command upstream and include it as `entrypoint`,
+`command`, or both in the YAML. The adapter concatenates these arguments and
+rejects services without a command before provisioning. It does not inherit
+startup defaults from the image. Upstream preparation must also supply any
+required `working_dir` and `expose`/`ports` values.
+
+Health checks come from YAML and `CMD-SHELL` uses `/bin/sh`. Image environment
+variables remain the sandbox runtime's responsibility; YAML environment values
+are passed to the API. Images need a POSIX shell and basic utilities. Lifecycle
+and health commands use the image's default user unless YAML overrides it.
+Host-file configuration requires root access by default.
+
+Deployment-specific settings remain configurable:
+
+- `service_specs={name: SandboxSpec(...)}` supplies sandbox TTL, resources and
+  provider options. Compose values override corresponding spec fields.
+- `timeout_s` bounds startup; `poll_interval_s` controls startup polling.
+- `volume_init_image` selects the shared-volume helper image.
+
+## Networking and shared storage
+
+Providers must implement `SupportsSandboxNetwork`, including for single-service
+collections. OpenSandbox requires `networking.enabled=True` and mutually reachable
+sandbox IPs. Service names and aliases are installed in each sandbox's `/etc/hosts`.
+Client-facing proxy endpoints cannot substitute for direct service communication.
+
+For `network_mode: service:<name>`, OpenSandbox can opt into TCP loopback
+forwarding with `networking.loopback_forwarding=True`. This forwards the target's
+YAML-declared TCP ports on both `127.0.0.1` and `::1`. It provides the localhost
+connectivity used by these services; it does not create a shared Linux network
+namespace or forward UDP, undeclared ports, or reverse connections. Providers
+must implement `SupportsSandboxPortForwarding`. The forwarding interpreter is
+configurable through `networking.python_executable` (default `python3`).
+Forwarding requires `operations.background_exec=True`. If the image lacks the
+interpreter, `networking.setup_command` can install it before listeners start;
+setup failures stop collection startup.
+
+`cap_add` and `shm_size` require `SupportsSandboxRuntimeRequirements`.
+OpenSandbox's `runtime_requirements.capability_probes` maps capability names to
+commands that verify support already provided by the deployment. The adapter
+does not grant kernel capabilities. With `runtime_requirements.resize_shared_memory=True`,
+the provider checks `/dev/shm`, remounts it when necessary, and verifies the requested
+size. A deployment that denies the remount fails explicitly; the requested limit
+is never silently ignored.
+
+Volumes require `SupportsSandboxSharedStorage`. Configure OpenSandbox with
+`shared_storage={"host_path": "/mnt/shared/compose", "metadata": {}}`, using a path
+backed by storage shared across sandbox nodes and allowed by the server. Metadata
+can supply deployment-specific placement settings. No cluster or EFS paths are
+built into the adapter.
+
+Unmapped named volumes use a unique directory for the collection. Empty volumes
+receive the image mount target's contents unless `volume.nocopy` is set. These
+volumes are ephemeral: stopping the collection deletes its managed data.
+
+For existing data, supply `volume_sources={source: relative_shared_path}`. Keys
+are resolved absolute bind source paths or Compose named-volume keys; values
+are existing directories beneath the configured shared root. These directories
+are preserved on cleanup. Local bind data is not uploaded automatically.
+Read-only mounts remain read-only.
+
+## Optional Gym-specific extensions
+
+`x-sandbox` is a Gym adapter extension, not a standard Compose service option.
+Docker Compose permits [custom `x-` fields](https://docs.docker.com/reference/compose-file/extension/)
+and ignores their contents; only this adapter interprets the options below.
+The basic example above does not need them. These options support non-root
+services whose sandbox deployment cannot provide normal service-name resolution.
+
+A service that requires no injected host names can explicitly set
+`x-sandbox: {hosts: []}` in its YAML. This allows a non-root service to run without
+modifying `/etc/hosts`; other services still receive its alias. It opts that
+service out of peer-name resolution and must not be used when its workload needs
+those names.
+
+For services that connect through environment URLs, explicitly select variables
+whose service hostname should resolve to the sandbox IP:
+
+```yaml
+x-sandbox:
+  hosts: []
+  resolve_environment: [BROWSER_URL]
+environment:
+  BROWSER_URL: http://workspace:18073
+```
+
+Only selected URLs are rewritten, for the service process and its health checks.
+The URL must name a Compose service; credentials, port, path, query and fragment
+are preserved. This avoids host-file writes for non-root services. It does not
+provide DNS for other commands or rewrite hostnames embedded elsewhere.
+
+## Supported scope
+
+Supported fields include upstream-resolved commands, entrypoints, environment, working directory,
+users, CPU and memory limits, labels, default-network aliases, TCP endpoints,
+shared volumes, health checks, and all three required dependency conditions:
+`service_started`, `service_healthy`, and `service_completed_successfully`.
+
+Unsupported requirements fail explicitly, including builds, custom networks,
+unsupported network modes, restart policies, optional dependencies,
+`user:group`, fixed published ports, host IP bindings, and volume drivers or unsupported mount options.
