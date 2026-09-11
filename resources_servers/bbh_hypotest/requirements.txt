@@ -1,0 +1,3 @@
+-e nemo-gym[dev] @ ../../
+hypotest[opensandbox] @ git+https://github.com/EdisonScientific/hypotest.git@7e6274739d0b3430889b9702186927d5817170b5
+pillow==12.1.1

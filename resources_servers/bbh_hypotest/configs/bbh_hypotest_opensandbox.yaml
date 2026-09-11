@@ -1,0 +1,124 @@
+# BBH Hypotest environment backed by OpenSandbox. Deployments must provide the
+# task catalog and mounted capsule root, and bind the generic
+# bbh_hypotest_judge_model reference to a Responses API model server.
+bbh_hypotest_aviary_resources_server:
+  resources_servers:
+    bbh_hypotest:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      judge_model_server:
+        type: responses_api_models
+        name: bbh_hypotest_judge_model
+
+      dataset:
+        problem_jsonl: ???
+        capsule_dir: /tmp
+        capsule_pull: lazy
+        work_dir: /workspace
+        force_python: true
+        faithfulness_mode: "off"
+        cell_timeout_override_mode: "off"
+        cell_timeout_min: 60.0
+        cell_timeout_max: 1200.0
+        replace_image_payloads_with_placeholders: true
+        include_images_in_rubric_model: false
+        max_rubric_images: 0
+        rubric_notebook_serialization: legacy
+
+        rubric_model: openai/bbh_hypotest_judge_model
+        rubric_provider_debug_log: false
+        rubric_dispatch:
+          enabled: true
+          max_concurrency: 64
+          max_outstanding: 1024
+          first_attempt_reserved_slots: 16
+          retry_reserved_slots: 16
+          attempt_timeout_seconds: 1800
+          ready_queue_timeout_seconds: 5400
+          logical_timeout_seconds: 7200
+          max_attempts: 4
+          retry_backoff_initial_seconds: 10
+          retry_backoff_max_seconds: 60
+          retry_backoff_multiplier: 2
+        rubric_model_config:
+          router_kwargs:
+            routing_strategy: least-busy
+            num_retries: 0
+            timeout: 1800
+          model_list:
+            - model_name: openai/bbh_hypotest_judge_model
+              litellm_params:
+                model: openai/bbh_hypotest_judge_model
+                api_key: local-gym
+                base_url: "http://${bbh_hypotest_judge_model.responses_api_models.local_vllm_model.host}:${bbh_hypotest_judge_model.responses_api_models.local_vllm_model.port}/v1"
+                num_retries: 0
+                timeout: 1800
+                max_tokens: 32768
+                temperature: 0.7
+
+        use_ray: false
+        use_docker: false
+        use_enroot: false
+        container_sqsh_path: null
+        enable_recovery: true
+        pull_capsule_in_pod: true
+        opensandbox_spec:
+          image: ${oc.env:BBH_OPEN_SANDBOX_IMAGE,akomaragiri89904/hypotest-kernel:opensandbox-rlimit-20260731a}
+          # Null delegates connection discovery and defaults to the
+          # OpenSandbox SDK.
+          domain: null
+          api_key: null
+          protocol: null
+          use_server_proxy: true
+          capsule_mode: mounted_volume
+          mounted_capsule_root: ???
+          capsule_key: "{capsule_uuid}"
+          install_shim_enabled: false
+          kernel_memory_limit_mb: 57344
+          local_fallback_enabled: false
+          ttl_seconds: 5400
+          ready_timeout_seconds: 300
+          lifecycle_max_connections: 64
+          lifecycle_max_keepalive_connections: 32
+          lifecycle_create_concurrency: 64
+          kernel_max_connections: 256
+          kernel_max_keepalive_connections: 128
+          kernel_request_concurrency: 128
+          http_keepalive_expiry_seconds: 30
+          execution_poll_interval_seconds: 0.5
+          execution_poll_max_interval_seconds: 10
+          execution_poll_backoff_multiplier: 2
+          execution_poll_jitter_ratio: 0.2
+          execution_poll_request_timeout_seconds: 5
+          execution_poll_max_retries: null
+          image_pull_policy: IfNotPresent
+          platform_os: linux
+          platform_arch: amd64
+        execution_config:
+          safe_execute: false
+          cell_execution_timeout: 600
+          cell_timeout_recovery: interrupt
+          cell_interrupt_grace_seconds: 10
+          job_timeout: 3600
+          time_accounting:
+            mode: wall_clock
+          sandbox_cpu_request: 0.25
+          sandbox_memory_request_mb: 512
+          sandbox_cpu: 4
+          sandbox_memory_limit_mb: 65536
+          sandbox_ephemeral_storage_gib: 50
+
+bbh_hypotest_aviary_agent:
+  responses_api_agents:
+    aviary_agent:
+      entrypoint: app.py
+      max_steps: 100
+      return_transitions: false
+      resources_server:
+        type: resources_servers
+        name: bbh_hypotest_aviary_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_total_sequence_length: 131072
