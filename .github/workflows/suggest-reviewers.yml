@@ -23,10 +23,14 @@ permissions:
 jobs:
   suggest-reviewers:
     # TODO: pin to a released tag once NVIDIA-NeMo/FW-CI-templates#556 merges.
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_suggest_reviewers.yml@184d565744d754a3c3f1fc7437021c764891129a
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_suggest_reviewers.yml@90b8b8260830daa734f713a43f526902425eeab2
     with:
-      workflow_ref: 184d565744d754a3c3f1fc7437021c764891129a
-      app-id: ${{ vars.BOT_ID }}
+      workflow_ref: 90b8b8260830daa734f713a43f526902425eeab2
     secrets:
-      BOT_KEY: ${{ secrets.BOT_KEY }}
+      # Needed only for team-reviewer suggestions (individual-user suggestions
+      # work fine without it). Fine-grained PAT, repo access limited to this
+      # repo, "Pull requests: Read and write" + org "Members: Read-only".
+      # See _suggest_reviewers.yml's TEAM_REVIEWER_PAT description for why a
+      # PAT is required here instead of the default token or a GitHub App.
+      TEAM_REVIEWER_PAT: ${{ secrets.TEAM_REVIEWER_PAT }}
       SLACK_TEAM_CHANNEL_WEBHOOK: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
