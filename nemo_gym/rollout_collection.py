@@ -52,6 +52,7 @@ from nemo_gym.config_types import (
     UploadRolloutsConfigMixin,
 )
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
+from nemo_gym.failure_routing import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
@@ -144,9 +145,6 @@ logger = logging.getLogger(__name__)
 #     retried regardless of attempt count.
 # ---------------------------------------------------------------------------
 
-NG_FAILURE_CLASS_KEY = "_ng_failure_class"
-NG_NO_PERSIST_KEY = "_ng_no_persist"
-NG_TERMINAL_KEY = "_ng_failure_terminal"
 AGENT_REQUEST_FAILED_FAILURE_CLASS = "agent_request_failed"
 AGENT_RUN_ERROR_FAILURE_CLASS = "agent_run_error"
 _NO_RESULT_FAILURE_CLASSES = frozenset({AGENT_REQUEST_FAILED_FAILURE_CLASS, AGENT_RUN_ERROR_FAILURE_CLASS})
