@@ -464,6 +464,38 @@ class TestDiscriminatedResponseItems:
 
 
 class TestNeMoGymChatCompletionSchemas:
+    @pytest.mark.parametrize("field", ["reasoning_content", "reasoning"])
+    def test_thinking_tool_history_survives_streaming_validation(self, field):
+        from nemo_gym.chat_streaming import sanitize_streaming_chat_body
+
+        payload = {
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "model": "deepseek-v4-flash",
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "max",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    field: "Inspect the file.",
+                    "tool_calls": [
+                        {"id": "call-1", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+                    ],
+                }
+            ],
+        }
+        cleaned, include_usage = sanitize_streaming_chat_body(payload)
+        result = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(cleaned).model_dump(exclude_unset=True)
+        assert include_usage
+        assert result["messages"] == payload["messages"]
+        assert result["thinking"] == {"type": "enabled"}
+        assert result["reasoning_effort"] == "max"
+
+    def test_thinking_configuration_still_validates_its_wire_values(self):
+        with pytest.raises(ValueError):
+            NeMoGymChatCompletionCreateParamsNonStreaming(messages=[], thinking={"type": "invalid"})
+
     def test_user_audio_and_file_content_parts_round_trip(self) -> None:
         payload = {
             "messages": [
@@ -1621,12 +1653,12 @@ def test_request_model_carries_every_sdk_request_field() -> None:
 
 
 def test_chat_request_field_set_matches_sdk_without_deprecated_fields() -> None:
-    """Keep the strict Chat request model aligned with the supported SDK fields.
+    """Keep the strict Chat request model aligned with SDK fields and Gym extensions.
 
     Deprecated fields remain disabled.
     """
     sdk_fields = set(get_type_hints(CompletionCreateParamsNonStreaming, include_extras=True))
-    expected = sdk_fields - {"function_call", "functions"}
+    expected = (sdk_fields - {"function_call", "functions"}) | {"thinking"}
     actual = set(NeMoGymChatCompletionCreateParamsNonStreaming.model_fields)
     assert actual == expected, (
         f"openai {openai.__version__} Chat request fields changed: "
