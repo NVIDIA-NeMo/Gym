@@ -78,6 +78,7 @@ C4, `V` evaluates the correlated Gym Model Server path; direct-provider alternat
 | `langgraph_agent` | X | X | X | X | X | X | X |
 | `mini_swe_agent` | X | X | X | X | X | X | X |
 | `mini_swe_agent_2` | V | V | X | V | X | X | X |
+| `nooa_agent` | V | V | X | V | V | O | V |
 | `non_executing_simple_agent` | V | V | X | V | X | X | X |
 | `openclaw_agent` | V | V | X | O | V | V | V |
 | `opencode_agent` | V | V | X | V | V | V | V |
@@ -112,4 +113,9 @@ C4, `V` evaluates the correlated Gym Model Server path; direct-provider alternat
   decoupled path composes agent observations with verifier-sandbox evidence returned by its resources server.
 - Legacy OpenHands retains one cumulative root conversation, so its model-visible history remains partial. Its pinned
   fork does not route model calls through a rollout-prefixed Gym Model Server endpoint.
+- NOOA coverage was measured with the embedded `WeatherAgent` and `example_single_tool_call`: two model calls were
+  joined by exact response ID, token accounting was complete, and the semantic Resources call included output,
+  status, and independent timing. NOOA exports model-visible conversation history but not normalized turn records,
+  so C3 is unavailable. C6 is path-dependent because generated code can issue concurrent resource calls, while the
+  measured rollout used one call.
 - C7 requires standardized agent-side trajectory evidence; model HTTP capture alone does not satisfy it.

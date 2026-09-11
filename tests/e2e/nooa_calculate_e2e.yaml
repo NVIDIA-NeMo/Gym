@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - responses_api_agents/nooa_agent/configs/nooa_calculate_capability.yaml
+  - resources_servers/nooa_capability/configs/nooa_capability.yaml
+  - responses_api_models/openai_model/configs/openai_model.yaml
+
+policy_base_url: http://127.0.0.1:18080/v1
+policy_api_key: not-a-real-key # pragma: allowlist secret
+policy_model_name: deterministic-nooa
+skip_venv_if_present: ${oc.env:NOOA_E2E_SKIP_VENV,false}
+observability_enabled: true
+model_call_capture_dir: ${oc.env:NOOA_E2E_CAPTURE_DIR}

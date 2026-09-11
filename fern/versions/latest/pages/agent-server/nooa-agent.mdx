@@ -1,0 +1,229 @@
+---
+title: "Run NOOA agents"
+description: "Embed an existing NOOA agent while Gym owns model routing, resource tools, verification, and trajectory evidence"
+position: 5
+---
+
+# Run NOOA agents
+
+The NOOA agent server runs an ordinary [`nooa.Agent`](https://github.com/NVIDIA-NeMo/labs-OO-Agents)
+inside the Gym agent process. Gym remains authoritative for model inference, environment tools, session
+state, verification, rewards, and rollout observability.
+
+<Warning>
+Embedded NOOA classes are trusted Python code. The current runner does not provide process or package
+isolation. Only load agent classes you trust.
+</Warning>
+
+## How it works
+
+For `/run`, Gym passes the complete dataset row to the adapter. The adapter seeds the Resources server
+session, maps row fields to the configured NOOA method, constructs a fresh agent with a Gym-backed LLM,
+and attaches the row's function tools under the configured semantic namespace (for example, `self.weather`). After execution, Gym projects the model
+and resource evidence into a Responses object, asks the Resources server to verify it, and writes reward
+and trajectory attachments.
+
+All NOOA policy calls use Gym's Responses-compatible Model Server path. The adapter does not use
+NOOA/LiteLLM's HTTP transport. During each rollout, a scoped NOOA `InstrumentationHooks` observer projects
+NOOA-owned call IDs and parent relationships into Gym observation schemas. It composes with native
+OpenInference tracing and is removed automatically when the rollout exits; Gym does not reconstruct a
+second lifecycle from NOOA events.
+
+## Run the included example
+
+The included `WeatherAgent` uses the `example_single_tool_call` Resources server. Start the composed
+servers with your preferred Gym model:
+
+```bash
+gym env start \
+  --config responses_api_agents/nooa_agent/configs/nooa_agent.yaml \
+  --resources-server example_single_tool_call \
+  --model-type openai_model
+```
+
+In another terminal, collect the included validation row:
+
+```bash
+gym eval run --no-serve \
+  --config responses_api_agents/nooa_agent/configs/nooa_agent.yaml \
+  --resources-server example_single_tool_call \
+  --model-type openai_model \
+  --agent nooa_agent \
+  --input responses_api_agents/nooa_agent/data/example.jsonl \
+  --output results/nooa-example.jsonl \
+  --limit 1
+```
+
+The model-generated code calls `self.weather.get_weather(...)`; Gym routes that call to the Resources
+server and verifies the projected answer.
+
+### Run the NOOA capability smoke evaluation
+
+The repository also includes a Gym-native copy of NOOA's `calculate_simple` capability fixture. It maps
+the original typed `CalculateSingleAgent.calculate(a, b, calculation)` method into Gym rows and uses the
+`nooa_capability` Resources server to preserve NOOA v0.0.9 `ExactMatchScorer` semantics. See the
+[capability evaluation README](../../../../../responses_api_agents/nooa_agent/capabilities/README.md) for
+commands, provenance, and the staged expansion plan.
+
+To collect model-call observability in an all-in-one run, provide a writable capture directory:
+
+```bash
+gym eval run \
+  --config responses_api_agents/nooa_agent/configs/nooa_agent.yaml \
+  --resources-server example_single_tool_call \
+  --model-type openai_model \
+  --agent nooa_agent \
+  --split validation \
+  --output results/nooa-observable.jsonl \
+  +observability_enabled=true \
+  +model_call_capture_dir=results/nooa-model-calls
+```
+
+## Configure an existing NOOA agent
+
+Make the module containing your agent importable in the `nooa_agent` environment. Add its dependency to
+`responses_api_agents/nooa_agent/requirements.txt`, or package the adapter and your agent together when
+using an external component search path. The current pinned NOOA implementation supports Python 3.12–3.13;
+use Gym's pinned Python 3.13 for the agent server environment.
+
+Reference the class and generated async method from a config overlay:
+
+```yaml
+feedback_nooa:
+  responses_api_agents:
+    nooa_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: feedback_environment
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      nooa:
+        agent_class: my_agents.feedback:FeedbackAgent
+        entrypoint: analyze_feedback
+        init_kwargs:
+          language: en
+        tool_namespace: feedback
+        arguments:
+          text:
+            source: responses_create_params.input
+            transform: latest_user_text
+          customer_id:
+            source: customer_id
+            transform: identity
+      max_steps: 10
+      concurrency: 8
+      run_timeout_secs: 600
+```
+
+At startup, the adapter verifies that:
+
+- `agent_class` imports and subclasses `nooa.Agent`;
+- `entrypoint` is an async generated method;
+- constructor arguments are valid, with Gym supplying `llm`;
+- every required method argument has a mapping and unknown arguments are rejected; and
+- every source path and transform is valid.
+
+Gym always injects its LLM instance, even if the class declares another default.
+
+## Write a new agent
+
+Write a normal typed NOOA agent. Environment actions belong in the Gym Resources server, not in a
+provider-specific client:
+
+```python
+from nooa import Agent, CodeActStrategy, strategy
+
+
+class FeedbackAgent(Agent):
+    @strategy(CodeActStrategy())
+    async def analyze_feedback(self, text: str, customer_id: str) -> str:
+        """Look up the customer with self.feedback.get_customer, then analyze the feedback."""
+
+        ...
+```
+
+Keep dataset rows agent-independent:
+
+```json
+{
+  "responses_create_params": {
+    "input": [{"role": "user", "content": "The checkout was confusing."}],
+    "tools": [{
+      "type": "function",
+      "name": "get_customer",
+      "description": "Get customer context",
+      "parameters": {
+        "type": "object",
+        "properties": {"customer_id": {"type": "string"}},
+        "required": ["customer_id"],
+        "additionalProperties": false
+      },
+      "strict": true
+    }]
+  },
+  "customer_id": "customer-42"
+}
+```
+
+Do not add a NOOA-specific argument envelope or put verifier answers in mapped fields.
+
+## Argument mappings
+
+A source is a dot-separated path into the complete `/run` row. Sequence indexes are supported.
+
+- `identity` returns the resolved value unchanged.
+- `latest_user_text` extracts text from the last user message in Responses input.
+- `normalize_responses_input` converts Responses models to ordinary Python values.
+
+Mappings cannot read `verifier_metadata`, `agent_ref`, response/reward fields, or private Gym routing
+fields. Missing fields produce an actionable rollout error that identifies the path and segment.
+
+The direct `/v1/responses` endpoint constructs a row containing only `responses_create_params`. It is
+therefore available only when every configured source is under that field; otherwise it returns a clear
+missing-source error. Use `/run` for mappings such as `customer_id`.
+
+## Generated Gym tools
+
+Each strict Responses function tool becomes an async method at
+`self.<tool_namespace>.<function_name>(...)`. The namespace name is trusted configuration, not row data. Its public methods use positional-or-keyword Python signatures generated from closed object schemas (`additionalProperties: false`); control endpoints and invalid Python identifiers are rejected. Transport clients, cookies, and observation state stay off the public object. The proxy:
+
+- validates arguments against the advertised object JSON Schema;
+- carries the rollout's Resources server cookie jar;
+- returns resource failures as model-visible structured results;
+- records semantic function call and output items plus status and timing; and
+- rejects duplicate, private, invalid, or colliding method names.
+
+The initial adapter supports function tools with object schemas. Built-in and non-function Responses
+tools are rejected.
+
+## Training and observability
+
+Model-authored Responses items remain in generation order with their prompt token IDs, generation token
+IDs, log probabilities, routed-expert metadata, and response IDs when the selected Gym Model Server
+provides them. Exact prior model outputs are restored into later NOOA policy requests, preserving
+multi-turn on-policy metadata. The projected output is accepted by Gym's Responses-to-training
+conversion path.
+
+With model-call capture enabled, rollout collection joins each NOOA model reference to its captured
+request by exact response ID. Resource calls include output, status, timestamps, and duration.
+
+NOOA's typed method return is the authoritative benchmark answer. If the last completed model-authored
+message is not an exact textual representation of that value, the adapter appends a synthetic assistant
+message and records `non_trainable_terminal_output`. Earlier model-authored items remain training evidence;
+the synthetic terminal item does not carry model token metadata.
+
+## Limits and troubleshooting
+
+- `max_steps` is the total model-call budget for one NOOA rollout, including nested generated calls.
+- `run_timeout_secs` bounds NOOA execution. Seed and verification are outside that episode budget;
+  downstream timeout failures remain retryable infrastructure failures.
+- Each rollout gets a fresh agent, scoped hook observer, LLM, semantic tool namespace, and separate model
+  and resource cookie jars. When response cookies share a name, the resource-side value wins.
+- NOOA currently depends on a newer LiteLLM package whose OpenAI requirement exceeds Gym's tested SDK
+  window. `overrides.txt` intentionally keeps Gym's OpenAI version because this adapter bypasses
+  LiteLLM transport. Do not remove the override without running Gym's OpenAI schema tests.
+- If startup reports a class, constructor, or signature error, fix the configuration before collecting
+  rollouts. Tool and model failures occur during a rollout and are reported through Gym's failure
+  routing.
