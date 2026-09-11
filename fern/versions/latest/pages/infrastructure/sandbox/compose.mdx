@@ -133,8 +133,7 @@ transfer of lifecycle ownership.
 On `start()`,
 the adapter runs `docker-compose config --format yaml` to resolve the YAML,
 including interpolation, `.env` values and relative paths. Compose validates
-its schema. YAML output retains `x-sandbox` extensions that the JSON formatter
-omits; the adapter only deserializes this normalized output. It rejects requirements the sandbox API cannot honor
+its schema; the adapter deserializes this normalized output. It rejects requirements the sandbox API cannot honor
 before creating services. It does not invoke `docker compose up`.
 
 The YAML must reference prebuilt images and contain no `build` entries. This is
@@ -182,28 +181,6 @@ Forwarding requires `operations.background_exec=True`. If the image lacks the
 interpreter, `networking.setup_command` can install it before listeners start;
 setup failures stop collection startup.
 
-A service that requires no injected host names can explicitly set
-`x-sandbox: {hosts: []}` in its YAML. This allows a non-root service to run without
-modifying `/etc/hosts`; other services still receive its alias. It opts that
-service out of peer-name resolution and must not be used when its workload needs
-those names.
-
-For services that connect through environment URLs, explicitly select variables
-whose service hostname should resolve to the sandbox IP:
-
-```yaml
-x-sandbox:
-  hosts: []
-  resolve_environment: [BROWSER_URL]
-environment:
-  BROWSER_URL: http://workspace:18073
-```
-
-Only selected URLs are rewritten, for the service process and its health checks.
-The URL must name a Compose service; credentials, port, path, query and fragment
-are preserved. This avoids host-file writes for non-root services. It does not
-provide DNS for other commands or rewrite hostnames embedded elsewhere.
-
 `cap_add` and `shm_size` require `SupportsSandboxRuntimeRequirements`.
 OpenSandbox's `runtime_requirements.capability_probes` maps capability names to
 commands that verify support already provided by the deployment. The adapter
@@ -228,14 +205,43 @@ are existing directories beneath the configured shared root. These directories
 are preserved on cleanup. Local bind data is not uploaded automatically.
 Read-only mounts remain read-only.
 
+## Optional Gym-specific extensions
+
+`x-sandbox` is a Gym adapter extension, not a standard Compose service option.
+Docker Compose permits [custom `x-` fields](https://docs.docker.com/reference/compose-file/extension/)
+and ignores their contents; only this adapter interprets the options below.
+The basic example above does not need them. These options support non-root
+services whose sandbox deployment cannot provide normal service-name resolution.
+
+A service that requires no injected host names can explicitly set
+`x-sandbox: {hosts: []}` in its YAML. This allows a non-root service to run without
+modifying `/etc/hosts`; other services still receive its alias. It opts that
+service out of peer-name resolution and must not be used when its workload needs
+those names.
+
+For services that connect through environment URLs, explicitly select variables
+whose service hostname should resolve to the sandbox IP:
+
+```yaml
+x-sandbox:
+  hosts: []
+  resolve_environment: [BROWSER_URL]
+environment:
+  BROWSER_URL: http://workspace:18073
+```
+
+Only selected URLs are rewritten, for the service process and its health checks.
+The URL must name a Compose service; credentials, port, path, query and fragment
+are preserved. This avoids host-file writes for non-root services. It does not
+provide DNS for other commands or rewrite hostnames embedded elsewhere.
+
 ## Supported scope
 
-Supported fields include image commands, entrypoints, environment, working directory,
+Supported fields include upstream-resolved commands, entrypoints, environment, working directory,
 users, CPU and memory limits, labels, default-network aliases, TCP endpoints,
 shared volumes, health checks, and all three required dependency conditions:
 `service_started`, `service_healthy`, and `service_completed_successfully`.
 
 Unsupported requirements fail explicitly, including builds, custom networks,
 unsupported network modes, restart policies, optional dependencies,
-`user:group`, unsetting inherited image environment variables, fixed published
-ports, host IP bindings, and volume drivers or unsupported mount options.
+`user:group`, fixed published ports, host IP bindings, and volume drivers or unsupported mount options.
