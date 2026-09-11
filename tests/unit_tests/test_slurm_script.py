@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -333,6 +334,26 @@ def test_render_driver_entrypoint_install_and_prepare():
     assert "checkout v1.0" in out
     assert "gym eval prepare" in out
     assert 'exec "$@"' in out
+
+
+def test_render_driver_entrypoint_prepare_arg_with_spaces_survives_the_shell():
+    """A prepare argument containing spaces must reach Hydra as ONE word.
+
+    The entrypoint body is embedded in a single-quoted `bash -c '...'`, so an
+    inner single quote ends the outer string instead of nesting. Without
+    escaping, gdpval's real prepare argument word-split and Hydra failed with
+    "no viable alternative at input '[{num_tasks:'". Asserting on the rendered
+    string would not catch that -- only running it through a shell does.
+    """
+    arg = "+multistage.stages=[{num_tasks: 45, waivable: [timeout, transient]}]"
+    out = render_driver_entrypoint(None, None, f"printf '%s\\n' {shlex.quote(arg)}")
+
+    script = out.replace('exec "$@"', ":").replace('"${GYM_CMD[@]}"', "''")
+    printed = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+
+    assert printed == [arg]
 
 
 # ---------------------------------------------------------------------------

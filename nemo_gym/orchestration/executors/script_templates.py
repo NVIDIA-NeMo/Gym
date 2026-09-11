@@ -160,4 +160,14 @@ def render_driver_entrypoint(
 
     preamble.append('exec "$@"')
     body = "\n    ".join(preamble)
+    # The body goes inside a single-quoted `bash -c '...'`, and POSIX shells do
+    # not nest single quotes: an inner quote ENDS the outer string rather than
+    # nesting in it. So every argument shlex.quote() had to quote -- which is
+    # every value containing a space -- would break out and word-split. A real
+    # run died exactly here: gdpval's prepare passes
+    # `+multistage.stages=[{num_tasks: 45, ...}]`, the shell handed Hydra just
+    # `+multistage.stages=[{num_tasks:`, and Hydra reported "no viable
+    # alternative at input '[{num_tasks:'". The replacement below is the
+    # standard end-quote / literal-quote / reopen-quote dance.
+    body = body.replace("'", "'\"'\"'")
     return f"bash -c '\n    {body}\n' -- \"${{GYM_CMD[@]}}\""
