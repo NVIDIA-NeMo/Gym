@@ -26,12 +26,15 @@ Prepare the pinned dataset:
 python benchmarks/injecagent/prepare.py
 ```
 
-Then use the standard external model endpoint configuration:
+Then use any OpenAI-compatible model endpoint through NeMo Gym's inference-provider model server:
 
 ```bash
-gym eval run --config benchmarks/injecagent/config.yaml \
-  --agent injecagent_benchmark \
-  --input benchmarks/injecagent/data/injecagent_base.jsonl \
+gym eval run --benchmark injecagent \
+  --model-type inference_provider \
+  --model "$POLICY_MODEL_NAME" \
+  --model-url "$POLICY_MODEL_BASE_URL" \
+  --model-api-key "$POLICY_MODEL_API_KEY" \
+  --split benchmark \
   --output results/injecagent.jsonl
 ```
 
