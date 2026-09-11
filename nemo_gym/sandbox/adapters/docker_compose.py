@@ -14,7 +14,6 @@ import tempfile
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from functools import partial
 from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 from typing import Any
@@ -74,8 +73,6 @@ class AsyncSandboxCompose:
         compose_file: str | Path | None,
         *,
         compose_command: Sequence[str] = ("docker-compose",),
-        image_platform: str = "linux/amd64",
-        registry_options: Mapping[str, Any] | None = None,
         service_specs: Mapping[str, SandboxSpec] | None = None,
         timeout_s: float = 1200,
         poll_interval_s: float = 0.5,
@@ -86,11 +83,6 @@ class AsyncSandboxCompose:
         self.compose_file = Path(compose_file).resolve() if compose_file is not None else None
         self.compose_command = tuple(compose_command)
         self.document: dict[str, Any] = {}
-        self._image_configs: dict[str, Any] = {}
-        self.image_platform = image_platform
-        if len(image_platform.split("/")) not in (2, 3) or not all(image_platform.split("/")):
-            raise ValueError("image_platform must be os/architecture[/variant]")
-        self.registry_options = dict(registry_options or {})
         self.service_specs = dict(service_specs or {})
         self.timeout_s = timeout_s
         self.poll_interval_s = poll_interval_s
@@ -108,39 +100,6 @@ class AsyncSandboxCompose:
         self._stop_task: asyncio.Task | None = None
         self._processes: dict[str, asyncio.Task] = {}
         self._seeds: list[AsyncSandbox] = []
-
-    def _inspect_image(self, image: str) -> dict:
-        from oras.container import Container
-        from oras.provider import Registry
-
-        container = Container(image)
-        if container.registry in {"docker.io", "index.docker.io"}:
-            container.registry = "registry-1.docker.io"
-            container.namespace = container.namespace or "library"
-        platform = dict(zip(("os", "architecture", "variant"), self.image_platform.split("/")))
-        client = Registry(**self.registry_options)
-        # ORAS shares this session with its authentication backend.
-        client.session.request = partial(client.session.request, timeout=self.timeout_s)
-        try:
-            manifest = client.get_manifest(container)
-            if "manifests" in manifest:
-                candidates = [
-                    item
-                    for item in manifest["manifests"]
-                    if all(item.get("platform", {}).get(key) == value for key, value in platform.items())
-                ]
-                if len(candidates) != 1:
-                    raise ValueError(f"Image {image!r} needs one manifest for {self.image_platform!r}")
-                container.digest = candidates[0]["digest"]
-                manifest = client.get_manifest(container)
-            with client.get_blob(container, manifest["config"]["digest"]) as response:
-                response.raise_for_status()
-                config = response.json()
-            if any(config.get(key) != value for key, value in platform.items() if key != "variant"):
-                raise ValueError(f"Image {image!r} does not match {self.image_platform!r}")
-            return config["config"]
-        finally:
-            client.session.close()
 
     async def _normalize(self):
         raw = await _command([*self.compose_command, "-f", str(self.compose_file), "config", "--format", "yaml"])
@@ -296,26 +255,15 @@ class AsyncSandboxCompose:
     async def _prepare(self):
         for name, service in self.document["services"].items():
             image = service["image"]
-            entrypoint = service.get("entrypoint")
-            image_config = {}
-            if entrypoint is None:
-                if image not in self._image_configs:
-                    self._image_configs[image] = await asyncio.to_thread(self._inspect_image, image)
-                image_config = self._image_configs[image]
-            command = service.get("command")
-            if entrypoint is None:
-                entrypoint = image_config.get("Entrypoint") or []
-                if command is None:
-                    command = image_config.get("Cmd") or []
-            elif command is None:
-                command = []
+            entrypoint = service.get("entrypoint") or []
+            command = service.get("command") or []
             if isinstance(entrypoint, str):
                 entrypoint = shlex.split(entrypoint)
             if isinstance(command, str):
                 command = shlex.split(command)
             argv = list(entrypoint) + list(command or [])
             if not argv:
-                raise ValueError(f"Service {name!r}: image and Compose specify no command")
+                raise ValueError(f"Service {name!r}: resolve entrypoint or command upstream before starting Compose")
             env = {key: str(value) for key, value in (service.get("environment") or {}).items() if value is not None}
             for key in (service.get("x-sandbox") or {}).get("resolve_environment", []):
                 url = urlsplit(env.get(key, ""))
@@ -339,11 +287,6 @@ class AsyncSandboxCompose:
             if not isinstance(health.get("retries", 3), int) or health.get("retries", 3) < 1:
                 raise ValueError(f"Service {name!r}: healthcheck retries must be positive")
             ports = [int(str(port).removesuffix("/tcp")) for port in service.get("expose", [])]
-            ports += [
-                int(port.removesuffix("/tcp"))
-                for port in image_config.get("ExposedPorts", {})
-                if port.endswith("/tcp")
-            ]
             ports += [int(port["target"]) for port in service.get("ports", [])]
             spec = self.service_specs.get(name, SandboxSpec(ttl_s=self.timeout_s + 3600))
             resources = dict(vars(spec.resources))
@@ -367,7 +310,7 @@ class AsyncSandboxCompose:
                     spec,
                     image=image,
                     env={**spec.env, **env},
-                    workdir=service.get("working_dir", image_config.get("WorkingDir") or spec.workdir),
+                    workdir=service.get("working_dir", spec.workdir),
                     resources=resources,
                     ports=tuple(dict.fromkeys(ports)),
                     entrypoint=["/bin/sh", "-c", "while :; do sleep 3600; done"],

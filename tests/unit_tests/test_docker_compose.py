@@ -16,14 +16,17 @@ from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle
 pytestmark = pytest.mark.sandbox
 
 
-def make_compose(provider, document, *, image_configs=None, **kwargs):
-    """Stub external normalization/inspection for focused lifecycle tests."""
+def make_compose(provider, document, *, default_command=None, **kwargs):
+    """Supply normalized YAML and optional commands for focused lifecycle tests."""
     from unittest.mock import AsyncMock
 
     from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
 
     group = AsyncSandboxCompose(provider, "compose.yaml", **kwargs)
-    group._image_configs = dict(image_configs or {})
+    if default_command is not None:
+        for service in document["services"].values():
+            if not service.get("entrypoint"):
+                service.setdefault("command", default_command)
     group.document = document
     group._normalize = AsyncMock(return_value=document)
     return group
@@ -190,9 +193,7 @@ async def test_health_and_completed_dependency_gate_real_processes(tmp_path):
         }
     }
     provider = ShellProvider()
-    async with make_compose(
-        provider, document, image_configs={"image": {"Cmd": ["false"]}}, poll_interval_s=0.01
-    ) as group:
+    async with make_compose(provider, document, default_command=["false"], poll_interval_s=0.01) as group:
         await group._wait("app", "service_completed_successfully")
         assert result.read_text() == "compose"
     assert provider.closed == ["3", "2", "1"]
@@ -214,7 +215,6 @@ async def test_failed_one_shot_prevents_dependent_start_and_cleans_up(tmp_path):
                 },
             }
         },
-        image_configs={"image": {}},
         poll_interval_s=0.01,
     )
     with pytest.raises(RuntimeError, match="exited.*7"):
@@ -224,7 +224,7 @@ async def test_failed_one_shot_prevents_dependent_start_and_cleans_up(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_explicit_entrypoint_clears_image_command_and_argv_preserves_empty(tmp_path):
+async def test_explicit_entrypoint_preserves_empty_arguments(tmp_path):
     output = tmp_path / "output"
     provider = ShellProvider()
     group = make_compose(
@@ -237,7 +237,6 @@ async def test_explicit_entrypoint_clears_image_command_and_argv_preserves_empty
                 }
             }
         },
-        image_configs={"image": {"Cmd": ["incorrect"]}},
         poll_interval_s=0.01,
     )
     async with group:
@@ -256,7 +255,7 @@ async def test_invalid_health_dependency_rejected_before_provisioning():
                 "app": {"image": "image", "depends_on": {"db": {"condition": "service_healthy"}}},
             }
         },
-        image_configs={"image": {"Cmd": ["sleep", "1"]}},
+        default_command=["sleep", "1"],
     )
     with pytest.raises(ValueError, match="no healthcheck"):
         await group.start()
@@ -285,7 +284,7 @@ async def test_collection_closes_provider_only_after_all_sandboxes(tmp_path):
                 "two": {"image": "image"},
             }
         },
-        image_configs={"image": {"Cmd": ["sleep", ".1"]}},
+        default_command=["sleep", ".1"],
     ):
         assert not provider.shutdown
     assert provider.closed == ["2", "1"]
@@ -314,7 +313,7 @@ async def test_cancelled_cleanup_finishes_every_member():
                 "two": {"image": "image"},
             }
         },
-        image_configs={"image": {"Cmd": ["sleep", ".1"]}},
+        default_command=["sleep", ".1"],
         poll_interval_s=0.01,
     )
     await group.start()
@@ -343,7 +342,7 @@ async def test_failed_cleanup_can_be_retried():
     group = make_compose(
         provider,
         {"services": {"one": {"image": "image"}}},
-        image_configs={"image": {"Cmd": ["sleep", ".1"]}},
+        default_command=["sleep", ".1"],
         poll_interval_s=0.01,
     )
     await group.start()
@@ -370,7 +369,7 @@ async def test_single_service_receives_its_name_and_alias():
                 }
             }
         },
-        image_configs={"image": {"Cmd": ["sleep", ".1"]}},
+        default_command=["sleep", ".1"],
         poll_interval_s=0.01,
     ):
         assert provider.hosts == {"one": "192.0.2.1", "self-name": "192.0.2.1"}
@@ -416,7 +415,7 @@ async def test_volume_helper_create_failure_preserves_error_and_closes_provider(
             },
             "volumes": {"data": {}},
         },
-        image_configs={"app": {"Cmd": ["true"]}},
+        default_command=["true"],
     )
     with pytest.raises(RuntimeError, match="volume helper unavailable"):
         await group.start()
@@ -424,7 +423,7 @@ async def test_volume_helper_create_failure_preserves_error_and_closes_provider(
 
 
 @pytest.mark.asyncio
-async def test_yaml_input_normalizes_environment_and_runs_services(tmp_path, monkeypatch):
+async def test_yaml_input_normalizes_environment_and_runs_services(tmp_path):
     import shutil
 
     import yaml
@@ -453,7 +452,6 @@ async def test_yaml_input_normalizes_environment_and_runs_services(tmp_path, mon
     )
     provider = ShellProvider()
     provider.set_hosts = AsyncMock(side_effect=AssertionError("explicit host opt-out was lost"))
-    monkeypatch.setattr(AsyncSandboxCompose, "_inspect_image", lambda *args: {})
     async with AsyncSandboxCompose(
         provider,
         path,
@@ -507,7 +505,6 @@ async def test_compose_cli_normalization_decodes_literal_dollars_and_empty_ipam(
     )
     compose.document = await compose._normalize()
     assert compose.document["services"]["app"].pop("shm_size") == 1073741824
-    compose._image_configs = {"alpine": {}}
     await compose._prepare()
     assert shlex.split(compose._plans["app"]["command"])[2] == 'echo $HOME "${FOO}"'
     assert compose._plans["app"]["spec"].env["FOO"] == "$literal"
@@ -539,7 +536,7 @@ async def test_cancel_during_initial_file_upload_deletes_created_service():
     group = make_compose(
         provider,
         {"services": {"app": {"image": "image"}}},
-        image_configs={"image": {"Cmd": ["true"]}},
+        default_command=["true"],
         service_specs={"app": SandboxSpec(files={"/input": "data"})},
     )
     starting = asyncio.create_task(group.start())
@@ -592,7 +589,7 @@ async def test_failed_volume_seed_delete_is_retried_by_collection_cleanup():
             },
             "volumes": {"data": {}},
         },
-        image_configs={"image": {"Cmd": ["true"]}},
+        default_command=["true"],
     )
     with pytest.raises(RuntimeError, match="temporary seed deletion failure"):
         await group.start()
@@ -656,7 +653,7 @@ async def test_external_command_cancellation_reaps_child(tmp_path):
         ({"healthcheck": {"test": ["CMD", "true"], "retries": 0}}, "retries"),
         ({"healthcheck": {"test": ["BAD", "true"]}}, "invalid healthcheck"),
         ({"image": ""}, "requires a prebuilt image"),
-        ({"entrypoint": [], "command": []}, "no command"),
+        ({"entrypoint": [], "command": []}, "resolve entrypoint or command upstream"),
         ({"depends_on": {"missing": {"condition": "service_started"}}}, "unknown dependency"),
         ({"depends_on": {"app": {"condition": "invalid"}}}, "invalid dependency"),
         ({"networks": {"default": {"aliases": ["invalid alias"]}}}, "alias"),
@@ -675,7 +672,7 @@ async def test_invalid_service_configuration_fails_before_provisioning(fields, m
     group = make_compose(
         provider,
         {"services": {"app": {"image": "image", **fields}}},
-        image_configs={"image": {"Cmd": ["true"]}},
+        default_command=["true"],
     )
     with pytest.raises((ValueError, NotImplementedError), match=message):
         await group.start()
@@ -712,7 +709,7 @@ async def test_health_probe_timeout_retries_then_starts_dependent(tmp_path):
                 },
             }
         },
-        image_configs={"image": {"Cmd": ["sleep", "1"]}},
+        default_command=["sleep", "1"],
         poll_interval_s=0.01,
     ) as group:
         await group._wait("app", "service_completed_successfully")
@@ -768,7 +765,7 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
             },
             "volumes": {"data": {}},
         },
-        image_configs={"image": {"Cmd": ["sleep", "1"]}},
+        default_command=["sleep", "1"],
         volume_sources={"/operator/source": "operator-data"},
         poll_interval_s=0.01,
     )
@@ -921,7 +918,7 @@ async def test_dependency_timeout_or_failure_cleans_every_service(tmp_path, cond
                 },
             }
         },
-        image_configs={"image": {"Cmd": ["sleep", "1"]}},
+        default_command=["sleep", "1"],
         timeout_s=0.3 if condition == "service_completed_successfully" else 5,
         poll_interval_s=0.01,
     )
@@ -962,7 +959,6 @@ async def test_nonroot_image_default_exec_and_explicit_host_opt_out(tmp_path):
                 "client": {"image": "image", "command": ["true"]},
             }
         },
-        image_configs={"image": {"User": "appuser"}},
         poll_interval_s=0.01,
     )
     async with group:
@@ -1018,7 +1014,6 @@ async def test_runtime_requirements_configured_before_workload(tmp_path):
                 }
             }
         },
-        image_configs={"image": {}},
         poll_interval_s=0.01,
     ) as group:
         await group._wait("app", "service_completed_successfully")
@@ -1087,7 +1082,6 @@ async def test_network_mode_orders_target_waits_for_relay_and_cancels_on_cleanup
                 "db": {"image": "image", "expose": [5432], "command": ["sleep", ".1"]},
             }
         },
-        image_configs={"image": {}},
         poll_interval_s=0.01,
     ) as group:
         await group._wait("app", "service_completed_successfully")
@@ -1123,7 +1117,6 @@ async def test_resolve_selected_environment_urls_for_nonroot_service(tmp_path, a
                 }
             }
         },
-        image_configs={"image": {}},
         poll_interval_s=0.01,
     )
     async with group:
@@ -1155,7 +1148,6 @@ async def test_invalid_environment_resolution_fails_before_provisioning(selectio
                 }
             }
         },
-        image_configs={"image": {}},
     )
     with pytest.raises(ValueError, match="environment|[Pp]ort"):
         await group.start()
@@ -1170,7 +1162,6 @@ async def test_process_finishing_during_marker_probe_is_not_startup_failure(monk
     group = make_compose(
         provider,
         {"services": {"app": {"image": "image", "command": ["true"]}}},
-        image_configs={"image": {}},
         poll_interval_s=0.001,
     )
     execute = provider.exec
@@ -1217,7 +1208,6 @@ async def test_compose_connect_round_trip_without_yaml_or_provisioning(tmp_path)
                 "db": {"image": "image", "command": ["sleep", "60"]},
             }
         },
-        image_configs={"image": {}},
         poll_interval_s=0.01,
     )
     async with owner:
@@ -1310,34 +1300,6 @@ async def test_compose_start_requires_yaml():
 
 
 @pytest.mark.asyncio
-async def test_registry_inspection_supplies_startup_directory_and_ports(monkeypatch):
-    from unittest.mock import Mock
-
-    config = {
-        "Entrypoint": ["/entrypoint.sh"],
-        "Cmd": ["serve"],
-        "Env": ["MODE=production"],
-        "WorkingDir": "/app",
-        "Healthcheck": {"Test": ["CMD-SHELL", "check-health"], "Interval": 1000000000},
-        "Shell": ["/bin/bash", "-c"],
-        "ExposedPorts": {"8080/tcp": {}},
-    }
-    inspect = Mock(return_value=config)
-    monkeypatch.setattr(AsyncSandboxCompose, "_inspect_image", inspect)
-    group = make_compose(Provider(), {"services": {"app": {"image": "example/app:1"}}})
-    await group._prepare()
-    await group._prepare()
-    inspect.assert_called_once_with("example/app:1")
-    plan = group._plans["app"]
-    assert plan["command"] == "/entrypoint.sh serve"
-    assert plan["spec"].env == {}
-    assert plan["spec"].workdir == "/app"
-    assert plan["spec"].ports == (8080,)
-    assert plan["health"]["test"] == ["NONE"]
-    assert plan["shell"] == ["/bin/sh", "-c"]
-
-
-@pytest.mark.asyncio
 async def test_missing_compose_command_fails_before_provisioning():
     provider = ShellProvider()
     group = AsyncSandboxCompose(provider, "compose.yaml", compose_command=("missing-compose-tool-915ab",))
@@ -1350,78 +1312,8 @@ def test_compose_default_does_not_require_docker_cli():
     assert AsyncSandboxCompose(Provider(), "compose.yaml").compose_command == ("docker-compose",)
 
 
-@pytest.mark.parametrize("platform", ["linux", "linux/", "linux/amd64/v1/extra"])
-def test_invalid_image_platform(platform):
-    with pytest.raises(ValueError, match="image_platform"):
-        AsyncSandboxCompose(Provider(), "compose.yaml", image_platform=platform)
-
-
-@pytest.mark.parametrize("indexed", [False, True])
-def test_registry_sdk_fetches_only_config_for_selected_platform(monkeypatch, indexed):
-    from unittest.mock import MagicMock
-
-    provider = pytest.importorskip("oras.provider")
-    client = MagicMock()
-    factory = MagicMock(return_value=client)
-    monkeypatch.setattr(provider, "Registry", factory)
-    manifest = {"config": {"digest": "sha256:config"}}
-    index = {
-        "manifests": [
-            {"platform": {"os": "linux", "architecture": "amd64"}, "digest": "sha256:amd"},
-            {"platform": {"os": "linux", "architecture": "arm64", "variant": "v8"}, "digest": "sha256:arm"},
-        ]
-    }
-    client.get_manifest.side_effect = [index, manifest] if indexed else [manifest]
-    config = {"Healthcheck": {"Test": ["CMD", "check"]}, "Shell": ["bash", "-c"]}
-    response = client.get_blob.return_value.__enter__.return_value
-    response.json.return_value = {"os": "linux", "architecture": "arm64", "config": config}
-    group = AsyncSandboxCompose(
-        Provider(),
-        "compose.yaml",
-        image_platform="linux/arm64/v8",
-        registry_options={"tls_verify": "/custom/ca.pem"},
-        timeout_s=7,
-    )
-    assert group._inspect_image("python:3.13-slim") == config
-    factory.assert_called_once_with(tls_verify="/custom/ca.pem")
-    container, digest = client.get_blob.call_args.args
-    assert container.registry == "registry-1.docker.io"
-    assert container.namespace == "library"
-    assert digest == "sha256:config"
-    if indexed:
-        assert container.digest == "sha256:arm"
-    assert client.get_manifest.call_count == (2 if indexed else 1)
-    response.raise_for_status.assert_called_once()
-    client.session.close.assert_called_once()
-
-
-@pytest.mark.parametrize("failure", ["missing", "ambiguous", "wrong-platform", "http"])
-def test_registry_failures_close_session(monkeypatch, failure):
-    from unittest.mock import MagicMock
-
-    provider = pytest.importorskip("oras.provider")
-    client = MagicMock()
-    monkeypatch.setattr(provider, "Registry", lambda **kwargs: client)
-    if failure in {"missing", "ambiguous"}:
-        entry = {"platform": {"os": "linux", "architecture": "amd64"}, "digest": "sha256:test"}
-        client.get_manifest.return_value = {"manifests": [] if failure == "missing" else [entry, entry]}
-    else:
-        client.get_manifest.return_value = {"config": {"digest": "sha256:config"}}
-        response = client.get_blob.return_value.__enter__.return_value
-        response.json.return_value = {"os": "linux", "architecture": "arm64", "config": {}}
-        if failure == "http":
-            response.raise_for_status.side_effect = ValueError("registry unavailable")
-    with pytest.raises(ValueError):
-        AsyncSandboxCompose(Provider(), "compose.yaml")._inspect_image("example.org/team/app:1")
-    client.session.close.assert_called_once()
-
-
 @pytest.mark.asyncio
-async def test_explicit_entrypoint_needs_no_registry(tmp_path, monkeypatch):
-    from unittest.mock import Mock
-
-    inspect = Mock(side_effect=AssertionError("registry access must not occur"))
-    monkeypatch.setattr(AsyncSandboxCompose, "_inspect_image", inspect)
+async def test_explicit_entrypoint_runs_service(tmp_path):
     output = tmp_path / "output"
     group = make_compose(
         ShellProvider(),
@@ -1439,4 +1331,13 @@ async def test_explicit_entrypoint_needs_no_registry(tmp_path, monkeypatch):
     async with group:
         await group._wait("app", "service_completed_successfully")
         assert output.read_text() == "started"
-    inspect.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("startup", [{}, {"entrypoint": [], "command": []}])
+async def test_unresolved_startup_rejected_before_provisioning(startup):
+    provider = ShellProvider()
+    group = make_compose(provider, {"services": {"app": {"image": "example/app:1", **startup}}})
+    with pytest.raises(ValueError, match="resolve entrypoint or command upstream"):
+        await group.start()
+    assert provider.created == []
