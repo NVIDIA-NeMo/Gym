@@ -156,16 +156,18 @@ fi
 # most of its wall time in tool calls, sandbox execution and judging rather than generating.
 #
 # Do not lower this to 128: a run at 128 against D2 sat at 12.5% of capacity with the client
-# semaphore, not the GPUs, as the limit, and 128 would clip the p99 bursts that are the only
+# semaphore, not the GPUs, as the limit (128/(2x1024) = 6.25% of engine capacity), and 128 would
+# clip the p99 bursts that are the only
 # moments the driver has real work queued. Raising it to 1024 to match the engines is harmless
 # but unsupported -- P2D8 requested 4,096 and never had more than ~264 in flight.
 #
 # Do NOT raise NUM_SAMPLES_IN_PARALLEL above this derived default without re-testing: 8192 (2x)
 # on P2D8 killed a decode engine ~30 min into collection with `assert num_new_tokens > 0` in
 # vllm/v1/core/sched/scheduler.py:914, which cascaded to NIXL_ERR_REMOTE_DISCONNECT on the other
-# engines (job 7062901). The same shape at 4096 ran 1 h 37 m clean at ~45k rollouts/hr with zero
-# connection errors (job 7061265). More in-flight work reaches a vLLM scheduler edge case long
-# before it reaches any capacity limit.
+# engines (job 7062901). The same shape at 4096 ran 1 h 37 m clean with zero connection errors,
+# at ~29,941 rollouts/hr sustained (job 7061265; a favourable 553 s window hit 45,452, which is not
+# the rate to plan with). More in-flight work reaches a vLLM scheduler edge case long before it
+# reaches any capacity limit.
 #
 # GLOBAL_AIOHTTP_CONNECTOR_LIMIT_PER_HOST is *not* the ceiling here, despite looking like one.
 # Gym defaults it to 1024 / num_workers (server_utils.py:96,163) and aiohttp keys limit_per_host on
@@ -321,7 +323,8 @@ WORKER_SERVER_PORT=8001
 # KV cache -- read the "Hit N global" counter in env_start.log, not the line count, because Gym
 # prints one line per 100 errors.
 #
-# The router health-checks each engine every 60 s with a 5 s timeout and ejects it after 3 misses.
+# Left at their upstream defaults the router health-checks each engine every 60 s with a 5 s
+# timeout and ejects it after 3 misses -- which is what the settings below exist to override.
 # A busy engine misses that easily, and an ejection drops its in-flight connections, so the
 # defaults turn load into apparent failure. These are deliberately generous: a slow /health means
 # the engine is working.
@@ -426,7 +429,7 @@ gym eval run --no-serve --resume \\
 # Split back out to one directory per manifest entry, then profile each separately. agent_ref
 # cannot do this -- the three ns_tools entries share ns_tools_simple_agent -- so the split keys on
 # _ng_task_index against the task_index_range materialize recorded per entry.
-PYTHONPATH="$RP_DIR" python -m infra split $SWEEP_DIR
+PYTHONPATH="$RP_DIR${PYTHONPATH:+:$PYTHONPATH}" python -m infra split $SWEEP_DIR
 
 for _label_dir in $SWEEP_DIR/by_label/*/; do
     _label=\$(basename "\$_label_dir")
@@ -479,7 +482,9 @@ if (( SLURM_PROCID == 0 )); then
     read -r -a nodes <<< "\$ALL_NODES"
 
     # @bxyu-nvidia: for --intra-node-data-parallel-size: Not sure what to set this to other than 1. I can't tell from the docs what is appropriate and 1 seems to work fine.
-    # Set a super long request timeout since some reasoning requests may take a long time to generate.
+    # Request timeout is deliberately finite now (ROUTER_REQUEST_TIMEOUT_S, 3600) rather than the
+    # 86400 this line used to argue for: inside a 4 h job 'never' means a wedged request holds a
+    # driver concurrency slot until the walltime kills it.
     # Don't manually wait as vllm-router will wait for the URLs to come up
     router_args=( \
         --prefill-policy cache_aware \

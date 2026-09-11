@@ -15,9 +15,13 @@
 """Split a materialized sweep across several jobs, and merge their rollouts back.
 
 One job cannot use 256 nodes: ``--segment`` needs a topology-contiguous allocation and an NVL72
-rack is 18 nodes, and a single driver at ``512 x decode_nodes`` concurrency would exceed the
-aiohttp per-host connector limit long before the GPUs saturated. Several identical jobs over
-disjoint slices of the same input is the shape that scales.
+rack is 18 nodes. Several identical jobs over disjoint slices of the same input is the shape that
+scales. (This used to also cite the aiohttp per-host connector limit; that was wrong -- the limit
+applies per Gym server process and there are 63 of them, so it has never bound.)
+
+Sharding also cuts the per-job driver preflight, a linear scan of the input before the first
+dispatch: ~20 min over the full 271.5 GiB, about a minute over a 1/16 shard, paid again on every
+resubmission.
 
 This is safe because ``materialize`` stamps ``_ng_task_index`` **before** any sharding and Gym
 preserves it through collection -- it is a reserved key, present on 100% of rollouts measured.

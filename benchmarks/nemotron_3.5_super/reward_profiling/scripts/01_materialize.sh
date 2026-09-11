@@ -19,7 +19,7 @@
 #                     which takes the first N rows of the whole file -- only the first entry
 #   JOBS              worker processes                    (default: one per CPU, capped at entries)
 #   OVERWRITE=1       replace an existing materialized file
-#   GYM_SITE_PACKAGES a venv's site-packages, if nemo_gym is not already importable
+#   GYM_SITE_PACKAGES a venv's site-packages, if orjson/yaml/pydantic are not importable
 #
 # OUTPUT
 #   OUT_DIR/<nickname>/rollouts_materialized_inputs.jsonl   expanded inputs
@@ -48,12 +48,12 @@ args=(--out-dir "$OUT_DIR")
 # `infra` needs orjson/yaml/pydantic importable. It no longer imports nemo_gym -- the package is
 # self-contained under reward_profiling/infra -- but the deps still have to be there, and on a login
 # node the failure is otherwise a bare ModuleNotFoundError from deep in the CLI.
-if ! PYTHONPATH="$RP_DIR" python -c "import orjson, infra" >/dev/null 2>&1; then
+if ! PYTHONPATH="$RP_DIR${PYTHONPATH:+:$PYTHONPATH}" python -c "import orjson, infra" >/dev/null 2>&1; then
     if [[ -n "${GYM_SITE_PACKAGES:-}" ]]; then
         REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
         export PYTHONPATH="$REPO_ROOT:$GYM_SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}"
     fi
-    if ! PYTHONPATH="$RP_DIR" python -c "import orjson, infra" >/dev/null 2>&1; then
+    if ! PYTHONPATH="$RP_DIR${PYTHONPATH:+:$PYTHONPATH}" python -c "import orjson, infra" >/dev/null 2>&1; then
         echo "ERROR: cannot import infra and its deps (orjson, yaml, pydantic)." >&2
         echo "       Run inside the eval container, activate the Gym venv, or set" >&2
         echo "       GYM_SITE_PACKAGES=<venv>/lib/python3.*/site-packages" >&2
@@ -62,7 +62,7 @@ if ! PYTHONPATH="$RP_DIR" python -c "import orjson, infra" >/dev/null 2>&1; then
 fi
 
 echo ">>> validating $MANIFEST"
-PYTHONPATH="$RP_DIR" python -m infra validate "$MANIFEST"
+PYTHONPATH="$RP_DIR${PYTHONPATH:+:$PYTHONPATH}" python -m infra validate "$MANIFEST"
 
 echo ">>> materializing into $OUT_DIR"
-PYTHONPATH="$RP_DIR" python -m infra materialize "$MANIFEST" "${args[@]}"
+PYTHONPATH="$RP_DIR${PYTHONPATH:+:$PYTHONPATH}" python -m infra materialize "$MANIFEST" "${args[@]}"

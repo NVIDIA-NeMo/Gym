@@ -53,9 +53,15 @@ Lane aggregates: **plain 5,621/hr** (concurrency 128), **judge 1,398-2,139/hr** 
 
 ## Sizing
 
+> **Superseded.** Everything in this section predates the router and sandbox fixes and is
+> **~2x pessimistic**. Use *Sizing after the fixes* near the bottom of this file. Kept because the
+> lane tables above are still the best per-environment ranking we have.
+
 Size from the mixed-workload run, not from the lanes. Running all 36 together on
 2 shards x (1 prefill + 1 decode) = 16 GPUs gave **~5,620 rollouts/hr** (job 6602112/6602113),
-and a launcher run at the same shape sustained a **~550 rollouts/hr/GPU peak** (job 6608099/6608100).
+i.e. **351 per GPU-hr**, which is the number the sizing below uses. A launcher run at the same shape
+touched **~550 rollouts/hr/GPU** at peak (job 6608099/6608100) — an instantaneous peak, not a
+sustained rate, so do not size from it.
 
 ```
 5,808,968 rollouts / 5,620 per hr = 1,034 h on 16 GPUs = 16,540 GPU-hours
@@ -71,10 +77,11 @@ Summing the lanes instead gives 23,178-24,409 GPU-hours, and the gap is the poin
 together: a judge rollout blocked on the gateway and a sandbox rollout blocked on uWSGI hold no GPU
 while they wait, so they fill time the GPU-bound environments would leave idle.
 
-Disk, one-time per (manifest, checkpoint): `01_materialize.sh` writes **271.5 GB** in ~27.5 min
-(5,808,968 rows from 726,121 source rows, 36 workers). **Peak during the run is ~541 GB, roughly
-2x the final size**, because `_parts/` is not removed until concatenation finishes — budget for the
-peak, not the result. Sharding copies the file again, so a sharded run peaks near 815 GB.
+Disk, one-time per (manifest, checkpoint): `01_materialize.sh` writes **271.5 GiB** (291.5 GB;
+291,527,648,016 bytes) in ~27.5 min from 726,121 source rows, 36 workers. **Peak during the run is
+roughly 2x that, ~543 GiB**, because `_parts/` is not removed until concatenation finishes — budget
+for the peak, not the result. Sharding copies the file again, so a sharded run peaks near 815 GiB.
+Every figure here is GiB; an earlier revision mixed GiB and GB, which differ by 7% at this size.
 
 ## P2D8 on full data (job 6706202, 2026-08-29)
 
@@ -136,8 +143,9 @@ percent, is not a sample worth sizing from. The 12-GPU lane table above is still
 ~93% of the concurrency window went:
 
 - **The `vllm-router` is a single process on one node** (`nodes[0]`, port 8000). It absorbed
-  **12,495 `ClientOSError` retries**, and individual requests reached **`retry=954`** — a request
-  retrying ~950 times holds a concurrency slot indefinitely without ever reaching a GPU.
+  **483,000 `ClientOSError`s**, and individual requests reached **`retry=954`** — a request
+  retrying ~950 times holds a concurrency slot indefinitely without ever reaching a GPU. (Read the
+  `Hit N global` counter, not the 12,495 printed lines: Gym logs roughly one line per 100 errors.)
 - **The sandbox is one node** serving all 63 Gym servers: 1,168 IPython session timeouts, 190x502,
   137x504. Its two consumers, `ns_tools` and `lean`, returned **zero** rollouts.
 - **Agentic rollouts are mostly not on the GPU.** `tau_pivot` and `swe_pivot` spend their wall time
@@ -146,7 +154,7 @@ percent, is not a sample worth sizing from. The 12-GPU lane table above is still
 
 **The judge is not the bottleneck.** Correcting the earlier reading of this run: the judge is the
 hosted endpoint (`https://inference-api.nvidia.com/v1`) and it took **4 retries in the whole run**,
-against 12,495 to the local router. Note the judge-heavy environments produced no rollouts, so the
+against 483,000 to the local router. Note the judge-heavy environments produced no rollouts, so the
 judge is untested at load here rather than proven healthy.
 
 ### Sizing at this shape
@@ -157,8 +165,9 @@ judge is untested at load here rather than proven healthy.
 ```
 
 That is roughly twice the 16,540 GPU-hours estimated from the 16-GPU run (186 vs 351 per GPU-hr):
-2.5x the GPUs bought about 1.25x the throughput. **Fix the router and the sandbox tier before
-adding decode nodes**; until those move, extra decode nodes are idle capacity.
+2.5x the GPUs bought about 1.3x the throughput. At the time this read **fix the router and the
+sandbox tier before adding decode nodes**; both were fixed in job 7061265 below, and this sizing is
+superseded by the section after it. Kept as the before-picture, not as advice.
 
 ## P2D8 after the router and sandbox fixes (job 7061265, 2026-09-10)
 
@@ -192,6 +201,29 @@ tier was the binding constraint for that lane.
 
 KV cache usage did *not* rise, so the GPUs are still not the limit even at 6x the rollout rate.
 
+### Sizing after the fixes
+
+This supersedes the *Sizing* section near the top of the file.
+
+Plan from the **sustained** rate, not the window figure: job 7061265 collected 34,432 rollouts in
+69 min of collection = **29,941 rollouts/hr**, i.e. **749 per GPU-hr** on 40 GPUs.
+
+```
+5,808,968 / 29,941 per hr = 194 h on one P2D8 = 7,762 GPU-hours
+                                              -> 8.1 days on one P2D8
+                                              -> 12.1 h on 16 shards
+```
+
+| | GPU-hours | basis |
+|---|---|---|
+| pre-fix P2D8 (6706202) | 35,132 | 186 /GPU-hr, router and sandbox both broken |
+| 16-GPU estimate | 16,540 | 351 /GPU-hr, the old headline number |
+| **post-fix P2D8 (7061265)** | **7,762** | **749 /GPU-hr** |
+
+So the fixes moved this from *twice the cost of the small shape* to *half of it*. Two things this
+does not include: each job pays a ~20 min driver preflight (~12% of a 4 h walltime, and much less
+per shard), and the rate above is measured before any tail decay.
+
 ## Concurrency has a ceiling, and it is not a capacity limit (job 7062901)
 
 Raising `NUM_SAMPLES_IN_PARALLEL` from the derived 4,096 to **8,192** on the same P2D8 shape killed
@@ -207,8 +239,9 @@ AssertionError  ->  EngineDeadError
 
 It produced 12,640 rollouts, then nothing for the remaining 1 h 40 m while the driver retried
 against a dead router: **6,454,400 `ClientOSError`s**, `retry=11993` on a single request,
-`elapsed_s` p50 3,130 s. The identical shape at 4,096 ran 1 h 37 m clean, ~45k rollouts/hr, zero
-connection errors.
+`elapsed_s` p50 3,130 s. The identical shape at 4,096 ran 1 h 37 m clean with zero connection
+errors, at **29,941 rollouts/hr sustained** — the 45,452 quoted above is a favourable 553 s window,
+not a planning number.
 
 So the practical ceiling is a vLLM scheduler edge case, reached long before engine capacity
 (8,192 sequences), the sandbox tier (640), or the aiohttp connector (~63k). **Leave the derived
@@ -226,13 +259,16 @@ resubmit and `--resume` carries the collected work forward.
   requests 512 per decode node. Neither binds: engines actually ran p50 28-33 concurrent sequences,
   p99 66-210, max 435 across jobs 7060112 and 6706202, because an agentic rollout spends most of
   its wall time in tool calls, sandbox execution and judging rather than generating. The old 128
-  concurrency against 2 decode nodes did bind, at ~12.5% of capacity, which is why it was raised;
+  concurrency against 2 decode nodes did bind, at 128/(2x1024) = **6.25%** of engine capacity, which
+  is why it was raised;
   do not go back to it.
 - **Plan around the tail, not the aggregate.** A whole-manifest run went 151 -> 55 -> 18 -> 14 -> 12
   -> 6 -> 3 rollouts per 30 s window — ~18,000/hr instantaneous down to ~360, a 50x collapse. Fast
   environments drain immediately and the slow ones dominate the end. Expect a residue job.
 - **Sandbox capacity is a separate axis from GPU count.** It measured lowest of any lane at the
-  lowest concurrency, on a single node. Size the sandbox tier before trusting the sandbox figures.
+  lowest concurrency, back when it was a single node with 32 workers. It is now `sandbox_nodes x
+  sandbox_workers` (640 at P2D8) and no longer the binding constraint — but it still does not scale
+  with GPUs, so size it explicitly when adding nodes.
 - **The judge lane ran at concurrency 48 against the plain lane's 128**, so the 4x aggregate gap
   overstates the judge penalty. It also measured 1,398 and 2,139/hr on two runs at identical
   concurrency — a 53% spread, probably prefix-cache warmth. Re-measure on a cold endpoint.

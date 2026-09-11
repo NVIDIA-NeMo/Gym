@@ -89,7 +89,7 @@ for block in ("srun", "gym_eval_profile"):
 PY_MANIFEST
 )
 
-PYTHONPATH="$RP_DIR" python -m infra split "$SWEEP_DIR"
+PYTHONPATH="$RP_DIR${PYTHONPATH:+:$PYTHONPATH}" python -m infra split "$SWEEP_DIR"
 
 profile_cmd() {
     local inputs=$1 rollouts=$2 out=$3

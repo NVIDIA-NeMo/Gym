@@ -12,7 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CLI for sweep manifests: ``python -m infra {validate,build}``."""
+"""CLI for sweep manifests: ``python -m infra
+{validate,build,materialize,shard,merge,split,container-config}``.
+
+Run it with the reward_profiling directory on PYTHONPATH, which every script in ../scripts does.
+"""
 
 from __future__ import annotations
 

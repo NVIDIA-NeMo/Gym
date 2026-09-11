@@ -3,9 +3,13 @@
 # Each shard's own job profiles itself; run 05_profile.sh afterwards for the whole sweep.
 #
 # One job cannot use 256 nodes: --segment needs a topology-contiguous allocation and an NVL72 rack
-# is 18 nodes, and a single driver at 512 x decode_nodes concurrency would exceed the aiohttp
-# per-host connector limit long before the GPUs saturated. N identical jobs over disjoint slices is
-# the shape that scales. Nodes = NUM_SHARDS x (prefill + decode), so 16 shards at the 1+2 default is 48 nodes.
+# is 18 nodes. N identical jobs over disjoint slices is the shape that scales. (This used to also
+# cite the aiohttp per-host connector limit; that was wrong -- the limit is per Gym server process
+# and there are 63 of them, so it has never bound. See 03_run_single.sh's note on it.)
+#
+# Sharding also cuts the per-job driver preflight, which is a linear scan of the input before the
+# first dispatch: ~20 min over the full 271.5 GiB, about a minute over a 1/16 shard, and it is paid
+# again on every resubmission. Nodes = NUM_SHARDS x (prefill + decode), so 16 shards at the 1+2 default is 48 nodes.
 #
 # USAGE
 #   MODEL=<ckpt> \
@@ -18,7 +22,7 @@
 #   SHARDS_DIR    where shard_NNN/ go                      (default: SWEEP_DIR/shards)
 #   POLL_S        seconds between squeue checks            (default: 60)
 #   EXPERIMENT_NAME  job-name prefix                       (default: rp)
-#   GYM_SITE_PACKAGES a venv's site-packages, if nemo_gym is not already importable
+#   GYM_SITE_PACKAGES a venv's site-packages, if orjson/yaml/pydantic are not importable
 #   MAX_ROUNDS    total attempts per shard, first submission included (default: 4)
 #
 # This runs in the FOREGROUND for hours, so detach it. It locks the sweep directory and refuses
@@ -82,14 +86,15 @@ MAX_ROUNDS=${MAX_ROUNDS:-4}
 
 cd "$REPO_ROOT"
 
-# nemo_gym needs its dependencies importable. Inside the eval container that is automatic; on a
+# `infra` needs orjson/yaml/pydantic importable; it does not import nemo_gym at all. Inside the
+# eval container that is automatic; on a
 # login node it is not, and the failure is otherwise a bare ModuleNotFoundError from deep inside
 # the CLI. GYM_SITE_PACKAGES points PYTHONPATH at a venv's site-packages if you are not in one.
-if ! PYTHONPATH="$RP_DIR" python -c "import orjson, infra" >/dev/null 2>&1; then
+if ! PYTHONPATH="$RP_DIR${PYTHONPATH:+:$PYTHONPATH}" python -c "import orjson, infra" >/dev/null 2>&1; then
     if [[ -n "${GYM_SITE_PACKAGES:-}" ]]; then
         export PYTHONPATH="$REPO_ROOT:$GYM_SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}"
     fi
-    if ! PYTHONPATH="$RP_DIR" python -c "import orjson, infra" >/dev/null 2>&1; then
+    if ! PYTHONPATH="$RP_DIR${PYTHONPATH:+:$PYTHONPATH}" python -c "import orjson, infra" >/dev/null 2>&1; then
         echo "ERROR: cannot import infra and its deps (orjson, yaml, pydantic)." >&2
         echo "       Run inside the eval container, activate the Gym venv, or set" >&2
         echo "       GYM_SITE_PACKAGES=<venv>/lib/python3.*/site-packages" >&2
@@ -179,7 +184,7 @@ SWEEP_DIR="$SWEEP_DIR" SHARDS_DIR="$SHARDS_DIR" OUTPUT="$SWEEP_DIR/rollouts.json
     bash "$RP_DIR/scripts/04_merge_shards.sh"
 
 echo ">>> splitting by manifest entry"
-PYTHONPATH="$RP_DIR" python -m infra split "$SWEEP_DIR"
+PYTHONPATH="$RP_DIR${PYTHONPATH:+:$PYTHONPATH}" python -m infra split "$SWEEP_DIR"
 
 echo
 echo "Merged rollouts : $SWEEP_DIR/rollouts.jsonl"
