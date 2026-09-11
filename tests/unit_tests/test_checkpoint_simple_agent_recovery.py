@@ -56,7 +56,7 @@ from nemo_gym.rollout_correlation import (
 )
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.token_id_capture.lineage import FileLineageStore
-from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit
+from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit, RolloutManifest
 from resources_servers.example_session_state_mgmt.app import (
     IncrementCounterRequest,
     IncrementCounterResponse,
@@ -262,6 +262,7 @@ def _model_app(
                     fingerprint_version=1,
                 ),
                 staging_chain=staging_chain,
+                parent_manifest=(parent_match.parent_manifest if parent_match is not None else ()),
                 request_items=input_items,
                 response_items=output,
             )
@@ -493,6 +494,14 @@ async def test_simple_agent_restores_next_turn_without_repeating_resource_mutati
         )
         assert result.status_code == 200, result.text
         assert result.json()["reward"] == 1.0
+        restored_manifest = RolloutManifest.model_validate(
+            await FileLineageStore(tmp_path / "restored-lineage").manifest(f"{ROLLOUT_ID}-a1")
+        )
+        assert [record.capture_key for record in restored_manifest.records] == [ROLLOUT_ID, f"{ROLLOUT_ID}-a1"]
+        assert [record.model_call_id for record in restored_manifest.records] == [
+            source_model_requests[-1]["call_id"],
+            restored_model_requests[0]["call_id"],
+        ]
     finally:
         for client in restored_clients.values():
             await client.aclose()

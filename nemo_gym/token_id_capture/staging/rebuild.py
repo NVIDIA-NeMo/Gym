@@ -113,7 +113,8 @@ def _compare_manifest_fields(
     snapshot: StagedCallBaseSnapshot,
 ) -> None:
     call_id = record.model_call_id
-    if snapshot.rollout_id != receipt.rollout_id:
+    expected_capture_key = record.capture_key or receipt.rollout_id
+    if snapshot.rollout_id != expected_capture_key:
         raise _fail("wrong_rollout", f"snapshot {call_id} belongs to {snapshot.rollout_id}")
     comparisons = {
         "model_call_id": snapshot.model_call_id,
