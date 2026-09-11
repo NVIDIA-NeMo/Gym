@@ -12,11 +12,16 @@ health checks, service aliases, and shared volumes.
 
 ## Start two services
 
-Install NeMo Gym's `sandbox` extra and Docker with Compose on the machine
-running this script. The creating server needs access to a running Docker daemon
-to inspect locally pulled images. Configure an [OpenSandbox provider](/infrastructure/sandbox/opensandbox)
-whose sandbox IPs can reach each other. The example images run as root so the
-provider can install service names in `/etc/hosts`.
+Install NeMo Gym's `sandbox` extra and the official
+[standalone Docker Compose executable](https://docs.docker.com/compose/install/standalone/)
+on the creating server. Compose is used only to normalize the YAML with `config`;
+no Docker daemon is needed, including on Slurm nodes. The ORAS Python SDK, included
+in the `sandbox` extra, reads image manifests and configuration directly from the
+registry without downloading image layers.
+
+Configure an [OpenSandbox provider](/infrastructure/sandbox/opensandbox) whose
+sandbox IPs can reach each other. The example images run as root so the provider
+can install service names in `/etc/hosts`.
 
 Save this as `compose.yaml`:
 
@@ -38,16 +43,6 @@ services:
       peer:
         condition: service_healthy
 ```
-
-Pull the images locally for your sandbox deployment's platform (this example
-uses Linux amd64):
-
-```bash
-DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose -f compose.yaml pull
-```
-
-This downloads the image layers to the local Docker daemon. The sandboxes still
-run on OpenSandbox; no local Compose services are started.
 
 Save this as `run_compose.py`. Set `OPENSANDBOX_DOMAIN` and
 `OPENSANDBOX_API_KEY` for your deployment, then run `python run_compose.py`:
@@ -150,14 +145,18 @@ overrides the service user. Host-file configuration requires root access by defa
 
 Deployment-specific settings remain configurable:
 
-- `compose_command` selects the Compose executable, defaulting to `("docker", "compose")`.
-- `image_config_command` selects the OCI inspection command, defaulting to
-  `("docker", "image", "inspect", "--format", "{{json .Config}}", "{image}")`.
-  Images must already be pulled for the sandbox platform. The output preserves
-  Docker-specific defaults such as `Healthcheck` and `Shell`. A custom command
-  can instead print the image configuration JSON, or an OCI image object with
-  a `config` field. Receiving servers using `connect()` need neither image
-  inspection nor a Docker daemon.
+- `compose_command` selects the Compose executable, defaulting to `("docker-compose",)`.
+  If the Docker CLI and Compose plugin are installed, use `("docker", "compose")`;
+  `config` still needs no daemon. Docker's current Compose SDK is Go-only, so the
+  adapter uses the official executable for interpolation and normalization.
+- `image_platform` selects registry metadata for the sandbox platform, defaulting
+  to `"linux/amd64"`. Set it to match your deployment, for example `"linux/arm64/v8"`.
+- `registry_options` passes options to ORAS's `Registry`, for example
+  `{"tls_verify": "/path/to/registry-ca.pem"}`. ORAS reads registry credentials from
+  the creator's Docker credential configuration; a daemon is not required.
+  Configure credentials independently on the sandbox provider so it can pull images.
+  The raw config preserves Docker defaults such as `Healthcheck` and `Shell`.
+  Receiving servers using `connect()` need neither Compose nor registry access.
 - `service_specs={name: SandboxSpec(...)}` supplies sandbox TTL, resources and
   provider options. Compose values override corresponding spec fields.
 - `timeout_s` bounds normalization and startup; `poll_interval_s` controls startup polling.

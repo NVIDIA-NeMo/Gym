@@ -8,13 +8,13 @@ rejected before provisioning services.
 """
 
 import asyncio
-import json
 import re
 import shlex
 import tempfile
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from functools import partial
 from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 from typing import Any
@@ -73,15 +73,9 @@ class AsyncSandboxCompose:
         provider,
         compose_file: str | Path | None,
         *,
-        compose_command: Sequence[str] = ("docker", "compose"),
-        image_config_command: Sequence[str] = (
-            "docker",
-            "image",
-            "inspect",
-            "--format",
-            "{{json .Config}}",
-            "{image}",
-        ),
+        compose_command: Sequence[str] = ("docker-compose",),
+        image_platform: str = "linux/amd64",
+        registry_options: Mapping[str, Any] | None = None,
         service_specs: Mapping[str, SandboxSpec] | None = None,
         timeout_s: float = 1200,
         poll_interval_s: float = 0.5,
@@ -93,7 +87,10 @@ class AsyncSandboxCompose:
         self.compose_command = tuple(compose_command)
         self.document: dict[str, Any] = {}
         self._image_configs: dict[str, Any] = {}
-        self.image_config_command = tuple(image_config_command)
+        self.image_platform = image_platform
+        if len(image_platform.split("/")) not in (2, 3) or not all(image_platform.split("/")):
+            raise ValueError("image_platform must be os/architecture[/variant]")
+        self.registry_options = dict(registry_options or {})
         self.service_specs = dict(service_specs or {})
         self.timeout_s = timeout_s
         self.poll_interval_s = poll_interval_s
@@ -111,6 +108,39 @@ class AsyncSandboxCompose:
         self._stop_task: asyncio.Task | None = None
         self._processes: dict[str, asyncio.Task] = {}
         self._seeds: list[AsyncSandbox] = []
+
+    def _inspect_image(self, image: str) -> dict:
+        from oras.container import Container
+        from oras.provider import Registry
+
+        container = Container(image)
+        if container.registry in {"docker.io", "index.docker.io"}:
+            container.registry = "registry-1.docker.io"
+            container.namespace = container.namespace or "library"
+        platform = dict(zip(("os", "architecture", "variant"), self.image_platform.split("/")))
+        client = Registry(**self.registry_options)
+        # ORAS shares this session with its authentication backend.
+        client.session.request = partial(client.session.request, timeout=self.timeout_s)
+        try:
+            manifest = client.get_manifest(container)
+            if "manifests" in manifest:
+                candidates = [
+                    item
+                    for item in manifest["manifests"]
+                    if all(item.get("platform", {}).get(key) == value for key, value in platform.items())
+                ]
+                if len(candidates) != 1:
+                    raise ValueError(f"Image {image!r} needs one manifest for {self.image_platform!r}")
+                container.digest = candidates[0]["digest"]
+                manifest = client.get_manifest(container)
+            with client.get_blob(container, manifest["config"]["digest"]) as response:
+                response.raise_for_status()
+                config = response.json()
+            if any(config.get(key) != value for key, value in platform.items() if key != "variant"):
+                raise ValueError(f"Image {image!r} does not match {self.image_platform!r}")
+            return config["config"]
+        finally:
+            client.session.close()
 
     async def _normalize(self):
         raw = await _command([*self.compose_command, "-f", str(self.compose_file), "config", "--format", "yaml"])
@@ -267,10 +297,7 @@ class AsyncSandboxCompose:
         for name, service in self.document["services"].items():
             image = service["image"]
             if image not in self._image_configs:
-                raw = json.loads(
-                    await _command([part.replace("{image}", image) for part in self.image_config_command])
-                )
-                self._image_configs[image] = raw.get("config", raw)
+                self._image_configs[image] = await asyncio.to_thread(self._inspect_image, image)
             image_config = self._image_configs[image]
             entrypoint = service.get("entrypoint")
             command = service.get("command")

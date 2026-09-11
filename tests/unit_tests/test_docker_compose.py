@@ -424,9 +424,8 @@ async def test_volume_helper_create_failure_preserves_error_and_closes_provider(
 
 
 @pytest.mark.asyncio
-async def test_yaml_input_normalizes_environment_and_runs_services(tmp_path):
+async def test_yaml_input_normalizes_environment_and_runs_services(tmp_path, monkeypatch):
     import shutil
-    import sys
 
     import yaml
 
@@ -454,11 +453,11 @@ async def test_yaml_input_normalizes_environment_and_runs_services(tmp_path):
     )
     provider = ShellProvider()
     provider.set_hosts = AsyncMock(side_effect=AssertionError("explicit host opt-out was lost"))
+    monkeypatch.setattr(AsyncSandboxCompose, "_inspect_image", lambda *args: {})
     async with AsyncSandboxCompose(
         provider,
         path,
         compose_command=(compose,),
-        image_config_command=(sys.executable, "-c", "print('{\"config\": {}}')"),
         poll_interval_s=0.01,
     ) as group:
         await group._wait("app", "service_completed_successfully")
@@ -916,8 +915,6 @@ async def test_image_environment_unset_and_health_disable(tmp_path, unset, disab
 
 @pytest.mark.asyncio
 async def test_image_inspection_resources_and_environment(tmp_path):
-    import sys
-
     from nemo_gym.sandbox.providers.base import SandboxSpec
 
     output = tmp_path / "output"
@@ -927,10 +924,6 @@ async def test_image_inspection_resources_and_environment(tmp_path):
         "Env": ["IMAGE=from-image", "OVERRIDE=old"],
         "Shell": ["/bin/bash", "-c"],
     }
-    inspector = tmp_path / "inspect.py"
-    inspector.write_text(
-        "import json, sys\nassert sys.argv[1] == 'original-image'\n" + f"print(json.dumps({{'config': {config!r}}}))\n"
-    )
 
     class UserProvider(ShellProvider):
         users = None
@@ -960,7 +953,7 @@ async def test_image_inspection_resources_and_environment(tmp_path):
                 }
             }
         },
-        image_config_command=[sys.executable, str(inspector), "{image}"],
+        image_configs={"original-image": config},
         service_specs={"app": SandboxSpec(env={"SPEC": "from-spec"}, ttl_s=30)},
         poll_interval_s=0.01,
     )
@@ -1386,8 +1379,8 @@ async def test_compose_start_requires_yaml():
 
 
 @pytest.mark.asyncio
-async def test_default_docker_inspection_preserves_image_startup_and_health(monkeypatch):
-    from nemo_gym.sandbox.adapters import docker_compose
+async def test_default_registry_inspection_preserves_image_startup_and_health(monkeypatch):
+    from unittest.mock import Mock
 
     config = {
         "Entrypoint": ["/entrypoint.sh"],
@@ -1398,20 +1391,12 @@ async def test_default_docker_inspection_preserves_image_startup_and_health(monk
         "Shell": ["/bin/bash", "-c"],
         "ExposedPorts": {"8080/tcp": {}},
     }
-    inspect = AsyncMock(return_value=json.dumps(config))
-    monkeypatch.setattr(docker_compose, "_command", inspect)
+    inspect = Mock(return_value=config)
+    monkeypatch.setattr(AsyncSandboxCompose, "_inspect_image", inspect)
     group = make_compose(Provider(), {"services": {"app": {"image": "example/app:1"}}})
     await group._prepare()
-    inspect.assert_awaited_once_with(
-        [
-            "docker",
-            "image",
-            "inspect",
-            "--format",
-            "{{json .Config}}",
-            "example/app:1",
-        ]
-    )
+    await group._prepare()
+    inspect.assert_called_once_with("example/app:1")
     plan = group._plans["app"]
     assert plan["command"] == "/entrypoint.sh serve"
     assert plan["spec"].env["MODE"] == "production"
@@ -1420,3 +1405,82 @@ async def test_default_docker_inspection_preserves_image_startup_and_health(monk
     assert plan["health"]["test"] == ["CMD-SHELL", "check-health"]
     assert plan["health"]["interval"] == 1
     assert plan["shell"] == ["/bin/bash", "-c"]
+
+
+@pytest.mark.asyncio
+async def test_missing_compose_command_fails_before_provisioning():
+    provider = ShellProvider()
+    group = AsyncSandboxCompose(provider, "compose.yaml", compose_command=("missing-compose-tool-915ab",))
+    with pytest.raises(FileNotFoundError):
+        await group.start()
+    assert provider.created == []
+
+
+def test_compose_default_does_not_require_docker_cli():
+    assert AsyncSandboxCompose(Provider(), "compose.yaml").compose_command == ("docker-compose",)
+
+
+@pytest.mark.parametrize("platform", ["linux", "linux/", "linux/amd64/v1/extra"])
+def test_invalid_image_platform(platform):
+    with pytest.raises(ValueError, match="image_platform"):
+        AsyncSandboxCompose(Provider(), "compose.yaml", image_platform=platform)
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_registry_sdk_fetches_only_config_for_selected_platform(monkeypatch, indexed):
+    from unittest.mock import MagicMock
+
+    provider = pytest.importorskip("oras.provider")
+    client = MagicMock()
+    factory = MagicMock(return_value=client)
+    monkeypatch.setattr(provider, "Registry", factory)
+    manifest = {"config": {"digest": "sha256:config"}}
+    index = {
+        "manifests": [
+            {"platform": {"os": "linux", "architecture": "amd64"}, "digest": "sha256:amd"},
+            {"platform": {"os": "linux", "architecture": "arm64", "variant": "v8"}, "digest": "sha256:arm"},
+        ]
+    }
+    client.get_manifest.side_effect = [index, manifest] if indexed else [manifest]
+    config = {"Healthcheck": {"Test": ["CMD", "check"]}, "Shell": ["bash", "-c"]}
+    response = client.get_blob.return_value.__enter__.return_value
+    response.json.return_value = {"os": "linux", "architecture": "arm64", "config": config}
+    group = AsyncSandboxCompose(
+        Provider(),
+        "compose.yaml",
+        image_platform="linux/arm64/v8",
+        registry_options={"tls_verify": "/custom/ca.pem"},
+        timeout_s=7,
+    )
+    assert group._inspect_image("python:3.13-slim") == config
+    factory.assert_called_once_with(tls_verify="/custom/ca.pem")
+    container, digest = client.get_blob.call_args.args
+    assert container.registry == "registry-1.docker.io"
+    assert container.namespace == "library"
+    assert digest == "sha256:config"
+    if indexed:
+        assert container.digest == "sha256:arm"
+    assert client.get_manifest.call_count == (2 if indexed else 1)
+    response.raise_for_status.assert_called_once()
+    client.session.close.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", ["missing", "ambiguous", "wrong-platform", "http"])
+def test_registry_failures_close_session(monkeypatch, failure):
+    from unittest.mock import MagicMock
+
+    provider = pytest.importorskip("oras.provider")
+    client = MagicMock()
+    monkeypatch.setattr(provider, "Registry", lambda **kwargs: client)
+    if failure in {"missing", "ambiguous"}:
+        entry = {"platform": {"os": "linux", "architecture": "amd64"}, "digest": "sha256:test"}
+        client.get_manifest.return_value = {"manifests": [] if failure == "missing" else [entry, entry]}
+    else:
+        client.get_manifest.return_value = {"config": {"digest": "sha256:config"}}
+        response = client.get_blob.return_value.__enter__.return_value
+        response.json.return_value = {"os": "linux", "architecture": "arm64", "config": {}}
+        if failure == "http":
+            response.raise_for_status.side_effect = ValueError("registry unavailable")
+    with pytest.raises(ValueError):
+        AsyncSandboxCompose(Provider(), "compose.yaml")._inspect_image("example.org/team/app:1")
+    client.session.close.assert_called_once()
