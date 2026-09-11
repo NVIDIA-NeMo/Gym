@@ -559,12 +559,16 @@ unset PYTHONPATH
 
 nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
 
-ALL_NODES="\${nodes[*]}" \
 # --kill-on-bad-exit=1 so one dead engine ends the step. Without it srun keeps the step alive
 # waiting on the surviving tasks, the `wait -n` below never fires, and the job runs on with no
 # endpoint: job 7062901 lost an engine to a vLLM scheduler assertion and then burned 1 h 40 m of
 # 10 nodes retrying against a router that had already shut down (6.45M ClientOSErrors, zero
 # rollouts). Failing fast lets 03_run_sharded.sh's watcher resubmit and --resume carry the work.
+#
+# Keep this comment ABOVE the ALL_NODES= line: that line ends in a backslash and is an environment
+# prefix to srun, so a comment between the two silently turns it into a plain local assignment
+# that srun never propagates. Job 7083782 died in 81 s with "ALL_NODES: unbound variable".
+ALL_NODES="\${nodes[*]}" \
 srun --kill-on-bad-exit=1 --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 \
     --container-image=$CONTAINER \
     --container-name=container-on-node \
