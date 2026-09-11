@@ -40,6 +40,14 @@ class BaseServiceConfig(_StrictModel):
     # Pyxis-style bind mounts passed as --container-mounts.
     # Each entry is "src", "src:dst", or "src:dst:flags" (e.g. "/data:/data:ro").
     mounts: list[str] = []
+    # Raw shell statements run before the service command starts, in the same
+    # shell (so export/unset and dynamic values like $(hostname -I) work
+    # normally) -- e.g. working around an image or engine-version bug that
+    # needs an env var set to a real address or a stale one unset before the
+    # service binary runs. Unlike `env` (literal key=value pairs only) or a
+    # service-specific extra_args (appended to that service's own command
+    # line), this runs as its own statement(s) ahead of the command.
+    pre_command: str = ""
 
 
 class BaseModelServiceConfig(BaseServiceConfig):
@@ -55,6 +63,8 @@ class VllmServiceConfig(BaseModelServiceConfig):
     pipeline_parallel_size: int = 1
     trust_remote_code: bool = False
     number_of_instances: int = 1
+    # Raw extra flags appended verbatim to `vllm serve` (e.g. "--max-model-len 8192").
+    extra_args: str = ""
 
     @field_validator("number_of_instances")
     @classmethod

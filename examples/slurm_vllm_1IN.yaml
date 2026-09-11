@@ -22,8 +22,12 @@ services:
     port: 8000
     health_check:
       timeout_seconds: 1200
-    mounts: 
+    mounts:
       - /lustre/datasets:/data
+    extra_args: --max-model-len 8192 # optional, appended verbatim to `vllm serve`
+    pre_command: |
+      export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
+      unset RAY_ADDRESS # optional, raw shell run before the service command starts
 
 driver:
   policy_model: vllm_model # synthactic sugar

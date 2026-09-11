@@ -106,11 +106,18 @@ def _render_service_command(
     mounts: list[str] | None = None,
     nodes: int | None = None,
     ntasks: int | None = None,
+    pre_command: str = "",
 ) -> str:
     var = bash_var(name)
     env_prefix = _resolve_env(env) if env else ""
     node_flags = f" --nodes={nodes} --ntasks={ntasks}" if (nodes is not None and nodes > 1) else ""
     mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in mounts)}" if mounts else ""
+    if pre_command:
+        # Wrapped in one shell so export/unset statements in pre_command are
+        # visible to the exec'd command; shlex.quote keeps the whole thing one
+        # word, so it can't interfere with --container-mounts/-image parsing
+        # regardless of what pre_command contains.
+        command = f"bash -c {shlex.quote(pre_command + chr(10) + 'exec ' + command)}"
     # --overlap lets this step share the allocation with other concurrent steps (driver + services).
     # --no-container-mount-home avoids polluting the container with host home directory contents.
     # PID is captured so the health check can detect early service death.
@@ -129,6 +136,8 @@ def _vllm_base_flags(service: VllmServiceConfig) -> str:
     )
     if service.pipeline_parallel_size > 1:
         cmd += f" --pipeline-parallel-size {service.pipeline_parallel_size}"
+    if service.extra_args:
+        cmd += " " + service.extra_args
     return cmd
 
 
@@ -260,6 +269,7 @@ def build_sbatch_script(
             # on a single node regardless of how many nodes the overall job spans).
             nodes=total_nodes if _vllm_spans_multiple_nodes(service, total_nodes) else None,
             ntasks=total_ntasks if _vllm_spans_multiple_nodes(service, total_nodes) else None,
+            pre_command=service.pre_command,
         )
         for name, service in config.services.items()
     )

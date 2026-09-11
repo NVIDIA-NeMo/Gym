@@ -35,6 +35,10 @@ DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
 ROUTER_SERVER_PORT=8000
 WORKER_SERVER_PORT=8001
 
+ROUTER_PREFILL_POLICY="${ROUTER_PREFILL_POLICY:-cache_aware}"
+ROUTER_DECODE_POLICY="${ROUTER_DECODE_POLICY:-cache_aware}"
+ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE="${ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE:-1}"
+
 eval_command=$(cat <<EOF
 set -euo pipefail
 
@@ -130,18 +134,17 @@ this_node_hostname=\$(hostname)
 if (( SLURM_PROCID == 0 )); then
     read -r -a nodes <<< "\$ALL_NODES"
 
-    # @bxyu-nvidia: for --intra-node-data-parallel-size: Not sure what to set this to other than 1. I can't tell from the docs what is appropriate and 1 seems to work fine.
     # Set a super long request timeout since some reasoning requests may take a long time to generate.
     # Don't manually wait as vllm-router will wait for the URLs to come up
     router_args=( \
-        --prefill-policy cache_aware \
-        --decode-policy cache_aware \
+        --prefill-policy $ROUTER_PREFILL_POLICY \
+        --decode-policy $ROUTER_DECODE_POLICY \
         --balance-abs-threshold 4 \
         --balance-rel-threshold 1.1 \
         --vllm-pd-disaggregation \
         --host \$this_node_hostname \
         --port $ROUTER_SERVER_PORT \
-        --intra-node-data-parallel-size 1 \
+        --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
         --request-timeout-secs 86400 \
         --log-level error
     )
@@ -158,6 +161,12 @@ if (( SLURM_PROCID == 0 )); then
 
     router_pid=\$!
     trap 'kill "\$router_pid" 2>/dev/null || true' EXIT
+
+    sleep 5
+    if ! kill -0 "\$router_pid" 2>/dev/null; then
+        echo "vllm-router exited during startup" >&2
+        exit 1
+    fi
 fi
 
 # Split nodes here by index

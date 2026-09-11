@@ -323,6 +323,29 @@ class TestServerUtils:
         head_server = HeadServer(config=BaseServerConfig(host="", port=0))
         head_server.setup_webserver()
 
+    def test_HeadServer_health_reports_readiness_without_changing_liveness(self) -> None:
+        from fastapi.testclient import TestClient
+
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+
+        with TestClient(head_server.setup_webserver()) as client:
+            for path in ("/", "/livez"):
+                response = client.get(path)
+                assert response.status_code == 200
+                assert response.json() == {"status": "ok"}
+
+            for path in ("/health", "/healthz", "/readyz"):
+                response = client.get(path)
+                assert response.status_code == 503
+                assert response.json() == {"status": "starting"}
+
+            head_server.mark_ready()
+
+            for path in ("/health", "/healthz", "/readyz"):
+                response = client.get(path)
+                assert response.status_code == 200
+                assert response.json() == {"status": "ok"}
+
     async def test_HeadServer_global_config_dict_yaml(self, monkeypatch: MonkeyPatch) -> None:
         global_config_dict = DictConfig({"a": 2})
         get_global_config_dict_mock = MagicMock()
@@ -541,6 +564,19 @@ class TestServerUtils:
                 pass
 
         TestSimpleServer.run_webserver()
+
+    def test_setup_liveness_exposes_conventional_probe_surface(self) -> None:
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        app = FastAPI()
+        BaseServer.setup_liveness(MagicMock(), app)
+
+        with TestClient(app) as client:
+            for path in ("/", "/health", "/healthz", "/livez", "/readyz"):
+                response = client.get(path)
+                assert response.status_code == 200
+                assert response.json() == {"status": "ok"}
 
     def test_setup_session_middleware_idempotent(self) -> None:
         from fastapi import FastAPI, Request
