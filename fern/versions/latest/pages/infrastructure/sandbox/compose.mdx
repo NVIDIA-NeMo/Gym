@@ -12,8 +12,9 @@ health checks, service aliases, and shared volumes.
 
 ## Start two services
 
-Install NeMo Gym's `sandbox` extra, Docker Compose, and `crane` on the machine
-running this script. Configure an [OpenSandbox provider](/infrastructure/sandbox/opensandbox)
+Install NeMo Gym's `sandbox` extra and Docker with Compose on the machine
+running this script. The creating server needs access to a running Docker daemon
+to inspect locally pulled images. Configure an [OpenSandbox provider](/infrastructure/sandbox/opensandbox)
 whose sandbox IPs can reach each other. The example images run as root so the
 provider can install service names in `/etc/hosts`.
 
@@ -37,6 +38,16 @@ services:
       peer:
         condition: service_healthy
 ```
+
+Pull the images locally for your sandbox deployment's platform (this example
+uses Linux amd64):
+
+```bash
+DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose -f compose.yaml pull
+```
+
+This downloads the image layers to the local Docker daemon. The sandboxes still
+run on OpenSandbox; no local Compose services are started.
 
 Save this as `run_compose.py`. Set `OPENSANDBOX_DOMAIN` and
 `OPENSANDBOX_API_KEY` for your deployment, then run `python run_compose.py`:
@@ -124,7 +135,7 @@ transfer of lifecycle ownership.
 
 ## Input and deployment configuration
 
-Install NeMo Gym's `sandbox` extra, Docker Compose, and `crane`. On `start()`,
+On `start()`,
 the adapter runs `docker compose config --format yaml` to resolve the YAML,
 including interpolation, `.env` values and relative paths. Compose validates
 its schema. YAML output retains `x-sandbox` extensions that the JSON formatter
@@ -141,8 +152,12 @@ Deployment-specific settings remain configurable:
 
 - `compose_command` selects the Compose executable, defaulting to `("docker", "compose")`.
 - `image_config_command` selects the OCI inspection command, defaulting to
-  `("crane", "config", "--platform", "linux/amd64", "{image}")`. Match the platform
-  to your deployment; the command must print OCI configuration JSON.
+  `("docker", "image", "inspect", "--format", "{{json .Config}}", "{image}")`.
+  Images must already be pulled for the sandbox platform. The output preserves
+  Docker-specific defaults such as `Healthcheck` and `Shell`. A custom command
+  can instead print the image configuration JSON, or an OCI image object with
+  a `config` field. Receiving servers using `connect()` need neither image
+  inspection nor a Docker daemon.
 - `service_specs={name: SandboxSpec(...)}` supplies sandbox TTL, resources and
   provider options. Compose values override corresponding spec fields.
 - `timeout_s` bounds normalization and startup; `poll_interval_s` controls startup polling.
