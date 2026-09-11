@@ -1,0 +1,26 @@
+safe_child_llm:
+  resources_servers:
+    safe_child_llm:
+      entrypoint: app.py
+      domain: safety
+      verified: false
+      description: Collect Safe-Child-LLM responses for explicit human annotation
+      value: Preserve both developmental splits without assigning a synthetic or heuristic safety score
+
+safe_child_llm_response_collector:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      skip_verification: true
+      skip_verification_reward: 0.0
+      resources_server:
+        type: resources_servers
+        name: safe_child_llm
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/safe_child_llm/data/example.jsonl

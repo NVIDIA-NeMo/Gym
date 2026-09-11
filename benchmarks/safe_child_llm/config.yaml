@@ -1,0 +1,15 @@
+config_paths:
+  - resources_servers/safe_child_llm/configs/safe_child_llm.yaml
+
+safe_child_llm_benchmark:
+  _inherit_from: safe_child_llm_response_collector
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: safe-child-llm
+          type: benchmark
+          jsonl_fpath: benchmarks/safe_child_llm/data/safe_child_llm.jsonl
+          prepare_script: benchmarks/safe_child_llm/prepare.py
+          prompt_config: null
+          num_repeats: 1
+          license: MIT
