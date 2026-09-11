@@ -40,11 +40,6 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxPtyAttach,
     create_provider,
 )
-from nemo_gym.sandbox.providers.base import (
-    SupportsSandboxNetwork,
-    SupportsSandboxPortForwarding,
-    SupportsSandboxRuntimeRequirements,
-)
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
@@ -528,34 +523,6 @@ class AsyncSandbox:
             raise TypeError(f"Sandbox provider endpoint() must return SandboxEndpoint, got {type(resolved).__name__}")
         return resolved
 
-    async def network_address(self) -> str:
-        """Return the provider's direct address for communication between sandboxes."""
-        if not isinstance(self._provider, SupportsSandboxNetwork):
-            raise NotImplementedError("Sandbox provider does not support networking between sandboxes")
-        self._provider.validate_networking()
-        return await self._provider.network_address(self._require_handle())
-
-    async def set_hosts(self, hosts: Mapping[str, str]) -> None:
-        """Install service names using the provider's networking capability."""
-        if not isinstance(self._provider, SupportsSandboxNetwork):
-            raise NotImplementedError("Sandbox provider does not support networking between sandboxes")
-        self._provider.validate_networking()
-        await self._provider.set_hosts(self._require_handle(), hosts)
-
-    async def configure_runtime(self, *, cap_add: tuple[str, ...] = (), shm_size: int | None = None) -> None:
-        """Apply and verify optional runtime requirements before launching a workload."""
-        if not isinstance(self._provider, SupportsSandboxRuntimeRequirements):
-            raise NotImplementedError("Sandbox provider does not support runtime requirements")
-        self._provider.validate_runtime_requirements(cap_add=cap_add, shm_size=shm_size)
-        await self._provider.configure_runtime(self._require_handle(), cap_add=cap_add, shm_size=shm_size)
-
-    async def forward_ports(self, target_address: str, ports: tuple[int, ...], *, ready_file: str) -> None:
-        """Forward local TCP ports until cancelled; ready_file signals bound listeners."""
-        if not isinstance(self._provider, SupportsSandboxPortForwarding):
-            raise NotImplementedError("Sandbox provider does not support TCP forwarding")
-        self._provider.validate_port_forwarding()
-        await self._provider.forward_ports(self._require_handle(), target_address, ports, ready_file=ready_file)
-
     async def stop(self) -> None:
         if self._closed:
             return
@@ -589,7 +556,9 @@ class AsyncSandbox:
         return descriptor
 
     @classmethod
-    async def connect(cls, descriptor: Mapping[str, Any] | Any, *, provider: SandboxProvider) -> "AsyncSandbox":
+    async def connect(
+        cls, descriptor: Mapping[str, Any] | Any, *, provider: SandboxProvider, owns_provider: bool = True
+    ) -> "AsyncSandbox":
         """Rebuild a sandbox in this process from a descriptor produced by
         :meth:`serialize`, using ``provider`` (which must support connect)."""
         if not isinstance(provider, ConnectableProvider):
@@ -599,7 +568,7 @@ class AsyncSandbox:
             descriptor = descriptor.to_dict()
         handle = await provider.connect(descriptor)
         workdir = descriptor.get("workdir") if isinstance(descriptor, Mapping) else None
-        sandbox = cls(provider, SandboxSpec(workdir=workdir))
+        sandbox = cls(provider, SandboxSpec(workdir=workdir), owns_provider=owns_provider)
         sandbox._handle = handle
         sandbox._stopped = False
         return sandbox
