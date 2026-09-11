@@ -314,7 +314,11 @@ def test_render_driver_entrypoint_with_gym_install():
     out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
     assert "git clone" in out
     assert "git checkout main" in out
-    assert "uv pip install -e . --system" in out
+    assert "uv venv --seed .venv" in out
+    assert "source .venv/bin/activate" in out
+    assert "uv pip install -e ." in out
+    assert "--system" not in out
+    assert "--break-system-packages" not in out
     assert 'exec "$@"' in out
     assert '"${GYM_CMD[@]}"' in out
 
@@ -331,6 +335,29 @@ def test_render_driver_entrypoint_install_and_prepare():
     assert "git checkout v1.0" in out
     assert "gym eval prepare" in out
     assert 'exec "$@"' in out
+
+
+def test_render_driver_entrypoint_no_install_no_prepare_has_no_set_e():
+    # The trivial path isn't wrapped in bash -c at all, so there's no
+    # preamble for a failure to silently fall through in the first place.
+    out = render_driver_entrypoint(None, None, None)
+    assert "set -euo pipefail" not in out
+
+
+def test_render_driver_entrypoint_with_gym_install_sets_e():
+    out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
+    assert "set -euo pipefail" in out
+    # Must be the first statement, ahead of the clone/checkout/install, so a
+    # failure anywhere in the preamble aborts instead of falling through to
+    # exec "$@" against whatever was already on disk/PATH.
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    assert lines[0] == "bash -c '"
+    assert lines[1] == "set -euo pipefail"
+
+
+def test_render_driver_entrypoint_with_prepare_sets_e():
+    out = render_driver_entrypoint(None, None, "gym eval prepare +foo=bar")
+    assert "set -euo pipefail" in out
 
 
 # ---------------------------------------------------------------------------
