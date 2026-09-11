@@ -95,7 +95,7 @@ C4, `V` evaluates the correlated Gym Model Server path; direct-provider alternat
 | `tau2` | V | V | X | V | X | X | X |
 | `tool_simulation_agent` | V | V | X | V | X | X | X |
 | `toolsandbox_agent` | V | V | X | V | X | X | X |
-| `verifiers_agent` | X | X | X | X | X | X | X |
+| `verifiers_agent` | V | V | X | V | X | X | X |
 
 ### Coverage notes
 
@@ -108,6 +108,11 @@ C4, `V` evaluates the correlated Gym Model Server path; direct-provider alternat
   - Raised failures omitted by Simple-derived agents.
   - Stirrup calls outside its policy path.
 - OpenClaw coverage includes its standalone resource-server path and the PinchBench sandbox benchmark path.
+- Verifiers C1, C2, and C4 cover the Gym Model Server path: the agent routes the client it
+  hands to `verifiers` through the rollout capture prefix, so calls the environment makes on its
+  own are captured and correlated. C5 and C6 are unavailable because the agent emits no
+  `ng_agent_observations`, so tool attempts carry no status or timing, and rollout-health checks
+  that read agent turns or bound calls stay unobserved.
 - OpenCode coverage includes both the standalone producer and the decoupled `opencode_sandboxed_agent` path. The
   decoupled path composes agent observations with verifier-sandbox evidence returned by its resources server.
 - Legacy OpenHands retains one cumulative root conversation, so its model-visible history remains partial. Its pinned

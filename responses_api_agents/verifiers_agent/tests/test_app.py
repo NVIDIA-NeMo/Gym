@@ -174,15 +174,46 @@ class TestPolicyClient:
 
     def test_policy_client_is_shared_across_rollouts(self) -> None:
         agent = self._agent()
-        with patch.object(VerifiersAgent, "_policy_model_server_url", return_value=POLICY_URL):
+        with patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL):
             first = agent._get_client()
             second = agent._get_client()
         assert first is second
         assert str(first.client.base_url).rstrip("/") == POLICY_URL
 
+    def test_client_base_url_carries_the_rollout_capture_prefix(self) -> None:
+        agent = self._agent()
+
+        def fake_resolve(model_server_name: str, rollout_id: str | None = None) -> str:
+            prefix = f"/ng-rollout/{rollout_id}" if rollout_id else ""
+            return f"http://policy{prefix}/v1"
+
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", side_effect=fake_resolve),
+            patch.object(VerifiersAgent, "rollout_id_from_run", lambda _self, body: body.rollout_id),
+        ):
+            first = agent._get_client(MagicMock(rollout_id="7-2"))
+            second = agent._get_client(MagicMock(rollout_id="7-3"))
+
+        assert str(first.client.base_url).rstrip("/") == "http://policy/ng-rollout/7-2/v1"
+        assert str(second.client.base_url).rstrip("/") == "http://policy/ng-rollout/7-3/v1"
+        assert second is not first
+        assert second.client._client is first.client._client
+
+    def test_client_base_url_is_unprefixed_when_capture_is_disabled(self) -> None:
+        agent = self._agent()
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL),
+            patch.object(VerifiersAgent, "rollout_id_from_run", lambda _self, body: None),
+        ):
+            first = agent._get_client(MagicMock())
+            second = agent._get_client(MagicMock())
+
+        assert first is second
+        assert str(first.client.base_url).rstrip("/") == POLICY_URL
+
     def test_policy_client_never_replays_the_session_cookie(self) -> None:
         agent = self._agent()
-        with patch.object(VerifiersAgent, "_policy_model_server_url", return_value=POLICY_URL):
+        with patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL):
             openai_client = agent._get_client().client
 
         # The jar must be ours. httpx.Cookies adopts a CookieJar instance but
