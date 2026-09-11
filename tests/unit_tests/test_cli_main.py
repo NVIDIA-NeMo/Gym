@@ -264,6 +264,36 @@ class TestEvalRunFlags:
         assert "+responses_create_params.tool_choice=auto" in overrides  # unknown +override passes through
 
 
+class TestEvalExportFlags:
+    def test_flags_dispatch_as_hydra_overrides(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "eval",
+                "export",
+                "--format",
+                "atif",
+                "--rollouts",
+                "rollouts.jsonl",
+                "--output-dir",
+                "atif",
+                "--session-id",
+                "evaluation-42",
+                "--agent-version",
+                "2.3.1",
+            ],
+        )
+
+        assert target == "nemo_gym.cli.eval:export_rollouts_as_atif"
+        assert set(overrides) == {
+            "+format=atif",
+            '+rollouts_jsonl_fpath="rollouts.jsonl"',
+            '+output_dirpath="atif"',
+            '+session_id="evaluation-42"',
+            '+agent_version="2.3.1"',
+        }
+
+
 class TestEnvTestResourceServerFlag:
     def test_no_target_refuses_instead_of_testing_every_server(self, monkeypatch: MonkeyPatch) -> None:
         with pytest.raises(SystemExit) as exc_info:
