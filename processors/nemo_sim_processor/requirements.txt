@@ -1,0 +1,2 @@
+-e ../../
+conversation-plugin @ git+ssh://git@gitlab-master.nvidia.com/sdg-research/sdg-nemo-sim.git@12bca4fc7711c89c095f933e7b53f29a07904779#subdirectory=conversation-plugin
