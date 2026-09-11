@@ -22,6 +22,16 @@ automationbench:
       max_tokens: 131072
       temperature: 1.0
       top_p: 1.0
+      # Deadline for one request to the policy server. The openai SDK default
+      # is 600s read/write with 2 retries. A single AutomationBench turn from a
+      # large policy on a shared engine exceeds that under load: on a 116B
+      # policy at 512 concurrent rollouts, 421/512 came back as empty
+      # trajectories with `499 CLIENT DISCONNECTED` on the server side while
+      # the same job at 120 concurrent had none. No retries: the SDK retries a
+      # timed-out generation from scratch, spending 3x the deadline on the same
+      # failure.
+      client_timeout_s: 3600
+      client_max_retries: 0
       datasets:
         - name: example
           type: example
