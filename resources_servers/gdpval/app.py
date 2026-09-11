@@ -184,6 +184,9 @@ class JudgePanelMember(BaseModel):
     # max_native_pdf_bytes eligibility ceiling, overflow mode rasterizes only
     # documents above this lossless representation threshold.
     max_native_pdf_bytes_per_document: Optional[int] = None
+    max_image_base64_bytes: Optional[int] = Field(default=None, gt=0)
+    max_total_image_base64_bytes: Optional[int] = Field(default=None, gt=0)
+    max_video_files: Optional[int] = Field(default=None, ge=0)
     # Tried in order for images_and_text. The first lossless projection below
     # max_serialized_request_bytes wins; otherwise this member is excluded.
     raster_dpi_tiers: Tuple[int, ...] = ()
@@ -269,6 +272,8 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     judge_pdf_include_text: bool = True
     # Exact request-wide image cap for raster and PDF-overflow transports.
     judge_max_images_per_request: int = 450
+    # Include nested task inputs while leaving submission directories shallow.
+    judge_reference_files_recursive: bool = False
     # Whether the (single) local judge natively reads audio / video, tracked
     # SEPARATELY because MiniMax-M3 — the reference self-hosted judge — reads video
     # but NOT audio (its config has an image + video tower but no audio config). So
@@ -501,6 +506,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     max_native_pdf_documents=member.max_native_pdf_documents,
                     max_native_pdf_bytes=member.max_native_pdf_bytes,
                     max_native_pdf_bytes_per_document=member.max_native_pdf_bytes_per_document,
+                    max_image_base64_bytes=member.max_image_base64_bytes,
+                    max_total_image_base64_bytes=member.max_total_image_base64_bytes,
+                    max_video_files=member.max_video_files,
                     raster_dpi_tiers=tuple(member.raster_dpi_tiers),
                     max_serialized_request_bytes=member.max_serialized_request_bytes,
                 )
@@ -846,6 +854,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 max_native_pdf_documents=rj.max_native_pdf_documents,
                 max_native_pdf_bytes=rj.max_native_pdf_bytes,
                 max_native_pdf_bytes_per_document=rj.max_native_pdf_bytes_per_document,
+                max_image_base64_bytes=rj.max_image_base64_bytes,
+                max_total_image_base64_bytes=rj.max_total_image_base64_bytes,
+                max_video_files=rj.max_video_files,
                 raster_dpi_tiers=rj.raster_dpi_tiers,
                 max_serialized_request_bytes=rj.max_serialized_request_bytes,
             )
@@ -911,6 +922,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     include_text=self.config.judge_pdf_include_text,
                     audio_capable=audio_capable,
                     video_capable=video_capable,
+                    recursive=bool(
+                        self.config.judge_reference_files_recursive and path and path.name == "reference_files"
+                    ),
                 )
             return section_cache[key]
 

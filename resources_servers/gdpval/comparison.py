@@ -266,7 +266,7 @@ def _reserve_attachment_path(
     return size_bytes, None
 
 
-def _maybe_unzip(path: str | Path) -> tuple[Path | None, list[Path]]:
+def _maybe_unzip(path: str | Path, *, omissions: list[str] | None = None) -> tuple[Path | None, list[Path]]:
     """Extract a bounded zip into a per-call tempdir.
 
     The reference deliverables tree is mounted read-only in production, so the
@@ -274,15 +274,22 @@ def _maybe_unzip(path: str | Path) -> tuple[Path | None, list[Path]]:
     and failed /verify outright. Member count, individual expanded size, and
     total expanded size are checked before opening a member; the streaming copy
     enforces the declared size as a second line of defence. Absolute, parent-
-    traversing, duplicate, and symlink entries are ignored.
+    traversing, duplicate, and symlink entries are rejected. Callers can collect
+    omissions so partial archives cannot silently become complete evidence.
 
     Returns ``(extract_dir, member_paths)``. Callers are responsible for
     ``shutil.rmtree(extract_dir)`` after reading the members.
     """
     path = Path(path)
+
+    def omitted(reason: str) -> None:
+        if omissions is not None:
+            omissions.append(f"[attachment omitted from {path.name}: {reason}]")
+
     extract_dir: Path | None = None
     try:
         if path.stat().st_size > MAX_ZIP_ARCHIVE_BYTES_FOR_JUDGE:
+            omitted("compressed archive limit")
             LOGGER.warning("zip %s exceeds the compressed archive limit; ignoring it", path)
             return None, []
         with zipfile.ZipFile(path, "r") as zip_ref:
@@ -298,6 +305,7 @@ def _maybe_unzip(path: str | Path) -> tuple[Path | None, list[Path]]:
                     continue
                 examined_files += 1
                 if examined_files > MAX_ZIP_MEMBERS_FOR_JUDGE:
+                    omitted("archive member count limit")
                     LOGGER.warning(
                         "zip %s exceeds the %d-member extraction limit; ignoring remaining members",
                         path,
@@ -318,25 +326,30 @@ def _maybe_unzip(path: str | Path) -> tuple[Path | None, list[Path]]:
                     or re.match(r"^[A-Za-z]:", parts[0])
                     or stat.S_ISLNK(mode)
                 ):
+                    omitted(f"unsafe archive member {info.filename!r}")
                     LOGGER.warning("ignoring unsafe zip member %r in %s", info.filename, path)
                     continue
 
                 member_size = max(0, info.file_size)
                 if member_size > MAX_ZIP_MEMBER_BYTES_FOR_JUDGE:
+                    omitted(f"archive member size limit: {info.filename!r}")
                     LOGGER.warning("ignoring oversize zip member %r in %s", info.filename, path)
                     continue
                 if total_uncompressed + member_size > MAX_ZIP_TOTAL_UNCOMPRESSED_BYTES_FOR_JUDGE:
+                    omitted(f"archive expansion limit: {info.filename!r}")
                     LOGGER.warning("ignoring zip member %r after aggregate expansion limit", info.filename)
                     continue
 
                 target = (extract_root / Path(*parts)).resolve()
                 if not target.is_relative_to(extract_root) or target in extracted_targets or target.exists():
+                    omitted(f"duplicate or escaping archive member {info.filename!r}")
                     LOGGER.warning("ignoring duplicate or escaping zip member %r in %s", info.filename, path)
                     continue
 
                 try:
                     target.parent.mkdir(parents=True, exist_ok=True)
                 except OSError:
+                    omitted(f"conflicting archive member {info.filename!r}")
                     LOGGER.warning("ignoring conflicting zip member %r in %s", info.filename, path)
                     continue
                 written = 0
@@ -351,6 +364,7 @@ def _maybe_unzip(path: str | Path) -> tuple[Path | None, list[Path]]:
                         if written != member_size or source.read(1):
                             raise ValueError("expanded size does not match ZIP metadata")
                 except (OSError, RuntimeError, ValueError, zipfile.BadZipFile):
+                    omitted(f"unreadable archive member {info.filename!r}")
                     if target.is_file() or target.is_symlink():
                         target.unlink(missing_ok=True)
                     LOGGER.warning("failed bounded extraction of zip member %r in %s", info.filename, path)
@@ -361,6 +375,7 @@ def _maybe_unzip(path: str | Path) -> tuple[Path | None, list[Path]]:
                 extracted_paths.append(target)
         return extract_dir, extracted_paths
     except (zipfile.BadZipFile, zipfile.LargeZipFile, FileNotFoundError, OSError):
+        omitted("unreadable archive")
         if extract_dir is not None:
             shutil.rmtree(extract_dir, ignore_errors=True)
         return None, []
@@ -750,6 +765,7 @@ def build_file_section(
     include_text: bool = True,
     audio_capable: bool = False,
     video_capable: bool = False,
+    recursive: bool = False,
 ) -> list[dict]:
     """Build OpenAI content blocks from all files in a directory.
 
@@ -766,6 +782,8 @@ def build_file_section(
     *video_capable* keep audio / video files (respectively) as native media
     blocks (vs stubbing them) when the judge reads that modality — they are
     independent so a video-only judge (MiniMax-M3) keeps video but stubs audio.
+    Recursive reference inputs retain relative labels and per-directory PDF
+    provenance. Submission directories remain shallow unless explicitly opted in.
     """
     if clean_up_list is None:
         clean_up_list = []
@@ -798,14 +816,13 @@ def build_file_section(
         remaining = max(0, MAX_SECTION_TEXT_CHARS_FOR_JUDGE - text_used)
         if not value:
             return
+        if _is_lossy_transport_marker(value):
+            # Keep rejection evidence intact even when ordinary text fills the budget.
+            section.append(dict(block))
+            text_used += len(value)
+            return
         if remaining <= 0:
             text_omitted = True
-            if _is_lossy_transport_marker(value):
-                # Loss markers are what preflight_judge_transport scans for; a
-                # marker swallowed by the text budget would let a request that
-                # silently lost an attachment pass as eligible.
-                section.append(dict(block))
-                text_used += len(value)
             return
         shown = _bounded_text(value, remaining, text_marker)
         if len(shown) < len(value):
@@ -819,14 +836,26 @@ def build_file_section(
         for block in blocks:
             _append_block(block)
 
-    extracted_dirs: list[Path] = []
-    if file_dir is not None and os.path.exists(file_dir):
-        for file_name in os.listdir(file_dir):
-            if file_name.lower().endswith(".zip"):
-                extract_dir, _ = _maybe_unzip(os.path.join(file_dir, file_name))
-                if extract_dir is not None:
-                    clean_up_list.append(extract_dir)
-                    extracted_dirs.append(extract_dir)
+    source_root = Path(file_dir) if file_dir is not None else None
+    source_files: list[Path] = []
+    if source_root is not None and source_root.is_dir():
+        discovered = source_root.rglob("*") if recursive else source_root.iterdir()
+        for path in sorted(discovered):
+            if path.is_file():
+                source_files.append(path)
+            elif not path.is_dir() or (recursive and path.is_symlink()):
+                raise ValueError(f"unsupported reference entry: {path}")
+    extracted_archives: list[tuple[Path, str, list[Path]]] = []
+    for archive in source_files:
+        if archive.suffix.lower() != ".zip":
+            continue
+        omissions: list[str] = []
+        extract_dir, members = _maybe_unzip(archive, omissions=omissions)
+        for marker in omissions:
+            LOGGER.warning("Skipping unreadable or unsupported ZIP evidence in %s: %s", archive, marker)
+        if extract_dir is not None:
+            clean_up_list.append(extract_dir)
+            extracted_archives.append((extract_dir.resolve(), archive.relative_to(source_root).as_posix(), members))
 
     ignore_files = _ignore_files()
     provenance_by_dir: dict[Path, Any] = {}
@@ -882,17 +911,25 @@ def build_file_section(
         except Exception as exc:
             return f"[structured spreadsheet extraction failed: {exc}]"
 
-    def _emit(directory: str, file_name: str) -> None:
+    def _emit(directory: str, file_name: str, *, label: str | None = None) -> None:
         nonlocal no_files
         if file_name in ignore_files:
             return
+        label = label or file_name
         full_path = Path(directory) / file_name
         provenance = _provenance(directory)
         parent = Path(directory)
         if full_path in provenance.suppressed_pdfs or full_path in fallback_suppressed_by_dir[parent]:
             return
-        _append_block({"type": "text", "text": f"\n{file_name}:\n"})
         info = FILE_TYPE_MAP.get(full_path.suffix.lower().lstrip(".")) or {}
+        cached_office_pdf = provenance.office_pdfs.get(full_path) or fallback_pdfs_by_dir[parent].get(full_path)
+        if not info and cached_office_pdf is None:
+            LOGGER.info("Skipping unsupported judge file: %s", full_path)
+            return
+        if info.get("type") == "DOC" and cached_office_pdf is None:
+            LOGGER.info("Skipping unrendered Office judge file: %s", full_path)
+            return
+        _append_block({"type": "text", "text": f"\n{label}:\n"})
         av_identity: tuple[int, str] | None = None
         if info.get("type") in {"AUDIO", "VIDEO"}:
             try:
@@ -917,7 +954,6 @@ def build_file_section(
                 )
                 no_files = False
                 return
-        cached_office_pdf = provenance.office_pdfs.get(full_path) or fallback_pdfs_by_dir[parent].get(full_path)
         remaining_text = max(0, MAX_SECTION_TEXT_CHARS_FOR_JUDGE - text_used)
         if media_mode == "images_and_text":
             blocks = get_file_image_text_blocks(
@@ -936,14 +972,14 @@ def build_file_section(
             if blocks:
                 _append_blocks(blocks)
                 if av_identity is not None and any(_attachment_payload(block)[0] for block in blocks):
-                    retained_av_payloads[av_identity] = file_name
+                    retained_av_payloads[av_identity] = label
                 no_files = False
             sheet_text = _structured_xlsx_text(full_path)
             if sheet_text:
                 _append_block(
                     {
                         "type": "text",
-                        "text": f"\n{file_name} (structured spreadsheet cells):\n{sheet_text}",
+                        "text": f"\n{label} (structured spreadsheet cells):\n{sheet_text}",
                     }
                 )
                 no_files = False
@@ -959,25 +995,22 @@ def build_file_section(
         if block is not None:
             _append_block(block)
             if av_identity is not None and _attachment_payload(block)[0]:
-                retained_av_payloads[av_identity] = file_name
+                retained_av_payloads[av_identity] = label
             no_files = False
         sheet_text = _structured_xlsx_text(full_path)
         if sheet_text:
-            _append_block({"type": "text", "text": f"\n{file_name} (structured spreadsheet cells):\n{sheet_text}"})
+            _append_block({"type": "text", "text": f"\n{label} (structured spreadsheet cells):\n{sheet_text}"})
             no_files = False
 
-    if file_dir is not None and os.path.exists(file_dir):
-        for file_name in sorted(os.listdir(file_dir)):
-            full_path = os.path.join(file_dir, file_name)
-            if os.path.isdir(full_path) or file_name.lower().endswith(".zip"):
-                continue
-            _emit(file_dir, file_name)
+    for source in source_files:
+        if source.suffix.lower() != ".zip":
+            _emit(str(source.parent), source.name, label=source.relative_to(source_root).as_posix())
 
-    for extract_dir in extracted_dirs:
-        for member in sorted(extract_dir.rglob("*")):
-            if not member.is_file():
-                continue
-            _emit(str(member.parent), member.name)
+    for extract_dir, archive_name, members in extracted_archives:
+        for member in sorted(members):
+            _emit(
+                str(member.parent), member.name, label=f"{archive_name}!/{member.relative_to(extract_dir).as_posix()}"
+            )
 
     if no_files:
         _append_block({"type": "text", "text": "None"})
@@ -988,6 +1021,8 @@ def build_file_section(
         for block in reversed(section):
             if block.get("type") == "text":
                 previous = str(block.get("text", ""))
+                if _is_lossy_transport_marker(previous):
+                    continue
                 block["text"] = _bounded_text(previous + "x", len(previous), text_marker)
                 break
 
@@ -1081,6 +1116,10 @@ def _bound_section_text(section: list[dict], cap: int) -> list[dict]:
             result.append(block)
             continue
         value = str(block.get("text", ""))
+        if _is_lossy_transport_marker(value):
+            result.append(block)
+            remaining = max(0, remaining - len(value))
+            continue
         if remaining <= 0:
             omitted = omitted or bool(value)
             continue
@@ -1484,6 +1523,9 @@ class Judge:
     max_native_pdf_documents: Optional[int] = None
     max_native_pdf_bytes: Optional[int] = None
     max_native_pdf_bytes_per_document: Optional[int] = None
+    max_image_base64_bytes: Optional[int] = None
+    max_total_image_base64_bytes: Optional[int] = None
+    max_video_files: Optional[int] = None
     raster_dpi_tiers: tuple[int, ...] = ()
     max_serialized_request_bytes: Optional[int] = None
 
@@ -1811,12 +1853,6 @@ def preflight_judge_transport(
         submission_a=sections["submission_a"],
         submission_b=sections["submission_b"],
     )
-    markers: list[str] = []
-    for message in messages:
-        for block in message.get("content") or []:
-            text = str(block.get("text", ""))
-            if _is_lossy_transport_marker(text):
-                markers.append(text.splitlines()[0][:240])
     create_kwargs = merge_create_kwargs(
         {
             "model": judge.model,
@@ -1826,6 +1862,25 @@ def preflight_judge_transport(
         },
         judge.create_overrides,
     )
+    markers: list[str] = []
+    image_sizes: list[int] = []
+    unmeasured_images = 0
+    video_count = 0
+    for message in create_kwargs["messages"]:
+        for block in message.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            text = str(block.get("text", ""))
+            if _is_lossy_transport_marker(text):
+                markers.append(text.splitlines()[0][:240])
+            if block.get("type") == "video_url":
+                video_count += 1
+            if block.get("type") == "image_url":
+                payload, start = _attachment_payload(block)
+                if payload.startswith("data:image/"):
+                    image_sizes.append(len(payload) - start)
+                elif not payload.startswith("data:application/pdf;"):
+                    unmeasured_images += 1
     serialized_bytes = len(json.dumps(create_kwargs, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
     cap = judge.max_serialized_request_bytes
     reasons: list[str] = []
@@ -1833,12 +1888,28 @@ def preflight_judge_transport(
         reasons.append("lossy_attachment_omission")
     if cap is not None and serialized_bytes >= cap:
         reasons.append("provider_wire_cap")
+    image_cap = judge.max_image_base64_bytes
+    if unmeasured_images and (image_cap is not None or judge.max_total_image_base64_bytes is not None):
+        reasons.append("provider_image_size_unknown")
+    if image_cap is not None and any(size > image_cap for size in image_sizes):
+        reasons.append("provider_image_byte_cap")
+    total_image_bytes = sum(image_sizes)
+    if judge.max_total_image_base64_bytes is not None and total_image_bytes >= judge.max_total_image_base64_bytes:
+        reasons.append("provider_total_image_byte_cap")
+    if judge.max_video_files is not None and video_count > judge.max_video_files:
+        reasons.append("provider_video_count_cap")
     return {
         "eligible": not reasons,
         "judge": judge.name,
         "media_mode": judge.media_mode,
         "serialized_request_bytes": serialized_bytes,
         "max_serialized_request_bytes": cap,
+        "largest_image_base64_bytes": max(image_sizes, default=0),
+        "total_image_base64_bytes": total_image_bytes,
+        "max_image_base64_bytes": image_cap,
+        "max_total_image_base64_bytes": judge.max_total_image_base64_bytes,
+        "video_file_count": video_count,
+        "max_video_files": judge.max_video_files,
         "loss_markers": markers,
         "reasons": reasons,
     }

@@ -1,0 +1,199 @@
+---
+title: "GDPVal on Slurm"
+description: "Run the three AA-v2 phases with pinned Gym source and native resume."
+position: 12
+---
+
+# GDPVal on Slurm
+
+`benchmarks/gdpval/hsg/aav2/run_aav2.sh` retains the AA-v2 workflow: submit
+rollout, preconvert, and judge separately. Each command starts one job. Wait for
+that job to succeed before starting the next phase. Gym owns multistage planning,
+judgment caching, and resume.
+
+## Configure a run
+
+Use Linux Slurm nodes with `/raid/scratch`, `/lustre`, Bash, `flock`, `setsid`,
+`curl`, and an installed `uv` binary. Rollout uses one node with four GPUs;
+preconversion and judging use CPU nodes. The preconversion image must contain
+Python 3.11+, LibreOffice with Java support, FFmpeg, ffprobe, and the GDPVal Python dependencies.
+Provide a compatible Apptainer installation and vLLM image/serving script.
+
+Commit the Gym checkout before launching. Create a shell configuration file:
+
+```bash
+export GYM_SOURCE=/lustre/project/Gym
+export GYM_REVISION=YOUR_COMMIT_SHA
+export DATASET=/lustre/project/inputs/gdpval.jsonl
+export SMOKE_DATASET=/lustre/project/inputs/smoke4.jsonl
+export PROFILE=/lustre/project/inputs/iter3159.env
+export JUDGE_CONFIG=/lustre/project/inputs/reference-paths.yaml
+export ENV_FILE=/lustre/project/private/runtime.env
+export UV_SOURCE="$HOME/.local/bin/uv"
+export AGENT_SIF=/lustre/project/images/gdpval-agent.sif
+export JUDGE_SIF=/lustre/project/images/gdpval-office.sqsh
+export APPTAINER_BIN=/lustre/project/tools/apptainer/bin
+export ACCOUNT=YOUR_ACCOUNT
+export GPU_PARTITION=batch
+export CPU_PARTITION=cpu
+export GPU_QOS=normal
+export CPU_QOS=cpu-normal
+```
+
+The dataset must have unique `task_id` values and durable reference URLs.
+`SMOKE_DATASET` is required for `rollout smoke` and must contain at most four
+canonical task rows. For full rollouts and imports, omit it to use the first
+four rows when subsequently running `judge smoke`.
+Keep the external checkpoint, serving script, image, parser, and reference trees
+unchanged throughout the run.
+`JUDGE_SIF` selects the separate Office/media image; it defaults to `AGENT_SIF`.
+
+The serving profile sets `POLICY_SERVE_SCRIPT`, `MODEL_NAME`, `MODEL_PATH`,
+`CONTAINER_IMAGE`, and checkpoint-specific arguments. For the selected text
+checkpoint, retain the validated TP4, context 262144, MTP1, and parser settings.
+The script receives `REPLICA_NODES`, `OUTPUT_DIR`, `API_PORT`, `LOG_DIR`,
+`MODEL_PATH`, `CONTAINER_IMAGE`, `EXTRA_MOUNTS`, and `PYXIS_CONTAINER_ENV`; it must
+write `SERVER_URL=.../v1` to `$OUTPUT_DIR/server_info/*.env`.
+
+`JUDGE_CONFIG` is a self-contained YAML overlay with absolute reference paths
+and calibrated ELOs. Reference trees must contain one completed repeat per task.
+Judging inherits the panel, media settings, and trial-validation behavior from
+`benchmarks/gdpval/config.yaml` and the resources server defaults. The launcher
+enables recursive reference-file loading; completion still checks valid vote
+counts. The overlay can override benchmark settings. Do not reference additional
+local YAML files.
+
+```yaml
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      reference_models:
+        reference_a:
+          deliverables_dir: /lustre/project/references/a
+          elo: 1223
+        reference_b:
+          deliverables_dir: /lustre/project/references/b
+          elo: 1181
+```
+
+Those ELOs illustrate the file format. Use your frozen reference set's calibrated
+values, and include at least four references for pilot/full mode. Store
+`JUDGE_API_KEY`, optional `JUDGE_GEMINI_API_KEY`, and `TAVILY_API_KEY` for rollout
+in the protected `ENV_FILE`. Gemini uses its dedicated key when set and falls
+back to `JUDGE_API_KEY`; GPT and Claude use `JUDGE_API_KEY`. Credentials are read
+inside the job. Keep other
+scientific environment settings unchanged when resuming.
+
+The six global attachment budgets are frozen when creating a run. To use
+200 MiB raw and 280 MiB encoded per section, add these overrides to the shell
+configuration before creating the run:
+
+```bash
+export GDPVAL_MAX_SECTION_RAW_ATTACHMENT_BYTES_FOR_JUDGE=209715200
+export GDPVAL_MAX_SECTION_ENCODED_ATTACHMENT_CHARS_FOR_JUDGE=293601280
+```
+
+The total request and provider limits still apply. Changing shell settings after
+creation does not change a frozen run.
+
+## Run the three phases
+
+```bash
+export AAV2_CONFIG=/lustre/project/inputs/aav2.env
+W=/lustre/project/Gym/benchmarks/gdpval/hsg/aav2
+
+bash "$W/run_aav2.sh" rollout smoke
+# Record the printed RUN_DIR and wait for the rollout job to finish.
+RUN=/lustre/project/results/THE_PRINTED_RUN_DIRECTORY
+
+bash "$RUN/package/run_aav2.sh" preconvert "$RUN"
+# Wait for preconversion to finish.
+
+bash "$RUN/package/run_aav2.sh" judge "$RUN" smoke
+```
+
+For the full benchmark, use `rollout full` and `judge "$RUN" full`.
+
+## Judge existing rollouts again
+
+Set `DATASET` to the exact task inputs used for the existing rollout and
+`JUDGE_CONFIG` to the desired reference-path/ELO YAML. A serving profile is
+unnecessary for this workflow. Create a separate import for each model:
+
+```bash
+export AAV2_CONFIG=/lustre/project/inputs/aav2.env
+W=/lustre/project/Gym/benchmarks/gdpval/hsg/aav2
+bash "$W/run_aav2.sh" import /lustre/project/existing-rollout
+# Record the printed RUN_DIR. Import copies files and submits no job.
+RUN=/lustre/project/results/THE_PRINTED_RUN_DIRECTORY
+
+bash "$RUN/package/run_aav2.sh" preconvert "$RUN"
+# Wait for successful preconversion, then start fresh judging.
+bash "$RUN/package/run_aav2.sh" judge "$RUN" full
+```
+
+Import copies selected task evidence from `existing-rollout/deliverables/`,
+checks every task's finish marker, and excludes prior verify caches and judge
+directories. `import.json` records source paths and hashes. Imported runs support
+preconversion and judging; they cannot resume model rollout.
+
+Point `JUDGE_CONFIG` at the existing prepared reference caches. Preconversion
+processes only the candidate; it does not copy, convert, or inventory reference
+trees. Judging uses the supplied reference paths, model IDs, and ELOs unchanged.
+Reference mirrors may contain symlinks; their visible files remain the reference
+evidence used for judging.
+
+## Preparation and judging
+
+| Judge mode | Stages | Trials per task/reference matchup |
+|---|---|---|
+| smoke | Up to four smoke tasks | 1 |
+| pilot | 12 tasks, then 12 tasks against four nearby references | 2 |
+| full | 45 tasks, then the full dataset against four nearby references | 4 |
+
+Run creation freezes the source archive, datasets, any serving profile, and judge
+overlay. Jobs verify their hashes and stage code, environments,
+images, parsers, and caches under node-local storage. Safetensors weights stay
+shared through a read-only mount. Outputs remain in the durable run directory.
+
+Preconversion creates a separate candidate view under `prepared/candidate/`
+and preserves the original deliverables. It uses Gym's existing Office-to-PDF
+converter inside the SIF. Existing reference caches are reused directly.
+Supported large videos become H.264 proxies up to 720p with AAC
+sound; these are lossy views, not byte-size guarantees. PCM16/24 WAV and AIFF
+become FLAC only when decoded samples match and the output shrinks. Floating
+point, PCM32 audio, and audio with extra streams such as embedded artwork are
+preserved. ZIP preparation preserves members
+and adds Office sidecars without changing original files.
+
+Unsupported media features, decoding errors, and conversion timeouts preserve
+the original file and are logged. Nested ZIP members and other formats,
+including STEP and PSD, are copied unchanged. The judge can use
+existing PDF sidecars. Otherwise, it logs each unsupported filename and skips
+that file, judging the remaining supported files. Failed Office renders are
+also logged and skipped, as are unreadable or unsupported ZIP members. All tasks
+stay included. Request-size limits still apply.
+
+## Resume and inspect
+
+After a failed job has exited, repeat `preconvert` or `judge` with the same run
+and mode. To resume rollout, use:
+
+```bash
+bash "$RUN/package/run_aav2.sh" rollout resume "$RUN"
+```
+
+A run allows one active phase at a time. Preconversion reuses an existing
+candidate view when it has finish markers for every dataset task. Changing
+inputs or the judging protocol requires a new run; do not edit native cache or
+journal files.
+
+Read the job IDs printed by the launcher and the logs under the run directory.
+Judging uses separate `judge_smoke`, `judge_pilot`, and `judge_full` directories.
+Smoke and pilot require complete sampled task coverage and valid votes. Full
+mode additionally requires exact dataset coverage and a fitted final-stage ELO;
+a successful Gym exit alone is insufficient. A finished rollout can legitimately
+submit no document.
+
+Submitting the judge phase sends task evidence and deliverables to the configured
+provider endpoints. No background controller starts judging automatically.
