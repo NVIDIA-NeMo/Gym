@@ -1,0 +1,27 @@
+# LLM-as-judge variant of RoleMRC: 5 aspects (knowledge range, style, nested
+# instruction, multi-turn instruction, instruction priority), reward = mean 0/1
+# aspect score. Runs on the judge subset (rows whose `task` has an aspect
+# config), which is a strict subset of the reference split.
+#
+# A judge endpoint is REQUIRED and is deliberately separate from the model under
+# test — supply it at start time:
+#
+#   gym env start --model-type vllm_model --benchmark rolemrc/config_judge \
+#     +judge_base_url=https://api.openai.com/v1/ \
+#     +judge_api_key=$OPEN_AI_KEY \
+#     +judge_model_name=gpt-4.1
+config_paths:
+  - resources_servers/rolemrc/configs/rolemrc_judge.yaml
+
+rolemrc_judge_benchmark_simple_agent:
+  _inherit_from: rolemrc_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: rolemrc_judge
+        type: benchmark
+        jsonl_fpath: benchmarks/rolemrc/data/rolemrc_judge_benchmark.jsonl
+        prepare_script: benchmarks/rolemrc/prepare_judge.py
+        prompt_config: null
+        num_repeats: 1
+        license: Creative Commons Attribution 4.0 International

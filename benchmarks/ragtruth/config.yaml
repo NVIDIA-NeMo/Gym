@@ -1,0 +1,25 @@
+config_paths:
+  - resources_servers/ragtruth/configs/ragtruth.yaml
+
+# Gym-native RAGTruth benchmark. Inherits the resources server + model wiring
+# from ragtruth_simple_agent (see resources_servers/ragtruth/configs/ragtruth.yaml)
+# and points it at the Responses-shaped whole-dataset JSONL built by prepare.py —
+# the three task slices (QA / Summary / Data2txt) concatenated into one file, so
+# the headline is the upstream all-slice accuracy and compute_metrics still breaks
+# it down per slice from each row's task_type.
+ragtruth_benchmark_simple_agent:
+  _inherit_from: ragtruth_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: ragtruth
+        type: benchmark
+        jsonl_fpath: benchmarks/ragtruth/data/ragtruth_benchmark.jsonl
+        prepare_script: benchmarks/ragtruth/prepare.py
+        # Rows already carry a fully-built responses_create_params.input (the
+        # slice's prompt template is applied at prep time), so no prompt template
+        # is applied here. The key is required by BenchmarkDatasetConfig even
+        # when null.
+        prompt_config: null
+        num_repeats: 1
+        license: MIT

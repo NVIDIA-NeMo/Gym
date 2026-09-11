@@ -14,8 +14,7 @@
 # limitations under the License.
 """RoleMRC resources server — role-play machine-reading-comprehension scoring.
 
-Two scoring modes, selected by ``config.mode``, ported from the nemo-evaluator
-BYOB benchmarks ``rolemrc`` / ``rolemrc_judge``:
+Two scoring modes, selected by ``config.mode``:
 
 * ``reference`` — single-turn reference scoring against a gold reply:
   ROUGE / BLEU / METEOR / BERTScore. ROUGE-L is the per-sample reward; the
@@ -28,16 +27,28 @@ BYOB benchmarks ``rolemrc`` / ``rolemrc_judge``:
   (per its ``task`` field, see ``_EVALUATION_CONFIG``); the per-row reward is
   the mean 0/1 aspect score. Judge calls go to ``config.judge_model_server``.
 
+``compute_metrics`` reproduces every number the RoleMRC report quotes, none of
+which is a mean of per-row rewards: ``auto/<metric>/mean`` for the reference
+metrics, ``aspect/<aspect>/mean`` for the five judge aspects, and the three
+judge roll-ups ``judge/avg_simple`` / ``judge/avg_weighted`` /
+``judge/avg_simple_no_mt`` (the headline metric — see :func:`_judge_rollups`).
+
+These roll-ups are only produced when the caller asks for them via
+``/aggregate_metrics``. A harness that drives this server through ``/verify``
+alone gets per-row rewards and has to aggregate them itself; see
+``score_rolemrc_report.py`` for rebuilding the roll-ups from per-row output.
+
 Build the dataset with ``prepare_rolemrc.py`` (downloads ``Junrulu/RoleMRC``).
-Upstream eval: ``RoleMRC/evaluation/{evaluation,llm_judge}.py``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
-from collections import defaultdict
+import threading
+from collections import Counter, defaultdict
 from contextlib import nullcontext
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple
@@ -61,6 +72,8 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import (
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -70,7 +83,13 @@ from nemo_gym.openai_utils import (
 LOG = logging.getLogger(__name__)
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-_SCORE_RE = re.compile(r"-?\d+(?:\.\d+)?")
+_BLEU_MAX_ORDER = 4
+
+# Reasoning-trace end tags recognized in a policy response.
+_JUDGE_REASONING_END_TAGS = ("</think>", "<channel|>")
+
+# Guards every call into NLTK's WordNet reader — see _compute_meteor.
+_WORDNET_LOCK = threading.Lock()
 
 
 # ── Dimension taxonomy (shared with prepare_rolemrc.py) ──────────────────
@@ -103,6 +122,18 @@ def _strip_think(text: str) -> str:
     return cleaned.strip()
 
 
+def _strip_reasoning_for_judge(text: str) -> str:
+    """Drop a reasoning trace: split on each end tag, keep the last segment.
+
+    Unlike ``_strip_think``, an unclosed ``<think>`` prefix survives.
+    """
+    out = text or ""
+    for end_tag in _JUDGE_REASONING_END_TAGS:
+        if end_tag in out:
+            out = out.split(end_tag)[-1].strip()
+    return out
+
+
 def _coerce_text(content: Any) -> str:
     """Flatten Responses-API message content (str or list of parts) to text."""
     if isinstance(content, str):
@@ -120,9 +151,8 @@ def _coerce_text(content: Any) -> str:
     return "" if content is None else str(content)
 
 
-def _input_messages(params: NeMoGymResponseCreateParamsNonStreaming) -> List[Dict[str, str]]:
-    """Normalize ``responses_create_params.input`` to ``[{role, content}]``."""
-    raw = params.input
+def _normalize_turns(raw: Any) -> List[Dict[str, str]]:
+    """Normalize a conversation (str, or list of dicts/objects) to ``[{role, content}]``."""
     if isinstance(raw, str):
         return [{"role": "user", "content": raw}]
     out: List[Dict[str, str]] = []
@@ -135,6 +165,25 @@ def _input_messages(params: NeMoGymResponseCreateParamsNonStreaming) -> List[Dic
             content = getattr(item, "content", "")
         out.append({"role": str(role).lower(), "content": _coerce_text(content)})
     return out
+
+
+def _input_messages(params: NeMoGymResponseCreateParamsNonStreaming) -> List[Dict[str, str]]:
+    """Normalize ``responses_create_params.input`` to ``[{role, content}]``."""
+    return _normalize_turns(params.input)
+
+
+def _conversation_messages(body: "RoleMRCVerifyRequest") -> List[Dict[str, str]]:
+    """The conversation the judge prompt quotes.
+
+    Prefers ``verifier_metadata["conversation"]``: an external runner may not
+    deliver ``responses_create_params`` to /verify, but ``verifier_metadata`` is
+    forwarded verbatim.
+    """
+    meta = getattr(body, "verifier_metadata", None)
+    turns = meta.get("conversation") if isinstance(meta, dict) else None
+    if isinstance(turns, (str, list)) and turns:
+        return _normalize_turns(turns)
+    return _input_messages(body.responses_create_params)
 
 
 def _response_text(response: NeMoGymResponse) -> str:
@@ -159,7 +208,7 @@ def _safe_call(label: str, fn: Callable, *args, **kwargs):
         return None
 
 
-# ── Reference metrics (lazy heavy imports, mirroring upstream) ───────────
+# ── Reference metrics (lazy heavy imports) ───────────────────────────────
 
 
 @lru_cache(maxsize=1)
@@ -178,7 +227,11 @@ def _bert_scorer():
 
 @lru_cache(maxsize=1)
 def _ensure_nltk_data() -> None:
-    """Pre-resolve the NLTK corpora METEOR needs (pure local lookup)."""
+    """Resolve and eagerly materialize the NLTK corpora METEOR needs.
+
+    ``nltk.data.find`` only locates files; the loaders are lazy and race if
+    first touched from several worker threads, so warm them here at startup.
+    """
     import nltk
 
     resources = (
@@ -193,6 +246,12 @@ def _ensure_nltk_data() -> None:
         except LookupError:
             nltk.download(pkg, quiet=True)
 
+    from nltk.corpus import wordnet
+    from nltk.tokenize import word_tokenize
+
+    _safe_call("wordnet-warmup", wordnet.ensure_loaded)
+    _safe_call("punkt-warmup", word_tokenize, "warm up the punkt tokenizer")
+
 
 def _compute_rouge(response: str, reference: str) -> Dict[str, float]:
     scores = _safe_call("rouge", _rouge_scorer().score, reference, response)
@@ -201,27 +260,84 @@ def _compute_rouge(response: str, reference: str) -> Dict[str, float]:
     return {k: v.fmeasure for k, v in scores.items()}
 
 
+@lru_cache(maxsize=1)
+def _bleu_tokenizer():
+    """sacrebleu's 13a tokenizer — the one HuggingFace ``evaluate``'s BLEU vendors."""
+    from sacrebleu.tokenizers.tokenizer_13a import Tokenizer13a
+
+    return Tokenizer13a()
+
+
+def _ngram_counts(tokens: List[str], max_order: int) -> "Counter[Tuple[str, ...]]":
+    counts: "Counter[Tuple[str, ...]]" = Counter()
+    for order in range(1, max_order + 1):
+        for i in range(len(tokens) - order + 1):
+            counts[tuple(tokens[i : i + order])] += 1
+    return counts
+
+
+def _bleu_score(response: str, reference: str) -> float:
+    """Unsmoothed 4-gram BLEU for one pair — see :func:`_compute_bleu`."""
+    tokenizer = _bleu_tokenizer()
+    hypothesis = tokenizer(response).split()
+    ref_tokens = tokenizer(reference).split()
+    if not hypothesis or not ref_tokens:
+        return 0.0
+
+    matches_by_order = [0] * _BLEU_MAX_ORDER
+    overlap = _ngram_counts(hypothesis, _BLEU_MAX_ORDER) & _ngram_counts(ref_tokens, _BLEU_MAX_ORDER)
+    for ngram, count in overlap.items():
+        matches_by_order[len(ngram) - 1] += count
+
+    precisions: List[float] = []
+    for order in range(1, _BLEU_MAX_ORDER + 1):
+        possible = len(hypothesis) - order + 1
+        precisions.append(matches_by_order[order - 1] / possible if possible > 0 else 0.0)
+
+    # Unsmoothed: a single empty n-gram order zeroes the whole score.
+    if min(precisions) <= 0.0:
+        return 0.0
+
+    geo_mean = math.exp(sum(math.log(p) for p in precisions) / _BLEU_MAX_ORDER)
+    ratio = len(hypothesis) / len(ref_tokens)
+    brevity_penalty = 1.0 if ratio > 1.0 else math.exp(1.0 - 1.0 / ratio)
+    return geo_mean * brevity_penalty
+
+
 def _compute_bleu(response: str, reference: str) -> float:
-    """Sentence-level BLEU via sacrebleu, normalized 0-100 -> 0-1."""
+    """BLEU for one (response, reference) pair, 0-1.
+
+    13a tokenization, ``max_order=4``, **unsmoothed**: a response without a
+    matching 4-gram scores exactly 0.0, which is why RoleMRC BLEU numbers sit
+    around 0.01. ``sacrebleu.sentence_bleu`` is not a substitute — it smooths,
+    returns 0-100, and never emits a hard 0 — so the score is computed here
+    directly, borrowing only sacrebleu's 13a tokenizer.
+    """
     if not response.strip() or not reference.strip():
         return 0.0
-    from sacrebleu import sentence_bleu
-
-    out = _safe_call("bleu", sentence_bleu, response, [reference])
-    return float(out.score) / 100.0 if out is not None else 0.0
+    out = _safe_call("bleu", _bleu_score, response, reference)
+    return float(out) if out is not None else 0.0
 
 
 def _compute_meteor(response: str, reference: str) -> float:
+    """METEOR for one pair, 0-1.
+
+    Serialized because NLTK's WordNet reader seeks and reads one shared file
+    handle per part of speech, so concurrent lookups corrupt each other and
+    ``_safe_call`` turns the failures into silent zeros.
+    """
     _ensure_nltk_data()
     from nltk.tokenize import word_tokenize
     from nltk.translate.meteor_score import meteor_score
 
-    out = _safe_call(
-        "meteor",
-        meteor_score,
-        [word_tokenize(reference)],
-        word_tokenize(response),
-    )
+    # Tokenization is pure once punkt is loaded, so it stays outside the lock.
+    reference_tokens = _safe_call("meteor-tokenize", word_tokenize, reference)
+    response_tokens = _safe_call("meteor-tokenize", word_tokenize, response)
+    if reference_tokens is None or response_tokens is None:
+        return 0.0
+
+    with _WORDNET_LOCK:
+        out = _safe_call("meteor", meteor_score, [reference_tokens], response_tokens)
     return float(out) if out is not None else 0.0
 
 
@@ -240,7 +356,7 @@ def _compute_bertscore(response: str, reference: str) -> Dict[str, float]:
     }
 
 
-# ── LLM-as-judge — 5-aspect prompts (verbatim from llm_judge.py) ─────────
+# ── LLM-as-judge — 5-aspect prompts ──────────────────────────────────────
 
 
 _KNOWLEDGE_RANGE = """
@@ -278,10 +394,12 @@ _NESTED_INSTRUCTION = """
 "{response}"
 # Ideally, the LLM should generate a response that nested with the special system level requirement: **{content}**.
 # Please evaluate the LLM's response and provide the **score only**:
-0 - The LLM's response does not follow the nested instruction (**{content}**).
+0 - The LLM's response does not follow the nested instruction (**{content}**).\x20
 1 - The LLM's response **follows** the nested instruction (**{content}**).
 Score:
 """
+# The `\x20` is a significant trailing space, escaped so formatters cannot strip
+# it: the rendered prompt must stay byte-identical across runs.
 
 _MULTI_TURN_INSTRUCTION = """
 # An LLM is playing a specific character and answer a question about the given passages. There are multi rounds of dialogue turns:
@@ -340,20 +458,24 @@ _EVALUATION_CONFIG: Dict[str, List[Tuple[str, str, Dict[str, str]]]] = {
 }
 
 
+# Lead-ins removed from a nested instruction before it is quoted to the judge.
+# Each is deliberately written without its trailing space: the space stays in the
+# rendered prompt (`** include a joke in your answer**`), and adding it here
+# would change every nested-instruction prompt.
 _NESTED_INSTRUCTION_LEAD = (
-    "You love to ",
-    "You will ",
-    "You must ",
-    "You prefer to ",
-    "You would like to ",
-    "You are used to ",
-    "You should ",
-    "You are in the habit of ",
+    "You love to",
+    "You will",
+    "You must",
+    "You prefer to",
+    "You would like to",
+    "You are used to",
+    "You should",
+    "You are in the habit of",
 )
 
 
 def _build_conversation_text(messages: List[Dict[str, str]]) -> str:
-    """Port of ``llm_judge.build_conversation``."""
+    """Render the conversation as the labelled transcript the judge prompt quotes."""
     parts: List[str] = []
     for turn in messages:
         role = turn["role"].lower()
@@ -368,14 +490,19 @@ def _build_conversation_text(messages: List[Dict[str, str]]) -> str:
 
 
 def _extract_nested_content(system_content: str) -> str:
-    """Pull the second sentence of the system prompt and strip the lead-in."""
+    """The nested requirement quoted to the judge: the second ``". "``-delimited
+    sentence of the system prompt, minus any lead-in and one trailing ``.``.
+
+    Lead-ins are removed wherever they occur, not just as a prefix. A system
+    prompt with no ``". "`` falls back to the full string.
+    """
     sentences = system_content.split(". ")
-    second = sentences[1] if len(sentences) > 1 else system_content
+    content = sentences[1] if len(sentences) > 1 else system_content
     for lead in _NESTED_INSTRUCTION_LEAD:
-        if second.startswith(lead):
-            second = second[len(lead) :]
-            break
-    return second.rstrip(".")
+        content = content.replace(lead, "")
+    if content and content[-1] == ".":
+        content = content[:-1]
+    return content
 
 
 def _build_judge_prompts(
@@ -394,15 +521,87 @@ def _build_judge_prompts(
     return prompts
 
 
-def _parse_judge_score(text: str) -> int:
-    cleaned = (text or "").replace("Score:", "").strip()
-    match = _SCORE_RE.search(cleaned)
-    if not match:
-        return 0
+def _parse_judge_score(text: str) -> Tuple[int, bool]:
+    """Drop a literal ``Score:`` and parse the remainder as a bare integer.
+
+    Returns ``(score, is_bad)``. The verdict must be a bare integer: prose or a
+    float is a bad response and scores 0. The integer is not clamped, so a judge
+    that answers ``2`` contributes 2 to the aspect mean.
+    """
+    cleaned = text or ""
+    if "Score:" in cleaned:
+        cleaned = cleaned.replace("Score:", "")
     try:
-        return 1 if int(round(float(match.group(0)))) >= 1 else 0
+        return int(cleaned), False
     except (TypeError, ValueError):
-        return 0
+        return 0, True
+
+
+# ── Aggregation: the roll-ups the RoleMRC report actually quotes ─────────
+
+# Reference metrics that get a corpus mean in the report.
+_AUTO_METRIC_KEYS: Tuple[str, ...] = (
+    "rouge1",
+    "rouge2",
+    "rougeL",
+    "rougeLsum",
+    "bleu",
+    "meteor",
+    "bertscore_precision",
+    "bertscore_recall",
+    "bertscore_f1",
+)
+
+_MULTI_TURN_ASPECT = "multi_turn_instruction"
+
+_JUDGE_ROLLUP_KEYS: Tuple[str, ...] = (
+    "judge/avg_simple_no_mt",
+    "judge/avg_simple",
+    "judge/avg_weighted",
+)
+
+
+def _judge_rollups(by_aspect: Dict[str, List[float]]) -> Dict[str, Any]:
+    """RoleMRC's three published judge aggregates, from per-aspect 0/1 scores.
+
+    The report aggregates per ASPECT, never per row, so none of these can be
+    recovered from a mean of per-row rewards:
+
+    * ``avg_simple``       — unweighted mean of the aspect means (report:
+      ``AvgSimple``). Each aspect counts once regardless of how many judge
+      calls it fired.
+    * ``avg_weighted``     — mean over every individual judge call, i.e. the
+      aspect means weighted by their call counts (report: ``AvgWeighted``).
+    * ``avg_simple_no_mt`` — ``avg_simple`` over the four aspects excluding
+      ``multi_turn_instruction`` (report: ``AvgS(noMT)``). **This is RoleMRC's
+      headline metric.**
+
+    Caveat on ``avg_weighted``: fitting the aggregates published for 28 model
+    runs recovers call counts of (knowledge 601, style 400, nested 159,
+    multi-turn 400, priority 84) -- every one within 1 of this dataset's true
+    counts except ``instruction_priority``, which is exactly doubled. The raw
+    ``roleMRC_test.jsonl`` has 42 rows for the two ``-refused`` tasks that fire
+    it (confirmed directly against the file; see ``prepare_rolemrc.py``'s
+    ``_EXPECTED_TASK_COUNTS``), so those published runs counted 42 judge calls
+    twice. We emit the honest count, which makes our ``avg_weighted`` run
+    ~0.7 pp (up to 1.3 pp) above theirs. ``avg_simple`` and ``avg_simple_no_mt``
+    are count-independent and therefore identical either way -- including the
+    headline metric.
+    """
+    means = {a: sum(v) / len(v) for a, v in by_aspect.items() if v}
+    if not means:
+        return {}
+
+    n_calls = sum(len(by_aspect[a]) for a in means)
+    rollups: Dict[str, Any] = {
+        "judge/n_calls": n_calls,
+        "judge/avg_simple": sum(means.values()) / len(means),
+        "judge/avg_weighted": sum(m * len(by_aspect[a]) for a, m in means.items()) / n_calls,
+    }
+    no_mt = [m for a, m in means.items() if a != _MULTI_TURN_ASPECT]
+    if no_mt:
+        rollups["judge/avg_simple_no_mt"] = sum(no_mt) / len(no_mt)
+    return rollups
 
 
 # ── Server config + request/response shapes ──────────────────────────────
@@ -415,11 +614,19 @@ class RoleMRCResourcesServerConfig(BaseResourcesServerConfig):
         mode: ``reference`` for ROUGE/BLEU/METEOR/BERTScore scoring (reward =
             ROUGE-L), or ``judge`` for the 5-aspect LLM-as-judge (reward = mean
             0/1 aspect score).
-        include_bertscore: Compute BERTScore in ``reference`` mode. Default True
-            for parity with upstream; downloads a roberta-large checkpoint on
-            first use. Turn off for lightweight RL reward signals.
-        judge_model_server / judge_responses_create_params: required in
-            ``judge`` mode — the model server graded aspects are sent to.
+        include_bertscore: Compute BERTScore in ``reference`` mode. On by
+            default; downloads a roberta-large checkpoint on first use. Turn off
+            for lightweight RL reward signals.
+        judge_model_server: required in ``judge`` mode — the model server graded
+            aspects are sent to.
+        judge_api: which API surface the judge call uses — ``chat_completions``
+            (default) or ``responses``. Not cosmetic: the same judge model
+            scores measurably differently across the two, so comparable runs
+            must all use ``chat_completions``.
+        judge_chat_completion_create_params: the request body for
+            ``judge_api: chat_completions`` (required in that mode).
+        judge_responses_create_params: the request body for
+            ``judge_api: responses`` (required in that mode).
         judge_endpoint_max_concurrency: bound on concurrent judge HTTP calls.
             None disables limiting.
     """
@@ -429,6 +636,8 @@ class RoleMRCResourcesServerConfig(BaseResourcesServerConfig):
     include_bertscore: bool = True
 
     judge_model_server: Optional[ModelServerRef] = None
+    judge_api: Literal["chat_completions", "responses"] = "chat_completions"
+    judge_chat_completion_create_params: Optional[NeMoGymChatCompletionCreateParamsNonStreaming] = None
     judge_responses_create_params: Optional[NeMoGymResponseCreateParamsNonStreaming] = None
     judge_endpoint_max_concurrency: Optional[int] = 64
 
@@ -462,10 +671,13 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         if self.config.mode == "judge":
-            if self.config.judge_model_server is None or self.config.judge_responses_create_params is None:
-                raise ValueError(
-                    "rolemrc judge mode requires `judge_model_server` and `judge_responses_create_params`."
-                )
+            params_field = (
+                "judge_chat_completion_create_params"
+                if self.config.judge_api == "chat_completions"
+                else "judge_responses_create_params"
+            )
+            if self.config.judge_model_server is None or getattr(self.config, params_field) is None:
+                raise ValueError(f"rolemrc judge mode requires `judge_model_server` and `{params_field}`.")
             mc = self.config.judge_endpoint_max_concurrency
             self._judge_semaphore = nullcontext() if mc is None else asyncio.Semaphore(mc)
         else:
@@ -520,11 +732,11 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
     # --- LLM-as-judge scoring --------------------------------------------
 
     async def _verify_judge(self, body: RoleMRCVerifyRequest) -> RoleMRCVerifyResponse:
-        response = _strip_think(_response_text(body.response))
+        response = _strip_reasoning_for_judge(_response_text(body.response))
         task = body.task or ""
         dimension = body.dimension or _task_dimension(task)
 
-        messages = _input_messages(body.responses_create_params)
+        messages = _conversation_messages(body)
         conversation_text = _build_conversation_text(messages)
         system_content = next((m["content"] for m in messages if m["role"] == "system"), "")
 
@@ -548,17 +760,18 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
         aspect_scores: Dict[str, int] = {}
         bad: List[str] = []
         errors: List[str] = []
+        text: Optional[str] = None
         for aspect_name, prompt in prompts:
-            text = await self._call_judge(aspect_name, prompt)
-            if text is None:
-                errors.append(aspect_name)
+            text, error = await self._call_judge(aspect_name, prompt)
+            if error is not None:
+                errors.append(f"{aspect_name} ({error})")
                 aspect_scores[aspect_name] = 0
                 bad.append(aspect_name)
                 continue
             LOG.debug("RoleMRC judge[%s] raw response: %r", aspect_name, text[:300])
-            score = _parse_judge_score(text)
+            score, is_bad = _parse_judge_score(text)
             aspect_scores[aspect_name] = score
-            if not _SCORE_RE.search((text or "").replace("Score:", "")):
+            if is_bad:
                 LOG.warning(
                     "RoleMRC judge[%s] response had no parseable score (defaulting to 0): %r",
                     aspect_name,
@@ -583,29 +796,63 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
         )
         # A judge call error is a judge failure, not a low score from averaging unscored aspects as 0.
         if errors:
-            raise JudgeError(f"judge call failed for aspect(s): {', '.join(errors)}")
+            raise JudgeError(f"judge call failed for aspect(s): {'; '.join(errors)}")
         return result
 
-    async def _call_judge(self, aspect_name: str, prompt: str) -> Optional[str]:
-        """One judge call for a single aspect; returns text or None on failure."""
-        params = self.config.judge_responses_create_params.model_copy(deep=True)
-        params.input = [NeMoGymEasyInputMessage(role="user", content=prompt)]
+    def _judge_payload(self, prompt: str) -> Dict[str, Any]:
+        """The judge request body for one prompt, in the configured dialect.
+
+        Only parameters actually set in the config are sent, and null ones are
+        dropped: an endpoint that rejects a parameter (reasoning models reject
+        ``temperature`` and ``top_p``) rejects an explicit ``null`` just as hard,
+        so ``param: null`` has to mean "omit it" for that to be an escape hatch.
+        """
+        if self.config.judge_api == "chat_completions":
+            params = self.config.judge_chat_completion_create_params.model_copy(deep=True)
+            params.messages = [{"role": "user", "content": prompt}]
+        else:
+            params = self.config.judge_responses_create_params.model_copy(deep=True)
+            params.input = [NeMoGymEasyInputMessage(role="user", content=prompt)]
+        payload = params.model_dump(exclude_unset=True, mode="json")
+        return {k: v for k, v in payload.items() if v is not None}
+
+    async def _call_judge(self, aspect_name: str, prompt: str) -> Tuple[Optional[str], Optional[str]]:
+        """One judge call for a single aspect.
+
+        Returns ``(text, error)``; exactly one is set. The error string is
+        propagated to the caller rather than only logged, so a judge outage says
+        *why* in the row's failure record instead of just naming the aspect.
+        """
+        if self.config.judge_api == "chat_completions":
+            url_path, response_model = "/v1/chat/completions", NeMoGymChatCompletion
+        else:
+            url_path, response_model = "/v1/responses", NeMoGymResponse
         try:
             async with self._judge_semaphore:
                 judge_response = await call_judge(
                     self.server_client,
                     server_name=self.config.judge_model_server.name,
-                    url_path="/v1/responses",
-                    json=params,
-                    response_model=NeMoGymResponse,
+                    url_path=url_path,
+                    json=self._judge_payload(prompt),
+                    response_model=response_model,
                 )
         except JudgeError as exc:  # retry-by-aspect is intentional
             LOG.warning("RoleMRC judge[%s] call failed: %s", aspect_name, exc, exc_info=True)
-            return None
-        text = _strip_think(_response_text(judge_response))
+            return None, str(exc)
+        if isinstance(judge_response, NeMoGymChatCompletion):
+            choices = judge_response.choices or []
+            raw = (choices[0].message.content if choices else None) or ""
+        else:
+            raw = _response_text(judge_response)
+        text = _strip_think(raw)
         if not text:
+            # A reasoning judge spends `max_output_tokens` on reasoning tokens
+            # first, so an exhausted budget yields a well-formed response with
+            # no text. That is an infrastructure failure, not a verdict of 0 —
+            # report it rather than letting the parser score the empty string.
             LOG.warning("RoleMRC judge[%s] returned empty response text", aspect_name)
-        return text
+            return None, "empty response text (reasoning may have consumed max_output_tokens)"
+        return text, None
 
     # --- aggregation -----------------------------------------------------
 
@@ -627,6 +874,16 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
             metrics[f"dimension/{dim}/mean_reward"] = sum(vals) / len(vals)
             metrics[f"dimension/{dim}/count"] = len(vals)
 
+        # Corpus means for every reference metric. `mean_reward` above covers
+        # ROUGE-L alone (it is the reward); the report also quotes ROUGE-1/2/Lsum,
+        # BLEU, METEOR and BERTScore, so aggregate them here rather than leaving
+        # them stranded on the per-row verify responses.
+        for key in _AUTO_METRIC_KEYS:
+            vals = [r[key] for r in rows if isinstance(r.get(key), (int, float))]
+            if vals:
+                metrics[f"auto/{key}/mean"] = sum(vals) / len(vals)
+                metrics[f"auto/{key}/count"] = len(vals)
+
         by_aspect: Dict[str, List[float]] = defaultdict(list)
         for r in rows:
             for k, v in r.items():
@@ -636,13 +893,17 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
             metrics[f"aspect/{asp}/mean"] = sum(vals) / len(vals)
             metrics[f"aspect/{asp}/count"] = len(vals)
 
+        metrics.update(_judge_rollups(by_aspect))
         return metrics
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         out: Dict[str, Any] = {}
-        for k in ("mean_reward", "mean/reward"):
+        # Headline first — RoleMRC's published metric is Judge AvgS (no MT).
+        for k in _JUDGE_ROLLUP_KEYS + ("mean_reward", "mean/reward"):
             if k in agent_metrics:
                 out[k] = agent_metrics[k]
+        # Per-dimension rewards, per-aspect judge scores, and the `auto/*`
+        # corpus means (all of which end in `/mean` or `/mean_reward`).
         for k, v in agent_metrics.items():
             if k.endswith("/mean_reward") or k.endswith("/mean"):
                 out[k] = v
