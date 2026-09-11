@@ -143,6 +143,12 @@ def parse_args() -> argparse.Namespace:
         default=str(default_output_dir),
         help="Directory where generated shell scripts will be written (default: %(default)s).",
     )
+    parser.add_argument(
+        "--image-dir",
+        type=str,
+        required=True,
+        help="Path to the directory containing the singularity images.",
+    )
 
     return parser.parse_args()
 
@@ -154,6 +160,7 @@ def main() -> None:
         dataset_name=args.dataset_name,
         dataset_split=args.dataset_split,
         output_dir=output_dir,
+        image_dir=args.image_dir,
     )
 
 
