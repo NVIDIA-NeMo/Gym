@@ -18,9 +18,11 @@ import socket
 from concurrent.futures import ProcessPoolExecutor
 from unittest.mock import AsyncMock, MagicMock
 
+import uvicorn
 from aiohttp import ClientOSError, ClientResponseError, RequestInfo
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
+from pydantic import ValidationError
 from pytest import CaptureFixture, MonkeyPatch, raises
 from yarl import URL
 
@@ -28,6 +30,7 @@ import nemo_gym.global_config
 import nemo_gym.server_utils
 from nemo_gym.config_types import BaseRunServerInstanceConfig
 from nemo_gym.global_config import (
+    DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
@@ -43,6 +46,7 @@ from nemo_gym.server_utils import (
     HeadServer,
     ServerClient,
     SimpleServer,
+    UvicornProxyHeadersConfig,
     _format_upstream_error_log,
     _make_keepalive_socket_factory,
     initialize_ray,
@@ -811,3 +815,214 @@ class TestServerUtils:
         response = await nemo_gym.server_utils.request("POST", "http://flaky-host:1/v1")
         assert response is client.success_response
         assert client.request.await_count == 5
+
+
+_SPOOFED_HOST = "203.0.113.99"
+_LOOPBACK = "127.0.0.1"
+
+
+async def _scope_seen_by_app(*, proxy_headers: bool, allow_ips: list[str] | None, peer: str, forwarded: bool) -> dict:
+    """Drive uvicorn's loaded app with one request and return the scope the inner app observed."""
+    seen: dict = {}
+
+    async def recorder(scope, receive, send) -> None:
+        seen["client"] = scope.get("client")
+        seen["scheme"] = scope["scheme"]
+
+    config = uvicorn.Config(
+        app=recorder,
+        proxy_headers=proxy_headers,
+        forwarded_allow_ips=allow_ips or [],
+    )
+    config.load()
+
+    headers = []
+    if forwarded:
+        headers = [(b"x-forwarded-for", _SPOOFED_HOST.encode()), (b"x-forwarded-proto", b"https")]
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "method": "GET",
+        "path": "/",
+        "raw_path": b"/",
+        "query_string": b"",
+        "root_path": "",
+        "scheme": "http",
+        "headers": headers,
+        "client": (peer, 54321),
+        "server": (_LOOPBACK, 8000),
+    }
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message) -> None:
+        return None
+
+    await config.loaded_app(scope, receive, send)
+    return seen
+
+
+class TestUvicornProxyHeadersConfig:
+    def test_disabled_by_default(self) -> None:
+        config = UvicornProxyHeadersConfig.model_validate({})
+
+        assert config.uvicorn_proxy_headers is False
+        assert config.uvicorn_forwarded_allow_ips is None
+
+    def test_unrelated_config_keys_are_ignored(self) -> None:
+        config = UvicornProxyHeadersConfig.model_validate({"uvicorn_logging_show_200_ok": True, "port": 1234})
+
+        assert config.uvicorn_proxy_headers is False
+
+    def test_enabling_without_allowlist_is_rejected(self) -> None:
+        with raises(ValidationError, match="requires a non-empty uvicorn_forwarded_allow_ips"):
+            UvicornProxyHeadersConfig.model_validate({"uvicorn_proxy_headers": True})
+
+    def test_enabling_with_empty_allowlist_is_rejected(self) -> None:
+        with raises(ValidationError, match="requires a non-empty uvicorn_forwarded_allow_ips"):
+            UvicornProxyHeadersConfig.model_validate(
+                {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": ["  "]}
+            )
+
+    def test_wildcard_allowlist_is_rejected(self) -> None:
+        with raises(ValidationError, match="must not be"):
+            UvicornProxyHeadersConfig.model_validate(
+                {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": ["10.0.0.1", "*"]}
+            )
+
+    def test_allowlist_is_normalized(self) -> None:
+        config = UvicornProxyHeadersConfig.model_validate(
+            {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": [" 10.0.0.1 ", "", "10.0.0.2"]}
+        )
+
+        assert ["10.0.0.1", "10.0.0.2"] == config.uvicorn_forwarded_allow_ips
+
+
+class TestUvicornProxyHeadersBehavior:
+    async def test_forwarded_headers_ignored_when_disabled(self) -> None:
+        """The documented internal-only default: the real peer and scheme survive a forged header."""
+        seen = await _scope_seen_by_app(proxy_headers=False, allow_ips=None, peer=_LOOPBACK, forwarded=True)
+
+        assert (_LOOPBACK, 54321) == seen["client"]
+        assert "http" == seen["scheme"]
+
+    async def test_real_peer_reported_when_disabled_without_forwarded_headers(self) -> None:
+        seen = await _scope_seen_by_app(proxy_headers=False, allow_ips=None, peer=_LOOPBACK, forwarded=False)
+
+        assert (_LOOPBACK, 54321) == seen["client"]
+        assert "http" == seen["scheme"]
+
+    async def test_forwarded_headers_honored_for_trusted_proxy(self) -> None:
+        seen = await _scope_seen_by_app(proxy_headers=True, allow_ips=[_LOOPBACK], peer=_LOOPBACK, forwarded=True)
+
+        assert (_SPOOFED_HOST, 0) == seen["client"]
+        assert "https" == seen["scheme"]
+
+    async def test_forwarded_headers_ignored_from_untrusted_peer(self) -> None:
+        """Enabled, but the caller is not on the allowlist, so its forwarded claims are discarded."""
+        seen = await _scope_seen_by_app(proxy_headers=True, allow_ips=["10.0.0.1"], peer=_LOOPBACK, forwarded=True)
+
+        assert (_LOOPBACK, 54321) == seen["client"]
+        assert "http" == seen["scheme"]
+
+    def test_proxy_middleware_absent_for_single_and_multi_worker(self) -> None:
+        """run_webserver builds one kwargs dict for both launch paths, so the setting must hold for each."""
+        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+        for workers in (1, 4):
+            config = uvicorn.Config(
+                app=lambda scope, receive, send: None,
+                workers=workers,
+                proxy_headers=False,
+                forwarded_allow_ips=[],
+            )
+            config.load()
+
+            assert not isinstance(config.loaded_app, ProxyHeadersMiddleware), workers
+
+
+class TestRunWebserverProxyKwargs:
+    """run_webserver must forward the proxy config into uvicorn on both launch paths."""
+
+    def _capture_uvicorn_kwargs(self, monkeypatch: MonkeyPatch, config_dict: dict, num_workers: int) -> dict:
+        from fastapi import FastAPI
+
+        global_config = DictConfig({DRY_RUN_KEY_NAME: False, "my_server": {"a": {"b": {}}}, **config_dict})
+        monkeypatch.setattr(nemo_gym.server_utils.ray, "is_initialized", MagicMock(return_value=True))
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=global_config))
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="", port=0), global_config_dict=DictConfig({})
+        )
+        server_client_mock = MagicMock(return_value=server_client)
+        server_client_mock.load_head_server_config = MagicMock(return_value=BaseServerConfig(host="", port=0))
+        monkeypatch.setattr(nemo_gym.server_utils, "ServerClient", server_client_mock)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_worker", MagicMock(return_value=False))
+
+        captured: dict = {}
+        monkeypatch.setattr(nemo_gym.server_utils.uvicorn, "run", lambda **kwargs: captured.update(kwargs))
+
+        server_config = BaseRunServerInstanceConfig(
+            name="my_server", host="127.0.0.1", port=8000, entrypoint="app.py", num_workers=num_workers
+        )
+
+        class TestSimpleServer(SimpleServer):
+            @classmethod
+            def load_config_from_global_config(cls):
+                return server_config
+
+            def setup_webserver(self) -> FastAPI:
+                return FastAPI()
+
+            def setup_telemetry(self) -> None: ...
+            def set_ulimit(self) -> None: ...
+            def prefix_server_logs(self) -> None: ...
+            def setup_exception_middleware(self, app) -> None: ...
+            def setup_cancellation_middleware(self, app) -> None: ...
+            def instrument_app_for_telemetry(self, app) -> None: ...
+
+        TestSimpleServer.run_webserver()
+        return captured
+
+    def test_proxy_headers_disabled_by_default_single_worker(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
+
+        assert kwargs["proxy_headers"] is False
+        assert [] == kwargs["forwarded_allow_ips"]
+        # A single worker passes the app object itself rather than an import string.
+        assert not isinstance(kwargs["app"], str)
+        assert "workers" not in kwargs
+
+    def test_proxy_headers_disabled_by_default_multi_worker(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=4)
+
+        # Multi-worker launches re-import the app, so uvicorn receives an import string.
+        assert isinstance(kwargs["app"], str)
+        assert kwargs["app"].endswith(":app")
+        assert 4 == kwargs["workers"]
+        assert kwargs["proxy_headers"] is False
+        assert [] == kwargs["forwarded_allow_ips"]
+
+    def test_unrelated_uvicorn_settings_are_unchanged(self, monkeypatch: MonkeyPatch) -> None:
+        """The issue calls out parser, keepalive, access-log, and graceful-shutdown as must-not-change."""
+        kwargs = self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
+
+        assert "httptools" == kwargs["http"]
+        assert 30 == kwargs["timeout_keep_alive"]
+        assert kwargs["access_log"] is False
+        assert 0.5 == kwargs["timeout_graceful_shutdown"]
+
+    def test_trusted_proxy_opt_in_is_forwarded_to_uvicorn(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._capture_uvicorn_kwargs(
+            monkeypatch,
+            {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": ["10.0.0.1"]},
+            num_workers=1,
+        )
+
+        assert kwargs["proxy_headers"] is True
+        assert ["10.0.0.1"] == kwargs["forwarded_allow_ips"]
+
+    def test_enabling_without_allowlist_fails_startup(self, monkeypatch: MonkeyPatch) -> None:
+        with raises(ValidationError, match="requires a non-empty uvicorn_forwarded_allow_ips"):
+            self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_proxy_headers": True}, num_workers=1)

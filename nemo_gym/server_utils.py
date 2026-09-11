@@ -51,7 +51,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from multidict import CIMultiDict
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -645,6 +645,28 @@ class UvicornLoggingConfig(BaseModel):
     uvicorn_logging_show_200_ok: bool = False
 
 
+class UvicornProxyHeadersConfig(BaseModel):
+    # Gym servers call each other directly, so proxy headers stay off: uvicorn would otherwise let
+    # any caller rewrite its own client host and URL scheme through X-Forwarded-*.
+    uvicorn_proxy_headers: bool = False
+    # Trusted proxy addresses. Required when uvicorn_proxy_headers is enabled.
+    uvicorn_forwarded_allow_ips: Optional[List[str]] = None
+
+    @model_validator(mode="after")
+    def _require_trusted_proxy_allowlist(self) -> "UvicornProxyHeadersConfig":
+        if not self.uvicorn_proxy_headers:
+            return self
+
+        allow_ips = [ip.strip() for ip in (self.uvicorn_forwarded_allow_ips or []) if ip.strip()]
+        if not allow_ips:
+            raise ValueError("uvicorn_proxy_headers=True requires a non-empty uvicorn_forwarded_allow_ips allowlist.")
+        if "*" in allow_ips:
+            raise ValueError("uvicorn_forwarded_allow_ips must not be '*': it trusts forwarded headers from any peer.")
+
+        self.uvicorn_forwarded_allow_ips = allow_ips
+        return self
+
+
 _NEMO_GYM_STARTED_RAY_CLUSTER: bool = False
 
 
@@ -1050,6 +1072,7 @@ Full body: {json.dumps(exc.body, indent=4)}
             server.setup_profiling(app, profiling_config)
 
         uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
+        uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(global_config_dict)
         if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok and is_main_fastapi_proc:
             print(
                 "Disabling a uvicorn access logging so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
@@ -1069,6 +1092,10 @@ Full body: {json.dumps(exc.body, indent=4)}
             # A missing or incompatible httptools wheel now fails during startup.
             http="httptools",
             access_log=uvicorn_logging_cfg.uvicorn_logging_show_200_ok,
+            # Internal-only by default. Enabling this requires an explicit trusted-proxy allowlist,
+            # so forwarded headers are never honored from an arbitrary peer.
+            proxy_headers=uvicorn_proxy_cfg.uvicorn_proxy_headers,
+            forwarded_allow_ips=uvicorn_proxy_cfg.uvicorn_forwarded_allow_ips or [],
         )
 
         if server.config.num_workers and server.config.num_workers > 1:
