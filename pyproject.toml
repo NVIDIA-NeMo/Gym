@@ -306,7 +306,9 @@ sandbox = [
     # Upper bound <3.0.0: the provider depends on the E2B 2.x SDK contract.
     # Updated: Tue Aug 04, 2026 with e2b>=2.36.0,<3.0.0
     # License: MIT https://github.com/e2b-dev/E2B/blob/e2b@2.36.0/packages/python-sdk/LICENSE
-    "e2b>=2.36.0,<3.0.0",
+    # Floor raised from 2.36 to 2.46: gateway port routing reads
+    # ConnectionConfig.sandbox_headers, which 2.36 does not expose.
+    "e2b>=2.46.0,<3.0.0",
 
     # boto3: AWS SDK used by the ECS Fargate sandbox provider for ECS/EC2/ECR/
     # CodeBuild/S3/SSM/Secrets Manager calls.

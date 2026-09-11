@@ -215,11 +215,27 @@ python3 prepare.py \
 Then use `tools/start_control.sh` and `tools/run_eval.sh` exactly as shown in
 the quickstart.
 
-The default overlay sends the current screenshot plus at most two historical
-screenshots and compacts older interactions into text. For an endpoint limited
-to one image per request, use the same class and set
-`agent_kwargs.max_image_history_length: 1`; no alternate agent class is
-required.
+The default overlay uses the explicit fixed policy and sends the current
+screenshot plus at most two historical screenshots, compacting older
+interactions into text. For an endpoint limited to one image per request, use
+the same class with `history_policy: {name: fixed, params: {keep_images: 1}}`;
+no alternate agent class is required.
+
+Longer training rollouts can opt into a low/high-water snapshot window without
+changing standalone benchmark defaults:
+
+```yaml
+history_policy:
+  name: hysteresis
+  params: {low_water: 3, high_water: 10}
+```
+
+This accumulates 1 through 10 live screenshots, then compacts the old prefix
+into text and falls back to 3: `1, 2, ..., 10, 3, 4, ..., 10, 3`. Each exact
+model-call record includes the policy identity, snapshot count, window start,
+min/max settings, and whether that call triggered compaction. The legacy
+`max_trajectory_length: 3` plus `agent_kwargs.max_live_images: 10` form remains
+compatible and resolves to the same identity.
 
 Nano Omni history contains Thought and Action only; previously executed Code is
 not repeated. This prompt contract is implemented directly by the standard
@@ -289,8 +305,10 @@ bash ../../responses_api_agents/osworld_agent/install_optional_runtime_deps.sh \
 The script uses `--no-config` only for that named agent venv and installs
 cryptography, headless OpenCV, and the matching torchvision wheel. It is
 idempotent, but skips installation only when the required versions are both
-present and importable. It also reasserts the normal agent's `numpy<2`
-constraint because the OpenCV 4.8 wheel uses NumPy's 1.x ABI. These are runtime
+present and importable. It also reasserts the normal agent's
+`numpy>=2.1,<2.5` constraint and installs the OpenCV 4.10 abi3 wheel so the
+managed Python 3.13 environment never falls back to building NumPy 1.26 or
+OpenCV from source. These are runtime
 imports for OSWorld's desktop stack,
 but repository policy excludes them from managed package and container
 resolution. `skip_venv_if_present: true` in the generated config then lets
@@ -365,11 +383,11 @@ tools/run_eval.sh /absolute/run/root
 
 ### Deterministic task sharding
 
-`prepare.py` owns task splitting. Use the same canonical input on every
-agent/control host and select one zero-based shard per host:
+`prepare.py` owns task splitting. Use the same canonical input for every
+agent/control profile and select one zero-based shard per profile:
 
 ```bash
-# Agent/control host A
+# Agent/control profile A
 python3 prepare.py \
   --profile nano_omni \
   --execution-backend gym_sandbox \
@@ -380,8 +398,8 @@ python3 prepare.py \
   --shard-index 0 \
   --force-env
 
-# Agent/control host B uses the same command with --shard-index 1 and its own
-# output directory.
+# Agent/control profile B uses the same command with --shard-index 1 and its
+# own output directory.
 ```
 
 Non-empty input rows are assigned by `row_index % num_shards`. This is stable,
@@ -397,8 +415,22 @@ create a shard file or manifest. Any positive shard count works; two is only
 the deployment example below.
 
 The repository includes ready-to-use example and small inputs under `data/`.
-Larger inputs passed with `--input` must use the same JSONL schema; no
-untracked conversion helper is part of the public workflow.
+Generate larger canonical inputs from the exact pinned OSWorld checkout with
+`tools/convert_osworld_tasks.py`; do not silently reuse a historical JSONL
+after the OSWorld revision changes. The converter writes
+`<output>.manifest.json` with the OSWorld commit (when the source is a Git
+checkout), source/output hashes, row count, and task-ID digest. A production
+run should fail admission if that recorded commit does not match the runtime
+OSWorld pin.
+
+For example:
+
+```bash
+python3 benchmarks/osworld/tools/convert_osworld_tasks.py \
+  --osworld-root /absolute/path/to/JeffPengCoder-OSWorld \
+  --manifest test_all \
+  --output /absolute/path/to/test_all.jsonl
+```
 
 ### Split agent and OSWorld environment hosts
 
@@ -479,6 +511,94 @@ to `127.0.0.1`. A persistent `--server-venv-root` reuses complete server
 environments on retries; remove that run-owned directory after dependency
 changes to force a rebuild.
 
+### One agent with multiple environment hosts
+
+One agent host can run multiple shards against different environment hosts and
+a shared model endpoint. Use one checkout, but give every profile a distinct
+run root, `env.yaml`, run ID, and head port. `OSWORLD_ENV_FILE` tells the public
+wrappers which run-specific configuration to load.
+
+```mermaid
+flowchart LR
+    INPUT[Canonical task JSONL]
+
+    subgraph AGENT[Single agent / control host]
+        PA[Profile A<br/>prepare + control + eval<br/>shard 0 / head port A]
+        PB[Profile B<br/>prepare + control + eval<br/>shard 1 / head port B]
+        AA[OSWorld logic +<br/>Gym Sandbox adapter A]
+        AB[OSWorld logic +<br/>Gym Sandbox adapter B]
+        PA --> AA
+        PB --> AB
+    end
+
+    subgraph ENVA[Environment host A]
+        DA[Docker daemon]
+        SA[Ephemeral Gym Sandbox<br/>one per active task]
+        VA[QEMU/KVM desktop VM]
+        QA[(Read-only qcow2 baseline)]
+        DA --> SA --> VA
+        QA --> VA
+    end
+
+    subgraph ENVB[Environment host B]
+        DB[Docker daemon]
+        SB[Ephemeral Gym Sandbox<br/>one per active task]
+        VB[QEMU/KVM desktop VM]
+        QB[(Read-only qcow2 baseline)]
+        DB --> SB --> VB
+        QB --> VB
+    end
+
+    MODEL[Shared VLM endpoint<br/>OpenAI-compatible API]
+
+    INPUT -- row index modulo shard count --> PA
+    INPUT -- row index modulo shard count --> PB
+    AA -. Docker SSH lifecycle .-> DA
+    AB -. Docker SSH lifecycle .-> DB
+    AA -- published desktop HTTP endpoints --> VA
+    AB -- published desktop HTTP endpoints --> VB
+    AA -- model requests --> MODEL
+    AB -- model requests --> MODEL
+```
+
+The dashed links are lifecycle control through Docker's SSH transport. The
+solid environment links are direct OSWorld controller, observation, action,
+and evaluator HTTP traffic. The two profiles share neither `env.yaml` nor head
+port, but they may share the same checkout, input, model endpoint, and verified
+VM identity.
+
+For profile A, prepare and launch with:
+
+```bash
+export RUN_ROOT=/absolute/run/a
+export OSWORLD_RUN_ID=shard-a
+export OSWORLD_ENV_FILE=${RUN_ROOT}/config/env.yaml
+export DOCKER_HOST=ssh://REMOTE_USER@ENV_HOST_A
+export OSWORLD_SANDBOX_PUBLISH_HOST=ENV_HOST_A
+
+python3 prepare.py \
+  --profile nano_omni \
+  --execution-backend gym_sandbox \
+  --vm-path /same/absolute/path/on/all/hosts/Ubuntu.qcow2 \
+  --input /absolute/path/to/test_all.jsonl \
+  --output ${RUN_ROOT}/results/${OSWORLD_RUN_ID}/rollouts.jsonl \
+  --num-shards 2 \
+  --shard-index 0 \
+  --head-port 11000 \
+  --env-file ${OSWORLD_ENV_FILE} \
+  --force-env
+
+tools/start_control.sh ${RUN_ROOT}
+# After control is ready, in a second supervisor with the same exports:
+tools/run_eval.sh ${RUN_ROOT}
+```
+
+Run profile B in two other supervisors with its own run root, `shard-index 1`,
+head port `11001`, `ENV_HOST_B`, and run ID. Both profiles may use the same
+`POLICY_BASE_URL`; task assignment remains disjoint and exhaustive. A single
+profile still uses the unchanged defaults and does not require
+`OSWORLD_ENV_FILE`.
+
 ## Configuration
 
 `benchmarks/osworld/config.yaml` is the default benchmark config. It chains the
@@ -521,7 +641,7 @@ overlay.
 | --- | --- |
 | Gym OSWorld benchmark | No manual checkout. The agent package installs the exact SHA from `responses_api_agents/osworld_agent/requirements.txt`. |
 | Direct OSWorld, plain Docker/VMware, no proxy-required tasks | Upstream xlang OSWorld main is sufficient; this adapter's pre-fix baseline was `83e8534451ba8b3ab6477448ef3f0a8e563f05be`. |
-| Direct OSWorld with `provider_name=remote_docker` | `JeffPengCoder/OSWorld` `nv-gym`, pinned to `dc23424e9f6316b181bde149e0dc9bc3c5ff78c9` or a documented successor. |
+| Direct OSWorld with `provider_name=remote_docker` | `JeffPengCoder/OSWorld` `nv-gym`, pinned to `0a65076f6f686588697343da59295cefc6bb7e56` or a reviewed successor that preserves the selected task corpus. |
 | Direct OSWorld with proxy-required tasks | The same `nv-gym` pinned SHA; set `PROXY_CONFIG_FILE` and construct `DesktopEnv(enable_proxy=True)`. |
 | Direct OSWorld with both features | The same `nv-gym` pinned SHA provides both independent capabilities. |
 
@@ -530,14 +650,13 @@ For a direct integration of the tested version:
 ```bash
 git clone https://github.com/JeffPengCoder/OSWorld.git
 cd OSWorld
-git checkout dc23424e9f6316b181bde149e0dc9bc3c5ff78c9
+git checkout 0a65076f6f686588697343da59295cefc6bb7e56
 ```
 
-Use an immutable SHA in a lockfile or deployment manifest. The `nv-gym`
-branch is the integration line that follows upstream main, but its tip can
-move as new upstream changes are merged.
+Use an immutable SHA in a lockfile or deployment manifest. The integration
+branch may move; a recipe always records the exact revision it actually ran.
 
-This pinned revision also prevents OSWorld's Chrome setup DEBUG logging from
+This pinned revision prevents OSWorld's Chrome setup DEBUG logging from
 serializing the complete worker environment into task artifacts. Model and
 proxy credentials must remain runtime secrets and are never useful setup
 diagnostics.
@@ -584,7 +703,12 @@ Task setup commands may optionally declare `expected_returncodes` and
 than model behavior: an allowed return code continues normally, while
 `score_zero` records a valid evaluator score of zero instead of masking the
 rollout as a harness failure. Tasks that omit both fields continue through the
-pinned upstream setup implementation unchanged.
+pinned upstream setup implementation unchanged, including its best-effort
+handling of non-zero command results. Absence of a policy must not be inferred
+as `expected_returncodes: [0]`, and evaluator type must not be used to guess a
+setup contract. Gym-owned setup that is required for runtime correctness must
+declare its expected return codes explicitly; the adapter must not rewrite a
+canonical task to make an implicit strict policy pass.
 
 The Docker port-allocation lock wait is configurable because concurrent VM
 startup can legitimately take longer than the pinned upstream default. Raising
@@ -611,6 +735,33 @@ OSWorld aggregate metrics report both `osworld/binary_success_rate` and
 raw reward preserves fractional evaluator credit. Both rates use the same
 completed-rollout denominator and are reported regardless of `reward_mode`,
 which continues to control the training reward returned by each rollout.
+
+## Source composition and external capability patches
+
+The OSWorld integration branch contains only changes owned by that branch.
+Third-party or still-unmerged fixes are not copied into it. A complete
+runtime may instead use a separate integration branch that contains the exact
+external commits as ancestors, preserving their authorship and review history.
+Record the final integration commit in every run manifest.
+
+External source requirements are capability-scoped in
+`runtime_dependencies.toml`. For example, Pointer running through Gym Sandbox
+currently requires Michal Bien's exact runtime-hardening commit, while Nano
+Omni training does not:
+
+```bash
+python benchmarks/osworld/tools/check_runtime_dependencies.py --list
+python benchmarks/osworld/tools/check_runtime_dependencies.py \
+  --repo-root "$PWD" \
+  --capability pointer-gym-sandbox
+```
+
+The second command intentionally fails on the plain OSWorld integration
+branch. Fetch the named source branch and merge its exact commit only into a
+separate runtime branch, resolve integration conflicts there, then rerun the
+checker. Do not copy or squash the external patch into the OSWorld feature
+branch. The checker is read-only and never performs a fetch, checkout, merge,
+or cherry-pick.
 
 ## Logs and artifacts
 

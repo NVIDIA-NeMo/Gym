@@ -132,7 +132,7 @@ def test_parse_nemotron_rejects_unlabelled_global_code_block() -> None:
     )
 
     assert action == "<Error>: no explicit ## Code section found"
-    assert commands == ["FAIL"]
+    assert commands == []
 
 
 @pytest.mark.parametrize(
@@ -178,7 +178,7 @@ computer.terminate()
     )
 
     assert action.startswith("<Error>")
-    assert commands == ["FAIL"]
+    assert commands == []
 
 
 def test_parse_nemotron_does_not_infer_status_from_answer_text() -> None:
@@ -197,7 +197,7 @@ Stop.
     )
 
     assert action.startswith("<Error>")
-    assert commands == ["FAIL"]
+    assert commands == []
 
 
 def test_parse_nemotron_accepts_unfenced_code_section() -> None:
@@ -326,6 +326,233 @@ def test_nemotron_agent_routes_messages_and_compacts_old_images() -> None:
     assert payloads[0]["_nemo_gym_return_message"] is True
 
 
+def test_nemotron_automatically_records_exact_calls_with_bounded_images() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=4,
+        max_image_history_length=3,
+        parse_retries=1,
+    )
+    payloads: List[Dict[str, Any]] = []
+    responses = []
+    for index in range(4):
+        thought = f"Thought {index + 1}"
+        raw_content = (
+            f"<think>{thought}</think>## Action:\nClick.\n## Code:\n```python\npyautogui.click(0.5, 0.5)\n```"
+        )
+        responses.append(
+            {
+                "content": ("## Action:\nClick.\n## Code:\n```python\npyautogui.click(0.5, 0.5)\n```"),
+                "reasoning_content": thought,
+                "raw_content": raw_content,
+                "prompt_token_ids": [10, 11, index],
+                "generation_token_ids": [20 + index],
+                "generation_log_probs": [-0.1],
+            }
+        )
+
+    def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        payloads.append(payload)
+        return responses[len(payloads) - 1]
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    model_call_infos = []
+    for index in range(4):
+        _, actions, info = agent.predict(
+            "Complete the task.",
+            {"screenshot": f"png-{index + 1}".encode()},
+        )
+        # max_steps termination is runner-owned; the adapter must preserve a
+        # valid model-authored action even on its configured last step.
+        assert actions == ["pyautogui.click(960, 540)"]
+        model_call_infos.append(info["model_calls"][0])
+
+    image_counts = [
+        sum(
+            part.get("type") == "image_url"
+            for message in payload["messages"]
+            for part in message.get("content", [])
+            if isinstance(part, dict)
+        )
+        for payload in payloads
+    ]
+    assert image_counts == [1, 2, 3, 3]
+    assert "cG5nLTE=" not in str(payloads[-1]["messages"])
+    assert "# Previous History Actions" in str(payloads[-1]["messages"])
+    assert model_call_infos[-1]["response"]["generation_token_ids"] == [23]
+    assert model_call_infos[-1]["prompt_messages"] == payloads[-1]["messages"]
+    assert all(call["accepted"] for call in model_call_infos)
+
+
+def test_nemotron_snapshot_window_accumulates_from_three_to_ten_then_compacts() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=20,
+        max_image_history_length=3,
+        max_live_images=10,
+        parse_retries=1,
+    )
+    payloads: List[Dict[str, Any]] = []
+
+    def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        index = len(payloads)
+        payloads.append(payload)
+        return {
+            "content": "## Action:\nClick.\n## Code:\n```python\npyautogui.click(0.5, 0.5)\n```",
+            "reasoning_content": f"Thought {index + 1}",
+            "raw_content": f"raw completion {index + 1}",
+            "prompt_token_ids": [10, index],
+            "generation_token_ids": [20 + index],
+            "generation_log_probs": [-0.1],
+        }
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    model_calls = []
+    for index in range(12):
+        _, actions, info = agent.predict(
+            "Complete the task.",
+            {"screenshot": f"png-{index + 1}".encode()},
+        )
+        assert actions == ["pyautogui.click(960, 540)"]
+        model_calls.append(info["model_calls"][0])
+
+    image_counts = [
+        sum(
+            part.get("type") == "image_url"
+            for message in payload["messages"]
+            for part in message.get("content", [])
+            if isinstance(part, dict)
+        )
+        for payload in payloads
+    ]
+    assert image_counts == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 3, 4]
+    assert model_calls[9]["snapshot_compaction_triggered"] is False
+    assert model_calls[10]["snapshot_compaction_triggered"] is True
+    assert model_calls[10]["snapshot_window_start"] == 8
+    assert model_calls[10]["prompt_snapshot_count"] == 3
+    assert model_calls[11]["snapshot_compaction_triggered"] is False
+    assert model_calls[11]["prompt_snapshot_count"] == 4
+    assert "cG5nLTE=" not in str(payloads[10]["messages"])
+    assert "cG5nLTk=" in str(payloads[10]["messages"])
+    assert "# Previous History Actions" in str(payloads[10]["messages"])
+
+    agent.reset()
+    assert agent.compacted_before == 0
+
+
+def test_nemotron_snapshot_window_rejects_high_water_below_low_water() -> None:
+    with pytest.raises(ValueError, match="max_live_images"):
+        NemotronV3NanoOmniAgent(
+            model="policy-under-test",
+            max_steps=3,
+            max_image_history_length=3,
+            max_live_images=2,
+        )
+
+
+def test_nemotron_default_prompt_views_may_rewrite_between_calls() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=2,
+        max_image_history_length=1,
+        parse_retries=1,
+    )
+    payloads: List[Dict[str, Any]] = []
+    responses = [
+        {
+            "content": "## Action:\nClick.\n## Code:\n```python\npyautogui.click(0.5, 0.5)\n```",
+            "reasoning_content": "First thought",
+            "raw_content": "first raw completion",
+            "prompt_token_ids": [10, 11],
+            "generation_token_ids": [20],
+            "generation_log_probs": [-0.1],
+        },
+        {
+            "content": "## Action:\nFinish.\n## Code:\n```code\ncomputer.terminate(status='success')\n```",
+            "reasoning_content": "Second thought",
+            "raw_content": "second raw completion",
+            "prompt_token_ids": [99, 100],
+            "generation_token_ids": [101],
+            "generation_log_probs": [-0.2],
+        },
+    ]
+
+    def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        payloads.append(payload)
+        return responses[len(payloads) - 1]
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    _, first_actions, first_info = agent.predict("Complete the task.", {"screenshot": b"first-png"})
+    _, second_actions, second_info = agent.predict("Complete the task.", {"screenshot": b"second-png"})
+
+    assert first_actions == ["pyautogui.click(960, 540)"]
+    assert second_actions == ["DONE"]
+    assert first_info["model_calls"][0]["accepted"] is True
+    assert second_info["model_calls"][0]["accepted"] is True
+    assert "Zmlyc3QtcG5n" not in str(payloads[1]["messages"])
+    assert "c2Vjb25kLXBuZw==" in str(payloads[1]["messages"])
+
+
+def test_nemotron_missing_token_metadata_does_not_break_benchmarking() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=1,
+        parse_retries=1,
+    )
+    agent.call_llm = lambda _payload, _model: {  # type: ignore[method-assign]
+        "content": "## Action:\nFinish.\n## Code:\n```code\ncomputer.terminate(status='success')\n```",
+        "raw_content": "raw response",
+    }
+
+    content, actions, info = agent.predict("Complete the task.", {"screenshot": b"fake-png"})
+
+    assert actions == ["DONE"]
+    assert "Finish" in content
+    assert info["model_calls"][0]["accepted"] is True
+    assert "prompt_token_ids" not in info["model_calls"][0]["response"]
+
+
+def test_nemotron_preserves_model_call_when_python_is_invalid() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=1,
+        parse_retries=1,
+    )
+    response = {
+        "content": "## Action:\nType.\n## Code:\n```python\npyautogui.write('truncated)\n```",
+        "reasoning_content": "Attempt the action.",
+        "raw_content": "<think>Attempt the action.</think>\n## Action:\nType.\n"
+        "## Code:\n```python\npyautogui.write('truncated)\n```",
+        "prompt_token_ids": [10, 11],
+        "generation_token_ids": [20, 21],
+        "generation_log_probs": [-0.1, -0.2],
+    }
+    agent.call_llm = lambda _payload, _model: response  # type: ignore[method-assign]
+
+    error, actions, info = agent.predict("Type the text.", {"screenshot": b"fake-png"})
+
+    assert actions == []
+    assert "unterminated string literal" in error
+    assert info["agent_outcome"] == "model_response_invalid"
+    assert info["stop_rollout"] is True
+    assert info["model_call_completed"] is True
+    assert info["parse_failure"]["last_failure_stage"] == "response_parse"
+    assert "mask_sample" not in info
+    assert "termination_reason" not in info
+    assert info["model_calls"][0]["response"] == response
+    assert info["model_calls"][0]["prompt_messages"][-1]["role"] == "user"
+    assert info["model_calls"][0]["accepted"] is False
+
+
+def test_nemotron_rejects_removed_training_switches() -> None:
+    with pytest.raises(ValueError, match="training-specific agent switches"):
+        NemotronV3NanoOmniAgent(
+            model="policy-under-test",
+            max_steps=1,
+            training_turn_strategy="last",
+        )
+
+
 def test_nemotron_agent_uses_the_maintained_checkpoint_prompt_contract() -> None:
     agent = NemotronV3NanoOmniAgent(
         model="policy-under-test",
@@ -337,7 +564,7 @@ def test_nemotron_agent_uses_the_maintained_checkpoint_prompt_contract() -> None
     assert "The password of the computer is" not in agent.system_prompt
 
 
-def test_nemotron_agent_turns_last_nonterminal_step_into_fail() -> None:
+def test_nemotron_agent_preserves_last_nonterminal_action_for_runner() -> None:
     agent = NemotronV3NanoOmniAgent(model="policy", max_steps=1)
     agent.call_llm = lambda _payload, _model: {  # type: ignore[method-assign]
         "content": "## Action:\nClick.\n## Code:\n```python\npyautogui.click(1, 2)\n```",
@@ -346,8 +573,64 @@ def test_nemotron_agent_turns_last_nonterminal_step_into_fail() -> None:
 
     _response, actions, info = agent.predict("Try the task.", {"screenshot": b"fake-png"})
 
-    assert actions == ["FAIL"]
-    assert info["code"] == "FAIL"
+    assert actions == ["pyautogui.click(1, 2)"]
+    assert info["code"] == "pyautogui.click(1, 2)"
+    assert "mask_sample" not in info
+    assert "termination_reason" not in info
+
+
+def test_nemotron_agent_reports_exhausted_length_response_without_deciding_admission() -> None:
+    agent = NemotronV3NanoOmniAgent(model="policy", max_steps=2, parse_retries=1)
+
+    def truncated(_payload, _model):
+        return {
+            "content": "## Action:\nClick.\n## Code:\n```python\npyautogui.click(1, 2)",
+            "raw_content": "truncated sampled response",
+            "prompt_token_ids": [1],
+            "generation_token_ids": [2],
+            "generation_log_probs": [-0.1],
+            "finish_reason": "length",
+        }
+
+    agent.call_llm = truncated  # type: ignore[method-assign]
+
+    response, actions, info = agent.predict("Try the task.", {"screenshot": b"fake-png"})
+
+    assert "finish_reason='length'" in response
+    assert actions == []
+    assert info["agent_outcome"] == "model_response_invalid"
+    assert info["stop_rollout"] is True
+    assert info["model_call_completed"] is True
+    assert info["parse_failure"]["last_failure_stage"] == "response_parse"
+    assert "mask_sample" not in info
+    assert "termination_reason" not in info
+    assert info["model_calls"][0]["accepted"] is False
+    assert info["model_calls"][0]["response"]["finish_reason"] == "length"
+
+
+def test_nemotron_agent_reports_model_transport_failure_as_a_fact() -> None:
+    agent = NemotronV3NanoOmniAgent(model="policy", max_steps=2, parse_retries=1)
+
+    def unavailable(_payload, _model):
+        raise ConnectionError("policy endpoint unreachable")
+
+    agent.call_llm = unavailable  # type: ignore[method-assign]
+
+    response, actions, info = agent.predict("Try the task.", {"screenshot": b"fake-png"})
+
+    assert response == "policy endpoint unreachable"
+    assert actions == []
+    assert info["agent_outcome"] == "model_response_invalid"
+    assert info["stop_rollout"] is True
+    assert info["model_call_completed"] is False
+    assert info["parse_failure"] == {
+        "attempt_count": 1,
+        "completed_model_call_count": 0,
+        "last_failure_stage": "model_call",
+        "last_error_type": "ConnectionError",
+        "last_error": "policy endpoint unreachable",
+    }
+    assert "mask_sample" not in info
 
 
 def test_nemotron_agent_retries_invalid_python_action() -> None:
@@ -371,10 +654,12 @@ def test_nemotron_agent_retries_invalid_python_action() -> None:
         return response
 
     agent.call_llm = call_llm  # type: ignore[method-assign]
-    _response, actions, _info = agent.predict("Click.", {"screenshot": b"fake-png"})
+    _response, actions, info = agent.predict("Click.", {"screenshot": b"fake-png"})
 
     assert calls == 2
     assert actions == ["pyautogui.click(960, 540)"]
+    assert [call["accepted"] for call in info["model_calls"]] == [False, True]
+    assert [call["parse_attempt"] for call in info["model_calls"]] == [1, 2]
 
 
 def test_nemotron_agent_retries_invalid_python_with_feedback_and_lower_temperature(monkeypatch, tmp_path) -> None:

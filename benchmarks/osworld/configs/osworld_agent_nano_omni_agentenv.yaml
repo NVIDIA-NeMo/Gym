@@ -1,0 +1,41 @@
+# Nemotron 3 Nano Omni OSWorld profile on AgentENV microVMs.
+#
+# Same agent, same scaffold and same sampling as the Docker/OpenSandbox
+# profiles; only the execution backend changes. Layer it after the nano-omni
+# profile so the agent settings are inherited rather than restated:
+#
+#   gym env start \
+#     --config benchmarks/osworld/configs/osworld_agent_nano_omni.yaml \
+#     --config benchmarks/osworld/configs/osworld_agentenv.yaml \
+#     --config benchmarks/osworld/configs/osworld_agent_nano_omni_agentenv.yaml
+#
+# Required environment: AGENTENV_URL, AGENTENV_API_KEY, AGENTENV_TEMPLATE.
+
+config_paths:
+  - benchmarks/osworld/configs/osworld_agent_nano_omni.yaml
+
+osworld_nano_omni_agent:
+  responses_api_agents:
+    osworld_agent:
+      sandbox_provider: osworld_agentenv
+      sandbox_spec:
+        # An AgentENV template name, not an OCI reference. The E2B provider
+        # accepts an untagged name directly; a tagged name or a template ID
+        # has to go through provider_options.template instead.
+        image: ${oc.env:AGENTENV_TEMPLATE,osworld-slim}
+        ttl_s: 7200
+        ready_timeout_s: 600
+        # The template fixes the boot command and the CPU/memory shape, so the
+        # Docker profile's entrypoint, QEMU sizing env and resources do not
+        # apply. E2B rejects entrypoint outright; the adapter drops all three.
+        entrypoint: null
+        env: {}
+        resources: {}
+        provider_options: {}
+      # There is no qcow2: an AgentENV sandbox restores a template snapshot
+      # rather than booting a VM image the host supplies.
+      vm_path: ""
+      sandbox_require_kvm: false
+      # osworld-slim runs noVNC on 6901; the OSWorld Docker image uses 8006.
+      sandbox_vnc_guest_port: 6901
+      sandbox_ready_timeout_s: 600.0

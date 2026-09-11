@@ -83,6 +83,7 @@ from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
+_GLOBAL_AIOHTTP_CLIENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 _UPSTREAM_ERROR_LOG_BODY_CHARS = 2000
 
@@ -178,8 +179,9 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
         cookie_jar=DummyCookieJar(),
     )
 
-    global _GLOBAL_AIOHTTP_CLIENT
+    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_LOOP
     _GLOBAL_AIOHTTP_CLIENT = client_session
+    _GLOBAL_AIOHTTP_CLIENT_LOOP = asyncio.get_running_loop()
 
     global _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
     _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG = cfg.global_aiohttp_client_request_debug
@@ -195,14 +197,48 @@ def is_global_aiohttp_client_request_debug_enabled() -> bool:
     return _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG
 
 
+async def close_global_aiohttp_client() -> None:
+    """Close the process-wide client on its owning event loop."""
+
+    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_LOOP
+    client = _GLOBAL_AIOHTTP_CLIENT
+    _GLOBAL_AIOHTTP_CLIENT = None
+    _GLOBAL_AIOHTTP_CLIENT_LOOP = None
+
+    if client is not None and not client.closed:
+        await client.close()
+
+
 def global_aiohttp_client_exit():  # pragma: no cover
-    if not is_global_aiohttp_client_setup():
+    global _GLOBAL_AIOHTTP_CLIENT, _GLOBAL_AIOHTTP_CLIENT_LOOP
+    client = _GLOBAL_AIOHTTP_CLIENT
+    owner_loop = _GLOBAL_AIOHTTP_CLIENT_LOOP
+    _GLOBAL_AIOHTTP_CLIENT = None
+    _GLOBAL_AIOHTTP_CLIENT_LOOP = None
+
+    if client is None or client.closed:
         return
 
-    global _GLOBAL_AIOHTTP_CLIENT
-    asyncio.run(_GLOBAL_AIOHTTP_CLIENT.close())
+    async def close_client() -> None:
+        await client.close()
 
-    _GLOBAL_AIOHTTP_CLIENT = None
+    if owner_loop is None or owner_loop.is_closed():
+        # aiohttp has no owner-loop work left once the loop is closed, but the
+        # coroutine must still run so the session transitions to closed.
+        asyncio.run(close_client())
+        return
+
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    if running_loop is owner_loop:
+        owner_loop.create_task(close_client())
+    elif owner_loop.is_running():
+        asyncio.run_coroutine_threadsafe(close_client(), owner_loop).result(timeout=5)
+    else:
+        owner_loop.run_until_complete(close_client())
 
 
 atexit.register(global_aiohttp_client_exit)
@@ -228,6 +264,7 @@ async def request(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _retry_transport_errors: bool = True,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -246,10 +283,20 @@ async def request(
     # 16k+ concurrency, so this is a hot path (kb/knowledge/conventions/hot-path-overhead.md).
     if is_span_group_enabled(GymSpanGroup.HTTP_CLIENT):
         return await _traced_request(
-            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+            method,
+            url,
+            _internal=_internal,
+            _max_connection_retries=_max_connection_retries,
+            _retry_transport_errors=_retry_transport_errors,
+            **kwargs,
         )
     return await _request_with_retries(
-        method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+        method,
+        url,
+        _internal=_internal,
+        _max_connection_retries=_max_connection_retries,
+        _retry_transport_errors=_retry_transport_errors,
+        **kwargs,
     )
 
 
@@ -258,6 +305,7 @@ async def _traced_request(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _retry_transport_errors: bool = True,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -293,7 +341,12 @@ async def _traced_request(
             safe_set_span_attributes(span, attributes)
 
         response = await _request_with_retries(
-            method, url, _internal=_internal, _max_connection_retries=_max_connection_retries, **kwargs
+            method,
+            url,
+            _internal=_internal,
+            _max_connection_retries=_max_connection_retries,
+            _retry_transport_errors=_retry_transport_errors,
+            **kwargs,
         )
 
         if span is not None:
@@ -342,6 +395,7 @@ async def _request_with_retries(
     url: str,
     _internal: bool = False,
     _max_connection_retries: Optional[int] = None,
+    _retry_transport_errors: bool = True,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_client()
@@ -352,6 +406,8 @@ async def _request_with_retries(
         try:
             return await client.request(method=method, url=url, **kwargs)
         except ServerDisconnectedError:
+            if not _retry_transport_errors:
+                raise
             global _NUM_SERVER_DISCONNECTED_ERROR
             _NUM_SERVER_DISCONNECTED_ERROR += 1
             retries += 1
@@ -368,6 +424,8 @@ async def _request_with_retries(
 
             await asyncio.sleep(0.5)
         except ClientOSError:
+            if not _retry_transport_errors:
+                raise
             global _NUM_CLIENT_OS_ERROR
             _NUM_CLIENT_OS_ERROR += 1
             retries += 1
@@ -383,6 +441,8 @@ async def _request_with_retries(
 
             await asyncio.sleep(0.5)
         except Exception as e:
+            if not _retry_transport_errors:
+                raise
             if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                 print_exc()
 
@@ -437,6 +497,16 @@ DEFAULT_HEAD_SERVER_PORT = 11000
 ServerStatus = Union[Literal["success"], Literal["connection_error"], Literal["timeout"], Literal["unknown_error"]]
 
 
+def _connectable_client_host(host: str) -> str:
+    """Return a connectable client host for a server bind address."""
+
+    if host == "0.0.0.0":
+        return "127.0.0.1"
+    if host in {"::", "[::]"}:
+        return "[::1]"
+    return host
+
+
 class ServerClient(BaseModel):
     head_server_config: BaseServerConfig
 
@@ -446,6 +516,17 @@ class ServerClient(BaseModel):
 
     # Resolved base URLs, cached by server name.
     _server_base_urls: dict[str, str] = PrivateAttr(default_factory=dict)
+
+    @staticmethod
+    def _client_host(host: str) -> str:
+        """Return a connectable host for a server bind address.
+
+        Wildcard addresses are valid for binding a server but are not valid
+        advertised client targets. In particular, proxy-aware HTTP clients can
+        route ``0.0.0.0`` through an external proxy instead of reaching the
+        local server.
+        """
+        return _connectable_client_host(host)
 
     @classmethod
     def load_head_server_config(cls) -> BaseServerConfig:
@@ -471,7 +552,8 @@ class ServerClient(BaseModel):
             )
 
         # It's critical we use requests here instead of the global httpx client since a FastAPI server may be run downstream of this function call.
-        head_server_url = f"http://{head_server_config.host}:{head_server_config.port}"
+        head_server_host = _connectable_client_host(head_server_config.host)
+        head_server_url = f"http://{head_server_host}:{head_server_config.port}"
         try:
             response = requests.get(
                 f"{head_server_url}/global_config_dict_yaml",
@@ -487,7 +569,13 @@ class ServerClient(BaseModel):
         return cls(head_server_config=head_server_config, global_config_dict=global_config_dict)
 
     async def request(
-        self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
+        self,
+        server_name: str,
+        url_path: str,
+        method: str,
+        *,
+        retry_transport_errors: bool = True,
+        **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
         model_server_name = getenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME)
         model_server_base_url = getenv(NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME)
@@ -524,7 +612,13 @@ class ServerClient(BaseModel):
         ):
             url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
 
-        return await request(method=method, url=f"{base_url}{url_path}", _internal=True, **kwargs)
+        return await request(
+            method=method,
+            url=f"{base_url}{url_path}",
+            _internal=True,
+            _retry_transport_errors=retry_transport_errors,
+            **kwargs,
+        )
 
     async def get(
         self,
@@ -551,6 +645,8 @@ class ServerClient(BaseModel):
         self,
         server_name: str,
         url_path: str,
+        *,
+        retry_transport_errors: bool = True,
         **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
         """
@@ -565,6 +661,7 @@ class ServerClient(BaseModel):
             server_name=server_name,
             url_path=url_path,
             method="POST",
+            retry_transport_errors=retry_transport_errors,
             **kwargs,
         )
 
@@ -595,7 +692,10 @@ class ServerClient(BaseModel):
         return base_url
 
     def _build_server_base_url(self, server_config_dict: OmegaConf) -> str:
-        return f"http://{server_config_dict.host}:{server_config_dict.port}"
+        # Use the module helper so this method remains safe when borrowed by a
+        # duck-typed or mocked ServerClient.
+        host = _connectable_client_host(server_config_dict.host)
+        return f"http://{host}:{server_config_dict.port}"
 
 
 def _has_injected_global_config_env() -> bool:
