@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
-"""MCPToolset whose invocation client is scoped to the active Gym rollout."""
+"""MCPToolset whose discovery and invocation are scoped to the active Gym rollout."""
 
 import copy
+from collections.abc import Iterator
 from typing import Any
 
 from haystack.core.serialization import allow_deserialization_module
 from haystack.tools import Tool
 from haystack_integrations.tools.mcp.mcp_tool import (
     AsyncExecutor,
-    MCPClient,
-    MCPToolNotFoundError,
+    MCPServerInfo,
     _extract_first_text_element,
     _MCPClientSessionManager,
 )
@@ -24,9 +24,51 @@ allow_deserialization_module("responses_api_agents.haystack_agent.mcp_toolset")
 
 
 class ContextAwareMCPToolset(MCPToolset):
-    """Discover stable schemas once, but authenticate MCP calls with the rollout token."""
+    """Spawn ordinary, populated MCP toolsets using each rollout's credentials."""
 
-    def _client_for_current_rollout(self) -> MCPClient:
+    def __init__(
+        self,
+        server_info: MCPServerInfo,
+        tool_names: list[str] | None = None,
+        connection_timeout: float = 30.0,
+        invocation_timeout: float = 30.0,
+        eager_connect: bool = False,
+        inputs_from_state: dict[str, dict[str, str]] | None = None,
+        outputs_to_state: dict[str, dict[str, dict[str, Any]]] | None = None,
+        outputs_to_string: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
+        # Pipeline deserialization precedes the rollout token. Keep the configuration,
+        # but connect only when a rollout copy is warmed up.
+        super().__init__(
+            server_info,
+            tool_names,
+            connection_timeout,
+            invocation_timeout,
+            False,
+            inputs_from_state,
+            outputs_to_state,
+            outputs_to_string,
+        )
+        self.eager_connect = eager_connect
+
+    def spawn(self, *, allow_filtering: bool | None = None) -> "ContextAwareMCPToolset":
+        spawned = copy.copy(self)
+        state = chat_generator._current_run_state.get()
+        if state is None or getattr(self, "_rollout_state", None) is not state:
+            spawned.tools = []
+            spawned._warmup_called = False
+        spawned._selected_tool_names = None
+        if allow_filtering is not None:
+            spawned._allow_filtering = allow_filtering
+        spawned.warm_up()
+        return spawned
+
+    def _connect_and_load_tools(self) -> list[Tool]:
+        tools = self.tools_for_current_rollout(getattr(self, "_allow_filtering", False))
+        self._rollout_state = chat_generator._current_run_state.get()
+        return tools
+
+    def _worker_for_current_rollout(self) -> _MCPClientSessionManager:
         state = chat_generator._current_run_state.get()
         if state is None or not state.mcp_headers.get(NEMO_GYM_MCP_SESSION_TOKEN_HEADER):
             raise RuntimeError(
@@ -41,35 +83,29 @@ class ContextAwareMCPToolset(MCPToolset):
                 worker = state.mcp_workers.get(key)
                 if worker is None:
                     server_info = copy.copy(self.server_info)
-                    server_info.headers = dict(state.mcp_headers)
+                    server_info.headers = {**(self.server_info.headers or {}), **state.mcp_headers}
                     worker = _MCPClientSessionManager(server_info.create_client(), timeout=self.connection_timeout)
                     state.mcp_workers[key] = worker
-        return worker._client
+        return worker
 
-    def _connect_and_load_tools(self) -> list[Tool]:
-        """Fetch schemas without a rollout token; tool calls connect lazily with one."""
-        worker = _MCPClientSessionManager(self.server_info.create_client(), timeout=self.connection_timeout)
-        try:
-            tool_infos = worker.tools()
-        finally:
-            worker.stop()
+    def tools_for_current_rollout(self, allow_filtering: bool = False) -> list[Tool]:
+        """Discover authenticated schemas without changing the shared toolset."""
+        worker = self._worker_for_current_rollout()
+        tool_infos = worker.tools()
 
         available_names = {tool.name for tool in tool_infos}
-        if self.tool_names:
-            missing_names = set(self.tool_names) - available_names
-            if missing_names:
-                raise MCPToolNotFoundError(
-                    message=(
-                        f"The following tools were not found: {', '.join(missing_names)}. "
-                        f"Available tools: {', '.join(available_names)}"
-                    ),
-                    tool_name=next(iter(missing_names)),
-                    available_tools=list(available_names),
+        if self.tool_names is not None:
+            excluded_names = available_names - set(self.tool_names)
+            if excluded_names and not allow_filtering:
+                raise ValueError(
+                    f"MCP tool_names excludes tools available to this rollout: {sorted(excluded_names)}. "
+                    "Set tool_names to null to include all tools, or set allow_mcp_tool_filtering: true "
+                    "on the Haystack agent to intentionally select a subset."
                 )
 
         def invoke(tool_name: str, outputs_to_state: dict[str, Any] | None, **kwargs: Any) -> Any:
             result = AsyncExecutor.get_instance().run(
-                self._client_for_current_rollout().call_tool(tool_name, kwargs), timeout=self.invocation_timeout
+                worker._client.call_tool(tool_name, kwargs), timeout=self.invocation_timeout
             )
             return _extract_first_text_element(result) if outputs_to_state else result
 
@@ -101,42 +137,43 @@ class ContextAwareMCPToolset(MCPToolset):
 
 def configure_mcp_url(tools: Any, mcp_url: str) -> int:
     """Point all context-aware MCP toolsets in an Agent's tool collection at Gym."""
-    if isinstance(tools, ContextAwareMCPToolset):
-        tools.server_info.url = mcp_url
-        return 1
-    if isinstance(tools, (list, tuple, set)):
-        return sum(configure_mcp_url(tool, mcp_url) for tool in tools)
-    for attribute in ("toolsets", "_toolsets"):
-        nested = getattr(tools, attribute, None)
-        if isinstance(nested, (list, tuple, set)):
-            return sum(configure_mcp_url(tool, mcp_url) for tool in nested)
-    return 0
+    toolsets = list(context_aware_mcp_toolsets(tools))
+    for toolset in toolsets:
+        toolset.server_info.url = mcp_url
+    return len(toolsets)
 
 
 def has_context_aware_mcp_toolset(tools: Any) -> bool:
-    if isinstance(tools, ContextAwareMCPToolset):
-        return True
-    if isinstance(tools, (list, tuple, set)):
-        return any(has_context_aware_mcp_toolset(tool) for tool in tools)
-    return any(
-        isinstance(nested, (list, tuple, set)) and any(has_context_aware_mcp_toolset(tool) for tool in nested)
-        for nested in (getattr(tools, attribute, None) for attribute in ("toolsets", "_toolsets"))
-    )
+    return next(context_aware_mcp_toolsets(tools), None) is not None
 
 
-def context_aware_mcp_tool_names(tools: Any) -> set[str]:
-    """Return names discovered by all warmed context-aware MCP toolsets in ``tools``."""
+def spawn_mcp_toolsets(tools: Any, allow_filtering: bool) -> Any:
+    """Replace MCP templates with rollout copies, preserving local toolsets and wrappers."""
     if isinstance(tools, ContextAwareMCPToolset):
-        return {tool.name for tool in tools}
+        return tools.spawn(allow_filtering=allow_filtering)
     if isinstance(tools, (list, tuple, set)):
-        return set().union(*(context_aware_mcp_tool_names(tool) for tool in tools))
-    return set().union(
-        *(
-            context_aware_mcp_tool_names(nested)
-            for nested in (getattr(tools, attribute, None) for attribute in ("toolsets", "_toolsets"))
-            if isinstance(nested, (list, tuple, set))
-        )
-    )
+        return [spawn_mcp_toolsets(tool, allow_filtering) for tool in tools]
+    if has_context_aware_mcp_toolset(tools):
+        tools = copy.copy(tools)
+        for attribute in ("toolsets", "_toolsets"):
+            nested = getattr(tools, attribute, None)
+            if isinstance(nested, (list, tuple, set)):
+                setattr(tools, attribute, spawn_mcp_toolsets(nested, allow_filtering))
+    return tools
+
+
+def context_aware_mcp_toolsets(tools: Any) -> Iterator[ContextAwareMCPToolset]:
+    """Visit configured MCP toolsets without discovering or flattening their tools."""
+    if isinstance(tools, ContextAwareMCPToolset):
+        yield tools
+    elif isinstance(tools, (list, tuple, set)):
+        for tool in tools:
+            yield from context_aware_mcp_toolsets(tool)
+    else:
+        for attribute in ("toolsets", "_toolsets"):
+            nested = getattr(tools, attribute, None)
+            if isinstance(nested, (list, tuple, set)):
+                yield from context_aware_mcp_toolsets(nested)
 
 
 def close_rollout_mcp_sessions(state: chat_generator._GenRunState) -> None:

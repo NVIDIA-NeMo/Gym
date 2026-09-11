@@ -13,3 +13,4 @@ haystack_agent:
       # be a NeMoGymResponsesChatGenerator; its server_name is overridden with model_server.name.
       pipeline_yaml: configs/pipeline.yaml
       agent_component_name: agent
+      allow_mcp_tool_filtering: false

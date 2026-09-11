@@ -19,10 +19,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from haystack import Pipeline
 from haystack.components.agents import Agent
+from haystack.core.errors import PipelineRuntimeError
 from haystack.dataclasses import ChatMessage, ChatRole
-from haystack.tools import create_tool_from_function
+from haystack.tools import Toolset, create_tool_from_function
 from haystack_integrations.tools.mcp import StreamableHttpServerInfo
 from httpx import ASGITransport, AsyncClient
+from mcp.types import CallToolResult, TextContent
+from mcp.types import Tool as MCPToolSchema
 from pytest import MonkeyPatch
 
 from nemo_gym.config_types import AggregateMetricsRequest
@@ -57,6 +60,7 @@ from responses_api_agents.haystack_agent.chat_generator import (
 from responses_api_agents.haystack_agent.http_tool import HTTPTool
 from responses_api_agents.haystack_agent.mcp_toolset import (
     ContextAwareMCPToolset,
+    close_rollout_mcp_sessions,
 )
 
 
@@ -144,6 +148,36 @@ _USAGE = {
 
 def _weather_tool():
     return create_tool_from_function(get_weather, name="get_weather", description="Get the weather for a city.")
+
+
+def _function_schema(name: str) -> dict:
+    return {
+        "type": "function",
+        "name": name,
+        "description": "Get the weather for a city.",
+        "parameters": _weather_tool().parameters,
+        "strict": False,
+    }
+
+
+def _mock_mcp_discovery(monkeypatch: MonkeyPatch, names_by_token: dict[str, list[str]]) -> dict[str, MagicMock]:
+    clients = {}
+
+    def create_client(server_info):
+        token = server_info.headers["X-NeMo-Gym-Session-Token"]
+        client = MagicMock()
+        client.connect = AsyncMock(
+            return_value=[
+                MCPToolSchema(name=name, inputSchema=_weather_tool().parameters) for name in names_by_token[token]
+            ]
+        )
+        client.call_tool = AsyncMock(return_value=CallToolResult(content=[TextContent(type="text", text=token)]))
+        client.aclose = AsyncMock()
+        clients[token] = client
+        return client
+
+    monkeypatch.setattr(StreamableHttpServerInfo, "create_client", create_client)
+    return clients
 
 
 def _http_response(body: str, cookies: dict | None = None) -> MagicMock:
@@ -370,7 +404,7 @@ class TestContextAwareMCPToolset:
         )
 
         agent = HaystackAgent(config=config, server_client=MagicMock(spec=ServerClient))
-        toolset = next(tool for tool in agent._agent.tools if isinstance(tool, ContextAwareMCPToolset))
+        toolset = next(tool for tool in agent._configured_tools if isinstance(tool, ContextAwareMCPToolset))
         assert toolset.server_info.url == "http://resources:19724/mcp"
         warm_up.assert_not_called()
 
@@ -380,13 +414,98 @@ class TestContextAwareMCPToolset:
         context_token = chat_generator_module._current_run_state.set(state)
         try:
             with pytest.raises(RuntimeError, match="X-NeMo-Gym-Session-Token"):
-                toolset._client_for_current_rollout()
+                toolset._worker_for_current_rollout()
         finally:
             chat_generator_module._current_run_state.reset(context_token)
 
+    async def test_spawned_mcp_toolset_supports_collection_protocol(self, monkeypatch) -> None:
+        clients = _mock_mcp_discovery(monkeypatch, {"a": ["mcp_a"], "b": ["mcp_b"]})
+        template = ContextAwareMCPToolset(server_info=StreamableHttpServerInfo(url="http://unused/mcp"))
+        spawned = []
+        for token in ("a", "b"):
+            state = _GenRunState(mcp_headers={"X-NeMo-Gym-Session-Token": token})
+            context_token = _current_run_state.set(state)
+            try:
+                runtime = await asyncio.to_thread(template.spawn)
+                spawned.append(runtime)
+                name = f"mcp_{token}"
+                assert len(runtime) == 1
+                assert [tool.name for tool in runtime] == [name]
+                assert runtime[0].name == name
+                assert name in runtime
+                assert runtime[0] in runtime
+                assert "unavailable" not in runtime
+                assert runtime.get_selectable_tools() == runtime.tools == list(runtime)
+                assert runtime.spawn()[0] is runtime[0]
+                assert len(state.mcp_workers) == 1
+                clients[token].connect.assert_awaited_once()
+            finally:
+                await asyncio.to_thread(close_rollout_mcp_sessions, state)
+                _current_run_state.reset(context_token)
+            clients[token].aclose.assert_awaited_once()
+        assert [tool.name for tool in spawned[0]] == ["mcp_a"]
+        assert template._warmup_called is False
+
+    @pytest.mark.parametrize("eager_connect", [False, True])
+    async def test_discovery_is_per_rollout_without_http_tools(self, tmp_path, monkeypatch, eager_connect) -> None:
+        clients = _mock_mcp_discovery(monkeypatch, {"a": ["mcp_a"], "b": ["mcp_b"], "empty": []})
+        server, model_client = _build_agent(tmp_path, monkeypatch, model_responses=[_envelope([_text_item()])] * 3)
+        toolset = ContextAwareMCPToolset(
+            server_info=StreamableHttpServerInfo(url="http://unused/mcp"), eager_connect=eager_connect
+        )
+        server._configured_tools = [toolset]
+        assert clients == {}
+
+        for token, expected in (("a", ["mcp_a"]), ("b", ["mcp_b"]), ("empty", [])):
+            await server.responses(
+                request=MagicMock(headers={"X-NeMo-Gym-Session-Token": token}, cookies={}),
+                response=MagicMock(),
+                body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+            )
+            params = model_client.post.call_args.kwargs["json"]
+            assert [tool["name"] for tool in (params.tools or [])] == expected
+            assert toolset._warmup_called is False
+            clients[token].connect.assert_awaited_once()
+            clients[token].aclose.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        "tool_names, allow_filtering, expected",
+        [
+            (None, False, ["mcp_a", "mcp_b"]),
+            (["mcp_a", "mcp_b", "unavailable"], False, ["mcp_a", "mcp_b"]),
+            (["mcp_a"], False, None),
+            (["mcp_a"], True, ["mcp_a"]),
+            ([], False, None),
+            ([], True, []),
+        ],
+    )
+    async def test_tool_names_filtering(self, tmp_path, monkeypatch, tool_names, allow_filtering, expected) -> None:
+        clients = _mock_mcp_discovery(monkeypatch, {"token": ["mcp_a", "mcp_b"]})
+        server, model_client = _build_agent(tmp_path, monkeypatch, model_responses=[_envelope([_text_item()])])
+        server.config.allow_mcp_tool_filtering = allow_filtering
+        server._configured_tools = [
+            ContextAwareMCPToolset(
+                server_info=StreamableHttpServerInfo(url="http://unused/mcp"), tool_names=tool_names
+            )
+        ]
+        response = server.responses(
+            request=MagicMock(headers={"X-NeMo-Gym-Session-Token": "token"}, cookies={}),
+            response=MagicMock(),
+            body=NeMoGymResponseCreateParamsNonStreaming(input="hi"),
+        )
+        if expected is None:
+            with pytest.raises(ValueError, match="MCP tool_names excludes.*mcp_b.*allow_mcp_tool_filtering"):
+                await response
+            model_client.post.assert_not_awaited()
+        else:
+            await response
+            params = model_client.post.call_args.kwargs["json"]
+            assert [tool["name"] for tool in (params.tools or [])] == expected
+        clients["token"].aclose.assert_awaited_once()
+
     async def test_rejects_mcp_toolset_when_mcp_is_disabled(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         server, _ = _build_agent(tmp_path, monkeypatch, model_responses=[])
-        server._agent.tools = [ContextAwareMCPToolset.__new__(ContextAwareMCPToolset)]
+        server._configured_tools = [ContextAwareMCPToolset.__new__(ContextAwareMCPToolset)]
         body = NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": "hi"})
 
         with pytest.raises(RuntimeError, match="did not enable MCP"):
@@ -645,45 +764,178 @@ class TestApp:
             "environment_tool",
         ]
 
-    def test_request_http_tool_overrides_configured_tool(self, tmp_path, monkeypatch: MonkeyPatch, caplog) -> None:
-        server, _ = _build_agent(tmp_path, monkeypatch, model_responses=[])
+    @pytest.mark.parametrize(
+        "sources",
+        [
+            ("local", "HTTP"),
+            ("local", "MCP"),
+            ("local", "MCP", "HTTP"),
+            ("local", "local"),
+            ("MCP", "MCP"),
+            ("HTTP", "HTTP"),
+        ],
+    )
+    async def test_tool_name_collisions_raise(self, tmp_path, monkeypatch, sources) -> None:
+        _mock_mcp_discovery(monkeypatch, {"token": ["get_weather"] * sources.count("MCP")})
+        server, model_client = _build_agent(tmp_path, monkeypatch, model_responses=[])
+        server._configured_tools = [_weather_tool() for source in sources if source == "local"]
+        headers = {}
+        if "MCP" in sources:
+            server._configured_tools.append(
+                ContextAwareMCPToolset(server_info=StreamableHttpServerInfo(url="http://unused/mcp"))
+            )
+            headers["X-NeMo-Gym-Session-Token"] = "token"
+        with pytest.raises(ValueError, match="Tool name.*conflicts|HTTP environment tool names must be unique"):
+            await server.responses(
+                request=MagicMock(headers=headers, cookies={}),
+                response=MagicMock(),
+                body=NeMoGymResponseCreateParamsNonStreaming(
+                    input="hi", tools=[_function_schema("get_weather") for source in sources if source == "HTTP"]
+                ),
+            )
+        model_client.post.assert_not_awaited()
 
-        with caplog.at_level("WARNING"):
-            runtime_tools = server._tools_for_http_request(
-                [
-                    {
-                        "type": "function",
-                        "name": "get_weather",
-                        "description": "Environment weather.",
-                        "parameters": {"type": "object", "properties": {}},
-                    }
-                ]
+    @pytest.mark.parametrize("mcp_available", [True, False])
+    async def test_rollout_mcp_suppresses_http_tool(self, tmp_path, monkeypatch, mcp_available) -> None:
+        clients = _mock_mcp_discovery(monkeypatch, {"token": ["environment_tool"] if mcp_available else []})
+        server, model_client = _build_agent(
+            tmp_path,
+            monkeypatch,
+            model_responses=[_envelope([_function_call_item(name="environment_tool")]), _envelope([_text_item()])],
+        )
+        server._configured_tools = [
+            ContextAwareMCPToolset(server_info=StreamableHttpServerInfo(url="http://unused/mcp"))
+        ]
+        server.server_client.post = AsyncMock(return_value=_http_response("HTTP result"))
+        await server.responses(
+            request=MagicMock(headers={"X-NeMo-Gym-Session-Token": "token"}, cookies={"sid": "token"}),
+            response=MagicMock(),
+            body=NeMoGymResponseCreateParamsNonStreaming(input="hi", tools=[_function_schema("environment_tool")]),
+        )
+        assert [tool["name"] for tool in model_client.post.call_args.kwargs["json"].tools] == ["environment_tool"]
+        if mcp_available:
+            clients["token"].call_tool.assert_awaited_once_with("environment_tool", {"city": "San Francisco"})
+            server.server_client.post.assert_not_awaited()
+        else:
+            clients["token"].call_tool.assert_not_awaited()
+            server.server_client.post.assert_awaited_once_with(
+                server_name="res",
+                url_path="/environment_tool",
+                json={"city": "San Francisco"},
+                cookies={"sid": "token"},
             )
 
-        assert len(runtime_tools) == 1
-        assert isinstance(runtime_tools[0], HTTPTool)
-        assert "overrides a configured local tool with the same name" in caplog.text
+    @pytest.mark.parametrize("collision", [False, True])
+    async def test_local_toolset_can_discover_tools_mid_run(self, tmp_path, monkeypatch, collision) -> None:
+        class DiscoveringToolset(Toolset):
+            def __init__(self):
+                super().__init__([])
+                self.add(create_tool_from_function(self.discover))
 
-    def test_configured_mcp_tool_overrides_request_http_tool(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
-        server, _ = _build_agent(tmp_path, monkeypatch, model_responses=[])
-        mcp_toolset = ContextAwareMCPToolset(server_info=StreamableHttpServerInfo(url="http://unused/mcp"))
-        mcp_toolset.tools = [_weather_tool()]
-        mcp_toolset._warmup_called = True
-        server._agent.tools = [mcp_toolset]
+            def discover(self) -> str:
+                """Discover a weather tool."""
+                self.add(_weather_tool())
+                return "Discovered get_weather."
 
-        runtime_tools = server._tools_for_http_request(
-            [
-                {
-                    "type": "function",
-                    "name": "get_weather",
-                    "description": "Environment weather.",
-                    "parameters": {"type": "object", "properties": {}},
-                }
+            def spawn(self):
+                return DiscoveringToolset()
+
+        _mock_mcp_discovery(monkeypatch, {"token": ["mcp_tool"]})
+        server, model_client = _build_agent(
+            tmp_path,
+            monkeypatch,
+            model_responses=[
+                _envelope([_function_call_item(name="discover", arguments="{}")]),
+                _envelope([_function_call_item()]),
+                _envelope([_text_item()]),
             ]
+            * 2,
         )
+        local = DiscoveringToolset()
+        # Include a native wrapper to exercise preservation of nested local toolsets.
+        server._configured_tools = local + ContextAwareMCPToolset(
+            server_info=StreamableHttpServerInfo(url="http://unused/mcp")
+        )
+        for _ in range(2):
+            response = server.responses(
+                request=MagicMock(headers={"X-NeMo-Gym-Session-Token": "token"}, cookies={}),
+                response=MagicMock(),
+                body=NeMoGymResponseCreateParamsNonStreaming(
+                    input="hi", tools=[_function_schema("get_weather" if collision else "http_tool")]
+                ),
+            )
+            if collision:
+                with pytest.raises(PipelineRuntimeError, match="Duplicate tool names found.*get_weather"):
+                    await response
+                model_client.post.assert_awaited_once()
+                assert [tool.name for tool in local] == ["discover"]
+                return
+            result = await response
+            turns = model_client.post.call_args_list[-3:]
+            initial_names = {"discover", "mcp_tool", "http_tool"}
+            assert {tool["name"] for tool in turns[0].kwargs["json"].tools} == initial_names
+            for turn in turns[1:]:
+                assert {tool["name"] for tool in turn.kwargs["json"].tools} == initial_names | {"get_weather"}
+            outputs = [item.output for item in result.output if item.type == "function_call_output"]
+            assert outputs == ["Discovered get_weather.", "The weather in San Francisco is sunny and 22 degrees."]
+            assert [tool.name for tool in local] == ["discover"]
 
-        assert [tool.name for tool in runtime_tools] == ["get_weather"]
-        assert not isinstance(runtime_tools[0], HTTPTool)
+    async def test_concurrent_requests_cannot_access_each_others_tools(self, tmp_path, monkeypatch) -> None:
+        clients = _mock_mcp_discovery(monkeypatch, {"a": ["mcp_a"], "b": ["mcp_b"]})
+        server, model_client = _build_agent(tmp_path, monkeypatch, model_responses=[])
+        server._configured_tools.append(
+            ContextAwareMCPToolset(server_info=StreamableHttpServerInfo(url="http://unused/mcp"))
+        )
+        first_turn = asyncio.Barrier(2)
+        turns = {"a": 0, "b": 0}
+
+        async def model_post(*, json, **kwargs):
+            token = _current_run_state.get().mcp_headers["X-NeMo-Gym-Session-Token"]
+            assert {tool["name"] for tool in json.tools} == {"get_weather", f"mcp_{token}", f"http_{token}"}
+            turn = turns[token]
+            turns[token] += 1
+            if turn == 0:
+                # Both requests have resolved their tools before either model can call one.
+                await asyncio.wait_for(first_turn.wait(), timeout=5)
+            if turn < 2:
+                target = token if turn == 0 else ("b" if token == "a" else "a")
+                calls = [
+                    {
+                        **_function_call_item(name=f"{source}_{target}"),
+                        "call_id": f"{source}_{turn}",
+                        "id": f"fc_{source}_{turn}",
+                    }
+                    for source in ("mcp", "http")
+                ]
+                return _make_response(_envelope(calls))
+            outputs = [item for item in json.input if item.type == "function_call_output"]
+            assert len(outputs) == 4
+            assert all("not found" in item.output for item in outputs[-2:])
+            return _make_response(_envelope([_text_item("Done.")]))
+
+        async def http_post(*, cookies, **kwargs):
+            assert kwargs["url_path"] == f"/http_{cookies['sid']}"
+            return _http_response("HTTP result", cookies)
+
+        model_client.post.side_effect = model_post
+        server.server_client.post = AsyncMock(side_effect=http_post)
+        await asyncio.gather(
+            *(
+                server.responses(
+                    request=MagicMock(headers={"X-NeMo-Gym-Session-Token": token}, cookies={"sid": token}),
+                    response=MagicMock(),
+                    body=NeMoGymResponseCreateParamsNonStreaming(
+                        input="hi", tools=[_function_schema(f"http_{token}")]
+                    ),
+                )
+                for token in ("a", "b")
+            )
+        )
+        assert turns == {"a": 3, "b": 3}
+        assert server.server_client.post.await_count == 2
+        for token, client in clients.items():
+            client.call_tool.assert_awaited_once_with(f"mcp_{token}", {"city": "San Francisco"})
+            client.aclose.assert_awaited_once()
 
     async def test_responses_request_param_overrides_static_generation_kwargs(
         self, tmp_path, monkeypatch: MonkeyPatch

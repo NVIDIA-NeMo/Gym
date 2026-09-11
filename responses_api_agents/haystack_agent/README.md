@@ -9,12 +9,22 @@ HTTP environment tools, and `ContextAwareMCPToolset` environment tools exposed o
 
 > [!NOTE]
 > Function tools in `responses_create_params.tools` become request-scoped Haystack tools and
-> dispatch to the Resources Server's `POST /{tool_name}` routes. A configured MCP tool with the
-> same name takes precedence; otherwise the request tool overrides a same-named local pipeline tool.
+> dispatch to the Resources Server's `POST /{tool_name}` routes. An MCP tool available and selected
+> for the rollout takes precedence over a same-named request tool. Collisions with local pipeline
+> tools raise an error; rename or remove the conflicting definitions.
 
 The pipeline is deserialized once at startup and warmed by Haystack on its first use. Each rollout
-opens a token-authenticated MCP connection lazily on its first MCP tool call and closes it when the
-rollout ends. Concurrent rollouts remain isolated.
+opens a token-authenticated MCP connection to discover its available tools before inference, reuses
+that connection for tool calls, and closes it when the rollout ends. Discovery results belong only
+to that rollout, including when the pipeline configures `eager_connect: true`.
+MCP rollout copies support Haystack's standard toolset collection APIs. Local toolsets retain their
+`spawn()` lifecycle and can expose new tools during the run; Haystack checks names again each turn
+and rejects collisions with existing tools.
+
+MCP `tool_names: null` includes every tool returned by authenticated discovery. An explicit list
+selects only matching available tools. If it excludes any discovered tools, the agent raises an
+error unless its config sets `allow_mcp_tool_filtering: true`. This selection applies only to MCP;
+HTTP tools remain independently supplied by the request.
 
 ## Pipeline and request contract
 

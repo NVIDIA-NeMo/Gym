@@ -15,20 +15,20 @@
 """A NeMo Gym agent that runs a shared, serialized Haystack pipeline as its rollout harness.
 
 The pipeline is deserialized once and shared across requests. Haystack's ``Agent`` drives the
-model/tool loop through ``NeMoGymResponsesChatGenerator``. Configured local and MCP tools remain
-on that shared pipeline; a request may additionally supply function schemas which become ephemeral
-HTTP tools for that rollout only. Per-rollout state, including separate model-server and
-resources-server cookie jars, is stored in context variables so concurrent rollouts cannot leak
-session state into each other.
+model/tool loop through ``NeMoGymResponsesChatGenerator``. Configured toolsets are retained as
+templates; MCP discovery and request-supplied HTTP tools belong to each rollout. Per-rollout state,
+including separate model-server and resources-server cookie jars, is stored in context variables
+so concurrent rollouts cannot leak session state into each other.
 """
 
+import asyncio
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from fastapi import Request, Response
 from haystack import Pipeline, logging
-from haystack.tools import flatten_tools_or_toolsets, warm_up_tools
+from haystack.tools import Toolset, flatten_tools_or_toolsets, warm_up_tools
 from pydantic import ConfigDict, PrivateAttr
 
 from nemo_gym.base_resources_server import (
@@ -64,8 +64,9 @@ from responses_api_agents.haystack_agent.http_tool import HTTPTool
 from responses_api_agents.haystack_agent.mcp_toolset import (
     close_rollout_mcp_sessions,
     configure_mcp_url,
-    context_aware_mcp_tool_names,
+    context_aware_mcp_toolsets,
     has_context_aware_mcp_toolset,
+    spawn_mcp_toolsets,
 )
 
 
@@ -87,6 +88,8 @@ class HaystackAgentConfig(BaseResponsesAPIAgentConfig):
     pipeline_yaml: str
     # Name of the Agent component inside the pipeline.
     agent_component_name: str = "agent"
+    # Explicit opt-in when MCP tool_names excludes tools available to a rollout.
+    allow_mcp_tool_filtering: bool = False
 
 
 class HaystackAgentRunRequest(BaseRunRequest):
@@ -108,6 +111,7 @@ class HaystackAgent(SimpleResponsesAPIAgent):
     _pipeline: Any = PrivateAttr(default=None)
     _agent: Any = PrivateAttr(default=None)
     _generator: Any = PrivateAttr(default=None)
+    _configured_tools: Any = PrivateAttr(default=None)
 
     def _get_agent_and_generator(self, pipeline: Any) -> tuple[Any, NeMoGymResponsesChatGenerator]:
         agent = pipeline.get_component(self.config.agent_component_name)
@@ -139,36 +143,40 @@ class HaystackAgent(SimpleResponsesAPIAgent):
             raise ValueError("HTTP environment tool names must be unique within a request.")
         return http_tools
 
-    def _tools_for_http_request(self, schemas: list[Any]) -> list[Any]:
-        """Combine configured tools with request-scoped HTTP tools, preferring MCP on collisions."""
+    def _tools_for_request(self, schemas: list[Any]) -> Toolset:
+        """Resolve rollout tools, preferring MCP over HTTP and rejecting local collisions."""
         http_tools = self._runtime_http_tools(schemas)
-        http_names = {tool.name for tool in http_tools}
 
-        configured_tools = getattr(self._agent, "tools", None)
-        # Haystack can flatten a toolset only after it has discovered its concrete tools. Gym's
-        # MCP toolset performs a schema-only ``tools/list`` here; authenticated MCP clients are
-        # still created lazily, per rollout, when an MCP tool is actually invoked.
+        configured_tools = spawn_mcp_toolsets(self._configured_tools, self.config.allow_mcp_tool_filtering)
         warm_up_tools(configured_tools)
-        mcp_names = context_aware_mcp_tool_names(configured_tools)
-        mcp_overrides = http_names & mcp_names
-        if mcp_overrides:
-            http_tools = [tool for tool in http_tools if tool.name not in mcp_overrides]
-        http_names = {tool.name for tool in http_tools}
+        mcp_tools = flatten_tools_or_toolsets(list(context_aware_mcp_toolsets(configured_tools)))
+        mcp_tool_ids = {id(tool) for tool in mcp_tools}
+        local_tools = [tool for tool in flatten_tools_or_toolsets(configured_tools) if id(tool) not in mcp_tool_ids]
 
-        tools = []
-        for tool in flatten_tools_or_toolsets(configured_tools):
-            if tool.name in http_names:
-                logger.warning(
-                    "HTTP environment tool '{tool_name}' overrides a configured local tool with the same name.",
-                    tool_name=tool.name,
-                )
-                continue
-            tools.append(tool)
-        return [*tools, *http_tools]
+        sources = {}
+        for source, candidates in (("local", local_tools), ("MCP", mcp_tools), ("HTTP", http_tools)):
+            for tool in candidates:
+                previous_source = sources.get(tool.name)
+                if previous_source is not None:
+                    if previous_source == "MCP" and source == "HTTP":
+                        continue
+                    raise ValueError(
+                        f"Tool name {tool.name!r} conflicts between {previous_source} and {source} tools. "
+                        "Rename or remove the conflicting tool definitions."
+                    )
+                sources[tool.name] = source
+        # Validate the initial names above, but retain the toolsets themselves so
+        # Haystack can spawn local state and discover new tools on subsequent turns.
+        resolved = Toolset([])
+        configured = configured_tools if isinstance(configured_tools, list) else [configured_tools]
+        for collection in configured:
+            if collection is not None:
+                resolved += collection if isinstance(collection, Toolset) else Toolset([collection])
+        return resolved + Toolset([tool for tool in http_tools if sources[tool.name] == "HTTP"])
 
     def _validate_mcp_configuration(self, mcp_enabled: bool) -> None:
         """Require the pipeline's MCP configuration to match this rollout's Resources Server."""
-        has_mcp_toolset = has_context_aware_mcp_toolset(getattr(self._agent, "tools", None))
+        has_mcp_toolset = has_context_aware_mcp_toolset(self._configured_tools)
         if has_mcp_toolset and not mcp_enabled:
             raise RuntimeError(
                 "The Haystack pipeline configures ContextAwareMCPToolset, but the Resources Server did not "
@@ -187,8 +195,8 @@ class HaystackAgent(SimpleResponsesAPIAgent):
             pipeline_path = Path(__file__).parent / pipeline_path
         self._pipeline_text = pipeline_path.read_text()
 
-        # Deserialize once. Haystack warms components on the first run; MCP schemas are then
-        # shared, while authenticated clients are created from each request's context.
+        # Deserialize once. MCP configuration is shared, but discovery and clients belong
+        # to each rollout and are never stored on the pipeline's toolsets.
         self._pipeline = Pipeline.loads(self._pipeline_text, unsafe=True)
         self._agent, self._generator = self._get_agent_and_generator(self._pipeline)
         if getattr(self._agent, "user_prompt", None) is not None:
@@ -197,9 +205,12 @@ class HaystackAgent(SimpleResponsesAPIAgent):
                 "complete user context; Haystack appends user_prompt after that input, which would be "
                 "mistaken for generated output when the trajectory is reconstructed."
             )
-        tools = getattr(self._agent, "tools", None)
+        tools = self._configured_tools = self._agent.tools
         if has_context_aware_mcp_toolset(tools):
             configure_mcp_url(tools, self._resources_mcp_url())
+        # Every run receives explicit runtime tools. Keep templates out of the shared
+        # Agent's warm-up, which otherwise connects MCP before its rollout copy exists.
+        self._agent.tools = []
         return super().model_post_init(context)
 
     async def responses(
@@ -238,14 +249,21 @@ class HaystackAgent(SimpleResponsesAPIAgent):
         self._validate_mcp_configuration(mcp_enabled=bool(session_token))
         run_state = chat_generator._GenRunState(resources_server_cookies=request.cookies, mcp_headers=mcp_headers)
         token = chat_generator._current_run_state.set(run_state)
+        tool_resolution = asyncio.create_task(asyncio.to_thread(self._tools_for_request, body.tools or []))
         try:
-            agent_inputs = {"messages": messages, "generation_kwargs": generation_kwargs}
-            if body.tools:
-                agent_inputs["tools"] = self._tools_for_http_request(body.tools)
+            agent_inputs = {
+                "messages": messages,
+                "generation_kwargs": generation_kwargs,
+                "tools": await asyncio.shield(tool_resolution),
+            }
             result = await self._pipeline.run_async({self.config.agent_component_name: agent_inputs})
         finally:
             try:
-                close_rollout_mcp_sessions(run_state)
+                # A cancelled request must let discovery finish before closing its connections.
+                try:
+                    await tool_resolution
+                finally:
+                    await asyncio.to_thread(close_rollout_mcp_sessions, run_state)
             finally:
                 chat_generator._current_run_state.reset(token)
         all_messages = result[self.config.agent_component_name]["messages"]
