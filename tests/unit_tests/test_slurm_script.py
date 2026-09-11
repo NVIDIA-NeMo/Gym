@@ -216,6 +216,33 @@ def test_build_vllm_command_no_extra_args_by_default(vllm_service):
     assert cmd.endswith("--tensor-parallel-size 1")
 
 
+def test_build_vllm_command_served_model_name():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="/checkpoint",
+        served_model_name="super-bf16",
+    )
+    cmd = _build_vllm_command(service)
+    assert "--served-model-name super-bf16" in cmd
+
+
+def test_build_vllm_command_no_served_model_name_by_default(vllm_service):
+    cmd = _build_vllm_command(vllm_service)
+    assert "--served-model-name" not in cmd
+
+
+def test_build_vllm_command_served_model_name_quoted_if_needed():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="/checkpoint",
+        served_model_name="name with spaces",
+    )
+    cmd = _build_vllm_command(service)
+    assert "--served-model-name 'name with spaces'" in cmd
+
+
 # ---------------------------------------------------------------------------
 # _build_vllm_ray_command - single instance, TP/PP spans nodes (uses Ray core)
 # ---------------------------------------------------------------------------
