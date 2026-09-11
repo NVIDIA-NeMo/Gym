@@ -124,6 +124,14 @@ If DCO checks fail after you have already pushed, see the [Development Setup Gui
 
 ## Code, Documentation, and Tests
 
+- Before changing established behavior, briefly review the relevant history of
+  the affected code. Start with `git log --oneline -n 10 -- <path>`; for a
+  non-obvious line or small range, use
+  `git blame -L <start>,<end> -- <path>`. When a relevant commit links a PR or
+  issue, read that discussion for compatibility constraints or corner cases
+  that may not yet be documented. If a constraint still applies, preserve it
+  in a regression test, documentation, or a focused code comment so future
+  contributors do not have to rediscover it.
 - Follow the code-style rules in [`AGENTS.md`](./AGENTS.md). Ruff, not Black,
   owns Python linting and formatting; `pyproject.toml` and
   `.pre-commit-config.yaml` are the enforced configuration. Annotate new or
