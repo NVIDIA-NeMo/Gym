@@ -59,6 +59,12 @@ class TestRegistryLookup:
     def test_a_bare_name_is_not_namespaced(self) -> None:
         assert not is_namespaced("judge_failed")
 
+    def test_a_trailing_newline_is_not_a_legal_name(self) -> None:
+        """`$` also matches before a final newline, so `match` would admit a second,
+        silently different label for the same failure."""
+        assert not is_namespaced("my_server:odd_case\n")
+        assert not is_registered("judge_failed\n")
+
 
 class TestValidation:
     def test_a_registered_name_passes_silently(self, caplog) -> None:
@@ -75,11 +81,39 @@ class TestValidation:
 
     def test_an_unknown_name_warns_but_survives(self, caplog) -> None:
         """Rejecting it would trade a visible wrong name for an invisible dropped failure."""
+        failure_kinds._WARNED_UNKNOWN.discard("legacy_label")
         with caplog.at_level(logging.WARNING):
             result = validate_failure_kind("legacy_label")
 
         assert result == "legacy_label"
         assert any("legacy_label" in record.getMessage() for record in caplog.records)
+
+    def test_a_malformed_namespaced_value_takes_the_unknown_path(self, caplog) -> None:
+        """It stays observable instead of passing silently as a namespaced name."""
+        with caplog.at_level(logging.WARNING):
+            result = validate_failure_kind("my_server:odd_case\n")
+
+        assert result == "my_server:odd_case\n"
+        assert len(caplog.records) == 1
+
+    def test_the_same_unknown_name_is_reported_once(self, caplog) -> None:
+        """A failing component emits the same label on every rollout; warning per call
+        buries the one line that matters."""
+        failure_kinds._WARNED_UNKNOWN.discard("repeated_legacy")
+        with caplog.at_level(logging.WARNING):
+            for _ in range(1000):
+                assert validate_failure_kind("repeated_legacy") == "repeated_legacy"
+
+        assert len(caplog.records) == 1
+
+    def test_each_distinct_unknown_name_is_still_reported(self, caplog) -> None:
+        for name in ("legacy_one", "legacy_two"):
+            failure_kinds._WARNED_UNKNOWN.discard(name)
+        with caplog.at_level(logging.WARNING):
+            validate_failure_kind("legacy_one")
+            validate_failure_kind("legacy_two")
+
+        assert len(caplog.records) == 2
 
     def test_absent_is_not_a_failure(self, caplog) -> None:
         with caplog.at_level(logging.WARNING):
