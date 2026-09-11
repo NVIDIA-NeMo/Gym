@@ -1,0 +1,33 @@
+automationbench:
+  responses_api_agents:
+    verifiers_agent:
+      entrypoint: app.py
+      domain: other
+      description: AutomationBench scored with the Artificial Analysis headline metric, guardrail-gated partial credit.
+      value: Evaluate enterprise workflow automation capabilities
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ""
+      vf_env_id: automationbench_env
+      vf_env_args:
+        max_turns: 50
+        toolset: api
+        # "aa_headline" (guardrail-gated AA metric) or "partial_credit" (upstream ungated fraction).
+        # Both are always reported as metrics; this only picks which one carries the reward weight.
+        reward_fn: aa_headline
+      group_size: 1
+      max_concurrent_generation: -1
+      max_concurrent_scoring: -1
+      max_tokens: 131072
+      temperature: 1.0
+      top_p: 1.0
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: environments/automationbench/data/example.jsonl
+          license: MIT
+        - name: validation
+          type: validation
+          jsonl_fpath: environments/automationbench/data/automationbench-600.jsonl
+          license: MIT
