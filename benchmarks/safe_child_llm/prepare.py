@@ -19,7 +19,7 @@ DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "safe_child_llm.jsonl"
 
 UPSTREAM_REPOSITORY = "The-Responsible-AI-Initiative/Safe_Child_LLM_Evaluation"
-UPSTREAM_REVISION = "f69a651ff5c992c6d423b6a129ade8bf674fb63b"
+UPSTREAM_REVISION = "f69a651ff5c992c6d423b6a129ade8bf674fb63b"  # pragma: allowlist secret
 RAW_BASE_URL = f"https://raw.githubusercontent.com/{UPSTREAM_REPOSITORY}/{UPSTREAM_REVISION}/assets"
 SOURCES = {
     "6-12": "6_12_ChildSafeLLM.xlsx",
