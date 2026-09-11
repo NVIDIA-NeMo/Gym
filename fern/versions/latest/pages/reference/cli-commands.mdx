@@ -241,7 +241,7 @@ List the manifest-first catalog unioned with legacy environment and benchmark co
 | `[<name>]` | Inspect one environment or benchmark. |
 | `--kind environment\|benchmark` | Filter the list or resolve an ambiguous name. |
 | `--domain`, `--modality`, `--licensing` | Filter by catalog metadata. |
-| `--status experimental\|no-manifest` | Filter by manifest coverage status. |
+| `--status experimental\|maintained\|no-manifest` | Filter by manifest maintenance or coverage status. |
 | `--lifecycle active\|deprecated` | Filter by lifecycle. |
 | `--json` | Output catalog entries as JSON. |
 
@@ -590,7 +590,7 @@ gym env test --all
 
 ### `gym env publish`
 
-Run the local publication check for a manifest-backed workload. The command runs static validation and the verifier fixture, rejects manifest metadata placeholders, and confirms that the exact manifest is visible as `experimental`. It does not assess implementation quality, require a full evaluation or training run, commit, or push changes.
+Run the local publication check for a manifest-backed workload. The command runs static validation and the verifier fixture, rejects manifest metadata placeholders, and confirms that the exact manifest is visible as `experimental` or `maintained`. It does not assess implementation quality, require a full evaluation or training run, commit, or push changes.
 
 | Option | Description |
 | --- | --- |

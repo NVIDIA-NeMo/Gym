@@ -197,6 +197,12 @@ class EnvironmentManifest(_ManifestModel):
     version: NonEmptyString = Field(
         description="Version of the resolved composition; Semantic Versioning is recommended."
     )
+    experimental: bool = Field(
+        default=True,
+        description=(
+            "Whether the workload is experimental; false means it is officially maintained by the NeMo Gym team."
+        ),
+    )
     kind: EnvironmentKind
     integration_profile: IntegrationProfile
     domain: Domain

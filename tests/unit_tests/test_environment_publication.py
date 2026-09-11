@@ -53,7 +53,7 @@ def _entry(tmp_path: Path, **manifest_updates: object) -> EnvironmentCatalogEntr
     return EnvironmentCatalogEntry(
         name="sample",
         kind="environment",
-        status="experimental",
+        status="experimental" if manifest.get("experimental", True) else "maintained",
         path=directory,
         config_path=config_path,
         manifest_path=manifest_path,
@@ -128,13 +128,22 @@ def test_publication_report_serializes() -> None:
     assert report.to_dict()["verifier_cases"] == 3
 
 
+def test_publication_accepts_maintained_workload(tmp_path: Path) -> None:
+    entry = _entry(tmp_path, experimental=False)
+    validation, verifier = _reports()
+
+    report = finalize_publication(entry, validation, verifier, catalog_entries=(entry,))
+
+    assert report.status == "maintained"
+
+
 @pytest.mark.parametrize(
     ("case", "message"),
     [
         ("missing_manifest", "no manifest"),
         ("wrong_validation", "Validation report"),
         ("missing_catalog_entry", "Catalog did not resolve"),
-        ("wrong_status", "must enter as experimental"),
+        ("wrong_status", "unsupported catalog status"),
     ],
 )
 def test_publication_rejects_inconsistent_inputs(tmp_path: Path, case: str, message: str) -> None:

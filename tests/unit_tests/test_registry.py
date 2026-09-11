@@ -199,7 +199,12 @@ class TestDiscoverEnvironmentsAcrossRoots:
 
 class TestEnvironmentCatalog:
     def test_discovers_manifest_and_legacy_union(self, tmp_path: Path, monkeypatch) -> None:
-        manifest_path = _write_manifest(tmp_path, "environments", "manifest_env", _manifest("manifest_env"))
+        manifest_path = _write_manifest(
+            tmp_path,
+            "environments",
+            "manifest_env",
+            _manifest("manifest_env", experimental=False),
+        )
         _make_env(tmp_path / "environments", "legacy_env", _ENV_CONFIG.format(name="legacy_env"))
         benchmark = tmp_path / "benchmarks" / "legacy_benchmark" / "config.yaml"
         benchmark.parent.mkdir(parents=True)
@@ -223,7 +228,7 @@ class TestEnvironmentCatalog:
             ("benchmark", "legacy_benchmark"),
         }
         manifest_entry = entries[("environment", "manifest_env")]
-        assert manifest_entry.status == "experimental"
+        assert manifest_entry.status == "maintained"
         assert manifest_entry.manifest_path == manifest_path
         assert manifest_entry.version == "0.1.0"
         assert manifest_entry.integration_profile == "custom-gym-verifier"

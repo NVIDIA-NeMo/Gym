@@ -12,10 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 from unittest.mock import MagicMock
 
 from nemo_gym.server_utils import ServerClient
+from nemo_gym.verifier_fixture import exercise_verifier_fixture
 from resources_servers.example_single_tool_call.app import (
+    VERIFIER_FIXTURE,
     SimpleWeatherResourcesServer,
     SimpleWeatherResourcesServerConfig,
 )
@@ -30,3 +33,13 @@ class TestApp:
             name="",
         )
         SimpleWeatherResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def test_verifier_fixture(self) -> None:
+        asyncio.run(
+            exercise_verifier_fixture(
+                VERIFIER_FIXTURE,
+                reward_range=(0.0, 1.0),
+                higher_is_better=True,
+                determinism="unknown",
+            )
+        )
