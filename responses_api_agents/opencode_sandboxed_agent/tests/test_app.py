@@ -190,14 +190,18 @@ class TestOpenCodeSandboxedAgent:
 
         assert expected_usages == actual_usages
 
-    async def test_responses_sanity(self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch) -> None:
+    @mark.parametrize("execution_error", [None, ConnectionError("synthetic sandbox disconnect")])
+    async def test_responses_sanity(
+        self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch, execution_error: Exception | None
+    ) -> None:
         config = self._create_config()
         server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
 
         sandbox_mock = MagicMock()
         sandbox_mock.exec = AsyncMock(
             side_effect=[
-                SimpleNamespace(
+                execution_error
+                or SimpleNamespace(
                     stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
                 ),
                 SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
@@ -310,6 +314,12 @@ class TestOpenCodeSandboxedAgent:
         )
 
         assert expected_response == actual_response
+        health = server._sandbox_id_to_run_result[""]["opencode_execution"]
+        assert health["schema_version"] == 1
+        if execution_error is not None:
+            assert health["outcome"] == "infrastructure_error"
+            assert health["exception_type"] == "ConnectionError"
+            assert health["retryable"] is True
         assert not any(key.startswith("_ng_") for key in server._sandbox_id_to_run_result[""])
         assert "XDG_DATA_HOME" not in sandbox_mock.exec.await_args_list[0].kwargs["command"]
 

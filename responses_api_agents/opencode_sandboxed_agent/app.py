@@ -18,7 +18,7 @@ import sqlite3
 import sys
 from pathlib import Path
 from shlex import quote
-from time import time
+from time import monotonic, time
 from traceback import format_exc
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -69,6 +69,7 @@ from nemo_gym.server_utils import (
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
+from responses_api_agents.opencode_sandboxed_agent.execution_health import execution_health
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -723,6 +724,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print(f"OpenCode config JSON str: {opencode_config_content}", file=sys.stderr)
 
         run_error_type = None
+        run_started = monotonic()
         try:
             result = await sandbox.exec(
                 command=command,
@@ -732,6 +734,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             result = None
             run_error_type = type(exc).__name__
             print("OpenCode exec hit error.", format_exc(), file=sys.stderr)
+        run_elapsed_s = monotonic() - run_started
 
         if self.config.debug and result:
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
@@ -866,6 +869,15 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             "opencode_run_stderr": result_stderr,
             "opencode_export_found": opencode_export_found,
             "opencode_finished": opencode_finished,
+            "opencode_execution": execution_health(
+                return_code=getattr(result, "return_code", None),
+                error_type=getattr(result, "error_type", None),
+                exception_type=run_error_type,
+                elapsed_s=run_elapsed_s,
+                budget_s=self.config.sandbox_timeout,
+                finished=opencode_finished,
+                export=opencode_export,
+            ),
         }
         if collect_observations:
             run_result["_ng_agent_observations"] = observations
