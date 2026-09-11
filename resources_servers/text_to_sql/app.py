@@ -43,6 +43,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from resources_servers.text_to_sql.prompts import SQL_JUDGE_PROMPT_TEMPLATE, SQL_JUDGE_SYSTEM_MESSAGE
+from resources_servers.text_to_sql.task_data import TaskData
 
 
 class FailureCode(str, Enum):
@@ -162,17 +163,10 @@ class TextToSqlResourcesServerConfig(BaseResourcesServerConfig):
     reward_if_swap_fails: float = 0.0
 
 
-class TextToSqlRunRequest(BaseRunRequest):
+class TextToSqlRunRequest(TaskData, BaseRunRequest):
     """Run/verify request payload for text-to-SQL tasks."""
 
     model_config = ConfigDict(extra="allow")
-
-    uuid: Optional[str | int] = None
-    sql: str  # Ground truth SQL query (required)
-    sql_dialect: str  # SQL dialect: mysql, postgresql, sqlite (required)
-    sql_context: str = ""  # Database schema (CREATE/INSERT statements)
-    sql_prompt: str  # Natural language question (required)
-    metadata: Optional[dict[str, Any]] = None
 
 
 class TextToSqlVerifyRequest(TextToSqlRunRequest, BaseVerifyRequest):

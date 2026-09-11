@@ -48,6 +48,7 @@ from resources_servers.hotpotqa_qa.scoring import (
     normalize_gt,
     parse_generation,
 )
+from resources_servers.hotpotqa_qa.task_data import TaskData
 
 
 class HotpotQAQAResourcesServerConfig(BaseResourcesServerConfig):
@@ -59,10 +60,8 @@ class HotpotQAQAResourcesServerConfig(BaseResourcesServerConfig):
     report_filtered_metrics: bool = True
 
 
-class HotpotQAQARunRequest(BaseRunRequest):
-    model_config = ConfigDict(extra="allow")
-
-    expected_answer: str
+class HotpotQAQARunRequest(TaskData, BaseRunRequest):
+    pass
 
 
 class HotpotQAQAVerifyRequest(HotpotQAQARunRequest, BaseVerifyRequest):

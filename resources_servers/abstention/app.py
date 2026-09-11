@@ -31,7 +31,7 @@ INCORRECT, or NOT_ATTEMPTED. NOT_ATTEMPTED is treated as implicit abstention.
 from __future__ import annotations
 
 import re
-from typing import List, Optional, Union
+from typing import List, Optional
 
 from fastapi import FastAPI
 from pydantic import ConfigDict, Field
@@ -50,6 +50,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from resources_servers.abstention.task_data import TaskData
 
 
 # ---------------------------------------------------------------------------
@@ -263,12 +264,8 @@ class AbstentionConfig(BaseResourcesServerConfig):
     incorrect_reward: float = Field(default=0.0, description="Reward for an incorrect answer.")
 
 
-class AbstentionRunRequest(BaseRunRequest):
+class AbstentionRunRequest(TaskData, BaseRunRequest):
     model_config = ConfigDict(extra="allow")
-
-    id: Optional[Union[int, str]] = None
-    question: Optional[str] = None
-    answer: Optional[str] = None
 
 
 class AbstentionVerifyRequest(AbstentionRunRequest, BaseVerifyRequest):

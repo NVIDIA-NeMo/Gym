@@ -16,7 +16,7 @@ import json
 from typing import List
 
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -25,6 +25,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from resources_servers.example_multi_step.task_data import TaskData
 
 
 class ExampleMultiStepResourcesServerConfig(BaseResourcesServerConfig):
@@ -47,12 +48,8 @@ class ExtractSynonymValuesResponse(BaseModel):
     success: bool
 
 
-class ExampleMultiStepRunRequest(BaseRunRequest):
-    id: int
-    expected_synonym_values: List[int]
-    expected_synonyms: List[str]
-    minefield_label: str
-    minefield_label_value: int
+class ExampleMultiStepRunRequest(TaskData, BaseRunRequest):
+    model_config = ConfigDict(extra="ignore")
 
 
 class ExampleMultiStepVerifyRequest(ExampleMultiStepRunRequest, BaseVerifyRequest):

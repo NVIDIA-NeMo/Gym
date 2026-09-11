@@ -36,7 +36,7 @@ from __future__ import annotations
 import json
 import re
 from enum import Enum
-from typing import Any, List, Optional
+from typing import List
 
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field
@@ -55,6 +55,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from resources_servers.inverse_if.task_data import TaskData
 
 
 # ---------------------------------------------------------------------------
@@ -129,19 +130,10 @@ class InverseIFConfig(BaseResourcesServerConfig):
 # ---------------------------------------------------------------------------
 
 
-class InverseIFRunRequest(BaseRunRequest):
+class InverseIFRunRequest(TaskData, BaseRunRequest):
     """Run request payload for Inverse IF tasks."""
 
     model_config = ConfigDict(extra="allow")
-
-    uuid: Optional[str | int] = None
-    task_id: Optional[int] = None
-    prompt: Optional[str] = None
-    rubric: Optional[List[dict]] = None
-    reference_response: Optional[str] = None
-    judge_prompt_template: Optional[str] = None
-    judge_system_prompt: Optional[str] = None
-    metadata: Optional[dict[str, Any]] = None
 
 
 class InverseIFVerifyRequest(InverseIFRunRequest, BaseVerifyRequest):

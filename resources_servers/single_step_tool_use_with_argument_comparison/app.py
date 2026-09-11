@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from fastapi import FastAPI
+from pydantic import ConfigDict
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -28,13 +29,16 @@ from resources_servers.single_step_tool_use_with_argument_comparison.common.veri
     StepRewardCategory,
     ToolCallComparatorConfig,
 )
+from resources_servers.single_step_tool_use_with_argument_comparison.task_data import TaskData
 
 
 class SingleStepToolUseArgumentComparisonResourcesServerConfig(BaseResourcesServerConfig):
     tool_call_comparator_config: ToolCallComparatorConfig
 
 
-class SingleStepToolUseArgumentComparisonRunRequest(BaseRunRequest):
+class SingleStepToolUseArgumentComparisonRunRequest(TaskData, BaseRunRequest):
+    # Redeclared: the comparators isinstance-check these exact classes.
+    model_config = ConfigDict(extra="ignore")
     expected_action: ExpectedAction
 
 

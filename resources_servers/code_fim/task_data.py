@@ -6,8 +6,7 @@ Pointer rows: the only task-owned field is ``verifier_metadata.task_id``. The ac
 payload (prefix/prompt, suffix, tests, entry point) lives OUT of the row, in the
 ``human_eval_infilling`` package: it is loaded at server startup via
 ``read_problems(config.split)`` (split: single_line | multi_line | random_span |
-random_span_light) and looked up by task_id at verify time. evalplus's TaskData subclasses this
-model — same pointer shape, different task-id namespace.
+random_span_light) and looked up by task_id at verify time.
 """
 
 from typing import Optional

@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import re
 from contextlib import nullcontext
-from typing import Any, Optional
+from typing import Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict
@@ -43,6 +43,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from resources_servers.equivalence_llm_judge.task_data import TaskData
 
 
 class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
@@ -110,7 +111,7 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     reward_if_full_generation_succeeds: float = 0.5
 
 
-class LLMJudgeRunRequest(BaseRunRequest):
+class LLMJudgeRunRequest(TaskData, BaseRunRequest):
     """Run/verify request payload.
 
     Compatible with MCQA-like datasets. Only `expected_answer` is required for
@@ -118,11 +119,6 @@ class LLMJudgeRunRequest(BaseRunRequest):
     """
 
     model_config = ConfigDict(extra="allow")
-
-    uuid: Optional[str | int] = None
-    expected_answer: Optional[str] = None
-    options: Optional[list[dict[str, str]]] = None
-    metadata: Optional[dict[str, Any]] = None
 
 
 class LLMJudgeVerifyRequest(LLMJudgeRunRequest, BaseVerifyRequest):

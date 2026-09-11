@@ -426,6 +426,8 @@ class DiscardSessionResponse(BaseModel):
 
 
 class ConversationalToolUseVerifyRequest(BaseVerifyRequest):
+    # Not inheriting TaskData: this stateful server consumes task fields at seed_session, and
+    # verify() reads none of them, so the verify wire must not require row fields.
     model_config = ConfigDict(extra="allow")
 
 

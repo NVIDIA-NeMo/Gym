@@ -61,6 +61,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from resources_servers.imo_gradingbench.task_data import TaskData
 
 
 # ---------------------------------------------------------------------------
@@ -173,14 +174,10 @@ class ImoGradingBenchConfig(BaseResourcesServerConfig):
     """
 
 
-class ImoGradingBenchRunRequest(BaseRunRequest):
+class ImoGradingBenchRunRequest(TaskData, BaseRunRequest):
     """Run-time fields carried through the verify response for metrics."""
 
     model_config = ConfigDict(extra="allow")
-
-    expected_answer: Optional[str] = None
-    grading_id: Optional[str] = None
-    problem_id: Optional[str] = None
 
 
 class ImoGradingBenchVerifyRequest(ImoGradingBenchRunRequest, BaseVerifyRequest):

@@ -29,6 +29,8 @@ response and expected answer and compute `SequenceMatcher.ratio()` in
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Union
 
+from pydantic import ConfigDict
+
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
@@ -40,17 +42,15 @@ from nemo_gym.reward_profile import (
     compute_subset_metrics,
     highest_k_metrics,
 )
+from resources_servers.mrcr.task_data import TaskData
 
 
 class MRCRResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
 
-class MRCRVerifyRequest(BaseVerifyRequest):
-    expected_answer: str
-    random_string_to_prepend: str
-    n_needles: int
-    n_tokens: int
+class MRCRVerifyRequest(TaskData, BaseVerifyRequest):
+    model_config = ConfigDict(extra="ignore")
 
 
 class MRCRVerifyResponse(MRCRVerifyRequest, BaseVerifyResponse):
