@@ -17,7 +17,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 
 if TYPE_CHECKING:
@@ -25,6 +25,13 @@ if TYPE_CHECKING:
     # module) and would pull the mcp SDK into agent/model processes that never need it.
     from nemo_gym.mcp_auto_exposure import MCPTool
 
+from nemo_gym._checkpoint.control import ControlCapabilities, checkpoint_control_auth_token
+from nemo_gym._checkpoint.resources import (
+    ResourcesCheckpointParticipant,
+    ResourceSnapshot,
+    ResourcesRouteKind,
+    install_resources_checkpoint,
+)
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.judge import judge_failsafe
 from nemo_gym.openai_utils import (
@@ -78,6 +85,8 @@ class ReverifyMode(str, Enum):
 class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     # Opt in to serve this server's tool routes over MCP; default off.
     expose_tools_over_mcp: bool = False
+    # A replacement process must remain paused until checkpoint restore completes.
+    checkpoint_restore_expected: bool = False
     # The mode of reverification (for gym eval reverify) of this server.
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNKNOWN
 
@@ -145,10 +154,16 @@ class MCPServerMetadata(BaseModel):
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
     config: BaseResourcesServerConfig
 
+    _CONTROL_COMPONENT = "resources_servers"
+    _checkpoint_participant: Optional[ResourcesCheckpointParticipant] = PrivateAttr(default=None)
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
         self.setup_session_middleware(app)
+        # Starlette wraps middleware in reverse registration order.
+        # Register this first so RolloutContext strips /ng-rollout/<id> before route admission.
+        self.setup_resources_checkpoint(app)
         app.add_middleware(RolloutContextMiddleware)
 
         app.post("/seed_session")(self.seed_session)
@@ -161,8 +176,74 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         )
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         app.get("/reverify_mode")(self.get_reverify_mode)
+        self.setup_control_plane(app)
 
         return app
+
+    def checkpoint_state_enabled(self) -> bool:
+        """Whether this server implements logical session export and restore."""
+        return False
+
+    async def export_checkpoint_state(self, rollout_id: str, attempt_index: int) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def restore_checkpoint_states(self, snapshots: list[ResourceSnapshot]) -> None:
+        """Validate and atomically activate all restored sessions."""
+        raise NotImplementedError
+
+    async def retire_checkpoint_state(self, rollout_id: str, attempt_index: int) -> None:
+        """Remove one execution's adapter-owned session state."""
+        raise NotImplementedError
+
+    def checkpoint_participant(self) -> ResourcesCheckpointParticipant:
+        if self._checkpoint_participant is None:
+            self._checkpoint_participant = ResourcesCheckpointParticipant(
+                export_state=self.export_checkpoint_state,
+                restore_states=self.restore_checkpoint_states,
+                retire_state=self.retire_checkpoint_state,
+                restore_expected=self.config.checkpoint_restore_expected,
+            )
+        return self._checkpoint_participant
+
+    def checkpoint_route_kind(self, path: str, method: str) -> Optional[ResourcesRouteKind]:
+        """Classify checkpointed routes, defaulting unknown POST data routes to mutation."""
+        if method != "POST":
+            return None
+        if path.startswith("/ng-control/") or path in {"/aggregate_metrics", "/mcp"} or path.startswith("/mcp/"):
+            return None
+        if path == "/seed_session":
+            return "start"
+        if path == "/verify":
+            return "terminal"
+        return "mutation"
+
+    def checkpoint_control_auth_token(self) -> Optional[str]:
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        return checkpoint_control_auth_token(global_config)
+
+    def setup_resources_checkpoint(self, app: FastAPI) -> None:
+        auth_token = self.checkpoint_control_auth_token()
+        if not self.checkpoint_state_enabled():
+            return
+        if auth_token is None:
+            if self.config.checkpoint_restore_expected:
+                raise ValueError("checkpoint_restore_expected requires checkpoint control authentication")
+            return
+        install_resources_checkpoint(
+            app,
+            participant=self.checkpoint_participant(),
+            fence=self.checkpoint_fence(),
+            auth_token=auth_token,
+            server_name=self.config.name,
+            route_kind=self.checkpoint_route_kind,
+        )
+
+    def control_capabilities(self) -> ControlCapabilities:
+        capabilities = super().control_capabilities()
+        if self.checkpoint_state_enabled() and self.checkpoint_control_auth_token() is not None:
+            capabilities.checkpoint_mode = "export_restore"
+            capabilities.concurrency_contract = "serialized_per_session"
+        return capabilities
 
     def normalize_tool_name(self, name: str) -> str:
         """Strip this server's MCP namespace from a trajectory tool-call name (see module function)."""

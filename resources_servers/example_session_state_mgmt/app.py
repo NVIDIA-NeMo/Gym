@@ -14,9 +14,10 @@
 # limitations under the License.
 from typing import Dict
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from nemo_gym._checkpoint import ResourceSnapshot
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -25,6 +26,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.rollout_correlation import current_attempt_index, current_logical_rollout_id
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 
@@ -55,6 +57,7 @@ class StatefulCounterSeedSessionRequest(BaseSeedSessionRequest):
 class StatefulCounterResourcesServer(SimpleResourcesServer):
     config: StatefulCounterResourcesServerConfig
     session_id_to_counter: Dict[str, int] = Field(default_factory=dict)
+    execution_to_session: Dict[tuple[str, int], str] = Field(default_factory=dict)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -67,10 +70,13 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
     async def seed_session(self, request: Request, body: StatefulCounterSeedSessionRequest) -> BaseSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
         self.session_id_to_counter.setdefault(session_id, body.initial_count)
+        identity = self._current_identity()
+        if identity is not None:
+            self.execution_to_session[identity] = session_id
         return BaseSeedSessionResponse()
 
     async def increment_counter(self, request: Request, body: IncrementCounterRequest) -> IncrementCounterResponse:
-        session_id = request.session[SESSION_ID_KEY]
+        session_id = self._session_id(request)
         counter = self.session_id_to_counter.setdefault(session_id, 0)
 
         counter += body.count
@@ -80,19 +86,69 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
         return IncrementCounterResponse(success=True)
 
     async def get_counter_value(self, request: Request) -> GetCounterValueResponse:
-        session_id = request.session[SESSION_ID_KEY]
+        session_id = self._session_id(request)
         counter = self.session_id_to_counter.setdefault(session_id, 0)
         return GetCounterValueResponse(count=counter)
 
     async def verify(self, request: Request, body: StatefulCounterVerifyRequest) -> BaseVerifyResponse:
-        session_id = request.session[SESSION_ID_KEY]
+        identity = self._current_identity()
+        session_id = self._session_id(request)
+        try:
+            reward = 0.0
+            if session_id in self.session_id_to_counter:
+                counter = self.session_id_to_counter[session_id]
+                reward = float(body.expected_count == counter)
+            return BaseVerifyResponse(**body.model_dump(), reward=reward)
+        finally:
+            self.session_id_to_counter.pop(session_id, None)
+            if identity is not None:
+                self.execution_to_session.pop(identity, None)
+                if self._checkpoint_participant is not None:
+                    self.checkpoint_participant().mark_terminal_after_request(*identity)
 
-        reward = 0.0
-        if session_id in self.session_id_to_counter:
-            counter = self.session_id_to_counter[session_id]
-            reward = float(body.expected_count == counter)
+    @staticmethod
+    def _current_identity() -> tuple[str, int] | None:
+        rollout_id = current_logical_rollout_id()
+        attempt_index = current_attempt_index()
+        if rollout_id is None or attempt_index is None:
+            return None
+        return rollout_id, attempt_index
 
-        return BaseVerifyResponse(**body.model_dump(), reward=reward)
+    def _session_id(self, request: Request) -> str:
+        identity = self._current_identity()
+        if identity is not None:
+            session_id = self.execution_to_session.get(identity)
+            if session_id is None:
+                raise HTTPException(status_code=409, detail="execution has no successful seed binding")
+            return session_id
+        return request.session[SESSION_ID_KEY]
+
+    def checkpoint_state_enabled(self) -> bool:
+        return True
+
+    def checkpoint_route_kind(self, path: str, method: str):
+        if method == "POST" and path == "/get_counter_value":
+            return "read"
+        return super().checkpoint_route_kind(path, method)
+
+    async def export_checkpoint_state(self, rollout_id: str, attempt_index: int) -> dict:
+        session_id = self.execution_to_session[(rollout_id, attempt_index)]
+        return {"counter": self.session_id_to_counter[session_id]}
+
+    async def restore_checkpoint_states(self, snapshots: list[ResourceSnapshot]) -> None:
+        counters = dict(self.session_id_to_counter)
+        index = dict(self.execution_to_session)
+        for snapshot in snapshots:
+            session_id = f"checkpoint:{snapshot.rollout_id}:a{snapshot.attempt_index}"
+            counters[session_id] = int(snapshot.state["counter"])
+            index[(snapshot.rollout_id, snapshot.attempt_index)] = session_id
+        self.session_id_to_counter = counters
+        self.execution_to_session = index
+
+    async def retire_checkpoint_state(self, rollout_id: str, attempt_index: int) -> None:
+        session_id = self.execution_to_session.pop((rollout_id, attempt_index), None)
+        if session_id is not None:
+            self.session_id_to_counter.pop(session_id, None)
 
 
 if __name__ == "__main__":

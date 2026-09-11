@@ -12,11 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+from io import StringIO
 from typing import Any, Dict
 
+import pandas as pd
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from nemo_gym._checkpoint import ResourceSnapshot
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -25,8 +29,13 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.rollout_correlation import current_attempt_index, current_logical_rollout_id
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.workplace_assistant.utils import get_tools, is_correct
+
+
+_TOOLKITS = ["email", "calendar", "analytics", "project_management", "customer_relationship_manager"]
+_TOOL_NAMES = frozenset(schema["name"] for schema in get_tools(_TOOLKITS)["schemas"])
 
 
 class WorkbenchResourcesServerConfig(BaseResourcesServerConfig):
@@ -55,6 +64,7 @@ class WorkbenchVerifyResponse(BaseVerifyResponse):
 class WorkbenchResourcesServer(SimpleResourcesServer):
     config: WorkbenchResourcesServerConfig
     session_id_to_tool_env: Dict[str, Any] = Field(default_factory=dict)
+    execution_to_session: Dict[tuple[str, int], str] = Field(default_factory=dict)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -71,18 +81,20 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
     async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
         # init session once for each sample.
         session_id = request.session[SESSION_ID_KEY]
-        toolkits = [
-            "email",
-            "calendar",
-            "analytics",
-            "project_management",
-            "customer_relationship_manager",
-        ]
-        self.session_id_to_tool_env[session_id] = get_tools(toolkits)
+        self.session_id_to_tool_env[session_id] = get_tools(_TOOLKITS)
+        identity = self._current_identity()
+        if identity is not None:
+            self.execution_to_session[identity] = session_id
         return BaseSeedSessionResponse()
 
     async def route_to_python_function(self, path: str, body: WorkbenchRequest, request: Request) -> WorkbenchResponse:
-        session_id = request.session[SESSION_ID_KEY]
+        identity = self._current_identity()
+        if identity is not None:
+            session_id = self.execution_to_session.get(identity)
+            if session_id is None:
+                raise HTTPException(status_code=409, detail="execution has no successful seed binding")
+        else:
+            session_id = request.session[SESSION_ID_KEY]
 
         # Check if session exists
         if session_id not in self.session_id_to_tool_env:
@@ -104,7 +116,13 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
             )  # return error to model so that it can correct itself
 
     async def verify(self, request: Request, body: WorkbenchVerifyRequest) -> WorkbenchVerifyResponse:
-        session_id = request.session[SESSION_ID_KEY]
+        identity = self._current_identity()
+        if identity is not None:
+            session_id = self.execution_to_session.get(identity)
+            if session_id is None:
+                raise HTTPException(status_code=409, detail="execution has no successful seed binding")
+        else:
+            session_id = request.session[SESSION_ID_KEY]
         try:
             ground_truth = body.ground_truth
             response = body.response.output
@@ -127,6 +145,77 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
             total_score += is_correct(predicted_function_calls, ground_truth, None) * 1.0
             return WorkbenchVerifyResponse(**body.model_dump(), reward=total_score)
         finally:
+            self.session_id_to_tool_env.pop(session_id, None)
+            if identity is not None:
+                self.execution_to_session.pop(identity, None)
+                if self._checkpoint_participant is not None:
+                    self.checkpoint_participant().mark_terminal_after_request(*identity)
+
+    @staticmethod
+    def _current_identity() -> tuple[str, int] | None:
+        rollout_id = current_logical_rollout_id()
+        attempt_index = current_attempt_index()
+        if rollout_id is None or attempt_index is None:
+            return None
+        return rollout_id, attempt_index
+
+    def checkpoint_state_enabled(self) -> bool:
+        return True
+
+    def checkpoint_route_kind(self, path: str, method: str):
+        kind = super().checkpoint_route_kind(path, method)
+        if kind is not None:
+            return kind
+        if method == "POST" and path.lstrip("/") in _TOOL_NAMES:
+            return "mutation"
+        return None
+
+    async def export_checkpoint_state(self, rollout_id: str, attempt_index: int) -> dict[str, Any]:
+        session_id = self.execution_to_session[(rollout_id, attempt_index)]
+        tool_env = self.session_id_to_tool_env[session_id]
+        return {
+            "containers": {
+                name: {
+                    attribute: frame.to_json(orient="split")
+                    for attribute, frame in vars(container).items()
+                    if isinstance(frame, pd.DataFrame)
+                }
+                for name, container in tool_env["containers"].items()
+            }
+        }
+
+    async def restore_checkpoint_states(self, snapshots: list[ResourceSnapshot]) -> None:
+        restored: list[tuple[ResourceSnapshot, str, dict[str, Any]]] = []
+        for snapshot in snapshots:
+            tool_env = get_tools(_TOOLKITS)
+            for name, frames in snapshot.state["containers"].items():
+                container = tool_env["containers"][name]
+                for attribute, payload in frames.items():
+                    frame = pd.read_json(StringIO(payload), orient="split", dtype=False, convert_dates=False)
+                    encoded = json.loads(payload)
+                    columns = encoded.get("columns", [])
+                    rows = encoded.get("data", [])
+                    for index, column in enumerate(columns):
+                        if any(len(row) > index and row[index] is None for row in rows):
+                            frame[column] = frame[column].astype(object).where(frame[column].notna(), None)
+                    index_values = encoded.get("index", [])
+                    if index_values == list(range(len(index_values))):
+                        frame.index = pd.RangeIndex(len(index_values))
+                    setattr(container, attribute, frame)
+            session_id = f"checkpoint:{snapshot.rollout_id}:a{snapshot.attempt_index}"
+            restored.append((snapshot, session_id, tool_env))
+
+        replacement_environments = dict(self.session_id_to_tool_env)
+        replacement_index = dict(self.execution_to_session)
+        for snapshot, session_id, tool_env in restored:
+            replacement_environments[session_id] = tool_env
+            replacement_index[(snapshot.rollout_id, snapshot.attempt_index)] = session_id
+        self.session_id_to_tool_env = replacement_environments
+        self.execution_to_session = replacement_index
+
+    async def retire_checkpoint_state(self, rollout_id: str, attempt_index: int) -> None:
+        session_id = self.execution_to_session.pop((rollout_id, attempt_index), None)
+        if session_id is not None:
             self.session_id_to_tool_env.pop(session_id, None)
 
 

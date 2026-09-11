@@ -26,7 +26,7 @@ from os import environ, getenv
 from pathlib import Path
 from threading import Thread
 from traceback import format_exc, print_exc
-from typing import Any, List, Literal, NamedTuple, Optional, TextIO, Tuple, Type, Union, Unpack
+from typing import Any, ClassVar, List, Literal, NamedTuple, Optional, TextIO, Tuple, Type, Union, Unpack
 from uuid import uuid4
 
 import orjson
@@ -57,6 +57,13 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from nemo_gym import WORKING_DIR
+from nemo_gym._checkpoint.control import (
+    CONTROL_URL_PREFIX,
+    ControlCapabilities,
+    ControlFence,
+    install_control_plane,
+    multi_process_capability_from_num_workers,
+)
 from nemo_gym.config_types import (
     ROLLOUT_PATH_PREFIX,
     TOKEN_CAPTURE_PATH_SEGMENT,
@@ -77,7 +84,18 @@ from nemo_gym.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_correlation import current_rollout_id, maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import (
+    ATTEMPT_INDEX_HEADER,
+    PARENT_MODEL_CALL_ID_HEADER,
+    ROLLOUT_ID_HEADER,
+    SOURCE_CAPTURE_KEY_HEADER,
+    current_attempt_index,
+    current_logical_rollout_id,
+    current_rollout_id,
+    execution_identity_from_run_body,
+    maybe_rollout_id_from_run_body,
+    take_checkpoint_parent,
+)
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
@@ -489,6 +507,7 @@ class ServerClient(BaseModel):
     async def request(
         self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
     ) -> ClientResponse:
+        request_path = url_path.partition("?")[0]
         model_server_name = getenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME)
         model_server_base_url = getenv(NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME)
         if model_server_base_url and server_name == model_server_name:
@@ -508,9 +527,13 @@ class ServerClient(BaseModel):
         observability_enabled = self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False)
         server_entry = self.global_config_dict.get(server_name)
         rollout_id = current_rollout_id()
+        logical_rollout_id = current_logical_rollout_id()
+        attempt_index = current_attempt_index()
         if observability_enabled and server_entry is not None and "resources_servers" in server_entry:
             if url_path == "/verify":
                 rollout_id = rollout_id or maybe_rollout_id_from_run_body(json_obj)
+                if logical_rollout_id is None:
+                    logical_rollout_id, attempt_index = execution_identity_from_run_body(json_obj)
             if rollout_id is not None and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/"):
                 url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
 
@@ -523,6 +546,43 @@ class ServerClient(BaseModel):
             and not url_path.startswith(f"/{ROLLOUT_PATH_PREFIX}/")
         ):
             url_path = f"{rollout_path_prefix(rollout_id)}{url_path}"
+
+        if logical_rollout_id is not None and attempt_index is not None:
+            headers = dict(kwargs.get("headers") or {})
+            supplied_rollout_id = headers.get(ROLLOUT_ID_HEADER)
+            supplied_attempt_index = headers.get(ATTEMPT_INDEX_HEADER)
+            if supplied_rollout_id is not None and supplied_rollout_id != logical_rollout_id:
+                raise ValueError("caller-supplied rollout ID header disagrees with the active execution")
+            if supplied_attempt_index is not None and supplied_attempt_index != str(attempt_index):
+                raise ValueError("caller-supplied attempt index header disagrees with the active execution")
+            headers[ROLLOUT_ID_HEADER] = logical_rollout_id
+            headers[ATTEMPT_INDEX_HEADER] = str(attempt_index)
+            kwargs["headers"] = headers
+
+        is_policy_generation = (
+            server_entry is not None
+            and "responses_api_models" in server_entry
+            and request_path.endswith(("/v1/responses", "/v1/chat/completions", "/v1/messages"))
+            and get_first_server_config_dict(self.global_config_dict, server_name).get("instance_role", "policy")
+            == "policy"
+        )
+        is_agent_parent_relay = (
+            server_entry is not None
+            and "responses_api_agents" in server_entry
+            and request_path.endswith("/v1/responses")
+        )
+        source_capture_key, parent_model_call_id = (
+            take_checkpoint_parent() if is_policy_generation or is_agent_parent_relay else (None, None)
+        )
+        if source_capture_key is not None and parent_model_call_id is not None:
+            headers = dict(kwargs.get("headers") or {})
+            if headers.get(SOURCE_CAPTURE_KEY_HEADER, source_capture_key) != source_capture_key:
+                raise ValueError("caller-supplied source capture key disagrees with the restored continuation")
+            if headers.get(PARENT_MODEL_CALL_ID_HEADER, parent_model_call_id) != parent_model_call_id:
+                raise ValueError("caller-supplied parent model-call ID disagrees with the restored continuation")
+            headers[SOURCE_CAPTURE_KEY_HEADER] = source_capture_key
+            headers[PARENT_MODEL_CALL_ID_HEADER] = parent_model_call_id
+            kwargs["headers"] = headers
 
         return await request(method=method, url=f"{base_url}{url_path}", _internal=True, **kwargs)
 
@@ -818,6 +878,8 @@ class ClientDisconnectCancellationMiddleware:
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
+    _checkpoint_fence: Optional[ControlFence] = PrivateAttr(default=None)
+
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
         pass
@@ -886,6 +948,41 @@ class SimpleServer(BaseServer):
 
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
+
+    # -- checkpoint control plane ---------------------------------------------
+
+    # Set by each server base class to its config-group name. ``None`` means
+    # the server kind does not participate in checkpoint coordination.
+    _CONTROL_COMPONENT: ClassVar[Optional[str]] = None
+
+    def checkpoint_fence(self) -> "ControlFence":
+        """The process-local control fence guarding this server's control routes."""
+        if self._checkpoint_fence is None:
+            self._checkpoint_fence = ControlFence()
+        return self._checkpoint_fence
+
+    def control_capabilities(self) -> "ControlCapabilities":
+        """The declaration served at ``GET /ng-control/v1/capabilities``.
+
+        Override to declare richer support (state export, admission states,
+        concurrency contract). The defaults describe a server with nothing to
+        export and no admission limiter.
+        """
+        assert self._CONTROL_COMPONENT is not None, f"{type(self).__name__} does not declare a control component"
+        return ControlCapabilities(
+            component=self._CONTROL_COMPONENT,
+            name=self.config.name,
+            multi_process=multi_process_capability_from_num_workers(self.config.num_workers),
+        )
+
+    def setup_control_plane(self, app: FastAPI) -> None:
+        """Register ``/ng-control/v1`` on this server's app.
+
+        Servers that build their own FastAPI app instead of calling their
+        base ``setup_webserver`` must call this themselves to be reachable by
+        the checkpoint coordinator.
+        """
+        install_control_plane(app, capabilities=self.control_capabilities(), fence=self.checkpoint_fence())
 
     def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
         @app.middleware("http")
@@ -1022,6 +1119,9 @@ repr(e): {repr(e)}"""
         server.setup_telemetry()
 
         app = server.setup_webserver()
+        capabilities_path = f"{CONTROL_URL_PREFIX}/capabilities"
+        if not any(getattr(route, "path", None) == capabilities_path for route in app.routes):
+            server.setup_control_plane(app)
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):

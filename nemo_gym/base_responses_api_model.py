@@ -37,15 +37,32 @@ import time
 from abc import abstractmethod
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Literal, Mapping, Optional
 from uuid import uuid4
 
 import orjson
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
 
+from nemo_gym._checkpoint.admission import (
+    GATED_MODEL_ROUTE_SUFFIXES,
+    AdmissionLimiter,
+    AdmissionMiddleware,
+    bind_current_model_call,
+    mark_current_generation_started,
+)
+from nemo_gym._checkpoint.control import (
+    AdmissionState,
+    ControlCapabilities,
+)
+from nemo_gym._checkpoint.control import (
+    checkpoint_control_auth_token as resolve_checkpoint_control_auth_token,
+)
+from nemo_gym._checkpoint.ledger import install_model_checkpoint
+from nemo_gym._checkpoint.model_admission import install_model_admission
+from nemo_gym._checkpoint.model_control_contracts import GenerationCutBackend
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
@@ -61,7 +78,13 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import (
+    LOGICAL_REQUEST_HEADER,
+    MODEL_CALL_ID_HEADER,
+    PARENT_MODEL_CALL_ID_HEADER,
+    SOURCE_CAPTURE_KEY_HEADER,
+    maybe_rollout_id_from_run_body,
+)
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
 from nemo_gym.server_utils import (
     BaseRunServerInstanceConfig,
@@ -76,6 +99,7 @@ from nemo_gym.token_id_capture import (
     current_capture_context,
     installed_lineage_store,
     installed_token_sink,
+    mark_external_staging_failed,
     register_call_intent,
     reset_token_sink,
     resolve_parent,
@@ -186,7 +210,12 @@ def _orjson_dispatch_response(content: Any) -> Any:
 
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
-    pass
+    # Checkpoint role of this instance. 'policy' instances serve the
+    # generations that produce training tokens and gate admission during a
+    # checkpoint. 'auxiliary' instances serve environment traffic (judges,
+    # user or tool simulators) and never pause: accepted operations must be
+    # able to finish their nested calls while the policy instance drains.
+    instance_role: Literal["policy", "auxiliary"] = "policy"
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -194,18 +223,24 @@ class BaseResponsesAPIModel(BaseServer):
 
 
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+    _CONTROL_COMPONENT = "responses_api_models"
+
+    _admission_limiter: Optional[AdmissionLimiter] = PrivateAttr(default=None)
+
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
         self.setup_session_middleware(app)
+        self.setup_control_plane(app)
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        install_model_call_capture(
+        capture_ledger = install_model_call_capture(
             app,
             capture_config,
             model_server_name=self.config.name,
             global_config_dict=self.server_client.global_config_dict,
             num_workers=self.config.num_workers,
         )
+        app.state.nemo_gym_capture_ledger = capture_ledger
 
         model_attributes = {"nemo.gym.server.name": self.config.name}
         app.post("/v1/chat/completions")(
@@ -226,7 +261,72 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.messages", self.messages, model_attributes)
         )
 
+        self.setup_model_admission(app)
+
         return app
+
+    def admission_limiter(self) -> AdmissionLimiter:
+        if self._admission_limiter is None:
+            self._admission_limiter = AdmissionLimiter(self.generation_cut_backend())
+        return self._admission_limiter
+
+    def generation_cut_backend(self) -> GenerationCutBackend | None:
+        """Return a framework-owned cut backend, if this server has one."""
+        return None
+
+    def setup_model_admission(self, app: FastAPI) -> None:
+        """Register admission control on this model server.
+
+        External token staging provides the authenticated control plane used by
+        the first checkpoint milestone.
+        """
+        auth_token = self.checkpoint_control_auth_token()
+        if auth_token is None:
+            return
+        install_model_admission(
+            app,
+            limiter=self.admission_limiter(),
+            fence=self.checkpoint_fence(),
+            instance_role=self.config.instance_role,
+            server_name=self.config.name,
+            auth_token=auth_token,
+        )
+        install_model_checkpoint(
+            app,
+            fence=self.checkpoint_fence(),
+            limiter=self.admission_limiter(),
+            ledger_provider=lambda: getattr(app.state, "nemo_gym_capture_ledger", None),
+            file_ledger_root_provider=lambda: (
+                ledger.checkpoint_root
+                if isinstance((ledger := getattr(app.state, "nemo_gym_capture_ledger", None)), FileLineageStore)
+                else None
+            ),
+            instance_role=self.config.instance_role,
+            server_name=self.config.name,
+            auth_token=auth_token,
+            expected_workers=self.config.num_workers or 1,
+        )
+        if self.config.instance_role == "policy":
+            app.add_middleware(
+                AdmissionMiddleware,
+                limiter=self.admission_limiter(),
+                gated_suffixes=GATED_MODEL_ROUTE_SUFFIXES,
+            )
+
+    def checkpoint_control_auth_token(self) -> Optional[str]:
+        return resolve_checkpoint_control_auth_token(getattr(self.server_client, "global_config_dict", None))
+
+    def control_capabilities(self) -> ControlCapabilities:
+        capabilities = super().control_capabilities()
+        capabilities.instance_role = self.config.instance_role
+        if self.config.instance_role == "policy" and self.checkpoint_control_auth_token() is not None:
+            capabilities.admission_states = [
+                AdmissionState.ACCEPTING,
+                AdmissionState.DRAINING,
+                AdmissionState.PAUSED,
+            ]
+            capabilities.checkpoint_mode = "export_restore"
+        return capabilities
 
     @abstractmethod
     async def chat_completions(
@@ -326,8 +426,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         else:
             request_messages = None
         if "request" in inspect.signature(self.chat_completions).parameters:
+            mark_current_generation_started()
             completion = await self.chat_completions(request=request, body=params)
         else:
+            mark_current_generation_started()
             completion = await self.chat_completions(body=params)
         await capture_tokens(
             completion,
@@ -371,8 +473,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         else:
             request_messages = None
         if "request" in inspect.signature(self.responses).parameters:
+            mark_current_generation_started()
             response = await self.responses(request=request, body=params)
         else:
+            mark_current_generation_started()
             response = await self.responses(body=params)
         # Capture before streaming dispatch wraps the response.
         # Anthropic mapping drops the token fields.
@@ -881,6 +985,19 @@ def _unique_request_header(headers: list, name: bytes) -> Optional[str]:
     return values.pop() if len(values) == 1 else None
 
 
+def _scope_header(scope: dict[str, Any], name: str) -> str | None:
+    """Read one unambiguous ASGI header value."""
+    encoded_name = name.lower().encode("ascii")
+    values = {value.decode("latin-1") for key, value in scope.get("headers", []) if key.lower() == encoded_name}
+    if not values:
+        return None
+    if len(values) == 1:
+        return values.pop()
+    # A joined value cannot authenticate.
+    # Logical ID validation rejects the comma.
+    return ",".join(sorted(values))
+
+
 def _consume_terminal_sse_event(buffer: bytearray, dialect: str) -> Optional[str]:
     blocks = re.split(rb"\r?\n\r?\n", bytes(buffer))
     buffer[:] = blocks.pop()
@@ -1220,6 +1337,10 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
             context.model_call_id,
             UNCOMMITTED_CALL_REASON,
         )
+        mark_external_staging_failed(
+            rollout_id=context.rollout_id,
+            model_call_id=context.model_call_id,
+        )
     except Exception:
         logger.exception(
             "Could not poison uncommitted call %s for rollout %s.",
@@ -1323,6 +1444,14 @@ class _CaptureMiddleware:
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
         client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
+        bind_current_model_call(model_call_id)
+
+        async def _send_with_model_call_id(message: dict[str, Any]) -> None:
+            if message.get("type") == "http.response.start":
+                headers = list(message.get("headers") or ())
+                headers.append((MODEL_CALL_ID_HEADER.encode("ascii"), model_call_id.encode("ascii")))
+                message = {**message, "headers": headers}
+            await send(message)
 
         # Give the model server a token sink keyed to this call.
         # The sink records token ids from the complete response.
@@ -1339,6 +1468,9 @@ class _CaptureMiddleware:
                 lineage_store=self._capture_ledger if self._external_staging else self._lineage_store,
                 delta_records=self._delta_records,
                 external_staging=self._external_staging,
+                logical_request_id=_scope_header(scope, LOGICAL_REQUEST_HEADER),
+                source_capture_key=_scope_header(scope, SOURCE_CAPTURE_KEY_HEADER),
+                explicit_parent_call_id=_scope_header(scope, PARENT_MODEL_CALL_ID_HEADER),
                 admitted_at=time.time(),
             )
             sink_token = set_token_sink(capture_context)
@@ -1347,7 +1479,7 @@ class _CaptureMiddleware:
         # Forward without buffering while the sink is active.
         if self._store is None:
             try:
-                await self._app(scope, receive, send)
+                await self._app(scope, receive, _send_with_model_call_id)
             finally:
                 await _fail_uncommitted_external_call(capture_context)
                 if sink_token is not None:
@@ -1379,6 +1511,9 @@ class _CaptureMiddleware:
             nonlocal defer_response
             message_type = message.get("type")
             if message_type == "http.response.start":
+                headers = list(message.get("headers") or ())
+                headers.append((MODEL_CALL_ID_HEADER.encode("ascii"), model_call_id.encode("ascii")))
+                message = {**message, "headers": headers}
                 state["status"] = message.get("status")
                 content_type = _headers_content_type(message.get("headers") or [])
                 state["streaming"] = content_type.startswith(b"text/event-stream")
@@ -1515,7 +1650,7 @@ def install_model_call_capture(
     model_server_name: str | None = None,
     global_config_dict: Any = None,
     num_workers: int | None = None,
-) -> None:
+) -> Optional[CaptureLedger]:
     """Install model-call capture middleware.
 
     Always strip ``/ng-rollout/<id>/...`` before routing.
@@ -1604,6 +1739,7 @@ def install_model_call_capture(
         external_staging=external_staging,
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
     )
+    return lineage_store if isinstance(lineage_store, CaptureLedger) else None
 
 
 # --- Run-level capture helpers (rollout-collection side) ---
