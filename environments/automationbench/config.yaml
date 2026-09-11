@@ -31,6 +31,13 @@ automationbench:
       # timed-out generation from scratch, spending 3x the deadline on the same
       # failure.
       client_timeout_s: 3600
+      # Connect is separate. With no retries, a connection that does not
+      # establish inside the SDK's 5s is a permanently aborted rollout, and a
+      # validation pass fires every rollout at once into engines that have just
+      # come up: on the 116B policy at 512 in flight, 196 of 300 step-0 rows
+      # aborted with ConnectTimeout before their first model call. 60s lets
+      # that burst queue in the server's accept backlog instead.
+      client_connect_timeout_s: 60
       client_max_retries: 0
       datasets:
         - name: example
