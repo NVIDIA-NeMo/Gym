@@ -16,7 +16,7 @@
 
 bc_v4_6 differs from bc_v4_5 in EXACTLY ONE value: the ``search.queries``
 override moves ``word_count_similarity_threshold`` 0.30 -> 0.40. It copies
-venkats' 2026-08-15 change to his own ``search_pivot`` config, measured in this
+a 2026-08-15 change to the ``search_pivot`` config, measured in this
 directory's notes.
 
 WHY THIS IS A RECALL CHANGE, NOT A SIMILARITY CHANGE
