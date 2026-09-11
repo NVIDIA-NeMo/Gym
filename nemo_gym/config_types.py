@@ -850,6 +850,23 @@ class MLFlowConfig(ExporterConfig):
         )
 
 
+class LangSmithConfig(ExporterConfig):
+    langsmith_api_key: Optional[str] = None
+    langsmith_endpoint: str = "https://api.smith.langchain.com"
+    langsmith_workspace_id: Optional[str] = None
+    langsmith_dataset_name: Optional[str] = None
+    langsmith_experiment_name: Optional[str] = None
+
+    @property
+    def is_available(self) -> bool:
+        return bool(
+            self.langsmith_api_key
+            and self.langsmith_api_key != "****"
+            and self.langsmith_dataset_name
+            and self.langsmith_experiment_name
+        )
+
+
 ########################################
 # Aggregate Metrics
 ########################################
