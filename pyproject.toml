@@ -660,7 +660,13 @@ omit = [
     "temp*",
     "results/*",
     "/tmp/*",
-    "benchmarks/*",
+    # Was a blanket "benchmarks/*". The reward-profiling sweep package moved from nemo_gym/sweep to
+    # benchmarks/nemotron_3.5_super/reward_profiling/infra, and a blanket omit would silently drop
+    # it from the gate while its tests kept running. Only the benchmark modules that tests actually
+    # import need omitting; everything else under benchmarks/ is never imported, so coverage never
+    # sees it.
+    "benchmarks/mmlu_pro/*",
+    "benchmarks/ruler/*",
     "environments/*",
     "scripts/*",
 ]

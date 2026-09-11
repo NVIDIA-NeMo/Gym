@@ -394,6 +394,9 @@ manifests/       input: what to profile. Hand-edited.
 configs/         generated container config. Reproducible from the manifests.
 infra/           the sweep package itself (manifest schema, materialize, shard, merge, split).
                  Invoked as `PYTHONPATH=$R python -m infra <cmd>`; the scripts set that for you.
+                 Source-only, like everything else in this directory: `nemotron_3.5_super` is not a
+                 valid Python identifier, so no part of this benchmark ships in the `nemo-gym`
+                 wheel. Run it from a checkout or from the eval container, which clones the repo.
 outputs/         everything a run produces: sweeps/<nickname>/. Gitignored.
 scripts/         numbered by run order; see below.
 ```
