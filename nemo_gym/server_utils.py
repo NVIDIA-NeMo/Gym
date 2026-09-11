@@ -86,6 +86,9 @@ _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 _UPSTREAM_ERROR_LOG_BODY_CHARS = 2000
 
+NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_NAME"
+NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_BASE_URL"
+
 # Pydantic-core context strings that describe the schema rather than the
 # rejected input. Keep this keyed by error type: custom validators may attach
 # arbitrary strings under otherwise familiar context keys.
@@ -563,7 +566,15 @@ class ServerClient(BaseModel):
     async def request(
         self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
     ) -> ClientResponse:
-        base_url = self._resolve_base_url(server_name)
+        model_server_name = getenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME)
+        model_server_base_url = getenv(NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME)
+        if model_server_base_url and server_name == model_server_name:
+            # Subprocess agents do not inherit the current rollout context.
+            # The launcher provides a model URL that already contains the rollout prefix.
+            # Use that URL instead of rebuilding it from global server configuration.
+            base_url = model_server_base_url.rstrip("/")
+        else:
+            base_url = self._resolve_base_url(server_name)
 
         json_obj = kwargs.get("json")
         if "json" in kwargs:
@@ -692,6 +703,10 @@ class BaseServer(BaseModel):
         return server_config
 
     def setup_liveness(self, app: FastAPI) -> None:
+        @app.get("/readyz", include_in_schema=False)
+        @app.get("/livez", include_in_schema=False)
+        @app.get("/healthz", include_in_schema=False)
+        @app.get("/health", include_in_schema=False)
         @app.get("/", include_in_schema=False)
         async def _liveness():
             return {"status": "ok"}
@@ -823,13 +838,18 @@ class ClientDisconnectCancellationMiddleware:
 
         received_messages: asyncio.Queue[Message] = asyncio.Queue()
         client_disconnected = asyncio.Event()
+        response_complete = asyncio.Event()
 
         async def receive_message() -> Message:
             return await received_messages.get()
 
         async def send_message(message: Message) -> None:
-            if not client_disconnected.is_set():
-                await send(message)
+            if client_disconnected.is_set():
+                return
+
+            await send(message)
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                response_complete.set()
 
         # The listener is the sole reader of the original ASGI receive channel.
         # Forwarding request messages keeps the body available to the app while
@@ -845,10 +865,17 @@ class ClientDisconnectCancellationMiddleware:
             async def listen_for_disconnect() -> None:
                 while True:
                     message = await receive()
-                    await received_messages.put(message)
                     if message["type"] != "http.disconnect":
+                        await received_messages.put(message)
                         continue
 
+                    # Uvicorn returns http.disconnect from receive() once the response is complete,
+                    # even if the peer did not disconnect early. Only cancel requests whose response
+                    # has not finished being sent.
+                    if response_complete.is_set():
+                        return
+
+                    await received_messages.put(message)
                     client_disconnected.set()
                     self.num_cancelled += 1
                     if is_global_aiohttp_client_request_debug_enabled() or self.num_cancelled % 100 == 0:
@@ -1159,17 +1186,34 @@ Body shape: {json.dumps(_validation_body_shape(exc.body), indent=4)}
 class HeadServer(BaseServer):
     config: BaseServerConfig
     _server_instances: List[dict] = []
+    _ready: bool = PrivateAttr(default=False)
     # Serialized global config returned to clients.
     _cached_yaml: Optional[str] = None
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
-        self.setup_liveness(app)
+        @app.get("/livez", include_in_schema=False)
+        @app.get("/", include_in_schema=False)
+        async def _liveness():
+            return {"status": "ok"}
+
+        @app.get("/readyz", include_in_schema=False)
+        @app.get("/healthz", include_in_schema=False)
+        @app.get("/health", include_in_schema=False)
+        async def _readiness(response: Response):
+            if not self._ready:
+                response.status_code = 503
+                return {"status": "starting"}
+            return {"status": "ok"}
+
         app.get("/global_config_dict_yaml")(self.global_config_dict_yaml)
         app.get("/server_instances")(self.get_server_instances)
 
         return app
+
+    def mark_ready(self) -> None:
+        self._ready = True
 
     def get_server_instances(self) -> List[dict]:
         return self._server_instances

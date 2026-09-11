@@ -23,10 +23,6 @@ on:
         type: string
         default: ""
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 env:
   # Number of parallel shards for the full server suite. Keep in sync with the matrix below.
   NUM_SHARDS: "8"

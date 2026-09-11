@@ -393,7 +393,33 @@ def _to_sandbox_status(state: Any) -> SandboxStatus:
     return SandboxStatus.UNKNOWN
 
 
-@dataclass(frozen=True)
+def split_domain_scheme(domain: str) -> tuple[str, str | None]:
+    """Split a configured OpenSandbox domain into ``(domain, scheme)``.
+
+    ``"https://sandbox.example:8080/prefix/"`` -> ``("sandbox.example:8080/prefix", "https")``;
+    a bare host is returned unchanged with scheme ``None``. Surrounding whitespace
+    is stripped either way. Only ``scheme://host[:port][/path-prefix]`` is accepted:
+    other schemes, a missing host, or a query string / fragment raise ``ValueError``.
+    """
+    domain = domain.strip()
+    if "://" not in domain:
+        return domain, None
+    parts = urlsplit(domain)
+    scheme = parts.scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"connection.domain {domain!r} has unsupported scheme {parts.scheme!r}; use http or https")
+    if not parts.netloc:
+        raise ValueError(f"connection.domain {domain!r} has no host")
+    if parts.query or parts.fragment:
+        raise ValueError(
+            f"connection.domain {domain!r} must not carry a query string or fragment; "
+            "use scheme://host[:port][/path-prefix]"
+        )
+    # Keep any path prefix (a reverse proxy may mount the server under one); the SDK appends /v1.
+    return parts.netloc + parts.path.rstrip("/"), scheme
+
+
+@dataclass
 class OpenSandboxConnectionConfig:
     """OpenSandbox server connection settings.
 
@@ -403,7 +429,17 @@ class OpenSandboxConnectionConfig:
     ``transport_backend`` is "httpx" or "aiohttp" (via the optional
     ``httpx-aiohttp`` bridge, falling back to httpx when it is absent).
     The pool is shared, so ``max_connections`` also caps in-flight sandbox
-    operations per process; null means no cap.
+    operations per process; null means no cap. ``tls_verify`` applies to every
+    connection the provider opens (SDK transport and PTY sockets) and is off by
+    default; set it for endpoints whose certificate the client can verify.
+    ``domain`` may carry its scheme (``https://sandbox.example``). The scheme is
+    moved into ``protocol`` and takes precedence over a configured ``protocol``,
+    so every URL the provider builds itself (the PTY WebSocket target) agrees
+    with the SDK's base URL; the SDK receives the host plus any path prefix
+    (``sandbox.example:8080/prefix``). The SDK would accept a scheme in
+    ``domain`` on its own, but the provider reads ``protocol`` directly, hence
+    the normalization here. Only ``scheme://host[:port][/path-prefix]`` is
+    accepted: a query string or fragment is a configuration error.
     """
 
     domain: str | None = None
@@ -420,6 +456,14 @@ class OpenSandboxConnectionConfig:
     max_connections: int | None = 100
     connect_retries: int = 2
     transport_backend: str = "httpx"
+    tls_verify: bool = False
+
+    def __post_init__(self) -> None:
+        if self.domain is None:
+            return
+        self.domain, scheme = split_domain_scheme(self.domain)
+        if scheme is not None:
+            self.protocol = scheme
 
 
 @dataclass(frozen=True)
@@ -721,17 +765,18 @@ class OpenSandboxProvider:
             max_keepalive_connections=max_keepalive,
             keepalive_expiry=self._connection.keepalive_expiry_s,
         )
+        verify = self._connection.tls_verify
         if self._connection.transport_backend == "aiohttp":
             try:
                 from httpx_aiohttp import AiohttpTransport
 
-                return AiohttpTransport(limits=limits, retries=self._connection.connect_retries)
+                return AiohttpTransport(verify=verify, limits=limits, retries=self._connection.connect_retries)
             except ImportError:
                 LOGGER.warning(
                     "connection.transport_backend=aiohttp requested but httpx-aiohttp "
                     "is not installed; falling back to the httpx transport"
                 )
-        return httpx.AsyncHTTPTransport(limits=limits, retries=self._connection.connect_retries)
+        return httpx.AsyncHTTPTransport(verify=verify, limits=limits, retries=self._connection.connect_retries)
 
     async def _retire_closed_pty_sessions(self) -> None:
         """Release sessions that ended on their own; their aiohttp client is
@@ -1467,8 +1512,11 @@ class OpenSandboxProvider:
         )
 
     def _pty_http_client(self) -> Any:
+        """Return the aiohttp client for one PTY session (same ``tls_verify`` as the SDK transport)."""
         import aiohttp
 
+        if not self._connection.tls_verify:
+            return aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False))
         return aiohttp.ClientSession()
 
     async def _pty_target(self, handle: SandboxHandle) -> tuple[str, dict[str, str], float | None]:
