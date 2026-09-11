@@ -40,6 +40,11 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxPtyAttach,
     create_provider,
 )
+from nemo_gym.sandbox.providers.base import (
+    SupportsSandboxNetwork,
+    SupportsSandboxPortForwarding,
+    SupportsSandboxRuntimeRequirements,
+)
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
@@ -373,14 +378,21 @@ class SandboxPty:
 
 
 class AsyncSandbox:
-    """Async sandbox object backed by a runtime provider."""
+    """Async sandbox object backed by a runtime provider.
+
+    With ``owns_provider=False``, the caller closes the shared provider after
+    all of its sandboxes have stopped.
+    """
 
     def __init__(
         self,
         provider: Mapping[str, Any] | SandboxProvider,
         spec: SandboxSpec | None = None,
+        *,
+        owns_provider: bool = True,
     ) -> None:
         self._provider = create_provider(provider) if isinstance(provider, Mapping) else provider
+        self._owns_provider = owns_provider
         self._spec = spec
         self._handle: SandboxHandle | None = None
         self._stopped = True
@@ -417,6 +429,9 @@ class AsyncSandbox:
                 handle = await self._provider.create(requested_spec)
         else:
             handle = await self._provider.create(requested_spec)
+        self._handle = handle
+        self._spec = requested_spec
+        self._stopped = False
         try:
             if requested_spec.files:
                 with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
@@ -425,15 +440,10 @@ class AsyncSandbox:
                         source_path = tmp_path / f"file-{index}"
                         source_path.write_text(contents, encoding="utf-8")
                         await self._provider.upload_file(handle, source_path, target_path)
-        except Exception:
-            await self._provider.close(handle)
-            await self._provider.aclose()
-            self._closed = True
+        except BaseException:
+            await self.stop()
             raise
 
-        self._spec = requested_spec
-        self._handle = handle
-        self._stopped = False
         return self
 
     async def exec(
@@ -518,16 +528,46 @@ class AsyncSandbox:
             raise TypeError(f"Sandbox provider endpoint() must return SandboxEndpoint, got {type(resolved).__name__}")
         return resolved
 
+    async def network_address(self) -> str:
+        """Return the provider's direct address for communication between sandboxes."""
+        if not isinstance(self._provider, SupportsSandboxNetwork):
+            raise NotImplementedError("Sandbox provider does not support networking between sandboxes")
+        self._provider.validate_networking()
+        return await self._provider.network_address(self._require_handle())
+
+    async def set_hosts(self, hosts: Mapping[str, str]) -> None:
+        """Install service names using the provider's networking capability."""
+        if not isinstance(self._provider, SupportsSandboxNetwork):
+            raise NotImplementedError("Sandbox provider does not support networking between sandboxes")
+        self._provider.validate_networking()
+        await self._provider.set_hosts(self._require_handle(), hosts)
+
+    async def configure_runtime(self, *, cap_add: tuple[str, ...] = (), shm_size: int | None = None) -> None:
+        """Apply and verify optional runtime requirements before launching a workload."""
+        if not isinstance(self._provider, SupportsSandboxRuntimeRequirements):
+            raise NotImplementedError("Sandbox provider does not support runtime requirements")
+        self._provider.validate_runtime_requirements(cap_add=cap_add, shm_size=shm_size)
+        await self._provider.configure_runtime(self._require_handle(), cap_add=cap_add, shm_size=shm_size)
+
+    async def forward_ports(self, target_address: str, ports: tuple[int, ...], *, ready_file: str) -> None:
+        """Forward local TCP ports until cancelled; ready_file signals bound listeners."""
+        if not isinstance(self._provider, SupportsSandboxPortForwarding):
+            raise NotImplementedError("Sandbox provider does not support TCP forwarding")
+        self._provider.validate_port_forwarding()
+        await self._provider.forward_ports(self._require_handle(), target_address, ports, ready_file=ready_file)
+
     async def stop(self) -> None:
         if self._closed:
             return
         try:
             if self._handle is not None and not self._stopped:
-                self._stopped = True
                 await self._provider.close(self._handle)
+                self._stopped = True
         finally:
-            await self._provider.aclose()
-            self._closed = True
+            if self._owns_provider:
+                await self._provider.aclose()
+                self._closed = True
+        self._closed = True
 
     async def serialize(self, *, scope: str | None = None) -> dict[str, Any]:
         """Return a JSON descriptor another process can rebuild this box from.

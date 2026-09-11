@@ -247,6 +247,54 @@ class SandboxProvider(Protocol):
 
 
 @runtime_checkable
+class SupportsSandboxNetwork(Protocol):
+    """Optional direct networking between sandboxes, preserving service ports."""
+
+    def validate_networking(self) -> None: ...
+
+    async def network_address(self, handle: SandboxHandle) -> str: ...
+
+    async def set_hosts(self, handle: SandboxHandle, hosts: Mapping[str, str]) -> None: ...
+
+
+@runtime_checkable
+class SupportsSandboxRuntimeRequirements(Protocol):
+    """Optional validation and setup of task-declared runtime requirements."""
+
+    def validate_runtime_requirements(self, *, cap_add: tuple[str, ...], shm_size: int | None) -> None: ...
+
+    async def configure_runtime(
+        self, handle: SandboxHandle, *, cap_add: tuple[str, ...], shm_size: int | None
+    ) -> None: ...
+
+
+@runtime_checkable
+class SupportsSandboxPortForwarding(Protocol):
+    """Optional loopback TCP forwarding, running until cancellation."""
+
+    def validate_port_forwarding(self) -> None: ...
+
+    async def forward_ports(
+        self, handle: SandboxHandle, target_address: str, ports: tuple[int, ...], *, ready_file: str
+    ) -> None: ...
+
+
+@runtime_checkable
+class SupportsSandboxSharedStorage(Protocol):
+    """Optional shared filesystem provisioned by the operator's provider config.
+
+    ``shared_volume_options`` returns provider options containing a ``volumes``
+    list of opaque mount descriptors. Collections concatenate these lists.
+    ``source`` is relative to the configured shared root; ``None`` mounts that
+    root for initialization and cleanup. Metadata supplies placement settings.
+    """
+
+    def shared_volume_options(self, source: str | None, target: str, *, read_only: bool = False) -> dict[str, Any]: ...
+
+    def shared_volume_metadata(self) -> dict[str, str]: ...
+
+
+@runtime_checkable
 class SupportsSandboxEndpoint(Protocol):
     """Optional provider capability for resolving declared service ports."""
 
