@@ -41,7 +41,6 @@ from aiohttp import (
     ClientTimeout,
     DummyCookieJar,
     ServerDisconnectedError,
-    TCPConnector,
 )
 from aiohttp.client import _RequestOptions
 from anyio import create_task_group
@@ -57,6 +56,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from nemo_gym import WORKING_DIR
+from nemo_gym.aiohttp_heartbeat import HeartbeatTCPConnector
 from nemo_gym.config_types import (
     ROLLOUT_PATH_PREFIX,
     TOKEN_CAPTURE_PATH_SEGMENT,
@@ -116,6 +116,16 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
         description=("TCP_KEEPCNT: number of unanswered probes before the kernel drops the connection."),
     )
 
+    global_aiohttp_crlf_heartbeat_seconds: float = Field(
+        default=0,
+        description=(
+            "If > 0, write a bare CRLF on every in-flight HTTP/1.1 connection this often (seconds) so that "
+            "intermediaries with fixed idle timeouts (e.g. AWS Global Accelerator, 340s, which ignores TCP "
+            "keepalives) do not drop long-running requests. 60 is a sensible value for such endpoints. "
+            "0 disables it. See nemo_gym/aiohttp_heartbeat.py."
+        ),
+    )
+
 
 def get_global_aiohttp_client(
     global_config_dict_parser_config: Optional[GlobalConfigDictParserConfig] = None,
@@ -164,7 +174,8 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
 
     num_workers = get_nemo_gym_fastapi_num_workers()
     client_session = ClientSession(
-        connector=TCPConnector(
+        connector=HeartbeatTCPConnector(
+            heartbeat=cfg.global_aiohttp_crlf_heartbeat_seconds,
             limit=cfg.global_aiohttp_connector_limit // num_workers,
             limit_per_host=cfg.global_aiohttp_connector_limit_per_host // num_workers,
             keepalive_timeout=15.0,
