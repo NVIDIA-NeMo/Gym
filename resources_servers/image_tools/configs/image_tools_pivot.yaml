@@ -42,11 +42,11 @@ image_tools_pivot_agent:
       # the server is silently demoted to an "almost-server" that never starts.
       - name: train
         type: train
-        jsonl_fpath: resources_servers/image_tools/data/train.jsonl
+        jsonl_fpath: resources_servers/image_tools/data/pivot_train.jsonl
         num_repeats: 1
         license: NVIDIA Internal Use Only, Do Not Distribute
       - name: validation
         type: validation
-        jsonl_fpath: resources_servers/image_tools/data/validation.jsonl
+        jsonl_fpath: resources_servers/image_tools/data/pivot_validation.jsonl
         num_repeats: 1
         license: NVIDIA Internal Use Only, Do Not Distribute

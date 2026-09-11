@@ -37,6 +37,8 @@ Tool families in the bvstyle tool-call data:
 
 import json
 import logging
+import re
+import unicodedata
 from enum import Enum
 from typing import Any, Optional
 
@@ -319,6 +321,39 @@ def compute_argument_score(
 # ---------------------------------------------------------------------------
 
 
+_BOXED_RE = re.compile(r"\\boxed\{([^{}]*)\}")
+
+
+def extract_final_answer(text: str) -> Optional[str]:
+    """Answer from the segment after the last </think>, matching how the eval
+    harness reads a final turn. Prefer \\boxed{}; fall back to 'Answer: ...'."""
+    tail = (text or "").rsplit("</think>", 1)[-1]
+    hits = _BOXED_RE.findall(tail)
+    if hits:
+        return hits[-1].strip()
+    m = re.search(r"(?i)(?:final\s+answer|answer)\s*[:\uff1a]\s*(.+)", tail)
+    if m:
+        return m.group(1).strip().rstrip(".")
+    return None
+
+
+def answers_match(expected: str, actual: Optional[str]) -> bool:
+    """Deliberately the same normalisation string_match uses, so a terminal row
+    is graded exactly like the answer-based environment grades the same task."""
+    if actual is None:
+        return False
+    def norm(x):
+        x = unicodedata.normalize("NFKC", str(x)).strip().lower()
+        x = x.strip("\"'` ")
+        x = re.sub(r"\s+", " ", x)
+        return x.rstrip(".")
+    return norm(expected) == norm(actual)
+
+
+# Sentinel tool name marking a terminal (answer) expectation.
+_ANSWER_ACTION = "__answer__"
+
+
 class FailureCode(str, Enum):
     NONE = "none"
     EXPECTED_ACTION_INVALID = "expected_action_invalid"
@@ -326,6 +361,9 @@ class FailureCode(str, Enum):
     TOOL_NAME_MISMATCH = "tool_name_mismatch"
     TARGET_MISMATCH = "target_mismatch"
     ARGUMENT_BELOW_THRESHOLD = "argument_below_threshold"
+    TOOL_CALL_WHEN_ANSWER_EXPECTED = "tool_call_when_answer_expected"
+    ANSWER_MISSING = "answer_missing"
+    ANSWER_INCORRECT = "answer_incorrect"
     UNKNOWN_ERROR = "unknown_error"
 
 
@@ -472,6 +510,32 @@ class ImageToolsPivotResourcesServer(SimpleResourcesServer):
             text = extract_assistant_text(body.response)
             rollout_calls = parse_image_tool_calls(text)
             state["num_rollout_tool_calls"] = len(rollout_calls)
+
+            # --- terminal rows: the demonstration ANSWERED here rather than
+            # calling another tool. Reward is conditional on the answer being
+            # right; rewarding any message (as the generic pivot server does)
+            # would pay the model to stop investigating and guess.
+            if expected.get("name") == _ANSWER_ACTION:
+                state["tool_family"] = "answer"
+                state["expected_tool_name"] = _ANSWER_ACTION
+                gold = str(expected.get("arguments", {}).get("answer", ""))
+                state["expected_answer_text"] = gold
+                if rollout_calls:
+                    state["reward"] = 0.0
+                    state["failure_reason"] = FailureCode.TOOL_CALL_WHEN_ANSWER_EXPECTED
+                    state["model_output"] = f"{rollout_calls[0].get('name')}(...)"
+                    return self._build(body, state)
+                got = extract_final_answer(text)
+                state["model_output"] = (got if got is not None else text[-300:])
+                if got is None:
+                    state["reward"] = 0.0
+                    state["failure_reason"] = FailureCode.ANSWER_MISSING
+                elif answers_match(gold, got):
+                    state["reward"] = 1.0
+                else:
+                    state["reward"] = 0.0
+                    state["failure_reason"] = FailureCode.ANSWER_INCORRECT
+                return self._build(body, state)
 
             if not rollout_calls:
                 state["failure_reason"] = FailureCode.NO_TOOL_CALL_IN_ROLLOUT
