@@ -304,7 +304,6 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             instance_role=self.config.instance_role,
             server_name=self.config.name,
             auth_token=auth_token,
-            expected_workers=self.config.num_workers or 1,
         )
         if self.config.instance_role == "policy":
             app.add_middleware(
