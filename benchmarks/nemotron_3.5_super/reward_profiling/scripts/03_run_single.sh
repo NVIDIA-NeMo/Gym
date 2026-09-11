@@ -51,6 +51,9 @@
 #   VLLM_CONFIG                            the manifest's vllm.config; the arg script that is sourced
 #   EXPERIMENT_NAME / SLURM_COMMENT        job-name prefix / --comment
 #
+# OPTIONAL - endpoint watchdog (fails the job when the policy endpoint dies)
+#   ENDPOINT_WATCHDOG_POLL_S / _FAILURES   60 / 5, i.e. ~5 min of a dead router ends the job
+#
 # OPTIONAL - vllm-router (the single process every Gym server talks to)
 #   ROUTER_REQUEST_TIMEOUT_S               3600
 #   ROUTER_HEALTH_TIMEOUT_S / _INTERVAL_S  60 / 120
@@ -354,6 +357,15 @@ ROUTER_QUEUE_TIMEOUT_S=${ROUTER_QUEUE_TIMEOUT_S:-600}
 ROUTER_CIRCUIT_BREAKER=${ROUTER_CIRCUIT_BREAKER:-0}
 # `error` hid every worker-health transition in 6706202, which is exactly what explains a stall.
 ROUTER_LOG_LEVEL=${ROUTER_LOG_LEVEL:-info}
+
+# ---- endpoint watchdog ------------------------------------------------------------
+# vLLM exits *0* when its engine dies: it catches EngineDeadError, tears down cleanly and returns
+# success, so --kill-on-bad-exit has no bad exit to fire on and srun keeps the step alive for the
+# surviving tasks. Job 7086601 idled 3 h that way -- router gone, 2.4M ClientOSErrors, zero
+# rollouts, Slurm reporting RUNNING throughout. Poll the router instead: it is what the whole job
+# depends on, and "not answering" is unambiguous where "exited 0" is not.
+ENDPOINT_WATCHDOG_POLL_S=${ENDPOINT_WATCHDOG_POLL_S:-60}
+ENDPOINT_WATCHDOG_FAILURES=${ENDPOINT_WATCHDOG_FAILURES:-5}
 
 eval_command=$(cat <<EOF
 # The 63 Gym servers hold a socket per in-flight request to the router, so the default soft
@@ -744,9 +756,43 @@ trap cleanup_server EXIT INT TERM
         ' &
     eval_step=\$!
 
+    # Fails the job when the policy endpoint disappears. Waits for it to come up first -- model
+    # load takes many minutes and must not count as failure -- then requires
+    # ENDPOINT_WATCHDOG_FAILURES consecutive misses so a single blip does not kill a good run.
+    (
+        _rurl="http://\$(getent hosts "\${nodes[0]}" | awk 'NR==1 {print \$1}'):$ROUTER_SERVER_PORT"
+        while ! curl -sf -m 5 "\$_rurl/v1/models" >/dev/null 2>&1; do
+            sleep $ENDPOINT_WATCHDOG_POLL_S
+        done
+        echo "endpoint watchdog: router answering at \$_rurl"
+        _fails=0
+        while :; do
+            sleep $ENDPOINT_WATCHDOG_POLL_S
+            if curl -sf -m 10 "\$_rurl/v1/models" >/dev/null 2>&1; then
+                _fails=0
+            else
+                _fails=\$(( _fails + 1 ))
+                echo "endpoint watchdog: router unreachable (\$_fails/$ENDPOINT_WATCHDOG_FAILURES)" >&2
+                (( _fails >= $ENDPOINT_WATCHDOG_FAILURES )) && exit 1
+            fi
+        done
+    ) &
+    watchdog_step=\$!
+
     completed_pid=""
     completed_status=0
-    wait -n -p completed_pid "\$server_step" "\$eval_step" || completed_status=\$?
+    wait -n -p completed_pid "\$server_step" "\$eval_step" "\$watchdog_step" || completed_status=\$?
+
+    if [[ "\$completed_pid" == "\$watchdog_step" ]]; then
+        echo "endpoint watchdog fired: the policy endpoint is gone, so nothing can be collected." >&2
+        echo "Exiting non-zero so 03_run_sharded.sh resubmits and --resume carries the work." >&2
+        kill "\$eval_step" 2>/dev/null || true
+        wait "\$eval_step" 2>/dev/null || true
+        cleanup_server
+        trap - EXIT INT TERM
+        exit 1
+    fi
+    kill "\$watchdog_step" 2>/dev/null || true
 
     if [[ "\$completed_pid" == "\$server_step" ]]; then
         if (( completed_status == 0 )); then
