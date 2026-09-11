@@ -112,12 +112,64 @@ translation, not real-model quality or benchmark/provider compatibility. A real
 rollout with the intended model and sandbox provider is still required before
 claiming benchmark validation.
 
-A real-model smoke on 2026-09-10 passed for both profiles with DeepSeek V4 Flash,
+Tests are passed for both profiles with DeepSeek V4 Flash,
 Gym's `openai_model`, and an Enroot task container: read and repair a Python
 function, execute tool calls, export the trajectory, and pass independent Python
 assertions. This exercises `/responses` on a prepared sandbox; it does not
 validate the resource-server `/run` handoff or a benchmark. Enroot itself does
 not implement the reconnect capability required by `/run`.
+
+### Benchmark pilot
+
+Gym commit `7d1761dc58e9799d8c2762963264b92d612d958f` was evaluated with
+OpenSandbox task containers on an H100 host. All three harnesses used
+`nvidia/deepseek-ai/deepseek-v4-flash` through NVIDIA Inference Hub; inference
+was remote, so these results do not measure local H100 inference performance.
+DSH used SDK `0.1.5rc1`; the reference harness used OpenCode `1.17.11`.
+
+The fixed pilot selected 50 SWE-bench Verified tasks across 12 repositories and
+10 Terminal-Bench 2.1 tasks across 10 categories. Dataset revisions were
+`c104f840cc67f8b6eec6f759ebc8b2693d585d4a` (SWE) and
+`7131e4375048a0e408a8fb404b5f499d726b695b` (Terminal), with selection seed
+`dsh-benchmark-20260910-v1`. Each harness used the same tasks, model, temperature
+(0.6), and externally enforced budgets: 8,192 output tokens per model call,
+65,536 cumulative output tokens and 100 model calls per rollout, with separate
+1,800-second agent and verifier limits. Native harness prompts and tools differed.
+
+| Harness | SWE-bench Verified (50 tasks) | Terminal-Bench 2.1 (10 tasks) |
+| --- | ---: | ---: |
+| DSH `sdk` | 31/50 (62%) | 6/10 (60%) |
+| DSH `sdk-minimal` | 39/50 (78%) | 4/10 (40%) |
+| OpenCode | 32/50 (64%) | 6/10 (60%) |
+
+Scores count tasks resolved by the benchmark verifier. All 120 positive/negative
+verifier calibration controls passed. The final audit found no score or budget
+inconsistencies across 180 retained outcomes and 150 official SWE test reports.
+Verifiers completed for 179/180 outcomes; one `sdk-minimal` Terminal attempt
+damaged its task environment and remained in the denominator with score 0.
+Timeouts and budget stops also remained in the scored cohort.
+
+On this SWE sample, `sdk-minimal` solved seven more tasks than OpenCode while
+using 3.28× the upstream input tokens and 2.30× the output tokens. This is a
+coverage-oriented pilot; the results do not establish full-suite performance
+or a stable ranking between harnesses.
+
+Remaining validation limits:
+
+- Six interrupted SWE attempts and three setup failures before model calls were
+  rerun, with their original records retained. Earlier batches affected by gateway
+  throttling or a test-adapter history-isolation error were quarantined in full.
+  These scores therefore cannot be described as uninterrupted pass@1.
+- Evidence has gaps: 18 OpenCode structured snapshots failed, one model response
+  was truncated, and two SDK final result files were absent after inferred
+  timeouts. Available exports, partial events, usage records and verifier results
+  were retained; complete trajectory capture has not been validated.
+- SDK errors can produce `dsh_finish_reason="error"` with `dsh_error=null` on the
+  tested commit. A separate error-propagation patch passed 37 focused tests and
+  real-model smoke runs for both profiles; it was not part of the scored code.
+
+Full SWE (500 tasks), Terminal (89 tasks), and repeated experiments have not run.
+Expansion is gated on fixing error reporting and the material capture gaps.
 
 Tracking: [#2577](https://github.com/NVIDIA-NeMo/Gym/issues/2577),
 [#2950](https://github.com/NVIDIA-NeMo/Gym/issues/2950).
