@@ -37,20 +37,21 @@ python -m resources_servers.swebench_pro.image_cache \
 SIF filenames use the digest's hexadecimal part. The server rejects missing
 manifests, mismatched registry digests and changed SIF checksums. Old caches
 without manifests must be prepared again. The runtime bind must be accessible
-from the node running Gym. Create an overlay directory on disk before launching:
+from the node running Gym:
 
 ```bash
 gym env start \
   --config responses_api_models/openai_model/configs/openai_model.yaml \
-  --config nemo_gym/sandbox/providers/apptainer/configs/apptainer.yaml \
+  --config responses_api_agents/hermes_sandboxed_agent/configs/apptainer.yaml \
   --config responses_api_agents/hermes_sandboxed_agent/configs/hermes_sandboxed_agent.yaml \
   --config resources_servers/swebench_pro/configs/swebench_pro.yaml \
+  +swebench_pro_example_agent=null \
+  +swebench_pro_example_resources_server=null \
   +policy_base_url=http://MODEL_HOST:MODEL_PORT/v1 \
   +policy_api_key=gym \
   +policy_model_name=REAL_MODEL_NAME \
   +hermes_sandboxed_agent.responses_api_agents.hermes_sandboxed_agent.model=REAL_MODEL_NAME \
   +hermes_sandboxed_agent.responses_api_agents.hermes_sandboxed_agent.resources_server.name=swebench_pro_resources_server \
-  +sandbox.apptainer.create.overlay_root=/absolute/disk/path/overlays \
   '+sandbox.apptainer.exec.default_binds=[/absolute/path/hermes-runtime:/opt/hermes:ro]' \
   '+swebench_pro_resources_server.resources_servers.swebench_pro.image_template=/cache/sifs/{image_digest_hex}.sif'
 ```
@@ -75,55 +76,10 @@ Pro also ships five prepared example rows at
 `resources_servers/swebench_pro/data/example.jsonl`; these include pinned task
 scripts and image digests and can be used for the first smoke run.
 
-## Small HTTP smoke run
-
-`smoke.py` starts actual Gym model, agent and Pro HTTP servers in three processes.
-It avoids Ray for a small single-node run and uses the real Hermes runner and Pro
-verifier. It does not allocate a model server.
-
-```bash
-python -m responses_api_agents.hermes_sandboxed_agent.smoke \
-  --dataset resources_servers/swebench_pro/data/example.jsonl \
-  --provider-config /path/to/provider.yaml \
-  --sif-dir /cache/sifs --output /fresh/path/pro-results \
-  --model-url http://MODEL_HOST:MODEL_PORT/v1 --model REAL_MODEL_NAME \
-  --instance-id INSTANCE_ID_FROM_DATASET \
-  --max-turns 30 --max-tokens 8192 --sandbox-timeout 1800
-```
-
-For a CPU startup check, use `--model-url http://127.0.0.1:9/v1`,
-`--max-turns 1` and `--api-timeout 2`. An expected connection error demonstrates
-startup and failure handling only; the smoke command exits 1 and records an
-excluded attempt. A live endpoint consumes model inference
-capacity even when the sandbox job itself uses no GPUs.
-
-Cluster deployment is maintained in the Slurm evaluations repository. See its
-[evaluation configuration](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/evaluations/swebench-pro-hermes.yaml)
-on the matching `jnolan/hermes-sandboxed-pro` branch.
-
-To check the reference patch with Gym's verifier directly, use:
-
-```bash
-python -m responses_api_agents.hermes_sandboxed_agent.check_verifier \
-  --smoke-results /path/to/completed/pro-smoke-results \
-  --provider-config /path/to/provider.yaml \
-  --output /path/to/reference-control.jsonl
-```
-
-`--provider-config` optionally overrides the recorded sandbox settings for the
-current run. This control starts fresh verification containers without Hermes
-or model inference.
-
-Results include inputs, redacted config, server logs, model-call captures,
-Hermes conversation and execution details, extracted patches and Pro test output.
-Runtime diagnostics record the source commit, Python import path and working
-directories. Image provenance records the selected image path, original registry
-digest and local SIF checksum for both the agent and verifier containers.
-
-`rollouts.jsonl` contains scored attempts; `failures.jsonl` contains excluded
-attempts. `summary.json` lists all attempts, and `metrics.json` reports attempted,
-scored, excluded, coverage and accuracy. Accuracy is over scored attempts only;
-it is `null` when none were scored. Coverage must accompany any reported accuracy.
+Cluster deployment uses the Slurm evaluations repository's existing pipeline;
+select its [evaluation configuration](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/evaluations/swebench-pro-hermes.yaml).
+For a reference-patch control, use Pro's existing
+[golden-patch commands](../../resources_servers/swebench_pro/README.md#golden-patch-smoke-test).
 
 ## Interface and checks
 

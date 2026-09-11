@@ -40,49 +40,6 @@ FAKE_BINARY = "/usr/bin/apptainer"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("exit_code", [0, 1])
-async def test_disk_overlay_is_serialized_and_cleaned(fake_binary, monkeypatch, tmp_path, exit_code):
-    provider, rec = _make_provider(
-        monkeypatch,
-        lambda argv: (exit_code, "", "failed"),
-        create={"writable_overlay": True, "overlay_root": str(tmp_path)},
-        probe={"command": None},
-    )
-    if exit_code:
-        with pytest.raises(apptainer_provider.ApptainerCreateError):
-            await provider.create(SandboxSpec(image="test"))
-    else:
-        handle = await provider.create(SandboxSpec(image="test"))
-        descriptor = await provider.serialize_handle(handle)
-        assert descriptor["overlay_dir"] == str(handle.raw.overlay_dir)
-        assert handle.raw.overlay_dir.is_dir()
-        await provider.close(handle)
-    argv = rec.calls[0]["argv"]
-    overlay = Path(argv[argv.index("--overlay") + 1])
-    assert overlay.parent == tmp_path  # Independent of TMPDIR and tempfile's cached default.
-    assert "--writable-tmpfs" not in argv and not overlay.exists()
-
-
-@pytest.mark.parametrize("root", [None, "relative/path"])
-def test_writable_overlay_requires_explicit_absolute_root(root):
-    with pytest.raises(ValueError, match="absolute create.overlay_root"):
-        apptainer_provider.ApptainerCreateConfig(writable_overlay=True, overlay_root=root)
-
-
-@pytest.mark.asyncio
-async def test_failed_readiness_probe_removes_disk_overlay(fake_binary, monkeypatch, tmp_path):
-    provider, rec = _make_provider(
-        monkeypatch,
-        lambda argv: (0, "", ""),
-        create={"writable_overlay": True, "overlay_root": str(tmp_path)},
-    )
-    with pytest.raises(apptainer_provider.ApptainerCreateVerificationError):
-        await provider.create(SandboxSpec(image="test"))
-    start = rec.calls[0]["argv"]
-    assert not Path(start[start.index("--overlay") + 1]).exists()
-
-
-@pytest.mark.asyncio
 async def test_reconnect_preserves_workdir_environment_and_transfers(fake_binary, tmp_path, monkeypatch):
     import tempfile
 

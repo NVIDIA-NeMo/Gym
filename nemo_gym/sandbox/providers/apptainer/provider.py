@@ -99,16 +99,12 @@ class ApptainerCreateConfig:
     start_timeout_s: float | None = 600
     extra_start_args: list[str] = field(default_factory=list)
     apply_resource_limits: bool = True
-    writable_overlay: bool = False
-    overlay_root: str | None = None
 
     def __post_init__(self) -> None:
         if self.start_timeout_s is not None and self.start_timeout_s <= 0:
             raise ValueError("create.start_timeout_s must be > 0")
         if not self.mount_point.startswith("/"):
             raise ValueError("create.mount_point must be an absolute path")
-        if self.writable_overlay and (not self.overlay_root or not Path(self.overlay_root).is_absolute()):
-            raise ValueError("create.writable_overlay requires an absolute create.overlay_root on disk storage")
 
 
 @dataclass(frozen=True)
@@ -162,7 +158,6 @@ class _ApptainerInstance:
     mount_point: str  # where the folder shows up inside
     image: str  # what it was built from
     env: dict[str, str] = field(default_factory=dict)
-    overlay_dir: Path | None = None
 
 
 def _resource_flags(resources: SandboxResources) -> list[str]:
@@ -455,21 +450,6 @@ class ApptainerProvider:
         for bind in extra_binds:
             argv += ["--bind", bind]
         start_args = list(self._create_config.extra_start_args)
-        overlay_dir = None
-        if self._create_config.writable_overlay:
-            if "--overlay" in start_args or "--writable" in start_args:
-                shutil.rmtree(staging_dir)
-                raise ValueError("create.writable_overlay cannot be combined with an explicit writable layer")
-            # --writable-tmpfs is often capped at 64 MiB, too small for builds.
-            try:
-                overlay_dir = Path(
-                    tempfile.mkdtemp(prefix="nemo-gym-apptainer-ovl-", dir=self._create_config.overlay_root)
-                )
-            except OSError:
-                shutil.rmtree(staging_dir, ignore_errors=True)
-                raise
-            start_args = [arg for arg in start_args if arg != "--writable-tmpfs"]
-            start_args += ["--overlay", str(overlay_dir)]
         resource_limit_flags = _resource_limit_flags(spec.resources)
         if resource_limit_flags and self._create_config.apply_resource_limits:
             if "--fakeroot" in start_args:
@@ -494,13 +474,9 @@ class ApptainerProvider:
                 )
         except TimeoutError as e:
             shutil.rmtree(staging_dir, ignore_errors=True)
-            if overlay_dir is not None:
-                shutil.rmtree(overlay_dir, ignore_errors=True)
             raise ApptainerCreateError(f"apptainer instance start timed out for image={image!r}: {e}") from e
         if code != 0:
             shutil.rmtree(staging_dir, ignore_errors=True)
-            if overlay_dir is not None:
-                shutil.rmtree(overlay_dir, ignore_errors=True)
             raise ApptainerCreateError(
                 f"apptainer instance start failed (code={code}) for image={image!r}: {err.strip()}"
             )
@@ -515,7 +491,6 @@ class ApptainerProvider:
                 mount_point=mount_point,
                 image=image,
                 env=dict(spec.env),
-                overlay_dir=overlay_dir,
             ),
         )
 
@@ -581,8 +556,6 @@ class ApptainerProvider:
                 timeout_s=self._exec_config.default_timeout_s,
             )
         shutil.rmtree(inst.staging_dir, ignore_errors=True)
-        if inst.overlay_dir is not None:
-            shutil.rmtree(inst.overlay_dir, ignore_errors=True)
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
         """Share a local instance with another Gym worker on the same host/UID.
@@ -601,7 +574,6 @@ class ApptainerProvider:
             "mount_point": inst.mount_point,
             "image": inst.image,
             "env": dict(inst.env),
-            "overlay_dir": str(inst.overlay_dir) if inst.overlay_dir else None,
         }
 
     async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
@@ -620,13 +592,6 @@ class ApptainerProvider:
             raise ValueError("Invalid Apptainer mount point")
         env = dict(descriptor.get("env", {}))
         _serialize_env_file(env)
-        overlay_dir = Path(descriptor["overlay_dir"]) if descriptor.get("overlay_dir") else None
-        if overlay_dir is not None and (
-            not overlay_dir.is_absolute()
-            or not overlay_dir.name.startswith("nemo-gym-apptainer-ovl-")
-            or not overlay_dir.is_dir()
-        ):
-            raise ValueError("Apptainer overlay directory is unavailable")
         handle = SandboxHandle(
             sandbox_id=name,
             provider_name=self.name,
@@ -636,7 +601,6 @@ class ApptainerProvider:
                 mount_point=mount_point,
                 image=descriptor["image"],
                 env=env,
-                overlay_dir=overlay_dir,
             ),
         )
         if await self.status(handle) != SandboxStatus.RUNNING:
@@ -825,9 +789,6 @@ class ApptainerProvider:
             shutil.rmtree(inst.staging_dir, ignore_errors=False)
         except OSError as e:
             LOGGER.warning("failed to remove staging dir %s: %s", inst.staging_dir, e)
-
-        if inst.overlay_dir is not None:
-            shutil.rmtree(inst.overlay_dir, ignore_errors=True)
 
         if stop_error is not None:
             raise stop_error

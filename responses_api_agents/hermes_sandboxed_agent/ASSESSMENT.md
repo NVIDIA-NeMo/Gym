@@ -33,12 +33,12 @@ code and images; each run starts its own processes and task containers.
 | [Hermes runner](runner.py#L51) and [runtime preparation](prepare_runtime.sh#L27) | **Added** | The runner starts Hermes inside the task container. Runtime preparation builds its separate Python installation before a run. |
 | [NousResearch Hermes v2026.8.31](prepare_runtime.sh#L11) | **Existing upstream software** | The pinned Hermes program, used without source changes. Runs inside the task container, calls the model and executes terminal/file tools. |
 | [Gym model proxy](../../responses_api_models/openai_model/app.py#L93) | **Existing** | Python web server in the outer container. Forwards requests to the model endpoint; inference happens at that endpoint. |
-| [Apptainer provider](../../nemo_gym/sandbox/providers/apptainer/provider.py#L291) | **Extended** | Existing Python library used by the outer Gym servers. Already created containers, ran commands and transferred files. We added reconnect and an optional writable layer on disk. |
-| [Standalone provider YAML](../../nemo_gym/sandbox/providers/apptainer/configs/apptainer.yaml#L2) and [cluster settings](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/configs/swebench_pro.yaml#L6) | **Added** | Gym supplies the reusable Apptainer preset; Slurm evaluations supplies cluster mounts and execution settings. |
+| [Apptainer provider](../../nemo_gym/sandbox/providers/apptainer/provider.py#L281) | **Extended** | Existing Python library used by the outer Gym servers. Already created containers, ran commands and transferred files. We added reconnect. |
+| [Standalone provider YAML](configs/apptainer.yaml#L2) and [cluster settings](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/configs/swebench_pro.yaml#L6) | **Added** | The Hermes agent supplies its standalone Apptainer preset; Slurm evaluations supplies cluster mounts and execution settings. |
 | [Image cache preparation](../../resources_servers/swebench_pro/image_cache.py#L45) | **Added** | Converts pinned registry images into SIFs and records their checksums. The Pro server checks the manifest before each container starts. |
-| [Smoke driver](smoke.py#L123), [Slurm launcher](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/scripts/run_eval.sh) and [reference-patch check](check_verifier.py#L17) | **Added helpers; extended launcher** | Gym contains the HTTP smoke driver and generic verifier helper. The existing Slurm evaluations launcher is extended to compose the separate agent and resources server. |
+| [Slurm launcher](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/scripts/run_eval.sh) | **Extended** | Composes the separate agent and resources server through the existing Gym launch and evaluation commands. Reference-patch checks use Pro's existing client. |
 | [Outer Pyxis container image](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/scripts/run_eval.sh) | **Existing cluster infrastructure** | An already available image containing the Gym/Apptainer execution environment. The standard launcher takes its path from `CONTAINER_IMAGE`. |
-| [Model endpoint](smoke.py#L160) | **Supplied separately** | For a live run, inference runs outside this CPU job. We have not created a model server; the CPU checks used an unreachable address. |
+| [Model endpoint](app.py#L187) | **Supplied separately** | For a live run, inference runs outside this CPU job. We have not created a model server; the CPU checks used an unreachable address. |
 
 The [OpenCode sandboxed agent](../opencode_sandboxed_agent/app.py#L886) is also
 existing Gym code. It was our reference for the agent/benchmark interface;
@@ -133,7 +133,7 @@ within a Slurm CPU allocation. Gym starts three separate HTTP services there: th
 resources server, and the model proxy. Each has its own port. The task and
 verification containers use the same CPU allocation and are created as work
 arrives. The
-[Apptainer provider](../../nemo_gym/sandbox/providers/apptainer/provider.py#L291)
+[Apptainer provider](../../nemo_gym/sandbox/providers/apptainer/provider.py#L281)
 is a library used within the outer servers, rather than another HTTP service.
 
 There are separate software installations. The outer processes use
@@ -176,7 +176,7 @@ and [creates the fresh verification container](../../resources_servers/swebench_
 | Agent: [run()](app.py#L236), then [_run_in_sandbox()](app.py#L156) | The complete task sequence and the data uploaded to the container. |
 | Runner: [run()](runner.py#L51), then [main()](runner.py#L145) | Hermes configuration, tool working directory, model calls and result capture. |
 | Pro: [seed_session()](../../resources_servers/swebench_pro/app.py#L322), [close_session()](../../resources_servers/swebench_pro/app.py#L223), then [verify()](../../resources_servers/swebench_pro/app.py#L420) | Optional terminal creation, container handoff and cleanup. Existing patch extraction and grading are reused. |
-| Apptainer: [serialize_handle()](../../nemo_gym/sandbox/providers/apptainer/provider.py#L587), [connect()](../../nemo_gym/sandbox/providers/apptainer/provider.py#L607), then [create()](../../nemo_gym/sandbox/providers/apptainer/provider.py#L405) | Reconnecting from another Gym process and providing space for container writes. |
+| Apptainer: [serialize_handle()](../../nemo_gym/sandbox/providers/apptainer/provider.py#L560), [connect()](../../nemo_gym/sandbox/providers/apptainer/provider.py#L579), then [create()](../../nemo_gym/sandbox/providers/apptainer/provider.py#L400) | Reconnecting from another Gym process. |
 | [Runtime preparation](prepare_runtime.sh#L27), then [launch instructions](README.md#launch-with-pro) | Installing the exact Hermes release and composing the launch configuration. |
 | [Agent handoff tests](tests/test_app.py#L172), [Pro handoff tests](../../resources_servers/swebench_pro/tests/test_app.py#L470), and [existing terminal behavior](../../resources_servers/swebench_pro/tests/test_app.py#L320) | Failure handling, cookies, cleanup and compatibility with existing Pro callers. |
 
@@ -202,37 +202,28 @@ release Pro's session state even if it fails before grading. An optional [image
 path template](../../resources_servers/swebench_pro/app.py#L256) supports locally cached Apptainer images. Pro's [patch extraction](../../resources_servers/swebench_pro/app.py#L402),
 [verification scripts](../../resources_servers/swebench_pro/verification.py#L394), [environment repairs](../../resources_servers/swebench_pro/verification.py#L210) and [retry budgets](../../resources_servers/swebench_pro/app.py#L109) are reused.
 
-**Apptainer: existing provider, with two additions.** Gym already had an
-Apptainer provider on our base revision, including [container creation](../../nemo_gym/sandbox/providers/apptainer/provider.py#L405),
-[command execution](../../nemo_gym/sandbox/providers/apptainer/provider.py#L646),
-[file transfer](../../nemo_gym/sandbox/providers/apptainer/provider.py#L715) and
-[cleanup](../../nemo_gym/sandbox/providers/apptainer/provider.py#L802). We reuse that implementation.
+**Apptainer: existing provider, with reconnect added.** Gym already had an
+Apptainer provider on our base revision, including [container creation](../../nemo_gym/sandbox/providers/apptainer/provider.py#L400),
+[command execution](../../nemo_gym/sandbox/providers/apptainer/provider.py#L610),
+[file transfer](../../nemo_gym/sandbox/providers/apptainer/provider.py#L679) and
+[cleanup](../../nemo_gym/sandbox/providers/apptainer/provider.py#L766). We reuse that implementation.
 
-The [configs/apptainer.yaml file](../../nemo_gym/sandbox/providers/apptainer/configs/apptainer.yaml#L2)
-is new. It is a standalone launch preset that supplies settings to the existing
-Python provider. The `apptainer` key selects the backend already present in
-[Gym's provider registry](../../nemo_gym/sandbox/providers/registry.py#L182).
-Existing Gym configurations also select Apptainer inline, for example the
-[CVDP Hermes configuration](../cvdp_agent/configs/cvdp_agent_generic_hermes.yaml#L25).
-I added a separate YAML so the four-file launch can select the sandbox provider
-independently of the model, agent and benchmark. Thus the YAML is a new file;
-the existing provider's Python implementation is a modified file.
+The agent-local [configs/apptainer.yaml](configs/apptainer.yaml#L2) is a new
+standalone launch preset for the existing provider. Cluster mounts and settings
+remain in Slurm evaluations.
 
 The missing operation for this design was handing a running container from one
 Gym process to another: the Pro resources server creates it, and the separate
-Hermes agent server must then use it. I added [serialize_handle()](../../nemo_gym/sandbox/providers/apptainer/provider.py#L587)
-to export the necessary connection details and [connect()](../../nemo_gym/sandbox/providers/apptainer/provider.py#L607)
+Hermes agent server must then use it. I added [serialize_handle()](../../nemo_gym/sandbox/providers/apptainer/provider.py#L560)
+to export the necessary connection details and [connect()](../../nemo_gym/sandbox/providers/apptainer/provider.py#L579)
 to reconstruct a usable handle in the receiving process. Both processes
-[must share a host, user and staging filesystem](../../nemo_gym/sandbox/providers/apptainer/provider.py#L610).
+[must share a host, user and staging filesystem](../../nemo_gym/sandbox/providers/apptainer/provider.py#L582).
 The OpenCode example's [launch instructions select OpenSandbox](../opencode_sandboxed_agent/README.md#L6),
 which is a different sandbox provider; that example did not establish Apptainer reconnect support.
 
-The other addition is an optional [writable layer on disk](../../nemo_gym/sandbox/providers/apptainer/provider.py#L458)
-to avoid the small tmpfs limit when tools or tests write files. Writable overlays
-require an [explicit `create.overlay_root`](../../nemo_gym/sandbox/providers/apptainer/provider.py#L110); they no longer use the default temporary
-directory. A CPU-node check confirmed `/tmp` is tmpfs. The launcher now uses a
-job-specific directory under `/var/tmp`, checks the filesystem and logs its capacity.
-There is no per-task disk quota in this configuration. The cluster-specific
+Container writes use Apptainer's existing `--writable-tmpfs` option. The earlier
+disk-overlay extension was removed pending evidence that it is needed; the CPU
+results below used that earlier configuration. The cluster-specific
 [configuration](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/configs/swebench_pro.yaml#L6) mounts the existing portable
 Hermes runtime read-only into task containers; Slurm supplies CPU, memory and
 wall-time limits through the [launch setup](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/scripts/run_eval.sh).
@@ -248,10 +239,8 @@ still scores zero when its fix is wrong. An unfinished harness or inconclusive
 verification is excluded. This is a completion rule, not a claim that every
 excluded attempt was caused by infrastructure.
 
-The [smoke driver](smoke.py#L55) saves scored attempts in `rollouts.jsonl`, excluded attempts in
-`failures.jsonl`, and every attempt in its summary. Its metrics give the numbers
-attempted, scored and excluded, plus coverage and accuracy over scored attempts.
-If all attempts are excluded, accuracy is `null`, and the smoke command exits 1.
+Slurm evaluations reports scored and excluded counts, coverage and accuracy.
+If all attempts are excluded, accuracy is `null`.
 A partial-coverage accuracy must not be reported as the full benchmark result.
 The agent's [aggregate endpoint](app.py#L146) also filters failed rows for direct callers;
 Gym's collector supplies only its scored rows to that endpoint and reports
@@ -287,14 +276,14 @@ existing [default terminal behavior](../../resources_servers/swebench_pro/tests/
 on [failed preparation](../../resources_servers/swebench_pro/tests/test_app.py#L505) or [attachment](tests/test_app.py#L235), and [local image selection](../../resources_servers/swebench_pro/tests/test_app.py#L461). Ruff and
 four-component configuration resolution pass.
 
-CPU Slurm job `1916880`, using the [smoke driver](smoke.py#L123), completed in 2m20s using 8 CPUs, 32 GiB and zero GPUs.
+CPU Slurm job `1916880`, using the [smoke driver](https://github.com/elisam0/Gym/blob/aeb168ca8d4b7b7c35f3714250b5164d94026f5d/responses_api_agents/hermes_sandboxed_agent/smoke.py#L123), completed in 2m20s using 8 CPUs, 32 GiB and zero GPUs.
 The prepared Ansible Pro task started the pinned Hermes in its actual image,
 with tool working directory `/app`, then reached the deliberately unreachable
 model endpoint. The run returned through Pro verification and cleanup. Its empty
 patch produced 38 passing tests and 4 failures. This historical artifact used the
 old zero-reward failure behavior; subsequent runs use the exclusion rule above.
 
-A separate [reference-patch control](check_verifier.py#L17), CPU job `1916905`, completed in 27 seconds.
+A separate [reference-patch control](https://github.com/elisam0/Gym/blob/aeb168ca8d4b7b7c35f3714250b5164d94026f5d/responses_api_agents/hermes_sandboxed_agent/check_verifier.py#L17), CPU job `1916905`, completed in 27 seconds.
 The same Pro verifier applied the dataset's reference patch in a fresh container
 and all 42 tests passed (`resolved=true`). This checks that the image and verifier
 can grade a valid fix. It is not a Hermes-generated solution.

@@ -5,6 +5,9 @@ Hermes `v2026.8.31` (`29112bef099274229cadff79cdff7bf7b99c4b77`).
 The [recorded results](validation.json) include the dataset/evaluator pins,
 selected instance, container checksum and CPU outcomes.
 
+These CPU runs used the subsequently removed disk-overlay extension. The current
+`--writable-tmpfs` configuration awaits cluster validation.
+
 ## Local checks
 
 149 targeted tests passed, covering the agent, Pro resources server, image
