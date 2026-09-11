@@ -55,6 +55,7 @@ class BaseModelServiceConfig(BaseServiceConfig):
 
     model: str
     port: int = 8000
+    served_model_name: str | None = None
 
 
 class VllmServiceConfig(BaseModelServiceConfig):
@@ -217,7 +218,7 @@ class SubmitConfig(_StrictModel):
                             f"but driver.policy_model is also set. Remove one."
                         )
                     benchmark.run["policy_base_url"] = f"http://localhost:{service.port}/v1"
-                    benchmark.run["policy_model_name"] = service.model
+                    benchmark.run["policy_model_name"] = service.served_model_name or service.model
                     # vLLM doesn't require auth; dummy key satisfies clients that require the header.
                     benchmark.run["policy_api_key"] = "dummy"  # pragma: allowlist secret
 

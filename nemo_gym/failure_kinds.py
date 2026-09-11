@@ -43,11 +43,13 @@ logger = logging.getLogger(__name__)
 
 # ``<domain>_<condition>``. The domain says which layer observed the failure, so a reader
 # can tell an unreachable model server from an unreachable sandbox without a second field.
-_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
+# ``fullmatch`` below, not ``match``: ``$`` also matches before a final newline, which
+# would admit "judge_failed\n" as a second, silently different label for one failure.
+_NAME_PATTERN = re.compile(r"[a-z][a-z0-9_]*")
 
 # An environment may use ``<server>:<kind>`` for something the shared vocabulary should not
 # grow a name for. The prefix keeps it groupable without making it look registered.
-_NAMESPACED_PATTERN = re.compile(r"^[a-z][a-z0-9_]*:[a-z][a-z0-9_]*$")
+_NAMESPACED_PATTERN = re.compile(r"[a-z][a-z0-9_]*:[a-z][a-z0-9_]*")
 
 
 # --- transport: reaching another process at all ------------------------------------- #
@@ -127,11 +129,16 @@ def is_registered(name: str) -> bool:
 
 def is_namespaced(name: str) -> bool:
     """Whether ``name`` is an environment's own ``<server>:<kind>`` extension."""
-    return bool(_NAMESPACED_PATTERN.match(name))
+    return bool(_NAMESPACED_PATTERN.fullmatch(name))
+
+
+# Names already reported. A failing component emits the same label on every rollout, so
+# warning per call would bury the one line that matters under thousands of copies.
+_WARNED_UNKNOWN: set[str] = set()
 
 
 def validate_failure_kind(name: str | None) -> str | None:
-    """Return ``name`` unchanged, warning once about anything unregistered.
+    """Return ``name`` unchanged, warning once per unregistered value.
 
     Producers call this at their boundary. It warns rather than raises so a component that
     still emits an old label stays visible during migration — rejecting it outright would
@@ -140,9 +147,11 @@ def validate_failure_kind(name: str | None) -> str | None:
     """
     if name is None or is_registered(name) or is_namespaced(name):
         return name
-    logger.warning(
-        "unregistered failure_kind %r; register it in nemo_gym/failure_kinds.py or namespace it as '<server>:%s'",
-        name,
-        name,
-    )
+    if name not in _WARNED_UNKNOWN:
+        _WARNED_UNKNOWN.add(name)
+        logger.warning(
+            "unregistered failure_kind %r; register it in nemo_gym/failure_kinds.py or namespace it as "
+            "'<server>:<kind>'. Reported once per name.",
+            name,
+        )
     return name
