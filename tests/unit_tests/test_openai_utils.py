@@ -239,6 +239,17 @@ class TestTokenMetadataValidation:
 
 
 class TestNeMoGymChatCompletionSchemas:
+    @pytest.mark.parametrize("field", ["reasoning", "reasoning_content"])
+    def test_assistant_reasoning_fields_round_trip(self, field: str) -> None:
+        payload = {
+            "messages": [{"role": "assistant", "content": "answer", field: "thought"}],
+            "model": "gpt-test",
+        }
+
+        params = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(payload)
+
+        assert params.model_dump(exclude_unset=True)["messages"][0][field] == "thought"
+
     def test_user_audio_and_file_content_parts_round_trip(self) -> None:
         payload = {
             "messages": [

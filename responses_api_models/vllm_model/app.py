@@ -186,6 +186,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # ``uses_reasoning_parser``.
     preserve_reasoning_in_assistant_content: bool = False
     replace_developer_role_with_system: bool = False
+    fold_system_messages: bool = False
 
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
     sequential_reasoning_allowed: bool = True
@@ -410,7 +411,10 @@ class VLLMModel(SimpleResponsesAPIModel):
             return await self._responses_native(request, body)
 
         # Response Create Params -> Chat Completion Create Params
-        chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(body)
+        converter_body = body
+        if "include" in body.model_fields_set:
+            converter_body = body.model_copy(update={"include": None})
+        chat_completion_create_params = self._converter.responses_to_chat_completion_create_params(converter_body)
         body.model = self.config.model
 
         # Chat Completion Create Params -> Chat Completion
@@ -530,6 +534,25 @@ class VLLMModel(SimpleResponsesAPIModel):
             if tool_dict.get("type") == "function":
                 (tool_dict.get("function") or {}).pop("strict", None)
 
+    @staticmethod
+    def _fold_system_messages(body_dict: Dict[str, Any]) -> None:
+        system_parts = []
+        other_messages = []
+        for message in body_dict["messages"]:
+            if message.get("role") not in ("system", "developer"):
+                other_messages.append(message)
+                continue
+            content = message.get("content", "")
+            if isinstance(content, str):
+                system_parts.append(content)
+            else:
+                system_parts.append("".join(part.get("text", "") for part in content))
+        if system_parts:
+            body_dict["messages"] = [
+                {"role": "system", "content": "\n\n".join(system_parts)},
+                *other_messages,
+            ]
+
     def _preprocess_chat_completion_create_params(self, request: Request, body_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Preprocess the body dict before issuing a chat completion request.
 
@@ -548,10 +571,17 @@ class VLLMModel(SimpleResponsesAPIModel):
         """
         self._strip_hosted_only_tool_fields(body_dict)
 
+        for message_dict in body_dict["messages"]:
+            message_dict.pop("reasoning", None)
+            message_dict.pop("reasoning_content", None)
+
         if self.config.replace_developer_role_with_system:
             for message_dict in body_dict["messages"]:
                 if message_dict.get("role") == "developer":
                     message_dict["role"] = "system"
+
+        if self.config.fold_system_messages:
+            self._fold_system_messages(body_dict)
 
         body_dict["model"] = self.config.model
 

@@ -64,6 +64,7 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
         root = f"/tmp/nemo-gym-harness-exa-search-{uuid.uuid4().hex}"
         input_path, output_path = f"{root}/input.json", f"{root}/response.json"
         runner_path, config_path = f"{root}/agent_runner.py", f"{root}/runner.json"
+        pi_extension_path = f"{root}/exa_pi_extension.ts"
         values = dict(self.config.sandbox_spec)
         spec = SandboxSpec(
             image=self.config.image.removeprefix("docker://"),
@@ -88,6 +89,7 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
             "input_path": input_path,
             "output_path": output_path,
             "exa_api_key": self.config.exa_api_key.get_secret_value() if self.config.exa_api_key else None,
+            "pi_extension_path": pi_extension_path,
         }
         sandbox = AsyncSandbox(self._provider, spec)
         try:
@@ -97,6 +99,7 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
                 (local / "input.json").write_text(body.model_dump_json())
                 (local / "runner.json").write_text(json.dumps(runner_config))
                 await sandbox.upload(Path(__file__).with_name("agent_runner.py"), runner_path)
+                await sandbox.upload(Path(__file__).with_name("exa_pi_extension.ts"), pi_extension_path)
                 await sandbox.upload(local / "input.json", input_path)
                 await sandbox.upload(local / "runner.json", config_path)
                 command = f"{shlex.quote(self.config.python)} {runner_path} {config_path}"
@@ -104,9 +107,13 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
                     command = f"{self.config.setup_command} && {command}"
                 result = await sandbox.exec(command, timeout_s=None)
                 if result.return_code != 0:
-                    raise RuntimeError(f"sandboxed harness failed: {(result.stderr or result.stdout or '')[-2000:]}")
+                    diagnostics = "\n".join(part for part in (result.stdout, result.stderr) if part)
+                    raise RuntimeError(f"sandboxed harness failed: {diagnostics[-4000:]}")
                 await sandbox.download(output_path, local / "response.json")
-                return NeMoGymResponse.model_validate_json((local / "response.json").read_text())
+                response = NeMoGymResponse.model_validate_json((local / "response.json").read_text())
+                if response.usage and response.usage.total_tokens == 0 and result.stderr:
+                    self.logger.warning("sandboxed harness diagnostics: %s", result.stderr[-2000:])
+                return response
         finally:
             await sandbox.stop()
 

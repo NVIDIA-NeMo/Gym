@@ -5,6 +5,7 @@ import importlib
 import inspect
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from time import monotonic
@@ -34,11 +35,14 @@ async def main() -> None:
         "entrypoint": "app.py",
         **settings["harness_kwargs"],
     }
+    exa_api_key = settings.get("exa_api_key")
+    if exa_api_key:
+        os.environ["EXA_API_KEY"] = exa_api_key
     if "model_server" in config_class.model_fields:
         config_values["model_server"] = ModelServerRef(name=model_name, type="responses_api_models")
     if "resources_server" in config_class.model_fields:
         config_values["resources_server"] = ResourcesServerRef(name="unused", type="resources_servers")
-    if "mcp_config" in config_class.model_fields and settings.get("exa_api_key"):
+    if "mcp_config" in config_class.model_fields and exa_api_key:
         mcp_path = Path(settings["input_path"]).with_name("exa_mcp.json")
         mcp_path.write_text(
             json.dumps(
@@ -47,26 +51,43 @@ async def main() -> None:
                         "exa": {
                             "command": "npx",
                             "args": ["-y", "exa-mcp-server"],
-                            "env": {"EXA_API_KEY": settings["exa_api_key"]},
+                            "env": {"EXA_API_KEY": exa_api_key},
                         }
                     }
                 }
             )
         )
         config_values["mcp_config"] = str(mcp_path)
-    if "extra_config" in config_class.model_fields and settings.get("exa_api_key"):
+    if "extra_config" in config_class.model_fields and exa_api_key:
         config_values.setdefault("extra_config", {}).setdefault("mcp_servers", {})["exa"] = {
             "command": "npx",
             "args": ["-y", "exa-mcp-server"],
-            "env": {"EXA_API_KEY": settings["exa_api_key"]},
+            "env": {"EXA_API_KEY": exa_api_key},
         }
-    if "opencode_config" in config_class.model_fields and settings.get("exa_api_key"):
-        config_values.setdefault("opencode_config", {}).setdefault("mcp", {})["exa"] = {
-            "type": "local",
-            "command": ["npx", "-y", "exa-mcp-server"],
-            "environment": {"EXA_API_KEY": settings["exa_api_key"]},
-            "enabled": True,
+    for config_field in ("opencode_config", "kilo_config"):
+        if config_field in config_class.model_fields and exa_api_key:
+            config_values.setdefault(config_field, {}).setdefault("mcp", {})["exa"] = {
+                "type": "local",
+                "command": ["npx", "-y", "exa-mcp-server"],
+                "environment": {"EXA_API_KEY": exa_api_key},
+                "enabled": True,
+            }
+    if "fabric_config" in config_class.model_fields and exa_api_key:
+        config_values.setdefault("fabric_config", {}).setdefault("mcp", {}).setdefault("servers", {})["exa"] = {
+            "transport": "stdio",
+            "url": "npx",
+            "args": ["-y", "exa-mcp-server"],
+            "env": {"EXA_API_KEY": exa_api_key},
+            "exposure": "harness_native",
         }
+    if "openclaw_config" in config_class.model_fields and exa_api_key:
+        config_values.setdefault("openclaw_config", {}).setdefault("mcp", {}).setdefault("servers", {})["exa"] = {
+            "command": "npx",
+            "args": ["-y", "exa-mcp-server"],
+            "env": {"EXA_API_KEY": exa_api_key},
+        }
+    if settings.get("pi_extension_path") and settings["harness_class"] == "PiAgent":
+        config_values.setdefault("extra_args", []).extend(["--extension", settings["pi_extension_path"]])
     config = config_class(**config_values)
     body = NeMoGymResponseCreateParamsNonStreaming.model_validate_json(Path(settings["input_path"]).read_text())
     agent = agent_class(config=config, server_client=client)

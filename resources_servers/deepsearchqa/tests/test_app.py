@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 from pytest import approx
 
+from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -49,6 +50,10 @@ def test_parse_published_output_format() -> None:
         '"Excessive Answers":[]}}\n```'
     )
     assert parsed["Correctness Details"] == {"A": True}
+
+
+def test_reverification_is_stateless() -> None:
+    assert DeepSearchQAConfig.REVERIFY_MODE is ReverifyMode.STATELESS
 
 
 async def test_verify_scores_valid_output_and_handles_invalid_output() -> None:
