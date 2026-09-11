@@ -1297,12 +1297,17 @@ Found global config dict yaml:
         )
 
         with open_dict(global_config_dict):
-            # Populate head server defaults
-            if not global_config_dict.get(HEAD_SERVER_KEY_NAME):
-                global_config_dict[HEAD_SERVER_KEY_NAME] = {
-                    "host": default_host,
-                    "port": DEFAULT_HEAD_SERVER_PORT,
-                }
+            # Populate head server defaults. Filled key by key, not all-or-nothing:
+            # a config that pins only the port (to keep the head server inside an
+            # allocated port range, say) previously suppressed the host default
+            # too, and the caller then had to supply a host it cannot know --
+            # the address of whichever node the job lands on. `use_absolute_ip`
+            # already resolves that here, so completing a partial mapping lets
+            # the caller pin what it cares about and inherit the rest.
+            head_server = global_config_dict.get(HEAD_SERVER_KEY_NAME) or {}
+            head_server.setdefault("host", default_host)
+            head_server.setdefault("port", DEFAULT_HEAD_SERVER_PORT)
+            global_config_dict[HEAD_SERVER_KEY_NAME] = head_server
 
             # Store final list of disallowed ports.
             global_config_dict[DISALLOWED_PORTS_KEY_NAME] = disallowed_ports
