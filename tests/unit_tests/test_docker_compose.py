@@ -1383,3 +1383,40 @@ async def test_compose_connect_requires_provider_capability():
 async def test_compose_start_requires_yaml():
     with pytest.raises(ValueError, match="YAML"):
         await AsyncSandboxCompose(Provider(), None).start()
+
+
+@pytest.mark.asyncio
+async def test_default_docker_inspection_preserves_image_startup_and_health(monkeypatch):
+    from nemo_gym.sandbox.adapters import docker_compose
+
+    config = {
+        "Entrypoint": ["/entrypoint.sh"],
+        "Cmd": ["serve"],
+        "Env": ["MODE=production"],
+        "WorkingDir": "/app",
+        "Healthcheck": {"Test": ["CMD-SHELL", "check-health"], "Interval": 1000000000},
+        "Shell": ["/bin/bash", "-c"],
+        "ExposedPorts": {"8080/tcp": {}},
+    }
+    inspect = AsyncMock(return_value=json.dumps(config))
+    monkeypatch.setattr(docker_compose, "_command", inspect)
+    group = make_compose(Provider(), {"services": {"app": {"image": "example/app:1"}}})
+    await group._prepare()
+    inspect.assert_awaited_once_with(
+        [
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            "{{json .Config}}",
+            "example/app:1",
+        ]
+    )
+    plan = group._plans["app"]
+    assert plan["command"] == "/entrypoint.sh serve"
+    assert plan["spec"].env["MODE"] == "production"
+    assert plan["spec"].workdir == "/app"
+    assert plan["spec"].ports == (8080,)
+    assert plan["health"]["test"] == ["CMD-SHELL", "check-health"]
+    assert plan["health"]["interval"] == 1
+    assert plan["shell"] == ["/bin/bash", "-c"]
