@@ -511,6 +511,12 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             body.model_dump() | {"response": await get_response_json(response)}
         )
 
+        if self.config.skip_verification:
+            return FinanceAgentVerifyResponse.model_validate(
+                verify_request.model_dump()
+                | {"reward": float(self.config.skip_verification_reward), "verification_skipped": True}
+            )
+
         verify_response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",
