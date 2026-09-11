@@ -42,10 +42,17 @@ That closes the window where the final call's entry is lost without a trace.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import Protocol, runtime_checkable
 
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
 from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
+
+
+class ParentSelection(Enum):
+    """Distinguish an omitted parent hint from an explicitly parentless root."""
+
+    INFER = auto()
 
 
 @dataclass(frozen=True)
@@ -104,12 +111,17 @@ class LineageResolver(Protocol):
     Unstamped entries are invisible to resolution.
     """
 
-    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
+    async def resolve(
+        self, rollout_id: str, request_items: list[dict], *, parent_response_id: str | None = None
+    ) -> LineageResolution:
         """Return whether the request is a root, resolved, or unresolved.
 
         ``request_items`` are the unmodified harness items.
         The implementation must verify the recorded request context.
         A conflicting set of committed payloads for one call id must count as zero candidates.
+        ``parent_response_id`` selects exactly one served response in this rollout.
+        It must still pass the ordinary fingerprint and context checks; missing
+        or duplicate response IDs are unresolved. ``None`` preserves inference.
         UNRESOLVED is always a safe answer; a wrong RESOLVED is caught later by digest verification.
         """
         ...

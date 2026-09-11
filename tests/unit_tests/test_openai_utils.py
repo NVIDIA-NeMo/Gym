@@ -27,10 +27,12 @@ from typing import (
     get_origin,
     get_type_hints,
 )
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import openai
 import pytest
+from aiohttp import ClientOSError, ClientResponse, ClientResponseError, RequestInfo, ServerDisconnectedError
+from multidict import CIMultiDict, CIMultiDictProxy
 from openai.types.chat.completion_create_params import CompletionCreateParamsNonStreaming
 from openai.types.responses import (
     EasyInputMessage,
@@ -67,7 +69,10 @@ from openai.types.responses.response_output_item import (
     McpListTools,
 )
 from pydantic import ValidationError
+from yarl import URL
 
+import nemo_gym.openai_utils
+import nemo_gym.server_utils
 from nemo_gym.openai_utils import (
     MAX_NUM_TRIES,
     RESPONSES_TO_TRAIN,
@@ -141,6 +146,88 @@ class TestOpenAIUtils:
             await client._request_with_retry()
 
         assert request.await_count == MAX_NUM_TRIES
+
+
+class TestModelClientRetries:
+    @pytest.fixture
+    def transport(self, monkeypatch: pytest.MonkeyPatch):
+        send = AsyncMock()
+        sleep = AsyncMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: MagicMock(request=send))
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _: False)
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", sleep)
+        monkeypatch.setattr(nemo_gym.openai_utils, "sleep", sleep)
+        return send, sleep
+
+    @staticmethod
+    def response(status: int):
+        url = URL("http://model.test/v1/responses")
+        headers = CIMultiDictProxy(CIMultiDict())
+        info = RequestInfo(url=url, method="POST", headers=headers, real_url=url)
+        response = MagicMock(spec=ClientResponse, status=status, ok=status < 400, request_info=info)
+        response.read = AsyncMock(return_value=b'{"id":"resp_1"}')
+        response.content = MagicMock(read=AsyncMock(return_value=b'{"error":"unavailable"}'))
+        if status >= 400:
+            response.raise_for_status.side_effect = ClientResponseError(
+                request_info=info, history=(), status=status, message="unavailable", headers=headers
+            )
+        return response
+
+    @pytest.mark.parametrize("failure_type", [ServerDisconnectedError, ClientOSError, TimeoutError, RuntimeError])
+    async def test_single_attempt_transport_failure(self, transport, failure_type: type[Exception]) -> None:
+        send, sleep = transport
+        failure = failure_type("response lost")
+        send.side_effect = failure
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="http://model.test/v1", retry_requests=False)
+
+        with pytest.raises(failure_type) as exc_info:
+            await client.create_response(input="hello")
+
+        assert exc_info.value is failure
+        send.assert_awaited_once()
+        sleep.assert_not_awaited()
+
+    @pytest.mark.parametrize("status", [429, 500, 502, 503, 504, 520])
+    async def test_single_attempt_surfaces_retryable_status(self, transport, status: int) -> None:
+        send, sleep = transport
+        send.return_value = self.response(status)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="http://model.test/v1", retry_requests=False)
+
+        with pytest.raises(ClientResponseError) as exc_info:
+            await client.create_response(input="hello")
+
+        assert exc_info.value.status == status
+        assert exc_info.value.response_content == b'{"error":"unavailable"}'
+        send.assert_awaited_once()
+        sleep.assert_not_awaited()
+
+    @pytest.mark.parametrize("status", [200, 503])
+    async def test_single_attempt_body_timeout(self, transport, status: int) -> None:
+        send, sleep = transport
+        response = self.response(status)
+        failure = TimeoutError("response body timed out")
+        response.read.side_effect = failure
+        response.content.read.side_effect = failure
+        send.return_value = response
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="http://model.test/v1", retry_requests=False)
+
+        with pytest.raises(TimeoutError) as exc_info:
+            await client.create_response(input="hello")
+
+        assert exc_info.value is failure
+        send.assert_awaited_once()
+        sleep.assert_not_awaited()
+
+    @pytest.mark.parametrize("status", [429, 500, 502, 503, 504, 520])
+    async def test_default_retries_recover_from_status(self, transport, status: int) -> None:
+        send, sleep = transport
+        failures = nemo_gym.openai_utils.MAX_NUM_TRIES - 1
+        send.side_effect = [self.response(status) for _ in range(failures)] + [self.response(200)]
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="http://model.test/v1")
+
+        assert await client.create_response(input="hello") == {"id": "resp_1"}
+        assert send.await_count == failures + 1
+        assert sleep.await_count == failures
 
 
 class TestNeMoGymResponseCreateParamsNonStreaming:

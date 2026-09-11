@@ -121,3 +121,6 @@ class ContextHistoryConfig(BaseModel):
     policy: HistoryPolicyConfig = Field(default_factory=HistoryPolicyConfig)
     schedule: CompactionScheduleConfig = Field(default_factory=CompactionScheduleConfig)
     guards: ContextGuardConfig = Field(default_factory=ContextGuardConfig)
+    max_model_calls: int = Field(default=256, ge=1)
+    max_segments: int = Field(default=256, ge=1)
+    max_response_retries: int = Field(default=0, ge=0)

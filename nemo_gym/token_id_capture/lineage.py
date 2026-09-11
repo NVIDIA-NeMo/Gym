@@ -212,6 +212,7 @@ class LineageNode:
     staging_key: str = ""
     staging_chain: list[str] = field(default_factory=list)
     chain_hash: str = ""
+    response_id: str | None = None
 
 
 def stamp_continuation(entry: TokenEntry, request_items: list[dict]) -> TokenEntry:
@@ -229,16 +230,32 @@ class RolloutLineage:
 
     by_fingerprint: dict[str, list[str]] = field(default_factory=dict)
     by_call_id: dict[str, LineageNode] = field(default_factory=dict)
+    by_response_id: dict[str, list[str]] = field(default_factory=dict)
     # Cache the cumulative token count for memory bounds.
     total_tokens: int = 0
 
-    def resolve_node(self, messages: list[dict]) -> tuple[ParentResolutionStatus, "LineageNode | None", str]:
+    def resolve_node(
+        self, messages: list[dict], *, parent_response_id: str | None = None
+    ) -> tuple[ParentResolutionStatus, "LineageNode | None", str]:
         """Return the parent decision without touching token arrays.
 
         Matching needs only fingerprints, digests, and lengths.
         The caller materializes tokens for the single winner.
         """
         fingerprint = assistant_fingerprint(messages)
+        if parent_response_id is not None:
+            call_ids = list(dict.fromkeys(self.by_response_id.get(parent_response_id) or []))
+            if len(call_ids) != 1:
+                return ParentResolutionStatus.UNRESOLVED, None, "no_match" if not call_ids else "ambiguous"
+            node = self.by_call_id.get(call_ids[0])
+            if (
+                node is None
+                or not fingerprint
+                or node.call_id not in self.by_fingerprint.get(fingerprint, [])
+                or not self._continues(node, messages)
+            ):
+                return ParentResolutionStatus.UNRESOLVED, None, "no_match"
+            return ParentResolutionStatus.RESOLVED, node, ""
         if not fingerprint:
             return ParentResolutionStatus.ROOT, None, ""
         # dict.fromkeys: a call id indexed twice (e.g. by racing refreshes) is one candidate.
@@ -258,14 +275,14 @@ class RolloutLineage:
             return ParentResolutionStatus.UNRESOLVED, None, "no_match" if not candidates else "ambiguous"
         return ParentResolutionStatus.RESOLVED, candidates[0], ""
 
-    def resolve(self, messages: list[dict]) -> LineageResolution:
+    def resolve(self, messages: list[dict], *, parent_response_id: str | None = None) -> LineageResolution:
         """Return the immutable parent decision for this request.
 
         A request without model-authored history is a root.
         A request with unverified history is unresolved.
         Never guess among calls with identical output.
         """
-        status, node, reason = self.resolve_node(messages)
+        status, node, reason = self.resolve_node(messages, parent_response_id=parent_response_id)
         if status != ParentResolutionStatus.RESOLVED:
             return LineageResolution(status, reason=reason)
         if node.cum_tokens is None:
@@ -320,6 +337,7 @@ class RolloutLineage:
             context_digest=entry.continuation_context_digest,
             parent_call_id=entry.parent_call_id,
             prompt_is_delta=entry.prompt_is_delta,
+            response_id=entry.response_id,
         )
         previous = self.by_call_id.get(entry.model_call_id)
         if previous is not None:
@@ -329,6 +347,8 @@ class RolloutLineage:
         self.total_tokens += node.cum_len
         self.by_call_id[entry.model_call_id] = node
         self.by_fingerprint.setdefault(entry.continuation_fingerprint, []).append(entry.model_call_id)
+        if entry.response_id:
+            self.by_response_id.setdefault(entry.response_id, []).append(entry.model_call_id)
 
     def record(
         self,
@@ -342,6 +362,7 @@ class RolloutLineage:
         parent_staging_chain: list[str] | None = None,
         cum_len: int | None = None,
         chain_hash: str = "",
+        response_id: str | None = None,
     ) -> None:
         """Index a completed call by its continuation fingerprint.
 
@@ -362,6 +383,7 @@ class RolloutLineage:
             staging_key=staging_key,
             staging_chain=list(parent_staging_chain) if parent_staging_chain else [],
             chain_hash=chain_hash,
+            response_id=response_id,
         )
         previous = self.by_call_id.get(call_id)
         if previous is not None:
@@ -373,6 +395,8 @@ class RolloutLineage:
         fingerprint = assistant_fingerprint(messages)
         if fingerprint:
             self.by_fingerprint.setdefault(fingerprint, []).append(call_id)
+        if response_id:
+            self.by_response_id.setdefault(response_id, []).append(call_id)
 
 
 class LineageIndex:
@@ -445,8 +469,10 @@ class InMemoryLineageStore:
         self.index = LineageIndex(max_rollouts=max_rollouts, max_tokens=max_tokens)
         self._ledgers: dict[str, list[dict]] = {}
 
-    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
-        return self.index.for_rollout(rollout_id).resolve(request_items)
+    async def resolve(
+        self, rollout_id: str, request_items: list[dict], *, parent_response_id: str | None = None
+    ) -> LineageResolution:
+        return self.index.for_rollout(rollout_id).resolve(request_items, parent_response_id=parent_response_id)
 
     async def put(self, entry: TokenEntry) -> None:
         """Publish one committed entry to the worker-local index."""
@@ -480,6 +506,7 @@ class InMemoryLineageStore:
             parent_staging_chain=list(commit.staging_chain),
             cum_len=record.cum_len,
             chain_hash=record.chain_hash,
+            response_id=record.response_id,
         )
         rows.append(row)
 
@@ -684,13 +711,17 @@ class IncrementalLineageStore:
         self._remember_materialized(rollout_id, node.call_id, materialized)
         return materialized
 
-    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
-        return await asyncio.to_thread(self._resolve, rollout_id, request_items)
+    async def resolve(
+        self, rollout_id: str, request_items: list[dict], *, parent_response_id: str | None = None
+    ) -> LineageResolution:
+        return await asyncio.to_thread(self._resolve, rollout_id, request_items, parent_response_id=parent_response_id)
 
-    def _resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
+    def _resolve(
+        self, rollout_id: str, request_items: list[dict], *, parent_response_id: str | None = None
+    ) -> LineageResolution:
         with self._rollout_lock(rollout_id), self._read_locked(rollout_id):
             refs, lineage = self._refresh(rollout_id)
-            status, node, reason = lineage.resolve_node(request_items)
+            status, node, reason = lineage.resolve_node(request_items, parent_response_id=parent_response_id)
             if status != ParentResolutionStatus.RESOLVED:
                 return LineageResolution(status, reason=reason)
             tokens = (
@@ -845,25 +876,39 @@ class FileLineageStore(IncrementalLineageStore):
         records.append(record)
         self._ledger_cache[rollout_id] = (inode, offset, records)
 
-    def _resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
-        resolution = super()._resolve(rollout_id, request_items)
+    def _resolve(
+        self, rollout_id: str, request_items: list[dict], *, parent_response_id: str | None = None
+    ) -> LineageResolution:
+        resolution = super()._resolve(rollout_id, request_items, parent_response_id=parent_response_id)
         if resolution.status != ParentResolutionStatus.UNRESOLVED:
             return resolution
-        match = self._resolve_row(rollout_id, request_items)
+        match = self._resolve_row(rollout_id, request_items, parent_response_id=parent_response_id)
         if match is not None:
             return LineageResolution(ParentResolutionStatus.RESOLVED, match=match)
         return resolution
 
-    def _resolve_row(self, rollout_id: str, request_items: list[dict]) -> LineageMatch | None:
+    def _resolve_row(
+        self, rollout_id: str, request_items: list[dict], *, parent_response_id: str | None = None
+    ) -> LineageMatch | None:
         fingerprint = assistant_fingerprint(request_items)
         if not fingerprint:
             return None
         with self._locked(rollout_id):
             # Failure rows carry no fingerprint and can never resolve as parents.
-            records = [record for record in self._read(rollout_id) if record.get("fingerprint") == fingerprint]
+            records = [
+                record
+                for record in self._read(rollout_id)
+                if (
+                    record.get("response_id") == parent_response_id
+                    if parent_response_id is not None
+                    else record.get("fingerprint") == fingerprint
+                )
+            ]
         if len(records) != 1:
             return None
         record = records[0]
+        if record.get("fingerprint") != fingerprint:
+            return None
         context_len = int(record["context_len"])
         if len(request_items) < context_len:
             return None

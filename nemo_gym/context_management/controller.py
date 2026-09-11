@@ -9,8 +9,8 @@ from collections import Counter
 from dataclasses import replace
 from typing import Literal, Sequence
 
-from responses_api_agents.simple_agent_with_compaction.compaction.config import ContextGuardConfig
-from responses_api_agents.simple_agent_with_compaction.compaction.history import (
+from nemo_gym.context_management.config import ContextGuardConfig
+from nemo_gym.context_management.history import (
     ContextMeasurements,
     FinalizedChunkRecord,
     GuardEvaluation,
@@ -27,12 +27,12 @@ from responses_api_agents.simple_agent_with_compaction.compaction.history import
     _semantic_part_digest,
     _view_digest,
 )
-from responses_api_agents.simple_agent_with_compaction.compaction.materialization import (
+from nemo_gym.context_management.materialization import (
     descriptor_is_append_compatible,
     materialize_history_view,
     ordered_media_is_append_compatible,
 )
-from responses_api_agents.simple_agent_with_compaction.compaction.policies import HistoryPolicy
+from nemo_gym.context_management.policies import HistoryPolicy
 
 
 class HistoryController:
@@ -44,6 +44,7 @@ class HistoryController:
         self._completed_descriptor: tuple[str, ...] | None = None
         self._completed_media_ids: tuple[str, ...] | None = None
         self._completed_view_digest: str | None = None
+        self._completed_items: tuple | None = None
         self._pending_boundary: RewriteBoundaryEvent | None = None
         self._boundary_events: list[RewriteBoundaryEvent] = []
         self._context_epoch = 0
@@ -88,6 +89,10 @@ class HistoryController:
         append_compatible = descriptor_is_append_compatible(
             self._completed_descriptor, view.descriptor
         ) and ordered_media_is_append_compatible(self._completed_media_ids, view.media_ids)
+        # IDs alone do not catch rendering changes (for example a changed omission marker).
+        append_compatible = append_compatible and (
+            self._completed_items == view.items[: len(self._completed_items or ())]
+        )
         boundary = None
         if self._completed_descriptor is not None and not append_compatible:
             assert self._completed_view_digest is not None
@@ -98,7 +103,9 @@ class HistoryController:
                 current_view_digest=view_digest,
             )
             self._pending_boundary = boundary
-            self._boundary_events.append(boundary)
+            # Retain only the current diagnostic. Historical selections can grow
+            # with history; keeping every one would recreate quadratic storage.
+            self._boundary_events[:] = [boundary]
             self._context_epoch += 1
             self._segment_index += 1
 
@@ -125,6 +132,7 @@ class HistoryController:
         self._completed_descriptor = prepared.view.descriptor
         self._completed_media_ids = prepared.view.media_ids
         self._completed_view_digest = prepared.view_digest
+        self._completed_items = prepared.view.items
 
     def _make_boundary(
         self,

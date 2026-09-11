@@ -24,13 +24,15 @@ from time import monotonic, time, time_ns
 from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from aiohttp.client_exceptions import ClientResponseError
-from fastapi import Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     Body,
     SimpleResponsesAPIModel,
+    _decode_capture_parent,
+    _request_messages,
 )
 from nemo_gym.openai_utils import (
     REQUIRED_TOKEN_METADATA_FIELDS,
@@ -61,9 +63,11 @@ from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant
 from nemo_gym.token_id_capture.protocols import CaptureLedger
 from nemo_gym.token_id_capture.records import (
     TOKEN_FIELDS,
+    ParentResolutionStatus,
     response_to_output_items,
     strip_token_fields,
 )
+from nemo_gym.token_id_capture.sink import CAPTURE_PARENT_HEADER
 from nemo_gym.token_id_capture.staging.records import (
     INVALID_COMMIT_COORDS_REASON,
     WORKER_CAPTURE_FAILED_REASON,
@@ -297,7 +301,14 @@ class VLLMModel(SimpleResponsesAPIModel):
         "model",
         "messages",
         "tools",
+        "documents",
+        "reasoning_effort",
+        "add_generation_prompt",
+        "continue_final_message",
+        "add_special_tokens",
+        "chat_template",
         "chat_template_kwargs",
+        "media_io_kwargs",
         "mm_processor_kwargs",
         "required_prefix_token_ids",
     )
@@ -318,6 +329,67 @@ class VLLMModel(SimpleResponsesAPIModel):
                 raise
 
         super().setup_exception_middleware(app)
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        if self._external_capture_enabled:
+            # Outside capture routing: a probe cannot create an intent, call ID,
+            # failure row, or evaluation transcript.
+            app.post("/context/{rollout_id}/measure")(self.measure_context)
+        return app
+
+    async def measure_context(
+        self,
+        request: Request,
+        rollout_id: str,
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+    ) -> dict[str, int]:
+        """Measure the exact next prompt using read-only parent lookup and worker splice."""
+        if not self._external_capture_enabled or self._capture_lineage is None:
+            raise HTTPException(status_code=409, detail="context measurement requires external capture")
+        hint = request.headers.get(CAPTURE_PARENT_HEADER)
+        if hint is None or body.stream:
+            raise HTTPException(
+                status_code=422, detail="context measurement requires an explicit parent and no streaming"
+            )
+        parent = _decode_capture_parent(hint)
+        chain, prefix_len = [], 0
+        if parent is not None:
+            resolution = await self._capture_lineage.resolve(
+                rollout_id, _request_messages(body), parent_response_id=parent
+            )
+            match = resolution.match
+            if (
+                resolution.status != ParentResolutionStatus.RESOLVED
+                or match is None
+                or not match.staging_chain
+                or match.prev_len <= 0
+                or not match.chain_hash
+            ):
+                raise HTTPException(status_code=409, detail="context measurement parent could not be resolved")
+            chain, prefix_len = list(match.staging_chain), match.prev_len
+        chat = self._converter.responses_to_chat_completion_create_params(body)
+        processed = self._preprocess_chat_completion_create_params(request, chat.model_dump(exclude_unset=True))
+        if processed.get("truncate_prompt_tokens") is not None:
+            raise HTTPException(
+                status_code=422, detail="CC context measurement does not support engine prompt truncation"
+            )
+        if processed.get(NG_CAPTURE_FIELD) is not None or processed.get("required_prefix_token_ids") is not None:
+            raise HTTPException(
+                status_code=422, detail="context measurement cannot carry generation capture or inline tokens"
+            )
+        tokenize = self._get_tokenize_chat_body(processed)
+        tokenize.update(ng_prefix_staging_chain=chain, ng_prefix_len=prefix_len)
+        result = await self._resolve_client(request).create_tokenize(**tokenize)
+        count = result.get("prompt_token_count")
+        if (
+            type(count) is not int
+            or count < prefix_len
+            or type(result.get("ng_prefix_len")) is not int
+            or result["ng_prefix_len"] != prefix_len
+        ):
+            raise HTTPException(status_code=502, detail="worker did not provide exact-prefix context measurement")
+        return {"prompt_token_count": count}
 
     def get_converter(self) -> "VLLMConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
@@ -756,6 +828,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         admission = context.capture_admission
         if admission is None:
             return body_dict
+        if context.fail_on_capture_error and body_dict.get("truncate_prompt_tokens") is not None:
+            raise HTTPException(
+                status_code=422, detail="CC requires policy-controlled context compaction, not prompt truncation"
+            )
         body_dict[NG_CAPTURE_FIELD] = admission.model_dump(mode="json")
         body_dict.update(
             logprobs=True,
@@ -1011,7 +1087,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         if self._external_capture_enabled:
-            await self._finalize_external_capture(chat_completion_dict)
+            self._prepare_external_capture(chat_completion_dict)
 
         if self.config.return_token_id_information:
             message_dict = choice_dict["message"]
@@ -1079,13 +1155,27 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         return NeMoGymChatCompletion.model_validate(chat_completion_dict)
 
+    def _prepare_external_capture(self, payload: Dict[str, Any]) -> None:
+        """Strip transport fields and retain acknowledgement until API conversion finishes."""
+        context = current_capture_context()
+        if context is None or not context.external_staging:
+            return
+        context.external_commit_coords = payload.pop(NG_COMMIT_COORDS_FIELD, None)
+        self._strip_capture_transport_fields(payload)
+
+    async def _finalize_served_response(self, response: Any) -> None:
+        """Publish lineage using the final Chat, Responses, or Messages representation."""
+        context = current_capture_context()
+        if context is not None and context.external_staging:
+            await self._finalize_external_capture(_jsonable(response))
+        await super()._finalize_served_response(response)
+
     async def _finalize_external_capture(self, payload: Dict[str, Any]) -> None:
         """Validate and record a response staged by the inference worker.
 
         The worker returns commit coordinates only after ``StagingSink.stage`` succeeds.
         This method validates those coordinates against the active call.
-        It then records the call in the lineage store.
-        Finally, it removes token data and commit coordinates from the served response.
+        It records fingerprints from the final API response in the lineage store.
         """
         context = current_capture_context()
         if context is None or not context.external_staging or context.lineage_store is None:
@@ -1093,11 +1183,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         ledger = context.lineage_store
         if not isinstance(ledger, CaptureLedger):
             raise ValueError("external staging requires a CaptureLedger on the capture context")
-        coords_payload = payload.pop(NG_COMMIT_COORDS_FIELD, None)
+        coords_payload = context.external_commit_coords
         admission = context.capture_admission
         if admission is None:
             # UNRESOLVED — the ledger already carries this call's poison row.
-            self._strip_capture_transport_fields(payload)
             return
         try:
             if coords_payload is None:
@@ -1198,7 +1287,10 @@ class VLLMModel(SimpleResponsesAPIModel):
                     context.model_call_id,
                 )
         finally:
-            self._strip_capture_transport_fields(payload)
+            if context.fail_on_capture_error and not context.committed:
+                # A failed staging acknowledgement may hide a completed write.
+                # CC must stop rather than serve success and continue its chain.
+                raise HTTPException(status_code=502, detail="CC worker capture did not commit")
 
     @staticmethod
     def _strip_capture_transport_fields(payload: Dict[str, Any]) -> None:
@@ -1767,7 +1859,10 @@ class VLLMModel(SimpleResponsesAPIModel):
             client = self._clients[client_idx]
             self._session_id_to_client[session_id] = client
         client = self._session_id_to_client[session_id]
-
+        context = current_capture_context()
+        if context is not None and context.fail_on_capture_error:
+            # Never mutate a cached client shared with ordinary traffic.
+            return client.model_copy(update={"retry_requests": False})
         return client
 
 

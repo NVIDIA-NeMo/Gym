@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Append-only semantic history and exact generation evidence.
-
-This module deliberately does not tokenize requests or construct training
-rows. It owns the semantic, generation-time side of context compaction:
-
-* a complete, append-only semantic history for deriving request views;
-* stable media identities with occurrence-preserving request order;
-* semantic events and stable media identities;
-* policy plans, lineage, and exact generation contracts; and
-* exact completion evidence captured from model responses.
-
-Exact generation evidence and flat-trace construction consume these contracts
-at later integration boundaries. Model-serving dependencies remain unchanged.
-"""
+"""Append-only semantic history, media identities, and policy view structures."""
 
 from __future__ import annotations
 
@@ -22,12 +9,11 @@ import base64
 import hashlib
 import json
 import struct
-from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel
 
 
 BUILTIN_SEMANTIC_PART_KINDS = frozenset(
@@ -288,75 +274,6 @@ class TransformationLineageRecord:
 
 
 @dataclass(frozen=True)
-class TransformationLineageDeltaRecord:
-    transformation_id: str
-    parent_transformation_id: str | None
-    transformation_type: str
-    transformation_version: str
-    configuration_digest: str
-    deterministic: bool
-    lossy: bool
-    generator_contract_id: str | None
-    unit_upserts: tuple[UnitLineageRecord, ...]
-    source_unit_count: int
-    state_digest: str
-    validator_result: Literal["passed"]
-
-
-def lineage_state_digest(
-    records: Mapping[str, UnitLineageRecord] | Sequence[UnitLineageRecord],
-) -> str:
-    values = records.values() if isinstance(records, Mapping) else records
-    return canonical_digest(
-        [
-            {
-                "source_unit_id": record.source_unit_id,
-                "source_digest": record.source_digest,
-                "disposition": record.disposition,
-                "output_unit_ids": record.output_unit_ids,
-                "output_digests": record.output_digests,
-            }
-            for record in sorted(
-                values,
-                key=lambda item: item.source_unit_id,
-            )
-        ]
-    )
-
-
-def build_lineage_delta(
-    lineage: TransformationLineageRecord,
-    *,
-    previous_records: Mapping[str, UnitLineageRecord],
-    parent_transformation_id: str | None,
-) -> tuple[
-    TransformationLineageDeltaRecord,
-    dict[str, UnitLineageRecord],
-]:
-    current_records = {record.source_unit_id: record for record in lineage.unit_records}
-    upserts = tuple(
-        record for source_unit_id, record in current_records.items() if previous_records.get(source_unit_id) != record
-    )
-    return (
-        TransformationLineageDeltaRecord(
-            transformation_id=lineage.transformation_id,
-            parent_transformation_id=parent_transformation_id,
-            transformation_type=lineage.transformation_type,
-            transformation_version=lineage.transformation_version,
-            configuration_digest=lineage.configuration_digest,
-            deterministic=lineage.deterministic,
-            lossy=lineage.lossy,
-            generator_contract_id=lineage.generator_contract_id,
-            unit_upserts=upserts,
-            source_unit_count=len(current_records),
-            state_digest=lineage_state_digest(current_records),
-            validator_result=lineage.validator_result,
-        ),
-        current_records,
-    )
-
-
-@dataclass(frozen=True)
 class PolicyDecisionRecord:
     policy_name: str
     policy_version: str
@@ -369,19 +286,6 @@ class PolicyDecisionRecord:
     inserted_artifact_ids: tuple[str, ...]
     decision_turn: int
     lineage: TransformationLineageRecord
-
-
-class PolicyDecisionEvidence(BaseModel):
-    """Bounded per-call reference to rollout-level transformation lineage."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    policy_name: str
-    policy_version: str
-    config_digest: str
-    decision_turn: int = Field(ge=1)
-    selection_digest: str
-    transformation_id: str
 
 
 @dataclass(frozen=True)
@@ -482,128 +386,6 @@ class PreparedHistoryView:
     boundary: RewriteBoundaryEvent | None
     context_epoch: int
     segment_index: int
-
-
-class GenerationContract(BaseModel):
-    """Composable generation provenance carried once per rollout contract."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: Literal[1] = 1
-    model_contract_id: str
-    tokenizer_contract_id: str
-    template_contract_id: str
-    sampling_contract_id: str
-    processor_contract_id: str
-    compaction_policy_id: str
-    generation_contract_id: str
-    loss_normalization: Literal["global_action_token_mean"] = "global_action_token_mean"
-    training_eligible: bool = False
-    incomplete_reasons: tuple[str, ...] = ()
-
-    @model_validator(mode="after")
-    def validate_composition(self) -> "GenerationContract":
-        component_ids = {
-            "model_contract_id": self.model_contract_id,
-            "tokenizer_contract_id": self.tokenizer_contract_id,
-            "template_contract_id": self.template_contract_id,
-            "sampling_contract_id": self.sampling_contract_id,
-            "processor_contract_id": self.processor_contract_id,
-            "compaction_policy_id": self.compaction_policy_id,
-        }
-        expected = stable_id(
-            "generation-contract",
-            canonical_digest(component_ids),
-        )
-        if self.generation_contract_id != expected:
-            raise ValueError("generation_contract_id does not match its component IDs")
-        if self.training_eligible and self.incomplete_reasons:
-            raise ValueError("A training-eligible generation contract cannot be incomplete")
-        return self
-
-
-class PolicyOutputSpan(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    policy_output_span_id: str
-    model_call_id: str
-    action_ids: tuple[str, ...]
-    start: int = Field(ge=0)
-    end: int = Field(ge=0)
-    eligible: bool
-    old_logprobs_alignment: Literal["sampled_tokens"] = "sampled_tokens"
-
-    @model_validator(mode="after")
-    def validate_span(self) -> "PolicyOutputSpan":
-        if self.end < self.start:
-            raise ValueError("Policy output span end precedes its start")
-        return self
-
-
-class MediaOccurrence(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    media_id: str
-    occurrence_ordinal: int = Field(ge=0)
-    model_call_id: str
-    placeholder_span_or_position: tuple[int, int] | int | None = None
-    processed_dimensions: tuple[int, int] | None = None
-    model_specific_sidecars: dict[str, Any] = Field(default_factory=dict)
-
-
-class ObservedCompletion(BaseModel):
-    """Exact immutable evidence returned by the generation operation itself."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    rollout_id: str
-    completion_id: str
-    action_id: str
-    turn_id: int = Field(ge=1)
-    prepared_request_id: str
-    request_id: str
-    context_epoch: int = Field(ge=0)
-    segment_index: int = Field(ge=0)
-    segment_id: str
-    expected_append_compatible: bool
-    compaction_event_id: str | None = None
-    prompt_token_ids: tuple[int, ...]
-    sampled_token_ids: tuple[int, ...]
-    sampled_logprobs: tuple[float, ...]
-    finish_reason: str | None = None
-    media_ids: tuple[str, ...]
-    policy_decision: PolicyDecisionEvidence
-    generation_contract_id: str
-    policy_output_spans: tuple[PolicyOutputSpan, ...]
-    media_occurrences: tuple[MediaOccurrence, ...]
-    processor_fingerprint: str | None = None
-    eligible: bool = True
-    evidence_source: Literal["generation_response"] = "generation_response"
-
-    @model_validator(mode="after")
-    def validate_alignment(self) -> "ObservedCompletion":
-        if len(self.sampled_token_ids) != len(self.sampled_logprobs):
-            raise ValueError(
-                "sampled token/logprob length mismatch: "
-                f"tokens={len(self.sampled_token_ids)} "
-                f"logprobs={len(self.sampled_logprobs)}"
-            )
-        if len(self.policy_output_spans) != 1:
-            raise ValueError("Initial authority contract requires one policy-output span per model call")
-        span = self.policy_output_spans[0]
-        if (
-            span.start != 0
-            or span.end != len(self.sampled_token_ids)
-            or span.action_ids != (self.action_id,)
-            or span.eligible != self.eligible
-        ):
-            raise ValueError(
-                "Initial policy-output span must cover the complete sampled "
-                "completion and match its action/eligibility"
-            )
-        if tuple(occurrence.media_id for occurrence in self.media_occurrences) != (self.media_ids):
-            raise ValueError("Media occurrence order does not match completion media IDs")
-        return self
 
 
 def _as_item_dict(item: Any) -> dict[str, Any]:
@@ -861,128 +643,6 @@ def normalize_semantic_items(items: Sequence[Any]) -> tuple[dict[str, Any], ...]
     """Normalize a legacy request input for comparison with a semantic view."""
 
     return tuple(strip_completion_evidence(item) for item in items)
-
-
-def capture_observed_completion(
-    output_items: Sequence[Any],
-    *,
-    rollout_id: str,
-    turn_id: int,
-    media_ids: Sequence[str],
-    policy_decision: PolicyDecisionRecord,
-    prepared_request_id: str,
-    context_epoch: int,
-    segment_index: int,
-    segment_id: str,
-    expected_append_compatible: bool,
-    compaction_event_id: str | None,
-    generation_contract_id: str,
-    finish_reason: str | None = None,
-    processor_fingerprint: str | None = None,
-    required_prefix_token_ids: Sequence[int] | None = None,
-) -> ObservedCompletion:
-    """Extract one exact completion record without retaining semantic payloads."""
-
-    evidence_items: list[dict[str, Any]] = []
-    required_fields = {
-        "prompt_token_ids",
-        "generation_token_ids",
-        "generation_log_probs",
-    }
-    for item in output_items:
-        value = _as_item_dict(item)
-        if required_fields <= value.keys():
-            evidence_items.append(value)
-
-    if len(evidence_items) != 1:
-        raise RuntimeError(
-            f"Expected exactly one generation evidence item for a model call, found {len(evidence_items)}"
-        )
-
-    evidence = evidence_items[0]
-    prompt_token_ids = tuple(evidence["prompt_token_ids"])
-    sampled_token_ids = tuple(evidence["generation_token_ids"])
-    sampled_logprobs = tuple(evidence["generation_log_probs"])
-    required_prefix = tuple(required_prefix_token_ids or ())
-    if required_prefix and prompt_token_ids[: len(required_prefix)] != required_prefix:
-        raise RuntimeError(
-            "Generation-observed prompt does not contain the required exact "
-            "prefix: "
-            f"required_count={len(required_prefix)} "
-            f"prompt_count={len(prompt_token_ids)}"
-        )
-    identity = _config_digest(
-        {
-            "rollout_id": rollout_id,
-            "turn_id": turn_id,
-            "prompt_token_ids": prompt_token_ids,
-            "sampled_token_ids": sampled_token_ids,
-        }
-    )
-    completion_id = f"completion-{turn_id:06d}-{identity[:12]}"
-    action_id = f"action-{turn_id:06d}"
-    request_id = stable_id(
-        "request",
-        prepared_request_id,
-        prompt_token_ids,
-        tuple(media_ids),
-    )
-    model_call_id = stable_id("model-call", request_id, completion_id)
-    policy_output_span = PolicyOutputSpan(
-        policy_output_span_id=stable_id(
-            "policy-output-span",
-            model_call_id,
-            action_id,
-            len(sampled_token_ids),
-        ),
-        model_call_id=model_call_id,
-        action_ids=(action_id,),
-        start=0,
-        end=len(sampled_token_ids),
-        eligible=True,
-    )
-    occurrence_counts: Counter[str] = Counter()
-    media_occurrences: list[MediaOccurrence] = []
-    for media_id in media_ids:
-        ordinal = occurrence_counts[media_id]
-        occurrence_counts[media_id] += 1
-        media_occurrences.append(
-            MediaOccurrence(
-                media_id=media_id,
-                occurrence_ordinal=ordinal,
-                model_call_id=model_call_id,
-            )
-        )
-    return ObservedCompletion(
-        rollout_id=rollout_id,
-        completion_id=completion_id,
-        action_id=action_id,
-        turn_id=turn_id,
-        prepared_request_id=prepared_request_id,
-        request_id=request_id,
-        context_epoch=context_epoch,
-        segment_index=segment_index,
-        segment_id=segment_id,
-        expected_append_compatible=expected_append_compatible,
-        compaction_event_id=compaction_event_id,
-        prompt_token_ids=prompt_token_ids,
-        sampled_token_ids=sampled_token_ids,
-        sampled_logprobs=sampled_logprobs,
-        finish_reason=finish_reason,
-        media_ids=tuple(media_ids),
-        policy_decision=PolicyDecisionEvidence(
-            policy_name=policy_decision.policy_name,
-            policy_version=policy_decision.policy_version,
-            config_digest=policy_decision.config_digest,
-            decision_turn=policy_decision.decision_turn,
-            selection_digest=policy_decision.selection_digest,
-            transformation_id=(policy_decision.lineage.transformation_id),
-        ),
-        generation_contract_id=generation_contract_id,
-        policy_output_spans=(policy_output_span,),
-        media_occurrences=tuple(media_occurrences),
-        processor_fingerprint=processor_fingerprint,
-    )
 
 
 def _ordered_id_digest(ids: Sequence[str]) -> str:
