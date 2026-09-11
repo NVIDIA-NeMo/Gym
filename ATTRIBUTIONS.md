@@ -228,6 +228,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 
 | Component | License | Upstream | Notes |
 |-----------|---------|----------|-------|
+| EnterpriseOps-Gym | Apache-2.0 | https://github.com/ServiceNow/EnterpriseOps-Gym | Pinned source checkout; scoring semantics are ported in `resources_servers/enterpriseops_gym/verifier_engine.py`, and public service tool schemas are redistributed in `nvidia/NeMo-Gym-EnterpriseOps-Assets`. |
 | PinchBench skill | MIT | https://github.com/pinchbench/skill | Cloned and patched at image build (modification). |
 
 ---
