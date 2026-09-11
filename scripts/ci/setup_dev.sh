@@ -12,6 +12,7 @@ gym_ci_setup_dev() {
     local setup_uv_cache_dir
     local setup_uv_bin_dir
     local setup_uv_install_url
+    local setup_uv_installer
 
     setup_ci_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     setup_repo_root="$(cd "${setup_ci_dir}/../.." && pwd)"
@@ -25,7 +26,11 @@ gym_ci_setup_dev() {
     fi
 
     cd "${setup_repo_root}"
-    curl -LsSf "${setup_uv_install_url}" | env UV_UNMANAGED_INSTALL="${setup_uv_bin_dir}" sh
+    setup_uv_installer="$(
+        curl -LsSf --retry 5 --retry-all-errors --retry-max-time 300 \
+            --connect-timeout 30 --max-time 120 "${setup_uv_install_url}"
+    )"
+    printf '%s\n' "${setup_uv_installer}" | env UV_UNMANAGED_INSTALL="${setup_uv_bin_dir}" sh
     export PATH="${setup_uv_bin_dir}:${PATH}"
     test "$(uv --version | awk '{print $2}')" = "0.11.29"
     # Resolve uv's default when the CI provider did not supply a cache directory, then export the
