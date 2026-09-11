@@ -13,6 +13,8 @@ dependencies = [
   "nemo-gym",
   "httpx",
   "pillow",
+  "numpy>=1.26.4,<2",
+  "scikit-image",
   # The qualified WebArena evaluation image contains the Playwright 1.55
   # browser bundle (Chromium 1187).  Python and browser revisions must match.
   "playwright==1.55.0",

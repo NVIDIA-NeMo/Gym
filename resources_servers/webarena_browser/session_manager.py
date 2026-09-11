@@ -12,6 +12,7 @@ from resources_servers.webarena_browser.config import WebArenaBrowserResourcesSe
 
 WEBARENA_VERIFIER_PROFILES = {
     WebBenchmark.WEBARENA: "webarena_classic",
+    WebBenchmark.VISUALWEBARENA: "visualwebarena_classic",
 }
 
 
@@ -26,7 +27,7 @@ class WebArenaBrowserSessionManager(WebSessionManager):
         if task.action_profile != WebActionProfile.COMPUTER_USE:
             raise ValueError("webarena_browser requires action_profile=computer_use")
         if task.benchmark not in WEBARENA_VERIFIER_PROFILES:
-            raise ValueError("webarena_browser only accepts WebArena tasks")
+            raise ValueError("webarena_browser only accepts WebArena-family tasks")
         expected_verifier = WEBARENA_VERIFIER_PROFILES[task.benchmark]
         if task.verifier_profile != expected_verifier:
             raise ValueError(

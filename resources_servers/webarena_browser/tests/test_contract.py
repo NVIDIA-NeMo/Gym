@@ -74,6 +74,25 @@ def _browser_lease() -> BrowserSessionHandle:
     )
 
 
+def _visualwebarena_task(**updates) -> WebTask:
+    task = WebTask(
+        benchmark="visualwebarena",
+        task_id="0",
+        intent="Return a number at least three",
+        runtime_profile="visual_browser",
+        action_profile="computer_use",
+        verifier_profile="visualwebarena_classic",
+        original_metadata={
+            "id": "visualwebarena-0",
+            "eval": {
+                "eval_types": ["string_match"],
+                "reference_answers": {"required_values": [">= 3"]},
+            },
+        },
+    )
+    return task.model_copy(update=updates)
+
+
 def test_resource_rejects_non_webarena_benchmark() -> None:
     manager = WebArenaBrowserSessionManager(_config())
     with pytest.raises(ValueError, match="benchmark 'webvoyager' is disabled"):
@@ -95,6 +114,10 @@ def test_resource_reuses_the_shared_visual_browser_contract() -> None:
         "artifacts",
         "browser_lease",
     ]
+
+
+def test_resource_accepts_visualwebarena_with_its_verifier() -> None:
+    WebArenaBrowserSessionManager(_config())._validate_task(_visualwebarena_task())
 
 
 def test_evaluator_fails_closed_without_installed_benchmark() -> None:
@@ -159,6 +182,24 @@ def test_reference_judge_default_url_includes_single_v1_prefix(monkeypatch) -> N
 
     assert classic_evaluation._judge_chat([{"role": "user", "content": "judge this"}]) == "ok"
     assert requested_urls == ["https://inference-api.nvidia.com/v1/chat/completions"]
+
+
+def test_visualwebarena_evaluator_scores_rule_only_task() -> None:
+    evaluator = WebArenaTaskEvaluator(config=_config())
+    task = _visualwebarena_task()
+
+    evaluator.prepare(task=task, observation=WebObservation(), browser_context=_evaluation_context())
+    result = evaluator.evaluate(
+        task=task,
+        observation=WebObservation(),
+        final_answer="4",
+        browser_context=_evaluation_context(),
+    )
+
+    assert result.reward == 1.0
+    assert result.task_success
+    assert result.valid_sample
+    assert result.verifier_version == "visualwebarena-reference-3b775dc"
 
 
 def test_webarena_evaluator_merges_api_and_browser_snapshots(monkeypatch) -> None:
@@ -258,6 +299,8 @@ def test_component_declares_isolated_runtime_dependencies() -> None:
     assert "nemo-gym" in dependencies
     assert "nemo-gym[dev]" not in dependencies
     assert "playwright==1.55.0" in dependencies
+    assert "numpy>=1.26.4,<2" in dependencies
+    assert "scikit-image" in dependencies
     assert project["tool"]["uv"]["sources"]["nemo-gym"] == {
         "path": "../..",
         "editable": True,
