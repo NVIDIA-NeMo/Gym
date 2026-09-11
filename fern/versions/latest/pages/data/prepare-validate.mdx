@@ -65,7 +65,13 @@ NeMo Gym uses JSONL files. Each line requires a `responses_create_params` field 
 
 ### With Verification Fields
 
-Most resources servers add fields for reward computation:
+Verification fields are task-owned and specific to the selected resources server. Inspect its typed schema first:
+
+```bash
+gym env schema --resources-server <name>
+```
+
+A server that reads `question` and `expected_answer` at the row top level accepts rows such as:
 
 ```json
 {
@@ -77,9 +83,21 @@ Most resources servers add fields for reward computation:
 }
 ```
 
-<Tip>
-Check `resources_servers/<name>/README.md` for required fields specific to each resources server.
+Some existing servers instead read task fields from the legacy `verifier_metadata` container. Their schema marks those fields with `legacy_location: verifier_metadata`, and their committed data uses this form:
 
+```json
+{
+  "responses_create_params": {
+    "input": [{"role": "user", "content": "What is the weather in Paris?"}]
+  },
+  "verifier_metadata": {"expected_city": "Paris"}
+}
+```
+
+Do not duplicate a field at the top level and inside `verifier_metadata`. Conflicting duplicates fail validation; equal duplicates add no information. Use the placement required by the selected server until its runtime request contract is migrated.
+
+<Tip>
+The flat schema is authoritative for field names, types, and requiredness. The `legacy_location` annotation records only where the current wire contract expects a field.
 </Tip>
 
 ### Key Properties
