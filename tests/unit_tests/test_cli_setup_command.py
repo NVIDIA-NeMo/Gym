@@ -416,6 +416,28 @@ class TestCLISetupCommandRunCommand:
         assert popen.call_args.kwargs["stdout"] == "isolated stdout"
         assert popen.call_args.kwargs["stderr"] == "isolated stderr"
 
+    def test_uv_lock_timeout_is_propagated_to_server_processes(self, monkeypatch: MonkeyPatch) -> None:
+        popen, _ = self._setup(monkeypatch)
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/my path"),
+            global_config_dict={"uv_cache_dir": "shared cache", "uv_lock_timeout_seconds": 1800},
+        )
+
+        assert popen.call_args.kwargs["env"]["UV_LOCK_TIMEOUT"] == "1800"
+
+    def test_uv_lock_timeout_absent_when_unconfigured(self, monkeypatch: MonkeyPatch) -> None:
+        popen, _ = self._setup(monkeypatch)
+
+        run_command(
+            command="my command",
+            working_dir_path=Path("/my path"),
+            global_config_dict={"uv_cache_dir": "shared cache"},
+        )
+
+        assert "UV_LOCK_TIMEOUT" not in popen.call_args.kwargs["env"]
+
 
 class TestGetNemoGymInstallFlags:
     """Test _get_nemo_gym_install_flags helper function."""

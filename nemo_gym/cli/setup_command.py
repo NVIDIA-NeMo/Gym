@@ -30,6 +30,7 @@ from nemo_gym.global_config import (
     PYTHON_VERSION_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
     UV_CACHE_DIR_KEY_NAME,
+    UV_LOCK_TIMEOUT_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
     get_global_config_dict,
@@ -213,6 +214,11 @@ def run_command(
     custom_env["PYTHONPATH"] = ":".join(py_path_entries)
 
     custom_env["UV_CACHE_DIR"] = global_config_dict[UV_CACHE_DIR_KEY_NAME]
+    # Servers start concurrently and contend for the lock on that shared cache, so the wait has to
+    # cover a cold install of the slowest one rather than uv's 300s default.
+    uv_lock_timeout = global_config_dict.get(UV_LOCK_TIMEOUT_KEY_NAME)
+    if uv_lock_timeout is not None:
+        custom_env["UV_LOCK_TIMEOUT"] = str(uv_lock_timeout)
 
     log_dir = global_config_dict.get(NEMO_GYM_LOG_DIR_KEY_NAME)
     if log_dir:
