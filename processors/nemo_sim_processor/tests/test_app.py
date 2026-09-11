@@ -9,14 +9,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nemo_gym.config_types import AgentServerRef, ModelServerRef
-from nemo_gym.processors.nemo_sim_processor import (
+from nemo_gym.server_utils import ServerClient
+from processors.nemo_sim_processor.app import (
     NeMoSimProcessor,
     NeMoSimProcessorConfig,
     NeMoSimRunRequest,
     _ConversationBridge,
     _GymModelFacade,
 )
-from nemo_gym.server_utils import ServerClient
 
 
 def _model_response(response_id: str, text: str) -> dict:
