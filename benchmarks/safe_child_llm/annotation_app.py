@@ -175,7 +175,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result", action="append", required=True, metavar="MODEL=PATH")
     parser.add_argument("--annotations", type=Path, default=Path("results/safe_child_llm_human_labels.jsonl"))
-    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--port", type=int, default=8877)
     args = parser.parse_args()
     items = load_results(args.result)
     if not items:

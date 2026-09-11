@@ -27,7 +27,7 @@ python -m benchmarks.safe_child_llm.annotation_app \
   --result ultra-3=results/ultra-3.jsonl
 ```
 
-The app binds only to `127.0.0.1:8765`. Labels are atomically saved to
+The app binds only to `127.0.0.1:8877`. Labels are atomically saved to
 `results/safe_child_llm_human_labels.jsonl` with safety verdict, response style, age appropriateness, and notes.
 
 Code and source data are MIT licensed upstream. NeMo Gym adapter code is Apache-2.0. Prepared JSONL is generated
