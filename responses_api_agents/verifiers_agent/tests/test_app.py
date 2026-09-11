@@ -12,15 +12,54 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 from unittest.mock import MagicMock, patch
+
+import httpx
+from openai import AsyncOpenAI
 
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.verifiers_agent.app import (
     VerifiersAgent,
     VerifiersAgentConfig,
+    _NoStoreCookieJar,
 )
+
+
+POLICY_URL = "http://policy.test/v1"
+SESSION_COOKIE = "VLLMModel___policy_model=abc123; Path=/"
+
+
+def _policy_server_that_sets_a_session_cookie(seen_cookie_headers: list) -> httpx.MockTransport:
+    """Stand-in for Gym's vllm_model server.
+
+    Like the real one (SessionMiddleware + add_session_id in
+    nemo_gym/server_utils.py) it puts a session cookie on EVERY response, and
+    it records the Cookie header each request arrived with so a test can see
+    whether the client replayed it.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_cookie_headers.append(request.headers.get("cookie"))
+        body = {
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "m",
+            "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"},
+            ],
+        }
+        return httpx.Response(200, json=body, headers={"set-cookie": SESSION_COOKIE})
+
+    return httpx.MockTransport(handler)
+
+
+async def _three_chat_completions(openai_client: AsyncOpenAI) -> None:
+    for _ in range(3):
+        await openai_client.chat.completions.create(model="m", messages=[{"role": "user", "content": "hi"}])
 
 
 class TestApp:
@@ -109,53 +148,40 @@ class TestApp:
         assert output[2]["content"][0]["text"] == "answer"
         assert output[2]["prompt_token_ids"] == [3]
 
+
+class TestPolicyClient:
+    """The policy client decides which vLLM engine serves a rollout.
+
+    vllm_model routes a request to ``sha256(session_id) % n_engines`` and mints
+    the session id per cookie jar, so a client that replays Set-Cookie pins
+    every rollout in this process to one engine (CMH 3670120, 2026-09-10: 6 of
+    48 engines busy). These tests hold the two properties the fix relies on:
+    the client is shared (a hot connection pool; per-rollout clients aborted
+    468/512 rollouts on CMH 3670792 racing the router's keep-alive close) and
+    it never sends a cookie back.
+    """
+
+    @staticmethod
+    def _agent() -> VerifiersAgent:
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        )
+        return VerifiersAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+    def test_policy_client_is_shared_across_rollouts(self) -> None:
+        agent = self._agent()
+        with patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL):
+            first = agent._get_client()
+            second = agent._get_client()
+        assert first is second
+        assert str(first.client.base_url).rstrip("/") == POLICY_URL
+
     def test_client_base_url_carries_the_rollout_capture_prefix(self) -> None:
-        """Model-call capture is keyed by the ``/ng-rollout/<id>`` URL prefix.
-
-        Without it the capture store stays empty for every rollout, the projected
-        trajectory reports ``model_call_capture_no_records``, and every
-        rollout-health check degrades to ``unobserved`` -- a silently broken run
-        then looks identical to a healthy low-scoring one.
-        """
-        config = VerifiersAgentConfig(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            name="",
-            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
-        )
-        agent = VerifiersAgent(config=config, server_client=MagicMock(spec=ServerClient))
-
-        def fake_resolve(model_server_name: str, rollout_id: str | None = None) -> str:
-            prefix = f"/ng-rollout/{rollout_id}" if rollout_id else ""
-            return f"http://policy{prefix}/v1"
-
-        with (
-            patch.object(VerifiersAgent, "resolve_model_base_url", side_effect=fake_resolve) as resolve,
-            patch.object(VerifiersAgent, "rollout_id_from_run", lambda _self, body: body.rollout_id),
-        ):
-            first = agent._get_client(MagicMock(rollout_id="7-2"))
-            assert str(first.client.base_url).rstrip("/") == "http://policy/ng-rollout/7-2/v1"
-
-            # A second rollout must not reuse the first rollout's prefixed client.
-            second = agent._get_client(MagicMock(rollout_id="7-3"))
-            assert str(second.client.base_url).rstrip("/") == "http://policy/ng-rollout/7-3/v1"
-            assert second is not first
-
-            # Same rollout is still served from cache, not re-resolved.
-            assert agent._get_client(MagicMock(rollout_id="7-2")) is first
-            assert resolve.call_count == 2
-
-    def test_client_base_url_is_unprefixed_when_capture_is_disabled(self) -> None:
-        """``rollout_id_from_run`` returns ``None`` with capture off; URL is unchanged."""
-        config = VerifiersAgentConfig(
-            host="0.0.0.0",
-            port=8080,
-            entrypoint="",
-            name="",
-            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
-        )
-        agent = VerifiersAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        agent = self._agent()
 
         def fake_resolve(model_server_name: str, rollout_id: str | None = None) -> str:
             prefix = f"/ng-rollout/{rollout_id}" if rollout_id else ""
@@ -163,8 +189,55 @@ class TestApp:
 
         with (
             patch.object(VerifiersAgent, "resolve_model_base_url", side_effect=fake_resolve),
+            patch.object(VerifiersAgent, "rollout_id_from_run", lambda _self, body: body.rollout_id),
+        ):
+            first = agent._get_client(MagicMock(rollout_id="7-2"))
+            second = agent._get_client(MagicMock(rollout_id="7-3"))
+
+        assert str(first.client.base_url).rstrip("/") == "http://policy/ng-rollout/7-2/v1"
+        assert str(second.client.base_url).rstrip("/") == "http://policy/ng-rollout/7-3/v1"
+        assert second is not first
+        assert second.client._client is first.client._client
+
+    def test_client_base_url_is_unprefixed_when_capture_is_disabled(self) -> None:
+        agent = self._agent()
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL),
             patch.object(VerifiersAgent, "rollout_id_from_run", lambda _self, body: None),
         ):
-            client = agent._get_client(MagicMock())
-            assert str(client.client.base_url).rstrip("/") == "http://policy/v1"
-            assert agent._get_client(MagicMock()) is client
+            first = agent._get_client(MagicMock())
+            second = agent._get_client(MagicMock())
+
+        assert first is second
+        assert str(first.client.base_url).rstrip("/") == POLICY_URL
+
+    def test_policy_client_never_replays_the_session_cookie(self) -> None:
+        agent = self._agent()
+        with patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL):
+            openai_client = agent._get_client().client
+
+        # The jar must be ours. httpx.Cookies adopts a CookieJar instance but
+        # copies an httpx.Cookies into a fresh stdlib jar, which silently
+        # discards the subclass -- exactly the mistake this line catches.
+        assert isinstance(openai_client._client.cookies.jar, _NoStoreCookieJar)
+
+        seen = []
+        openai_client._client._transport = _policy_server_that_sets_a_session_cookie(seen)
+        asyncio.run(_three_chat_completions(openai_client))
+
+        assert seen == [None, None, None], seen
+
+    def test_a_default_openai_client_would_replay_the_session_cookie(self) -> None:
+        """Positive control: proves the previous test can fail.
+
+        The stock AsyncOpenAI sits on an httpx client that persists cookies, so
+        from the second request on it carries the session cookie back -- the
+        behaviour that pinned every rollout to one engine.
+        """
+        openai_client = AsyncOpenAI(base_url=POLICY_URL, api_key="EMPTY")  # pragma: allowlist secret
+        seen = []
+        openai_client._client._transport = _policy_server_that_sets_a_session_cookie(seen)
+        asyncio.run(_three_chat_completions(openai_client))
+
+        assert seen[0] is None
+        assert seen[1] == seen[2] == SESSION_COOKIE.split(";")[0]

@@ -17,11 +17,12 @@ from __future__ import annotations
 import json
 import logging
 import traceback
-from typing import Any, Optional
+from http.cookiejar import CookieJar
+from typing import Any
 
 import verifiers as vf
 from fastapi import Body, Request, Response
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 from pydantic import ConfigDict, Field
 from verifiers.clients import NeMoRLChatCompletionsClient
 
@@ -153,6 +154,18 @@ class VerifiersAgentVerifyResponse(BaseVerifyResponse):
     reward: float
 
 
+class _NoStoreCookieJar(CookieJar):
+    """A cookie jar that drops every Set-Cookie, so no request ever carries one.
+
+    See VerifiersAgent._get_client: the policy server's session cookie decides
+    which vLLM engine serves a request, and a jar that remembers it would pin
+    every rollout in this process to one engine.
+    """
+
+    def set_cookie(self, cookie) -> None:
+        return None
+
+
 class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     model_name: str = Field(default="", description="Model name")
@@ -186,9 +199,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
     config: VerifiersAgentConfig
 
     envs_cache: dict[str, Any] = Field(default_factory=dict)
-    # Keyed by (model-server name, rollout id): the rollout id selects the
-    # capture prefix baked into the client's base_url.
-    client_cache: dict[tuple[str, Optional[str]], NeMoRLChatCompletionsClient] = Field(default_factory=dict)
+    client_cache: dict[str, NeMoRLChatCompletionsClient] = Field(default_factory=dict)
 
     def _get_env(self, vf_env_id: str) -> vf.Environment:
         if vf_env_id not in self.envs_cache:
@@ -196,29 +207,56 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         return self.envs_cache[vf_env_id]
 
     def _get_client(self, body: Any = None) -> NeMoRLChatCompletionsClient:
-        """Return the model client for this run, carrying its capture prefix.
+        """Return a rollout-prefixed client over one shared policy transport.
 
-        Model-call capture is keyed by the ``/ng-rollout/<id>`` URL prefix, so a
-        client built from the bare model-server root is never attributed to a
-        rollout: the capture store stays empty, the projected trajectory reports
-        ``model_call_capture_no_records``, and every rollout-health check
-        degrades to ``unobserved``. The cache is therefore keyed by rollout too —
-        one client per server would pin the first rollout's prefix onto all of
-        them. ``rollout_id_from_run`` returns ``None`` when capture is disabled,
-        which collapses this back to the unprefixed URL and a single cache entry.
+        The vllm_model server picks a vLLM engine per session
+        (``sha256(session_id) % len(base_urls)`` in
+        responses_api_models/vllm_model/app.py ``_resolve_client``) and mints the
+        session id per cookie jar (nemo_gym/server_utils.py
+        ``setup_session_middleware``). openai's AsyncOpenAI sits on an httpx client
+        that persists cookies, so a plain shared client is one session and
+        therefore one engine: on CMH job 3670120 (2026-09-10) 512 concurrent
+        rollouts ran on 6 of 48 engines while 42 sat idle. Gym's own aiohttp
+        client avoids exactly this with a DummyCookieJar; ``_NoStoreCookieJar``
+        is the httpx equivalent. Every request is then a fresh session and the
+        router spreads them over every engine.
+
+        Why not a client per rollout: each rollout's single pooled connection sat
+        idle through its tool phases, the router's uvicorn closes idle
+        connections after 30 s, and the next turn raced that close -- CMH 3670792
+        aborted 468 of 512 rollouts with
+        ``APIConnectionError -> ReadError(BrokenResourceError)`` while the
+        shared-client runs before it had zero. One shared pool keeps connections
+        hot. The price is per-turn engine affinity, which Gym's own client does
+        not have either.
+
+        Model-call capture is keyed by the ``/ng-rollout/<id>`` URL prefix. The
+        lightweight per-run OpenAI client copy changes only ``base_url`` and
+        shares the cached client's transport, so calls remain correlated without
+        accumulating a connection pool per rollout. ``rollout_id_from_run``
+        returns ``None`` when capture is disabled, preserving the shared
+        unprefixed client path.
         """
-        rollout_id = self.rollout_id_from_run(body) if body is not None else None
-        cache_key = (self.config.model_server.name, rollout_id)
+        cache_key = self.config.model_server.name
         if cache_key not in self.client_cache:
-            model_server_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
-
             openai_client = AsyncOpenAI(
-                base_url=model_server_url,
+                base_url=self.resolve_model_base_url(self.config.model_server.name),
                 api_key="EMPTY",  # pragma: allowlist secret
+                # DefaultAsyncHttpxClient keeps the SDK's pool limits and redirect
+                # policy. Pass the bare CookieJar: httpx.Cookies adopts a CookieJar
+                # instance as-is but COPIES an httpx.Cookies into a fresh stdlib
+                # jar, which would silently discard the no-store behaviour.
+                http_client=DefaultAsyncHttpxClient(cookies=_NoStoreCookieJar()),
             )
             self.client_cache[cache_key] = NeMoRLChatCompletionsClient(openai_client)
 
-        return self.client_cache[cache_key]
+        shared_client = self.client_cache[cache_key]
+        rollout_id = self.rollout_id_from_run(body) if body is not None else None
+        if rollout_id is None:
+            return shared_client
+
+        model_server_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
+        return NeMoRLChatCompletionsClient(shared_client.client.copy(base_url=model_server_url))
 
     def _convert_trajectory_to_output(self, rollout_output: dict) -> list:
         assistant_tokens = self._collect_assistant_tokens(rollout_output.get("trajectory") or [])

@@ -77,6 +77,17 @@ def test_policy_model_injects_run_args():
     assert benchmark.run["policy_api_key"] == "dummy"  # pragma: allowlist secret
 
 
+def test_policy_model_injects_served_model_name_when_set():
+    config = SubmitConfig.model_validate(
+        _config(
+            services={"svc": {**SERVICE, "served_model_name": "my-model"}},
+            driver={**DRIVER, "policy_model": "svc"},
+        )
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    assert benchmark.run["policy_model_name"] == "my-model"
+
+
 def test_policy_model_conflict_raises():
     driver = {**DRIVER, "policy_model": "svc", "benchmarks": {"gsm8k": {"run": {"policy_base_url": "http://other"}}}}
     with pytest.raises(ValidationError, match="already sets"):
