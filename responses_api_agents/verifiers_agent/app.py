@@ -17,11 +17,12 @@ from __future__ import annotations
 import json
 import logging
 import traceback
+from http.cookiejar import CookieJar
 from typing import Any
 
 import verifiers as vf
 from fastapi import Body, Request, Response
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 from pydantic import ConfigDict, Field
 from verifiers.clients import NeMoRLChatCompletionsClient
 
@@ -154,6 +155,18 @@ class VerifiersAgentVerifyResponse(BaseVerifyResponse):
     reward: float
 
 
+class _NoStoreCookieJar(CookieJar):
+    """A cookie jar that drops every Set-Cookie, so no request ever carries one.
+
+    See VerifiersAgent._get_client: the policy server's session cookie decides
+    which vLLM engine serves a request, and a jar that remembers it would pin
+    every rollout in this process to one engine.
+    """
+
+    def set_cookie(self, cookie) -> None:
+        return None
+
+
 class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     model_name: str = Field(default="", description="Model name")
@@ -194,21 +207,52 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             self.envs_cache[vf_env_id] = vf.load_environment(vf_env_id, **self.config.vf_env_args)
         return self.envs_cache[vf_env_id]
 
+    def _policy_model_server_url(self) -> str:
+        server_config_dict = get_first_server_config_dict(
+            self.server_client.global_config_dict,
+            self.config.model_server.name,
+        )
+        model_server_url = f"http://{server_config_dict.host}:{server_config_dict.port}"
+
+        if not model_server_url.endswith("/v1"):
+            model_server_url = model_server_url.rstrip("/") + "/v1"
+
+        return model_server_url
+
     def _get_client(self) -> NeMoRLChatCompletionsClient:
+        """One shared policy client per process, with a cookie jar that never stores.
+
+        The vllm_model server picks a vLLM engine per session
+        (``sha256(session_id) % len(base_urls)`` in
+        responses_api_models/vllm_model/app.py ``_resolve_client``) and mints the
+        session id per cookie jar (nemo_gym/server_utils.py
+        ``setup_session_middleware``). openai's AsyncOpenAI sits on an httpx client
+        that persists cookies, so a plain shared client is one session and
+        therefore one engine: on CMH job 3670120 (2026-09-10) 512 concurrent
+        rollouts ran on 6 of 48 engines while 42 sat idle. Gym's own aiohttp
+        client avoids exactly this with a DummyCookieJar; ``_NoStoreCookieJar``
+        is the httpx equivalent. Every request is then a fresh session and the
+        router spreads them over every engine.
+
+        Why not a client per rollout: each rollout's single pooled connection sat
+        idle through its tool phases, the router's uvicorn closes idle
+        connections after 30 s, and the next turn raced that close -- CMH 3670792
+        aborted 468 of 512 rollouts with
+        ``APIConnectionError -> ReadError(BrokenResourceError)`` while the
+        shared-client runs before it had zero. One shared pool keeps connections
+        hot. The price is per-turn engine affinity, which Gym's own client does
+        not have either.
+        """
         cache_key = self.config.model_server.name
         if cache_key not in self.client_cache:
-            server_config_dict = get_first_server_config_dict(
-                self.server_client.global_config_dict,
-                self.config.model_server.name,
-            )
-            model_server_url = f"http://{server_config_dict.host}:{server_config_dict.port}"
-
-            if not model_server_url.endswith("/v1"):
-                model_server_url = model_server_url.rstrip("/") + "/v1"
-
             openai_client = AsyncOpenAI(
-                base_url=model_server_url,
+                base_url=self._policy_model_server_url(),
                 api_key="EMPTY",  # pragma: allowlist secret
+                # DefaultAsyncHttpxClient keeps the SDK's pool limits and redirect
+                # policy. Pass the bare CookieJar: httpx.Cookies adopts a CookieJar
+                # instance as-is but COPIES an httpx.Cookies into a fresh stdlib
+                # jar, which would silently discard the no-store behaviour.
+                http_client=DefaultAsyncHttpxClient(cookies=_NoStoreCookieJar()),
             )
             self.client_cache[cache_key] = NeMoRLChatCompletionsClient(openai_client)
 

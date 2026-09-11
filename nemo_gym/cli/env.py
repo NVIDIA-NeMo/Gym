@@ -494,8 +494,13 @@ class RunHelper:  # pragma: no cover
         if global_config_dict[DRY_RUN_KEY_NAME]:
             self.wait_for_dry_run_spinup()
         else:
-            self.wait_for_spinup()
-            self.wait_for_model_endpoints(global_config_dict)
+            self.wait_for_server_readiness(global_config_dict)
+
+    def wait_for_server_readiness(self, global_config_dict: DictConfig) -> None:
+        """Mark the head ready only after every managed server and model endpoint is reachable."""
+        self.wait_for_spinup()
+        self.wait_for_model_endpoints(global_config_dict)
+        self._head_server_instance.mark_ready()
 
     def display_server_instance_info(self) -> None:
         if not self._server_instance_display_configs:

@@ -279,12 +279,55 @@ def join_model_call_observations(
 
     result = bundle.model_copy()
     result.records = [
-        record.model_copy() if isinstance(record, (AgentInvocation, ContextCompactionObservation)) else record
+        record.model_copy(update={"model_calls": list(record.model_calls)})
+        if isinstance(record, AgentInvocation)
+        else record.model_copy()
+        if isinstance(record, ContextCompactionObservation)
+        else record
         for record in bundle.records
     ]
     invocations = [record for record in result.records if isinstance(record, AgentInvocation)]
     compactions = [record for record in result.records if isinstance(record, ContextCompactionObservation)]
     captured = list(calls)
+
+    invocations_by_id = {invocation.invocation_id: invocation for invocation in invocations}
+    reference_keys = {
+        invocation.invocation_id: {
+            (
+                reference.model_call_id,
+                (reference.model_ref.type, reference.model_ref.name) if reference.model_ref is not None else None,
+                reference.response_id,
+            )
+            for reference in invocation.model_calls
+        }
+        for invocation in invocations
+    }
+    for call in captured:
+        if not call.client_session_id or not call.model_call_id:
+            continue
+        invocation = invocations_by_id.get(call.client_session_id)
+        if invocation is None:
+            continue
+        model_ref_key = (call.model_ref.type, call.model_ref.name) if call.model_ref is not None else None
+        matching_keys = {
+            (call.model_call_id, None, None),
+            (call.model_call_id, model_ref_key, None),
+            (call.model_call_id, None, call.response_id),
+            (call.model_call_id, model_ref_key, call.response_id),
+        }
+        if model_ref_key is not None and call.response_id is not None:
+            matching_keys.add((None, model_ref_key, call.response_id))
+        invocation_keys = reference_keys[invocation.invocation_id]
+        if matching_keys & invocation_keys:
+            continue
+        reference = ModelCallRef(
+            model_call_id=call.model_call_id,
+            model_ref=call.model_ref,
+            response_id=call.response_id,
+        )
+        invocation.model_calls.append(reference)
+        invocation_keys.add((reference.model_call_id, model_ref_key, reference.response_id))
+
     by_call_id: dict[str, list[ModelCallRecord]] = {}
     by_response: dict[tuple[str, str, str], list[ModelCallRecord]] = {}
     for call in captured:
