@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import traceback
-from typing import Any
+from typing import Any, Optional
 
 import verifiers as vf
 from fastapi import Body, Request, Response
@@ -28,7 +28,6 @@ from verifiers.clients import NeMoRLChatCompletionsClient
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -187,24 +186,31 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
     config: VerifiersAgentConfig
 
     envs_cache: dict[str, Any] = Field(default_factory=dict)
-    client_cache: dict[str, NeMoRLChatCompletionsClient] = Field(default_factory=dict)
+    # Keyed by (model-server name, rollout id): the rollout id selects the
+    # capture prefix baked into the client's base_url.
+    client_cache: dict[tuple[str, Optional[str]], NeMoRLChatCompletionsClient] = Field(default_factory=dict)
 
     def _get_env(self, vf_env_id: str) -> vf.Environment:
         if vf_env_id not in self.envs_cache:
             self.envs_cache[vf_env_id] = vf.load_environment(vf_env_id, **self.config.vf_env_args)
         return self.envs_cache[vf_env_id]
 
-    def _get_client(self) -> NeMoRLChatCompletionsClient:
-        cache_key = self.config.model_server.name
-        if cache_key not in self.client_cache:
-            server_config_dict = get_first_server_config_dict(
-                self.server_client.global_config_dict,
-                self.config.model_server.name,
-            )
-            model_server_url = f"http://{server_config_dict.host}:{server_config_dict.port}"
+    def _get_client(self, body: Any = None) -> NeMoRLChatCompletionsClient:
+        """Return the model client for this run, carrying its capture prefix.
 
-            if not model_server_url.endswith("/v1"):
-                model_server_url = model_server_url.rstrip("/") + "/v1"
+        Model-call capture is keyed by the ``/ng-rollout/<id>`` URL prefix, so a
+        client built from the bare model-server root is never attributed to a
+        rollout: the capture store stays empty, the projected trajectory reports
+        ``model_call_capture_no_records``, and every rollout-health check
+        degrades to ``unobserved``. The cache is therefore keyed by rollout too —
+        one client per server would pin the first rollout's prefix onto all of
+        them. ``rollout_id_from_run`` returns ``None`` when capture is disabled,
+        which collapses this back to the unprefixed URL and a single cache entry.
+        """
+        rollout_id = self.rollout_id_from_run(body) if body is not None else None
+        cache_key = (self.config.model_server.name, rollout_id)
+        if cache_key not in self.client_cache:
+            model_server_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)
 
             openai_client = AsyncOpenAI(
                 base_url=model_server_url,
@@ -291,7 +297,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 example_id=body.example_id,
             )
 
-            client = self._get_client()
+            client = self._get_client(body)
 
             # prefer NeMo RL generation config set in responses_create_params
             # https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/experience/rollouts.py#L1045-L1046
