@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 from pytest import approx
 
+from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -19,6 +20,10 @@ from resources_servers.widesearch.app import (
     WideSearchVerifyRequest,
     extract_dataframe,
 )
+
+
+def test_reverify_mode_is_stateless() -> None:
+    assert WideSearchConfig.REVERIFY_MODE is ReverifyMode.STATELESS
 
 
 def response(text: str) -> NeMoGymResponse:

@@ -24,6 +24,7 @@ responses_api_agents:
       system_prompt: You must call an Exa MCP search tool before answering.
       claude_code_version: null
     image: <sandbox-image>
+    runtime_archive: /path/to/prebuilt-harness-runtime.tar.gz
     setup_command: null
     sandbox_provider: sandbox
     sandbox_spec:
@@ -41,6 +42,7 @@ responses_api_agents:
 | `harness_kwargs` | Arguments forwarded to that config class. Supported keys depend on the harness. |
 | `image` | Sandbox image containing Python, the harness runtime, and any system dependencies. |
 | `python` | Python executable used to launch `agent_runner.py`. It defaults to `python3`. |
+| `runtime_archive` | Optional AnySWE-style portable harness runtime. Gym uploads and unpacks it once per sandbox. |
 | `setup_command` | Optional sandbox setup command run before the agent. |
 | `sandbox_provider` | Gym sandbox provider reference. |
 | `sandbox_spec` | Sandbox lifetime, resources, workdir, environment, and provider options. |

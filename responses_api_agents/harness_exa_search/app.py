@@ -29,6 +29,7 @@ class HarnessExaSearchConfig(BaseResponsesAPIAgentConfig):
     harness_kwargs: dict[str, Any] = Field(default_factory=dict)
     image: str
     python: str = "python3"
+    runtime_archive: Path | None = None
     setup_command: str | None = None
     sandbox_provider: str | dict[str, Any] = "sandbox"
     sandbox_spec: dict[str, Any] = Field(default_factory=dict)
@@ -96,13 +97,28 @@ class HarnessExaSearchAgent(SimpleResponsesAPIAgent):
             await sandbox.start()
             with tempfile.TemporaryDirectory() as temporary:
                 local = Path(temporary)
-                (local / "input.json").write_text(body.model_dump_json())
+                (local / "input.json").write_text(body.model_dump_json(exclude_none=True))
                 (local / "runner.json").write_text(json.dumps(runner_config))
                 await sandbox.upload(Path(__file__).with_name("agent_runner.py"), runner_path)
                 await sandbox.upload(Path(__file__).with_name("exa_pi_extension.ts"), pi_extension_path)
                 await sandbox.upload(local / "input.json", input_path)
                 await sandbox.upload(local / "runner.json", config_path)
-                command = f"{shlex.quote(self.config.python)} {runner_path} {config_path}"
+                python = self.config.python
+                if self.config.runtime_archive:
+                    archive_path = f"{root}/runtime.tar.gz"
+                    runtime_path = f"{root}/runtime"
+                    await sandbox.upload(self.config.runtime_archive, archive_path)
+                    unpack = await sandbox.exec(
+                        f"mkdir -p {runtime_path} && tar -xzf {archive_path} -C {runtime_path} --strip-components=1",
+                        timeout_s=None,
+                    )
+                    if unpack.return_code != 0:
+                        raise RuntimeError(f"failed to unpack harness runtime: {(unpack.stderr or '')[-2000:]}")
+                    python = f"{runtime_path}/bin/python"
+                command = (
+                    f"PATH={shlex.quote(str(Path(python).parent))}:$PATH "
+                    f"{shlex.quote(python)} {runner_path} {config_path}"
+                )
                 if self.config.setup_command:
                     command = f"{self.config.setup_command} && {command}"
                 result = await sandbox.exec(command, timeout_s=None)
