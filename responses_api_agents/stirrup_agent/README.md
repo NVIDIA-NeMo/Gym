@@ -387,11 +387,32 @@ Some GDPVal tasks ask the model to install packages or run untrusted code. By de
 agent uses a local sandbox; setting `gdpval_container_path` to an Apptainer `.sif` routes
 all `code_exec` calls through a persistent container.
 
-Build the supplied container definition:
+Build the supplied container definition. Build **from the `containers/`
+directory**: the definition stages the vendored GDPval-AA v2 manifests via
+`%files`, and apptainer resolves those paths relative to the build working
+directory, so building from the repository root silently fails to find them.
 
 ```bash
-apptainer build gdpval.sif responses_api_agents/stirrup_agent/containers/gdpval.def
+cd responses_api_agents/stirrup_agent/containers
+apptainer build gdpval.sif gdpval.def
 ```
+
+The image is x86_64 only. The published pin set includes packages with no
+aarch64 wheels, so an arm64 build fails the pinned install rather than shipping
+a degraded sandbox.
+
+Verify a built image before running an eval in it. The verifier is staged into
+the image and audits it against both vendored manifests, then exercises the
+toolchain end to end:
+
+```bash
+apptainer exec --writable-tmpfs --cleanenv --pid \
+  --no-mount home,tmp,bind-paths --home /root \
+  gdpval.sif python /opt/gdpval/verify_gdpval_sandbox.py
+```
+
+A green build only proves the build steps exited 0; this is what catches a tool
+that is installed but cannot produce a file.
 
 Then:
 
