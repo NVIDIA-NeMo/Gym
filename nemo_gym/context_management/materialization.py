@@ -8,7 +8,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Mapping, Sequence
 
-from responses_api_agents.simple_agent_with_compaction.compaction.history import (
+from nemo_gym.context_management.history import (
     HistoryViewPlan,
     MaterializedHistoryView,
     SemanticHistory,

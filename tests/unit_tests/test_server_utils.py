@@ -16,12 +16,13 @@ import asyncio
 import multiprocessing
 import socket
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import nullcontext
 from unittest.mock import AsyncMock, MagicMock
 
-from aiohttp import ClientOSError, ClientResponseError, RequestInfo
+from aiohttp import ClientOSError, ClientResponseError, RequestInfo, ServerDisconnectedError
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
-from pytest import CaptureFixture, MonkeyPatch, raises
+from pytest import CaptureFixture, MonkeyPatch, mark, raises
 from yarl import URL
 
 import nemo_gym.global_config
@@ -64,6 +65,62 @@ _TEST_ADDR_INFO = (
 
 def _return_exception_from_child_process(error: ClientResponseError) -> ClientResponseError:
     return error
+
+
+class TestRequestRetries:
+    @mark.parametrize("internal", [False, True])
+    @mark.parametrize("traced", [False, True])
+    @mark.parametrize("failure_type", [ServerDisconnectedError, ClientOSError, TimeoutError, RuntimeError])
+    async def test_single_attempt_preserves_failure_after_execution(
+        self, monkeypatch: MonkeyPatch, internal: bool, traced: bool, failure_type: type[Exception]
+    ) -> None:
+        effects = []
+        failure = failure_type("response lost after execution")
+
+        async def execute_then_fail(**kwargs):
+            effects.append("applied")
+            raise failure
+
+        send = AsyncMock(side_effect=execute_then_fail)
+        sleep = AsyncMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: MagicMock(request=send))
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", sleep)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _: traced)
+        monkeypatch.setattr("nemo_gym.telemetry.spans.client_span", lambda _: nullcontext(None))
+        monkeypatch.setattr("nemo_gym.telemetry.contrib.inject_trace_context", lambda headers: None)
+
+        with raises(failure_type) as exc_info:
+            await nemo_gym.server_utils.request(
+                "POST", "http://server.test/step", _internal=internal, _retry=False, json={"action": "move"}
+            )
+
+        assert exc_info.value is failure
+        assert effects == ["applied"]
+        send.assert_awaited_once_with(
+            method="POST",
+            url="http://server.test/step",
+            data=b'{"action":"move"}',
+            headers={"Content-Type": "application/json"},
+        )
+        sleep.assert_not_awaited()
+
+    @mark.parametrize("internal", [False, True])
+    @mark.parametrize("failure_type", [ServerDisconnectedError, ClientOSError, TimeoutError, RuntimeError])
+    async def test_default_retries_recover(
+        self, monkeypatch: MonkeyPatch, internal: bool, failure_type: type[Exception]
+    ) -> None:
+        response = MagicMock()
+        send = AsyncMock(side_effect=[failure_type("transient failure"), response])
+        sleep = AsyncMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: MagicMock(request=send))
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", sleep)
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _: False)
+
+        actual = await nemo_gym.server_utils.request("POST", "http://server.test/step", _internal=internal)
+
+        assert actual is response
+        assert send.await_count == 2
+        sleep.assert_awaited_once_with(0.5)
 
 
 class TestServerUtils:
