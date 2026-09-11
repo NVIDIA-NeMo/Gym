@@ -23,7 +23,7 @@ from typing import Dict, List, Optional
 
 import yaml
 
-from nemo_gym.sweep.manifest import AGENT_REF_KEY, SweepManifest, SweepValidationError
+from .manifest import AGENT_REF_KEY, SweepManifest, SweepValidationError
 
 
 INPUT_JSONL_NAME = "input.jsonl"

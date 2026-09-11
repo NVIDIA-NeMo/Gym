@@ -1,7 +1,7 @@
 #!/bin/bash
 # Assert the shard / reshard / merge / split / profile invariants against a real sweep.
 #
-# Run after changing anything in nemo_gym/sweep/. Read-only with respect to SWEEP_DIR: everything
+# Run after changing anything in reward_profiling/infra/. Read-only with respect to SWEEP_DIR: everything
 # happens on a scratch copy.
 #
 # USAGE
@@ -26,6 +26,10 @@ set -euo pipefail
 SWEEP_DIR=${SWEEP_DIR:?set SWEEP_DIR to a sweep directory that has rollouts.jsonl}
 SHAPES=${SHAPES:-"4 7 2 9 3 5"}
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+# The sweep package lives beside these scripts, not in nemo_gym; the embedded python below shells
+# out to `python -m infra`, so it has to be on PYTHONPATH for the child processes too.
+RP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONPATH="$RP_DIR${PYTHONPATH:+:$PYTHONPATH}"
 cd "$REPO_ROOT"
 
 if [[ ! -s "$SWEEP_DIR/rollouts.jsonl" ]]; then
@@ -83,7 +87,7 @@ check("every rollout has an input", set(baseline_rollouts) <= set(baseline_input
 # collected back into the parent before rewriting shard directories, so nothing is stranded.
 for n in shapes:
     print(f"\n--- reshard to {n} ---")
-    subprocess.run([sys.executable, "-m", "nemo_gym.sweep", "shard", str(d), "--num-shards", str(n)],
+    subprocess.run([sys.executable, "-m", "infra", "shard", str(d), "--num-shards", str(n)],
                    check=True, capture_output=True)
     shard_dirs = sorted(p for p in (d / "shards").glob("shard_*") if p.is_dir())
 
@@ -107,14 +111,14 @@ for n in shapes:
     sizes = [len(keys(s / "rollouts_materialized_inputs.jsonl")) for s in shard_dirs]
     check("shards are balanced to within one row", max(sizes) - min(sizes) <= 1, f"sizes {sizes}")
 
-    merged = subprocess.run([sys.executable, "-m", "nemo_gym.sweep", "merge", str(d / "shards"),
+    merged = subprocess.run([sys.executable, "-m", "infra", "merge", str(d / "shards"),
                              "--output", str(d / "rollouts.jsonl")],
                             check=True, capture_output=True, text=True)
     check("merge round-trips to the original rollout set",
           sorted(keys(d / "rollouts.jsonl")) == baseline_rollouts, merged.stdout.strip()[-80:])
 
 print("\n--- split ---")
-subprocess.run([sys.executable, "-m", "nemo_gym.sweep", "split", str(d)], check=True, capture_output=True)
+subprocess.run([sys.executable, "-m", "infra", "split", str(d)], check=True, capture_output=True)
 report = json.loads((d / "by_label" / "split_report.json").read_text())
 labels = report["labels"]
 check("no row is unattributable to an entry",

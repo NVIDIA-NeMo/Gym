@@ -39,8 +39,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import orjson
 import yaml
 
-from nemo_gym.sweep.manifest import AGENT_REF_KEY, SweepManifest, SweepValidationError
-from nemo_gym.sweep.shuffle import DEFAULT_BUFFER_ROWS, streaming_shuffle
+from .manifest import AGENT_REF_KEY, SweepManifest, SweepValidationError
+from .shuffle import DEFAULT_BUFFER_ROWS, streaming_shuffle
 
 
 TASK_INDEX_KEY = "_ng_task_index"

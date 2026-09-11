@@ -85,12 +85,12 @@ cd "$REPO_ROOT"
 # nemo_gym needs its dependencies importable. Inside the eval container that is automatic; on a
 # login node it is not, and the failure is otherwise a bare ModuleNotFoundError from deep inside
 # the CLI. GYM_SITE_PACKAGES points PYTHONPATH at a venv's site-packages if you are not in one.
-if ! python -c "import orjson, nemo_gym" >/dev/null 2>&1; then
+if ! PYTHONPATH="$RP_DIR" python -c "import orjson, infra" >/dev/null 2>&1; then
     if [[ -n "${GYM_SITE_PACKAGES:-}" ]]; then
         export PYTHONPATH="$REPO_ROOT:$GYM_SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}"
     fi
-    if ! python -c "import orjson, nemo_gym" >/dev/null 2>&1; then
-        echo "ERROR: cannot import nemo_gym and its deps." >&2
+    if ! PYTHONPATH="$RP_DIR" python -c "import orjson, infra" >/dev/null 2>&1; then
+        echo "ERROR: cannot import infra and its deps (orjson, yaml, pydantic)." >&2
         echo "       Run inside the eval container, activate the Gym venv, or set" >&2
         echo "       GYM_SITE_PACKAGES=<venv>/lib/python3.*/site-packages" >&2
         exit 2
@@ -179,7 +179,7 @@ SWEEP_DIR="$SWEEP_DIR" SHARDS_DIR="$SHARDS_DIR" OUTPUT="$SWEEP_DIR/rollouts.json
     bash "$RP_DIR/scripts/04_merge_shards.sh"
 
 echo ">>> splitting by manifest entry"
-python -m nemo_gym.sweep split "$SWEEP_DIR"
+PYTHONPATH="$RP_DIR" python -m infra split "$SWEEP_DIR"
 
 echo
 echo "Merged rollouts : $SWEEP_DIR/rollouts.jsonl"

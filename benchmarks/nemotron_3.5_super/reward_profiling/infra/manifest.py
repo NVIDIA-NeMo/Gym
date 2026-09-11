@@ -148,7 +148,7 @@ class GymEvalRun(BaseModel):
 
 
 class Materialize(BaseModel):
-    """What ``nemo_gym.sweep materialize`` reads, i.e. how the input file gets built.
+    """What ``infra materialize`` reads, i.e. how the input file gets built.
 
     Separate from ``gym_eval_run`` because these are decided before collection exists: they
     determine which rows are in the sweep at all, not how the sweep is run.

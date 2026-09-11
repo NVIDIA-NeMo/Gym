@@ -6,7 +6,8 @@ can see which environments the checkpoint has saturated and which still carry si
 `manifests/nemotron_3_5_super.yaml` is the full sweep: **36 environments, 726,121 source rows**, run
 as **one** Gym deployment over one concatenated input. Each row carries its own `agent_ref` and
 rollout collection dispatches per row, so judge-scored, sandbox-backed and plain environments all
-coexist in a single job. The machinery is generic and lives in `nemo_gym/sweep/`; only the
+coexist in a single job. The machinery is generic and lives in `infra/` beside this file -- nothing in Gym imports it,
+so it is not part of `nemo_gym`; only the
 manifests here are Nemotron-specific.
 
 To contribute an environment, see [CONTRIBUTING.md](./CONTRIBUTING.md).
@@ -207,7 +208,7 @@ entries:
 Validate before running — it checks the configs exist, the agent is declared, and the data parses:
 
 ```bash
-python -m nemo_gym.sweep validate $R/manifests/<name>.yaml
+PYTHONPATH=$R python -m infra validate $R/manifests/<name>.yaml
 ```
 
 See `manifests/example_basic.yaml`, `example_judge.yaml`, `example_sandbox_judge.yaml` for a
@@ -297,7 +298,7 @@ SWEEP_DIR=<sweep> bash $R/scripts/04_merge_shards.sh
 Then split the one concatenated file back into one directory per manifest entry:
 
 ```bash
-python -m nemo_gym.sweep split <sweep>     # -> <sweep>/by_label/<label>/
+PYTHONPATH=$R python -m infra split <sweep>     # -> <sweep>/by_label/<label>/
 ```
 
 This keys on `_ng_task_index`, not `agent_ref`, because entries share agents — `math_tir`,
@@ -507,7 +508,7 @@ It follows the same flow from the [Super-v3.5 readme](../README.md), with one ch
 
 ```bash
 # 0. make container config
-python -m nemo_gym.sweep container-config $R/manifests/*.yaml --out $R/configs/container_config.yaml
+PYTHONPATH=$R python -m infra container-config $R/manifests/*.yaml --out $R/configs/container_config.yaml
 
 # 1. make vllm container
 mkdir -p results/vllm

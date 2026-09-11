@@ -59,6 +59,8 @@
 # hashes the same header the same way, so session -> node -> worker stays deterministic.
 set -euo pipefail
 
+RP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 # SWEEP_DIR first and on its own: it is the path to the manifest's own output, so unlike MODEL and
 # CONTAINER it cannot be supplied by the manifest.
 if [[ -z "${SWEEP_DIR:-}" ]]; then
@@ -424,7 +426,7 @@ gym eval run --no-serve --resume \\
 # Split back out to one directory per manifest entry, then profile each separately. agent_ref
 # cannot do this -- the three ns_tools entries share ns_tools_simple_agent -- so the split keys on
 # _ng_task_index against the task_index_range materialize recorded per entry.
-python -m nemo_gym.sweep split $SWEEP_DIR
+PYTHONPATH="$RP_DIR" python -m infra split $SWEEP_DIR
 
 for _label_dir in $SWEEP_DIR/by_label/*/; do
     _label=\$(basename "\$_label_dir")

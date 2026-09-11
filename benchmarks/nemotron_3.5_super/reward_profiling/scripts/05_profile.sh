@@ -33,6 +33,8 @@ SWEEP_DIR=${SWEEP_DIR:?set SWEEP_DIR to the <out-dir>/<nickname> directory}
 # Exported so the xargs children below see them.
 export SWEEP_DIR VLLM_JOBID="${VLLM_JOBID:-}" CONTAINER="${CONTAINER:-}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+# The sweep package lives beside these scripts, not in nemo_gym.
+RP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 # `gym eval profile` is an executable, not a module, so the import check above is not enough:
@@ -87,7 +89,7 @@ for block in ("srun", "gym_eval_profile"):
 PY_MANIFEST
 )
 
-python -m nemo_gym.sweep split "$SWEEP_DIR"
+PYTHONPATH="$RP_DIR" python -m infra split "$SWEEP_DIR"
 
 profile_cmd() {
     local inputs=$1 rollouts=$2 out=$3

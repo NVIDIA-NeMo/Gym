@@ -36,24 +36,27 @@ PY_SHARDS
 NUM_SHARDS=${NUM_SHARDS:-${_manifest_shards:-16}}
 SHARDS_DIR=${SHARDS_DIR:-$SWEEP_DIR/shards}
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+# The sweep package lives beside these scripts, not in nemo_gym.
+RP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 cd "$REPO_ROOT"
 
-# nemo_gym needs its dependencies importable. Automatic inside the eval container, not on a login
-# node, where the failure is otherwise a bare ModuleNotFoundError from deep in the CLI.
-if ! python -c "import orjson, nemo_gym" >/dev/null 2>&1; then
+# `infra` needs orjson/yaml/pydantic importable. It no longer imports nemo_gym -- the package is
+# self-contained under reward_profiling/infra -- but the deps still have to be there, and on a login
+# node the failure is otherwise a bare ModuleNotFoundError from deep in the CLI.
+if ! PYTHONPATH="$RP_DIR" python -c "import orjson, infra" >/dev/null 2>&1; then
     if [[ -n "${GYM_SITE_PACKAGES:-}" ]]; then
         export PYTHONPATH="$REPO_ROOT:$GYM_SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}"
     fi
-    if ! python -c "import orjson, nemo_gym" >/dev/null 2>&1; then
-        echo "ERROR: cannot import nemo_gym and its deps." >&2
+    if ! PYTHONPATH="$RP_DIR" python -c "import orjson, infra" >/dev/null 2>&1; then
+        echo "ERROR: cannot import infra and its deps (orjson, yaml, pydantic)." >&2
         echo "       Run inside the eval container, activate the Gym venv, or set" >&2
         echo "       GYM_SITE_PACKAGES=<venv>/lib/python3.*/site-packages" >&2
         exit 2
     fi
 fi
 
-python -m nemo_gym.sweep shard "$SWEEP_DIR" --num-shards "$NUM_SHARDS" --out-dir "$SHARDS_DIR"
+PYTHONPATH="$RP_DIR" python -m infra shard "$SWEEP_DIR" --num-shards "$NUM_SHARDS" --out-dir "$SHARDS_DIR"
 echo
 echo "Each shard directory is a valid SWEEP_DIR. Run them with:"
 echo "  SWEEP_DIR=$SHARDS_DIR/shard_000 bash .../scripts/03_run_single.sh"

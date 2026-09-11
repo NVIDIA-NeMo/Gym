@@ -13,8 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
+import sys
+from pathlib import Path
 
 import pytest
+
+
+# The reward-profiling sweep package lives beside its benchmark (reward_profiling/infra) rather
+# than in nemo_gym, because nothing in Gym imports it. Its tests stay here so CI still covers
+# them, which means the package directory has to be importable.
+sys.path.insert(
+    0, str(Path(__file__).resolve().parent.parent / "benchmarks" / "nemotron_3.5_super" / "reward_profiling")
+)
 
 
 def pytest_addoption(parser):

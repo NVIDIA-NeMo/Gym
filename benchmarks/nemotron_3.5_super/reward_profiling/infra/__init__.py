@@ -20,7 +20,7 @@ own `agent_ref`, the entries can be concatenated into one input file and served 
 Gym deployment composed from the union of their configs.
 """
 
-from nemo_gym.sweep.manifest import (
+from .manifest import (
     SweepEntry,
     SweepManifest,
     SweepValidationError,

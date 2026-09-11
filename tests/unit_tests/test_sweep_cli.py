@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for `python -m nemo_gym.sweep`, the surface a user actually types.
+"""Tests for `python -m infra`, the surface a user actually types.
 
 The library tests in test_sweep_manifest.py call the functions directly, so they miss everything
 argparse and main() do: exit codes, which errors are caught and printed as one-liners versus
@@ -23,8 +23,7 @@ import json
 
 import pytest
 import yaml
-
-from nemo_gym.sweep.__main__ import main
+from infra.__main__ import main
 
 
 def _env(tmp_path, *, label="alpha", rows=4, agent="alpha_agent", nickname="sweep", config="alpha.yaml"):

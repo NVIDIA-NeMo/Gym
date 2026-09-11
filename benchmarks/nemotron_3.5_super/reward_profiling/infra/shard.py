@@ -92,7 +92,7 @@ def shard_sweep(sweep_dir: str | Path, num_shards: int, out_dir: Optional[str | 
 
     inputs = sweep_dir / INPUTS_NAME
     if not inputs.is_file():
-        raise SweepShardError(f"No materialized inputs at {inputs}; run `nemo_gym.sweep materialize` first.")
+        raise SweepShardError(f"No materialized inputs at {inputs}; run `infra materialize` first.")
 
     out_dir = Path(out_dir) if out_dir is not None else sweep_dir / "shards"
     out_dir.mkdir(parents=True, exist_ok=True)

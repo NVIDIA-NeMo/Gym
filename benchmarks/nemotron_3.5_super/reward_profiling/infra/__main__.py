@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CLI for sweep manifests: ``python -m nemo_gym.sweep {validate,build}``."""
+"""CLI for sweep manifests: ``python -m infra {validate,build}``."""
 
 from __future__ import annotations
 
@@ -21,11 +21,11 @@ import sys
 
 import yaml
 
-from nemo_gym.sweep.build import build_sweep, container_config, run_command
-from nemo_gym.sweep.manifest import DEFAULT_SAMPLE_ROWS, SweepValidationError, load_manifest, validate_manifest
-from nemo_gym.sweep.materialize import materialize
-from nemo_gym.sweep.shard import SweepShardError, merge_shards, shard_sweep
-from nemo_gym.sweep.split import SweepSplitError, split_sweep
+from .build import build_sweep, container_config, run_command
+from .manifest import DEFAULT_SAMPLE_ROWS, SweepValidationError, load_manifest, validate_manifest
+from .materialize import materialize
+from .shard import SweepShardError, merge_shards, shard_sweep
+from .split import SweepSplitError, split_sweep
 
 
 def _add_shared(parser: argparse.ArgumentParser) -> None:
@@ -34,7 +34,7 @@ def _add_shared(parser: argparse.ArgumentParser) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="nemo_gym.sweep", description=__doc__)
+    parser = argparse.ArgumentParser(prog="infra", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
     validate = sub.add_parser("validate", help="Check the manifest against its configs and data.")

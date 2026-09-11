@@ -23,10 +23,8 @@ from pathlib import Path
 
 import pytest
 import yaml
-from pydantic import ValidationError as PydanticValidationError
-
-from nemo_gym.sweep.build import build_sweep, container_config
-from nemo_gym.sweep.manifest import (
+from infra.build import build_sweep, container_config
+from infra.manifest import (
     GymEvalRun,
     Sbatch,
     SweepManifest,
@@ -34,9 +32,10 @@ from nemo_gym.sweep.manifest import (
     load_manifest,
     validate_manifest,
 )
-from nemo_gym.sweep.materialize import materialize
-from nemo_gym.sweep.shard import SweepShardError, merge_shards, shard_sweep
-from nemo_gym.sweep.split import SweepSplitError, split_sweep
+from infra.materialize import materialize
+from infra.shard import SweepShardError, merge_shards, shard_sweep
+from infra.split import SweepSplitError, split_sweep
+from pydantic import ValidationError as PydanticValidationError
 
 
 def _write_config(tmp_path, name, agent):
@@ -287,7 +286,7 @@ def test_build_shards_round_robin_across_entries(tmp_path):
 
 
 def test_materialize_expands_repeats_with_stable_identity(tmp_path):
-    from nemo_gym.sweep.materialize import materialize
+    from infra.materialize import materialize
 
     _write_config(tmp_path, "a.yaml", "agent_a")
     _write_config(tmp_path, "b.yaml", "agent_b")
@@ -330,7 +329,7 @@ def test_materialize_expands_repeats_with_stable_identity(tmp_path):
 
 def test_materialize_is_deterministic_across_runs(tmp_path):
     """Regenerating on another node must reproduce the same resume keys."""
-    from nemo_gym.sweep.materialize import materialize
+    from infra.materialize import materialize
 
     _write_config(tmp_path, "a.yaml", "agent_a")
     _write_data(tmp_path, "x.jsonl", "agent_a", rows=4)
@@ -346,7 +345,7 @@ def test_materialize_is_deterministic_across_runs(tmp_path):
 
 def test_materialize_completes_the_resume_gate(tmp_path):
     """Gym resumes only when BOTH the materialized file and the output file exist."""
-    from nemo_gym.sweep.materialize import materialize
+    from infra.materialize import materialize
 
     _write_config(tmp_path, "a.yaml", "agent_a")
     _write_data(tmp_path, "x.jsonl", "agent_a", rows=2)
@@ -362,7 +361,7 @@ def test_materialize_completes_the_resume_gate(tmp_path):
 
 
 def test_materialize_refuses_to_clobber(tmp_path):
-    from nemo_gym.sweep.materialize import materialize
+    from infra.materialize import materialize
 
     _write_config(tmp_path, "a.yaml", "agent_a")
     _write_data(tmp_path, "x.jsonl", "agent_a", rows=1)
@@ -377,7 +376,7 @@ def test_materialize_refuses_to_clobber(tmp_path):
 
 def test_materialize_writes_observed_counts_report(tmp_path):
     """Row counts are a result, not a declaration: the report records what the data held."""
-    from nemo_gym.sweep.materialize import materialize
+    from infra.materialize import materialize
 
     _write_config(tmp_path, "a.yaml", "agent_a")
     _write_data(tmp_path, "x.jsonl", "agent_a", rows=5)
@@ -416,7 +415,7 @@ def test_owner_is_optional_and_round_trips(tmp_path):
 
 
 def test_streaming_shuffle_is_seeded_and_lossless():
-    from nemo_gym.sweep.shuffle import streaming_shuffle
+    from infra.shuffle import streaming_shuffle
 
     rows = [f"{i}\n".encode() for i in range(500)]
     a = list(streaming_shuffle(iter(rows), seed=1, buffer_rows=32))
@@ -430,7 +429,7 @@ def test_streaming_shuffle_is_seeded_and_lossless():
 
 def test_materialize_shuffle_preserves_identity_and_ranges(tmp_path):
     """Shuffling changes dispatch order only; resume keys and provenance must not move."""
-    from nemo_gym.sweep.materialize import materialize
+    from infra.materialize import materialize
 
     _write_config(tmp_path, "a.yaml", "agent_a")
     _write_config(tmp_path, "b.yaml", "agent_b")
@@ -459,7 +458,7 @@ def test_materialize_shuffle_preserves_identity_and_ranges(tmp_path):
 
 
 def test_task_index_range_maps_a_rollout_back_to_its_entry(tmp_path):
-    from nemo_gym.sweep.materialize import materialize
+    from infra.materialize import materialize
 
     _write_config(tmp_path, "a.yaml", "agent_a")
     _write_data(tmp_path, "x.jsonl", "agent_a", rows=5)
@@ -484,7 +483,7 @@ def test_task_index_range_maps_a_rollout_back_to_its_entry(tmp_path):
 
 def test_materialize_defaults_to_manifest_order(tmp_path):
     """Grouped layout is the default: it is what lets vLLM prefix caching hit."""
-    from nemo_gym.sweep.materialize import materialize
+    from infra.materialize import materialize
 
     _write_config(tmp_path, "a.yaml", "agent_a")
     _write_config(tmp_path, "b.yaml", "agent_b")
@@ -539,7 +538,7 @@ def test_agent_declared_by_no_config_is_still_an_error(tmp_path):
 
 def test_materialize_writes_a_self_contained_sweep_dir(tmp_path):
     """The launchers serve from SWEEP_DIR, so the composed config must land beside the inputs."""
-    from nemo_gym.sweep.materialize import materialize
+    from infra.materialize import materialize
 
     _write_config(tmp_path, "a.yaml", "agent_a")
     _write_data(tmp_path, "x.jsonl", "agent_a", rows=2)

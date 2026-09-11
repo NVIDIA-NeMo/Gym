@@ -56,7 +56,7 @@ container. A server with no baked venv installs at runtime and hangs the run beh
 retries rather than failing, so check first:
 
 ```bash
-python -m nemo_gym.sweep container-config $R/manifests/<yours>.yaml --out /tmp/mine.yaml
+PYTHONPATH=$R python -m infra container-config $R/manifests/<yours>.yaml --out /tmp/mine.yaml
 python -c "
 import yaml
 have = set(yaml.safe_load(open('$R/configs/container_config.yaml'))['config_paths'])
@@ -77,7 +77,7 @@ Copy the closest `manifests/example_*.yaml` and change `entries`. Every entry ne
 identifying anyone once the data is copied or a blend is re-cut.
 
 ```bash
-python -m nemo_gym.sweep validate $R/manifests/<yours>.yaml
+PYTHONPATH=$R python -m infra validate $R/manifests/<yours>.yaml
 ```
 
 This checks the configs exist, the agent is declared by one of them, the data parses, and each
