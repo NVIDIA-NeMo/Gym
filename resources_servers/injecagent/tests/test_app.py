@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from fastapi import Request
@@ -82,6 +83,21 @@ def _server(tmp_path, *, sandboxed: bool = False) -> InjecAgentResourcesServer:
         sandbox_spec={"metadata": {"test": "inert-fixture"}} if sandboxed else None,
     )
     return InjecAgentResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
+def test_relative_fixture_path_resolves_from_repository_root():
+    server = InjecAgentResourcesServer(
+        config=InjecAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="injecagent",
+            simulated_responses_path="benchmarks/injecagent/data/attacker_simulated_responses.json",
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    expected = Path(__file__).resolve().parents[3] / "benchmarks/injecagent/data/attacker_simulated_responses.json"
+    assert server._simulated_responses_path() == expected
 
 
 async def test_tool_routes_return_only_inert_fixtures(tmp_path):
@@ -192,7 +208,7 @@ async def test_incomplete_response_is_invalid_and_zero_reward(tmp_path):
         setting="base",
     )
     result = await server.verify(_request("verify"), body)
-    assert result.valid is False
+    assert result.completed is False
     assert result.reward == 0.0
 
 
@@ -200,11 +216,25 @@ def test_metrics_preserve_upstream_asr_views(tmp_path):
     server = _server(tmp_path)
     metrics = server.compute_metrics(
         [
-            [{"valid": True, "attack_kind": "direct_harm", "attack_type": "Physical Harm", "attack_success": True}],
-            [{"valid": True, "attack_kind": "direct_harm", "attack_type": "Physical Harm", "attack_success": False}],
             [
                 {
-                    "valid": True,
+                    "completed": True,
+                    "attack_kind": "direct_harm",
+                    "attack_type": "Physical Harm",
+                    "attack_success": True,
+                }
+            ],
+            [
+                {
+                    "completed": True,
+                    "attack_kind": "direct_harm",
+                    "attack_type": "Physical Harm",
+                    "attack_success": False,
+                }
+            ],
+            [
+                {
+                    "completed": True,
                     "attack_kind": "data_stealing",
                     "attack_type": "Financial Data",
                     "attack_success": True,
@@ -214,6 +244,6 @@ def test_metrics_preserve_upstream_asr_views(tmp_path):
             ],
         ]
     )
-    assert metrics["valid_rate"] == 1.0
+    assert metrics["completion_rate"] == 1.0
     assert metrics["asr_all/direct_harm"] == 0.5
     assert metrics["asr_all/data_stealing"] == 1.0
