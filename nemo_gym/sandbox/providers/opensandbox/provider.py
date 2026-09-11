@@ -384,7 +384,9 @@ def _to_sandbox_status(state: Any) -> SandboxStatus:
     normalized = str(state or "").lower()
     if normalized in {"active", "ready", "running"}:
         return SandboxStatus.RUNNING
-    if normalized in {"creating", "initializing", "pending", "starting"}:
+    if normalized == "paused":
+        return SandboxStatus.PAUSED
+    if normalized in {"creating", "initializing", "pausing", "pending", "resuming", "starting"}:
         return SandboxStatus.STARTING
     if normalized in {"completed", "deleted", "exited", "stopped", "terminated"}:
         return SandboxStatus.STOPPED
@@ -569,6 +571,7 @@ class OpenSandboxOperationConfig:
     retry_max_delay_s: float = 15.0
     command_retries: int = 0
     close_timeout_s: float | None = 30.0
+    pause_resume_timeout_s: float = 600.0
     # Poll short status/log requests instead of holding one SSE stream open for
     # the whole command. Set this behind a load balancer that caps stream
     # duration, which would otherwise drop the stream and hang the client.
@@ -593,6 +596,8 @@ class OpenSandboxOperationConfig:
             raise ValueError("operations.command_retries must be >= 0")
         if self.close_timeout_s is not None and self.close_timeout_s <= 0:
             raise ValueError("operations.close_timeout_s must be > 0")
+        if self.pause_resume_timeout_s <= 0:
+            raise ValueError("operations.pause_resume_timeout_s must be > 0")
         if self.background_poll_interval_s <= 0:
             raise ValueError("operations.background_poll_interval_s must be > 0")
         if self.background_poll_initial_s <= 0:
@@ -825,23 +830,128 @@ class OpenSandboxProvider:
     async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
         """Rebuild a live handle from an OpenSandbox sandbox id via the SDK.
 
-        Health-checks unless the caller opts out: a sandbox id only proves the
-        workload exists, not that its exec daemon is listening yet, so an
-        unchecked handle turns that gap into a 502 on the first call.
+        Running sandboxes are health-checked unless the caller opts out. A
+        paused sandbox has no exec daemon to check; resume rebuilds its
+        endpoints and performs the health check instead.
         """
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
         sandbox_id = str(descriptor["sandbox_id"])
         timeout_s = self._create.connect_attempt_timeout_s
-        sandbox = await asyncio.wait_for(
-            Sandbox.connect(
-                sandbox_id,
-                connection_config=self._connection_config(request_timeout_s=timeout_s),
-                connect_timeout=timedelta(seconds=timeout_s),
-                skip_health_check=self._create.skip_health_check,
-            ),
-            timeout=timeout_s,
-        )
-        return SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
+        sandbox = None
+        try:
+            async with asyncio.timeout(timeout_s):
+                sandbox = await Sandbox.connect(
+                    sandbox_id,
+                    connection_config=self._connection_config(request_timeout_s=timeout_s),
+                    connect_timeout=timedelta(seconds=timeout_s),
+                    skip_health_check=True,
+                )
+                handle = SandboxHandle(sandbox_id=str(sandbox.id), provider_name=self.name, raw=sandbox)
+                if not self._create.skip_health_check and await self.status(handle) != SandboxStatus.PAUSED:
+                    await sandbox.check_ready(
+                        timedelta(seconds=timeout_s),
+                        timedelta(seconds=self._create.connect_poll_s),
+                    )
+                return handle
+        except Exception:
+            if sandbox is not None:
+                try:
+                    await asyncio.wait_for(
+                        sandbox.close(),
+                        timeout=min(timeout_s, self._operations.close_timeout_s or timeout_s),
+                    )
+                except Exception as cleanup_error:
+                    LOGGER.warning(
+                        "Failed to close OpenSandbox handle after connect failure; sandbox_id=%r: %r",
+                        sandbox_id,
+                        cleanup_error,
+                    )
+            raise
+
+    async def pause(self, handle: SandboxHandle) -> None:
+        """Pause a sandbox and wait until its snapshot-backed state is ready."""
+        timeout_s = self._operations.pause_resume_timeout_s
+        lifecycle_timeout = asyncio.timeout(timeout_s)
+        try:
+            async with lifecycle_timeout:
+                await self._await_sdk_call(
+                    handle.raw.pause(),
+                    operation="pause",
+                    sandbox_id=handle.sandbox_id,
+                    timeout_s=self._connection.request_timeout_s,
+                )
+
+                # Pause commits the root filesystem and replaces the runtime;
+                # processes and their PTY sessions do not survive it. Drop our
+                # local clients without sending a delete for sessions the new
+                # runtime never had. Callers open a fresh PTY after resume.
+                for session in [s for s in self._pty_sessions if s._sandbox_id == handle.sandbox_id]:
+                    try:
+                        session._owned = False
+                        await session.close()
+                    except Exception:
+                        LOGGER.warning(
+                            "Failed to detach PTY session %r while pausing sandbox %r",
+                            getattr(session, "session_id", "?"),
+                            handle.sandbox_id,
+                            exc_info=True,
+                        )
+                    self._pty_sessions.discard(session)
+
+                while True:
+                    status = await self.status(handle)
+                    if status == SandboxStatus.PAUSED:
+                        return
+                    if status in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
+                        raise RuntimeError(
+                            f"OpenSandbox sandbox {handle.sandbox_id!r} entered {status.value} while pausing"
+                        )
+                    await asyncio.sleep(self._create.connect_poll_s)
+        except TimeoutError as e:
+            if not lifecycle_timeout.expired():
+                raise
+            raise TimeoutError(
+                f"Timed out waiting for OpenSandbox sandbox {handle.sandbox_id!r} to pause after {timeout_s:g}s"
+            ) from e
+
+    async def resume(self, handle: SandboxHandle) -> None:
+        """Resume a paused sandbox and rebuild its SDK clients and endpoints.
+
+        One ``pause_resume_timeout_s`` deadline covers the resume request, the
+        endpoint rebuild and the readiness check. On timeout the server-side
+        state is unknown: reconnect and inspect ``status()`` before retrying.
+        Processes and PTY sessions do not survive pause; open a new PTY after.
+        """
+        Sandbox, _, _, _, _ = _require_opensandbox_sdk()
+        timeout_s = self._operations.pause_resume_timeout_s
+        lifecycle_timeout = asyncio.timeout(timeout_s)
+        try:
+            async with lifecycle_timeout:
+                resumed = await Sandbox.resume(
+                    handle.sandbox_id,
+                    connection_config=self._connection_config(),
+                    resume_timeout=timedelta(seconds=timeout_s),
+                    health_check_polling_interval=timedelta(seconds=self._create.connect_poll_s),
+                    skip_health_check=self._create.skip_health_check,
+                )
+        except TimeoutError as e:
+            if not lifecycle_timeout.expired():
+                raise
+            raise TimeoutError(
+                f"Timed out waiting for OpenSandbox sandbox {handle.sandbox_id!r} to resume after {timeout_s:g}s; "
+                "reconnect and check status() before retrying"
+            ) from e
+
+        try:
+            await self._await_sdk_call(
+                handle.raw.close(),
+                operation="close_pre_resume_handle",
+                sandbox_id=handle.sandbox_id,
+                timeout_s=self._operations.close_timeout_s,
+            )
+        except Exception as e:
+            LOGGER.warning("Failed to close pre-resume OpenSandbox handle %r: %r", handle.sandbox_id, e)
+        handle.raw = resumed
 
     async def _await_sdk_call(
         self,
@@ -1552,6 +1662,7 @@ class OpenSandboxProvider:
             request_timeout_s=request_timeout_s,
             diagnose=lambda: self._oom_death_notice(handle, any_death=True),
         )
+        session._sandbox_id = handle.sandbox_id
         await self._retire_closed_pty_sessions()
         self._pty_sessions.add(session)
         return session
@@ -1609,6 +1720,7 @@ class OpenSandboxProvider:
                         raise SandboxPtyError(f"PTY attach takeover kept being refused: {notice}") from e
                     raise
             await asyncio.sleep(delay)
+        session._sandbox_id = handle.sandbox_id
         await self._retire_closed_pty_sessions()
         self._pty_sessions.add(session)
         return session

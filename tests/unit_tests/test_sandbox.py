@@ -35,6 +35,7 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxEndpoint,
+    SupportsSandboxPauseResume,
     create_provider,
     get_provider_class,
     list_providers,
@@ -94,6 +95,8 @@ class FakeSandboxProvider:
         self.endpoint_calls: list[tuple[SandboxHandle, int]] = []
         self.upload_calls: list[tuple[SandboxHandle, Path, str]] = []
         self.download_calls: list[tuple[SandboxHandle, str, Path]] = []
+        self.pause_calls: list[SandboxHandle] = []
+        self.resume_calls: list[SandboxHandle] = []
         self.closed: list[SandboxHandle] = []
         self.aclosed = False
         FakeSandboxProvider.last_instance = self
@@ -145,6 +148,13 @@ class FakeSandboxProvider:
     async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
         self.endpoint_calls.append((handle, port))
         return SandboxEndpoint(endpoint=f"http://127.0.0.1:{port}", headers={"x-route": "fake"})
+
+    async def pause(self, handle: SandboxHandle) -> None:
+        self.pause_calls.append(handle)
+
+    async def resume(self, handle: SandboxHandle) -> None:
+        self.resume_calls.append(handle)
+        handle.raw = {"resumed_from": handle.raw}
 
     async def close(self, handle: SandboxHandle) -> None:
         self.closed.append(handle)
@@ -307,6 +317,15 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
     assert provider.download_calls == [(handle, "/remote/source.txt", target_path)]
     assert target_path.read_bytes() == b"downloaded"
 
+    raw_before_resume = handle.raw
+    await sandbox.pause()
+    await sandbox.resume()
+    assert provider.pause_calls == [handle]
+    assert provider.resume_calls == [handle]
+    await sandbox.exec("after resume")
+    assert provider.exec_calls[-1]["handle"] is handle
+    assert handle.raw["resumed_from"] is raw_before_resume
+
     await sandbox.stop()
     await sandbox.stop()
     assert provider.closed[-1] == handle
@@ -370,6 +389,10 @@ async def _assert_async_sandbox_requires_spec_and_reports_unknown_status() -> No
         await plain.endpoint(9000)
     with pytest.raises(ValueError, match="between 1 and 65535"):
         await plain.endpoint(0)
+    with pytest.raises(NotImplementedError, match="does not support pause/resume"):
+        await plain.pause()
+    with pytest.raises(NotImplementedError, match="does not support pause/resume"):
+        await plain.resume()
     await plain.stop()
 
 
@@ -395,9 +418,13 @@ def test_sandbox_resources_validation() -> None:
         SandboxEndpoint(endpoint="/relative/path")
 
 
-def test_sandbox_endpoint_is_an_optional_provider_capability() -> None:
-    assert isinstance(FakeSandboxProvider(), SupportsSandboxEndpoint)
-    assert not isinstance(PlainSandboxProvider(), SupportsSandboxEndpoint)
+def test_sandbox_optional_provider_capabilities_are_structural() -> None:
+    capable = FakeSandboxProvider()
+    plain = PlainSandboxProvider()
+    assert isinstance(capable, SupportsSandboxEndpoint)
+    assert isinstance(capable, SupportsSandboxPauseResume)
+    assert not isinstance(plain, SupportsSandboxEndpoint)
+    assert not isinstance(plain, SupportsSandboxPauseResume)
 
 
 def test_sandbox_spec_keeps_legacy_positional_provider_options() -> None:
@@ -656,6 +683,10 @@ def test_sync_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> None:
         sandbox.upload(upload_path, "/tmp/sync-upload.txt")
         sandbox.download("/tmp/sync-download.txt", download_path)
         assert download_path.read_bytes() == b"downloaded"
+        sandbox.pause()
+        sandbox.resume()
+        assert provider.pause_calls == [handle]
+        assert provider.resume_calls == [handle]
         sandbox.stop()
         assert provider.closed[-1] == handle
         assert sandbox.status() == SandboxStatus.STOPPED
@@ -1311,7 +1342,7 @@ async def _assert_opensandbox_implements_connectable_provider(monkeypatch) -> No
 
     provider = OpenSandboxProvider(
         connection={"domain": "sandbox.example", "protocol": "https"},
-        create={"connect_attempt_timeout_s": 1},
+        create={"connect_attempt_timeout_s": 1, "skip_health_check": True},
         probe={"command": None},
     )
 
@@ -1330,8 +1361,7 @@ async def _assert_opensandbox_implements_connectable_provider(monkeypatch) -> No
     assert isinstance(handle.raw, FakeSDKSandbox)
     connect_call = FakeSDKSandbox.connect_calls[0]
     assert connect_call["sandbox_id"] == "sdk-sandbox-9"
-    # connect() health-checks by default so the handle it returns is usable.
-    assert connect_call["skip_health_check"] is False
+    assert connect_call["skip_health_check"] is True
     assert connect_call["connection_config"].kwargs["domain"] == "sandbox.example"
 
 
