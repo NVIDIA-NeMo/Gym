@@ -175,6 +175,10 @@ class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
         default=None,
         description="Read/write/pool timeout in seconds for requests to the policy model server. None keeps the openai SDK default.",
     )
+    client_connect_timeout_s: float | None = Field(
+        default=None,
+        description="Connect timeout in seconds for the policy model server. None keeps the openai SDK default (5s), which a burst of new connections against a just-started server can exceed.",
+    )
     client_max_retries: int | None = Field(
         default=None,
         description="openai SDK retry count for the policy client. None keeps the SDK default.",
@@ -220,14 +224,11 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 model_server_url = model_server_url.rstrip("/") + "/v1"
 
             client_kwargs: dict[str, Any] = {}
-            if self.config.client_timeout_s is not None:
-                # connect stays at the SDK default so an unreachable server still fails fast.
-                client_kwargs["timeout"] = Timeout(
-                    connect=5.0,
-                    read=self.config.client_timeout_s,
-                    write=self.config.client_timeout_s,
-                    pool=self.config.client_timeout_s,
-                )
+            if self.config.client_timeout_s is not None or self.config.client_connect_timeout_s is not None:
+                # Unset fields keep the SDK defaults (5s connect, 600s read/write/pool).
+                connect = self.config.client_connect_timeout_s if self.config.client_connect_timeout_s is not None else 5.0
+                other = self.config.client_timeout_s if self.config.client_timeout_s is not None else 600.0
+                client_kwargs["timeout"] = Timeout(connect=connect, read=other, write=other, pool=other)
             if self.config.client_max_retries is not None:
                 client_kwargs["max_retries"] = self.config.client_max_retries
             openai_client = AsyncOpenAI(

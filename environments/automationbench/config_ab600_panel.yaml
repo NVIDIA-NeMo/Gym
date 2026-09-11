@@ -37,4 +37,5 @@ automationbench_aa:
       temperature: 1.0
       top_p: 1.0
       client_timeout_s: 3600
+      client_connect_timeout_s: 60
       client_max_retries: 0
