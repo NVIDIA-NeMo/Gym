@@ -1,0 +1,76 @@
+# AA-Briefcase-Lite — Stirrup rollout plus public binary/local pairwise judging.
+
+aa_briefcase_lite_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
+      openai_model: ${oc.env:JUDGE_MODEL_NAME,gcp/google/gemini-3.1-pro-preview}
+
+aa_briefcase_lite_resources_server:
+  resources_servers:
+    aa_briefcase_lite:
+      allowed_agents: [stirrup_agent]
+      entrypoint: app.py
+      domain: other
+      verified: false
+      dataset_dir: ${oc.env:AA_BRIEFCASE_LITE_DATASET_DIR}
+      # binary: released A/C prompt and checks; pairwise: local AQ/P comparison;
+      # all: both, with a non-official convenience scalar averaging the two.
+      reward_mode: ${oc.env:AA_BRIEFCASE_REWARD_MODE,binary}
+      pairwise_reference_ids: [gpt-5-5]
+      pairwise_num_trials: 2
+      binary_formatting_retries: 1
+      preconvert_office_to_pdf: true
+      preconvert_max_concurrent: 1
+      judge_model_server:
+        type: responses_api_models
+        name: aa_briefcase_lite_judge_model
+      judge_responses_create_params_overrides: {}
+      judge_panel:
+        - name: gpt-5.5
+          model: ${oc.env:JUDGE_GPT_MODEL,openai/openai/gpt-5.5}
+          media_mode: images_and_text
+          create_params_overrides: {reasoning_effort: medium, temperature: null}
+        - name: gemini-3.1-pro
+          model: ${oc.env:JUDGE_GEMINI_MODEL,gcp/google/gemini-3.1-pro-preview}
+          handles_audio: true
+          handles_video: true
+          media_mode: native_pdf
+          create_params_overrides: {extra_body: {reasoning_effort: high}, temperature: null}
+        - name: claude-opus-4.8
+          model: ${oc.env:JUDGE_CLAUDE_MODEL,aws/anthropic/bedrock-claude-opus-4-8}
+          media_mode: native_pdf
+          create_params_overrides: {extra_body: {thinking: {type: enabled}}, temperature: null}
+      judge_sampling_seed: ${oc.env:JUDGE_SAMPLING_SEED,null}
+      persist_raw_judge_responses: false
+
+aa_briefcase_lite_stirrup_agent:
+  responses_api_agents:
+    stirrup_agent:
+      entrypoint: app.py
+      task: aa_briefcase_lite
+      agent_max_turns: 500
+      concurrency: 4
+      temperature: ${oc.env:AA_BRIEFCASE_TEMPERATURE,1.0}
+      aa_briefcase_container_path: ${oc.env:AA_BRIEFCASE_CONTAINER_PATH,null}
+      persist_deliverables_dir: ${oc.env:PERSIST_DELIVERABLES_DIR,/tmp/aa_briefcase_lite/deliverables}
+      # Generation is the safe default. Set EXECUTE_ONLY=false,JUDGE_ONLY=true
+      # to judge cached artifacts without rerunning the policy.
+      execute_only: ${oc.env:EXECUTE_ONLY,true}
+      judge_only: ${oc.env:JUDGE_ONLY,false}
+      rerun_incomplete: ${oc.env:RERUN_INCOMPLETE,false}
+      resources_server:
+        type: resources_servers
+        name: aa_briefcase_lite_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: aa_briefcase_lite
+          type: benchmark
+          jsonl_fpath: benchmarks/aa_briefcase_lite/data/aa_briefcase_lite.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/aa_briefcase_lite/prepare.py
+          num_repeats: 1

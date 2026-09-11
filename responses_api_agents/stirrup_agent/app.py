@@ -396,8 +396,10 @@ _TASK_REGISTRY: Dict[str, type] = {}
 def _load_task_registry() -> Dict[str, type]:
     """Lazily populate the registry so imports only happen when needed."""
     if not _TASK_REGISTRY:
+        from responses_api_agents.stirrup_agent.tasks.aa_briefcase_lite import AABriefcaseLiteTask
         from responses_api_agents.stirrup_agent.tasks.gdpval import GDPValTask
 
+        _TASK_REGISTRY["aa_briefcase_lite"] = AABriefcaseLiteTask
         _TASK_REGISTRY["gdpval"] = GDPValTask
     return _TASK_REGISTRY
 
@@ -492,6 +494,11 @@ async def _run_stirrup_agent(
     truncation_recovery: bool = True,
     tavily_api_key: Optional[Union[str, List[str]]] = None,
     tavily_max_sweeps: int = 1,
+    allow_web_tools: bool = True,
+    require_exec_provider: bool = False,
+    use_abandon_finish_tool: bool = False,
+    skip_input_file_listing: bool = False,
+    tool_response_as_user: bool = True,
 ) -> Dict[str, Any]:
     """Run a Stirrup agent session and return history + metadata.
 
@@ -567,19 +574,14 @@ async def _run_stirrup_agent(
         mod = importlib.import_module(module_path)
         provider_cls = getattr(mod, class_name)
         exec_provider = provider_cls(**(exec_provider_kwargs or {}))
-    elif is_gdpval:
+    elif is_gdpval or require_exec_provider:
         # GDPval must execute inside the Apptainer sandbox (see
         # GDPValTask.get_exec_provider). The local backend runs on the
         # evaluation container, which intentionally does NOT carry the heavy
         # GDPval sandbox dependencies (TeX Live, the full data/ML/document
         # stack, CPU torch, ...) — installing them here would bloat the eval
         # image by many GB. Refuse rather than run tasks in a crippled env.
-        raise RuntimeError(
-            "GDPval requires the Apptainer sandbox but no exec provider was configured; "
-            "set `gdpval_container_path` to a .sif built from containers/gdpval.def. The "
-            "local backend is rejected because the sandbox dependencies are not installed "
-            "in the evaluation container."
-        )
+        raise RuntimeError("This task requires a sandbox execution provider but none was configured")
     else:
         exec_provider = _SandboxTolerantExecProvider()
 
@@ -592,7 +594,9 @@ async def _run_stirrup_agent(
 
     from stirrup.tools.web import WebToolProvider
 
-    if tavily_api_key or _os.environ.get("TAVILY_API_KEY"):
+    if not allow_web_tools:
+        tools = [tool for tool in tools if not isinstance(tool, WebToolProvider)]
+    elif tavily_api_key or _os.environ.get("TAVILY_API_KEY"):
         from responses_api_agents.stirrup_agent.tavily_search import TavilyToolProvider
 
         tools = [
@@ -607,12 +611,12 @@ async def _run_stirrup_agent(
         "name": "stirrup_agent",
         "max_turns": max_turns,
         "tools": tools,
-        "tool_response_as_user": True,
-        "skip_input_file_listing": is_gdpval,
+        "tool_response_as_user": tool_response_as_user,
+        "skip_input_file_listing": skip_input_file_listing or is_gdpval,
     }
     if system_prompt:
         agent_kwargs["system_prompt"] = system_prompt
-    if is_gdpval:
+    if is_gdpval or use_abandon_finish_tool:
         # GDPval-AA v2 early-exit: expose a second finish tool the model can call
         # instead of ``finish`` when it cannot complete the task (no files).
         # Requires stirrup >= 0.1.9 (multiple finish tools, PR #49).
@@ -917,6 +921,10 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         default=None,
         description="Path to GDPVal Apptainer .sif container. When set, code execution runs inside the container.",
     )
+    aa_briefcase_container_path: Optional[str] = Field(
+        default=None,
+        description="Path to the AA-Briefcase-Lite Apptainer image.",
+    )
     swebench_tests_timeout: int = Field(
         default=30 * 60,
         description="Timeout in seconds for SWE-bench test evaluation.",
@@ -1042,6 +1050,15 @@ _TASK_METADATA_FIELDS = (
     "rubric_json",
     "rubric_pretty",
     "instance_id",
+    "week",
+    "dataset_dir",
+    "dataset_revision",
+    "task_md_path",
+    "deliverable_filenames",
+    "scenario_overview_path",
+    "week_overview_path",
+    "shared_files",
+    "week_files",
     "_ng_rollout_index",
 )
 
@@ -1166,6 +1183,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         max_tokens = getattr(body, "max_output_tokens", 262144) or 262144
 
         exec_provider = self.task_strategy.get_exec_provider(task_info, self.config)
+        runtime_options = self.task_strategy.runtime_options()
         exec_provider_class = None
         exec_provider_kwargs = None
         if exec_provider is not None:
@@ -1200,6 +1218,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             "truncation_recovery": self.config.truncation_recovery,
             "tavily_api_key": self.config.tavily_api_key,
             "tavily_max_sweeps": self.config.tavily_max_sweeps,
+            **runtime_options,
         }
 
         future = run_stirrup_agent_remote.remote(params)
