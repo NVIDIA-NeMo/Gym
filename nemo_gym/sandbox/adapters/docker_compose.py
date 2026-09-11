@@ -3,8 +3,8 @@
 
 """Run Compose services through the sandbox API.
 
-Docker Compose normalizes the input YAML; unsupported runtime semantics are
-rejected before provisioning services.
+Input YAML is resolved upstream; unsupported runtime semantics are rejected
+before provisioning services.
 """
 
 import asyncio
@@ -12,7 +12,7 @@ import re
 import shlex
 import tempfile
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import replace
 from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
@@ -30,22 +30,6 @@ from nemo_gym.sandbox.providers.base import (
     SupportsSandboxRuntimeRequirements,
     SupportsSandboxSharedStorage,
 )
-
-
-async def _command(argv: Sequence[str]) -> str:
-    process = await asyncio.create_subprocess_exec(
-        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    try:
-        stdout, stderr = await process.communicate()
-    except BaseException:
-        if process.returncode is None:
-            process.kill()
-        await process.wait()
-        raise
-    if process.returncode:
-        raise RuntimeError(f"{argv[0]} failed ({process.returncode}): {stderr.decode(errors='replace')}")
-    return stdout.decode(errors="replace")
 
 
 def _seconds(value: str | int | float) -> float:
@@ -72,7 +56,6 @@ class AsyncSandboxCompose:
         provider,
         compose_file: str | Path | None,
         *,
-        compose_command: Sequence[str] = ("docker-compose",),
         service_specs: Mapping[str, SandboxSpec] | None = None,
         timeout_s: float = 1200,
         poll_interval_s: float = 0.5,
@@ -81,7 +64,6 @@ class AsyncSandboxCompose:
     ):
         self.provider = create_provider(provider) if isinstance(provider, Mapping) else provider
         self.compose_file = Path(compose_file).resolve() if compose_file is not None else None
-        self.compose_command = tuple(compose_command)
         self.document: dict[str, Any] = {}
         self.service_specs = dict(service_specs or {})
         self.timeout_s = timeout_s
@@ -101,22 +83,21 @@ class AsyncSandboxCompose:
         self._processes: dict[str, asyncio.Task] = {}
         self._seeds: list[AsyncSandbox] = []
 
-    async def _normalize(self):
-        raw = await _command([*self.compose_command, "-f", str(self.compose_file), "config", "--format", "yaml"])
-        # `config` emits escaped dollars for Compose to consume at runtime.
-        document = yaml.safe_load(raw.replace("$$", "$"))
-        for service in (document.get("services") or {}).values():
-            if "shm_size" in service:
-                service["shm_size"] = int(service["shm_size"])
-        return document
+    def _load(self):
+        return yaml.safe_load(self.compose_file.read_text(encoding="utf-8"))
 
     def _validate(self) -> list[str]:
+        if not isinstance(self.document, Mapping):
+            raise ValueError("Compose requires a mapping")
         unknown = set(self.document) - {"name", "services", "networks", "volumes"}
         if unknown:
             raise NotImplementedError(f"Unsupported Compose fields: {sorted(unknown)}")
         services = self.document.get("services")
         if not isinstance(services, Mapping) or not services:
             raise ValueError("Compose requires a non-empty services mapping")
+        for field in ("networks", "volumes"):
+            if not isinstance(self.document.get(field) or {}, Mapping):
+                raise ValueError(f"Compose {field} requires a mapping")
         networks = self.document.get("networks") or {}
         default_network = networks.get("default") or {}
         if set(networks) - {"default"} or set(default_network) - {"name", "ipam"} or default_network.get("ipam"):
@@ -124,6 +105,16 @@ class AsyncSandboxCompose:
         dependencies = {}
         aliases_seen = set(services)
         for name, service in services.items():
+            if not isinstance(service, Mapping):
+                raise ValueError(f"Service {name!r} requires a mapping")
+            for field in ("environment", "depends_on", "networks", "healthcheck", "labels", "x-sandbox"):
+                if not isinstance(service.get(field) or {}, Mapping):
+                    raise ValueError(f"Service {name!r}: resolve {field} to a mapping upstream")
+            for field in ("ports", "volumes"):
+                if not isinstance(service.get(field, []), list) or any(
+                    not isinstance(item, Mapping) for item in service.get(field, [])
+                ):
+                    raise ValueError(f"Service {name!r}: resolve {field} to a list of mappings upstream")
             if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", name):
                 raise ValueError(f"Invalid Compose service name: {name!r}")
             unknown = set(service) - {
@@ -169,6 +160,8 @@ class AsyncSandboxCompose:
                 raise ValueError("x-sandbox.hosts only supports [] to explicitly disable host injection")
             dependencies[name] = dict(service.get("depends_on") or {})
             for dependency, config in dependencies[name].items():
+                if not isinstance(config, Mapping):
+                    raise ValueError(f"Service {name!r}: resolve dependency {dependency!r} options upstream")
                 if dependency not in services:
                     raise ValueError(f"Service {name!r}: unknown dependency {dependency!r}")
                 if (
@@ -444,7 +437,7 @@ class AsyncSandboxCompose:
         self._started = True
         try:
             async with asyncio.timeout(self.timeout_s):
-                self.document = await self._normalize()
+                self.document = self._load()
                 order = self._validate()
                 await self._prepare()
                 if any(service.get("volumes") for service in self.document["services"].values()):

@@ -18,7 +18,7 @@ pytestmark = pytest.mark.sandbox
 
 def make_compose(provider, document, *, default_command=None, **kwargs):
     """Supply normalized YAML and optional commands for focused lifecycle tests."""
-    from unittest.mock import AsyncMock
+    from unittest.mock import Mock
 
     from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
 
@@ -28,7 +28,7 @@ def make_compose(provider, document, *, default_command=None, **kwargs):
             if not service.get("entrypoint"):
                 service.setdefault("command", default_command)
     group.document = document
-    group._normalize = AsyncMock(return_value=document)
+    group._load = Mock(return_value=document)
     return group
 
 
@@ -423,17 +423,13 @@ async def test_volume_helper_create_failure_preserves_error_and_closes_provider(
 
 
 @pytest.mark.asyncio
-async def test_yaml_input_normalizes_environment_and_runs_services(tmp_path):
-    import shutil
+async def test_yaml_input_runs_services_without_local_tools(tmp_path, monkeypatch):
+    import asyncio
 
     import yaml
 
     from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
 
-    compose = shutil.which("docker-compose")
-    if compose is None:
-        pytest.skip("docker-compose executable is not installed")
-    (tmp_path / ".env").write_text("COMPOSE_TEST_VALUE=from-dotenv\n")
     output = tmp_path / "result"
     path = tmp_path / "compose.yaml"
     path.write_text(
@@ -442,74 +438,63 @@ async def test_yaml_input_normalizes_environment_and_runs_services(tmp_path):
                 "services": {
                     "app": {
                         "image": "test-image",
-                        "environment": ["VALUE=${COMPOSE_TEST_VALUE}"],
+                        "environment": {"VALUE": "from-yaml"},
                         "x-sandbox": {"hosts": []},
-                        "command": ["sh", "-c", f'printf "%s" "$$VALUE" > {output}'],
+                        "command": ["sh", "-c", f'printf "%s" "$VALUE" > {output}'],
                     }
                 }
             }
         )
     )
+    original_subprocess = asyncio.create_subprocess_exec
+
+    async def sandbox_shell_only(*argv, **kwargs):
+        assert argv[0] == "/bin/sh"
+        return await original_subprocess(*argv, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", sandbox_shell_only)
     provider = ShellProvider()
     provider.set_hosts = AsyncMock(side_effect=AssertionError("explicit host opt-out was lost"))
     async with AsyncSandboxCompose(
         provider,
         path,
-        compose_command=(compose,),
         poll_interval_s=0.01,
     ) as group:
         await group._wait("app", "service_completed_successfully")
-        assert output.read_text() == "from-dotenv"
-        assert provider.created[0].env["VALUE"] == "from-dotenv"
+        assert output.read_text() == "from-yaml"
+        assert provider.created[0].env["VALUE"] == "from-yaml"
     assert provider.closed == ["1"]
 
 
 @pytest.mark.asyncio
 async def test_invalid_yaml_fails_before_provisioning(tmp_path):
-    import shutil
+    import yaml
 
-    from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
-
-    compose = shutil.which("docker-compose")
-    if compose is None:
-        pytest.skip("docker-compose executable is not installed")
     path = tmp_path / "compose.yaml"
     path.write_text("services: [\n")
     provider = ShellProvider()
-    with pytest.raises(RuntimeError, match="failed"):
-        await AsyncSandboxCompose(provider, path, compose_command=(compose,)).start()
+    with pytest.raises(yaml.YAMLError):
+        await AsyncSandboxCompose(provider, path).start()
     assert provider.created == []
 
 
-@pytest.mark.asyncio
-async def test_compose_cli_normalization_decodes_literal_dollars_and_empty_ipam(tmp_path, monkeypatch):
-    path = tmp_path / "compose.yaml"
-    normalized = {
-        "networks": {"default": {"name": "project_default", "ipam": {}}},
+def test_yaml_preserves_literal_dollars_and_does_not_load_dotenv(tmp_path, monkeypatch):
+    import yaml
+
+    monkeypatch.setenv("VALUE", "from-process")
+    (tmp_path / ".env").write_text("VALUE=from-dotenv\n")
+    document = {
         "services": {
             "app": {
-                "image": "alpine",
-                "command": ["sh", "-c", 'echo $$HOME "$${FOO}"'],
-                "environment": {"FOO": "$$literal"},
-                "healthcheck": {"test": ["CMD-SHELL", 'test "$$FOO" = "$$literal"']},
-                "shm_size": "1073741824",
+                "image": "test-image",
+                "command": ["sh", "-c", 'echo $$ "$VALUE"'],
+                "environment": {"VALUE": "${VALUE}"},
             }
-        },
+        }
     }
-    monkeypatch.setattr(
-        "nemo_gym.sandbox.adapters.docker_compose._command", AsyncMock(return_value=json.dumps(normalized))
-    )
-    compose = AsyncSandboxCompose(
-        SimpleNamespace(validate_networking=lambda: None, network_address=AsyncMock(), set_hosts=AsyncMock()),
-        path,
-    )
-    compose.document = await compose._normalize()
-    assert compose.document["services"]["app"].pop("shm_size") == 1073741824
-    await compose._prepare()
-    assert shlex.split(compose._plans["app"]["command"])[2] == 'echo $HOME "${FOO}"'
-    assert compose._plans["app"]["spec"].env["FOO"] == "$literal"
-    assert compose._plans["app"]["health"]["test"][1] == 'test "$FOO" = "$literal"'
-    assert compose._validate() == ["app"]
+    path = tmp_path / "compose.yaml"
+    path.write_text(yaml.safe_dump(document))
+    assert AsyncSandboxCompose(Provider(), path)._load() == document
 
 
 @pytest.mark.asyncio
@@ -595,52 +580,6 @@ async def test_failed_volume_seed_delete_is_retried_by_collection_cleanup():
         await group.start()
     await group.stop()
     assert not live
-
-
-@pytest.mark.asyncio
-async def test_external_command_preserves_stdout_and_reports_stderr():
-    import sys
-
-    from nemo_gym.sandbox.adapters.docker_compose import _command
-
-    assert await _command([sys.executable, "-c", "print('normalized configuration')"]) == "normalized configuration\n"
-    with pytest.raises(RuntimeError, match=r"failed \(7\): invalid input"):
-        await _command([sys.executable, "-c", "import sys; sys.stderr.write('invalid input'); sys.exit(7)"])
-
-
-@pytest.mark.asyncio
-async def test_external_command_cancellation_reaps_child(tmp_path):
-    import asyncio
-    import os
-    import sys
-
-    from nemo_gym.sandbox.adapters.docker_compose import _command
-
-    marker = tmp_path / "child.pid"
-    task = asyncio.create_task(
-        _command(
-            [
-                sys.executable,
-                "-c",
-                "import os, pathlib, sys, time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)",
-                str(marker),
-            ]
-        )
-    )
-    try:
-        async with asyncio.timeout(5):
-            while not marker.exists():
-                await asyncio.sleep(0.01)
-        pid = int(marker.read_text())
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
-    finally:
-        if not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -1301,19 +1240,6 @@ async def test_compose_start_requires_yaml():
 
 
 @pytest.mark.asyncio
-async def test_missing_compose_command_fails_before_provisioning():
-    provider = ShellProvider()
-    group = AsyncSandboxCompose(provider, "compose.yaml", compose_command=("missing-compose-tool-915ab",))
-    with pytest.raises(FileNotFoundError):
-        await group.start()
-    assert provider.created == []
-
-
-def test_compose_default_does_not_require_docker_cli():
-    assert AsyncSandboxCompose(Provider(), "compose.yaml").compose_command == ("docker-compose",)
-
-
-@pytest.mark.asyncio
 async def test_explicit_entrypoint_runs_service(tmp_path):
     output = tmp_path / "output"
     group = make_compose(
@@ -1341,4 +1267,29 @@ async def test_unresolved_startup_rejected_before_provisioning(startup):
     group = make_compose(provider, {"services": {"app": {"image": "example/app:1", **startup}}})
     with pytest.raises(ValueError, match="resolve entrypoint or command upstream"):
         await group.start()
+    assert provider.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "document",
+    [
+        None,
+        [],
+        {"services": {"app": None}},
+        {"services": {"app": {"image": "image", "environment": ["KEY=value"]}}},
+        {"services": {"app": {"image": "image", "ports": ["8000:80"]}}},
+        {"services": {"app": {"image": "image", "volumes": ["data:/data"]}}},
+        {"services": {"app": {"image": "image", "depends_on": {"app": None}}}},
+        {"services": {"app": {}}, "networks": ["default"]},
+    ],
+)
+async def test_unresolved_yaml_shapes_fail_before_provisioning(tmp_path, document):
+    import yaml
+
+    path = tmp_path / "compose.yaml"
+    path.write_text(yaml.safe_dump(document))
+    provider = ShellProvider()
+    with pytest.raises(ValueError, match="mapping|upstream"):
+        await AsyncSandboxCompose(provider, path).start()
     assert provider.created == []

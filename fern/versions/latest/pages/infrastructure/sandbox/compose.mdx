@@ -12,12 +12,11 @@ health checks, service aliases, and shared volumes.
 
 ## Start two services
 
-The adapter uses Gym's existing Python dependencies and adds no Python packages.
-Install NeMo Gym's `sandbox` extra for the provider SDKs and the official
-[standalone Docker Compose executable](https://docs.docker.com/compose/install/standalone/)
-on the creating server. Compose is used only to normalize the YAML with `config`;
-no Docker daemon is needed, including on Slurm nodes. The adapter does not inspect
-images or contact an image registry. The sandbox provider pulls the configured images.
+Install NeMo Gym's `sandbox` extra for the provider SDKs. The adapter reads YAML
+with Gym's existing PyYAML dependency. No Docker daemon, Compose executable, or
+additional Python packages are required on the creating server, including Slurm
+nodes. The adapter does not inspect images or contact an image registry; the
+sandbox provider pulls the configured images.
 
 Configure an [OpenSandbox provider](/infrastructure/sandbox/opensandbox) whose
 sandbox IPs can reach each other. The example images run as root so the provider
@@ -98,8 +97,7 @@ payload = await collection.serialize(scope="operate")
 ```
 
 Send `payload` in your server request. The receiving server supplies its own
-provider configuration and reconnects without the Compose file, Docker Compose,
-image inspection, or provisioning new sandboxes:
+provider configuration and reconnects without the YAML file or provisioning new sandboxes:
 
 ```python
 from nemo_gym.sandbox import AsyncSandboxCompose
@@ -130,11 +128,15 @@ transfer of lifecycle ownership.
 
 ## Input and deployment configuration
 
-On `start()`,
-the adapter runs `docker-compose config --format yaml` to resolve the YAML,
-including interpolation, `.env` values and relative paths. Compose validates
-its schema; the adapter deserializes this normalized output. It rejects requirements the sandbox API cannot honor
-before creating services. It does not invoke `docker compose up`.
+On `start()`, the adapter loads the file with `yaml.safe_load` and validates its
+supported runtime requirements before creating services. It does not run Compose
+normalization, interpolate environment variables, read `.env` files, or merge
+Compose files. Resolve these inputs upstream.
+
+Use mappings for `environment` and `depends_on`, and long-form mappings for
+`ports` and `volumes`. Supply byte counts for `mem_limit` and `shm_size`, and
+resolved absolute bind paths. Strings are passed literally, including `$` and
+`$$`; write shell variables as `$VAR` rather than escaping them for Compose.
 
 The YAML must reference prebuilt images and contain no `build` entries. This is
 an adapter for launching task services through the sandbox API, with a supported
@@ -154,13 +156,9 @@ Host-file configuration requires root access by default.
 
 Deployment-specific settings remain configurable:
 
-- `compose_command` selects the Compose executable, defaulting to `("docker-compose",)`.
-  If the Docker CLI and Compose plugin are installed, use `("docker", "compose")`;
-  `config` still needs no daemon. Docker's current Compose SDK is Go-only, so the
-  adapter uses the official executable for interpolation and normalization.
 - `service_specs={name: SandboxSpec(...)}` supplies sandbox TTL, resources and
   provider options. Compose values override corresponding spec fields.
-- `timeout_s` bounds normalization and startup; `poll_interval_s` controls startup polling.
+- `timeout_s` bounds startup; `poll_interval_s` controls startup polling.
 - `volume_init_image` selects the shared-volume helper image.
 
 ## Networking and shared storage
@@ -172,7 +170,7 @@ Client-facing proxy endpoints cannot substitute for direct service communication
 
 For `network_mode: service:<name>`, OpenSandbox can opt into TCP loopback
 forwarding with `networking.loopback_forwarding=True`. This forwards the target's
-Compose/OCI-exposed TCP ports on both `127.0.0.1` and `::1`. It provides the localhost
+YAML-declared TCP ports on both `127.0.0.1` and `::1`. It provides the localhost
 connectivity used by these services; it does not create a shared Linux network
 namespace or forward UDP, undeclared ports, or reverse connections. Providers
 must implement `SupportsSandboxPortForwarding`. The forwarding interpreter is
@@ -200,7 +198,7 @@ receive the image mount target's contents unless `volume.nocopy` is set. These
 volumes are ephemeral: stopping the collection deletes its managed data.
 
 For existing data, supply `volume_sources={source: relative_shared_path}`. Keys
-are normalized absolute bind source paths or Compose named-volume keys; values
+are resolved absolute bind source paths or Compose named-volume keys; values
 are existing directories beneath the configured shared root. These directories
 are preserved on cleanup. Local bind data is not uploaded automatically.
 Read-only mounts remain read-only.
