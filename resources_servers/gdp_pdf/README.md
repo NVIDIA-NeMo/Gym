@@ -113,9 +113,10 @@ a `rationale` string. **The judge sees the model's response, the task prompt, an
 criterion** — never the PDF, or the criterion's type/severity/implicitness metadata. Including the
 task prompt is a deliberate deviation from upstream (see below).
 
-- `reward` = 1.0 only if **every** criterion passes (`score.round(4) >= 1.0`). GDP.pdf's headline
-  all-pass metric, matching upstream's `all_pass`.
-- `mean_criterion_pass` = fraction of criteria passed, reported alongside (upstream: `mean_criteria`).
+- `reward` = fraction of criteria passed, providing partial credit by default. It is identical to
+  `mean_criterion_pass` (upstream: `mean_criteria`).
+- `all_pass` = 1.0 only if **every** criterion passes (`score.round(4) >= 1.0`), otherwise 0.0.
+  This preserves GDP.pdf's strict response-level metric alongside the default reward.
 - `num_criteria`, `num_criteria_passed`, and per-criterion `criterion_evaluations` (score, rationale,
   and the raw judge request/response) are returned for inspection.
 - Judge output is parsed strictly (markdown fences stripped, JSON-schema validated, score coerced to
@@ -152,7 +153,8 @@ directly interchangeable across implementations.
 
 ## Metrics
 
-`compute_metrics` reports overall `all_pass` and `mean_criterion_pass` (plus `judge_no_verdict`, the
+Every verified rollout serializes both `all_pass` and `mean_criterion_pass`; `reward` is the latter.
+`compute_metrics` reports both metrics overall (plus `judge_no_verdict`, the
 share of criteria where no verdict token could be parsed — watch this, a non-trivial value means the
 judge is not following the output format), with a per-domain breakdown keyed on
 `verifier_metadata.domain`.

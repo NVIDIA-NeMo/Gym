@@ -329,6 +329,7 @@ class TestVerify:
         result = await server.verify(body)
 
         assert result.reward == 1.0
+        assert result.all_pass == 1.0
         assert result.num_criteria == 2
         assert result.num_criteria_passed == 2
         assert result.mean_criterion_pass == approx(1.0)
@@ -336,7 +337,9 @@ class TestVerify:
         assert result.criterion_evaluations[0].rationale == "matches"
 
     @pytest.mark.asyncio
-    async def test_one_failing_criterion_zeroes_reward_but_not_mean(self, server: GdpPdfResourcesServer) -> None:
+    async def test_one_failing_criterion_uses_mean_reward_and_fails_all_pass(
+        self, server: GdpPdfResourcesServer
+    ) -> None:
         _mock_judge(server, _scored_content("1"), _scored_content("0"))
         body = _verify_request(
             "The cap is $5M.",
@@ -345,8 +348,8 @@ class TestVerify:
 
         result = await server.verify(body)
 
-        # All-pass is strict; the mean still reflects partial credit.
-        assert result.reward == 0.0
+        assert result.reward == approx(1 / 3)
+        assert result.all_pass == 0.0
         assert result.num_criteria_passed == 1
         assert result.mean_criterion_pass == approx(1 / 3)
 
@@ -368,6 +371,7 @@ class TestVerify:
         result = await server.verify(body)
 
         assert result.reward == 0.0
+        assert result.all_pass == 0.0
         assert result.num_criteria == 2
         assert result.num_criteria_passed == 0
         assert result.mean_criterion_pass == 0.0
@@ -544,23 +548,29 @@ class TestJudgeRetry:
 
 class TestMetrics:
     @staticmethod
-    def _rollout(reward: float, mean_pass: float, domain: str) -> dict:
+    def _rollout(reward: float, mean_pass: float, domain: str, *, all_pass: float) -> dict:
         return {
             "reward": reward,
+            "all_pass": all_pass,
             "mean_criterion_pass": mean_pass,
             "verifier_metadata": {"domain": domain},
         }
 
     def test_score_fn_reports_all_pass_and_mean(self) -> None:
-        scores = GdpPdfResourcesServer._score_fn(self._rollout(1.0, 1.0, "Legal"))
+        scores = GdpPdfResourcesServer._score_fn(self._rollout(0.5, 0.5, "Legal", all_pass=0.0))
+        assert scores["all_pass"] == 0.0
+        assert scores["mean_criterion_pass"] == 0.5
+
+    def test_score_fn_supports_old_rollouts_without_explicit_all_pass(self) -> None:
+        scores = GdpPdfResourcesServer._score_fn({"reward": 1.0, "mean_criterion_pass": 0.75})
         assert scores["all_pass"] == 1.0
-        assert scores["mean_criterion_pass"] == 1.0
+        assert scores["mean_criterion_pass"] == 0.75
 
     def test_compute_metrics_adds_per_domain_breakdown(self, server: GdpPdfResourcesServer) -> None:
         tasks = [
-            [self._rollout(1.0, 1.0, "Legal")],
-            [self._rollout(0.0, 0.5, "Legal")],
-            [self._rollout(1.0, 1.0, "Healthcare")],
+            [self._rollout(1.0, 1.0, "Legal", all_pass=1.0)],
+            [self._rollout(0.5, 0.5, "Legal", all_pass=0.0)],
+            [self._rollout(1.0, 1.0, "Healthcare", all_pass=1.0)],
         ]
         metrics = server.compute_metrics(tasks)
 
@@ -569,7 +579,7 @@ class TestMetrics:
         assert not any(key.startswith("Legal/per_sample_aggregate") for key in metrics)
 
     def test_compute_metrics_without_domain_has_no_subsets(self, server: GdpPdfResourcesServer) -> None:
-        metrics = server.compute_metrics([[{"reward": 1.0, "mean_criterion_pass": 1.0}]])
+        metrics = server.compute_metrics([[{"reward": 1.0, "all_pass": 1.0, "mean_criterion_pass": 1.0}]])
         assert not any("/" in key and key.split("/")[0] not in ("mean", "std") for key in metrics if "@" not in key)
 
     def test_get_key_metrics_selects_headline_scores(self, server: GdpPdfResourcesServer) -> None:
@@ -579,6 +589,7 @@ class TestMetrics:
             "pass@1[avg-of-5]/all_pass": 0.3,
             "pass@1[avg-of-5]/mean_criterion_pass": 0.72,
             "pass@5/all_pass": 0.5,
+            "pass@5/mean_criterion_pass": 0.9,
         }
         key = server.get_key_metrics(agent_metrics)
 
@@ -587,6 +598,7 @@ class TestMetrics:
         assert key["pass@1[avg-of-5]/all_pass"] == 0.3
         assert key["pass@1[avg-of-5]/mean_criterion_pass"] == 0.72
         assert key["pass@5/all_pass"] == 0.5
+        assert key["pass@5/mean_criterion_pass"] == 0.9
 
     def test_get_key_metrics_tolerates_missing_token_counts(self, server: GdpPdfResourcesServer) -> None:
         assert server.get_key_metrics({}) == {}
@@ -761,9 +773,7 @@ class TestFetchExampleMedia:
         with open(tmp_path / "example.jsonl", "w") as f:
             for n in names:
                 task_id = n.removesuffix(".pdf")
-                f.write(
-                    json.dumps(_row(f"test_media/documents/{task_id}/manifest.json", f"media/pdfs/{n}")) + "\n"
-                )
+                f.write(json.dumps(_row(f"test_media/documents/{task_id}/manifest.json", f"media/pdfs/{n}")) + "\n")
 
     def _patch(self, monkeypatch, downloaded: list, rendered: list):
         import benchmarks.gdp_pdf.prepare as prepare_module

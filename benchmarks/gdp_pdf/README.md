@@ -5,14 +5,36 @@ Benchmark wrapper around the `gdp_pdf` resources server. See
 description of the dataset, grading, and configuration.
 
 100 expert-written prompts over real professional PDFs across ten domains, graded per atomic rubric
-criterion (1,275 criteria total) by an LLM judge. The headline metric is the **all-pass rate** —
-the share of attempts where every criterion passed — reported over **5 attempts per task**, matching
-the published protocol.
+criterion (1,275 criteria total) by an LLM judge. The default scalar reward is the mean criterion
+pass rate, while the strict **all-pass rate** is also serialized and reported. All-pass is the share
+of attempts where every criterion passed and is reported over **5 attempts per task**, matching the
+published protocol.
 
 > **Evaluation use only.** The upstream dataset has no train split by design; training on it
 > contaminates the benchmark.
 
 ## Prepare
+
+The prepare script runs in the same Python environment as the `gym` CLI. Before preparing the
+dataset, update the repository's `.venv` with the GDP.pdf resources-server requirements. Run the
+install from the requirements file's directory so its relative editable dependency resolves to
+this NeMo Gym checkout:
+
+```bash
+# From the NeMo Gym repository root
+(
+  cd resources_servers/gdp_pdf
+  uv pip install --python ../../.venv/bin/python -r requirements.txt
+)
+
+source .venv/bin/activate
+```
+
+This installs the preparation dependencies (`liteparse`, `datasets`, and `huggingface_hub`) into
+the environment that executes `gym eval prepare`. It does not update the agent's isolated
+`responses_api_agents/gdp_pdf_agent/.venv`.
+
+Then prepare the dataset:
 
 ```bash
 gym eval prepare --benchmark gdp_pdf

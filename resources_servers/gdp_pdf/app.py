@@ -41,11 +41,10 @@ retries on any criterion raises ``JudgeError`` for the *whole row*, which
 ``all_pass`` and ``mean_criterion_pass`` alike, not just the former. Given
 schema-constrained decoding, exhaustion should be rare.
 
-``reward`` is the strict all-pass score (1.0 only when every criterion
-passes), matching upstream's ``all_pass`` -- GDP.pdf's headline metric. The
-task-macro mean criterion pass rate is reported alongside it as
-``mean_criterion_pass`` (upstream: ``mean_criteria``) and surfaced in
-``compute_metrics``.
+``reward`` is the fraction of criteria passed, matching
+``mean_criterion_pass`` (upstream: ``mean_criteria``). The strict response-level
+``all_pass`` score (1.0 only when every criterion passes) is reported alongside
+it, and ``compute_metrics`` surfaces both.
 """
 
 from __future__ import annotations
@@ -134,6 +133,7 @@ class GdpPdfVerifyResponse(BaseVerifyResponse):
     verifier_metadata: Optional[dict[str, Any]] = None
     num_criteria: int = 0
     num_criteria_passed: int = 0
+    all_pass: float = 0.0
     mean_criterion_pass: float = 0.0
     criterion_evaluations: list[CriterionEvaluation] = []
 
@@ -273,12 +273,14 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
     def _build_response(body: GdpPdfVerifyRequest, evaluations: List[CriterionEvaluation]) -> GdpPdfVerifyResponse:
         num_passed = sum(1 for e in evaluations if e.passed)
         total = len(evaluations)
+        mean_criterion_pass = num_passed / total
         return GdpPdfVerifyResponse(
             **body.model_dump(),
-            reward=1.0 if num_passed == total else 0.0,
+            reward=mean_criterion_pass,
             num_criteria=total,
             num_criteria_passed=num_passed,
-            mean_criterion_pass=num_passed / total,
+            all_pass=1.0 if num_passed == total else 0.0,
+            mean_criterion_pass=mean_criterion_pass,
             criterion_evaluations=evaluations,
         )
 
@@ -360,9 +362,11 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
 
     @staticmethod
     def _score_fn(r: Dict[str, Any]) -> Dict[str, float]:
+        # Fall back to reward for rollouts produced before all_pass became an
+        # explicit field. New rollouts always serialize both metrics.
         return {
-            "all_pass": float(r.get("reward", 0.0)),
-            "mean_criterion_pass": float(r.get("mean_criterion_pass", 0.0)),
+            "all_pass": float(r.get("all_pass", r.get("reward", 0.0))),
+            "mean_criterion_pass": float(r.get("mean_criterion_pass", r.get("reward", 0.0))),
         }
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
@@ -392,7 +396,7 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
                 key[name] = agent_metrics[name]
         score_names = ["all_pass", "mean_criterion_pass"]
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=score_names))
-        key.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=["all_pass"]))
+        key.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=score_names))
         return key
 
 
