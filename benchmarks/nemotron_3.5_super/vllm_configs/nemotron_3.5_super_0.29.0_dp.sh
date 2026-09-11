@@ -34,7 +34,6 @@ VLLM_PREFILL_ARGS=(
     --max-num-batched-tokens 67840
     --max-num-seqs 1024
     --tensor-parallel-size 1
-    --all2all-backend deepep_high_throughput
 )
 VLLM_DECODE_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
@@ -42,5 +41,4 @@ VLLM_DECODE_ARGS=(
     --max-num-batched-tokens 33920
     --max-num-seqs 1024
     --tensor-parallel-size 1
-    --all2all-backend deepep_low_latency
 )
