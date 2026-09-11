@@ -349,9 +349,7 @@ def test_render_driver_entrypoint_prepare_arg_with_spaces_survives_the_shell():
     out = render_driver_entrypoint(None, None, f"printf '%s\\n' {shlex.quote(arg)}")
 
     script = out.replace('exec "$@"', ":").replace('"${GYM_CMD[@]}"', "''")
-    printed = subprocess.run(
-        ["bash", "-c", script], capture_output=True, text=True, check=True
-    ).stdout.splitlines()
+    printed = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True).stdout.splitlines()
 
     assert printed == [arg]
 
