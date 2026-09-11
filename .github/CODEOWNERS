@@ -24,7 +24,6 @@
 # ── Enforced ──────────────────────────────────────────────────────────────
 .github/ @nvidia-nemo/automation
 docker/ @nvidia-nemo/automation
-# suggest: docker/ @anwithk
 pyproject.toml @nvidia-nemo/automation
 uv.lock @nvidia-nemo/automation
 
@@ -32,8 +31,13 @@ uv.lock @nvidia-nemo/automation
 # Path → team map below mirrors the ownership proposal from PR #2439 (not
 # merged/enforced — kept here as suggestions only). Teams verified to exist
 # via the GitHub API at authoring time.
+#
+# NOTE: last-match-wins, so a more specific suggestion for a path already
+# covered by the `*` wildcard backstop below must be listed AFTER it, not
+# before it, or the wildcard silently overrides it.
 
 # suggest: * @nvidia-nemo/gym_architects
+# suggest: docker/ @anwithk
 
 # Frontier Eval
 # suggest: /responses_api_agents/ @nvidia-nemo/gym_env_benchmarks
