@@ -277,6 +277,10 @@ vllm = [
 ]
 
 sandbox = [
+    # ORAS: read image configuration directly from OCI registries without a Docker daemon.
+    # License: Apache 2.0 https://github.com/oras-project/oras-py/blob/main/LICENSE
+    "oras>=0.2.43,<0.3",
+
     # Tenacity: Retry helpers used by sandbox providers.
     # Updated: Sat May 09, 2026 with tenacity==9.1.4
     # License: Apache 2.0 https://github.com/jd/tenacity/blob/master/LICENSE
