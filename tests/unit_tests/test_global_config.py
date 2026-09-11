@@ -88,6 +88,35 @@ class TestGlobalConfig:
             "cache_dir": str(CACHE_DIR.expanduser().resolve()),
         }
 
+    def test_normalize_simple_agent_rollouts_adds_processor_sidecar(self) -> None:
+        config = OmegaConf.create(
+            {
+                "example_agent": {
+                    "responses_api_agents": {
+                        "simple_agent": {
+                            "entrypoint": "app.py",
+                            "resources_server": {"type": "resources_servers", "name": "resources"},
+                            "model_server": {"type": "responses_api_models", "name": "model"},
+                            "datasets": [{"name": "example", "type": "example", "jsonl_fpath": "example.jsonl"}],
+                            "token_id_capture": True,
+                        }
+                    }
+                }
+            }
+        )
+
+        GlobalConfigDictParser.normalize_simple_agent_rollouts(config)
+
+        assert "responses_api_agents" in config.example_agent
+        processor = config.example_agent__processor.processors.single_agent_turn
+        assert processor.agent_server == {"type": "responses_api_agents", "name": "example_agent"}
+        assert processor.resources_server == {"type": "resources_servers", "name": "resources"}
+        assert processor.token_id_capture is True
+        assert "datasets" not in processor
+
+        GlobalConfigDictParser.normalize_simple_agent_rollouts(config)
+        assert list(name for name in config if name.endswith("__processor")) == ["example_agent__processor"]
+
     def test_get_global_config_dict_sanity(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
 
@@ -1992,7 +2021,12 @@ class TestConfigLoadErrors:
         # config in the repo so this fails fast in CI instead.
         repo_root = Path(__file__).resolve().parents[2]
         config_dirs = ("responses_api_agents", "resources_servers", "nemo_gym/sandbox/providers")
-        config_paths = [p for d in config_dirs for p in (repo_root / d).rglob("*.yaml")]
+        config_paths = [
+            path
+            for directory in config_dirs
+            for path in (repo_root / directory).rglob("*.yaml")
+            if ".venv" not in path.parts
+        ]
         assert config_paths, "no config files discovered -- sweep dirs may have moved"
 
         failures = []
