@@ -10,7 +10,7 @@ Execution-based text-to-SQL on BIRD dev, bound to the `bird_sql` resource server
 ## Preparation
 
 ```bash
-pip install bm25s nltk
+uv sync --extra birdbench
 gym eval prepare --benchmark birdbench
 ```
 
@@ -26,6 +26,29 @@ via `original_column_name`. Example values combine a baseline per-column
 sample with per-question BM25 retrieval (via `bm25s`, pure Python, no JVM)
 against the question text. See `build_db_values.py` for the full retrieval
 and rendering design.
+
+Each column's description is built from `prepare_script_args.dscp`: a
+comma-separated, ordered list of BIRD's `column_name` (`name`),
+`column_description` (`col_dscp`), and `value_description` (`val_dscp`)
+fields, concatenated as prose (blank fields dropped, a period appended to
+each kept field unless it already ends with one). E.g. `dscp: name,col_dscp`
+includes both fields, name first. The default, `name_or_col_dscp`, is a
+single fallback field -- name if non-blank, else description -- matching
+this benchmark's original (pre-`dscp`) behavior of showing exactly one of
+the two, never both. Override from the CLI with, e.g.:
+
+```bash
+gym eval prepare --benchmark birdbench "+prepare_script_args.dscp='name,col_dscp,val_dscp'"
+```
+
+By default, each entry's BIRD `evidence` field (literal-value hints, e.g.
+"triple type bonds refers to bond_type = '#'") is prepended to its question.
+Set `prepare_script_args.include_evidence: false` (pre-declared in
+`config.yaml`) to disable this, e.g.:
+
+```bash
+gym eval prepare --benchmark birdbench +prepare_script_args.include_evidence=false
+```
 
 ## Running servers
 
@@ -46,7 +69,7 @@ gym eval run --no-serve \
     --input benchmarks/birdbench/data/birdbench_benchmark.jsonl \
     --prompt-config benchmarks/birdbench/prompts/default.yaml \
     --output results/birdbench_rollouts.jsonl \
-    --temperature 0 \
+    --temperature 1 \
     --num-repeats 4
 ```
 

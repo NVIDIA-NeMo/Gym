@@ -49,7 +49,9 @@ def extract_sql_from_response(text: Optional[str]) -> Optional[str]:
 
     Behavior:
     - No ` ```sql ``` ` block found → return ``None``. The caller scores this
-      as a hard 0 without attempting execution (no query to run).
+      as a hard 0 without attempting execution (no query to run). The ``sql``
+      fence tag is matched case-insensitively (e.g. ` ```SQL ` also matches);
+      the captured SQL content's case is left untouched.
     - Multiple blocks → use the LAST one.
     - SQL comments (``--...``, ``/*...*/``) are left as-is: SQLite's parser
       ignores them natively, so stripping them before execution is unnecessary.
@@ -61,7 +63,9 @@ def extract_sql_from_response(text: Optional[str]) -> Optional[str]:
     if not text:
         return None
 
-    matches = re.findall(r"(?:```sql)(.*?[a-zA-Z].*?)(?:```)", text, flags=re.DOTALL)
+    # \b after "sql" so IGNORECASE doesn't also match unrelated tags that merely start with
+    # those letters (```SQLite, ```sqlalchemy, ...).
+    matches = re.findall(r"(?:```sql\b)(.*?[a-zA-Z].*?)(?:```)", text, flags=re.DOTALL | re.IGNORECASE)
     if not matches:
         return None
 

@@ -305,6 +305,21 @@ sandbox = [
     "boto3>=1.34",
 ]
 
+# BirdBench is opt-in since bm25s/nltk are only used by benchmarks/birdbench/prepare.py
+# (offline dataset prep), never by resources_servers/bird_sql at server runtime.
+birdbench = [
+    # bm25s: Pure-Python BM25 retrieval (numpy/scipy-backed, no JVM) used to pull relevant
+    # example column values into the birdbench sql_context. See benchmarks/birdbench/build_db_values.py.
+    # Updated: Fri Sep 11, 2026 with bm25s==0.3.11
+    # License: MIT https://github.com/xhluca/bm25s
+    "bm25s>=0.3.11",
+
+    # nltk: Tokenization backend bm25s uses to build its BM25 index over column values.
+    # Updated: Fri Sep 11, 2026 with nltk==3.10.3
+    # License: Apache 2.0 https://github.com/nltk/nltk/blob/develop/LICENSE.txt
+    "nltk>=3.10.3",
+]
+
 # Keep OpenShell opt-in so its platform-specific SDK wheel cannot block installs for other providers.
 openshell = [
     # OpenShell SDK: used by the OpenShell sandbox provider for gateway create/exec/delete over gRPC.
