@@ -291,6 +291,7 @@ class TestParseOpencodeSession:
         assert compaction.summary == "condensed context"
         assert compaction.first_kept_item_id == "p5"
         assert "compaction_model_call_boundary_unavailable" in {gap.code for gap in bundle.gaps}
+        assert "model_call_ownership_unavailable" not in {gap.code for gap in bundle.gaps}
 
     def test_reports_unaddressable_compaction_boundary(self, tmp_path) -> None:
         db = _session_db(
@@ -434,6 +435,7 @@ class TestRolloutObservability:
             NeMoGymEasyInputMessage(role="user", content="configured system\n\nrequest system\n\nsolve")
         ]
         assert "agent_transcript_unavailable" in {gap.code for gap in episode.observations.gaps}
+        assert "model_call_ownership_unavailable" in {gap.code for gap in episode.observations.gaps}
 
     def test_run_attaches_artifact_observations_when_enabled(self, tmp_path: Path) -> None:
         db = _session_db(tmp_path, [("assistant", [{"type": "text", "text": "done"}])])
@@ -494,12 +496,13 @@ class TestRepoDir:
         process.communicate = AsyncMock(return_value=(b"", b""))
         agent = _make_agent(repo_dir=str(repo_dir))
         scored = [NeMoGymResponseOutputMessage(id="scored", content=[])]
+        create_process = AsyncMock(return_value=process)
 
         with (
             patch.object(agent, "_workspace_root", return_value=workspace),
             patch(
                 "responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec",
-                AsyncMock(return_value=process),
+                create_process,
             ),
             patch(
                 "responses_api_agents.opencode_agent.app.parse_opencode_session",
@@ -517,6 +520,8 @@ class TestRepoDir:
         assert output == scored
         assert usage == {"input_tokens": 1, "output_tokens": 2}
         assert run_metadata["status"] == "completed"
+        command = create_process.await_args.args
+        assert "--title" not in command
         assert "agent_artifact_unavailable" in {gap.code for gap in observations.gaps}
         assert repo_dir.is_dir()
         assert not workspace.exists()

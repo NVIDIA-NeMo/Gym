@@ -369,7 +369,6 @@ def _parse_opencode_session(db_path: Path, fallback_invocation_id: str) -> Agent
     if not invocations:
         invocations = [AgentInvocation(invocation_id=fallback_invocation_id)]
         gaps.append(ObservationGap(code="agent_transcript_unavailable"))
-    gaps.append(ObservationGap(code="model_call_ownership_unavailable"))
 
     return AgentObservationBundle(
         source="opencode",

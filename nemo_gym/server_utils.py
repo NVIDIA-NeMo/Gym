@@ -626,6 +626,10 @@ class BaseServer(BaseModel):
         return server_config
 
     def setup_liveness(self, app: FastAPI) -> None:
+        @app.get("/readyz", include_in_schema=False)
+        @app.get("/livez", include_in_schema=False)
+        @app.get("/healthz", include_in_schema=False)
+        @app.get("/health", include_in_schema=False)
         @app.get("/", include_in_schema=False)
         async def _liveness():
             return {"status": "ok"}
@@ -1105,17 +1109,34 @@ Full body: {json.dumps(exc.body, indent=4)}
 class HeadServer(BaseServer):
     config: BaseServerConfig
     _server_instances: List[dict] = []
+    _ready: bool = PrivateAttr(default=False)
     # Serialized global config returned to clients.
     _cached_yaml: Optional[str] = None
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
-        self.setup_liveness(app)
+        @app.get("/livez", include_in_schema=False)
+        @app.get("/", include_in_schema=False)
+        async def _liveness():
+            return {"status": "ok"}
+
+        @app.get("/readyz", include_in_schema=False)
+        @app.get("/healthz", include_in_schema=False)
+        @app.get("/health", include_in_schema=False)
+        async def _readiness(response: Response):
+            if not self._ready:
+                response.status_code = 503
+                return {"status": "starting"}
+            return {"status": "ok"}
+
         app.get("/global_config_dict_yaml")(self.global_config_dict_yaml)
         app.get("/server_instances")(self.get_server_instances)
 
         return app
+
+    def mark_ready(self) -> None:
+        self._ready = True
 
     def get_server_instances(self) -> List[dict]:
         return self._server_instances
