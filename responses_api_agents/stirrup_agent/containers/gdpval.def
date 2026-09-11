@@ -238,8 +238,13 @@ From: debian:trixie
     # a single-purpose image whose entire point is this dependency set, so
     # installing into the system interpreter is correct here; there is no other
     # Python on the image to protect.
+    # Deliberately NOT upgrading pip. Debian installs pip without a RECORD
+    # file, so `pip install --upgrade pip` fails at the uninstall step with
+    # `uninstall-no-record-file` and takes the whole build down. Debian's pip
+    # resolves the pinned manifest fine, and pinning the resolver to whatever
+    # trixie ships is one less thing drifting between builds.
     PIP="python3 -m pip install --no-cache-dir --break-system-packages"
-    $PIP --upgrade pip
+    python3 -m pip --version
 
     # Build the effective pin list for this architecture. x86_64 gets the
     # published manifest verbatim; arm64 drops only the closed exclusion list.
