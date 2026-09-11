@@ -534,7 +534,7 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
             )
 
         context_compacted_response = None
-        if model_response_json.get("context_compaction_contract") is not None:
+        if model_response_json.get("rollout_trace_contract") is not None:
             context_compacted_response = ContextCompactedResponse.model_validate(model_response_json)
             original_input = body.responses_create_params.input
             if isinstance(original_input, str):
@@ -588,10 +588,10 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
         if context_compacted_response is None:
             return verified
 
-        contract = context_compacted_response.context_compaction_contract
+        contract = context_compacted_response.rollout_trace_contract
         context_compacted_response = context_compacted_response.model_copy(
             update={
-                "context_compaction_contract": contract.model_copy(
+                "rollout_trace_contract": contract.model_copy(
                     update={
                         "group_id": body.context_compaction_group_id,
                         "task_id": body.context_compaction_task_id,
@@ -601,8 +601,6 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
                 )
             }
         )
-        if self.config.skip_verification:
-            return verified.model_copy(update={"response": context_compacted_response})
         return verified.model_copy(update={"response": build_transport_response(context_compacted_response)})
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:

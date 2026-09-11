@@ -44,9 +44,11 @@ from responses_api_agents.simple_agent_with_compaction.app import (
     SimpleAgentWithCompactionRunRequest,
 )
 from responses_api_agents.simple_agent_with_compaction.compaction import (
+    ContextCompactedTransportResponse,
     ContextCompactionSession,
     ContextHistoryConfig,
     build_generation_contract,
+    canonical_digest,
     normalize_semantic_items,
 )
 
@@ -333,7 +335,14 @@ class TestApp:
         assert second_input[1]["type"] == "reasoning"
         assert second_input[1]["summary"] == [{"text": "thinking", "type": "summary_text"}]
         assert "prompt_token_ids" not in second_input[1]
-        assert response.json()["context_compaction_contract"]["mode"] == "exact_trace_authority"
+        assert set(response.json()["rollout_trace_contract"]) == {
+            "rollout_id",
+            "group_id",
+            "task_id",
+            "rollout_index",
+            "attempt_index",
+            "generation_contract",
+        }
 
     async def test_responses_prefers_caller_owned_rollout_id_cookie(self) -> None:
         config = SimpleAgentWithCompactionConfig(
@@ -381,7 +390,7 @@ class TestApp:
         )
 
         assert response.status_code == 200
-        assert response.json()["context_compaction_contract"]["rollout_id"] == "caller-rollout"
+        assert response.json()["rollout_trace_contract"]["rollout_id"] == "caller-rollout"
 
     async def test_authority_identity_history_tracks_model_and_tool_outputs(self) -> None:
         config = SimpleAgentWithCompactionConfig(
@@ -624,7 +633,7 @@ class TestApp:
         assert len(payload["boundary_events"]) == 1
 
     @pytest.mark.parametrize("skip_verification", [False, True])
-    async def test_run_preserves_authority_contract_with_optional_resource_verification(
+    async def test_run_returns_one_trace_envelope_with_optional_resource_verification(
         self,
         skip_verification: bool,
     ) -> None:
@@ -713,23 +722,39 @@ class TestApp:
 
         result = await server.run(request, request_body)
 
-        assert result.response.context_compaction_contract.rollout_id == "rollout-run"
-        assert result.response.context_compaction_contract.group_id == "group-run"
-        assert result.response.context_compaction_contract.task_id == "task-run"
-        assert result.response.context_compaction_contract.rollout_index == 2
-        assert result.response.context_compaction_contract.attempt_index == 1
-        expected_schema_version = 2 if skip_verification else 3
-        assert result.response.context_compaction_contract.schema_version == expected_schema_version
+        assert isinstance(result.response, ContextCompactedTransportResponse)
+        contract_payload = result.response.rollout_trace_contract.model_dump(mode="json")
+        assert not ({"schema_version", "mode", "format"} & contract_payload.keys())
+        assert "schema_version" not in contract_payload["generation_contract"]
+        assert result.response.rollout_trace_contract.rollout_id == "rollout-run"
+        assert result.response.rollout_trace_contract.group_id == "group-run"
+        assert result.response.rollout_trace_contract.task_id == "task-run"
+        assert result.response.rollout_trace_contract.rollout_index == 2
+        assert result.response.rollout_trace_contract.attempt_index == 1
+        assert len(result.response.model_call_metadata) == 1
+        assert result.response.model_call_metadata[0].generation_evidence_digest == canonical_digest(
+            {
+                "prompt_token_ids": [10],
+                "sampled_token_ids": [11],
+                "sampled_logprobs": [-0.1],
+            }
+        )
+        assert not hasattr(result.response, "completion_evidence")
+        assert not hasattr(result.response, "agent_input")
+        assert not hasattr(result.response, "seed_obs")
         if skip_verification:
             assert result.reward == 0.25
             assert result.verification_skipped is True
-            assert len(result.response.completion_evidence) == 1
-            assert result.response.agent_input
+            assert server.server_client.post.call_count == 2
         else:
-            assert len(result.response.model_call_metadata) == 1
-            assert not hasattr(result.response, "completion_evidence")
-            assert not hasattr(result.response, "agent_input")
-            assert not hasattr(result.response, "seed_obs")
+            verifier_payload = server.server_client.post.call_args_list[2].kwargs["json"]["response"]
+            assert len(verifier_payload["completion_evidence"]) == 1
+            observed = verifier_payload["completion_evidence"][0]
+            assert observed["prompt_token_ids"] == [10]
+            assert observed["sampled_token_ids"] == [11]
+            assert observed["sampled_logprobs"] == [-0.1]
+            assert verifier_payload["agent_input"]
+            assert "model_call_metadata" not in verifier_payload
         inner_responses_call = server.server_client.post.call_args_list[1]
         assert inner_responses_call.kwargs["cookies"][_CONTEXT_COMPACTION_ROLLOUT_ID_COOKIE] == "rollout-run"
 
