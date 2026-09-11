@@ -12,15 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Prepare the vision (multimodal) variant of HLE-Verified.
+"""Prepare HLE-Verified with text and image questions.
 
-Thin wrapper around ``benchmarks.hle_verified.prepare.prepare`` with
-``include_vision=True``, mirroring ``benchmarks/hle/prepare_vision.py``. The Gold +
-Revision rows are kept including image questions, and every row is fully materialized
-(image questions carry an ``input_image`` block), written to
-``benchmarks/hle_verified/data/hle_verified_benchmark_vision.jsonl``.
-
-Evaluating the result needs a vision-capable policy model; the judge stays text-only.
+Writes materialized inputs to data/hle_verified_benchmark_vision.jsonl.
+Requires a vision-capable policy model for evaluation.
 """
 
 from pathlib import Path

@@ -14,32 +14,10 @@
 # limitations under the License.
 """Prepare HLE-Verified evaluation data for NeMo Gym.
 
-HLE-Verified (``skylenage/HLE-Verified``) is a re-annotation of Humanity's Last
-Exam in which every question was re-checked by domain experts and sorted into
-three subsets:
-
-  * **Gold** — the question and its reference answer were confirmed correct as-is.
-  * **Revision** — the reference answer was wrong or under-specified upstream and
-    has been corrected here.
-  * **Uncertain** — the annotators could not confirm the answer; excluded from the
-    default eval split because grading against it is unreliable.
-
-Mirrors NeMo Skills' ``nemo_skills/dataset/hle_verified/prepare.py``: the default
-``text`` subset is the image-free rows of Gold + Revision, matching Skills'
-``EVAL_SPLIT = "text"``. Rows are emitted in the same shape as
-``benchmarks/hle/prepare.py`` so the ``equivalence_llm_judge`` resources server and
-the official HLE judge prompt can be reused unchanged.
-
-Field renames vs Skills (to match Gym's HLE rows):
-  - Skills' ``problem``  -> Gym ``question``
-  - Skills' ``id``       -> Gym ``uuid``
-  - Skills' ``subset_for_metrics`` -> Gym ``category``
-
-``--include-vision`` additionally keeps the image questions and materializes every
-row's ``responses_create_params.input``, mirroring ``benchmarks/hle``'s vision
-variant. Subset and modality are independent: ``--subset`` still selects verified
-classes, and ``--include-vision`` decides whether image questions come along. Skills
-has no vision counterpart, so that split is Gym-only and not comparable to it.
+Downloads HLE-Verified from HuggingFace and converts it to Gym JSONL format.
+By default, only text questions from the Gold and Revision subsets are included.
+Pass ``include_vision=True`` to include image questions and materialize each row's
+``responses_create_params.input`` for use with ``config_vision.yaml``.
 """
 
 from __future__ import annotations
@@ -56,15 +34,12 @@ DATA_DIR = BENCHMARK_DIR / "data"
 DEFAULT_OUTPUT = DATA_DIR / "hle_verified_benchmark.jsonl"
 DEFAULT_OUTPUT_VISION = DATA_DIR / "hle_verified_benchmark_vision.jsonl"
 
-# Applied at prepare time in vision mode, and at rollout time via `prompt_config` in
-# text mode — the same file either way, so the two modes prompt identically.
+# Prompt applied at prepare time for vision rows and at rollout time for text rows.
 PROMPT_CONFIG_FPATH = BENCHMARK_DIR / "prompts" / "default.yaml"
 
 REPO_ID = "skylenage/HLE-Verified"
 
-# Verified-class labels as they appear in the dataset's `Verified_Classes` column,
-# mapped to the short subset names used by `--subset`. Copied from Skills'
-# HLE_VERIFIED_CLASSES_MAP so the two pipelines select identical row sets.
+# Map dataset labels to the subset names accepted by --subset.
 VERIFIED_CLASSES_MAP = {
     "Gold subset": "gold",
     "Revision subset": "revision",
@@ -72,22 +47,16 @@ VERIFIED_CLASSES_MAP = {
 }
 VERIFIED_CLASSES_REVERSE_MAP = {v: k for k, v in VERIFIED_CLASSES_MAP.items()}
 
-# The default eval subset: text-only rows from Gold + Revision (Uncertain dropped).
+# Default verified classes: Gold + Revision.
 DEFAULT_SUBSET = "text"
 SUBSETS = (DEFAULT_SUBSET, "all") + tuple(VERIFIED_CLASSES_MAP.values())
 
-# Fields the upstream repo folds into a single JSON-encoded `json` column rather than
-# exposing as top-level columns. Read back out here so rows carry them individually.
+# Metadata stored in the dataset's JSON column.
 _PACKED_FIELDS = ("author_name", "rationale", "answer_type", "canary", "image")
 
 
 def _unpack(row: dict) -> dict:
-    """Return ``row`` with the fields packed into its ``json`` column hoisted to the top level.
-
-    ``skylenage/HLE-Verified`` stores ``author_name`` / ``rationale`` / ``answer_type`` /
-    ``canary`` / ``image`` as a JSON string in a ``json`` column. Top-level columns win if
-    the repo ever promotes them, so this stays correct across either schema.
-    """
+    """Unpack metadata from the JSON column, preserving existing top-level values."""
     packed: dict = {}
     raw = row.get("json")
     if isinstance(raw, str) and raw:
@@ -104,12 +73,7 @@ def _unpack(row: dict) -> dict:
 
 
 def keep_row(row: dict, subset: str, include_vision: bool = False) -> bool:
-    """Whether an (already unpacked) row belongs in ``subset``.
-
-    Modality is orthogonal to ``subset``: image questions are dropped unless
-    ``include_vision`` is set, because the text-mode prompt sends only the question
-    text and an image question graded on its caption alone is unanswerable.
-    """
+    """Select rows by verified class, excluding images unless include_vision is set."""
     if row.get("image") and not include_vision:
         return False
 
@@ -117,30 +81,15 @@ def keep_row(row: dict, subset: str, include_vision: bool = False) -> bool:
     if subset == "all":
         return True
     if subset == DEFAULT_SUBSET:
-        # Gold + Revision; Uncertain answers are not reliable enough to grade against.
         return verified_class != VERIFIED_CLASSES_REVERSE_MAP["uncertain"]
     return verified_class == VERIFIED_CLASSES_REVERSE_MAP[subset]
 
 
 @lru_cache(maxsize=1)
 def _hle_build_input():
-    """``benchmarks/hle``'s ``_build_input``, loaded from the sibling file BY PATH.
+    """Load the shared HLE input builder from this checkout.
 
-    Deliberately not ``from benchmarks.hle.prepare import _build_input``. ``benchmarks/``
-    has no ``__init__.py``, so it is a namespace package: its ``__path__`` merges *every*
-    ``benchmarks/`` directory on ``sys.path``, and a submodule comes from whichever
-    portion holds it first. The eval container ships its own portion at
-    ``/opt/nemo-gym/benchmarks`` ahead of the uploaded checkout, and that copy has
-    ``hle/`` but not ``hle_verified/`` -- so the two halves of this function used to come
-    from *different* checkouts:
-
-        benchmarks.hle          -> /opt/nemo-gym/benchmarks/hle       (older, no _build_input)
-        benchmarks.hle_verified -> the uploaded checkout              (this file)
-
-    which failed on the cluster, at prepare time, after the allocation:
-    ``ImportError: cannot import name '_build_input' from 'benchmarks.hle.prepare'``.
-    Anchoring on ``__file__`` instead makes both halves come from this checkout, whatever
-    else is on ``sys.path``.
+    Loading by path avoids importing another installation's benchmarks package.
     """
     path = BENCHMARK_DIR.parent / "hle" / "prepare.py"
     spec = importlib.util.spec_from_file_location("_hle_prepare_for_hle_verified", path)
@@ -152,21 +101,15 @@ def _hle_build_input():
 
 
 def format_entry(row: dict, prompt_config: Any = None) -> dict:
-    """Map an unpacked HLE-Verified row to a Gym JSONL row.
+    """Convert an unpacked dataset row to Gym JSONL format.
 
-    ``question`` / ``expected_answer`` are what the prompt template and the judge read;
-    everything else is carried through for per-category analysis of the rollouts.
-
-    Passing ``prompt_config`` switches to vision mode: the prompt is applied here rather
-    than at rollout time and the row carries a materialized ``responses_create_params.input``,
-    with image questions gaining an ``input_image`` block. Such rows are self-contained and
-    must be used with ``prompt_config: null``, which is mutually exclusive with a
-    pre-populated input.
+    When prompt_config is provided, materialize the input messages and image blocks.
+    Use these rows with prompt_config: null at rollout time.
     """
     entry = {
         "question": row["question"],
         "expected_answer": row["answer"],
-        # Not used for grading — the judge compares free-form text — but useful for analysis.
+        # Metadata for analysis; not used for grading.
         "answer_type": row.get("answer_type"),
         "uuid": row["id"],
         "category": row.get("category"),
@@ -174,9 +117,6 @@ def format_entry(row: dict, prompt_config: Any = None) -> dict:
         "verified_class": VERIFIED_CLASSES_MAP.get(row.get("Verified_Classes"), row.get("Verified_Classes")),
     }
     if prompt_config is not None:
-        # Taken from benchmarks/hle for the same reason the judge prompt is shared:
-        # hle_verified exists to be compared against hle, so the two must build their
-        # multimodal inputs identically or the comparison measures the prompt instead.
         build_input = _hle_build_input()
 
         entry["has_image"] = bool(row.get("image"))
@@ -194,20 +134,12 @@ def prepare(
     """Download HLE-Verified and convert to Gym JSONL format.
 
     Args:
-        subset: Which verified classes to keep. ``"text"`` (default) is Gold +
-            Revision, matching Skills' ``EVAL_SPLIT``. ``"gold"`` / ``"revision"`` /
-            ``"uncertain"`` select a single class, and ``"all"`` keeps every class.
-            Orthogonal to ``include_vision``, which decides modality.
-        include_vision: When ``False`` (default), image questions are dropped and rows
-            carry raw fields to be templated at rollout time via ``prompt_config``. When
-            ``True``, image questions are kept and every row is materialized with
-            ``responses_create_params.input``; use with ``prompt_config: null`` and a
-            vision-capable policy model.
-        output_fpath: Where to write. Defaults to
-            ``benchmarks/hle_verified/data/hle_verified_benchmark.jsonl`` (or the
-            ``_vision`` variant), which is the path ``config.yaml`` / ``config_vision.yaml``
-            point at — override it only when preparing a non-default ``subset``, so the
-            two don't clobber each other.
+        subset: Verified classes to keep. "text" selects Gold + Revision;
+            "gold", "revision", and "uncertain" select one class; "all" keeps all.
+        output_fpath: Output JSONL path. Defaults to the text or vision dataset
+            path under benchmarks/hle_verified/data/.
+        include_vision: Include image questions and materialize input messages.
+            Use the resulting dataset with prompt_config: null.
 
     Returns:
         Path to the written JSONL file.

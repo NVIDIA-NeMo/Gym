@@ -1,7 +1,4 @@
-# HLE-Verified: the expert re-verified re-annotation of Humanity's Last Exam.
-# Grading is identical to `benchmarks/hle` — a pure LLM judge using the official
-# HLE judge prompt, no symbolic verification step. Only the dataset differs:
-# HLE-Verified's Gold + Revision subsets, with the corrected reference answers.
+# HLE-Verified: text-only Gold and Revision subsets with the official HLE judge prompt.
 config_paths:
   - resources_servers/equivalence_llm_judge/configs/equivalence_llm_judge.yaml
 
@@ -17,9 +14,6 @@ hle_verified_equivalence_llm_judge_resources_server:
       judge_system_message: ""
       judge_equal_label: "Judgement: yes"
       judge_not_equal_label: "Judgement: no"
-      # Deliberately the *same* file benchmarks/hle uses, not a copy: hle_verified
-      # exists to be compared against hle, and a duplicated grader prompt would
-      # silently drift the moment one of the two is edited.
       judge_prompt_template_fpath: ../../benchmarks/hle/prompts/judge.txt
       response_extract_regex: null
       question_extract_regex: null
