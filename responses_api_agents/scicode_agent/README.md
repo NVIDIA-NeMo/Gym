@@ -39,8 +39,8 @@ steps / non-prefilled steps. With no eligible sub-steps, the subproblem mean is 
 `step_usage` records each step's number, status, and usage. Coverage counts are
 `num_subproblems`, `num_generated_steps`, and `num_steps_with_usage`.
 
-Rollouts carry `token_usage_version: scicode-v1`; aggregates use numeric version `1`
-for evaluator export. Legacy records retain final-step metrics. Mixing versions is rejected.
+Rollouts and aggregates use `token_usage_version: 1`. Legacy records retain
+final-step metrics. Mixing versions is rejected.
 
 ## Configuration
 

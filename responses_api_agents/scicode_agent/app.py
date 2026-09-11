@@ -61,7 +61,7 @@ from nemo_gym.server_utils import raise_for_status
 
 
 LOG = logging.getLogger(__name__)
-TOKEN_USAGE_VERSION = "scicode-v1"
+TOKEN_USAGE_VERSION = 1
 
 
 class ScicodeAgentConfig(BaseResponsesAPIAgentConfig):
@@ -148,7 +148,7 @@ def _token_metrics(tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
     generated = [step for step in steps if step["status"] == "generated"]
     metrics = {
         # Aggregate values are exported as numeric scores by NeMo Evaluator.
-        "token_usage_version": 1,
+        "token_usage_version": TOKEN_USAGE_VERSION,
         "num_subproblems": len(steps),
         "num_generated_steps": len(generated),
         "num_steps_with_usage": sum(step["usage"] is not None for step in generated),
