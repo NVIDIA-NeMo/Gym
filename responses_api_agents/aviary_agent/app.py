@@ -221,6 +221,7 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                         url_path="/step",
                         json={"action": [c.model_dump(mode="json") for c in all_fn_calls], "env_id": env_id},
                     )
+                    raw_env_response.raise_for_status()
                     env_response = AviaryStepResponse.model_validate(await raw_env_response.json())
                     obs = env_response.obs
                     done = env_response.done
@@ -264,6 +265,7 @@ class AviaryAgent(SimpleResponsesAPIAgent):
                 url_path="/verify",
                 json=verify_request.model_dump(),
             )
+            verify_response.raise_for_status()
 
             return AviaryAgentVerifyResponse.model_validate(await verify_response.json())
         except Exception as e:
