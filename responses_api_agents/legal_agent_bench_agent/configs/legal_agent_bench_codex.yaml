@@ -1,0 +1,50 @@
+config_paths:
+  - resources_servers/legal_agent_bench/configs/resources_only.yaml
+
+legal_agent_bench_codex_agent:
+  responses_api_agents:
+    legal_agent_bench_agent:
+      entrypoint: app.py
+      domain: agent
+      description: Legal Agent Bench with a config-selected Codex agent harness.
+      value: Evaluate legal-document agents independently of Harbor orchestration.
+      resources_server:
+        type: resources_servers
+        name: legal_agent_bench
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      runtime_tasks_dir: ${legal_agent_bench.resources_servers.legal_agent_bench.harbor_tasks_dir}
+      skills_dir: ${legal_agent_bench.resources_servers.legal_agent_bench.harness_skills_dir}
+      concurrency: 1
+      agent_timeout_seconds: 10800
+      verifier_timeout_seconds: 3600
+      sandbox_staging_timeout_seconds: 900
+      results_dir: ${oc.env:NEMO_GYM_LAB_RESULTS_DIR,results/legal_agent_bench}
+      sandbox_provider:
+        docker: {}
+      sandbox_image: ${oc.env:NEMO_GYM_LAB_SANDBOX_IMAGE,null}
+      runtime_builder_provider_options: ${oc.decode:${oc.env:NEMO_GYM_LAB_RUNTIME_BUILDER_PROVIDER_OPTIONS,{}}}
+      agent_sandbox_provider_options: ${oc.decode:${oc.env:NEMO_GYM_LAB_AGENT_SANDBOX_PROVIDER_OPTIONS,{}}}
+      verifier_sandbox_provider_options: ${oc.decode:${oc.env:NEMO_GYM_LAB_VERIFIER_SANDBOX_PROVIDER_OPTIONS,{}}}
+      opensandbox_request_fraction: 0.25
+      sandbox_model_base_url: ${oc.env:NEMO_GYM_SANDBOX_MODEL_BASE_URL,null}
+      sandbox_model_api_key_env: ${oc.env:NEMO_GYM_LAB_SANDBOX_MODEL_API_KEY_ENV,null}
+      agent_server_module: responses_api_agents.codex_agent.app
+      agent_server_class: CodexAgent
+      agent_config_class: CodexAgentConfig
+      agent_kwargs:
+        model: null
+        sandbox_mode: danger-full-access
+        timeout: 10800
+        codex_version: 0.144.4
+        cwd: /sandbox/nemo-gym-legal-agent-bench/workspace/output
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/legal_agent_bench/data/example.jsonl
+          license: MIT
+        - name: legal_agent_bench
+          type: validation
+          jsonl_fpath: resources_servers/legal_agent_bench/data/generated/all.jsonl
+          license: MIT

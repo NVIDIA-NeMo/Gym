@@ -94,7 +94,9 @@ def _apply_spec_overrides(cfg: engine.EcsFargateConfig, spec: SandboxSpec) -> en
         overrides["cpu"] = str(int(resources.cpu * 1024))
     if resources.memory_mib is not None:
         overrides["memory"] = str(int(resources.memory_mib))
-    if resources.disk_gib is not None:
+    # Fargate supplies 20 GiB when ephemeralStorage is omitted and accepts only
+    # 21-200 GiB explicitly. The implicit default satisfies smaller requests.
+    if resources.disk_gib is not None and resources.disk_gib > 20:
         overrides["ephemeral_storage_gib"] = int(resources.disk_gib)
     return replace(cfg, **overrides) if overrides else cfg
 

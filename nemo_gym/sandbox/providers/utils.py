@@ -18,8 +18,12 @@ These were previously duplicated verbatim across the enroot, apptainer, and
 opensandbox providers. They live here so there is a single implementation.
 """
 
+import os
 import posixpath
+import shutil
+import stat
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 
@@ -50,3 +54,19 @@ def path_under_mount(mount_point: str, path: str) -> str | None:
     if mp == "/":
         return normalized.lstrip("/")
     return normalized[len(mp) + 1 :]
+
+
+def remove_writable_tree(path: Path) -> None:
+    """Remove a provider-owned staging tree even when sandbox files are read-only.
+
+    Archive extraction can intentionally remove write permission from files and
+    directories exposed to an agent. Restore only the host owner's permissions
+    when removal encounters such an entry; never follow a symlink.
+    """
+
+    for root, directories, _files in os.walk(path, topdown=True, followlinks=False):
+        for candidate in (Path(root), *(Path(root) / name for name in directories)):
+            mode = candidate.lstat().st_mode
+            if not stat.S_ISLNK(mode):
+                candidate.chmod(stat.S_IMODE(mode) | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    shutil.rmtree(path)

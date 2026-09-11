@@ -18,6 +18,7 @@ from asyncio import Semaphore
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -29,6 +30,7 @@ from responses_api_agents.harbor_agent.app import (
     HarborAgent,
     HarborAgentConfig,
     HarborRunRequest,
+    _stop_verification_after_agent_failure,
 )
 from responses_api_agents.harbor_agent.utils import HarborAgentUtils
 
@@ -273,6 +275,7 @@ _GLOBAL_CONFIG = {
 def _harbor_run_mocks(
     trial_result: Optional[Dict[str, Any]] = None,
     trajectory: Optional[Dict[str, Any]] = None,
+    agent_error_flags: Optional[Dict[str, Any]] = None,
     side_effect: Optional[Exception] = None,
 ):
     """Patch external deps and wire up mocks for HarborAgent.run()."""
@@ -296,10 +299,13 @@ def _harbor_run_mocks(
         else:
             trial_dir = tempfile.mkdtemp(prefix="harbor_trial_")
             (Path(trial_dir) / "result.json").write_text(json.dumps(trial_result or DEFAULT_TRIAL_RESULT))
-            if trajectory is not None:
+            if trajectory is not None or agent_error_flags is not None:
                 agent_dir = Path(trial_dir) / "agent"
                 agent_dir.mkdir(parents=True, exist_ok=True)
+            if trajectory is not None:
                 (agent_dir / "trajectory.json").write_text(json.dumps(trajectory))
+            if agent_error_flags is not None:
+                (agent_dir / "agent_error_flags.json").write_text(json.dumps(agent_error_flags))
         mock_ray.remote.side_effect = lambda *a, **k: _resolve_future()
         mock_ray.options.return_value.remote.side_effect = lambda *a, **k: _resolve_future()
 
@@ -309,7 +315,7 @@ def _harbor_run_mocks(
 
         mock_to_thread.side_effect = _run_inline
 
-        yield
+        yield mock_ray
 
 
 # ===========================================================================
@@ -443,6 +449,198 @@ class TestApp:
         assert len(response.response.output) == 0
         assert response.responses_create_params.temperature == 0.3
         assert response.responses_create_params.input == []
+        assert response.mask_sample is True
+        assert response.sandbox_failed is True
+        assert response.model_dump()["_ng_failure_class"] == "sandbox_failed"
+        assert "_ng_failure_terminal" not in response.model_dump()
+
+    async def test_run_masks_partial_agent_failure_and_ignores_verifier_reward(self):
+        server = _make_server(harbor_skip_verification_on_agent_failure=True)
+        trial_result = {
+            **DEFAULT_TRIAL_RESULT,
+            "agent_result": {
+                **DEFAULT_TRIAL_RESULT["agent_result"],
+                "metadata": {
+                    "agent_failed": True,
+                    "model_connection_failed": True,
+                    "agent_timed_out": False,
+                    "model_error": "adapter failed after partial output",
+                },
+            },
+            "exception_info": {
+                "exception_type": "LegalAgentBenchHarnessError",
+                "exception_message": "adapter failed after partial output",
+            },
+            "agent_execution": {"started_at": "2026-01-01T00:00:00Z"},
+            "verifier": None,
+        }
+        with _harbor_run_mocks(trial_result=trial_result, trajectory=DEFAULT_TRAJECTORY) as mock_ray:
+            response = await server.run(_make_run_request())
+
+        assert response.response.output
+        assert response.reward == 0.0
+        assert response.mask_sample is True
+        assert response.agent_failed is True
+        assert response.model_connection_failed is True
+        assert response.agent_timed_out is False
+        assert response.failure_reason == "adapter failed after partial output"
+        assert response.model_dump()["_ng_failure_class"] == "model_connection_failed"
+        assert "_ng_failure_terminal" not in response.model_dump()
+        params = mock_ray.remote.call_args.args[1]
+        assert params["skip_verification_on_agent_failure"] is True
+
+    async def test_verification_hook_rejects_agent_failure(self):
+        event = SimpleNamespace(
+            result=SimpleNamespace(exception_info=SimpleNamespace(exception_type="AgentTimeoutError"))
+        )
+
+        with pytest.raises(RuntimeError, match="Skipping verification after agent failure: AgentTimeoutError"):
+            await _stop_verification_after_agent_failure(event)
+
+        await _stop_verification_after_agent_failure(SimpleNamespace(result=SimpleNamespace(exception_info=None)))
+
+    async def test_run_masks_timeout_with_partial_output(self):
+        server = _make_server(harbor_skip_verification_on_agent_failure=True)
+        trial_result = {
+            **DEFAULT_TRIAL_RESULT,
+            "exception_info": {
+                "exception_type": "AgentTimeoutError",
+                "exception_message": "Agent execution timed out",
+            },
+            "agent_execution": {"started_at": "2026-01-01T00:00:00Z"},
+            "verifier": None,
+        }
+        with _harbor_run_mocks(trial_result=trial_result, trajectory=DEFAULT_TRAJECTORY):
+            response = await server.run(_make_run_request())
+
+        assert response.response.output
+        assert response.reward == 0.0
+        assert response.mask_sample is True
+        assert response.agent_failed is True
+        assert response.agent_timed_out is True
+        assert response.failure_reason == "Agent execution timed out"
+        assert response.model_dump()["_ng_failure_class"] == "agent_timed_out"
+        assert "_ng_failure_terminal" not in response.model_dump()
+
+    async def test_harbor_timeout_routes_to_retryable_failure_sidecar(self):
+        server = _make_server()
+        trial_result = {
+            **DEFAULT_TRIAL_RESULT,
+            "exception_info": {
+                "exception_type": "AgentTimeoutError",
+                "exception_message": "Agent execution timed out",
+            },
+            "agent_execution": {"started_at": "2026-01-01T00:00:00Z"},
+            "verifier": {"started_at": "2026-01-01T00:01:00Z"},
+        }
+        with _harbor_run_mocks(trial_result=trial_result, trajectory=DEFAULT_TRAJECTORY):
+            response = await server.run(_make_run_request())
+
+        assert response.reward == 0.0
+        assert response.agent_timeout_error == 1
+        assert response.mask_sample is True
+        assert response.agent_failed is True
+        assert response.agent_timed_out is True
+        assert response.verifier_failed is False
+        assert response.model_dump()["_ng_failure_class"] == "agent_timed_out"
+        assert "_ng_failure_terminal" not in response.model_dump()
+
+    async def test_harbor_verifier_failure_routes_to_retryable_failure_sidecar(self):
+        server = _make_server()
+        trial_result = {
+            **DEFAULT_TRIAL_RESULT,
+            "verifier_result": None,
+            "exception_info": {
+                "exception_type": "VerifierTimeoutError",
+                "exception_message": "Verifier execution timed out",
+            },
+            "agent_execution": {"started_at": "2026-01-01T00:00:00Z"},
+            "verifier": {"started_at": "2026-01-01T00:01:00Z"},
+        }
+        with _harbor_run_mocks(trial_result=trial_result, trajectory=DEFAULT_TRAJECTORY):
+            response = await server.run(_make_run_request())
+
+        assert response.reward == 0.0
+        assert response.mask_sample is True
+        assert response.agent_failed is False
+        assert response.verifier_failed is True
+        assert response.failure_reason == "Verifier execution timed out"
+        assert response.model_dump()["_ng_failure_class"] == "verifier_failed"
+        assert "_ng_failure_terminal" not in response.model_dump()
+
+    async def test_harbor_context_limit_is_verified_and_scored(self):
+        server = _make_server()
+        trial_result = {
+            **DEFAULT_TRIAL_RESULT,
+            "exception_info": {
+                "exception_type": "AgentTimeoutError",
+                "exception_message": "maximum context length exceeded",
+            },
+            "agent_execution": {"started_at": "2026-01-01T00:00:00Z"},
+            "verifier": {"started_at": "2026-01-01T00:01:00Z"},
+        }
+        with _harbor_run_mocks(
+            trial_result=trial_result,
+            trajectory=DEFAULT_TRAJECTORY,
+            agent_error_flags={"context_length_exceeded": True, "memory_limit_exceeded": False},
+        ):
+            response = await server.run(_make_run_request())
+
+        assert response.reward == 1.0
+        assert response.context_length_exceeded_error == 1
+        assert response.agent_timeout_error == 0
+        assert response.response.output
+        assert "mask_sample" not in response.model_dump()
+        assert "_ng_failure_class" not in response.model_dump()
+        assert "_ng_failure_terminal" not in response.model_dump()
+
+    async def test_harbor_memory_limit_routes_as_retryable_sandbox_failure(self):
+        server = _make_server()
+        trial_result = {
+            **DEFAULT_TRIAL_RESULT,
+            "verifier_result": None,
+            "agent_execution": {"started_at": "2026-01-01T00:00:00Z"},
+            "verifier": None,
+        }
+        with _harbor_run_mocks(
+            trial_result=trial_result,
+            trajectory=DEFAULT_TRAJECTORY,
+            agent_error_flags={"context_length_exceeded": False, "memory_limit_exceeded": True},
+        ):
+            response = await server.run(_make_run_request())
+
+        assert response.reward == 0.0
+        assert response.mask_sample is True
+        assert response.sandbox_failed is True
+        assert response.memory_limit_exceeded_error == 1
+        assert response.failure_reason == "Harbor sandbox exceeded its memory limit"
+        assert response.model_dump()["_ng_failure_class"] == "sandbox_failed"
+        assert "_ng_failure_terminal" not in response.model_dump()
+
+    async def test_invalid_instance_id_is_terminal(self):
+        server = _make_server()
+        with _harbor_run_mocks():
+            response = await server.run(_make_run_request(instance_id="not-an-instance-id"))
+
+        assert response.reward == 0.0
+        assert response.mask_sample is True
+        assert response.task_failed is True
+        assert response.model_dump()["_ng_failure_class"] == "task_failed"
+        assert response.model_dump()["_ng_failure_terminal"] is True
+
+    async def test_invalid_job_configuration_is_terminal(self):
+        server = _make_server()
+        with (
+            patch("responses_api_agents.harbor_agent.app.get_global_config_dict", return_value=_GLOBAL_CONFIG),
+            patch.object(server, "_build_job_config", side_effect=ValueError("invalid dataset source")),
+        ):
+            response = await server.run(_make_run_request())
+
+        assert response.reward == 0.0
+        assert response.mask_sample is True
+        assert response.configuration_failed is True
+        assert response.model_dump()["_ng_failure_class"] == "configuration_failed"
+        assert response.model_dump()["_ng_failure_terminal"] is True
 
     @pytest.mark.parametrize(
         "model_name, expected",

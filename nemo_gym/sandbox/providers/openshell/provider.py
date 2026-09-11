@@ -27,6 +27,7 @@ import asyncio
 import base64
 import binascii
 import functools
+import inspect
 import logging
 import math
 import posixpath
@@ -365,12 +366,15 @@ def _build_client(connection: OpenShellConnectionConfig) -> Any:
             cert_path=Path(connection.tls_cert_path) if connection.tls_cert_path else None,
             key_path=Path(connection.tls_key_path) if connection.tls_key_path else None,
         )
-    return SandboxClient(
-        connection.endpoint,
-        tls=tls,
-        bearer_token=connection.bearer_token,
-        timeout=connection.request_timeout_s,
-    )
+    kwargs: dict[str, Any] = {"tls": tls, "timeout": connection.request_timeout_s}
+    parameters = inspect.signature(SandboxClient).parameters
+    if connection.bearer_token is not None:
+        if "bearer_token" not in parameters:
+            raise ValueError(
+                "connection.bearer_token requires an OpenShell SDK whose SandboxClient supports bearer tokens"
+            )
+        kwargs["bearer_token"] = connection.bearer_token
+    return SandboxClient(connection.endpoint, **kwargs)
 
 
 def _acquire_shared_client(connection: OpenShellConnectionConfig, concurrency: int) -> _SharedClientState:
@@ -423,6 +427,11 @@ class OpenShellProvider:
         self._closed = False
 
     @property
+    def _workspace_api(self) -> bool:
+        """Whether lifecycle calls use the workspace-aware OpenShell API."""
+        return "workspace" in inspect.signature(self._client.create).parameters
+
+    @property
     def _client(self) -> Any:
         return self._shared.client
 
@@ -453,11 +462,16 @@ class OpenShellProvider:
         kwargs: dict[str, Any] = {"environment": {str(k): str(v) for k, v in spec.env.items()}}
         if image or options.template_resources or options.driver_config:
             template = openshell_pb2.SandboxTemplate()
+            template_fields = template.DESCRIPTOR.fields_by_name
             if image:
                 template.image = image
             if options.template_resources:
                 template.resources.update(options.template_resources)
             if options.driver_config:
+                if "driver_config" not in template_fields:
+                    raise OpenShellCreateError(
+                        "provider_options['driver_config'] requires the workspace-aware OpenShell API"
+                    )
                 template.driver_config.update(options.driver_config)
             kwargs["template"] = template
         if options.policy is not None:
@@ -466,9 +480,18 @@ class OpenShellProvider:
             kwargs["providers"] = options.providers
         resources = spec.resources
         if resources.gpu:
-            kwargs["resource_requirements"] = openshell_pb2.ResourceRequirements(
-                gpu=openshell_pb2.GpuResourceRequirements(count=resources.gpu)
-            )
+            spec_fields = openshell_pb2.SandboxSpec.DESCRIPTOR.fields_by_name
+            if "resource_requirements" in spec_fields:
+                kwargs["resource_requirements"] = openshell_pb2.ResourceRequirements(
+                    gpu=openshell_pb2.GpuResourceRequirements(count=resources.gpu)
+                )
+            elif resources.gpu == 1 and "gpu" in spec_fields:
+                kwargs["gpu"] = True
+            else:
+                raise OpenShellCreateError(
+                    "This OpenShell API can request at most one unspecified GPU; upgrade the gateway and SDK "
+                    "to request an exact GPU count"
+                )
         ignored = [
             key
             for key, value in (
@@ -487,6 +510,20 @@ class OpenShellProvider:
             )
         return openshell_pb2.SandboxSpec(**kwargs)
 
+    async def _get_sandbox(self, name: str, workspace: str) -> Any:
+        if self._workspace_api:
+            return await self._call(self._client.get, name, workspace=workspace)
+        if workspace != "default":
+            raise OpenShellCreateError("This OpenShell API does not support non-default workspaces")
+        return await self._call(self._client.get, name)
+
+    async def _delete_sandbox(self, name: str, workspace: str) -> Any:
+        if self._workspace_api:
+            return await self._call(self._client.delete, name, workspace=workspace)
+        if workspace != "default":
+            raise OpenShellCreateError("This OpenShell API does not support non-default workspaces")
+        return await self._call(self._client.delete, name)
+
     async def _create_sandbox_with_retries(self, pb_spec: Any, name: str, labels: dict[str, str]) -> Any:
         """Issue CreateSandbox, retrying transient gRPC failures with the same name.
 
@@ -499,12 +536,25 @@ class OpenShellProvider:
         attempt = 0
         while True:
             try:
-                return await self._call(
-                    self._client.create, workspace=workspace, spec=pb_spec, name=name, labels=labels
-                )
+                if self._workspace_api:
+                    return await self._call(
+                        self._client.create, workspace=workspace, spec=pb_spec, name=name, labels=labels
+                    )
+                if workspace != "default":
+                    raise OpenShellCreateError("This OpenShell API does not support non-default workspaces")
+                if labels:
+                    LOGGER.warning(
+                        "This OpenShell API does not support sandbox labels; LAB attribution metadata is omitted."
+                    )
+                return await self._call(self._client.create, spec=pb_spec)
             except Exception as e:
                 if _is_already_exists(e):
-                    return await self._call(self._client.get, name, workspace=workspace)
+                    return await self._get_sandbox(name, workspace)
+                # The legacy API lets only the gateway choose the name. Retrying
+                # after an ambiguous transport failure could create a second
+                # sandbox that the client cannot identify or clean up.
+                if not self._workspace_api:
+                    raise
                 if attempt >= cfg.retries or not _is_retryable_create_error(e):
                     raise
                 attempt += 1
@@ -578,7 +628,7 @@ class OpenShellProvider:
         last_phase: int | None = None
         while True:
             try:
-                ref = await self._call(self._client.get, inst.name, workspace=inst.workspace)
+                ref = await self._get_sandbox(inst.name, inst.workspace)
                 last_phase = ref.phase
             except Exception as e:
                 if not _is_runtime_failure(e):
@@ -633,7 +683,7 @@ class OpenShellProvider:
     async def _cleanup_failed_create_handle(self, handle: SandboxHandle) -> None:
         inst = handle.raw
         try:
-            await self._call(self._client.delete, inst.name, workspace=inst.workspace)
+            await self._delete_sandbox(inst.name, inst.workspace)
         except Exception as e:
             LOGGER.warning(
                 f"Failed to delete half-created OpenShell sandbox {inst.name!r}; it may be leaked on the gateway: {e}"
@@ -739,7 +789,7 @@ class OpenShellProvider:
         """Sandbox phase via GetSandbox (missing -> STOPPED; RPC failure -> UNKNOWN)."""
         inst = handle.raw
         try:
-            ref = await self._call(self._client.get, inst.name, workspace=inst.workspace)
+            ref = await self._get_sandbox(inst.name, inst.workspace)
         except Exception as e:
             if _is_not_found(e):
                 return SandboxStatus.STOPPED
@@ -752,7 +802,7 @@ class OpenShellProvider:
         """Delete the sandbox (already-gone counts as success), then wait until it is fully gone."""
         inst = handle.raw
         try:
-            deleted = await self._call(self._client.delete, inst.name, workspace=inst.workspace)
+            deleted = await self._delete_sandbox(inst.name, inst.workspace)
         except Exception as e:
             if _is_not_found(e):
                 return
@@ -771,7 +821,7 @@ class OpenShellProvider:
         deadline = loop.time() + self._operations.close_timeout_s
         while True:
             try:
-                await self._call(self._client.get, inst.name, workspace=inst.workspace)
+                await self._get_sandbox(inst.name, inst.workspace)
             except Exception as e:
                 if _is_not_found(e):
                     return

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -45,7 +46,7 @@ DEFAULT_SKILLS_DIR = PACKAGE_DIR / "data" / "cache" / "harness" / "skills"
 INDEX_FILENAME = "all.jsonl"
 DEFAULT_INDEX_FPATH = PACKAGE_DIR / "data" / "generated" / INDEX_FILENAME
 CACHE_MARKER = ".nemo_gym_asset.json"
-CACHE_FORMAT_VERSION = 4
+CACHE_FORMAT_VERSION = 5
 REWARD_MODES = ("full_task", "criteria_pass_rate")
 REWARD_MODE_ENV_KEY = "LEGAL_AGENT_BENCH_REWARD_MODE"
 LAB_HARBOR_SOURCE_DIR = PACKAGE_DIR / "vendor" / "harvey_labs" / "lab_harbor"
@@ -79,8 +80,16 @@ RUN apt-get update \\
     && apt-get install -y --no-install-recommends \\
         bash ca-certificates coreutils curl file findutils fonts-liberation g++ \\
         gawk gcc git grep jq libreoffice nodejs npm pandoc poppler-utils procps \\
-        qpdf ripgrep sed tesseract-ocr \\
+        iproute2 qpdf ripgrep sed tesseract-ocr \\
     && rm -rf /var/lib/apt/lists/*
+
+# OpenShell executes commands as a restricted sandbox identity and requires
+# iproute2 for its network namespace. The high UID/GID avoids colliding with
+# ordinary host users when user-namespace remapping is unavailable.
+RUN groupadd --gid 1000660000 sandbox \\
+    && useradd -K UID_MAX=1000660000 --no-log-init --uid 1000660000 \\
+        --gid sandbox --create-home --shell /bin/bash sandbox \\
+    && install -d -o sandbox -g sandbox /workspace/output
 
 RUN python -m pip install --upgrade pip \\
     && python -m pip install \\
@@ -101,12 +110,14 @@ WORKDIR /workspace/output
 _TEST_SCRIPT = """#!/usr/bin/env bash
 set -euo pipefail
 
-mkdir -p /logs/verifier
-python /tests/legal_agent_bench_verify.py \\
-  --task-json /tests/task.json \\
-  --run-dir /logs/agent/artifacts/lab-run \\
-  --verifier-dir /logs/verifier \\
-  --reward-json /logs/verifier/reward.json
+tests_dir="${LAB_TESTS_DIR:-/tests}"
+logs_dir="${LAB_LOGS_DIR:-/logs}"
+mkdir -p "$logs_dir/verifier"
+python "$tests_dir/legal_agent_bench_verify.py" \\
+  --task-json "$tests_dir/task.json" \\
+  --run-dir "$logs_dir/agent/artifacts/lab-run" \\
+  --verifier-dir "$logs_dir/verifier" \\
+  --reward-json "$logs_dir/verifier/reward.json"
 """
 
 
@@ -242,7 +253,10 @@ def prepare_assets(
                 print(f"Using cached Legal Agent Bench {name} in {prepared[name]}", flush=True)
                 continue
             except (FileNotFoundError, ValueError):
-                pass
+                if name == "tasks" and _migrate_legacy_agent_index(targets[name]):
+                    prepared[name] = validators[name](targets[name])
+                    print(f"Migrated cached Legal Agent Bench {name} index in {prepared[name]}", flush=True)
+                    continue
         missing.append(name)
 
     if not missing:
@@ -479,10 +493,6 @@ def _render_task_index(source_ids: Iterable[str]) -> str:
     rows = []
     for source_id in sorted(source_ids):
         row = {
-            "agent_ref": {
-                "name": "legal_agent_bench_harbor_agent",
-                "type": "responses_api_agents",
-            },
             "instance_id": f"legal_agent_bench::{flatten_task_id(source_id)}",
             "responses_create_params": {
                 "input": [],
@@ -658,21 +668,72 @@ def _hardlink_or_copy(source: str, destination: str) -> str:
 
 def _replace_directory(source: Path, target: Path) -> None:
     backup = target.with_name(f".{target.name}.backup")
-    if backup.exists():
-        shutil.rmtree(backup)
-    if target.exists():
-        target.rename(backup)
+    lock_path = target.with_name(f".{target.name}.replace.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            if backup.exists():
+                if target.exists():
+                    shutil.rmtree(backup)
+                else:
+                    backup.rename(target)
+            if target.exists():
+                target.rename(backup)
+            try:
+                source.rename(target)
+            except Exception:
+                if target.exists():
+                    shutil.rmtree(target)
+                if backup.exists():
+                    backup.rename(target)
+                raise
+            else:
+                if backup.exists():
+                    shutil.rmtree(backup)
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _migrate_legacy_agent_index(tasks_dir: Path) -> bool:
+    """Atomically remove the retired Harbor agent_ref from an otherwise exact cached index."""
+    index_path = tasks_dir / INDEX_FILENAME
     try:
-        source.rename(target)
-    except Exception:
-        if target.exists():
-            shutil.rmtree(target)
-        if backup.exists():
-            backup.rename(target)
-        raise
-    else:
-        if backup.exists():
-            shutil.rmtree(backup)
+        rows = [json.loads(line) for line in index_path.read_text(encoding="utf-8").splitlines()]
+    except (OSError, json.JSONDecodeError):
+        return False
+    legacy_ref = {
+        "name": "legal_agent_bench_harbor_agent",
+        "type": "responses_api_agents",
+    }
+    if not rows or any(not isinstance(row, dict) or row.get("agent_ref") != legacy_ref for row in rows):
+        return False
+    candidate_rows = []
+    for row in rows:
+        row = dict(row)
+        row.pop("agent_ref")
+        candidate_rows.append(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    candidate = "".join(candidate_rows)
+
+    source_ids = []
+    try:
+        for task_dir in sorted(child for child in tasks_dir.iterdir() if child.is_dir()):
+            task = json.loads((task_dir / "task.json").read_text(encoding="utf-8"))
+            source_ids.append(str(task["metadata"]["lab_task_id"]))
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if candidate != _render_task_index(source_ids):
+        return False
+
+    file_descriptor, temp_name = tempfile.mkstemp(dir=index_path.parent, prefix=f".{index_path.name}.")
+    os.close(file_descriptor)
+    temp_path = Path(temp_name)
+    try:
+        temp_path.write_text(candidate, encoding="utf-8")
+        os.replace(temp_path, index_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return True
 
 
 def _publish_task_index(tasks_dir: Path) -> Path:

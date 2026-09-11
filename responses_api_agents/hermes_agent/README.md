@@ -30,6 +30,10 @@ gym eval run --no-serve \
 
 Example math rollouts are in `environments/hermes_math/data/example_rollouts.jsonl`.
 
+Current runs also report nonzero `mean/input_tokens`,
+`mean/output_tokens`, and `mean/total_tokens` from Hermes' cumulative session
+counters.
+
 Example training reward for small multi environment test is shown [here](https://github.com/NVIDIA-NeMo/Gym/pull/1033#issuecomment-4399509664).
 
 ## Description
