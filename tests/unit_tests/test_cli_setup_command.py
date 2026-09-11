@@ -54,6 +54,31 @@ class TestCLISetupCommandSetupEnvCommand:
         expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python test python version {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -r requirements.txt ray[default]==test ray version openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         assert expected_command == actual_command
 
+    def test_hermes_agent_gets_nix_build_env_export(self, tmp_path: Path) -> None:
+        server_dir = tmp_path / "responses_api_agents" / "hermes_agent"
+        server_dir.mkdir(parents=True)
+        (server_dir / "requirements.txt").write_text("pytest\n")
+        (tmp_path / "pyproject.toml").write_text("")
+
+        actual_command = setup_env_command(
+            dir_path=server_dir,
+            global_config_dict=self._debug_global_config_dict(tmp_path),
+            prefix="hermes_agent",
+        )
+
+        assert "export HERMES_NIX_BUILD=1 && uv pip install" in actual_command
+
+    def test_other_servers_do_not_get_nix_build_env_export(self, tmp_path: Path) -> None:
+        server_dir = self._setup_server_dir(tmp_path)
+
+        actual_command = setup_env_command(
+            dir_path=server_dir,
+            global_config_dict=self._debug_global_config_dict(tmp_path),
+            prefix="my server name",
+        )
+
+        assert "HERMES_NIX_BUILD" not in actual_command
+
     def test_requirements_uses_server_local_overrides(self, tmp_path: Path) -> None:
         server_dir = self._setup_server_dir(tmp_path)
         (server_dir / "overrides.txt").write_text("dependency==2\n")
