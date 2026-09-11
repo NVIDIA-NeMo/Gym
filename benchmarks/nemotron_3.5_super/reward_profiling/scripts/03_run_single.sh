@@ -40,8 +40,16 @@
 #   MAX_NUM_SEQS_PER_DECODE_ENGINE         512
 #   ALLOW_PARTIAL_ROLLOUTS                 True
 #   ENV_PORT_RANGE_LOW / _HIGH             unset; the manifest's gym_env_start sets the range
+#   RUN_PORT_RANGE_LOW / _HIGH             unset; the driver's own range, separate from the above
+#   GLOBAL_AIOHTTP_CONNECTOR_LIMIT_PER_HOST  unset; Gym's 1024/num_workers applies. Per Gym server
+#                                          process, so ~63k in aggregate -- see the note below
 #   SERVERS_READY_TIMEOUT_S / ENV_START_ATTEMPTS   1800 / 4
+#   NUM_REPEATS                            the manifest's gym_eval_run.num_repeats. Collection runs
+#                                          at 1: repeats are already written into the inputs by
+#                                          01_materialize.sh, so raising this MULTIPLIES them
 #   ENV_YAML / MOUNTS / LOG_DIR            $PWD/env.yaml / /lustre:/lustre / SWEEP_DIR/slurm-logs
+#   VLLM_CONFIG                            the manifest's vllm.config; the arg script that is sourced
+#   EXPERIMENT_NAME / SLURM_COMMENT        job-name prefix / --comment
 #
 # OPTIONAL - vllm-router (the single process every Gym server talks to)
 #   ROUTER_REQUEST_TIMEOUT_S               3600

@@ -44,8 +44,10 @@ vllm_router:
   # Finite and shorter than the walltime. The old 86400 meant "never" inside a 4 h job, so a
   # wedged request held a driver concurrency slot until the job died.
   request_timeout_s: 3600
-  # The router's own default queue is 100 deep and returns 429 past it; size it to the driver.
-  queue_size: 4096
+  # The router's own default queue is 100 deep and returns 429 past it. Deliberately NOT set here:
+  # the launcher defaults ROUTER_QUEUE_SIZE to NUM_SAMPLES_IN_PARALLEL, so it tracks the shape
+  # (512 x decode_nodes). A literal value here would be right for one shape and wrong for the next
+  # -- 4096 was carried over from P2D8 while this file declares 1+2, whose driver is 1024.
   queue_timeout_s: 600
   # Nowhere to fail over to inside one job, so opening the breaker only kills a slow engine.
   circuit_breaker: false

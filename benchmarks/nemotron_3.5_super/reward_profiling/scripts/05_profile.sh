@@ -18,15 +18,16 @@
 #   VLLM_JOBID    borrow a container from this live job instead of using the local venv
 #   CONTAINER     the sqsh to use with VLLM_JOBID
 #   ENV_YAML      config whose ${oc.env:VAR} keys are checked  (default: <repo>/env.yaml)
-#   GYM_SITE_PACKAGES a venv's site-packages, if nemo_gym is not already importable
 #
 # OUTPUT
 #   SWEEP_DIR/by_label/<label>/profile.txt                per-entry
 #   SWEEP_DIR/rollouts_reward_profiling.jsonl             one row per source task
 #   SWEEP_DIR/rollouts_agent_metrics.json                 the same, aggregated per agent
 #
-# Checks up front that `gym eval profile` imports and that env.yaml's variables are exported,
-# because either failing writes the same error into all 36 profile.txt files instead of once.
+# Checks up front that `gym` is on PATH and that env.yaml's variables are exported, because either
+# failing writes the same error into all 36 profile.txt files instead of once. It does NOT check the
+# venv's openai version; a venv older than the openai==2.44.0 pin still passes both gates and then
+# fails per label on `cannot import name 'Moderation'`.
 set -euo pipefail
 
 SWEEP_DIR=${SWEEP_DIR:?set SWEEP_DIR to the <out-dir>/<nickname> directory}
@@ -37,9 +38,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 RP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# `gym eval profile` is an executable, not a module, so the import check above is not enough:
-# with GYM_SITE_PACKAGES set but no venv active it passes, and then every label fails with
-# "command not found" -- 36 identical errors instead of one. Activate the venv first (README 00).
+# `gym eval profile` is an executable, not a module, so importability would not be enough even if
+# it were checked: a PYTHONPATH pointing at site-packages with no venv active still leaves `gym`
+# off PATH, and every label then fails with "command not found" -- 36 identical errors instead of
+# one. Activate the venv first (README 00).
 if [[ -z "${VLLM_JOBID:-}" ]] && ! command -v gym >/dev/null 2>&1; then
     echo "ERROR: 'gym' is not on PATH." >&2
     echo "       source .venv/bin/activate  (see README 00 - Setup), or borrow a container with" >&2

@@ -70,8 +70,9 @@ A venv older than the branch's `openai==2.44.0` pin imports `nemo_gym` fine and 
 `gym eval profile`, so a stale one is worse than none.
 
 You also need an `env.yaml` in the repo root — it is gitignored, so it does not come with a
-checkout. Judge entries resolve their key through it, and the launchers refuse to submit if any
-variable it names is unexported:
+checkout. Judge entries resolve their key through it. `03_run_single.sh` and `05_profile.sh` refuse to start
+if any variable it names is unexported; `03_run_endpoint.sh` and `03_run_attached.sh` do not check,
+so with those you find out per rollout:
 
 ```yaml
 nv_inference_api_key: ${oc.env:NVI_KEY_EVALUATOR}
@@ -90,8 +91,9 @@ one only when an entry pulls in a server the image does not have — see
 ## 02 - Create a Manifest
 The manifest is the highest-level config of what environments are being profiled, and parameterizes any judge, sandbox, or config overrides needed.
 Every block but `nickname`, `num_shards` and `entries` is named for the command it configures, so
-where a setting goes follows from which command consumes it. The manifest lists them in this order:
-the things you tune first, then the deployment config, then the data.
+where a setting goes follows from which command consumes it. Order in the file is free — the list
+below is grouped for reading, and `nemotron_3_5_super.yaml` puts the blocks you tune most first
+(`vllm`, `vllm_router`) and the 36 `entries` last.
 
 1. **nickname** — names the run; artifacts land in `<OUT_DIR>/<nickname>/`
 2. **num_shards** — Slurm jobs to split across, i.e. `NUM_SHARDS`
@@ -341,8 +343,10 @@ SWEEP_DIR=<sweep> CONTAINER=<sqsh> VLLM_JOBID=<any live job> bash $R/scripts/05_
 Labels run concurrently — each is a separate `gym` process and on Lustre interpreter start
 dominates (~45s vs ~5s in the container). 36 labels take ~4m45s at `PROFILE_JOBS=12` (default 8).
 
-It fails fast on the two things that otherwise error identically in all 36 `profile.txt` files: a
-venv older than the `openai==2.44.0` pin, and an unexported `${oc.env:VAR}` from `env.yaml`.
+It fails fast on two things that would otherwise error identically in all 36 `profile.txt` files:
+`gym` missing from PATH, and an unexported `${oc.env:VAR}` from `env.yaml`. It does **not** catch a
+venv older than the `openai==2.44.0` pin — that one still gets you 36 identical
+`cannot import name 'Moderation'` failures, so activate the right venv first.
 
 ### 04c - Re-creating profiled data to input shapes with reward profiled information
 
@@ -388,6 +392,8 @@ manifests/       input: what to profile. Hand-edited.
                  nemotron_3_5_super.yaml is the real sweep; example_*.yaml are minimal
                  one-entry manifests for basic / judge / sandbox+judge.
 configs/         generated container config. Reproducible from the manifests.
+infra/           the sweep package itself (manifest schema, materialize, shard, merge, split).
+                 Invoked as `PYTHONPATH=$R python -m infra <cmd>`; the scripts set that for you.
 outputs/         everything a run produces: sweeps/<nickname>/. Gitignored.
 scripts/         numbered by run order; see below.
 ```
@@ -508,7 +514,7 @@ It follows the same flow from the [Super-v3.5 readme](../README.md), with one ch
 
 ```bash
 # 0. make container config
-PYTHONPATH=$R python -m infra container-config $R/manifests/*.yaml --out $R/configs/container_config.yaml
+PYTHONPATH=$R python -m infra container-config $R/manifests/*.yaml --output $R/configs/container_config.yaml
 
 # 1. make vllm container
 mkdir -p results/vllm

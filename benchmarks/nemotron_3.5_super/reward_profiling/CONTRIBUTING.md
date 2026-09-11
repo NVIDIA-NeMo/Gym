@@ -56,7 +56,7 @@ container. A server with no baked venv installs at runtime and hangs the run beh
 retries rather than failing, so check first:
 
 ```bash
-PYTHONPATH=$R python -m infra container-config $R/manifests/<yours>.yaml --out /tmp/mine.yaml
+PYTHONPATH=$R python -m infra container-config $R/manifests/<yours>.yaml --output /tmp/mine.yaml
 python -c "
 import yaml
 have = set(yaml.safe_load(open('$R/configs/container_config.yaml'))['config_paths'])

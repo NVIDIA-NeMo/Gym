@@ -10,6 +10,7 @@
 #   SWEEP_DIR     the sweep whose shards/ should be merged
 #
 # OPTIONAL
+#   GYM_SITE_PACKAGES a venv's site-packages, if orjson/yaml/pydantic are not importable
 #   SHARDS_DIR    where shard_NNN/ live                   (default: SWEEP_DIR/shards)
 #   OUTPUT        merged rollouts path                    (default: SWEEP_DIR/rollouts.jsonl)
 #

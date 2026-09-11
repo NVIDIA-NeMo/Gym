@@ -13,6 +13,7 @@
 #   (NUM_SHARDS is optional: the manifest's num_shards, else 16)
 #
 # OPTIONAL
+#   GYM_SITE_PACKAGES a venv's site-packages, if orjson/yaml/pydantic are not importable
 #   SHARDS_DIR    where shard_NNN/ go                     (default: SWEEP_DIR/shards)
 #
 # Safe to re-run with a different NUM_SHARDS: collected rollouts are folded back into the parent,
