@@ -24,6 +24,7 @@
 # ── Enforced ──────────────────────────────────────────────────────────────
 .github/ @nvidia-nemo/automation
 docker/ @nvidia-nemo/automation
+# suggest: docker/ @anwithk
 pyproject.toml @nvidia-nemo/automation
 uv.lock @nvidia-nemo/automation
 
