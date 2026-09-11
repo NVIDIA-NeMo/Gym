@@ -31,11 +31,11 @@ ContextVar means nested/subagent model calls get `model_url_path`/cookies for fr
 `task`/`atask` subagent tools already rely on `configurable` merging automatically into subagent
 invocations (see `deepagents/middleware/subagents.py`), so no extra plumbing is needed for that case.
 
-Cookies specifically evolve within one rollout: `_agenerate()` writes each response's cookies into a
-mutable holder dict referenced from `configurable["model_cookies"]`, created fresh per request in
-`responses()`, so a multi-turn rollout chains model-server session state instead of resending the same
-cookies on every turn — without mutating the `RunnableConfig` itself (which nested/parallel branches may
-share by reference; only this one designated holder is mutable, everything else in `configurable` is not).
+Cookies and usage evolve within one rollout: `_agenerate()` writes them into mutable holder dicts referenced
+from `configurable["model_cookies"]` and `configurable["model_usage"]`, created fresh per request in
+`responses()`. The cookie holder chains model-server session state across turns, while the usage holder
+accumulates token counts from every internal model call. This avoids replacing the `RunnableConfig` itself,
+which nested/parallel branches may share by reference.
 """
 
 import json
@@ -51,7 +51,7 @@ from langchain_core.runnables import ensure_config
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import Field
 
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputText
+from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputText, accumulate_response_usage
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
@@ -218,9 +218,10 @@ class GymResponsesChatModel(BaseChatModel):
         try:
             model_url_path = configurable["model_url_path"]
             model_cookies = configurable["model_cookies"]
+            model_usage = configurable["model_usage"]
         except KeyError as e:
             raise RuntimeError(
-                "GymResponsesChatModel called without model_url_path/model_cookies in "
+                "GymResponsesChatModel called without model_url_path/model_cookies/model_usage in "
                 "RunnableConfig['configurable'] — it must be invoked via DeepAgentsAgent.responses(), "
                 "which sets these once per request."
             ) from e
@@ -243,4 +244,5 @@ class GymResponsesChatModel(BaseChatModel):
         # It's a deliberate, narrow exception to treating `configurable` as otherwise immutable.
         model_cookies["cookies"] = resp.cookies
         gym_response = NeMoGymResponse.model_validate(await get_response_json(resp))
+        model_usage["usage"] = accumulate_response_usage(model_usage["usage"], gym_response.usage)
         return ChatResult(generations=[ChatGeneration(message=to_langchain_ai_message(gym_response))])

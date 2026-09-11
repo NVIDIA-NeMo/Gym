@@ -95,14 +95,19 @@ class DeepAgentsAgent(SimpleAgent):
         # cookies chained from /seed_session — see the cookie-mirroring loop above — and are unrelated to
         # the model server's own session). `GymResponsesChatModel._agenerate()` fills this holder in from
         # each model response and reads it back on the next internal call within this rollout; see
-        # responses_langchain_bridge.py.
+        # responses_langchain_bridge.py. `model_usage` similarly accumulates usage from every internal
+        # model call so the final agent response reports the whole rollout.
+        model_usage = {"usage": None}
         run_config: RunnableConfig = {
             "configurable": {
-                "model_url_path": self.url_path_for_request("/v1/responses", request), # build outbound url to model server
+                "model_url_path": self.url_path_for_request("/v1/responses", request),
                 "model_cookies": {"cookies": None},
+                "model_usage": model_usage,
             }
         }
         final_state = await self.agent.ainvoke({"messages": input_messages}, config=run_config)
 
         new_messages = final_state["messages"][len(input_messages) :]
-        return NeMoGymResponse.model_validate(to_responses(new_messages, self.config.model_server.name))
+        response_body = to_responses(new_messages, self.config.model_server.name)
+        response_body["usage"] = model_usage["usage"]
+        return NeMoGymResponse.model_validate(response_body)
