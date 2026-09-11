@@ -1,0 +1,12 @@
+# Default prompt for the SciCodePile runnable benchmark.
+#
+# Deliberately empty scaffolding: `question` is the upstream `prompt` field passed
+# through unmodified (a function signature plus docstring), HumanEval-style.
+# Upstream publishes no prompt of its own, so any instruction wrapper here would be
+# invention that changes what is measured. See the benchmark README for the A/B
+# measurement behind this choice, including the cost it carries.
+
+system: ""
+
+user: |-
+  {question}
