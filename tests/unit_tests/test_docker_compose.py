@@ -1097,8 +1097,9 @@ async def test_resolve_selected_environment_urls_for_nonroot_service(tmp_path, a
     provider = ShellProvider()
     provider.network_address = AsyncMock(return_value=address)
     provider.set_hosts = AsyncMock(side_effect=AssertionError("host injection must be disabled"))
-    original = "http://user:pass@workspace:18073/path?next=workspace#fragment"
-    expected = f"http://user:pass@{authority}:18073/path?next=workspace#fragment"
+    # Synthetic credentials exercise preservation of URL userinfo during hostname replacement.
+    original = "http://user:pass@workspace:18073/path?next=workspace#fragment"  # pragma: allowlist secret
+    expected = f"http://user:pass@{authority}:18073/path?next=workspace#fragment"  # pragma: allowlist secret
     group = make_compose(
         provider,
         {
