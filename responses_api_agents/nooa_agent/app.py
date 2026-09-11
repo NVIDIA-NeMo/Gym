@@ -74,7 +74,7 @@ def _configure_native_file_journal() -> None:
         # Only fan out to the live viewer when it answers; an unreachable endpoint
         # would otherwise retry-storm every model call while the file journal alone
         # already guarantees the durable record.
-        exporters.append(noa_exporters.journal(endpoint=endpoint))
+        exporters.append(nooa_exporters.journal(endpoint=endpoint))
     enable_tracing(exporters)
 
 
