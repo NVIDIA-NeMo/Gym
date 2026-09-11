@@ -16,6 +16,7 @@ from copy import deepcopy
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+from fastapi.encoders import jsonable_encoder
 from pytest import approx, fixture
 
 from nemo_gym.config_types import ModelServerRef
@@ -445,3 +446,348 @@ class TestApp:
         )
 
         assert _extract_question_text(params, None) == ""
+
+
+class TestVerdictParsing:
+    """The verdict is the label whose last occurrence ends latest in the judge's message.
+
+    Judges reason out loud before committing, so they routinely name the losing verdict
+    on the way to the winning one. Reading the first occurrence graded on that aside.
+    """
+
+    def _config(self, equal_label: str, not_equal_label: str) -> LLMJudgeResourcesServerConfig:
+        cfg = LLMJudgeResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            judge_prompt_template_fpath=str(
+                Path(__file__).resolve().parents[1] / "prompt_templates/equivalence_llm_judge.txt"
+            ),
+        )
+        cfg.judge_equal_label = equal_label
+        cfg.judge_not_equal_label = not_equal_label
+        return cfg
+
+    async def _judge(self, cfg: LLMJudgeResourcesServerConfig, judge_text: str) -> tuple[bool, str | None]:
+        """Run one judge pass over ``judge_text`` and return (is_equal, verdict_label)."""
+        server_mock = MagicMock(spec=ServerClient)
+        rs = LLMJudgeResourcesServer(config=cfg, server_client=server_mock)
+
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(
+            return_value=NeMoGymResponse(
+                id="judge_resp",
+                created_at=0.0,
+                model="judge_model",
+                object="response",
+                output=[
+                    NeMoGymResponseOutputMessage(
+                        id="msg_id",
+                        content=[NeMoGymResponseOutputText(annotations=[], text=judge_text, type="output_text")],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                ],
+                parallel_tool_calls=False,
+                tool_choice="none",
+                tools=[],
+            ).model_dump_json()
+        )
+        server_mock.post = AsyncMock(return_value=post_mock)
+
+        is_equal, record = await rs._generate_judge_evaluation(
+            question="Q?", expected_answer="B", generated_answer="A"
+        )
+        return is_equal, record.verdict_label
+
+    # --- HLE labels: the case this change exists for -----------------------------
+
+    async def test_verdict_after_contrary_reasoning_wins(self) -> None:
+        cfg = self._config("Judgement: yes", "Judgement: no")
+        text = (
+            "Reasoning: If the response had used different units this would be\n"
+            "Judgement: no, but the values agree exactly.\n"
+            "Judgement: yes\n"
+            "Confidence: 95%"
+        )
+        assert await self._judge(cfg, text) == (True, "Judgement: yes")
+
+    async def test_trailing_not_equal_verdict_wins(self) -> None:
+        cfg = self._config("Judgement: yes", "Judgement: no")
+        text = (
+            "Reasoning: A sloppier grader might say Judgement: yes here, but the\n"
+            "extracted answer is off by an order of magnitude.\n"
+            "Judgement: no\n"
+            "Confidence: 90%"
+        )
+        assert await self._judge(cfg, text) == (False, "Judgement: no")
+
+    # --- Overlapping labels: lc_judge grades with CORRECT / INCORRECT ------------
+
+    async def test_incorrect_is_not_read_as_correct(self) -> None:
+        """Regression guard: "INCORRECT" contains "CORRECT" one character later.
+
+        Ranking by match start would hand every INCORRECT verdict a passing grade.
+        """
+        cfg = self._config("CORRECT", "INCORRECT")
+        assert await self._judge(cfg, "INCORRECT") == (False, "INCORRECT")
+        assert await self._judge(cfg, "The candidate answer is INCORRECT.") == (False, "INCORRECT")
+
+    async def test_overlapping_labels_still_honour_the_last_verdict(self) -> None:
+        cfg = self._config("CORRECT", "INCORRECT")
+        assert await self._judge(cfg, "At first glance INCORRECT, but on reflection: CORRECT") == (True, "CORRECT")
+        assert await self._judge(cfg, "Initially CORRECT, however the units are wrong: INCORRECT") == (
+            False,
+            "INCORRECT",
+        )
+
+    # --- Degenerate judge output -------------------------------------------------
+
+    async def test_missing_verdict_is_not_equal_and_unlabelled(self) -> None:
+        cfg = self._config("Judgement: yes", "Judgement: no")
+        assert await self._judge(cfg, "I could not determine an answer.") == (False, None)
+
+    async def test_single_label_present_is_used_regardless_of_position(self) -> None:
+        cfg = self._config("[[A=B]]", "[[A!=B]]")
+        assert await self._judge(cfg, "[[A=B]] trailing commentary") == (True, "[[A=B]]")
+        assert await self._judge(cfg, "[[A!=B]] trailing commentary") == (False, "[[A!=B]]")
+
+
+class TestJudgementParsingIssueRate:
+    """The per-row flags roll up into aggregate metrics.
+
+    Without this the flags only exist in the rollout JSONL, so a run whose judge
+    silently stopped grading looks exactly like a run the model failed.
+    """
+
+    def _server(self) -> LLMJudgeResourcesServer:
+        cfg = LLMJudgeResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            judge_prompt_template_fpath=str(
+                Path(__file__).resolve().parents[1] / "prompt_templates/equivalence_llm_judge.txt"
+            ),
+        )
+        return LLMJudgeResourcesServer(config=cfg, server_client=MagicMock(spec=ServerClient))
+
+    @staticmethod
+    def _rollout(*evaluation_issues: list[str]) -> dict:
+        """One rollout, one entry per judge pass. Clean passes omit the key, as served."""
+        return {
+            "reward": 0.0,
+            "judge_evaluations": [
+                {"judgement_parsing_issues": issues} if issues else {} for issues in evaluation_issues
+            ],
+        }
+
+    def test_clean_run_reports_a_zero_rate_rather_than_nothing(self) -> None:
+        """0.0 and a missing key mean different things: "checked" versus "not measured"."""
+        metrics = self._server().compute_metrics([[self._rollout([])], [self._rollout([])]])
+        assert metrics == {"judgement_parsing_issue_rate": 0.0}
+
+    def test_rate_is_the_share_of_rollouts_with_any_issue(self) -> None:
+        tasks = [
+            [self._rollout(["no_verdict"])],
+            [self._rollout([])],
+            [self._rollout(["truncated_judge_output", "no_verdict"])],
+            [self._rollout([])],
+        ]
+        metrics = self._server().compute_metrics(tasks)
+        assert metrics["judgement_parsing_issue_rate"] == 0.5
+        assert metrics["judgement_parsing_issue_rate/no_verdict"] == 0.5
+        assert metrics["judgement_parsing_issue_rate/truncated_judge_output"] == 0.25
+
+    def test_a_rollout_judged_twice_still_counts_once(self) -> None:
+        """Swap and rescue configs make two judge calls per row.
+
+        Counting evaluations rather than rollouts would let a two-pass benchmark
+        report a rate above 1.0.
+        """
+        tasks = [[self._rollout(["no_verdict"], ["no_verdict"])], [self._rollout([], [])]]
+        metrics = self._server().compute_metrics(tasks)
+        assert metrics["judgement_parsing_issue_rate"] == 0.5
+        assert metrics["judgement_parsing_issue_rate/no_verdict"] == 0.5
+
+    def test_rows_that_never_reached_the_judge_are_not_in_the_denominator(self) -> None:
+        """A row that errored before grading is not evidence about the judge."""
+        tasks = [[self._rollout(["no_verdict"])], [{"reward": 0.0}], [{"reward": 0.0, "judge_evaluations": []}]]
+        assert self._server().compute_metrics(tasks)["judgement_parsing_issue_rate"] == 1.0
+
+    def test_a_run_with_no_judged_rows_reports_nothing(self) -> None:
+        assert self._server().compute_metrics([[{"reward": 0.0}]]) == {}
+
+    def test_rate_is_promoted_into_key_metrics(self) -> None:
+        """The default key set is `mean/*` only, which would bury the rate.
+
+        It is the one number saying whether the accuracy beside it can be trusted, so
+        it has to appear where the headline numbers are read, not only in the full
+        metrics JSON.
+        """
+        agent_metrics = {
+            "mean/accuracy": 0.31,
+            "std/accuracy": 0.02,
+            "judgement_parsing_issue_rate": 0.4,
+            "judgement_parsing_issue_rate/no_verdict": 0.4,
+        }
+        key = self._server().get_key_metrics(agent_metrics)
+        assert key == {"mean/accuracy": 0.31, "judgement_parsing_issue_rate": 0.4}
+
+    def test_key_metrics_without_a_rate_is_just_the_default_set(self) -> None:
+        """Other servers' metrics must not gain a phantom key."""
+        assert self._server().get_key_metrics({"mean/accuracy": 0.31, "std/accuracy": 0.02}) == {"mean/accuracy": 0.31}
+
+
+class TestJudgementParsingIssues:
+    """Verdicts that do not parse cleanly are recorded on the row that they graded.
+
+    A judge that stops emitting parseable verdicts is otherwise indistinguishable
+    from a model that got every question wrong: both are a column of zeros.
+    """
+
+    def _config(self, equal_label: str = "Judgement: yes", not_equal_label: str = "Judgement: no"):
+        cfg = LLMJudgeResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+            judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            judge_prompt_template_fpath=str(
+                Path(__file__).resolve().parents[1] / "prompt_templates/equivalence_llm_judge.txt"
+            ),
+        )
+        cfg.judge_equal_label = equal_label
+        cfg.judge_not_equal_label = not_equal_label
+        return cfg
+
+    def _server(self, cfg) -> LLMJudgeResourcesServer:
+        return LLMJudgeResourcesServer(config=cfg, server_client=MagicMock(spec=ServerClient))
+
+    async def _judge(self, rs, text: str | None, status: str = "completed"):
+        """One judge pass. ``text=None`` produces a response with no message output."""
+        output = []
+        if text is not None:
+            output = [
+                NeMoGymResponseOutputMessage(
+                    id="msg_id",
+                    content=[NeMoGymResponseOutputText(annotations=[], text=text, type="output_text")],
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                )
+            ]
+        pm = MagicMock()
+        pm.read = AsyncMock(
+            return_value=NeMoGymResponse(
+                id="judge_resp",
+                created_at=0.0,
+                model="judge_model",
+                object="response",
+                output=output,
+                status=status,
+                parallel_tool_calls=False,
+                tool_choice="none",
+                tools=[],
+            ).model_dump_json()
+        )
+        rs.server_client.post = AsyncMock(return_value=pm)
+        return await rs._generate_judge_evaluation(question="Q?", expected_answer="B", generated_answer="A")
+
+    async def test_clean_verdict_is_not_flagged(self) -> None:
+        rs = self._server(self._config())
+        is_equal, rec = await self._judge(rs, "Reasoning: they match.\nJudgement: yes\nConfidence: 95%")
+        assert is_equal is True
+        assert rec.judgement_parsing_issues == []
+
+    async def test_no_verdict_is_flagged(self) -> None:
+        rs = self._server(self._config())
+        is_equal, rec = await self._judge(rs, "I am unable to assess this answer.")
+        # Still scores not-equal, but no longer silently: the row says why.
+        assert (is_equal, rec.verdict_label) == (False, None)
+        assert rec.judgement_parsing_issues == ["no_verdict"]
+
+    async def test_conflicting_verdicts_are_flagged_but_still_scored(self) -> None:
+        rs = self._server(self._config())
+        is_equal, rec = await self._judge(rs, "Judgement: no\nOn reflection:\nJudgement: yes")
+        # The last-occurrence rule still decides; the flag records that it had to.
+        assert (is_equal, rec.verdict_label) == (True, "Judgement: yes")
+        assert rec.judgement_parsing_issues == ["conflicting_verdicts"]
+
+    async def test_repeated_verdict_is_flagged(self) -> None:
+        rs = self._server(self._config())
+        _, rec = await self._judge(rs, "Judgement: yes\n...restating...\nJudgement: yes")
+        assert rec.judgement_parsing_issues == ["repeated_verdict"]
+
+    async def test_truncated_judge_output_is_flagged_when_it_cost_the_verdict(self) -> None:
+        rs = self._server(self._config())
+        _, rec = await self._judge(rs, "Reasoning: the extracted answer is", status="incomplete")
+        # Truncation severed the verdict line, so both facts are recorded.
+        assert rec.judgement_parsing_issues == ["truncated_judge_output", "no_verdict"]
+
+    async def test_truncation_after_the_verdict_is_not_flagged(self) -> None:
+        """The HLE judge prompt puts `Confidence:` after `Judgement:`.
+
+        A judge cut off on that trailing line still committed to a verdict, and the row
+        is graded correctly. Flagging it would count good rows as problems and inflate
+        judgement_parsing_issue_rate -- exactly the signal the rate exists to give.
+        """
+        rs = self._server(self._config())
+        is_equal, rec = await self._judge(rs, "Reasoning: they match.\nJudgement: yes\nConfid", status="incomplete")
+        assert (is_equal, rec.verdict_label) == (True, "Judgement: yes")
+        assert rec.judgement_parsing_issues == []
+
+    async def test_unparseable_judge_output_is_flagged(self) -> None:
+        rs = self._server(self._config())
+        is_equal, rec = await self._judge(rs, None)
+        assert (is_equal, rec.verdict_label) == (False, None)
+        assert rec.judgement_parsing_issues == ["unparseable_judge_output"]
+
+    async def test_truncation_that_severed_the_whole_message_records_both(self) -> None:
+        rs = self._server(self._config())
+        _, rec = await self._judge(rs, None, status="incomplete")
+        assert rec.judgement_parsing_issues == ["truncated_judge_output", "unparseable_judge_output"]
+
+    async def test_overlapping_labels_do_not_produce_phantom_conflicts(self) -> None:
+        """lc_judge grades CORRECT / INCORRECT; "INCORRECT" also contains "CORRECT".
+
+        A naive text.count() would flag every ordinary not-equal verdict as a
+        conflict, which would bury the real signal under 100% false positives.
+        """
+        rs = self._server(self._config(equal_label="CORRECT", not_equal_label="INCORRECT"))
+        is_equal, rec = await self._judge(rs, "The candidate answer is INCORRECT.")
+        assert (is_equal, rec.verdict_label) == (False, "INCORRECT")
+        assert rec.judgement_parsing_issues == []
+
+    async def test_clean_record_omits_the_issues_key_entirely(self) -> None:
+        """A clean row carries no issues field at all, rather than an empty list.
+
+        Most rows are clean; an always-present empty list would be a column in the
+        rollout JSONL that never carries information.
+        """
+        rs = self._server(self._config())
+        _, clean = await self._judge(rs, "Judgement: yes")
+        assert "judgement_parsing_issues" not in jsonable_encoder(clean)
+        # The attribute still exists on the object -- only serialisation drops it.
+        assert clean.judgement_parsing_issues == []
+
+        _, flagged = await self._judge(rs, "no verdict here")
+        assert jsonable_encoder(flagged)["judgement_parsing_issues"] == ["no_verdict"]
+
+    async def test_flags_are_recorded_per_record_and_not_shared_between_rows(self) -> None:
+        """Each evaluation owns its own list.
+
+        The flags are the only surviving record of a broken judge, so a list shared
+        between records -- the classic mutable-default bug -- would smear one row's
+        issues across every later row and make the field useless for slicing.
+        """
+        rs = self._server(self._config())
+        records = [(await self._judge(rs, "no verdict here"))[1] for _ in range(50)]
+        assert all(rec.judgement_parsing_issues == ["no_verdict"] for rec in records)
+
+        _, clean = await self._judge(rs, "Judgement: yes")
+        assert clean.judgement_parsing_issues == []

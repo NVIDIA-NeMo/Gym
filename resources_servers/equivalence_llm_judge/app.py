@@ -23,11 +23,12 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections import Counter
 from contextlib import nullcontext
 from typing import Any, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -37,12 +38,51 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.global_config import MEAN_PREFIX
 from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+
+
+# Name of the aggregate metric reporting unparseable judge verdicts. Promoted into
+# key_metrics by get_key_metrics, which otherwise keeps only `mean/*` entries.
+JUDGEMENT_PARSING_ISSUE_RATE = "judgement_parsing_issue_rate"
+
+
+def _count_verdict_occurrences(text: str, equal_label: str, not_equal_label: str) -> tuple[int, int]:
+    """Count non-overlapping occurrences of each verdict label in ``text``.
+
+    Scans left to right and, where the two labels overlap, credits the longer one.
+    A plain ``text.count()`` would report lc_judge's "INCORRECT" as containing a
+    "CORRECT" too, flagging every ordinary not-equal verdict as a conflict.
+
+    Diagnostics only -- the verdict itself is decided by the ranking in
+    ``_generate_judge_evaluation``, which this function does not influence.
+    """
+    counts = {equal_label: 0, not_equal_label: 0}
+    i = 0
+    # Jump between matches with str.find rather than walking characters: judge messages
+    # run to tens of thousands of characters, and a per-character Python loop costs
+    # milliseconds of blocking CPU per call on an event loop shared by every rollout.
+    while i < len(text):
+        eq_at = text.find(equal_label, i) if equal_label else -1
+        neq_at = text.find(not_equal_label, i) if not_equal_label else -1
+        if eq_at < 0 and neq_at < 0:
+            break
+        if eq_at == neq_at:
+            # Same start: one label is a prefix of the other, so the longer one is meant.
+            label = equal_label if len(equal_label) > len(not_equal_label) else not_equal_label
+            pos = eq_at
+        elif neq_at < 0 or (eq_at >= 0 and eq_at < neq_at):
+            label, pos = equal_label, eq_at
+        else:
+            label, pos = not_equal_label, neq_at
+        counts[label] += 1
+        i = pos + len(label)
+    return counts[equal_label], counts[not_equal_label]
 
 
 class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
@@ -53,7 +93,9 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     - judge_system_message: optional custom system message for the judge.
     - judge_prompt_template: optional custom prompt template. Supported placeholders:
         {question}, {expected_answer}, {generated_answer}
-    - judge_equal_label / judge_not_equal_label: labels the judge must output.
+    - judge_equal_label / judge_not_equal_label: labels the judge must output. The
+        verdict is the label whose *last* occurrence ends latest in the judge's final
+        message, so a label named mid-reasoning does not override the closing verdict.
     """
 
     # Default logical name for this resources server
@@ -143,6 +185,25 @@ class JudgeEvaluation(BaseModel):
     # Extracted verdict token from judge output, e.g., "[[A=B]]" or "[[A!=B]]",
     # or JUDGE_ERROR_LABEL when the judge itself failed.
     verdict_label: Optional[str] = None
+    # Ways this judge response was malformed; empty when the verdict parsed cleanly.
+    # See LLMJudgeResourcesServer._flag_judgement_parsing_issue for the vocabulary.
+    # Persisted into the rollout JSONL so bad rows can be sliced out after a run:
+    #   jq '.judge_evaluations[].judgement_parsing_issues[]?' rollouts.jsonl | sort | uniq -c
+    judgement_parsing_issues: list[str] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _drop_empty_judgement_parsing_issues(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Omit the issues key entirely when the verdict parsed cleanly.
+
+        Most rows are clean, so serialising an empty list on every one of them would
+        add a field to the rollout JSONL that never says anything. Absent therefore
+        means "parsed cleanly" -- and equally means "written before this field
+        existed", so read a missing key as no-signal rather than as a clean run.
+        """
+        data = handler(self)
+        if not data.get("judgement_parsing_issues"):
+            data.pop("judgement_parsing_issues", None)
+        return data
 
 
 class LLMJudgeVerifyResponse(BaseVerifyResponse):
@@ -293,6 +354,30 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         return app
+
+    @staticmethod
+    def _flag_judgement_parsing_issue(kind: str, eval_record: JudgeEvaluation) -> None:
+        """Record on the row that the judge's verdict did not parse cleanly.
+
+        ``kind`` is one of:
+          - ``unparseable_judge_output``: the judge response carried no assistant text.
+          - ``truncated_judge_output``: the judge hit its token limit, which usually
+            severs the trailing verdict line.
+          - ``no_verdict``: neither label appears, so the row scores 0 by default
+            rather than by judgement.
+          - ``conflicting_verdicts``: both labels appear; the ranking picked the last.
+          - ``repeated_verdict``: one label appears more than once.
+
+        A row can carry several of these at once (a truncated response usually also
+        has no verdict), so they accumulate in a list rather than overwriting.
+
+        Nothing is logged: these servers run at high concurrency and a broken judge
+        makes *every* row bad. The flags ride the rollout JSONL instead, where a run
+        can be swept in one pass:
+          jq '.judge_evaluations[].judgement_parsing_issues[]?' rollouts.jsonl | sort | uniq -c
+        """
+        if kind not in eval_record.judgement_parsing_issues:
+            eval_record.judgement_parsing_issues.append(kind)
 
     def _should_skip_for_length(self, body: LLMJudgeVerifyRequest, expected: str) -> bool:
         """Check if length threshold should skip second evaluation (rescue or swap).
@@ -513,23 +598,118 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         # Parse the last output; fall back to not-equal if unexpected.
         try:
             last_output = judge_response.output[-1]
-            if getattr(last_output, "type", None) != "message":
-                return False, eval_record
-            last_content = last_output.content[-1]
-            text = getattr(last_content, "text", "")
+            is_message = getattr(last_output, "type", None) == "message"
+            text = getattr(last_output.content[-1], "text", "") if is_message else None
         except Exception:
+            text = None
+
+        truncated = judge_response.status == "incomplete"
+
+        if text is None:
+            # Truncation that severed the whole message explains the missing text.
+            if truncated:
+                self._flag_judgement_parsing_issue("truncated_judge_output", eval_record)
+            self._flag_judgement_parsing_issue("unparseable_judge_output", eval_record)
             return False, eval_record
 
-        eq_pos = text.find(equal_label)
-        neq_pos = text.find(not_equal_label)
+        eq_count, neq_count = _count_verdict_occurrences(text, equal_label, not_equal_label)
+        if eq_count == 0 and neq_count == 0:
+            # Truncation is only flagged when it cost the verdict. The HLE judge prompt
+            # puts `Confidence:` *after* `Judgement:`, so a judge cut off on its last
+            # line routinely still committed to a verdict; flagging those would count
+            # correctly graded rows as problems and inflate the rate.
+            if truncated:
+                self._flag_judgement_parsing_issue("truncated_judge_output", eval_record)
+            self._flag_judgement_parsing_issue("no_verdict", eval_record)
+        else:
+            if eq_count > 0 and neq_count > 0:
+                self._flag_judgement_parsing_issue("conflicting_verdicts", eval_record)
+            if eq_count > 1 or neq_count > 1:
+                self._flag_judgement_parsing_issue("repeated_verdict", eval_record)
+
+        # Take the *last* occurrence of each label, not the first. Judges routinely
+        # name both verdicts while reasoning ("this would be Judgement: no if the
+        # units differed...") and only commit at the very end, so the first mention
+        # is frequently not the verdict.
+        eq_pos = text.rfind(equal_label)
+        neq_pos = text.rfind(not_equal_label)
         if eq_pos < 0 and neq_pos < 0:
             eval_record.verdict_label = None
             return False, eval_record
-        if eq_pos >= 0 and (neq_pos < 0 or eq_pos < neq_pos):
+
+        # Rank by where each match *ends*, not where it starts, because one label can
+        # contain the other: lc_judge grades with CORRECT / INCORRECT, and every
+        # "INCORRECT" also contains "CORRECT" starting one character later. Comparing
+        # starts would read those as equal; comparing ends makes them tie, and the
+        # longer (more specific) label then wins. An exact tie between two same-length
+        # labels keeps the historical not-equal default.
+        eq_end = eq_pos + len(equal_label) if eq_pos >= 0 else -1
+        neq_end = neq_pos + len(not_equal_label) if neq_pos >= 0 else -1
+        if eq_end > neq_end or (eq_end == neq_end and len(equal_label) > len(not_equal_label)):
             eval_record.verdict_label = equal_label
             return True, eval_record
         eval_record.verdict_label = not_equal_label
         return False, eval_record
+
+    # -------------------------------------------------------------------------
+    # Aggregate metrics
+    # -------------------------------------------------------------------------
+
+    def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        """Report how much of the run was graded by a verdict that did not parse cleanly.
+
+        Every other signal this server produces is a reward, and a judge that stops
+        emitting parseable verdicts produces the same column of zeros as a model that
+        got every question wrong. This rate is what tells the two apart, so it is
+        emitted even when it is 0.0 -- a missing key would mean "not measured", which
+        is exactly the ambiguity the metric exists to remove.
+
+        Not every flagged row scored wrongly: ``no_verdict`` and
+        ``unparseable_judge_output`` force a 0, while ``conflicting_verdicts`` and
+        ``repeated_verdict`` did produce a verdict that the ranking rule resolved. The
+        per-kind rates alongside the headline are what separate the two.
+
+        Denominator is rollouts that actually reached the judge, not all rollouts:
+        a run where half the rows errored out before grading should report the rate
+        among the rows the judge did see. Each rollout counts once per kind however
+        many judge passes it made, so the rates read as "share of datapoints", not
+        "share of judge calls" -- swap and rescue configs make two calls per row.
+        """
+        judged = [r for task in tasks for r in task if r.get("judge_evaluations")]
+        if not judged:
+            return {}
+
+        kind_counts: Counter[str] = Counter()
+        rollouts_with_issues = 0
+        for rollout in judged:
+            issues = {
+                issue
+                for evaluation in rollout["judge_evaluations"]
+                for issue in ((evaluation or {}).get("judgement_parsing_issues") or [])
+            }
+            if issues:
+                rollouts_with_issues += 1
+                kind_counts.update(issues)
+
+        metrics: dict[str, Any] = {JUDGEMENT_PARSING_ISSUE_RATE: rollouts_with_issues / len(judged)}
+        # Per-kind rates only when non-zero: a clean run should not carry five zeros,
+        # and the headline rate above already says the run was checked.
+        for kind, count in sorted(kind_counts.items()):
+            metrics[f"{JUDGEMENT_PARSING_ISSUE_RATE}/{kind}"] = count / len(judged)
+        return metrics
+
+    def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
+        """The default headline set, plus the parsing-issue rate.
+
+        The default keeps only ``mean/*``, which would leave the rate buried in the
+        full metrics JSON -- the one number that says whether the accuracy beside it
+        can be trusted at all. Only the headline rate is promoted; the per-kind
+        breakdown stays in ``agent_metrics`` for whoever is actually debugging.
+        """
+        key = {k: v for k, v in agent_metrics.items() if k.startswith(MEAN_PREFIX)}
+        if JUDGEMENT_PARSING_ISSUE_RATE in agent_metrics:
+            key[JUDGEMENT_PARSING_ISSUE_RATE] = agent_metrics[JUDGEMENT_PARSING_ISSUE_RATE]
+        return key
 
 
 if __name__ == "__main__":
