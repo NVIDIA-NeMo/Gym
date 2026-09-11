@@ -1168,6 +1168,13 @@ class VLLMModel(SimpleResponsesAPIModel):
                 rollout_id=context.rollout_id,
                 record=record,
                 staging_chain=tuple(child_staging_chain),
+                parent_manifest=(
+                    tuple(context.parent_resolution.match.parent_manifest)
+                    if context.source_capture_key is not None
+                    and context.parent_resolution is not None
+                    and context.parent_resolution.match is not None
+                    else ()
+                ),
                 request_items=list(context.request_items or []),
                 response_items=response_items,
             )

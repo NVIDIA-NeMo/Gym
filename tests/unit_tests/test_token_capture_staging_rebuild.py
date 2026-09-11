@@ -357,6 +357,62 @@ def test_chained_receipt_verifies_and_linearizes() -> None:
     assert row.token_ids == [10, 11, 12, 20, 21]
 
 
+def test_chained_receipt_accepts_rows_owned_by_different_attempts() -> None:
+    root, child = _chained_pair()
+    child_values = child.model_dump()
+    child_values["rollout_id"] = "rollout-1-a1"
+    child_values["digest"] = compute_staging_digest(
+        schema_version=child.schema_version,
+        digest_version=child.digest_version,
+        extras_digest_version=child.extras_digest_version,
+        rollout_id="rollout-1-a1",
+        model_call_id=child.model_call_id,
+        parent_call_id=child.parent_call_id,
+        mode=child.mode,
+        prev_len=child.prev_len,
+        delta_len=child.delta_len,
+        cum_len=child.cum_len,
+        weight_version=child.weight_version,
+        token_ids_delta=child.token_ids_delta,
+        token_mask_delta=child.token_mask_delta,
+        generation_log_probs_delta=child.generation_log_probs_delta,
+        extras_digest=child.extras_digest,
+        chain_hash=child.chain_hash,
+        cumulative_hash=child.cumulative_hash,
+    )
+    recovered_child = StagedCallBaseSnapshot.model_validate(child_values)
+    receipt = RolloutReceipt(
+        rollout_id="rollout-1-a1",
+        terminal_model_call_id="child",
+        manifest=[
+            _manifest_row(root).model_copy(update={"capture_key": "rollout-1"}),
+            _manifest_row(recovered_child).model_copy(update={"capture_key": "rollout-1-a1"}),
+        ],
+        terminal_selection="declared",
+    )
+
+    row = verify_and_linearize(receipt, [root, recovered_child])
+
+    assert row.model_call_ids == ["root", "child"]
+    assert row.token_ids == [10, 11, 12, 20, 21]
+
+
+def test_cross_attempt_receipt_rejects_wrong_per_row_owner() -> None:
+    root, child = _chained_pair()
+    receipt = _receipt([root, child], terminal="child")
+    receipt = receipt.model_copy(
+        update={
+            "manifest": [
+                receipt.manifest[0].model_copy(update={"capture_key": "wrong-attempt"}),
+                receipt.manifest[1],
+            ]
+        }
+    )
+    with pytest.raises(ReceiptVerificationError) as error:
+        verify_and_linearize(receipt, [root, child])
+    assert error.value.code == "wrong_rollout"
+
+
 def test_broken_chain_link_is_rejected() -> None:
     root, child = _chained_pair()
     # A child whose declared chain hash does not extend the actual root delta.

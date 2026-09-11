@@ -14,6 +14,7 @@
 # limitations under the License.
 """Checkpoint token-free model custody without copying staged token arrays."""
 
+import asyncio
 import json
 import shutil
 from pathlib import Path
@@ -698,6 +699,73 @@ def test_restored_source_ledger_survives_the_next_commit(tmp_path) -> None:
         == 200
     )
     assert (second_checkpoint / MODEL_LEDGER_SUBDIR / "policy" / "rollout-a.lineage.jsonl").read_bytes() == expected
+
+
+def test_recovered_parent_manifest_survives_checkpoint_restore(tmp_path) -> None:
+    source_capture_key = "rollout-a"
+    recovered_capture_key = "rollout-a-a1"
+    parent = {
+        "capture_key": source_capture_key,
+        "model_call_id": "call-a",
+        "parent_call_id": None,
+        "prev_len": 0,
+        "delta_len": 2,
+        "cum_len": 2,
+        "weight_version": 1,
+        "digest": "1" * 64,
+        "extras_digest": "2" * 64,
+        "staging_key": f"{source_capture_key}/call-a",
+        "mode": "text",
+        "chain_hash": "3" * 64,
+        "cumulative_hash": "4" * 64,
+        "response_id": "response-a",
+    }
+    child = {
+        "model_call_id": "call-b",
+        "parent_call_id": "call-a",
+        "prev_len": 2,
+        "delta_len": 1,
+        "cum_len": 3,
+        "weight_version": 1,
+        "staging_digest": "5" * 64,
+        "extras_digest": "6" * 64,
+        "staging_key": f"{recovered_capture_key}/call-b",
+        "mode": "token_in",
+        "staging_chain": [f"{source_capture_key}/call-a"],
+        "chain_hash": "7" * 64,
+        "cumulative_hash": "8" * 64,
+        "response_id": "response-b",
+        "parent_manifest": [parent],
+    }
+    source = tmp_path / "source"
+    source.mkdir()
+    source_file = source / f"{recovered_capture_key}.lineage.jsonl"
+    source_file.write_text(json.dumps(child, sort_keys=True) + "\n")
+
+    checkpoint = tmp_path / "checkpoint"
+    CaptureLedgerCheckpointer(source).commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+        continuation_roots=[
+            AgentContinuationRoot(
+                rollout_id="rollout-a",
+                attempt_index=1,
+                capture_key=recovered_capture_key,
+                last_committed_model_call_id="call-b",
+            )
+        ],
+    )
+
+    restored = tmp_path / "restored"
+    CaptureLedgerCheckpointer(restored).restore(checkpoint)
+    restored_manifest = asyncio.run(FileLineageStore(restored).manifest(recovered_capture_key))
+
+    assert [record["model_call_id"] for record in restored_manifest["records"]] == ["call-a", "call-b"]
+    assert [record["capture_key"] for record in restored_manifest["records"]] == [
+        source_capture_key,
+        recovered_capture_key,
+    ]
 
 
 def test_failed_restore_is_paused_observable_and_recoverable(tmp_path) -> None:

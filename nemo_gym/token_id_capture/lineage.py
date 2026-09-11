@@ -87,16 +87,21 @@ _CUSTODY_FIELDS = (
     "output_fingerprint",
     "continuation_fingerprint",
     "fingerprint_version",
+    "parent_manifest",
 )
 
 
-def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[str] = ()) -> dict:
+def _custody_columns(
+    record: CallRecord,
+    staging_chain: tuple[str, ...] | list[str] = (),
+    parent_manifest: tuple[CallRecord, ...] | list[CallRecord] = (),
+) -> dict:
     """Return the ledger custody columns for one committed ``CallRecord``.
 
     ``_manifest_from_rows`` rebuilds the ``CallRecord`` from these columns, so
     the mapping must stay a lossless round trip.
     """
-    return {
+    columns = {
         "parent_call_id": record.parent_call_id,
         "staging_key": record.staging_key,
         "weight_version": record.weight_version,
@@ -115,6 +120,11 @@ def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[s
         "continuation_fingerprint": record.continuation_fingerprint or None,
         "fingerprint_version": record.fingerprint_version,
     }
+    # Keep ordinary/same-attempt rows byte-compatible with the existing
+    # append-only ledger. Only recovered roots need the additional metadata.
+    if parent_manifest:
+        columns["parent_manifest"] = [parent.model_dump(mode="json") for parent in parent_manifest]
+    return columns
 
 
 def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
@@ -135,8 +145,15 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
         RolloutManifest,
     )
 
-    records = []
+    records_by_id: dict[str, CallRecord] = {}
     failures = []
+
+    def add_record(record: CallRecord) -> None:
+        existing = records_by_id.get(record.model_call_id)
+        if existing is not None and existing != record:
+            raise ValueError(f"conflicting manifest rows for model call {record.model_call_id}")
+        records_by_id.setdefault(record.model_call_id, record)
+
     for row in rows:
         if row.get("failure_reason") is not None:
             failures.append(
@@ -146,6 +163,8 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                 )
             )
         elif row.get("staging_key") is not None:
+            for raw_parent in row.get("parent_manifest") or ():
+                add_record(CallRecord.model_validate(raw_parent))
             if not row.get("response_id"):
                 # A custody row without a served response id is a stamping
                 # bug, not a tolerated legacy shape. Poison the rollout
@@ -167,8 +186,9 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     )
                 )
                 continue
-            records.append(
+            add_record(
                 CallRecord(
+                    capture_key=rollout_id,
                     model_call_id=str(row["model_call_id"]),
                     parent_call_id=row.get("parent_call_id"),
                     prev_len=int(row["prev_len"]),
@@ -188,8 +208,30 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     fingerprint_version=int(row.get("fingerprint_version") or 0),
                 )
             )
-    manifest = RolloutManifest(rollout_id=rollout_id, records=records, failures=failures)
+    manifest = RolloutManifest(rollout_id=rollout_id, records=list(records_by_id.values()), failures=failures)
     return manifest.model_dump(mode="json")
+
+
+def _manifest_chain_for_call(rollout_id: str, rows: list[dict], model_call_id: str) -> tuple[CallRecord, ...]:
+    """Return the closed root-to-call chain from one ledger snapshot."""
+    from nemo_gym.token_id_capture.staging.records import RolloutManifest
+
+    manifest = RolloutManifest.model_validate(_manifest_from_rows(rollout_id, rows))
+    records_by_id = {record.model_call_id: record for record in manifest.records}
+    chain = []
+    seen: set[str] = set()
+    current_id: str | None = model_call_id
+    while current_id is not None:
+        if current_id in seen:
+            raise ValueError(f"cycle in manifest ancestry at model call {current_id}")
+        seen.add(current_id)
+        current = records_by_id.get(current_id)
+        if current is None:
+            raise ValueError(f"manifest ancestry is missing model call {current_id}")
+        chain.append(current)
+        current_id = current.parent_call_id
+    chain.reverse()
+    return tuple(chain)
 
 
 @dataclass
@@ -468,6 +510,17 @@ class InMemoryLineageStore:
             return LineageResolution(ParentResolutionStatus.UNRESOLVED, reason="explicit_parent_fingerprint_mismatch")
         if node.cum_tokens is None:
             return LineageResolution(ParentResolutionStatus.UNRESOLVED, reason="explicit_parent_tokens_missing")
+        try:
+            parent_manifest = _manifest_chain_for_call(
+                source_capture_key,
+                list(self._ledgers.get(source_capture_key) or []),
+                parent_call_id,
+            )
+        except ValueError:
+            return LineageResolution(
+                ParentResolutionStatus.UNRESOLVED,
+                reason="explicit_parent_manifest_invalid",
+            )
         return LineageResolution(
             ParentResolutionStatus.RESOLVED,
             match=LineageMatch(
@@ -477,6 +530,7 @@ class InMemoryLineageStore:
                 staging_chain=tuple(node.staging_chain),
                 prev_len=node.cum_len,
                 chain_hash=node.chain_hash,
+                parent_manifest=parent_manifest,
             ),
         )
 
@@ -493,7 +547,10 @@ class InMemoryLineageStore:
         # lineage-only local-capture rows that inject prompt prefixes.
         record = commit.record
         rows = self._ledgers.setdefault(commit.rollout_id, [])
-        row = {"model_call_id": record.model_call_id, **_custody_columns(record, commit.staging_chain)}
+        row = {
+            "model_call_id": record.model_call_id,
+            **_custody_columns(record, commit.staging_chain, commit.parent_manifest),
+        }
         # Write-once per model call (CaptureLedger contract): an identical
         # replay is a no-op, any differing field is a conflict. Checked on the
         # full custody row, not just the columns the lineage index keeps.
@@ -947,41 +1004,62 @@ class FileLineageStore(IncrementalLineageStore):
         request_items: list[dict],
     ) -> LineageResolution:
         resolution = super()._resolve_explicit(source_capture_key, parent_call_id, request_items)
-        if resolution.status == ParentResolutionStatus.RESOLVED:
-            return resolution
         with self._locked(source_capture_key):
+            source_rows = list(self._read(source_capture_key))
             records = [
                 record
-                for record in self._read(source_capture_key)
+                for record in source_rows
                 if record.get("model_call_id") == parent_call_id and record.get("failure_reason") is None
             ]
-        if len(records) != 1:
-            return LineageResolution(ParentResolutionStatus.UNRESOLVED, reason="explicit_parent_missing")
-        record = records[0]
-        fingerprint = assistant_fingerprint(request_items)
-        if record.get("fingerprint") != fingerprint:
+        if resolution.status != ParentResolutionStatus.RESOLVED:
+            if len(records) != 1:
+                return LineageResolution(ParentResolutionStatus.UNRESOLVED, reason="explicit_parent_missing")
+            record = records[0]
+            fingerprint = assistant_fingerprint(request_items)
+            if record.get("fingerprint") != fingerprint:
+                return LineageResolution(
+                    ParentResolutionStatus.UNRESOLVED,
+                    reason="explicit_parent_fingerprint_mismatch",
+                )
+            context_len = int(record["context_len"])
+            if (
+                len(request_items) < context_len
+                or conversation_digest(request_items[:context_len]) != record["context_digest"]
+            ):
+                return LineageResolution(
+                    ParentResolutionStatus.UNRESOLVED,
+                    reason="explicit_parent_fingerprint_mismatch",
+                )
+            resolution = LineageResolution(
+                ParentResolutionStatus.RESOLVED,
+                match=LineageMatch(
+                    model_call_id=str(record["model_call_id"]),
+                    cumulative_token_ids=tuple(int(token) for token in record.get("cumulative_token_ids") or ()),
+                    digest=str(record["digest"]),
+                    staging_chain=tuple(record.get("staging_chain") or []),
+                    prev_len=int(record.get("cum_len") or 0),
+                    chain_hash=str(record.get("chain_hash") or ""),
+                ),
+            )
+        assert resolution.match is not None
+        try:
+            parent_manifest = _manifest_chain_for_call(source_capture_key, source_rows, parent_call_id)
+        except ValueError:
             return LineageResolution(
                 ParentResolutionStatus.UNRESOLVED,
-                reason="explicit_parent_fingerprint_mismatch",
+                reason="explicit_parent_manifest_invalid",
             )
-        context_len = int(record["context_len"])
-        if (
-            len(request_items) < context_len
-            or conversation_digest(request_items[:context_len]) != record["context_digest"]
-        ):
-            return LineageResolution(
-                ParentResolutionStatus.UNRESOLVED,
-                reason="explicit_parent_fingerprint_mismatch",
-            )
+        match = resolution.match
         return LineageResolution(
             ParentResolutionStatus.RESOLVED,
             match=LineageMatch(
-                model_call_id=str(record["model_call_id"]),
-                cumulative_token_ids=tuple(int(token) for token in record.get("cumulative_token_ids") or ()),
-                digest=str(record["digest"]),
-                staging_chain=tuple(record.get("staging_chain") or []),
-                prev_len=int(record.get("cum_len") or 0),
-                chain_hash=str(record.get("chain_hash") or ""),
+                model_call_id=match.model_call_id,
+                cumulative_token_ids=match.cumulative_token_ids,
+                digest=match.digest,
+                staging_chain=match.staging_chain,
+                prev_len=match.prev_len,
+                chain_hash=match.chain_hash,
+                parent_manifest=parent_manifest,
             ),
         )
 
@@ -1025,7 +1103,7 @@ class FileLineageStore(IncrementalLineageStore):
             "context_len": len(request_items),
             "context_digest": conversation_digest(request_items),
             "digest": commit.record.cumulative_hash,
-            **_custody_columns(commit.record, commit.staging_chain),
+            **_custody_columns(commit.record, commit.staging_chain, commit.parent_manifest),
         }
         with self._locked(commit.rollout_id):
             records = self._read(commit.rollout_id)

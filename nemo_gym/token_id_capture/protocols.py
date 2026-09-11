@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
-from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
+from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit
 
 
 @dataclass(frozen=True)
@@ -71,6 +71,9 @@ class LineageMatch:
     staging_chain: tuple[str, ...] = ()
     prev_len: int = 0
     chain_hash: str = ""
+    # Token-free, root-to-parent call chain. Explicit cross-attempt resolution
+    # supplies it so the child attempt can persist a self-contained manifest.
+    parent_manifest: tuple[CallRecord, ...] = ()
 
 
 @dataclass(frozen=True)

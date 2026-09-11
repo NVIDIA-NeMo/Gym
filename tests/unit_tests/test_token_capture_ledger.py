@@ -80,11 +80,13 @@ def _commit(
     *,
     rollout_id: str = "r1",
     staging_chain: tuple[str, ...] | None = None,
+    parent_manifest: tuple[CallRecord, ...] = (),
 ) -> CaptureLedgerCommit:
     return CaptureLedgerCommit(
         rollout_id=rollout_id,
         record=record,
         staging_chain=staging_chain if staging_chain is not None else (record.staging_key,),
+        parent_manifest=parent_manifest,
         request_items=request_items,
         response_items=response_items,
     )
@@ -130,8 +132,8 @@ async def test_ledger_row_round_trips_token_free_manifest(store):
     assert manifest.rollout_id == "r1"
     assert manifest.failures == []
     (record,) = manifest.records
-    # The manifest row is exactly the committed ``CallRecord``.
-    assert record == _call_record("c1")
+    # Materializing the ledger stamps the owning capture key onto the record.
+    assert record == _call_record("c1").model_copy(update={"capture_key": "r1"})
     assert record.staging_key == "r1/c1"
     assert record.admitted_at == 1_755_600_000.25
     assert record.digest == STAGING_DIGEST
@@ -291,8 +293,12 @@ async def test_cross_attempt_admission_uses_explicit_verified_parent(store):
             [ASSISTANT_2],
             rollout_id="r1-a1",
             staging_chain=("r1/c1", "r1-a1/c2"),
+            parent_manifest=context.parent_resolution.match.parent_manifest,
         )
     )
+    manifest = RolloutManifest.model_validate(await store.manifest("r1-a1"))
+    assert [record.model_call_id for record in manifest.records] == ["c1", "c2"]
+    assert [record.capture_key for record in manifest.records] == ["r1", "r1-a1"]
     next_context = await _admit(
         store,
         [USER_1, ASSISTANT_1, USER_2, ASSISTANT_2, USER_3],
@@ -305,6 +311,89 @@ async def test_cross_attempt_admission_uses_explicit_verified_parent(store):
     assert next_admission.staging_chain == ["r1/c1", "r1-a1/c2"]
     assert next_admission.prev_len == len(tokens_2)
     assert next_admission.parent_chain_hash == chain_hash_2
+
+
+@pytest.mark.asyncio
+async def test_parent_manifest_survives_multiple_recovery_attempts(store):
+    await _record_call_1(store, rollout_id="r1")
+
+    first_recovery = await _admit(
+        store,
+        [USER_1, ASSISTANT_1, USER_2],
+        rollout_id="r1-a1",
+        model_call_id="c2",
+        source_capture_key="r1",
+        explicit_parent_call_id="c1",
+    )
+    first_match = first_recovery.parent_resolution.match
+    assert first_match is not None
+    tokens_2 = TOKENS_1 + [901, 902]
+    chain_hash_2 = compute_chain_hash(CHAIN_HASH_1, [901, 902])
+    await store.record(
+        _commit(
+            CallRecord(
+                model_call_id="c2",
+                parent_call_id="c1",
+                staging_key="r1-a1/c2",
+                weight_version=17,
+                prev_len=len(TOKENS_1),
+                delta_len=2,
+                cum_len=len(tokens_2),
+                digest=STAGING_DIGEST,
+                extras_digest=EMPTY_EXTRAS_DIGEST,
+                mode="token_in",
+                chain_hash=chain_hash_2,
+                cumulative_hash=hash_token_ids(tokens_2),
+                response_id="chatcmpl-c2",
+            ),
+            [USER_1, ASSISTANT_1, USER_2],
+            [ASSISTANT_2],
+            rollout_id="r1-a1",
+            staging_chain=("r1/c1", "r1-a1/c2"),
+            parent_manifest=first_match.parent_manifest,
+        )
+    )
+
+    second_recovery = await _admit(
+        store,
+        [USER_1, ASSISTANT_1, USER_2, ASSISTANT_2, USER_3],
+        rollout_id="r1-a2",
+        model_call_id="c3",
+        source_capture_key="r1-a1",
+        explicit_parent_call_id="c2",
+    )
+    second_match = second_recovery.parent_resolution.match
+    assert second_match is not None
+    assert [record.model_call_id for record in second_match.parent_manifest] == ["c1", "c2"]
+    tokens_3 = tokens_2 + [903]
+    await store.record(
+        _commit(
+            CallRecord(
+                model_call_id="c3",
+                parent_call_id="c2",
+                staging_key="r1-a2/c3",
+                weight_version=18,
+                prev_len=len(tokens_2),
+                delta_len=1,
+                cum_len=len(tokens_3),
+                digest=STAGING_DIGEST,
+                extras_digest=EMPTY_EXTRAS_DIGEST,
+                mode="token_in",
+                chain_hash=compute_chain_hash(chain_hash_2, [903]),
+                cumulative_hash=hash_token_ids(tokens_3),
+                response_id="chatcmpl-c3",
+            ),
+            [USER_1, ASSISTANT_1, USER_2, ASSISTANT_2, USER_3],
+            [{"role": "assistant", "content": "third answer"}],
+            rollout_id="r1-a2",
+            staging_chain=("r1/c1", "r1-a1/c2", "r1-a2/c3"),
+            parent_manifest=second_match.parent_manifest,
+        )
+    )
+
+    manifest = RolloutManifest.model_validate(await store.manifest("r1-a2"))
+    assert [record.model_call_id for record in manifest.records] == ["c1", "c2", "c3"]
+    assert [record.capture_key for record in manifest.records] == ["r1", "r1-a1", "r1-a2"]
 
 
 @pytest.mark.asyncio
