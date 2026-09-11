@@ -181,8 +181,9 @@ class GymVAgentConfig(BaseResponsesAPIAgentConfig):
     max_steps: int | None = Field(
         default=None,
         description=(
-            "Hard cap on rollout turns. Per-env horizon_cap in the task row is "
-            "the primary enforcement point; this is a global backstop."
+            "Global hard cap on model turns. When a task row supplies "
+            "horizon_cap, the lower of the two limits is used so invalid-action "
+            "and no-boxed recovery turns cannot bypass the task horizon."
         ),
     )
     return_transitions: bool = Field(
@@ -352,6 +353,20 @@ class GymVAgent(SimpleResponsesAPIAgent):
         req = req.model_copy(deep=True)
         body = req.responses_create_params
 
+        # The resources server can enforce horizon_cap only when /step is
+        # reached. Invalid actions and responses without a boxed action can
+        # stay entirely in the agent recovery loop, so they must count against
+        # the same task horizon here. Otherwise an 8-turn task silently falls
+        # back to the agent's global 64-turn cap and can overflow the model
+        # context before verification.
+        effective_max_steps = self.config.max_steps
+        if task_row is not None and task_row.horizon_cap is not None:
+            effective_max_steps = (
+                task_row.horizon_cap
+                if effective_max_steps is None
+                else min(effective_max_steps, task_row.horizon_cap)
+            )
+
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
@@ -385,6 +400,7 @@ class GymVAgent(SimpleResponsesAPIAgent):
                 "seed_obs": [_message_summary(m) for m in seed_obs],
                 "agent_state_input_len": len(agent_state.input),
                 "max_output_tokens": body.max_output_tokens,
+                "effective_max_steps": effective_max_steps,
             },
         )
 
@@ -394,15 +410,22 @@ class GymVAgent(SimpleResponsesAPIAgent):
         # The initial observation is returned separately as `seed_obs`. Keep it
         # out of the flat output so downstream multimodal consumers see it once.
         all_messages: list[NeMoGymResponseOutputItem] = []
+        # An observation is part of the authoritative token trajectory only
+        # after a subsequent model call succeeds and returns token metadata for
+        # the prompt that contains it.  Holding it pending prevents max-step
+        # fallthroughs and failed model calls from publishing a phantom trailing
+        # user turn (especially a screenshot) that vLLM never covered.
+        pending_obs: list[
+            GymVEnvStateEasyInputMessage | NeMoGymEasyInputMessage
+        ] = []
         model_server_cookies = None
 
         step = 0
         try:
             while True:
-                if self.config.max_steps is not None and step >= self.config.max_steps:
+                if effective_max_steps is not None and step >= effective_max_steps:
                     break
                 step += 1
-                successful_transition = True
 
                 try:
                     raw_model_response = await self.server_client.post(
@@ -445,6 +468,10 @@ class GymVAgent(SimpleResponsesAPIAgent):
                     logger.warning(f"Error validating model response: {e!r}. Response: {model_response_json!r}.")
                     break
 
+                if not self.config.return_transitions and pending_obs:
+                    all_messages.extend(pending_obs)
+                    pending_obs = []
+
                 model_output = model_response.output
                 assistant_text = self._extract_assistant_text(model_output)
                 action_string = self._extract_boxed(assistant_text)
@@ -474,7 +501,6 @@ class GymVAgent(SimpleResponsesAPIAgent):
                         # /step is reached with garbage; here we have nothing
                         # to send.
                         obs = [self._no_boxed_recovery()]
-                        successful_transition = False
                 else:
                     step_request = GymVStepRequest(env_id=env_id, action_string=action_string)
                     raw_env_response = await self.server_client.post(
@@ -503,14 +529,13 @@ class GymVAgent(SimpleResponsesAPIAgent):
                     agent_state_history.append(cast(NeMoGymResponseInput, agent_state.input))
                 else:
                     all_messages.extend(model_output)
-                    # Skip the terminal env obs: on a done=True step, vLLM
-                    # never issued a follow-up /v1/responses call to see this
-                    # observation, so including it in response.output creates
-                    # a phantom trailing user turn that downstream token-level
-                    # reconstructors (e.g. NeMo-RL's _process_full_multimodal_
-                    # trajectory) will fail to align against vLLM's tokens.
-                    if successful_transition and not done:
-                        all_messages.extend(obs)
+                    # Do not publish this observation yet.  The next successful
+                    # model response proves that its prompt/token bundle covered
+                    # the observation, at which point the block above commits it.
+                    # This applies to both real env observations and synthetic
+                    # no-boxed recovery messages.
+                    if not done:
+                        pending_obs = list(obs)
 
                 if done:
                     break

@@ -294,7 +294,7 @@ class TestNoBoxedRecovery:
             task_idx=0,
             responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         )
-        await agent.responses(request)
+        result = await agent.responses(request)
 
         calls = agent.server_client.post.await_args_list
         urls = [c[1]["url_path"] for c in calls]
@@ -316,8 +316,131 @@ class TestNoBoxedRecovery:
         )
         assert recovery_present, "Expected the no-boxed-answer recovery message to be in agent state"
 
+        # The second successful model call covered the recovery text in its
+        # prompt, so the flat token-replay output must retain it between the
+        # two assistant turns.
+        output_recovery_present = any(
+            getattr(m, "role", None) == "user"
+            and "did not find a \\boxed{...}" in str(getattr(m, "content", ""))
+            for m in result.output
+        )
+        assert output_recovery_present
+
+
+class TestTokenCoveredOutputBoundary:
+    async def test_max_steps_omits_unseen_trailing_observation(self) -> None:
+        agent = _make_agent(max_steps=1)
+        env_id = str(uuid.uuid4())
+
+        dotjson_mock = AsyncMock()
+        dotjson_mock.json.side_effect = [
+            _seed_session(env_id=env_id),
+            _model_response("\\boxed{step}"),
+            _step(obs_text="Unseen trailing obs", done=False),
+            {"message": "ok", "success": True},
+        ]
+        dotjson_mock.raise_for_status = MagicMock()
+        dotjson_mock.cookies = None
+        agent.server_client.post = AsyncMock(return_value=dotjson_mock)
+
+        result = await agent.responses(
+            GymVAgentRunRequest(
+                task_idx=0,
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            )
+        )
+
+        assert [item.role for item in result.output] == ["assistant"]
+        assert all(
+            getattr(item, "content", None) != "Unseen trailing obs"
+            for item in result.output
+        )
+
+    async def test_failed_next_model_call_omits_pending_observation(self) -> None:
+        import aiohttp
+
+        agent = _make_agent(max_steps=2)
+        env_id = str(uuid.uuid4())
+
+        seed_mock = AsyncMock()
+        seed_mock.json = AsyncMock(return_value=_seed_session(env_id=env_id))
+        seed_mock.raise_for_status = MagicMock()
+
+        first_model_mock = AsyncMock()
+        first_model_mock.json = AsyncMock(return_value=_model_response("\\boxed{step}"))
+        first_model_mock.raise_for_status = MagicMock()
+        first_model_mock.cookies = None
+
+        step_mock = AsyncMock()
+        step_mock.json = AsyncMock(return_value=_step(obs_text="Uncovered obs", done=False))
+
+        failed_model_mock = AsyncMock()
+        failed_model_mock.raise_for_status = MagicMock(
+            side_effect=aiohttp.ClientResponseError(
+                request_info=MagicMock(), history=(), status=500, message="context full"
+            )
+        )
+        failed_model_mock.text = "context full"
+
+        close_mock = AsyncMock()
+        agent.server_client.post = AsyncMock(
+            side_effect=[seed_mock, first_model_mock, step_mock, failed_model_mock, close_mock]
+        )
+
+        result = await agent.responses(
+            GymVAgentRunRequest(
+                task_idx=0,
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            )
+        )
+
+        assert [item.role for item in result.output] == ["assistant"]
+        assert all(
+            getattr(item, "content", None) != "Uncovered obs"
+            for item in result.output
+        )
+
 
 class TestDoneIfNoBoxedAnswer:
+    async def test_task_horizon_caps_no_boxed_recovery_turns(self) -> None:
+        agent = _make_agent(max_steps=64)
+        env_id = str(uuid.uuid4())
+
+        dotjson_mock = AsyncMock()
+        dotjson_mock.json.side_effect = [
+            _seed_session(env_id=env_id),
+            _model_response("missing action", resp_id="r1"),
+            _model_response("still missing action", resp_id="r2"),
+            {"message": "ok", "success": True},
+        ]
+        dotjson_mock.raise_for_status = MagicMock()
+        dotjson_mock.cookies = None
+        agent.server_client.post = AsyncMock(return_value=dotjson_mock)
+
+        result = await agent.responses(
+            GymVAgentRunRequest(
+                task_idx=0,
+                env_id="Games/FrozenLake-v0",
+                env_kwargs={"size": 4},
+                seed=1234,
+                horizon_cap=2,
+                responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            )
+        )
+
+        urls = [c[1]["url_path"] for c in agent.server_client.post.await_args_list]
+        assert urls == [
+            "/seed_session",
+            "/v1/responses",
+            "/v1/responses",
+            "/close",
+        ]
+        assert [item.role for item in result.output] == [
+            "assistant",
+            "user",
+            "assistant",
+        ]
+
     async def test_done_if_no_boxed_answer_true(self) -> None:
         agent = _make_agent(max_steps=5, done_if_no_boxed_answer=True)
         env_id = str(uuid.uuid4())
