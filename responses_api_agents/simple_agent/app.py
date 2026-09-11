@@ -127,7 +127,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 ) from e
 
             output = model_response.output
-            print(output)
             new_outputs.extend(output)
             if collect_trajectory:
                 turn_model_calls = []
