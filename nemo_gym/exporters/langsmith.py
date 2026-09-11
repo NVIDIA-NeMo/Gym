@@ -15,7 +15,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, ClassVar, Optional
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from langsmith import Client
 from langsmith.utils import LangSmithConflictError
@@ -84,6 +84,7 @@ class LangSmithExporter(BaseExporter):
         self.client: Optional[Client] = None
         self.dataset_id: Optional[str] = None
         self.experiment_id: Optional[str] = None
+        self.experiment_name: Optional[str] = None
 
     def setup(self) -> None:
         self.client = Client(
@@ -104,15 +105,6 @@ class LangSmithExporter(BaseExporter):
 
         self.dataset_id = str(dataset.id)
 
-        # LangSmith's SDK calls evaluation experiments projects.
-        experiment = self.client.create_project(
-            self.config.langsmith_experiment_name,
-            upsert=True,
-            reference_dataset_id=self.dataset_id,
-            metadata=_LANGSMITH_RUNNER_METADATA,
-        )
-        self.experiment_id = str(experiment.id)
-
     def teardown(self) -> None:
         if self.client is None:
             return
@@ -132,6 +124,7 @@ class LangSmithExporter(BaseExporter):
                 self.client = None
                 self.dataset_id = None
                 self.experiment_id = None
+                self.experiment_name = None
 
     def _log_config(self, _config_dict: DictConfig) -> None:
         pass
@@ -140,7 +133,7 @@ class LangSmithExporter(BaseExporter):
         pass
 
     def _log_rollouts(self, rollouts: list[dict[str, Any]]) -> None:
-        if self.client is None or self.dataset_id is None or self.experiment_id is None:
+        if self.client is None or self.dataset_id is None:
             raise RuntimeError("LangSmith exporter is not set up")
 
         mapped_rollouts = [_map_rollout(rollout) for rollout in rollouts]
@@ -193,7 +186,24 @@ class LangSmithExporter(BaseExporter):
                     dataset_id=self.dataset_id,
                     updates=existing_examples,
                 )
+        if self.experiment_id is None:
+            dataset_version = datetime.now(timezone.utc).isoformat()
+            experiment_name = f"{self.config.langsmith_experiment_name}-{uuid4().hex[:8]}"
 
+            experiment = self.client.create_project(
+                experiment_name,
+                reference_dataset_id=self.dataset_id,
+                metadata={
+                    **_LANGSMITH_RUNNER_METADATA,
+                    "dataset_version": dataset_version,
+                    "dataset_splits": ["base"],
+                },
+                num_examples=len(examples_by_task),
+            )
+            self.experiment_id = str(experiment.id)
+            self.experiment_name = experiment_name
+
+        # create the langsmith experiment runs
         for mapped in mapped_rollouts:
             task_source = mapped.metadata.get("task_source")
             task_index = mapped.metadata["_ng_task_index"]
@@ -220,9 +230,12 @@ class LangSmithExporter(BaseExporter):
                 run_type="chain",
                 inputs=mapped.inputs,
                 outputs=mapped.outputs,
-                project_name=self.config.langsmith_experiment_name,
+                project_name=self.experiment_name,
+                session_id=self.experiment_id,
                 reference_example_id=example_ids[task_key],
                 id=run_id,
+                trace_id=run_id,
+                dotted_order=f"{timestamp.strftime('%Y%m%dT%H%M%S%fZ')}{run_id}",
                 tags=["nemo-gym"],
                 extra={"metadata": mapped.metadata},
                 start_time=timestamp,

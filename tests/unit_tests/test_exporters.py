@@ -684,7 +684,7 @@ class TestLangSmithExporter:
         )
         assert exporter.client is client_constructor.return_value
 
-    def test_setup_creates_dataset_and_linked_experiment_when_missing(
+    def test_setup_creates_dataset_without_starting_experiment(
         self,
         monkeypatch: MonkeyPatch,
         langsmith_config: DictConfig,
@@ -695,7 +695,6 @@ class TestLangSmithExporter:
         client = MagicMock()
         client.has_dataset.return_value = False
         client.create_dataset.return_value.id = "dataset-1"
-        client.create_project.return_value.id = "experiment-1"
         monkeypatch.setattr(
             langsmith_module,
             "Client",
@@ -716,19 +715,11 @@ class TestLangSmithExporter:
                 "source": "nemo-gym",
             },
         )
-        client.create_project.assert_called_once_with(
-            "gym-experiment",
-            upsert=True,
-            reference_dataset_id="dataset-1",
-            metadata={
-                "ls_runner": "nemo-gym",
-                "source": "nemo-gym",
-            },
-        )
+        client.create_project.assert_not_called()
         assert exporter.dataset_id == "dataset-1"
-        assert exporter.experiment_id == "experiment-1"
+        assert exporter.experiment_id is None
 
-    def test_setup_reuses_existing_dataset(
+    def test_setup_reuses_existing_dataset_without_starting_experiment(
         self,
         monkeypatch: MonkeyPatch,
         langsmith_config: DictConfig,
@@ -739,7 +730,6 @@ class TestLangSmithExporter:
         client = MagicMock()
         client.has_dataset.return_value = True
         client.read_dataset.return_value.id = "dataset-1"
-        client.create_project.return_value.id = "experiment-1"
         monkeypatch.setattr(
             langsmith_module,
             "Client",
@@ -753,16 +743,68 @@ class TestLangSmithExporter:
             dataset_name="gym-dataset",
         )
         client.create_dataset.assert_not_called()
-        client.create_project.assert_called_once_with(
-            "gym-experiment",
-            upsert=True,
-            reference_dataset_id="dataset-1",
-            metadata={
-                "ls_runner": "nemo-gym",
-                "source": "nemo-gym",
-            },
-        )
+        client.create_project.assert_not_called()
         assert exporter.dataset_id == "dataset-1"
+        assert exporter.experiment_id is None
+
+    def test_log_rollouts_creates_experiment_after_syncing_examples(
+        self,
+        monkeypatch: MonkeyPatch,
+        langsmith_config: DictConfig,
+    ) -> None:
+        pytest.importorskip("langsmith")
+        import nemo_gym.exporters.langsmith as langsmith_module
+
+        client = MagicMock()
+        client.has_dataset.return_value = True
+        client.read_dataset.return_value.id = "dataset-1"
+        client.create_project.return_value.id = "experiment-1"
+
+        lifecycle = MagicMock()
+        lifecycle.attach_mock(client.create_examples, "create_examples")
+        lifecycle.attach_mock(client.create_project, "create_project")
+
+        monkeypatch.setattr(
+            langsmith_module,
+            "Client",
+            MagicMock(return_value=client),
+        )
+
+        exporter = langsmith_module.LangSmithExporter(langsmith_config)
+        exporter.setup()
+        exporter._log_rollouts(
+            [
+                {
+                    "responses_create_params": {
+                        "input": [{"role": "user", "content": "What is 2 + 2?"}],
+                    },
+                    "response": {"output_text": "4"},
+                    "reward": 1.0,
+                    "_ng_task_index": 7,
+                    "_ng_rollout_index": 0,
+                    "agent_ref": {"name": "deep-agent"},
+                    "task_source": "math",
+                }
+            ]
+        )
+
+        assert [event[0] for event in lifecycle.method_calls] == [
+            "create_examples",
+            "create_project",
+        ]
+
+        experiment_name = client.create_project.call_args.args[0]
+        project_kwargs = client.create_project.call_args.kwargs
+
+        assert experiment_name.startswith("gym-experiment-")
+        assert experiment_name != "gym-experiment"
+        assert "upsert" not in project_kwargs
+        assert project_kwargs["reference_dataset_id"] == "dataset-1"
+        assert project_kwargs["metadata"]["ls_runner"] == "nemo-gym"
+        assert project_kwargs["metadata"]["source"] == "nemo-gym"
+        assert project_kwargs["metadata"]["dataset_version"]
+        assert project_kwargs["metadata"]["dataset_splits"] == ["base"]
+        assert project_kwargs["num_examples"] == 1
         assert exporter.experiment_id == "experiment-1"
 
     def test_log_rollouts_creates_one_dataset_example_per_task(
@@ -976,10 +1018,11 @@ class TestLangSmithExporter:
             assert kwargs["run_type"] == "chain"
             assert kwargs["inputs"] == rollout["responses_create_params"]
             assert kwargs["outputs"] == rollout["response"]
-            assert kwargs["project_name"] == "gym-experiment"
+            assert kwargs["project_name"] == exporter.experiment_name
+            assert kwargs["session_id"] == "experiment-1"
             assert kwargs["reference_example_id"] == example_id
-            assert "trace_id" not in kwargs
-            assert "dotted_order" not in kwargs
+            assert kwargs["trace_id"] == kwargs["id"]
+            assert kwargs["dotted_order"].endswith(str(kwargs["id"]))
             assert kwargs["tags"] == ["nemo-gym"]
             assert kwargs["extra"]["metadata"]["_ng_rollout_index"] == rollout_index
             assert kwargs["start_time"] <= kwargs["end_time"]
@@ -1105,6 +1148,21 @@ class TestLangSmithExporter:
         monkeypatch.setattr(langsmith_module, "Client", MagicMock(return_value=client))
         exporter = langsmith_module.LangSmithExporter(langsmith_config)
         exporter.setup()
+        exporter._log_rollouts(
+            [
+                {
+                    "responses_create_params": {
+                        "input": [{"role": "user", "content": "What is 2 + 2?"}],
+                    },
+                    "response": {"output_text": "4"},
+                    "reward": 1.0,
+                    "_ng_task_index": 7,
+                    "_ng_rollout_index": 0,
+                    "agent_ref": {"name": "deep-agent"},
+                    "task_source": "math",
+                }
+            ]
+        )
 
         exporter.teardown()
         exporter.teardown()
