@@ -84,6 +84,7 @@ class _AsyncBody:
 
 class _Response:
     def __init__(self, response: httpx.Response) -> None:
+        self._response = response
         self.status = response.status_code
         self.ok = response.is_success
         self.cookies = response.cookies
@@ -93,6 +94,9 @@ class _Response:
 
     async def read(self) -> bytes:
         return self._content
+
+    def raise_for_status(self) -> None:
+        self._response.raise_for_status()
 
 
 class _CountingResourcesServer(StatefulCounterResourcesServer):
@@ -366,12 +370,17 @@ async def test_simple_agent_restores_next_turn_without_repeating_resource_mutati
         )
         assert completed.status_code == 200
         assert completed.json()["reward"] == 1.0
+        completion_receipt = next(
+            item["completion_receipt"]
+            for item in source_agent.checkpoint_participant().status()["completed_unacknowledged_attempts"]
+            if item["rollout_id"] == COMPLETED_ROLLOUT_ID and item["attempt_index"] == 0
+        )
         acknowledgement = await _post_control(
             source_clients["agent.test"],
             f"{AGENT_CHECKPOINT_URL_PREFIX}/acknowledge-completed",
             {
                 "schema_version": 1,
-                "executions": [{"rollout_id": COMPLETED_ROLLOUT_ID, "attempt_index": 0}],
+                "executions": [completion_receipt],
             },
         )
         assert acknowledgement.status_code == 200

@@ -123,6 +123,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         collect_trajectory: bool = False,
         continuation: Optional[AgentBoundaryRecord] = None,
         request: Optional[Request] = None,
+        initial_resource_revision: int = 0,
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
         invocation_id = "root"
         tool_records: list[TrajectoryToolCall] = []
@@ -140,7 +141,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         boundary_index = 0
         invocation_status = "completed"
         model_server_cookies = None
-        resource_revision = 0
+        resource_revision = initial_resource_revision
         model_response: Optional[NeMoGymResponse] = None
         model_call_id: Optional[str] = None
         pending_cursor = 0
@@ -456,6 +457,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             rollout_id = path_params.get("rollout_id")
         collect_trajectory = self._model_call_capture_enabled() and isinstance(rollout_id, str)
         continuation = self.checkpoint_continuation(body, request)
+        initial_resource_revision = int(request.headers.get(RESOURCE_STATE_REVISION_HEADER, "0"))
         model_response, trajectory, model_server_cookies, resources_server_cookies = await self._create_episode(
             body,
             model_url_path=self.url_path_for_request("/v1/responses", request),
@@ -464,6 +466,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             collect_trajectory=collect_trajectory,
             continuation=continuation,
             request=request,
+            initial_resource_revision=initial_resource_revision,
         )
         # Propogate any extra cookies necessary for downstream verification
         for k, v in (*resources_server_cookies.items(), *model_server_cookies.items()):
@@ -528,6 +531,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             resource_revision = continuation.resource_state_revisions.get(self.config.resources_server.name, 0)
 
         execution_headers = self.checkpoint_execution_headers()
+        if execution_headers is not None:
+            execution_headers[RESOURCE_STATE_REVISION_HEADER] = str(resource_revision)
         response = await self.retry_checkpoint_refusal(
             lambda: self.server_client.post(
                 server_name=self.config.name,
