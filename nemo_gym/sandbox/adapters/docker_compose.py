@@ -75,6 +75,7 @@ class AsyncSandboxCompose:
         *,
         compose_command: Sequence[str] = ("docker-compose",),
         image_platform: str = "linux/amd64",
+        image_configs: Mapping[str, Mapping[str, Any]] | None = None,
         registry_options: Mapping[str, Any] | None = None,
         service_specs: Mapping[str, SandboxSpec] | None = None,
         timeout_s: float = 1200,
@@ -86,7 +87,7 @@ class AsyncSandboxCompose:
         self.compose_file = Path(compose_file).resolve() if compose_file is not None else None
         self.compose_command = tuple(compose_command)
         self.document: dict[str, Any] = {}
-        self._image_configs: dict[str, Any] = {}
+        self._image_configs = dict(image_configs or {})
         self.image_platform = image_platform
         if len(image_platform.split("/")) not in (2, 3) or not all(image_platform.split("/")):
             raise ValueError("image_platform must be os/architecture[/variant]")
