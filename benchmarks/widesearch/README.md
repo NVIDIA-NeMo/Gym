@@ -26,6 +26,25 @@ Five prepared tasks and their diagnostic rollouts are checked in under the
 The Claude Code config defaults to `nvidia/qwen/qwen3.8-27b`. Use `--limit 1` for
 an end-to-end check before running all 200 tasks.
 
+Complete long-run config copies for all supported harnesses are in
+[`configs`](configs). Each file includes the WideSearch verifier, agent
+settings, sandbox settings, prompt, and dataset. The files do not inherit from
+a shared agent config.
+
+For example, select the OpenCode copy directly:
+
+```bash
+gym eval run \
+  --benchmark widesearch/configs/widesearch_opencode \
+  --model-type <model-type> \
+  --model <model> \
+  --limit 1
+```
+
+Set `exa_api_key` in the selected config before running it. The available
+copies are Claude Code, Codex, OpenCode, Pi, Hermes, OpenClaw, Kilocode, Cline,
+Prime Agent, Simple Strands, and NeMo Fabric DeepAgents.
+
 ## Verification
 
 The verifier follows the upstream evaluation specification for required and

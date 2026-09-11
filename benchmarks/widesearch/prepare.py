@@ -28,10 +28,6 @@ def prepare() -> Path:
                 **row,
                 "evaluation": evaluation,
                 "gold_answer": gold_answer,
-                "agent_ref": {
-                    "type": "responses_api_agents",
-                    "name": "widesearch_claude_code_benchmark",
-                },
                 "responses_create_params": {"input": [{"role": "user", "content": row["query"]}]},
             }
             output.write(json.dumps(task, ensure_ascii=False) + "\n")

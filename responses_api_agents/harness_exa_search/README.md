@@ -1,8 +1,10 @@
 # Harness Exa Search Environment
 
-Runs a Gym agent harness in a sandbox with Exa MCP search, then delegates
-grading to the configured resources server. Claude Code is the only harness
-tested so far.
+Runs a Gym agent harness in a sandbox with Exa search, then delegates grading
+to the configured resources server. Benchmark-local configs are available for
+Claude Code, Codex, OpenCode, Pi, Hermes, OpenClaw, Kilocode, Cline, Prime
+Agent, Simple Strands, and NeMo Fabric DeepAgents. Validation depth varies by
+harness, so use a one-task smoke test before a full run.
 
 ## Configuration
 
@@ -50,9 +52,10 @@ For Claude Code, `harness_kwargs` are fields from `ClaudeCodeAgentConfig`.
 `bare` disables ambient local configuration, `system_prompt` requires web
 research, and `claude_code_version` optionally pins the CLI version.
 
-See [`configs/harness_exa_search_claude_code.yaml`](configs/harness_exa_search_claude_code.yaml)
-for the complete config. The sandbox image must contain the selected harness
-and its dependencies.
+See the complete, benchmark-specific config copies under
+[`benchmarks/deepsearchqa/configs`](../../benchmarks/deepsearchqa/configs) and
+[`benchmarks/widesearch/configs`](../../benchmarks/widesearch/configs). The
+sandbox image must contain the selected harness and its dependencies.
 
 ## Benchmarks
 

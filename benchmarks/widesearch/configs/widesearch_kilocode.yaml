@@ -1,0 +1,57 @@
+widesearch:
+  resources_servers:
+    widesearch:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: WideSearch benchmark
+      value: Evaluate wide search coverage and accuracy
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 32768
+        temperature: 0.0
+        top_p: 1.0
+widesearch_kilocode_benchmark:
+  responses_api_agents:
+    harness_exa_search:
+      entrypoint: app.py
+      domain: agent
+      description: Run WideSearch with KiloCodeAgent in a sandbox
+      value: Evaluate agentic web search
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      resources_server:
+        type: resources_servers
+        name: widesearch
+      harness_module: responses_api_agents.kilocode_agent.app
+      harness_class: KiloCodeAgent
+      harness_config_class: KiloCodeAgentConfig
+      harness_kwargs:
+        model: ${policy_model_name}
+        thinking: true
+        timeout: 7200
+        setup_timeout: 900
+        system_prompt: You must call an Exa MCP search tool before answering. Research the request on the web and return exactly the requested Markdown table.
+        context_window: 262144
+        max_output_tokens: 131072
+        kilo_version: 7.4.15
+      image: nikolaik/python-nodejs:python3.13-nodejs22-slim
+      setup_command: python3 -m pip install -q https://github.com/NVIDIA-NeMo/Gym/archive/621ecac6906f332c54ba4a588e3ce7b7005bbe98.zip
+      sandbox_provider: sandbox
+      sandbox_spec:
+        ttl_s: 9000
+        resources:
+          memory_mib: 8192
+      sandbox_model_base_url: null
+      exa_api_key: null
+      token_id_capture: false
+      datasets:
+        - name: widesearch
+          type: benchmark
+          jsonl_fpath: benchmarks/widesearch/data/widesearch_benchmark.jsonl
+          prepare_script: benchmarks/widesearch/prepare.py
+          license: MIT

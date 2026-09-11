@@ -7,14 +7,22 @@ import urllib.request
 from pathlib import Path
 
 
-url = "https://huggingface.co/datasets/google/deepsearchqa/resolve/main/DSQA-full.csv"
-data = urllib.request.urlopen(url).read().decode()
-output = Path(__file__).parent / "data" / "deepsearchqa_benchmark.jsonl"
-output.parent.mkdir(exist_ok=True)
-with output.open("w") as file:
-    for example_id, row in enumerate(csv.DictReader(io.StringIO(data))):
-        row["example_id"] = str(example_id)
-        row["agent_ref"] = {"type": "responses_api_agents", "name": "deepsearchqa_claude_code_benchmark"}
-        row["responses_create_params"] = {"input": [{"role": "user", "content": row["problem"]}]}
-        file.write(json.dumps(row) + "\n")
-print(f"wrote {sum(1 for _ in output.open())} tasks to {output}")
+URL = "https://huggingface.co/datasets/google/deepsearchqa/resolve/main/DSQA-full.csv"
+OUTPUT = Path(__file__).parent / "data" / "deepsearchqa_benchmark.jsonl"
+
+
+def prepare() -> Path:
+    data = urllib.request.urlopen(URL).read().decode()
+    rows = list(csv.DictReader(io.StringIO(data)))
+    OUTPUT.parent.mkdir(exist_ok=True)
+    with OUTPUT.open("w") as output:
+        for example_id, row in enumerate(rows):
+            row["example_id"] = str(example_id)
+            row["responses_create_params"] = {"input": [{"role": "user", "content": row["problem"]}]}
+            output.write(json.dumps(row) + "\n")
+    print(f"wrote {len(rows)} tasks to {OUTPUT}")
+    return OUTPUT
+
+
+if __name__ == "__main__":
+    prepare()

@@ -1,0 +1,67 @@
+widesearch:
+  resources_servers:
+    widesearch:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: WideSearch benchmark
+      value: Evaluate wide search coverage and accuracy
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 32768
+        temperature: 0.0
+        top_p: 1.0
+widesearch_simple_strands_benchmark:
+  responses_api_agents:
+    harness_exa_search:
+      entrypoint: app.py
+      domain: agent
+      description: Run WideSearch with SimpleStrandsAgent in a sandbox
+      value: Evaluate agentic web search
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      resources_server:
+        type: resources_servers
+        name: widesearch
+      harness_module: responses_api_agents.simple_strands_agent.app
+      harness_class: SimpleStrandsAgent
+      harness_config_class: SimpleStrandsAgentConfig
+      harness_kwargs:
+        model: ${policy_model_name}
+        max_turns: 200
+        max_output_tokens: 131072
+        temperature: 1.0
+        reasoning_effort: null
+        timeout: 7200
+        model_timeout: 7200
+        shell_timeout: 300
+        conversation_window: 300
+        tools: [bash, str_replace_editor]
+        prompt_tag: swe_generic_v2
+        native_user_prompt: false
+        system_prompt: You must search with Exa before answering. Use the bash tool to call the Exa search API with the EXA_API_KEY already in the environment. Never print the key. Return exactly the requested Markdown table.
+      image: nikolaik/python-nodejs:python3.13-nodejs22-slim
+      setup_command: >-
+        python3 -m pip install -q
+        https://github.com/NVIDIA-NeMo/Gym/archive/621ecac6906f332c54ba4a588e3ce7b7005bbe98.zip
+        && SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0
+        python3 -m pip install -q
+        https://github.com/strands-labs/benchmark-harnesses/archive/fd9395b672b670ddb6b90de19723327f007b0655.zip#subdirectory=simple-strands-agent
+      sandbox_provider: sandbox
+      sandbox_spec:
+        ttl_s: 9000
+        resources:
+          memory_mib: 8192
+      sandbox_model_base_url: null
+      exa_api_key: null
+      token_id_capture: false
+      datasets:
+        - name: widesearch
+          type: benchmark
+          jsonl_fpath: benchmarks/widesearch/data/widesearch_benchmark.jsonl
+          prepare_script: benchmarks/widesearch/prepare.py
+          license: MIT

@@ -23,6 +23,25 @@ Five prepared tasks and their example rollouts are checked in under the
 The benchmark config defaults to `nvidia/qwen/qwen3.8-27b` in Claude Code.
 Use `--limit 1` for a quick end-to-end check before running the full benchmark.
 
+Complete long-run config copies for all supported harnesses are in
+[`configs`](configs). Each file includes the DeepSearchQA verifier, agent
+settings, sandbox settings, prompt, and dataset. The files do not inherit from
+a shared agent config.
+
+For example, select the Codex copy directly:
+
+```bash
+gym eval run \
+  --benchmark deepsearchqa/configs/deepsearchqa_codex \
+  --model-type <model-type> \
+  --model <model> \
+  --limit 1
+```
+
+Set `exa_api_key` in the selected config before running it. The available
+copies are Claude Code, Codex, OpenCode, Pi, Hermes, OpenClaw, Kilocode, Cline,
+Prime Agent, Simple Strands, and NeMo Fabric DeepAgents.
+
 ## Verification
 
 The verifier compares the submitted answer with the reference answer using the
