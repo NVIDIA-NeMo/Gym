@@ -18,6 +18,7 @@ Sections:
             affect behaviour or is an artefact of the base image differing
   binaries  every command line tool the task prompt advertises
   latex     style files from the curated TeX Live set resolve
+  fonts     Calibri/Cambria resolve to their metric substitutes, CJK covered
   smoke     functional round-trips: each tool produces a non-empty artifact
 
 Exit code is 0 only when no check in a fatal section failed.
@@ -77,6 +78,11 @@ REQUIRED_BINARIES = [
 BINARY_ALTERNATIVES = {"chromium": ["chromium", "chromium-browser"]}
 
 REQUIRED_STY = ["tikz.sty", "siunitx.sty", "pst-plot.sty", "amsmath.sty", "geometry.sty"]
+
+# Metric-compatible substitutes. LibreOffice falls back silently when these are
+# absent, so an Office document written in Calibri reflows and the deliverable
+# differs from what the task author saw, with nothing in the logs to say why.
+FONT_SUBSTITUTIONS = {"Calibri": "carlito", "Cambria": "caladea"}
 
 
 class Report:
@@ -222,6 +228,25 @@ def _run(cmd: list[str], cwd: Path, timeout: int = 300) -> subprocess.CompletedP
 
 def _nonempty(p: Path) -> bool:
     return p.exists() and p.stat().st_size > 0
+
+
+def check_fonts(rep: Report) -> None:
+    header("fonts: Office metric substitutes and glyph coverage")
+    if not shutil.which("fc-match"):
+        rep.fail("fonts", "fc-match missing; fontconfig is not installed")
+        return
+    for requested, expected in FONT_SUBSTITUTIONS.items():
+        res = subprocess.run(["fc-match", requested], capture_output=True, text=True)
+        got = res.stdout.strip()
+        if expected in got.lower():
+            rep.ok(f"{requested} -> {got}")
+        else:
+            rep.fail("fonts", f"{requested} resolves to {got!r}, expected the {expected} substitute")
+    listing = subprocess.run(["fc-list", ":lang=ja"], capture_output=True, text=True).stdout
+    if listing.strip():
+        rep.ok(f"CJK glyph coverage present ({len(listing.splitlines())} fonts for lang=ja)")
+    else:
+        rep.fail("fonts", "no font covers Japanese; CJK text will render as tofu")
 
 
 def check_smoke(rep: Report, work: Path) -> None:
@@ -568,6 +593,7 @@ def main() -> int:
     check_apt(rep, args.strict_apt)
     check_binaries(rep)
     check_latex(rep)
+    check_fonts(rep)
     if not args.skip_smoke:
         with tempfile.TemporaryDirectory(prefix="gdpval_verify_") as td:
             check_smoke(rep, Path(td))

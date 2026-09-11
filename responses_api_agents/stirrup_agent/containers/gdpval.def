@@ -51,6 +51,13 @@
 #   * espeak-ng is installed although the closure omits it. The closure pins
 #     pyttsx3, which cannot speak without an espeak backend.
 #
+#   * The font set is installed explicitly rather than left to come in as a
+#     recommends of libreoffice. Building with --no-install-recommends dropped
+#     fonts-crosextra-{caladea,carlito} and the Noto families that the closure
+#     carries; Carlito and Caladea are the metric-compatible substitutes for
+#     Calibri and Cambria, so without them LibreOffice reflows every Office
+#     document written in the Microsoft defaults, and CJK text renders as tofu.
+#
 # x86_64 ONLY. The published pin set includes packages with no aarch64 wheels
 # (nvidia-nccl-cu12, aspose-words, cadquery-vtk/trame-vtk). Building on arm64
 # will fail the pinned install, by design — a silently degraded sif is worse
@@ -114,6 +121,17 @@ From: python:3.13-trixie
         libreoffice-math \
         fonts-dejavu-core \
         fonts-liberation \
+        fonts-crosextra-caladea \
+        fonts-crosextra-carlito \
+        fonts-noto-core \
+        fonts-noto-extra \
+        fonts-noto-mono \
+        fonts-noto-cjk \
+        fonts-noto-color-emoji \
+        fonts-firacode \
+        fontconfig \
+        locales \
+        miller \
         tesseract-ocr \
         tesseract-ocr-eng \
         tesseract-ocr-osd \
@@ -176,6 +194,15 @@ From: python:3.13-trixie
     command -v gdalinfo
     command -v jq
     command -v yq
+    command -v mlr
+    command -v fc-match
+    # Carlito and Caladea are the metric-compatible stand-ins for Calibri and
+    # Cambria. Without them LibreOffice silently reflows every Office document
+    # that uses the Microsoft defaults, so page counts and layout drift.
+    fc-match Calibri | grep -qi carlito
+    fc-match Cambria | grep -qi caladea
+    # Any CJK glyph coverage at all; without it CJK text renders as tofu.
+    fc-list :lang=ja | grep -qi noto
     command -v git
     command -v unzip
     command -v timeout
