@@ -24,6 +24,13 @@ import pytest
 import yaml
 from fastapi import Request
 
+from nemo_gym.agents.claude_code import (
+    ClaudeCodeHarness,
+    _extract_instruction,
+    _invocation_outcome,
+    parse_stream_json,
+)
+from nemo_gym.agents.claude_code_observability import extract_claude_code_observations
 from nemo_gym.global_config import SKILLS_REF_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -40,11 +47,7 @@ from responses_api_agents.claude_code_agent.app import (
     ClaudeCodeAgentRunRequest,
     ModelServerRef,
     ResourcesServerRef,
-    _extract_instruction,
-    _invocation_outcome,
-    parse_stream_json,
 )
-from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
 
 
 def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
@@ -71,6 +74,10 @@ def _make_agent(**kwargs) -> ClaudeCodeAgent:
     # The real model initialization still configures private attributes and the semaphore.
     with patch("responses_api_agents.claude_code_agent.app.ensure_claude_code"):
         return ClaudeCodeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
+
+
+def _make_harness(**kwargs) -> ClaudeCodeHarness:
+    return _make_agent(**kwargs)._harness
 
 
 def _event(type_: str, **kwargs) -> str:
@@ -113,7 +120,7 @@ class TestSanity:
 
 class TestBuildCommand:
     def test_default_passes_bare(self) -> None:
-        agent = _make_agent()
+        agent = _make_harness()
         cmd = agent._build_command("claude-sonnet-4-6", "do the thing")
         assert "--bare" in cmd
         assert "--mcp-config" not in cmd
@@ -129,35 +136,35 @@ class TestBuildCommand:
         ]
 
     def test_bare_false_omits_flag(self) -> None:
-        agent = _make_agent(bare=False)
+        agent = _make_harness(bare=False)
         cmd = agent._build_command("m", "x")
         assert "--bare" not in cmd
 
     def test_mcp_config_passed_independently_of_bare(self) -> None:
-        agent = _make_agent(mcp_config="/path/to/mcp.json")
+        agent = _make_harness(mcp_config="/path/to/mcp.json")
         cmd = agent._build_command("m", "x")
         # --mcp-config is explicit, so it coexists with the default --bare
         assert "--bare" in cmd
         assert cmd[cmd.index("--mcp-config") + 1] == "/path/to/mcp.json"
 
     def test_dynamic_mcp_config_overrides_static_for_command(self) -> None:
-        agent = _make_agent(mcp_config="/path/to/static.json")
+        agent = _make_harness(mcp_config="/path/to/static.json")
         cmd = agent._build_command("m", "x", mcp_config="/tmp/dynamic.json")
         assert cmd[cmd.index("--mcp-config") + 1] == "/tmp/dynamic.json"
 
     def test_skills_active_forces_bare_off(self) -> None:
         # Default config has bare=True, but staged skills must be discoverable, so --bare is dropped.
-        agent = _make_agent()
+        agent = _make_harness()
         cmd = agent._build_command("m", "x", skills_active=True)
         assert "--bare" not in cmd
 
     def test_skills_inactive_keeps_bare(self) -> None:
-        agent = _make_agent()
+        agent = _make_harness()
         cmd = agent._build_command("m", "x", skills_active=False)
         assert "--bare" in cmd
 
     def test_optional_flags_threaded_through(self) -> None:
-        agent = _make_agent(
+        agent = _make_harness(
             allowed_tools="Bash,Read",
             disallowed_tools="Write",
             thinking="enabled",
@@ -175,7 +182,7 @@ class TestBuildCommand:
 
 class TestBuildSettings:
     def test_default_disables_telemetry(self) -> None:
-        agent = _make_agent()
+        agent = _make_harness()
         settings = agent._build_settings()
         assert settings["env"]["CLAUDE_CODE_ENABLE_TELEMETRY"] == "0"
         assert settings["env"]["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
@@ -184,7 +191,7 @@ class TestBuildSettings:
     def test_user_settings_merged_preserving_telemetry(self, tmp_path: Path) -> None:
         settings_file = tmp_path / "settings.json"
         settings_file.write_text(json.dumps({"env": {"FOO": "bar"}, "permissions": {"allow": ["Bash"]}}))
-        agent = _make_agent(settings=str(settings_file))
+        agent = _make_harness(settings=str(settings_file))
         settings = agent._build_settings()
         # user env layered on top of telemetry defaults
         assert settings["env"]["FOO"] == "bar"
@@ -195,15 +202,15 @@ class TestBuildSettings:
     def test_user_settings_can_override_telemetry(self, tmp_path: Path) -> None:
         settings_file = tmp_path / "settings.json"
         settings_file.write_text(json.dumps({"env": {"CLAUDE_CODE_ENABLE_TELEMETRY": "1"}}))
-        agent = _make_agent(settings=str(settings_file))
+        agent = _make_harness(settings=str(settings_file))
         settings = agent._build_settings()
         assert settings["env"]["CLAUDE_CODE_ENABLE_TELEMETRY"] == "1"
 
 
 class TestSetupConfigDir:
     def test_creates_dir_with_settings(self, tmp_path: Path) -> None:
-        agent = _make_agent()
-        with patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path):
+        agent = _make_harness()
+        with patch("nemo_gym.agents.claude_code.Path.home", return_value=tmp_path):
             config_dir = agent._setup_config_dir()
         try:
             settings_path = config_dir / "settings.json"
@@ -219,8 +226,8 @@ class TestSetupConfigDir:
         skills_dir = _write_skill_dir(tmp_path)
         home = tmp_path / "home"
         home.mkdir()
-        agent = _make_agent()
-        with patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=home):
+        agent = _make_harness()
+        with patch("nemo_gym.agents.claude_code.Path.home", return_value=home):
             config_dir = agent._setup_config_dir(skills_path=str(skills_dir))
         try:
             assert (config_dir / "skills" / "cot_enhanced" / "SKILL.md").is_file()
@@ -284,11 +291,7 @@ class TestRunForwardsSkillsPath:
         agent.server_client.post = _seed_and_verify_post()
         req = MagicMock()
         req.cookies = {}
-        with patch.object(
-            ClaudeCodeAgent,
-            "_run_claude_code",
-            run_claude_code,
-        ):
+        with patch.object(agent._harness, "_run_claude_code", run_claude_code):
             return asyncio.run(agent.run(req, body))
 
     def test_skills_ref_path_forwarded(self) -> None:
@@ -370,7 +373,10 @@ class TestObservability:
                 "_ng_rollout_index": 2,
             }
         )
-        with patch.object(ClaudeCodeAgent, "_run_claude_code", run_claude_code):
+        with (
+            patch.object(agent, "_resolve_call_base_url", return_value="http://model-server"),
+            patch.object(agent._harness, "_run_claude_code", run_claude_code),
+        ):
             result = asyncio.run(agent.run(request, body))
 
         observations = result.ng_agent_observations
@@ -397,7 +403,7 @@ class TestObservability:
 
 class TestRunClaudeCode:
     def test_wires_command_env_and_cleans_up(self, tmp_path: Path) -> None:
-        agent = _make_agent(mcp_config="/path/to/mcp.json")
+        agent = _make_harness(mcp_config="/path/to/mcp.json")
         captured: dict = {}
 
         class FakeProc:
@@ -421,8 +427,8 @@ class TestRunClaudeCode:
             return FakeProc()
 
         with (
-            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
-            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+            patch("nemo_gym.agents.claude_code.Path.home", return_value=tmp_path),
+            patch("nemo_gym.agents.claude_code.asyncio.create_subprocess_exec", fake_exec),
         ):
             output_items, model, metadata = asyncio.run(agent._run_claude_code("hello", system_prompt="be terse"))
 
@@ -441,7 +447,7 @@ class TestRunClaudeCode:
         skills_dir = _write_skill_dir(tmp_path)
         home = tmp_path / "home"
         home.mkdir()
-        agent = _make_agent()  # bare defaults to True
+        agent = _make_harness()
         captured: dict = {}
 
         class FakeProc:
@@ -457,8 +463,8 @@ class TestRunClaudeCode:
             return FakeProc()
 
         with (
-            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=home),
-            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+            patch("nemo_gym.agents.claude_code.Path.home", return_value=home),
+            patch("nemo_gym.agents.claude_code.asyncio.create_subprocess_exec", fake_exec),
         ):
             asyncio.run(agent._run_claude_code("hello", skills_path=str(skills_dir)))
 
@@ -471,9 +477,9 @@ class TestRunClaudeCode:
         # still be cleaned up (setup happens inside the try whose finally rmtree's it).
         home = tmp_path / "home"
         home.mkdir()
-        agent = _make_agent()
+        agent = _make_harness()
 
-        with patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=home):
+        with patch("nemo_gym.agents.claude_code.Path.home", return_value=home):
             with pytest.raises(ValueError):
                 asyncio.run(agent._run_claude_code("hello", skills_path=str(tmp_path / "does_not_exist")))
 
@@ -481,7 +487,7 @@ class TestRunClaudeCode:
         assert not leaked.exists() or not any(leaked.iterdir())
 
     def test_timeout_returns_empty(self, tmp_path: Path) -> None:
-        agent = _make_agent(timeout=1)
+        agent = _make_harness(timeout=1)
         state = {"killed": False, "communicate_calls": 0}
 
         class SlowProc:
@@ -504,9 +510,9 @@ class TestRunClaudeCode:
             raise asyncio.TimeoutError
 
         with (
-            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
-            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
-            patch("responses_api_agents.claude_code_agent.app.asyncio.wait_for", fake_wait_for),
+            patch("nemo_gym.agents.claude_code.Path.home", return_value=tmp_path),
+            patch("nemo_gym.agents.claude_code.asyncio.create_subprocess_exec", fake_exec),
+            patch("nemo_gym.agents.claude_code.asyncio.wait_for", fake_wait_for),
         ):
             output_items, model, metadata = asyncio.run(agent._run_claude_code("hello"))
 
@@ -519,7 +525,7 @@ class TestRunClaudeCode:
         assert metadata["compaction_attempts"] == [{"invocation_id": "session-1", "outcome": "unknown"}]
 
     def test_cancellation_stops_process_before_observation_cleanup(self, tmp_path: Path) -> None:
-        agent = _make_agent()
+        agent = _make_harness()
         state: list[str] = []
 
         async def run() -> None:
@@ -549,8 +555,8 @@ class TestRunClaudeCode:
                 state.append("collect")
 
             with (
-                patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
-                patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+                patch("nemo_gym.agents.claude_code.Path.home", return_value=tmp_path),
+                patch("nemo_gym.agents.claude_code.asyncio.create_subprocess_exec", fake_exec),
             ):
                 task = asyncio.create_task(agent._run_claude_code("hello", observation_collector=collect))
                 await communicating.wait()
@@ -563,7 +569,7 @@ class TestRunClaudeCode:
         assert state == ["communicate", "kill", "stopped", "collect"]
 
     def test_collects_observations_before_cleanup(self, tmp_path: Path) -> None:
-        agent = _make_agent()
+        agent = _make_harness()
         captured: dict = {}
         event_loop_thread = threading.get_ident()
 
@@ -603,8 +609,8 @@ class TestRunClaudeCode:
             )
 
         with (
-            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
-            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+            patch("nemo_gym.agents.claude_code.Path.home", return_value=tmp_path),
+            patch("nemo_gym.agents.claude_code.asyncio.create_subprocess_exec", fake_exec),
         ):
             asyncio.run(agent._run_claude_code("hello", observation_collector=collect))
 
@@ -735,7 +741,7 @@ class TestRolloutMCPConfig:
             )
 
         agent.server_client.post.side_effect = fake_post
-        object.__setattr__(agent, "_run_claude_code", fake_run_claude_code)
+        object.__setattr__(agent._harness, "_run_claude_code", fake_run_claude_code)
         request = MagicMock(spec=Request)
         request.cookies = {}
         body = ClaudeCodeAgentRunRequest(
@@ -791,7 +797,7 @@ class TestRolloutMCPConfig:
             )
 
         agent.server_client.post.side_effect = fake_post
-        object.__setattr__(agent, "_run_claude_code", fake_run_claude_code)
+        object.__setattr__(agent._harness, "_run_claude_code", fake_run_claude_code)
         request = MagicMock(spec=Request)
         request.cookies = {}
         body = ClaudeCodeAgentRunRequest(
@@ -827,11 +833,12 @@ class TestRolloutCorrelation:
             return self._fake_proc()
 
         with (
-            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch("nemo_gym.agents.claude_code.Path.home", return_value=tmp_path),
             patch.object(agent, "_resolve_base_url", return_value="http://model-server:9000"),
-            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", fake_exec),
+            patch("nemo_gym.agents.claude_code.asyncio.create_subprocess_exec", fake_exec),
         ):
-            asyncio.run(agent._run_claude_code("hi", **run_kwargs))
+            base_url = agent._resolve_call_base_url(run_kwargs.pop("rollout_id", None))
+            asyncio.run(agent._harness._run_claude_code("hi", model_base_url=base_url, **run_kwargs))
         return captured["base_url"]
 
     def test_base_url_correlation(self, tmp_path: Path) -> None:

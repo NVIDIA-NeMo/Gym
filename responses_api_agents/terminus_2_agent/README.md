@@ -3,6 +3,8 @@
 Runs [Harbor's Terminus-2](https://github.com/harbor-framework/harbor/tree/main/src/harbor/agents/terminus_2)
 as a NeMo Gym Responses API agent.
 
+The reusable implementation is `nemo_gym.agents.terminus_2.Terminus2Harness`.
+
 Terminus-2 executes terminal commands in a fresh temporary workspace by default. Set
 `workspace_root` to run in an existing directory instead.
 

@@ -21,6 +21,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
+from nemo_gym.agents.pi import (
+    PiHarness,
+    _build_pi_observations,
+    _extract_instruction,
+    _read_pi_stdout,
+    parse_pi_events,
+)
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -36,10 +43,6 @@ from responses_api_agents.pi_agent.app import (
     PiAgentConfig,
     PiAgentRunRequest,
     ResourcesServerRef,
-    _build_pi_observations,
-    _extract_instruction,
-    _read_pi_stdout,
-    parse_pi_events,
 )
 
 
@@ -55,10 +58,12 @@ def _config(**kwargs) -> PiAgentConfig:
 
 
 def _make_agent(**kwargs) -> PiAgent:
-    with patch("responses_api_agents.pi_agent.app.PiAgent.model_post_init"):
-        agent = PiAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
-    return agent
+    with patch("responses_api_agents.pi_agent.app.ensure_pi"):
+        return PiAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
+
+
+def _make_harness(**kwargs) -> PiHarness:
+    return _make_agent(**kwargs)._harness
 
 
 def _msg_end(role, content, **extra) -> str:
@@ -156,7 +161,7 @@ class TestParsePiEvents:
 
 class TestEnv:
     def test_env_passthrough(self) -> None:
-        agent = _make_agent(env={"NVIDIA_API_KEY": "k", "EMPTY": ""})
+        agent = _make_harness(env={"NVIDIA_API_KEY": "k", "EMPTY": ""})
         env = agent._env(Path("/tmp/h"))
         assert env["NVIDIA_API_KEY"] == "k"
         assert env["HOME"] == "/tmp/h"
@@ -176,10 +181,11 @@ class TestModelServer:
             "resolve_model_base_url",
             return_value="http://model/ng-rollout/1-2/v1",
         ) as resolve:
-            config = agent._build_models_config("1-2")
+            base_url = agent._resolve_model_base_url("1-2")
+            config = agent._harness._build_models_config(base_url)
 
         provider = config["providers"]["nemo"]
-        assert agent._effective_model() == "nemo/Qwen3.6-35B-A3B"
+        assert agent._harness._effective_model(base_url) == "nemo/Qwen3.6-35B-A3B"
         assert provider["baseUrl"] == "http://model/ng-rollout/1-2/v1"
         assert provider["models"][0]["id"] == "Qwen3.6-35B-A3B"
         assert provider["models"][0]["maxTokens"] == 131072
@@ -188,9 +194,42 @@ class TestModelServer:
 
     def test_preserves_explicit_provider_without_model_server(self) -> None:
         config = {"providers": {"custom": {"baseUrl": "https://example.test"}}}
-        agent = _make_agent(models_config=config)
-        assert agent._effective_model() == agent.config.model
-        assert agent._build_models_config() == config
+        agent = _make_harness(models_config=config)
+        assert agent._effective_model(None) == agent.config.model.model
+        assert agent._build_models_config(None) == config
+
+
+class TestProcessLifecycle:
+    def test_timeout_kills_process_group(self, tmp_path) -> None:
+        agent = _make_harness(workspace_root=str(tmp_path), timeout=1)
+        proc = MagicMock(pid=4242, returncode=None, stdout=object(), stderr=object())
+        proc.communicate = AsyncMock(side_effect=[asyncio.TimeoutError(), (b"", b"")])
+        with (
+            patch("nemo_gym.agents.pi.asyncio.create_subprocess_exec", return_value=proc),
+            patch("nemo_gym.agents.pi.os.killpg") as killpg,
+            patch("nemo_gym.agents.pi.os.getpgid", return_value=4242),
+        ):
+            output, usage, _, _ = asyncio.run(agent._run_pi("hi", None, collect_observations=False))
+
+        killpg.assert_called_once_with(4242, 9)
+        assert output == []
+        assert usage == {"input_tokens": 0, "output_tokens": 0}
+
+    def test_cancellation_kills_group_drains_process_and_reraises(self, tmp_path) -> None:
+        agent = _make_harness(workspace_root=str(tmp_path))
+        proc = MagicMock(pid=4242, returncode=None, stdout=object(), stderr=object())
+        proc.communicate = AsyncMock(side_effect=[asyncio.CancelledError(), (b"", b"")])
+        with (
+            patch("nemo_gym.agents.pi.asyncio.create_subprocess_exec", return_value=proc) as spawn,
+            patch("nemo_gym.agents.pi.os.killpg") as killpg,
+            patch("nemo_gym.agents.pi.os.getpgid", return_value=4242),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            asyncio.run(agent._run_pi("hi", None, collect_observations=False))
+
+        assert spawn.call_args.kwargs["start_new_session"] is True
+        killpg.assert_called_once_with(4242, 9)
+        assert proc.communicate.await_count == 2
 
 
 class TestRolloutObservability:
@@ -199,7 +238,7 @@ class TestRolloutObservability:
         stream.feed_data(b'{"type":"tool_execution_start","toolCallId":"a"}\nnot-json\n')
         stream.feed_eof()
 
-        with patch("responses_api_agents.pi_agent.app.time", side_effect=[10.0, 11.0]):
+        with patch("nemo_gym.agents.pi.time", side_effect=[10.0, 11.0]):
             stdout, events = await _read_pi_stdout(stream)
 
         assert stdout.endswith("not-json\n")
@@ -400,14 +439,14 @@ class TestRolloutObservability:
             },
         }
         items, usage = parse_pi_events(json.dumps(event))
-        agent = _make_agent(
+        agent = _make_harness(
             model_server=ModelServerRef(type="responses_api_models", name="policy"),
             system_prompt="configured system",
         )
         agent._run_pi = AsyncMock(return_value=(items, usage, "model", [(1.0, event)]))
 
         episode = asyncio.run(
-            agent._create_episode(
+            agent.run_episode(
                 NeMoGymResponseCreateParamsNonStreaming(
                     input=[
                         NeMoGymEasyInputMessage(role="system", content="request system"),
@@ -416,11 +455,12 @@ class TestRolloutObservability:
                         NeMoGymEasyInputMessage(role="user", content="solve"),
                     ]
                 ),
+                model_ref=ModelServerRef(type="responses_api_models", name="policy"),
                 rollout_id="1-2",
             )
         )
 
-        assert agent._run_pi.await_args.kwargs["rollout_id"] == "1-2"
+        assert agent._run_pi.await_args.kwargs["model_base_url"] is None
         assert agent._run_pi.await_args.args == ("solve", "configured system\n\nrequest system")
         assert episode.response.output == items
         [invocation] = _records(episode.observations, AgentInvocation)
@@ -433,10 +473,10 @@ class TestRolloutObservability:
         assert "no_sandbox_runtime" in {gap.code for gap in episode.observations.gaps}
 
     def test_padding_is_not_reported_as_agent_evidence(self) -> None:
-        agent = _make_agent()
+        agent = _make_harness()
         agent._run_pi = AsyncMock(return_value=([], {"input_tokens": 0, "output_tokens": 0}, "model", []))
 
-        episode = asyncio.run(agent._create_episode(NeMoGymResponseCreateParamsNonStreaming(input="solve")))
+        episode = asyncio.run(agent.run_episode(NeMoGymResponseCreateParamsNonStreaming(input="solve")))
 
         assert episode.response.output
         [invocation] = _records(episode.observations, AgentInvocation)
@@ -445,10 +485,10 @@ class TestRolloutObservability:
 
     def test_partial_events_survive_empty_scoring_output(self) -> None:
         event = {"type": "tool_execution_start", "toolCallId": "call-1", "toolName": "bash"}
-        agent = _make_agent()
+        agent = _make_harness()
         agent._run_pi = AsyncMock(return_value=([], {"input_tokens": 0, "output_tokens": 0}, "model", [(1.0, event)]))
 
-        episode = asyncio.run(agent._create_episode(NeMoGymResponseCreateParamsNonStreaming(input="solve")))
+        episode = asyncio.run(agent.run_episode(NeMoGymResponseCreateParamsNonStreaming(input="solve")))
 
         [tool] = _records(episode.observations, ToolCallObservation)
         assert tool.tool_call_id == "call-1"
@@ -457,7 +497,7 @@ class TestRolloutObservability:
     def test_run_uses_prefixed_response_boundary(self) -> None:
         agent = _make_agent()
         agent.server_client.global_config_dict = {"observability_enabled": True}
-        agent._run_pi = AsyncMock(return_value=([], {"input_tokens": 0, "output_tokens": 0}, "model", []))
+        agent._harness._run_pi = AsyncMock(return_value=([], {"input_tokens": 0, "output_tokens": 0}, "model", []))
 
         def response(payload):
             result = MagicMock(ok=True, cookies={})
@@ -485,7 +525,7 @@ class TestRolloutObservability:
 
         assert result.ng_agent_observations is not None
         assert agent.server_client.post.await_args_list[1].kwargs["url_path"] == "/ng-rollout/1-2/v1/responses"
-        assert agent._run_pi.await_args.kwargs["rollout_id"] == "1-2"
+        assert agent._harness._run_pi.await_args.kwargs["model_base_url"] is None
         verify_json = agent.server_client.post.await_args_list[2].kwargs["json"]
         assert "_ng_agent_observations" not in verify_json["response"]
 
@@ -493,7 +533,7 @@ class TestRolloutObservability:
         from fastapi.testclient import TestClient
 
         agent = _make_agent()
-        agent._run_pi = AsyncMock(return_value=([], {"input_tokens": 0, "output_tokens": 0}, "model", []))
+        agent._harness._run_pi = AsyncMock(return_value=([], {"input_tokens": 0, "output_tokens": 0}, "model", []))
 
         response = TestClient(agent.setup_webserver()).post(
             "/ng-rollout/1-2/v1/responses",

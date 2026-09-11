@@ -1695,7 +1695,7 @@ def merge_model_call_capture_into_record(
             bundle = AgentObservationBundle.model_validate(observations)
             if bundle.source == "claude_code":
                 try:
-                    from responses_api_agents.claude_code_agent.observability import (
+                    from nemo_gym.agents.claude_code_observability import (
                         associate_claude_code_compaction_calls,
                     )
 
