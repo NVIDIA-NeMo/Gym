@@ -90,8 +90,8 @@ def test_prepare_enforces_the_maintained_552_task_population(monkeypatch, tmp_pa
 
 
 def test_provenance_matches_the_automatic_download_and_profiles() -> None:
-    provenance_path = Path(__file__).parents[1] / "provenance.json"
-    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    provenance_path = Path(__file__).parents[1] / "provenance.yaml"
+    provenance = yaml.safe_load(provenance_path.read_text(encoding="utf-8"))
 
     assert provenance["dataset"] == {
         "repository": "https://github.com/jayl940712/webarena_benchmarks",
@@ -113,7 +113,7 @@ def test_nano_omni_policy_preserves_history_thinking() -> None:
     kwargs = config["policy_model"]["responses_api_models"]["vllm_model"]["chat_template_kwargs"]
     assert kwargs == {"truncate_history_thinking": False}
 
-    provenance = json.loads((benchmark_dir / "provenance.json").read_text(encoding="utf-8"))
+    provenance = yaml.safe_load((benchmark_dir / "provenance.yaml").read_text(encoding="utf-8"))
     profile = provenance["policy_profiles"]["nano_omni"]
     assert profile["transport_endpoint"] == "/v1/chat/completions"
     assert profile["chat_template"]["kwargs"] == kwargs
@@ -151,7 +151,7 @@ def test_nano_omni_and_qwen_share_runtime_and_dataset_but_not_policy_protocol() 
     assert model["sampling_overrides"] == {"temperature": 0.1, "top_p": 0.9}
     assert model["replace_developer_role_with_system"] is True
 
-    provenance = json.loads((benchmark_dir / "provenance.json").read_text(encoding="utf-8"))
+    provenance = yaml.safe_load((benchmark_dir / "provenance.yaml").read_text(encoding="utf-8"))
     qwen_profile = provenance["policy_profiles"]["qwen35_122b_a10b"]
     assert qwen_profile["chat_template_kwargs"] == model["chat_template_kwargs"]
     assert {
