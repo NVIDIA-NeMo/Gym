@@ -1099,6 +1099,137 @@ def test_build_sbatch_script_vllm_service_backend_omits_ray_prelude(submit_confi
 
 
 # ---------------------------------------------------------------------------
+# build_sbatch_script — use_haproxy node-list prelude
+#
+# Regression coverage for a real failure: model-serving container images (e.g.
+# vllm/vllm-openai) don't bundle Slurm client tools like scontrol, so resolving the node list
+# must happen on the host and be handed to the container via an exported env var - not by
+# calling scontrol again from inside the `srun --container-image=...` command.
+# ---------------------------------------------------------------------------
+
+
+def _haproxy_single_node_config():
+    return SubmitConfig.model_validate(
+        {
+            "services": {
+                "vllm_model": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    "number_of_instances": 4,
+                    "use_haproxy": True,
+                }
+            },
+            "compute": {
+                "cluster": {
+                    "type": "slurm",
+                    "account": "my-account",
+                    "hostname": "foo",
+                    "node_pools": {"main": {"partition": "gpu", "nodes": 1, "gpus_per_node": 8}},
+                }
+            },
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+
+
+def _haproxy_multi_node_config():
+    return SubmitConfig.model_validate(
+        {
+            "services": {
+                "vllm_model": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    "tensor_parallel_size": 8,
+                    "number_of_instances": 2,
+                    "use_haproxy": True,
+                }
+            },
+            "compute": {
+                "cluster": {
+                    "type": "slurm",
+                    "account": "my-account",
+                    "hostname": "foo",
+                    "node_pools": {"main": {"partition": "gpu", "nodes": 4, "gpus_per_node": 4}},
+                }
+            },
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+
+
+def test_build_sbatch_script_haproxy_scontrol_runs_on_host_not_in_container(bench_dir):
+    config = _haproxy_multi_node_config()
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    # scontrol must appear exactly once, in the host-level prelude before the first srun.
+    assert script.count("scontrol show hostnames") == 1
+    prelude_pos = script.index("scontrol show hostnames")
+    first_srun_pos = script.index("srun --overlap")
+    assert prelude_pos < first_srun_pos
+    assert 'export HAPROXY_NODES_LIST="$(scontrol show hostnames "$SLURM_JOB_NODELIST")"' in script
+    # The containerized command reads the exported var instead of calling scontrol itself.
+    assert "nodes_array=($HAPROXY_NODES_LIST)" in script
+
+
+def test_build_sbatch_script_haproxy_single_node_still_gets_node_list_prelude(bench_dir):
+    # Even a single-node deployment needs the prelude: the backend-discovery loop inside the
+    # container always reads $HAPROXY_NODES_LIST.
+    config = _haproxy_single_node_config()
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert 'export HAPROXY_NODES_LIST="$(scontrol show hostnames "$SLURM_JOB_NODELIST")"' in script
+    assert "nodes_array=($HAPROXY_NODES_LIST)" in script
+
+
+def test_build_sbatch_script_haproxy_and_ray_preludes_coexist(bench_dir):
+    # A haproxy-multi-instance service and a plain multi-node ray-backed service in the same job
+    # should each get their own prelude without clobbering the other.
+    config = SubmitConfig.model_validate(
+        {
+            "services": {
+                "vllm_haproxy": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/model",
+                    "tensor_parallel_size": 8,
+                    "number_of_instances": 2,
+                    "use_haproxy": True,
+                    "port": 8000,
+                },
+                "vllm_ray": {
+                    "type": "vllm",
+                    "container": "vllm:latest",
+                    "model": "org/other-model",
+                    "tensor_parallel_size": 16,
+                    "port": 8001,
+                },
+            },
+            "compute": {
+                "cluster": {
+                    "type": "slurm",
+                    "account": "my-account",
+                    "hostname": "foo",
+                    "node_pools": {"main": {"partition": "gpu", "nodes": 4, "gpus_per_node": 4}},
+                }
+            },
+            "driver": {"container": "python:3.12", "benchmarks": {"gsm8k": {}}},
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert 'export HAPROXY_NODES_LIST="$(scontrol show hostnames "$SLURM_JOB_NODELIST")"' in script
+    assert 'export RAY_HEAD_NODE_IP="$head_node_ip:6379"' in script
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 

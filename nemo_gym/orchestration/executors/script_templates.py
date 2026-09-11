@@ -28,6 +28,13 @@ export RAY_HEAD_NODE_IP="$head_node_ip:6379"
 echo "Head node IP address: $HEAD_NODE_IP\""""
 
 
+_HAPROXY_NODE_LIST_PRELUDE = """\
+# Resolve every node's hostname for HAProxy backend discovery, on the host (not inside the vLLM
+# container - model-serving images like vllm/vllm-openai don't bundle Slurm client tools such as
+# scontrol). Exported so it's visible inside the containers spawned by srun below.
+export HAPROXY_NODES_LIST="$(scontrol show hostnames "$SLURM_JOB_NODELIST")\""""
+
+
 _VLLM_RAY_SYMMETRIC_RUN_BODY = """\
     command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"
     if ray symmetric-run --help >/dev/null 2>&1; then
@@ -85,8 +92,7 @@ _HAPROXY_BACKEND_LOOP = """\
 
 _HAPROXY_MULTI_INSTANCE = """\
 bash -c '
-    nodes=$(scontrol show hostnames "$SLURM_JOB_NODELIST")
-    nodes_array=($nodes)
+    nodes_array=($HAPROXY_NODES_LIST)
     node_idx=$SLURM_NODEID
 
 {instance_launch}
@@ -144,6 +150,10 @@ def bash_var(name: str) -> str:
 
 def render_ray_prelude() -> str:
     return _RAY_PRELUDE
+
+
+def render_haproxy_node_list_prelude() -> str:
+    return _HAPROXY_NODE_LIST_PRELUDE
 
 
 def render_vllm_ray_symmetric_run_body(inner_cmd: str, total_nodes: int, resource_flags: str) -> str:

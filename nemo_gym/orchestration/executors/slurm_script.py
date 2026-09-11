@@ -31,6 +31,7 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_driver_entrypoint,
     render_gym_cmd,
     render_haproxy_multi_instance_command,
+    render_haproxy_node_list_prelude,
     render_health_check,
     render_ray_prelude,
     render_vllm_ray_symmetric_run,
@@ -289,11 +290,14 @@ def build_sbatch_script(
     gpus_per_node_values = [p.gpus_per_node for p in compute.node_pools.values() if p.gpus_per_node is not None]
     max_gpus_per_node = max(gpus_per_node_values) if gpus_per_node_values else 0
 
-    ray_prelude = (
-        render_ray_prelude()
-        if any(_vllm_spans_multiple_nodes(s, total_nodes) for s in config.services.values())
-        else ""
-    )
+    preludes = []
+    if any(_vllm_spans_multiple_nodes(s, total_nodes) for s in config.services.values()):
+        preludes.append(render_ray_prelude())
+    if any(_uses_haproxy_multi_instance(s) for s in config.services.values()):
+        # Needed even for a single-node HAProxy deployment: the backend-discovery loop inside the
+        # container always reads $HAPROXY_NODES_LIST (containers don't have scontrol installed).
+        preludes.append(render_haproxy_node_list_prelude())
+    ray_prelude = "\n\n".join(preludes)
 
     service_commands = "\n\n".join(
         _render_service_command(
