@@ -24,8 +24,17 @@ AA_BRIEFCASE_LITE_REVISION=4dec557b47d43867a1648c0974db1d8208c8b677 \
 The generated JSONL contains task execution metadata only. It deliberately excludes checks, rubrics, traceability records, source graphs, and judge prompts so grader-only information cannot enter the agent request.
 It also records the checkout's absolute path, so
 `data/aa_briefcase_lite.jsonl` is intentionally ignored and must be regenerated
-for each installation. The preparation script rejects a different dataset
-revision or missing referenced source files.
+for each installation. Preparation requires exactly one row for each of the
+four task IDs. It rejects missing or escaping input paths, including files in
+referenced directories, and unmaterialized Git LFS pointers. Validation errors
+leave any existing generated JSONL unchanged. The revision check verifies the
+checkout HEAD or revision marker; it does not verify every file against Git.
+
+Run the preparation tests without a model or sandbox:
+
+```bash
+python -m pytest benchmarks/aa_briefcase_lite/tests/test_prepare.py
+```
 
 Set `AA_BRIEFCASE_CONTAINER_PATH` to an audited Apptainer image and
 `PERSIST_DELIVERABLES_DIR` to an absolute shared-filesystem output path, then
