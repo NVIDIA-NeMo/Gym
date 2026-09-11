@@ -20,7 +20,7 @@ OUTPUT_FPATH = DATA_DIR / "injecagent_base.jsonl"
 SIMULATED_RESPONSES_FPATH = DATA_DIR / "attacker_simulated_responses.json"
 
 UPSTREAM_REPOSITORY = "uiuc-kang-lab/InjecAgent"
-UPSTREAM_REVISION = "f19c9f2c79a41046eb13c03c51a24c567a8ffa07"
+UPSTREAM_REVISION = "f19c9f2c79a41046eb13c03c51a24c567a8ffa07"  # pragma: allowlist secret
 RAW_BASE_URL = f"https://raw.githubusercontent.com/{UPSTREAM_REPOSITORY}/{UPSTREAM_REVISION}/data"
 SOURCE_FILES = {
     "direct_harm": "test_cases_dh_base.json",
