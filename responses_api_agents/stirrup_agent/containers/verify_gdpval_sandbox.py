@@ -13,7 +13,8 @@ then actually exercises the toolchain, because the failure mode that costs a
 whole eval run is a tool that is present but cannot produce a file.
 
 Sections:
-  pins      every one of the 419 published Python pins, at the exact version
+  interp    CPython version matches the one pinned in the published closure
+  pins      every expected Python pin, at the exact published version
   apt       the 762-entry published apt closure, split by whether the gap can
             affect behaviour or is an artefact of the base image differing
   binaries  every command line tool the task prompt advertises
@@ -38,6 +39,9 @@ from pathlib import Path
 
 MANIFEST_DIR = Path("/opt/gdpval")
 PY_MANIFEST = MANIFEST_DIR / "aa_v2_python_requirements.txt"
+EFFECTIVE_MANIFEST = MANIFEST_DIR / "effective_requirements.txt"
+EXCLUDED_MANIFEST = MANIFEST_DIR / "excluded_requirements.txt"
+ARM64_EXCLUSIONS = MANIFEST_DIR / "aa_v2_arm64_exclusions.txt"
 APT_MANIFEST = MANIFEST_DIR / "aa_v2_apt_closure.txt"
 
 # Command line tools the GDPval task prompt tells the model it has. Advertising
@@ -106,18 +110,38 @@ def header(name: str) -> None:
     print(f"\n=== {name} ===", flush=True)
 
 
+def _read_pins(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    return [
+        ln.strip() for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip() and not ln.startswith("#")
+    ]
+
+
 def check_pins(rep: Report) -> None:
     header("pins: published Python manifest")
     if not PY_MANIFEST.exists():
         rep.fail("pins", f"{PY_MANIFEST} missing — image was not built from the aligned gdpval.def")
         return
-    pins = [
-        ln.strip()
-        for ln in PY_MANIFEST.read_text(encoding="utf-8").splitlines()
-        if ln.strip() and not ln.startswith("#")
-    ]
+    published = _read_pins(PY_MANIFEST)
+
+    # What the build actually asked for on this architecture. Falls back to the
+    # full manifest so an older image still gets checked.
+    effective = _read_pins(EFFECTIVE_MANIFEST) or published
+    excluded = _read_pins(EXCLUDED_MANIFEST)
+
+    # An arm64 build may drop pins, but only the ones on the published closed
+    # list. Anything else dropped means the build quietly thinned the sandbox.
+    allowed = {pin.split("==", 1)[0].lower().replace("_", "-") for pin in _read_pins(ARM64_EXCLUSIONS)}
+    for pin in excluded:
+        name = pin.split("==", 1)[0].lower().replace("_", "-")
+        if name in allowed:
+            rep.warn("pins", f"excluded on {os.uname().machine} (no aarch64 distribution): {pin}")
+        else:
+            rep.fail("pins", f"excluded but not on the published exclusion list: {pin}")
+
     absent, wrong = [], []
-    for pin in pins:
+    for pin in effective:
         name, want = pin.split("==", 1)
         try:
             got = version(name)
@@ -131,7 +155,27 @@ def check_pins(rep: Report) -> None:
     for item in sorted(wrong):
         rep.fail("pins", f"version drift: {item}")
     if not absent and not wrong:
-        rep.ok(f"all {len(pins)} published pins present at the published versions")
+        rep.ok(
+            f"all {len(effective)} expected pins present at the published versions"
+            + (f" ({len(excluded)} excluded for this architecture)" if excluded else "")
+        )
+
+
+def check_interpreter(rep: Report) -> None:
+    header("interpreter: version published in the apt closure")
+    want = None
+    for line in _read_pins(APT_MANIFEST):
+        if line.startswith("python3.13="):
+            # e.g. python3.13=3.13.5-2+deb13u2 -> upstream 3.13.5
+            want = line.split("=", 1)[1].split("-", 1)[0]
+            break
+    got = ".".join(str(n) for n in sys.version_info[:3])
+    if want is None:
+        rep.warn("interpreter", f"closure does not pin python3.13; running {got}")
+    elif got == want:
+        rep.ok(f"CPython {got} matches the published sandbox")
+    else:
+        rep.fail("interpreter", f"running CPython {got}, published sandbox is {want}")
 
 
 def check_apt(rep: Report, strict_apt: bool) -> None:
@@ -589,6 +633,7 @@ def main() -> int:
     rep = Report()
     print(f"python: {sys.version.split()[0]}  platform: {sys.platform}  arch: {os.uname().machine}", flush=True)
 
+    check_interpreter(rep)
     check_pins(rep)
     check_apt(rep, args.strict_apt)
     check_binaries(rep)

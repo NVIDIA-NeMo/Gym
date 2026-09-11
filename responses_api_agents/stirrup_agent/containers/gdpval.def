@@ -32,6 +32,12 @@
 #     bookworm base produced systematically older libreoffice/ffmpeg/chromium
 #     than the environment the reference scores came from.
 #
+#   * The interpreter is Debian's python3.13, not the one in the docker
+#     python:3.13 image. The closure pins python3.13=3.13.5, and the docker
+#     image ships a later patch release (3.13.15), so basing on it silently ran
+#     the eval on a different interpreter than the published sandbox. Building
+#     on plain debian:trixie is what makes `python3 --version` read 3.13.5.
+#
 #   * Python packages are installed from the published pin file verbatim rather
 #     than resolved from loose top-level names. The published list is a full
 #     `pip freeze`, so pinning it reproduces the reference sandbox instead of
@@ -58,13 +64,15 @@
 #     Calibri and Cambria, so without them LibreOffice reflows every Office
 #     document written in the Microsoft defaults, and CJK text renders as tofu.
 #
-# x86_64 ONLY. The published pin set includes packages with no aarch64 wheels
-# (nvidia-nccl-cu12, aspose-words, cadquery-vtk/trame-vtk). Building on arm64
-# will fail the pinned install, by design — a silently degraded sif is worse
-# than no sif.
+# ARCHITECTURE. x86_64 installs the published manifest in full and is the
+# faithful build; it is the architecture the reference sandbox runs on. arm64
+# builds drop exactly the pins listed in gdpval_aa_v2_arm64_exclusions.txt,
+# which publish x86_64 wheels and no sdist, so there is nothing to build from.
+# The exclusion list is closed and checked: any OTHER pin failing to install
+# aborts the build rather than producing a quietly thinner sandbox.
 
 Bootstrap: docker
-From: python:3.13-trixie
+From: debian:trixie
 
 %labels
     Author NVIDIA NeMo-Gym
@@ -75,6 +83,7 @@ From: python:3.13-trixie
 %files
     gdpval_aa_v2_python_requirements.txt /opt/gdpval/aa_v2_python_requirements.txt
     gdpval_aa_v2_apt_closure.txt /opt/gdpval/aa_v2_apt_closure.txt
+    gdpval_aa_v2_arm64_exclusions.txt /opt/gdpval/aa_v2_arm64_exclusions.txt
     verify_gdpval_sandbox.py /opt/gdpval/verify_gdpval_sandbox.py
 
 %post
@@ -101,6 +110,11 @@ From: python:3.13-trixie
     # so an apt failure silently produced a sif with no libreoffice/tesseract.
     apt-get install -y --no-install-recommends \
         ca-certificates \
+        python3.13 \
+        python3.13-dev \
+        python3-pip \
+        python3-venv \
+        python-is-python3 \
         git \
         build-essential \
         gcc \
@@ -167,6 +181,8 @@ From: python:3.13-trixie
         libgl1 \
         libglib2.0-0t64 \
         libsndfile1 \
+        libopenblas0 \
+        libopenblas0-pthread \
         espeak-ng \
         libzbar0t64 \
         x11-utils \
@@ -206,6 +222,11 @@ From: python:3.13-trixie
     command -v git
     command -v unzip
     command -v timeout
+    command -v python3
+    command -v python
+    # The published closure pins python3.13=3.13.5. Fail the build rather than
+    # ship an eval that runs on a different interpreter than the reference.
+    python3 -c 'import sys; v=sys.version_info; assert (v.major,v.minor,v.micro)==(3,13,5), sys.version; print("[gdpval.def] interpreter", sys.version.split()[0])'
     command -v chromium || command -v chromium-browser
     # Style files from the curated TeX Live set (texlive-pictures / -science /
     # -pstricks) must resolve, else figure/equation-heavy docs fail at runtime.
@@ -213,12 +234,44 @@ From: python:3.13-trixie
     kpsewhich siunitx.sty
     kpsewhich pst-plot.sty
 
-    python -m pip install --no-cache-dir --upgrade pip
+    # Debian marks its interpreter externally managed (PEP 668). We are building
+    # a single-purpose image whose entire point is this dependency set, so
+    # installing into the system interpreter is correct here; there is no other
+    # Python on the image to protect.
+    PIP="python3 -m pip install --no-cache-dir --break-system-packages"
+    $PIP --upgrade pip
 
-    # The published GDPval-AA v2 pin set, verbatim. This MUST fully succeed: a
-    # pin that will not install means this sif is not the advertised sandbox,
-    # and shipping it anyway would silently invalidate every rollout run in it.
-    pip install --no-cache-dir -r /opt/gdpval/aa_v2_python_requirements.txt
+    # Build the effective pin list for this architecture. x86_64 gets the
+    # published manifest verbatim; arm64 drops only the closed exclusion list.
+    ARCH="$(dpkg --print-architecture)"
+    REQ=/opt/gdpval/aa_v2_python_requirements.txt
+    EFFECTIVE=/opt/gdpval/effective_requirements.txt
+    EXCLUDED=/opt/gdpval/excluded_requirements.txt
+    : > "$EXCLUDED"
+    if [ "$ARCH" = "arm64" ]; then
+        grep -E '^[A-Za-z0-9]' /opt/gdpval/aa_v2_arm64_exclusions.txt \
+            | sed 's/==.*//' | sort -u > /tmp/excl_names
+        # Match on the distribution name only, so a refreshed manifest with a
+        # bumped version still drops the right package.
+        grep -E '^[A-Za-z0-9]' "$REQ" | while IFS= read -r pin; do
+            name="${pin%%==*}"
+            if grep -qxF "$name" /tmp/excl_names; then
+                echo "$pin" >> "$EXCLUDED"
+            else
+                echo "$pin"
+            fi
+        done > "$EFFECTIVE"
+        echo "[gdpval.def] arm64: excluded $(wc -l < "$EXCLUDED") pins with no aarch64 distribution"
+        cat "$EXCLUDED"
+    else
+        grep -E '^[A-Za-z0-9]' "$REQ" > "$EFFECTIVE"
+    fi
+    echo "[gdpval.def] installing $(wc -l < "$EFFECTIVE") pins on $ARCH"
+
+    # This MUST fully succeed: a pin that will not install means this sif is not
+    # the advertised sandbox, and shipping it anyway would silently invalidate
+    # every rollout run in it.
+    $PIP -r "$EFFECTIVE"
 
     # Fail loud if the pinned install did not land what the prompt advertises.
     # Import names differ from distribution names, hence the explicit mapping.
@@ -258,7 +311,7 @@ import re
 from importlib.metadata import PackageNotFoundError, version
 
 wrong, absent = [], []
-with open("/opt/gdpval/aa_v2_python_requirements.txt", encoding="utf-8") as fh:
+with open("/opt/gdpval/effective_requirements.txt", encoding="utf-8") as fh:
     pins = [ln.strip() for ln in fh if ln.strip() and not ln.startswith("#")]
 for pin in pins:
     name, want = pin.split("==", 1)
