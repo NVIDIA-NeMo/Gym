@@ -35,7 +35,7 @@ Hermes did not generate the solution.
 The agent container and both verification containers recorded the same
 registry digest and SIF checksum. Writable overlays used a job-specific path
 under `/var/tmp`, on a filesystem reporting 14 TiB capacity. An earlier CPU
-probe confirmed `/tmp` was tmpfs. The portable [Slurm example](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/scripts/run_hermes_sandboxed_pro.sh)
+probe confirmed `/tmp` was tmpfs. The portable [Slurm example](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/dae2139f98938ed1e85764c7ceb50eb0e456fc0d/scripts/run_hermes_sandboxed_pro.sh)
 uses this launch sequence with site paths supplied through environment variables.
 After moving it to Slurm evaluations, CPU job `1920893` completed in 32 seconds
 with 8 CPUs, 32 GiB and zero GPUs. It used the relocated launcher and current

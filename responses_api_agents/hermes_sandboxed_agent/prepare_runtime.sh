@@ -6,9 +6,26 @@ set -euo pipefail
 : "${DEPS_DIR:?Set DEPS_DIR to an empty runtime directory}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$DEPS_DIR"
+exec 9>"$DEPS_DIR/.prepare.lock"
+flock 9
+HERMES_COMMIT=29112bef099274229cadff79cdff7bf7b99c4b77
+if [[ -f "$DEPS_DIR/hermes-runtime.json" && -x "$DEPS_DIR/bin/python3" ]] &&
+    [[ "$(git -C "$DEPS_DIR/hermes-src" rev-parse HEAD)" == "$HERMES_COMMIT" ]] &&
+    "$DEPS_DIR/bin/python3" -I - "$DEPS_DIR" "$HERMES_COMMIT" <<'PY'
+import json
+import pathlib
+import sys
+import run_agent
+root = pathlib.Path(sys.argv[1]).resolve()
+assert json.loads((root / "hermes-runtime.json").read_text())["hermes_commit"] == sys.argv[2]
+assert pathlib.Path(run_agent.__file__).resolve().is_relative_to(root / "hermes-src")
+PY
+then
+    echo "Pinned Hermes runtime is ready: $DEPS_DIR"
+    exit 0
+fi
 source "$SCRIPT_DIR/../anyswe_agent/setup_scripts/_portable_python.sh"
 install_portable_python
-HERMES_COMMIT=29112bef099274229cadff79cdff7bf7b99c4b77
 if [ ! -d "$DEPS_DIR/hermes-src/.git" ]; then
     git clone --depth=1 --branch=v2026.8.31 https://github.com/NousResearch/hermes-agent.git "$DEPS_DIR/hermes-src"
 fi

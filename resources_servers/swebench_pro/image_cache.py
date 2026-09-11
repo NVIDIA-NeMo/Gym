@@ -3,6 +3,7 @@
 """Prepare SIFs from pinned registry images and verify their local provenance."""
 
 import argparse
+import fcntl
 import hashlib
 import json
 import re
@@ -45,10 +46,18 @@ def prepare_image(image_dir: Path, repository: str, digest: str) -> dict:
     path = image_dir / f"{digest_hex(digest)}.sif"
     source_uri = f"docker://{repository}@{digest}"
     image_dir.mkdir(parents=True, exist_ok=True)
+    # Concurrent pipeline preparations share this cache. Publish the SIF and
+    # manifest under one lock so another preparation cannot observe a partial pair.
+    with path.with_suffix(".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _prepare_image(path, source_uri)
+
+
+def _prepare_image(path: Path, source_uri: str) -> dict:
     if path.exists():
         return verify_local_image(path, source_uri)
     # Publish only a complete conversion. A failed pull never becomes a reusable cache entry.
-    with tempfile.TemporaryDirectory(prefix=".pro-pull-", dir=image_dir) as temporary:
+    with tempfile.TemporaryDirectory(prefix=".pro-pull-", dir=path.parent) as temporary:
         candidate = Path(temporary) / path.name
         subprocess.run(["apptainer", "pull", "--disable-cache", str(candidate), source_uri], check=True)
         manifest = {"source_uri": source_uri, "sif_sha256": sif_checksum(candidate)}

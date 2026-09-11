@@ -7,7 +7,7 @@ import json
 import logging
 from pathlib import Path
 from shlex import quote
-from time import time
+from time import monotonic, time
 from typing import Any
 from uuid import uuid4
 
@@ -154,6 +154,7 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
         return metrics
 
     async def _run_in_sandbox(self, sandbox, body, rollout_id):
+        started = monotonic()
         run_id = uuid4().hex
         local = Path(self.config.results_dir).resolve() / run_id
         local.mkdir(parents=True)
@@ -224,6 +225,7 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
             )
         response = trajectory_response(result, body, self.config.model, error_type)
         return response, {
+            "agent_run_time": monotonic() - started,
             "hermes_result_path": str(local / "agent_result.json"),
             "hermes_return_code": return_code,
             "hermes_error_type": error_type,

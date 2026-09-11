@@ -98,7 +98,7 @@ excluded attempt. A live endpoint consumes model inference
 capacity even when the sandbox job itself uses no GPUs.
 
 Cluster deployment is maintained in the Slurm evaluations repository. See its
-[setup and launch guide](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/docs/hermes-sandboxed-pro.md)
+[evaluation configuration](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/evaluations/swebench-pro-hermes.yaml)
 on the matching `jnolan/hermes-sandboxed-pro` branch.
 
 To check the reference patch with Gym's verifier directly, use:

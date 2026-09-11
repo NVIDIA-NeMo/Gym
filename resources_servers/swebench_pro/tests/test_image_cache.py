@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -43,3 +45,23 @@ def test_pro_server_rejects_local_image_without_provenance(tmp_path):
     path.with_suffix(".sif.json").write_text(json.dumps({"source_uri": "wrong source", "sif_sha256": "unused"}))
     with pytest.raises(ValueError, match="source does not match"):
         server._image_info(body)
+
+
+def test_concurrent_preparations_share_one_pull(tmp_path, monkeypatch):
+    started, release = Event(), Event()
+    calls = []
+
+    def pull(argv, **kwargs):
+        calls.append(argv)
+        started.set()
+        assert release.wait(5)
+        Path(argv[-2]).write_bytes(b"converted image")
+
+    monkeypatch.setattr("resources_servers.swebench_pro.image_cache.subprocess.run", pull)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(prepare_image, tmp_path, "example/images", "sha256:" + "a" * 64)
+        assert started.wait(5)
+        second = pool.submit(prepare_image, tmp_path, "example/images", "sha256:" + "a" * 64)
+        release.set()
+        assert first.result() == second.result()
+    assert len(calls) == 1
