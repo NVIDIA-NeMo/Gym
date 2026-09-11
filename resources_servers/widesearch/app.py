@@ -79,18 +79,17 @@ def parse_markdown_json(text: str) -> dict[str, Any]:
 def extract_dataframe(text: str) -> pd.DataFrame | None:
     matches = re.findall(r"```markdown(.*?)```", text, re.DOTALL)
     if not matches:
-        table = re.findall(r"((?:^\s*\|.*\|\s*$\n?)+)", text, re.MULTILINE)
-        matches = table[-1:] if table else []
-    if not matches:
-        return None
-    lines = []
-    for line in matches[0].strip().splitlines():
-        if "|" in line and not set(line.strip()).issubset(set("|- :")):
-            lines.append("|".join(part.strip() for part in line.split("|")))
-    if not lines:
-        return None
-    frame = pd.read_csv(StringIO("\n".join(lines)), sep="|")
-    return frame.loc[:, ~frame.columns.str.startswith("Unnamed")]
+        matches = re.findall(r"((?:^\s*\|.*\|\s*$\n?)+)", text, re.MULTILINE)
+    for match in reversed(matches):
+        lines = [
+            "|".join(part.strip() for part in line.split("|"))
+            for line in match.strip().splitlines()
+            if "|" in line and not set(line.strip()).issubset(set("|- :"))
+        ]
+        if lines:
+            frame = pd.read_csv(StringIO("\n".join(lines)), sep="|")
+            return frame.loc[:, ~frame.columns.str.startswith("Unnamed")]
+    return None
 
 
 def preprocess(value: Any, name: str) -> str:
