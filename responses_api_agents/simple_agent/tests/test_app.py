@@ -215,6 +215,46 @@ class TestApp:
         assert prefixed_response.status_code == 200
         assert prefixed_response.json()["_ng_trajectory"]["rollout_id"] == "0-0"
 
+    @pytest.mark.parametrize(
+        "input_value",
+        (
+            "question",
+            [{"role": "user", "content": [{"type": "input_text", "text": "question"}]}],
+        ),
+    )
+    async def test_create_episode_does_not_mutate_request(self, input_value) -> None:
+        server, server_client = _make_agent(False)
+        server_client.post = AsyncMock(
+            return_value=_mock_response(
+                {
+                    "id": "response-1",
+                    "created_at": 1.0,
+                    "model": "model",
+                    "object": "response",
+                    "output": [
+                        {
+                            "id": "message-1",
+                            "content": [{"annotations": [], "text": "answer", "type": "output_text"}],
+                            "role": "assistant",
+                            "status": "completed",
+                            "type": "message",
+                        }
+                    ],
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "tools": [],
+                }
+            )
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+            {"input": input_value, "metadata": {"nested": '{"value":[1,2,3]}'}}
+        )
+        body_before = body.model_dump()
+
+        await server._create_episode(body, model_url_path="/v1/responses")
+
+        assert body.model_dump() == body_before
+
     @pytest.mark.parametrize("resolved", [False, None])
     async def test_run_emits_standard_turns_and_tool_observation(self, resolved: bool | None) -> None:
         server, server_client = _make_agent(True)
