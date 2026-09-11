@@ -89,11 +89,11 @@ fails explicitly. Failed or unfinished runs retain `verifier_reward`, omit
 `reward` and `response` from their HTTP result, and set Gym's existing
 `_ng_failure_class=agent_run_error` marker. Gym's collector puts them in its
 `*_failures.jsonl` sidecar and excludes them from scores. Incomplete verification
-is excluded too. Completed, conclusive wrong answers still score zero. The
-agent's `/aggregate_metrics` also filters incomplete rows for direct callers.
+is excluded too. Completed, conclusive wrong answers still score zero.
+The agent inherits Gym's standard aggregation; Slurm reporting includes coverage.
 
 This agent requires a resources server that accepts `create_pty=false` and
-returns a full `sandbox_descriptor`; it uses `cleanup_url_path` when provided.
+returns a full `sandbox_descriptor`, with `/close_session` for cleanup.
 Only the Pro integration has been exercised. The current Verified server returns
 a bare handle, so changing the benchmark configuration alone will not make
 Verified work on Apptainer. Its interface migration and a second-benchmark run

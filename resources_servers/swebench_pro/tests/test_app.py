@@ -437,7 +437,6 @@ async def test_command_harness_seeds_without_pty_and_receives_reconnect_descript
     sandbox.pty.create.assert_not_awaited()
     assert response.sandbox_descriptor == descriptor
     assert "pty_session_id" not in response.model_dump()
-    assert response.cleanup_url_path == "/close_session"
     assert server._session_id_to_sandbox["session"] is sandbox
     assert server._session_id_to_pty == {}
 

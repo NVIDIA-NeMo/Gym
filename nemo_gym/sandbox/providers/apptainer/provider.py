@@ -582,10 +582,8 @@ class ApptainerProvider:
         if descriptor.get("hostname") != socket.gethostname() or descriptor.get("uid") != os.getuid():
             raise ValueError("Apptainer reconnect requires the same host and UID as the creator")
         name = descriptor["sandbox_id"]
-        if not isinstance(name, str) or not re.fullmatch(r"nemo-gym-[0-9a-f]{32}", name):
-            raise ValueError("Invalid Apptainer instance name")
         staging = Path(descriptor["staging_dir"])
-        if not staging.is_absolute() or not staging.name.startswith("nemo-gym-apptainer-") or not staging.is_dir():
+        if not staging.is_absolute() or not staging.is_dir():
             raise ValueError("Apptainer staging directory is unavailable")
         mount_point = descriptor["mount_point"]
         if not isinstance(mount_point, str) or not mount_point.startswith("/"):

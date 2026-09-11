@@ -164,13 +164,17 @@ async def test_missing_result_preserves_process_failure(agent, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("verify_fails", [False, True])
+@pytest.mark.parametrize("failed_endpoint", [None, "/verify", "/close_session"])
 @pytest.mark.parametrize(
-    ("finished", "evaluation_completed", "failure_kind"),
-    [(False, True, "harness_incomplete"), (True, False, "verification_error"), (True, True, None)],
+    ("finished", "evaluation_completed", "failure"),
+    [
+        (False, True, "Hermes response status: incomplete"),
+        (True, False, "Verification did not complete"),
+        (True, True, None),
+    ],
 )
 async def test_run_cookies_descriptor_reward_and_cleanup(
-    agent, monkeypatch, verify_fails, finished, evaluation_completed, failure_kind
+    agent, monkeypatch, failed_endpoint, finished, evaluation_completed, failure
 ):
     import responses_api_agents.hermes_sandboxed_agent.app as module
 
@@ -181,9 +185,13 @@ async def test_run_cookies_descriptor_reward_and_cleanup(
         data=body.model_dump()
         | {"response": response.model_dump(), "reward": 1, "evaluation_completed": evaluation_completed}
     )
-    agent.server_client.post = AsyncMock(
-        side_effect=[seeded, RuntimeError("verify unavailable") if verify_fails else verified]
-    )
+
+    async def post(*, url_path, **kwargs):
+        if url_path == failed_endpoint:
+            raise RuntimeError(f"{url_path} unavailable")
+        return {"/seed_session": seeded, "/verify": verified, "/close_session": SimpleNamespace()}[url_path]
+
+    agent.server_client.post = AsyncMock(side_effect=post)
     sandbox = SimpleNamespace(stop=AsyncMock())
     connected = AsyncMock(return_value=sandbox)
     monkeypatch.setattr(module.AsyncSandbox, "connect", connected)
@@ -207,27 +215,27 @@ async def test_run_cookies_descriptor_reward_and_cleanup(
             )
         ),
     )
-    if verify_fails:
+    if failed_endpoint == "/verify":
         with pytest.raises(RuntimeError, match="verify unavailable"):
             await agent.run(SimpleNamespace(cookies={"original": "cookie"}), body)
     else:
         result = await agent.run(SimpleNamespace(cookies={"original": "cookie"}), body)
         assert result.verifier_reward == 1
-        assert result.score_valid is (failure_kind is None)
-        assert result.failure_kind == failure_kind
         wire = result.model_dump(mode="json")
-        if failure_kind:
+        if failure:
             assert result.reward is None
             assert wire["_ng_failure_class"] == "agent_run_error"
+            assert wire["_ng_failure_message"] == failure
             assert "reward" not in wire and "response" not in wire
         else:
             assert wire["reward"] == 1
             assert wire["response"]["status"] == "completed"
             assert "_ng_failure_class" not in wire
     assert agent.server_client.post.call_args_list[0].kwargs["json"]["create_pty"] is False
+    assert agent.server_client.post.call_args.kwargs["url_path"] == "/close_session"
     assert agent.server_client.post.call_args.kwargs["cookies"] == {"original": "cookie", "session": "seeded"}
     connected.assert_awaited_once_with({"sandbox_id": "box"}, provider="provider")
-    sandbox.stop.assert_awaited_once()
+    assert sandbox.stop.await_count == (1 if failed_endpoint == "/close_session" else 0)
 
 
 @pytest.mark.asyncio
@@ -237,10 +245,10 @@ async def test_failed_connect_uses_benchmark_cleanup_with_seed_cookie(agent, mon
 
     seed = SimpleNamespace(
         cookies={"session": "seeded"},
-        data={"sandbox_descriptor": {"sandbox_id": "box"}, "cleanup_url_path": "/close_session"},
+        data={"sandbox_descriptor": {"sandbox_id": "box"}},
     )
     if bare_handle:
-        seed.data = {"sandbox_handle": "box", "cleanup_url_path": "/close_session"}
+        seed.data = {"sandbox_handle": "box"}
     agent.server_client.post = AsyncMock(side_effect=[seed, SimpleNamespace()])
     monkeypatch.setattr(module, "get_global_config_dict", lambda: {"sandbox": {"fake": {}}})
     monkeypatch.setattr(module, "create_provider", lambda config: "provider")
@@ -258,28 +266,3 @@ async def test_failed_connect_uses_benchmark_cleanup_with_seed_cookie(agent, mon
     cleanup = agent.server_client.post.call_args.kwargs
     assert cleanup["url_path"] == "/close_session"
     assert cleanup["cookies"] == {"session": "seeded"}
-
-
-def test_aggregate_endpoint_excludes_failures_and_reports_denominator(agent):
-    from fastapi.testclient import TestClient
-
-    from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-
-    rows = [
-        {"hermes_finished": True, "evaluation_completed": True, "reward": 1.0},
-        {"hermes_finished": True, "evaluation_completed": True, "reward": 0.0},
-        # Historical failed rows had a zero reward and no routing sentinel.
-        {"hermes_finished": False, "evaluation_completed": True, "reward": 0.0},
-        {"hermes_finished": True, "evaluation_completed": False, "verifier_reward": 1.0},
-    ]
-    rows = [row | {TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0} for i, row in enumerate(rows)]
-    client = TestClient(agent.setup_webserver())
-    response = client.post("/aggregate_metrics", json={"verify_responses": rows})
-    assert response.status_code == 200
-    result = response.json()
-    assert result["key_metrics"] == {"accuracy": 0.5, "attempted": 4, "scored": 2, "excluded": 2, "coverage": 0.5}
-    assert result["agent_metrics"]["mean/reward"] == 0.5
-    assert len(result["group_level_metrics"]) == 2
-    all_failed = client.post("/aggregate_metrics", json={"verify_responses": rows[2:]}).json()
-    assert all_failed["key_metrics"]["accuracy"] is None
-    assert all_failed["key_metrics"]["excluded"] == 2

@@ -16,14 +16,12 @@ from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
+from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.sandbox import AsyncSandbox, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
-from responses_api_agents.hermes_sandboxed_agent.scoring import is_scored, summarize
 
 
 LOG = logging.getLogger(__name__)
@@ -59,8 +57,6 @@ class HermesSandboxedVerifyResponse(BaseVerifyResponse):
     # Gym's agent_run_error contract carries diagnostics, but no score or response.
     reward: float | None = Field(default=None, exclude_if=lambda value: value is None)
     response: NeMoGymResponse | None = Field(default=None, exclude_if=lambda value: value is None)
-    score_valid: bool
-    failure_kind: str | None = None
     hermes_result_path: str
     hermes_return_code: int | None
     hermes_error_type: str | None
@@ -142,16 +138,6 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
 
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         raise HTTPException(400, "Use /run: Hermes requires a resources-server seeded sandbox")
-
-    async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
-        # Also guard direct /aggregate_metrics callers and historical failed rows.
-        metrics = compute_aggregate_metrics([row for row in body.verify_responses if is_scored(row)])
-        coverage = summarize(body.verify_responses)
-        metrics.agent_metrics.update(coverage)
-        metrics.key_metrics = {
-            key: coverage[key] for key in ("accuracy", "attempted", "scored", "excluded", "coverage")
-        }
-        return metrics
 
     async def _run_in_sandbox(self, sandbox, body, rollout_id):
         started = monotonic()
@@ -244,9 +230,9 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
             )
             await raise_for_status(seeded)
             cookies.update(seeded.cookies)
-            seed = await get_response_json(seeded)
             sandbox = None
             try:
+                seed = await get_response_json(seeded)
                 descriptor = seed.get("sandbox_descriptor")
                 if not isinstance(descriptor, dict) or not descriptor:
                     raise ValueError(
@@ -270,37 +256,31 @@ class HermesSandboxedAgent(SimpleResponsesAPIAgent):
                 result = await get_response_json(verified)
                 result["agent_image_provenance"] = seed.get("image_provenance")
                 result["verifier_reward"] = result["reward"]
-                result["score_valid"] = True
                 if response.status != "completed":
-                    result["failure_kind"] = "harness_error" if response.status == "failed" else "harness_incomplete"
-                    result["failure_reason"] = f"Hermes response status: {response.status}"
+                    failure = f"Hermes response status: {response.status}"
                 elif result.get("evaluation_completed") is False:
-                    result["failure_kind"] = "verification_error"
-                    result["failure_reason"] = result.get("error") or "Verification did not complete"
-                if result.get("failure_kind"):
+                    failure = result.get("error") or "Verification did not complete"
+                else:
+                    failure = None
+                if failure:
                     # The collector routes this to its failures sidecar and excludes it from metrics.
                     # Preserve raw verifier_reward and the on-disk Hermes trajectory for diagnosis.
                     result.update(
                         reward=None,
                         response=None,
-                        score_valid=False,
                         _ng_failure_class="agent_run_error",
-                        _ng_failure_message=result["failure_reason"],
+                        _ng_failure_message=failure,
                     )
                 return HermesSandboxedVerifyResponse.model_validate(result | metrics)
             finally:
                 try:
-                    cleanup_path = seed.get("cleanup_url_path")
-                    if cleanup_path:
-                        cleaned = await self.server_client.post(
-                            server_name=self.config.resources_server.name,
-                            url_path=cleanup_path,
-                            json={},
-                            cookies=cookies,
-                        )
-                        await raise_for_status(cleaned)
-                    elif sandbox is not None:
-                        await sandbox.stop()
+                    cleaned = await self.server_client.post(
+                        server_name=self.config.resources_server.name,
+                        url_path="/close_session",
+                        json={},
+                        cookies=cookies,
+                    )
+                    await raise_for_status(cleaned)
                 except Exception:
                     LOG.exception("Failed to stop Hermes sandbox")
                     if sandbox is not None:
