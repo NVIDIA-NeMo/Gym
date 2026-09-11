@@ -976,7 +976,7 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
     tool_calls: Optional[NeMoGymChatCompletionMessageToolCallsParam] = None
-    # Accept Verifiers' null compatibility field without forwarding it to model servers.
+    # Allow incoming responses with reasoning_content=None; this field should not be used.
     reasoning_content: Annotated[None, Field(exclude=True)]
 
 
