@@ -20,7 +20,7 @@ per column:
 ``sql_context`` itself is a per-table, per-column schema (data type, description, example
 values) followed by a "#### Foreign key" section -- see ``build_sql_context``.
 
-Requires ``bm25s`` and ``nltk`` (``pip install bm25s nltk``).
+Requires ``bm25s`` and ``nltk`` (``uv sync --extra birdbench``).
 """
 
 import json
@@ -98,8 +98,8 @@ def _clean_text(text: str) -> str:
 
 
 def _read_description_rows(description_dir: Path, table_name: str):
-    """Yields ``(original_column_name, column_name, column_description)`` from BIRD's
-    ``database_description/<table>.csv``, one tuple per row with a non-blank
+    """Yields ``(original_column_name, column_name, column_description, value_description)``
+    from BIRD's ``database_description/<table>.csv``, one tuple per row with a non-blank
     ``original_column_name`` (the real, queryable SQLite identifier -- used to align CSV rows
     to actual columns).
     """
@@ -119,17 +119,63 @@ def _read_description_rows(description_dir: Path, table_name: str):
                 original_column_name,
                 _clean_text(row.get("column_name") or ""),
                 _clean_text(row.get("column_description") or ""),
+                _clean_text(row.get("value_description") or ""),
             )
 
 
-def _column_descriptions(description_dir: Path, table_name: str) -> Dict[str, str]:
-    """{original_column_name: description}: the CSV's ``column_name`` (a cleaned/renamed
-    label BIRD provides), falling back to ``column_description`` (a full sentence) when
-    ``column_name`` is blank, which it is for a large fraction of rows.
+# Aliases accepted by the ``dscp`` field-selection string (e.g. ``"name,col_dscp"``), each mapped
+# to a resolver that picks its raw text out of a ``(column_name, column_description,
+# value_description)`` tuple. Most aliases are a straight field lookup; ``name_or_col_dscp`` is a
+# fallback (name if non-blank, else description) kept only to reproduce the pre-``dscp`` behavior
+# (``column_name or column_description``), which always emitted exactly one of the two fields,
+# never both -- unlike ``"name,col_dscp"``, which concatenates both when both are non-blank.
+_DSCP_FIELD_RESOLVERS = {
+    "name": lambda parts: parts[0],
+    "col_dscp": lambda parts: parts[1],
+    "val_dscp": lambda parts: parts[2],
+    "name_or_col_dscp": lambda parts: parts[0] or parts[1],
+}
+
+
+def parse_dscp_fields(dscp: str) -> List[str]:
+    """Parses a comma-separated ``dscp`` string (e.g. ``"name,col_dscp"``) into an ordered list
+    of field aliases, validating each against ``_DSCP_FIELD_RESOLVERS``.
+    """
+    fields = [field.strip() for field in dscp.split(",") if field.strip()]
+    if not fields:
+        raise ValueError(f"dscp must name at least one field from {sorted(_DSCP_FIELD_RESOLVERS)}, got {dscp!r}")
+    unknown = [field for field in fields if field not in _DSCP_FIELD_RESOLVERS]
+    if unknown:
+        raise ValueError(f"Unknown dscp field(s) {unknown} in {dscp!r}; valid fields: {sorted(_DSCP_FIELD_RESOLVERS)}")
+    return fields
+
+
+def _combine_description(fields: List[str], parts: Tuple[str, str, str]) -> str:
+    """Concatenates ``parts`` (``(column_name, column_description, value_description)``) in the
+    order given by ``fields``, dropping any blank part and appending a period to each kept part
+    that doesn't already end with one, so the result reads as prose.
+    """
+    segments: List[str] = []
+    for field in fields:
+        value = _DSCP_FIELD_RESOLVERS[field](parts).strip()
+        if not value:
+            continue
+        if not value.endswith("."):
+            value += "."
+        segments.append(value)
+    return " ".join(segments)
+
+
+def _column_descriptions(description_dir: Path, table_name: str, dscp_fields: List[str]) -> Dict[str, str]:
+    """{original_column_name: description}, built by concatenating the CSV's ``column_name``,
+    ``column_description``, and/or ``value_description`` fields in ``dscp_fields`` order -- see
+    ``_combine_description``.
     """
     return {
-        original: column_name or column_description
-        for original, column_name, column_description in _read_description_rows(description_dir, table_name)
+        original: _combine_description(dscp_fields, (column_name, column_description, value_description))
+        for original, column_name, column_description, value_description in _read_description_rows(
+            description_dir, table_name
+        )
     }
 
 
@@ -382,11 +428,14 @@ def build_sql_context(
 class DbHandle:
     """Everything needed to answer questions against one database, computed once."""
 
-    def __init__(self, cur: Cursor, description_dir: Path):
+    def __init__(self, cur: Cursor, description_dir: Path, dscp: str = "name_or_col_dscp"):
         self.cur = cur
         self.table_names = _table_names(cur)
         self.column_types_by_table = {t: _column_types(cur, t) for t in self.table_names}
-        self.descriptions_by_table = {t: _column_descriptions(description_dir, t) for t in self.table_names}
+        dscp_fields = parse_dscp_fields(dscp)
+        self.descriptions_by_table = {
+            t: _column_descriptions(description_dir, t, dscp_fields) for t in self.table_names
+        }
         self.primary_keys_by_table = {t: _primary_key_columns(cur, t) for t in self.table_names}
         self.foreign_keys = _all_foreign_keys(cur, self.table_names)
         self.sampled_values = _sample_table_values(cur, self.table_names)

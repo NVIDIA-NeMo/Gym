@@ -161,6 +161,18 @@ class TestExtractSqlFromResponse:
         text = "```sql\n12345\n```"
         assert extract_sql_from_response(text) is None
 
+    def test_fence_tag_case_insensitive(self):
+        # The ```sql fence tag itself is matched case-insensitively, but the
+        # captured SQL content's case is left untouched.
+        text = "```SQL\nSELECT Name FROM Students\n```"
+        assert extract_sql_from_response(text) == "SELECT Name FROM Students"
+
+    def test_fence_tag_requires_word_boundary(self):
+        # Case-insensitivity must not also match unrelated tags that merely start with
+        # "sql" (```SQLite, ```sqlalchemy, ...).
+        assert extract_sql_from_response("```SQLite\nSELECT 1\n```") is None
+        assert extract_sql_from_response("```sqlalchemy\nSELECT 1\n```") is None
+
 
 # ---------------------------------------------------------------------------
 # result_sets_match
