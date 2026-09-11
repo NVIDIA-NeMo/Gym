@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from types import SimpleNamespace
 from typing import Any, Literal
 
@@ -95,6 +96,7 @@ class NeMoSimProcessorConfig(BaseProcessorConfig):
     summary_model: ModelServerRef
     api_response_model: ModelServerRef
     max_turns: int = Field(5, ge=1)
+    agent_call_timeout_s: float = Field(300.0, gt=0)
     skip_verification: Literal[True] = True
 
     def target_for_alias(self, alias: str) -> AgentServerRef | ModelServerRef:
@@ -163,11 +165,24 @@ class _ConversationBridge:
         *,
         max_tokens: int | None,
     ) -> SimpleNamespace:
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is self.event_loop:
+            raise RuntimeError("NeMo-Sim's synchronous ConversationLoop must run outside the Processor event loop")
+
         future = asyncio.run_coroutine_threadsafe(
             self._invoke_agent(alias, messages, max_tokens=max_tokens),
             self.event_loop,
         )
-        return future.result()
+        try:
+            return future.result(timeout=self.processor.config.agent_call_timeout_s)
+        except FutureTimeoutError as error:
+            future.cancel()
+            raise TimeoutError(
+                f"Timed out after {self.processor.config.agent_call_timeout_s}s waiting for {alias}"
+            ) from error
 
     async def _invoke_agent(
         self,

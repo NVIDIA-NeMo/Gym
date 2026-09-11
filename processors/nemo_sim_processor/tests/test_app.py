@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -12,6 +13,7 @@ from nemo_gym.processors.nemo_sim_processor import (
     NeMoSimProcessor,
     NeMoSimProcessorConfig,
     NeMoSimRunRequest,
+    _ConversationBridge,
     _GymModelFacade,
 )
 from nemo_gym.server_utils import ServerClient
@@ -153,3 +155,17 @@ async def test_preserves_failure_before_first_assistant_turn(monkeypatch: pytest
     assert result.nemo_sim_result["conversation_status"] is False
     assert result.response.output == []
     assert result.invocations == []
+
+
+@pytest.mark.asyncio
+async def test_rejects_sync_bridge_call_on_processor_event_loop() -> None:
+    processor = _processor()
+    bridge = _ConversationBridge(
+        processor=processor,
+        body=_request(),
+        event_loop=asyncio.get_running_loop(),
+        cookies={},
+    )
+
+    with pytest.raises(RuntimeError, match="must run outside"):
+        bridge.complete_from_worker("user_model", [], max_tokens=None)
