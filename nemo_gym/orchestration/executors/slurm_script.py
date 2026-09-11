@@ -16,7 +16,9 @@
 import re
 import shlex
 from pathlib import Path
+from typing import Any
 
+from nemo_gym.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.orchestration.api import (
     BenchmarkRunConfig,
     NodePool,
@@ -239,6 +241,21 @@ def _node_totals(compute: SlurmComputeConfig) -> tuple[int, int]:
     return total_nodes, total_ntasks
 
 
+def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> dict[str, Any]:
+    """Auto-derive model_call_capture_dir from this benchmark's own real output
+    directory when observability is on and the caller didn't set one.
+
+    Hydra interpolation resolves before remote_bench_dir exists (it's computed
+    here, in build_sbatch_script, well after SubmitConfig validation), so
+    there's no way for a YAML value to reference it -- this has to happen in
+    Python, once the real path is known. An explicit model_call_capture_dir in
+    run always wins over this default.
+    """
+    if run.get(OBSERVABILITY_ENABLED_KEY_NAME) and MODEL_CALL_CAPTURE_DIR_KEY_NAME not in run:
+        return {**run, MODEL_CALL_CAPTURE_DIR_KEY_NAME: str(remote_bench_dir / "model-calls")}
+    return run
+
+
 def build_sbatch_script(
     config: SubmitConfig,
     benchmark_name: str,
@@ -290,7 +307,8 @@ def build_sbatch_script(
 
     output_path = "+output_jsonl_fpath=artifacts/rollouts.jsonl"
     extra_flags = ["--model-type openai_model"] if config.driver.policy_model else []
-    gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(benchmark.run))
+    run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
+    gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
     entrypoint = render_driver_entrypoint(
         repo=gi.repo if gi else None,
         ref=gi.ref if gi else None,
