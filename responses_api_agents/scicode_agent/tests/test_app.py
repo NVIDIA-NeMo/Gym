@@ -19,9 +19,12 @@ import pytest
 from fastapi import Response
 
 import responses_api_agents.scicode_agent.app as app
+from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.scicode_agent.app import (
+    TOKEN_USAGE_VERSION,
     ModelServerRef,
     ResourcesServerRef,
     ScicodeAgent,
@@ -360,3 +363,226 @@ class TestAcrossRunStats:
         assert "mean/problem_accuracy/std_dev_across_runs" in key
         assert "subtask_accuracy/std_dev_across_runs" in key
         assert "std/reward" not in key
+
+
+def _usage(output_tokens, input_tokens=10, cached_tokens=2, reasoning_tokens=3):
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "input_tokens_details": {"cached_tokens": cached_tokens},
+        "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
+    }
+
+
+async def _collect_usage(usages, problem_id="1", n_steps=None, response_overrides=None):
+    """Exercise the step loop and capture the payload sent to verification."""
+    agent = _agent()
+    responses = iter(usages)
+
+    def _post(server_name, url_path, json, cookies):
+        if url_path == "/v1/responses":
+            usage = next(responses)
+            if isinstance(usage, Exception):
+                raise usage
+            return _Resp({**_model_json("x = 1"), "usage": usage, **(response_overrides or {})})
+        return _Resp({**json, "reward": 0.0})
+
+    agent.server_client.post = AsyncMock(side_effect=_post)
+    with patch.object(app, "raise_for_status", AsyncMock()):
+        return await agent.run(
+            _FakeRequest(), _run_request(problem_id=problem_id, n_steps=len(usages) if n_steps is None else n_steps)
+        )
+
+
+def _aggregate(rows):
+    agent = _agent()
+    rows = [{"_ng_task_index": i, "_ng_rollout_index": 0, **row} for i, row in enumerate(rows)]
+    return compute_aggregate_metrics(rows, agent.compute_metrics, agent.get_key_metrics)
+
+
+class TestTokenAccounting:
+    @pytest.mark.asyncio
+    async def test_usage_sent_to_verifier_sums_all_steps_and_details(self):
+        row = await _collect_usage([_usage(100), _usage(300, input_tokens=20)])
+        assert row["token_usage_version"] == TOKEN_USAGE_VERSION
+        assert row["response"]["usage"] == _usage(400, input_tokens=30, cached_tokens=4, reasoning_tokens=6)
+        assert row["step_usage"] == [
+            {"step_number": "1.1", "status": "generated", "usage": _usage(100)},
+            {"step_number": "1.2", "status": "generated", "usage": _usage(300, input_tokens=20)},
+        ]
+        assert row["response"]["output"][0]["content"][0]["text"] == "```python\nx = 1\n```"
+
+    @pytest.mark.asyncio
+    async def test_unequal_step_counts_and_repeats_are_pooled(self):
+        # Two attempts each: one-step problem (100, 200), three-step problem
+        # (300+400+500, 600+700+800). Total 3600 / 4 problems / 8 steps.
+        rows = []
+        for task_idx, attempts in enumerate(([[100], [200]], [[300, 400, 500], [600, 700, 800]])):
+            for repeat_idx, tokens in enumerate(attempts):
+                row = await _collect_usage([_usage(t) for t in tokens])
+                rows.append({**row, "_ng_task_index": task_idx, "_ng_rollout_index": repeat_idx})
+        result = _aggregate(rows)
+        for name, per_problem, per_subproblem in (("input", 20, 10), ("output", 900, 450), ("total", 920, 460)):
+            assert result.key_metrics[f"mean/{name}_tokens_per_problem"] == per_problem
+            assert result.key_metrics[f"mean/{name}_tokens_per_subproblem"] == per_subproblem
+            assert result.key_metrics[f"mean/{name}_tokens"] == per_problem
+        assert result.agent_metrics["num_generated_steps"] == 8
+        assert result.agent_metrics["num_subproblems"] == 8
+        assert result.agent_metrics["num_steps_with_usage"] == 8
+        assert result.key_metrics["generation_coverage"] == 1.0
+        assert result.key_metrics["token_usage_complete"] is True
+        assert result.agent_metrics["token_usage_version"] == 1
+        assert all(isinstance(value, (int, float)) for value in result.agent_metrics.values())
+        assert [g["mean/output_tokens"] for g in result.group_level_metrics] == [150, 1650]
+
+    @pytest.mark.asyncio
+    async def test_prefilled_and_context_skipped_steps_are_not_generated(self):
+        row = await _collect_usage(
+            [_usage(100), RuntimeError("exceeds maximum input length")], problem_id="62", n_steps=4
+        )
+        assert [s["status"] for s in row["step_usage"]] == [
+            "prefilled",
+            "generated",
+            "context_window_exceeded",
+            "skipped",
+        ]
+        assert row["response"]["usage"]["output_tokens"] == 100
+        for i in (0, 2, 3):
+            assert row["step_usage"][i]["usage"] == _usage(0, input_tokens=0, cached_tokens=0, reasoning_tokens=0)
+        result = _aggregate([row])
+        metrics = result.key_metrics
+        assert metrics["mean/output_tokens_per_problem"] == 100
+        assert metrics["mean/output_tokens_per_subproblem"] == pytest.approx(100 / 3)
+        assert metrics["generation_coverage"] == 1 / 3
+        assert metrics["token_usage_complete"] is True
+        assert result.agent_metrics["num_subproblems"] == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("missing_index", [0, 1])
+    async def test_missing_usage_stays_unknown_in_rollout_and_collection(self, missing_index):
+        usages = [_usage(100), _usage(300)]
+        usages[missing_index] = None
+        unknown = await _collect_usage(usages)
+        known = await _collect_usage([_usage(200)])
+        assert unknown["response"]["usage"] is None
+        assert unknown["step_usage"][missing_index]["usage"] is None
+        result = _aggregate([unknown, {**known, "_ng_task_index": 1}])
+        for name in ("input", "output", "total"):
+            for suffix in ("", "_per_problem", "_per_subproblem"):
+                assert result.key_metrics[f"mean/{name}_tokens{suffix}"] is None
+        assert result.agent_metrics["num_generated_steps"] == 3
+        assert result.agent_metrics["num_steps_with_usage"] == 2
+        assert result.key_metrics["token_usage_complete"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("missing_usage", [False, True])
+    async def test_aggregate_endpoint_suppresses_all_partial_token_statistics(self, missing_usage):
+        rows = []
+        for task_idx in range(2):
+            for repeat_idx in range(2):
+                usage = None if missing_usage and task_idx == repeat_idx == 0 else _usage(100)
+                row = await _collect_usage([usage])
+                rows.append({**row, "_ng_task_index": task_idx, "_ng_rollout_index": repeat_idx})
+        body = AggregateMetricsRequest(verify_responses=rows)
+        original = body.model_dump()
+        result = await _agent().aggregate_metrics(body)
+        assert body.model_dump() == original
+        assert result.key_metrics["token_usage_complete"] is not missing_usage
+        assert result.key_metrics["generation_coverage"] == 1.0
+        for section in (result.agent_metrics, result.key_metrics):
+            assert all(value is not None and not isinstance(value, str) for value in section.values())
+        if missing_usage:
+            assert "mean/output_tokens_per_problem" not in result.key_metrics
+
+            def check_no_numeric_tokens(value):
+                if isinstance(value, dict):
+                    for key, item in value.items():
+                        if "tokens" in key:
+                            assert not isinstance(item, (int, float)), (key, item)
+                        check_no_numeric_tokens(item)
+                elif isinstance(value, list):
+                    for item in value:
+                        check_no_numeric_tokens(item)
+
+            check_no_numeric_tokens(result.model_dump())
+        else:
+            assert result.key_metrics["mean/output_tokens_per_problem"] == 100
+            assert result.agent_metrics["max/output_tokens"] == 100
+            assert all(group["mean/output_tokens"] == 100 for group in result.group_level_metrics)
+
+    @pytest.mark.asyncio
+    async def test_unknown_reasoning_details_do_not_poison_known_output_count(self):
+        row = await _collect_usage([_usage(100, reasoning_tokens=None), _usage(200)])
+        assert row["response"]["usage"]["output_tokens"] == 300
+        assert row["response"]["usage"]["output_tokens_details"]["reasoning_tokens"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["empty", "prefilled", "context"])
+    async def test_no_generations_zero_usage_with_fixed_subproblem_denominator(self, kind):
+        if kind == "prefilled":
+            row = await _collect_usage([], problem_id="62", n_steps=1)
+        elif kind == "context":
+            row = await _collect_usage([RuntimeError("exceeds maximum input length")], n_steps=2)
+        else:
+            row = await _collect_usage([])
+        assert row["response"]["usage"]["output_tokens"] == 0
+        assert all(step["usage"]["total_tokens"] == 0 for step in row["step_usage"])
+        metrics = _aggregate([row]).key_metrics
+        for name in ("input", "output", "total"):
+            assert metrics[f"mean/{name}_tokens_per_problem"] == 0
+            assert metrics[f"mean/{name}_tokens_per_subproblem"] == (0 if kind == "context" else None)
+        assert metrics["generation_coverage"] == (0 if kind == "context" else None)
+
+    @pytest.mark.asyncio
+    async def test_truncated_generation_counts_all_usage(self):
+        row = await _collect_usage(
+            [_usage(262000, input_tokens=144)],
+            response_overrides={"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}},
+        )
+        assert row["response"]["incomplete_details"] == {"reason": "max_output_tokens"}
+        assert row["step_usage"][0]["status"] == "generated"
+        metrics = _aggregate([row]).key_metrics
+        for scope in ("problem", "subproblem"):
+            assert metrics[f"mean/input_tokens_per_{scope}"] == 144
+            assert metrics[f"mean/output_tokens_per_{scope}"] == 262000
+            assert metrics[f"mean/total_tokens_per_{scope}"] == 262144
+
+    @pytest.mark.asyncio
+    async def test_correctness_does_not_filter_token_usage(self):
+        row = await _collect_usage([_usage(1000)] * 3)
+        one_correct = {**row, "step_results": [True, False, False], "num_steps_passed": 1, "num_steps_total": 3}
+        two_correct = {**row, "step_results": [True, True, False], "num_steps_passed": 2, "num_steps_total": 3}
+        first = _aggregate([one_correct]).key_metrics
+        second = _aggregate([two_correct]).key_metrics
+        assert first["subtask_accuracy"] == 1 / 3
+        assert second["subtask_accuracy"] == 2 / 3
+        assert first["mean/output_tokens_per_problem"] == second["mean/output_tokens_per_problem"] == 3000
+        assert first["mean/output_tokens_per_subproblem"] == second["mean/output_tokens_per_subproblem"] == 1000
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("text", ["not Python code", "```python\nthis is ! invalid\n```", "```python\n", ""])
+    async def test_unusable_code_does_not_stop_later_steps_or_drop_usage(self, text):
+        output = _model_json("ignored")["output"]
+        output[0]["content"][0]["text"] = text
+        row = await _collect_usage([_usage(100), _usage(200)], response_overrides={"output": output})
+        assert set(row["solutions"]) == {"1.1", "1.2"}
+        assert [step["status"] for step in row["step_usage"]] == ["generated", "generated"]
+        assert row["response"]["usage"]["output_tokens"] == 300
+        metrics = _aggregate([row]).key_metrics
+        assert metrics["mean/output_tokens_per_problem"] == 300
+        assert metrics["mean/output_tokens_per_subproblem"] == 150
+
+    def test_legacy_rollouts_do_not_gain_whole_problem_metrics(self):
+        row = {"reward": 0.0, "response": {"usage": _usage(100)}}
+        metrics = _aggregate([row]).key_metrics
+        assert metrics["mean/output_tokens"] == 100
+        assert "mean/output_tokens_per_problem" not in metrics
+        assert "mean/output_tokens_per_subproblem" not in metrics
+
+    @pytest.mark.asyncio
+    async def test_mixed_accounting_versions_rejected(self):
+        row = await _collect_usage([_usage(100)])
+        old_row = {"reward": 0.0, "response": {"usage": _usage(200)}}
+        with pytest.raises(ValueError, match="different token accounting versions"):
+            _aggregate([row, old_row])
