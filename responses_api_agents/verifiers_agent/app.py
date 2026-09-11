@@ -21,7 +21,7 @@ from typing import Any
 
 import verifiers as vf
 from fastapi import Body, Request, Response
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, Timeout
 from pydantic import ConfigDict, Field
 from verifiers.clients import NeMoRLChatCompletionsClient
 
@@ -167,6 +167,19 @@ class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
     temperature: float = Field(default=1.0)
     top_p: float = Field(default=1.0)
 
+    # Policy-client deadline. The openai SDK default is 600s read/write with 2
+    # retries; one long agentic turn from a large policy on a shared engine can
+    # exceed that under load, and the SDK then retries the whole generation.
+    # None keeps the SDK defaults so existing configs are unaffected.
+    client_timeout_s: float | None = Field(
+        default=None,
+        description="Read/write/pool timeout in seconds for requests to the policy model server. None keeps the openai SDK default.",
+    )
+    client_max_retries: int | None = Field(
+        default=None,
+        description="openai SDK retry count for the policy client. None keeps the SDK default.",
+    )
+
 
 class VerifiersAgentRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
@@ -206,9 +219,21 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
             if not model_server_url.endswith("/v1"):
                 model_server_url = model_server_url.rstrip("/") + "/v1"
 
+            client_kwargs: dict[str, Any] = {}
+            if self.config.client_timeout_s is not None:
+                # connect stays at the SDK default so an unreachable server still fails fast.
+                client_kwargs["timeout"] = Timeout(
+                    connect=5.0,
+                    read=self.config.client_timeout_s,
+                    write=self.config.client_timeout_s,
+                    pool=self.config.client_timeout_s,
+                )
+            if self.config.client_max_retries is not None:
+                client_kwargs["max_retries"] = self.config.client_max_retries
             openai_client = AsyncOpenAI(
                 base_url=model_server_url,
                 api_key="EMPTY",  # pragma: allowlist secret
+                **client_kwargs,
             )
             self.client_cache[cache_key] = NeMoRLChatCompletionsClient(openai_client)
 
