@@ -18,7 +18,7 @@ DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "harmbench_direct_request_text.jsonl"
 
 UPSTREAM_REPOSITORY = "centerforaisafety/HarmBench"
-UPSTREAM_REVISION = "8e1604d1171fe8a48d8febecd22f600e462bdcdd"
+UPSTREAM_REVISION = "8e1604d1171fe8a48d8febecd22f600e462bdcdd"  # pragma: allowlist secret
 SOURCE_PATH = "data/behavior_datasets/harmbench_behaviors_text_test.csv"
 SOURCE_URL = f"https://raw.githubusercontent.com/{UPSTREAM_REPOSITORY}/{UPSTREAM_REVISION}/{SOURCE_PATH}"
 EXPECTED_COUNTS = {"standard": 159, "contextual": 81}
