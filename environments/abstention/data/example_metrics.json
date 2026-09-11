@@ -1,11 +1,18 @@
 {
     "name": "example",
     "type": "example",
-    "jsonl_fpath": "resources_servers/abstention/data/example.jsonl",
+    "jsonl_fpath": "environments/abstention/data/example.jsonl",
     "num_repeats": 1,
+    "source": {
+        "unique_count": 4,
+        "total_count": 4
+    },
     "gitlab_identifier": null,
     "huggingface_identifier": null,
-    "license": null,
+    "license": {
+        "unique_count": 1,
+        "total_count": 5
+    },
     "Number of examples": 5,
     "Number of tools": {
         "Total # non-null values": 5,
@@ -16,10 +23,10 @@
     },
     "Json-dumped number of words (proxy for token count)": {
         "Total # non-null values": 5,
-        "Average": 78.2,
-        "Min": 75.0,
-        "Max": 82.0,
-        "Standard deviation": 2.86
+        "Average": 77.0,
+        "Min": 74.0,
+        "Max": 80.0,
+        "Standard deviation": 2.24
     },
     "Number of turns": {
         "Total # non-null values": 5,
@@ -45,6 +52,18 @@
     },
     "answer": {
         "unique_count": 5,
+        "total_count": 5
+    },
+    "domain": {
+        "unique_count": 3,
+        "total_count": 4
+    },
+    "uuid": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "used_in": {
+        "unique_count": 1,
         "total_count": 5
     }
 }
