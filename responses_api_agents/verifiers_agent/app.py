@@ -204,41 +204,53 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
     config: VerifiersAgentConfig
 
     envs_cache: dict[str, Any] = Field(default_factory=dict)
-    client_cache: dict[str, NeMoRLChatCompletionsClient] = Field(default_factory=dict)
 
     def _get_env(self, vf_env_id: str) -> vf.Environment:
         if vf_env_id not in self.envs_cache:
             self.envs_cache[vf_env_id] = vf.load_environment(vf_env_id, **self.config.vf_env_args)
         return self.envs_cache[vf_env_id]
 
-    def _get_client(self) -> NeMoRLChatCompletionsClient:
-        cache_key = self.config.model_server.name
-        if cache_key not in self.client_cache:
-            server_config_dict = get_first_server_config_dict(
-                self.server_client.global_config_dict,
-                self.config.model_server.name,
-            )
-            model_server_url = f"http://{server_config_dict.host}:{server_config_dict.port}"
+    def _policy_model_server_url(self) -> str:
+        server_config_dict = get_first_server_config_dict(
+            self.server_client.global_config_dict,
+            self.config.model_server.name,
+        )
+        model_server_url = f"http://{server_config_dict.host}:{server_config_dict.port}"
+        if not model_server_url.endswith("/v1"):
+            model_server_url = model_server_url.rstrip("/") + "/v1"
+        return model_server_url
 
-            if not model_server_url.endswith("/v1"):
-                model_server_url = model_server_url.rstrip("/") + "/v1"
+    def _make_openai_client(self) -> AsyncOpenAI:
+        """Build a policy client for ONE rollout. Never share it across rollouts.
 
-            client_kwargs: dict[str, Any] = {}
-            if self.config.client_timeout_s is not None or self.config.client_connect_timeout_s is not None:
-                # Unset fields keep the SDK defaults (5s connect, 600s read/write/pool).
-                connect = self.config.client_connect_timeout_s if self.config.client_connect_timeout_s is not None else 5.0
-                other = self.config.client_timeout_s if self.config.client_timeout_s is not None else 600.0
-                client_kwargs["timeout"] = Timeout(connect=connect, read=other, write=other, pool=other)
-            if self.config.client_max_retries is not None:
-                client_kwargs["max_retries"] = self.config.client_max_retries
-            openai_client = AsyncOpenAI(
-                base_url=model_server_url,
-                api_key="EMPTY",  # pragma: allowlist secret
-                **client_kwargs,
-            )
-            self.client_cache[cache_key] = NeMoRLChatCompletionsClient(openai_client)
+        The vllm_model server picks a vLLM engine per session
+        (``sha256(session_id) % len(base_urls)`` in
+        responses_api_models/vllm_model/app.py ``_resolve_client``) and mints the
+        session id per cookie jar (nemo_gym/server_utils.py
+        ``setup_session_middleware``). openai's AsyncOpenAI sits on an httpx client
+        that persists cookies, so one client shared by every rollout in this
+        process is one session and therefore one engine: on CMH job 3670120
+        (2026-09-10) 512 concurrent rollouts ran on 6 of 48 engines while 42 sat
+        idle. Gym's own aiohttp client sidesteps this with a DummyCookieJar.
 
-        return self.client_cache[cache_key]
+        A client per rollout gives each rollout its own session, so all of its
+        turns stay on one engine (the prefix-cache affinity the router is built
+        for) and the rollouts as a whole spread over every engine. The caller
+        closes it when the rollout ends.
+        """
+        client_kwargs: dict[str, Any] = {}
+        if self.config.client_timeout_s is not None or self.config.client_connect_timeout_s is not None:
+            # Unset fields keep the SDK defaults (5s connect, 600s read/write/pool).
+            connect = self.config.client_connect_timeout_s if self.config.client_connect_timeout_s is not None else 5.0
+            other = self.config.client_timeout_s if self.config.client_timeout_s is not None else 600.0
+            client_kwargs["timeout"] = Timeout(connect=connect, read=other, write=other, pool=other)
+        if self.config.client_max_retries is not None:
+            client_kwargs["max_retries"] = self.config.client_max_retries
+        return AsyncOpenAI(
+            base_url=self._policy_model_server_url(),
+            api_key="EMPTY",  # pragma: allowlist secret
+            **client_kwargs,
+        )
 
     def _convert_trajectory_to_output(self, rollout_output: dict) -> list:
         assistant_tokens = self._collect_assistant_tokens(rollout_output.get("trajectory") or [])
@@ -317,8 +329,6 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 example_id=body.example_id,
             )
 
-            client = self._get_client()
-
             # prefer NeMo RL generation config set in responses_create_params
             # https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/experience/rollouts.py#L1045-L1046
             sampling_args = {
@@ -326,13 +336,19 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 "temperature": getattr(body.responses_create_params, "temperature", None) or self.config.temperature,
                 "top_p": getattr(body.responses_create_params, "top_p", None) or self.config.top_p,
             }
-            outputs = await vf_env.run_group(
-                group_inputs=[rollout_input],
-                client=client,
-                model=self.config.model_name,
-                sampling_args=sampling_args,
-                state_columns=["trajectory"],
-            )
+            # One client per rollout; see _make_openai_client for why sharing one
+            # pins every rollout in this process to a single vLLM engine.
+            openai_client = self._make_openai_client()
+            try:
+                outputs = await vf_env.run_group(
+                    group_inputs=[rollout_input],
+                    client=NeMoRLChatCompletionsClient(openai_client),
+                    model=self.config.model_name,
+                    sampling_args=sampling_args,
+                    state_columns=["trajectory"],
+                )
+            finally:
+                await openai_client.close()
 
             rollout_output = outputs[0]
             reward = rollout_output.get("reward", 0.0) or 0.0
