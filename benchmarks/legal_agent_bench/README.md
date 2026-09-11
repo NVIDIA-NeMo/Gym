@@ -20,8 +20,9 @@ Harbor or one of Gym's built-in agent harnesses. All non-Harbor choices use the
 
 Benchmark preparation reuses the resource server's pinned task and skill
 caches and copies a small, gitignored, deterministic index. Source, example,
-and benchmark JSONL rows are agent-neutral. Gym stamps the variant's configured
-agent during dataset collation.
+and benchmark JSONL rows are agent-neutral. Gym stamps the declaring server as
+`task_source` during dataset collation and resolves the configured agent when
+the rollout is dispatched.
 
 ## Requirements
 

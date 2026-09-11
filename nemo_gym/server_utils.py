@@ -44,6 +44,7 @@ from aiohttp import (
     TCPConnector,
 )
 from aiohttp.client import _RequestOptions
+from anyio import create_task_group
 from fastapi import FastAPI, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
@@ -53,6 +54,7 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from nemo_gym import WORKING_DIR
 from nemo_gym.config_types import (
@@ -83,6 +85,9 @@ from nemo_gym.telemetry.span_groups import GymSpanGroup
 _GLOBAL_AIOHTTP_CLIENT: Union[None, ClientSession] = None
 _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG: bool = False
 _UPSTREAM_ERROR_LOG_BODY_CHARS = 2000
+
+NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_NAME"
+NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME = "NEMO_GYM_MODEL_SERVER_BASE_URL"
 
 
 class _PickleSafeRequestInfo(NamedTuple):
@@ -489,7 +494,15 @@ class ServerClient(BaseModel):
     async def request(
         self, server_name: str, url_path: str, method: str, **kwargs: Unpack[_RequestOptions]
     ) -> ClientResponse:
-        base_url = self._resolve_base_url(server_name)
+        model_server_name = getenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME)
+        model_server_base_url = getenv(NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME)
+        if model_server_base_url and server_name == model_server_name:
+            # Subprocess agents do not inherit the current rollout context.
+            # The launcher provides a model URL that already contains the rollout prefix.
+            # Use that URL instead of rebuilding it from global server configuration.
+            base_url = model_server_base_url.rstrip("/")
+        else:
+            base_url = self._resolve_base_url(server_name)
 
         json_obj = kwargs.get("json")
         if "json" in kwargs:
@@ -618,6 +631,10 @@ class BaseServer(BaseModel):
         return server_config
 
     def setup_liveness(self, app: FastAPI) -> None:
+        @app.get("/readyz", include_in_schema=False)
+        @app.get("/livez", include_in_schema=False)
+        @app.get("/healthz", include_in_schema=False)
+        @app.get("/health", include_in_schema=False)
         @app.get("/", include_in_schema=False)
         async def _liveness():
             return {"status": "ok"}
@@ -735,6 +752,74 @@ def _telemetry_server_type(server_cls: Type) -> Optional[str]:
     return None
 
 
+class ClientDisconnectCancellationMiddleware:
+    """Cancel an in-flight HTTP request when its client disconnects."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+        self.num_cancelled = 0
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        received_messages: asyncio.Queue[Message] = asyncio.Queue()
+        client_disconnected = asyncio.Event()
+        response_complete = asyncio.Event()
+
+        async def receive_message() -> Message:
+            return await received_messages.get()
+
+        async def send_message(message: Message) -> None:
+            if client_disconnected.is_set():
+                return
+
+            await send(message)
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                response_complete.set()
+
+        # The listener is the sole reader of the original ASGI receive channel.
+        # Forwarding request messages keeps the body available to the app while
+        # also allowing disconnects to cancel handlers that no longer call receive.
+        async with create_task_group() as task_group:
+
+            async def run_app() -> None:
+                try:
+                    await self.app(scope, receive_message, send_message)
+                finally:
+                    task_group.cancel_scope.cancel()
+
+            async def listen_for_disconnect() -> None:
+                while True:
+                    message = await receive()
+                    if message["type"] != "http.disconnect":
+                        await received_messages.put(message)
+                        continue
+
+                    # Uvicorn returns http.disconnect from receive() once the response is complete,
+                    # even if the peer did not disconnect early. Only cancel requests whose response
+                    # has not finished being sent.
+                    if response_complete.is_set():
+                        return
+
+                    await received_messages.put(message)
+                    client_disconnected.set()
+                    self.num_cancelled += 1
+                    if is_global_aiohttp_client_request_debug_enabled() or self.num_cancelled % 100 == 0:
+                        client = scope.get("client")
+                        client_address = f"{client[0]}:{client[1]}" if client else "-:-"
+                        print(
+                            f'{client_address} - "{scope["method"]} {scope["path"]}" '
+                            f"499 CLIENT DISCONNECTED ({self.num_cancelled} total for this server worker)"
+                        )
+                    task_group.cancel_scope.cancel()
+                    return
+
+            task_group.start_soon(run_app)
+            task_group.start_soon(listen_for_disconnect)
+
+
 class SimpleServer(BaseServer):
     server_client: ServerClient
 
@@ -822,7 +907,7 @@ class SimpleServer(BaseServer):
 
                 return JSONResponse(content=response_content, status_code=500)
             except CancelledError:
-                return JSONResponse(content="An unknown error occurred", status_code=500)
+                return JSONResponse(content="Request was cancelled", status_code=500)
             except Exception as e:
                 print(
                     f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
@@ -836,6 +921,9 @@ repr(e): {repr(e)}"""
                     f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
                 )
                 return JSONResponse(content="An unknown error occurred", status_code=500)
+
+    def setup_cancellation_middleware(self, app: FastAPI) -> None:
+        app.add_middleware(ClientDisconnectCancellationMiddleware)
 
     def setup_profiling(self, app: FastAPI, profiling_config: ProfilingMiddlewareConfig) -> None:  # pragma: no cover
         base_profile_dir = WORKING_DIR / profiling_config.profiling_results_dirpath / self.get_session_middleware_key()
@@ -949,6 +1037,8 @@ repr(e): {repr(e)}"""
         server.set_ulimit()
         server.prefix_server_logs()
         server.setup_exception_middleware(app)
+        # Register last so cancellation wraps the complete request stack.
+        server.setup_cancellation_middleware(app)
         # Must precede uvicorn.run: Starlette refuses add_middleware once the app has
         # started. This is the ingress half of cross-process propagation — the instrumentor
         # extracts an inbound `traceparent` and parents this server's SERVER span to the
@@ -1024,17 +1114,34 @@ Full body: {json.dumps(exc.body, indent=4)}
 class HeadServer(BaseServer):
     config: BaseServerConfig
     _server_instances: List[dict] = []
+    _ready: bool = PrivateAttr(default=False)
     # Serialized global config returned to clients.
     _cached_yaml: Optional[str] = None
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
 
-        self.setup_liveness(app)
+        @app.get("/livez", include_in_schema=False)
+        @app.get("/", include_in_schema=False)
+        async def _liveness():
+            return {"status": "ok"}
+
+        @app.get("/readyz", include_in_schema=False)
+        @app.get("/healthz", include_in_schema=False)
+        @app.get("/health", include_in_schema=False)
+        async def _readiness(response: Response):
+            if not self._ready:
+                response.status_code = 503
+                return {"status": "starting"}
+            return {"status": "ok"}
+
         app.get("/global_config_dict_yaml")(self.global_config_dict_yaml)
         app.get("/server_instances")(self.get_server_instances)
 
         return app
+
+    def mark_ready(self) -> None:
+        self._ready = True
 
     def get_server_instances(self) -> List[dict]:
         return self._server_instances

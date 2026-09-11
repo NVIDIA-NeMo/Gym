@@ -261,7 +261,7 @@ def test_configurable_variants_decode_phase_provider_options_from_environment(
         "legal_agent_bench_benchmark_codex_agent",
     ],
 )
-def test_benchmark_collation_stamps_selected_agent_without_changing_source(tmp_path, agent_name) -> None:
+def test_benchmark_collation_stamps_task_source_without_changing_source(tmp_path, agent_name) -> None:
     source = tmp_path / "legal_agent_bench.jsonl"
     neutral_row = {
         "instance_id": "legal_agent_bench::corporate__task",
@@ -298,4 +298,5 @@ def test_benchmark_collation_stamps_selected_agent_without_changing_source(tmp_p
     collated_row = json.loads(prepared.read_text(encoding="utf-8"))
 
     assert json.loads(source.read_text(encoding="utf-8")) == neutral_row
-    assert collated_row["agent_ref"] == {"type": "responses_api_agents", "name": agent_name}
+    assert collated_row["task_source"] == agent_name
+    assert "agent_ref" not in collated_row

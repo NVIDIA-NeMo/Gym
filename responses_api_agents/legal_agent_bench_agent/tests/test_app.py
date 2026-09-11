@@ -1061,6 +1061,19 @@ def test_partial_response_with_harness_error_is_an_agent_failure() -> None:
     assert "adapter failed after partial output" in failure
 
 
+def test_context_limit_error_is_scoreable_only_for_lab_hermes() -> None:
+    response = app.NeMoGymResponse.model_validate(
+        {
+            **_successful_response().model_dump(mode="json"),
+            "status": "failed",
+            "error": {"code": "server_error", "message": "maximum context length exceeded"},
+        }
+    )
+
+    assert app.agent_response_failure(response, "responses_api_agents.hermes_agent.app") is None
+    assert app.agent_response_failure(response, "responses_api_agents.codex_agent.app") is not None
+
+
 def test_native_timeout_failure_metadata_propagates_timeout_flag() -> None:
     response = app.NeMoGymResponse.model_validate(
         {
@@ -1628,15 +1641,55 @@ def test_opensandbox_request_fraction_can_be_disabled(monkeypatch, tmp_path) -> 
     ],
 )
 @pytest.mark.parametrize(
-    "agent_module",
+    ("agent_module", "response_update"),
     [
-        "responses_api_agents.legal_agent_bench_native_agent.app",
-        "responses_api_agents.hermes_agent.app",
-        "responses_api_agents.claude_code_agent.app",
-        "responses_api_agents.codex_agent.app",
+        (
+            "responses_api_agents.legal_agent_bench_native_agent.app",
+            {
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "metadata": {"nemo_gym_stop_reason": "max_turns"},
+            },
+        ),
+        (
+            "responses_api_agents.hermes_agent.app",
+            {
+                "status": "incomplete",
+                "metadata": {"interrupted": "false", "failed": "false", "partial": "false", "turns": "30"},
+            },
+        ),
+        (
+            "responses_api_agents.hermes_agent.app",
+            {
+                "status": "failed",
+                "error": {"code": "server_error", "message": "maximum context length exceeded"},
+                "metadata": {
+                    "interrupted": "false",
+                    "failed": "true",
+                    "partial": "false",
+                    "hermes_error": "maximum context length exceeded",
+                },
+            },
+        ),
+        (
+            "responses_api_agents.claude_code_agent.app",
+            {
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "metadata": {"nemo_gym_stop_reason": "max_turns"},
+            },
+        ),
+        (
+            "responses_api_agents.codex_agent.app",
+            {
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "metadata": {"nemo_gym_stop_reason": "max_turns"},
+            },
+        ),
     ],
 )
-async def test_incomplete_limit_outcomes_are_verified_for_every_harness(
+async def test_limit_outcomes_are_verified_for_every_harness(
     monkeypatch,
     tmp_path,
     capsys,
@@ -1644,6 +1697,7 @@ async def test_incomplete_limit_outcomes_are_verified_for_every_harness(
     expected_reward,
     expected_verifier_failed,
     agent_module,
+    response_update,
 ) -> None:
     _root, task = _task_tree(tmp_path)
     skills = _skills(tmp_path)
@@ -1688,12 +1742,7 @@ async def test_incomplete_limit_outcomes_are_verified_for_every_harness(
 
     def write_runner(paths, params, model_url):
         incomplete = app.NeMoGymResponse.model_validate(
-            _successful_response().model_dump(mode="json")
-            | {
-                "status": "incomplete",
-                "incomplete_details": {"reason": "max_output_tokens"},
-                "metadata": {"nemo_gym_stop_reason": "max_turns"},
-            }
+            _successful_response().model_dump(mode="json") | response_update
         )
         (paths["runtime"] / "response.json").write_text(incomplete.model_dump_json())
 

@@ -748,19 +748,39 @@ def _response_output_text(response: NeMoGymResponse) -> str:
     return "\n".join(parts).strip()
 
 
+def _is_context_limit_error(message: str) -> bool:
+    normalized = message.lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "context length",
+            "context window",
+            "context_length_exceeded",
+            "maximum context",
+            "max context",
+            "too many tokens",
+            "token limit",
+        )
+    )
+
+
 def agent_response_failure(response: NeMoGymResponse, agent_server_module: str) -> Optional[str]:
     """Return a harness-failure reason without treating normal task-quality failures as infrastructure."""
+    key = agent_key(agent_server_module)
     if response.error is not None:
+        # Hermes reports context exhaustion through its generic error channel.
+        # LAB treats it as a valid incomplete attempt and scores any artifacts.
+        if key == "hermes_agent" and _is_context_limit_error(response.error.message):
+            return None
         return f"Agent returned an error response: {response.error}"
     # Max-turn and context-limit stops are valid incomplete model outcomes. The
-    # harnesses represent those with ``incomplete_details`` so LAB can still
-    # verify and score whatever artifacts the agent produced.
-    if response.incomplete_details is not None:
+    # harnesses represent those with an incomplete status or details so LAB
+    # can still verify and score whatever artifacts the agent produced.
+    if response.status == "incomplete" or response.incomplete_details is not None:
         return None
     if not response.output:
         return "Agent produced an empty trajectory"
 
-    key = agent_key(agent_server_module)
     if key == "hermes_agent":
         message_items = [item for item in response.output if getattr(item, "type", None) == "message"]
         synthetic_messages = bool(message_items) and all(

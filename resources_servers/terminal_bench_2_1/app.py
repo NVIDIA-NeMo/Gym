@@ -185,6 +185,10 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         eval_sandbox = AsyncSandbox(resolved_sandbox_provider)
         await eval_sandbox.start(eval_sandbox_spec)
 
+        result = await eval_sandbox.exec("apt-get update", timeout_s=self.config.evaluation_timeout)
+        if result.return_code != 0:
+            print(f"Failed to apt-get update: {result}")
+
         return eval_sandbox
 
     async def seed_session(

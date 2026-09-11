@@ -372,7 +372,6 @@ def parse_opencode_observations(db_path: Path, fallback_invocation_id: str) -> A
     if not invocations:
         invocations = [AgentInvocation(invocation_id=fallback_invocation_id)]
         gaps.append(ObservationGap(code="agent_transcript_unavailable"))
-    gaps.append(ObservationGap(code="model_call_ownership_unavailable"))
 
     return AgentObservationBundle(
         source="opencode",
@@ -476,6 +475,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         resources = SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {}))
         # TODO @bxyu-nvidia: Refactor this after swapping to PTY as this should be set on the SWE Bench resources server side
         env = cpu_cap_env(resources.cpu) if self.config.sandbox_config.get("derive_cpu_env", True) else {}
+        env |= dict(self.config.sandbox_config.get("env", {}))  # explicit keys win over the derived caps
 
         # TODO @bxyu-nvidia: Refactor this after Hemil's swap from Python dataclass to Pydantic BaseModel
         sandbox_spec = SandboxSpec(
