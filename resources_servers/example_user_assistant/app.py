@@ -14,8 +14,8 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.processors.user_assistant import UserAssistantVerifyRequest, UserAssistantVerifyResponse
 from nemo_gym.server_utils import SESSION_ID_KEY
+from processors.user_assistant.app import UserAssistantVerifyRequest, UserAssistantVerifyResponse
 
 
 class MealRecommendation(BaseModel):

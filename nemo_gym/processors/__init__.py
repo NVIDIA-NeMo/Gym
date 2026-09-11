@@ -5,25 +5,19 @@
 
 from nemo_gym.processors.base import BaseProcessor, BaseProcessorConfig
 from nemo_gym.processors.multi_agent import (
+    EpisodeEvent,
+    EpisodeStatus,
     MultiAgentEpisodeSpec,
     MultiAgentProcessor,
     MultiAgentProcessorConfig,
     MultiAgentRunRequest,
     MultiAgentVerifyRequest,
     MultiAgentVerifyResponse,
+    ParticipantTurn,
 )
 from nemo_gym.processors.single_agent_turn import (
     SingleAgentTurnProcessor,
     SingleAgentTurnProcessorConfig,
-)
-from nemo_gym.processors.user_assistant import (
-    EpisodeEvent,
-    EpisodeStatus,
-    ParticipantTurn,
-    UserAssistantProcessorConfig,
-    UserAssistantRunRequest,
-    UserAssistantVerifyRequest,
-    UserAssistantVerifyResponse,
 )
 
 
@@ -41,8 +35,4 @@ __all__ = [
     "MultiAgentVerifyRequest",
     "MultiAgentVerifyResponse",
     "ParticipantTurn",
-    "UserAssistantProcessorConfig",
-    "UserAssistantRunRequest",
-    "UserAssistantVerifyRequest",
-    "UserAssistantVerifyResponse",
 ]

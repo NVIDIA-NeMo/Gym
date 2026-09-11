@@ -6,21 +6,60 @@
 from typing import Any, cast
 
 from fastapi import Request
+from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.processors.base import BaseProcessorConfig
 from nemo_gym.processors.multi_agent import (
     EpisodeEvent,
     MultiAgentEpisodeSpec,
     MultiAgentProcessor,
     ParticipantTurn,
 )
-from nemo_gym.processors.user_assistant import (
-    UserAssistantProcessorConfig,
-    UserAssistantRunRequest,
-    UserAssistantVerifyRequest,
-    UserAssistantVerifyResponse,
-)
+
+
+class UserAssistantRunRequest(BaseRunRequest):
+    """Preserve the original request shape for user-assistant rollouts."""
+
+    model_config = ConfigDict(extra="allow")
+
+    user_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+
+
+class UserAssistantVerifyRequest(BaseVerifyRequest):
+    """Verification payload with separately attributed assistant and user turns."""
+
+    model_config = ConfigDict(extra="allow")
+
+    assistant_trajectory: list[ParticipantTurn]
+    user_trajectory: list[ParticipantTurn]
+    episode_trajectory: list[EpisodeEvent]
+    termination_reason: str
+    turns_completed: int
+
+
+class UserAssistantVerifyResponse(BaseVerifyResponse):
+    """Original user-assistant response shape returned to rollout callers."""
+
+    model_config = ConfigDict(extra="allow")
+
+    assistant_trajectory: list[ParticipantTurn]
+    user_trajectory: list[ParticipantTurn]
+    episode_trajectory: list[EpisodeEvent]
+    termination_reason: str
+    turns_completed: int
+
+
+class UserAssistantProcessorConfig(BaseProcessorConfig):
+    """Configuration for the two-participant user-assistant specialization."""
+
+    assistant_agent: AgentServerRef
+    user_agent: AgentServerRef
+    resources_server: ResourcesServerRef
+    max_turns: int = Field(8, ge=1)
+    status_url_path: str = "/episode_status"
 
 
 class UserAssistantProcessor(MultiAgentProcessor):

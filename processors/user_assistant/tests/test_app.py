@@ -8,12 +8,12 @@ import pytest
 
 from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
 from nemo_gym.processors.multi_agent import MultiAgentProcessor
-from nemo_gym.processors.user_assistant import (
+from nemo_gym.server_utils import ServerClient
+from processors.user_assistant.app import (
+    UserAssistantProcessor,
     UserAssistantProcessorConfig,
     UserAssistantRunRequest,
 )
-from nemo_gym.server_utils import ServerClient
-from processors.user_assistant.app import UserAssistantProcessor
 
 
 def test_specializes_multi_agent_processor() -> None:
