@@ -1818,6 +1818,34 @@ async def test_resume_failure_keeps_the_paused_handle(monkeypatch: pytest.Monkey
     raw.close.assert_not_awaited()
 
 
+async def test_resume_timeout_bounds_the_full_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The SDK applies resume_timeout only to the readiness check; the request and endpoint rebuild must count too."""
+    resume_started = asyncio.Event()
+
+    async def stalled_resume(*_args: Any, **_kwargs: Any) -> Any:
+        resume_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_opensandbox_sdk",
+        lambda: (SimpleNamespace(resume=stalled_resume), FakeConnectionConfig, object, FakePlatformSpec, FakeVolume),
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"keepalive_expiry_s": None},
+        operations={"pause_resume_timeout_s": 0.05},
+    )
+    raw = SimpleNamespace(close=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("sandbox-paused", "opensandbox", raw)
+
+    with pytest.raises(TimeoutError, match=r"to resume after 0\.05s; reconnect and check status\(\)"):
+        await asyncio.wait_for(provider.resume(handle), timeout=1)
+
+    assert resume_started.is_set()
+    assert handle.raw is raw
+    raw.close.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_exec_retries_backend_connect_502_despite_zero_command_retries(
     monkeypatch: pytest.MonkeyPatch,

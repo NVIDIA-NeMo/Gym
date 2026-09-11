@@ -836,8 +836,10 @@ class OpenSandboxProvider:
                     timeout_s=self._connection.request_timeout_s,
                 )
 
-                # Pause invalidates its WebSockets. Detach local PTY clients
-                # without ending the server sessions being suspended.
+                # Pause commits the root filesystem and replaces the runtime;
+                # processes and their PTY sessions do not survive it. Drop our
+                # local clients without sending a delete for sessions the new
+                # runtime never had. Callers open a fresh PTY after resume.
                 for session in [s for s in self._pty_sessions if s._sandbox_id == handle.sandbox_id]:
                     try:
                         session._owned = False
@@ -868,16 +870,32 @@ class OpenSandboxProvider:
             ) from e
 
     async def resume(self, handle: SandboxHandle) -> None:
-        """Resume a paused sandbox and rebuild its SDK clients and endpoints."""
+        """Resume a paused sandbox and rebuild its SDK clients and endpoints.
+
+        One ``pause_resume_timeout_s`` deadline covers the resume request, the
+        endpoint rebuild and the readiness check. On timeout the server-side
+        state is unknown: reconnect and inspect ``status()`` before retrying.
+        Processes and PTY sessions do not survive pause; open a new PTY after.
+        """
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
         timeout_s = self._operations.pause_resume_timeout_s
-        resumed = await Sandbox.resume(
-            handle.sandbox_id,
-            connection_config=self._connection_config(),
-            resume_timeout=timedelta(seconds=timeout_s),
-            health_check_polling_interval=timedelta(seconds=self._create.connect_poll_s),
-            skip_health_check=self._create.skip_health_check,
-        )
+        lifecycle_timeout = asyncio.timeout(timeout_s)
+        try:
+            async with lifecycle_timeout:
+                resumed = await Sandbox.resume(
+                    handle.sandbox_id,
+                    connection_config=self._connection_config(),
+                    resume_timeout=timedelta(seconds=timeout_s),
+                    health_check_polling_interval=timedelta(seconds=self._create.connect_poll_s),
+                    skip_health_check=self._create.skip_health_check,
+                )
+        except TimeoutError as e:
+            if not lifecycle_timeout.expired():
+                raise
+            raise TimeoutError(
+                f"Timed out waiting for OpenSandbox sandbox {handle.sandbox_id!r} to resume after {timeout_s:g}s; "
+                "reconnect and check status() before retrying"
+            ) from e
 
         try:
             await self._await_sdk_call(

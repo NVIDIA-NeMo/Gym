@@ -203,12 +203,15 @@ def test_reap_deletes_snapshots_then_paused_sandboxes(
     session = Session(
         page([snapshot("snap-a"), snapshot("snap/b")]),
         page([sandbox("sb-1"), sandbox("sb-2", state="Running"), sandbox("sb-3", state="paused")]),
+        page([]),  # the confirming re-list after a successful sweep
+        page([]),
         delete_responses={url: Response(status=204) for url in snapshot_urls | sandbox_urls},
     )
     install_session(monkeypatch, session)
 
     assert run_cleanup(kill_paused=True) == 0
 
+    assert session.urls("GET") == [f"{BASE}/snapshots", f"{BASE}/sandboxes"] * 2
     deletes = session.urls("DELETE")
     assert set(deletes[:2]) == snapshot_urls
     assert set(deletes[2:]) == sandbox_urls
@@ -243,6 +246,7 @@ def test_delete_failures_are_reported_and_do_not_stop_the_sweep(
 ) -> None:
     session = Session(
         page([snapshot("failed"), snapshot("deleted"), snapshot("disconnected"), snapshot("redirected")]),
+        page([snapshot("failed"), snapshot("disconnected"), snapshot("redirected")]),  # survivors re-listed
         delete_responses={
             f"{BASE}/snapshots/failed": Response(status=500),
             f"{BASE}/snapshots/deleted": Response(status=204),
@@ -254,14 +258,67 @@ def test_delete_failures_are_reported_and_do_not_stop_the_sweep(
 
     assert run_cleanup() == 1
 
-    assert len(session.urls("DELETE")) == 4
+    # The first sweep tries all four; the retry sweep re-attempts the three survivors, then stops progressing.
+    assert len(session.urls("DELETE")) == 7
     output = capsys.readouterr()
     assert "Deleted snapshot deleted -> HTTP 204" in output.out
     assert "Failed to delete snapshot failed -> HTTP 500" in output.err
     assert "Failed to delete snapshot disconnected -> disconnected" in output.err
     assert "Failed to delete snapshot redirected -> HTTP 302" in output.err
-    assert "3 OpenSandbox snapshot(s) or paused sandbox(es) were not deleted" in output.err
+    assert "3 OpenSandbox snapshot(s) or paused sandbox(es) were not reaped" in output.err
     assert TEST_ACCESS_KEY not in output.out + output.err
+
+
+def test_reap_sweeps_catch_list_stragglers(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Numbered pages shift while another actor deletes, so an item can slip past
+    # the first listing; the re-list sweep must catch it.
+    session = Session(
+        page([snapshot("first")]),
+        page([snapshot("straggler")]),
+        page([]),
+        delete_responses={
+            f"{BASE}/snapshots/first": Response(status=204),
+            f"{BASE}/snapshots/straggler": Response(status=204),
+        },
+    )
+    install_session(monkeypatch, session)
+
+    assert run_cleanup() == 0
+    assert session.urls("DELETE") == [f"{BASE}/snapshots/first", f"{BASE}/snapshots/straggler"]
+    assert len(session.urls("GET")) == 3
+
+
+def test_reap_gives_up_after_bounded_sweeps(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A listing that never empties, because something keeps creating snapshots, must not loop forever.
+    lists = [page([snapshot(f"s{index}")]) for index in range(snapshots.REAP_SWEEPS + 1)]
+    session = Session(
+        *lists,
+        delete_responses={
+            f"{BASE}/snapshots/s{index}": Response(status=204) for index in range(snapshots.REAP_SWEEPS)
+        },
+    )
+    install_session(monkeypatch, session)
+
+    assert run_cleanup() == 1
+    assert len(session.urls("DELETE")) == snapshots.REAP_SWEEPS
+    assert "1 OpenSandbox snapshot(s) or paused sandbox(es) were not reaped" in capsys.readouterr().err
+
+
+def test_reap_succeeds_when_final_sweep_removes_last_straggler(monkeypatch: pytest.MonkeyPatch) -> None:
+    lists = [page([snapshot(f"s{index}")]) for index in range(snapshots.REAP_SWEEPS)]
+    session = Session(
+        *lists,
+        page([]),
+        delete_responses={
+            f"{BASE}/snapshots/s{index}": Response(status=204) for index in range(snapshots.REAP_SWEEPS)
+        },
+    )
+    install_session(monkeypatch, session)
+
+    assert run_cleanup() == 0
+    assert len(session.urls("DELETE")) == snapshots.REAP_SWEEPS
 
 
 async def test_reap_limits_concurrent_deletes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -356,6 +413,7 @@ def test_rejects_invalid_domain() -> None:
         [*SANDBOX_ARGS, "--sandbox-id", " "],
         [*SANDBOX_ARGS, "--state", ""],
         [*SANDBOX_ARGS, "--snapshot-id", "snap-a", "--snapshot-id", " "],
+        [*SANDBOX_ARGS, "--snapshot-id", "snap-a", "--kill-paused"],
         [*SANDBOX_ARGS, "--unknown"],
     ],
 )

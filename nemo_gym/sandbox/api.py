@@ -520,7 +520,11 @@ class AsyncSandbox:
         return resolved
 
     async def pause(self) -> None:
-        """Pause this sandbox while preserving its state."""
+        """Pause this sandbox, preserving its filesystem state.
+
+        Running processes and open PTY sessions do not survive a pause; open a
+        new PTY after ``resume()``.
+        """
         handle = self._require_handle()
         provider = self._provider
         if not isinstance(provider, SupportsSandboxPauseResume):
@@ -529,7 +533,11 @@ class AsyncSandbox:
         await provider.pause(handle)
 
     async def resume(self) -> None:
-        """Resume this sandbox and wait until it is ready."""
+        """Resume this sandbox and wait until it is ready.
+
+        A timeout leaves the server-side state unknown; reconnect and check
+        ``status()`` before retrying rather than calling ``resume()`` again blindly.
+        """
         handle = self._require_handle()
         provider = self._provider
         if not isinstance(provider, SupportsSandboxPauseResume):

@@ -40,6 +40,7 @@ import yaml
 
 REQUEST_TIMEOUT_SECONDS = 30
 REAP_CONCURRENCY = 32
+REAP_SWEEPS = 3
 PAGE_SIZE = 100
 
 
@@ -102,21 +103,23 @@ async def cleanup_snapshots(
                     return items
                 page += 1
 
-        if snapshot_ids:
-            snapshots = [{"id": snapshot_id} for snapshot_id in snapshot_ids]
-        else:
-            params = [("sandboxId", sandbox_id)] if sandbox_id else []
-            snapshots = await list_all("snapshots", [*params, *(("state", state) for state in states or [])])
+        async def list_matches() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+            if snapshot_ids:
+                snapshots = [{"id": snapshot_id} for snapshot_id in snapshot_ids]
+            else:
+                params = [("sandboxId", sandbox_id)] if sandbox_id else []
+                snapshots = await list_all("snapshots", [*params, *(("state", state) for state in states or [])])
+            paused: list[dict[str, Any]] = []
+            if kill_paused:
+                # Servers disagree on state casing, so match paused sandboxes client-side.
+                for item in await list_all("sandboxes", []):
+                    status = item.get("status")
+                    state = status.get("state") if isinstance(status, dict) else None
+                    if str(state or "").lower() == "paused" and sandbox_id in (None, item["id"]):
+                        paused.append(item)
+            return snapshots, paused
 
-        paused: list[dict[str, Any]] = []
-        if kill_paused:
-            # Servers disagree on state casing, so match paused sandboxes client-side.
-            for item in await list_all("sandboxes", []):
-                status = item.get("status")
-                state = status.get("state") if isinstance(status, dict) else None
-                if str(state or "").lower() == "paused" and sandbox_id in (None, item["id"]):
-                    paused.append(item)
-
+        snapshots, paused = await list_matches()
         action = "Deleting" if reap else "Would delete"
         for snapshot in snapshots:
             status = snapshot.get("status")
@@ -151,14 +154,29 @@ async def cleanup_snapshots(
                     print(f"Failed to delete {label} {item_id} -> {error}", file=sys.stderr)
                     return 1
 
-        # Snapshots first: deleting a paused sandbox releases its checkpoint, so this
-        # order keeps every snapshot delete a real delete rather than a 404.
-        failures = sum(await asyncio.gather(*(delete("snapshots", "snapshot", s["id"]) for s in snapshots)))
-        failures += sum(await asyncio.gather(*(delete("sandboxes", "paused sandbox", p["id"]) for p in paused)))
-        if failures:
-            print(f"{failures} OpenSandbox snapshot(s) or paused sandbox(es) were not deleted", file=sys.stderr)
-            return 1
-        return 0
+        # Numbered pages shift while another actor deletes: an item can move from
+        # page 2 to page 1 after page 1 was read and be skipped. Sweep until a
+        # fresh listing comes back empty, or a sweep stops progressing.
+        for _ in range(REAP_SWEEPS):
+            if not snapshots and not paused:
+                return 0
+            # Snapshots first: deleting a paused sandbox releases its checkpoint, so
+            # this order keeps every snapshot delete a real delete rather than a 404.
+            failures = sum(await asyncio.gather(*(delete("snapshots", "snapshot", s["id"]) for s in snapshots)))
+            failures += sum(await asyncio.gather(*(delete("sandboxes", "paused sandbox", p["id"]) for p in paused)))
+            if snapshot_ids:
+                # Exact ids: a 404 already counts as gone, so there is nothing to re-list.
+                return 1 if failures else 0
+            if failures == len(snapshots) + len(paused):
+                break
+            snapshots, paused = await list_matches()
+        if not snapshots and not paused:
+            return 0
+        print(
+            f"{len(snapshots) + len(paused)} OpenSandbox snapshot(s) or paused sandbox(es) were not reaped",
+            file=sys.stderr,
+        )
+        return 1
 
 
 def _run(
@@ -210,13 +228,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Exact snapshot ids instead of a listing; repeatable.",
     )
     parser.add_argument(
-        "--kill-paused", action="store_true", help="Also delete paused sandboxes and their checkpoints."
+        "--kill-paused",
+        action="store_true",
+        help="Also delete paused sandboxes and their checkpoints; every paused sandbox unless --sandbox-id is given.",
     )
     parser.add_argument("--reap", action="store_true", help="Delete matches; otherwise only audit them.")
     args = parser.parse_args(argv)
 
     if args.snapshot_ids and (args.sandbox_id is not None or args.states):
         parser.error("--snapshot-id cannot be combined with --sandbox-id or --state")
+    if args.snapshot_ids and args.kill_paused:
+        # Snapshot ids carry no sandbox scope, so this would select every paused sandbox.
+        parser.error("--kill-paused cannot be combined with --snapshot-id; scope it with --sandbox-id instead")
     for name, values in (
         ("sandbox-id", [args.sandbox_id]),
         ("state", args.states),
