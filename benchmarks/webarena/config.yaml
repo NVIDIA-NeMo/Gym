@@ -23,8 +23,7 @@ webarena_benchmark_agent:
       policy_protocol: nano_omni_toolcall
       max_steps: 100
       max_parse_retries: 2
-      nano_omni_action_recovery: repair_single_closing_bracket
-      nano_omni_tool_alias_recovery: webvoyager_v3
+      # Use model-server parser output without JSON or tool-alias repair.
       nano_omni_max_computer_actions: 20
       nano_omni_parse_retry_feedback: true
       nano_omni_parse_retry_temperature: 0.2
