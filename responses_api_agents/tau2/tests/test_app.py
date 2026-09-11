@@ -33,6 +33,8 @@ from responses_api_agents.tau2.app import (
     ModelServerRef,
     TAU2_AGENT_FAILURE_CLASS,
     TAU2_MALFORMED_TOOL_CALL_FAILURE_CLASS,
+    TURN_BUDGET_EXHAUSTED_FAILURE_CLASS,
+    TURN_BUDGET_EXHAUSTED_TERMINATION_REASON,
     Tau2Agent,
     Tau2Config,
     Tau2FailureResponse,
@@ -63,6 +65,7 @@ class TestApp:
         max_agent_steps: Optional[int] = None,
         turns_remaining_interval: int = 1,
         malformed_tool_call_max_retries: int = 0,
+        turn_constraint: Optional[dict] = None,
     ) -> Tuple[Tau2Config, Tau2Agent]:
         config = Tau2Config(
             host="0.0.0.0",
@@ -81,6 +84,7 @@ class TestApp:
             max_agent_steps=max_agent_steps,
             turns_remaining_interval=turns_remaining_interval,
             malformed_tool_call_max_retries=malformed_tool_call_max_retries,
+            turn_constraint=turn_constraint,
         )
         server = Tau2Agent(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -160,6 +164,18 @@ class TestApp:
         assert config.max_agent_steps is None
         assert config.turns_remaining_interval == 1
         assert config.malformed_tool_call_max_retries == 0
+        assert config.turn_constraint is None
+
+    def test_proxy_constraint_rejects_a_second_native_budget(self) -> None:
+        with pytest.raises(ValueError, match="cannot be combined with Tau2 max_agent_steps"):
+            self._dummy_server(
+                max_agent_steps=3,
+                turn_constraint={
+                    "enforcement": "proxy",
+                    "limit": 5,
+                    "scope": "session",
+                },
+            )
 
     def test_setup_webserver_installs_tool_validating_client(self) -> None:
         _, server = self._dummy_server(malformed_tool_call_max_retries=2)
@@ -400,6 +416,87 @@ class TestApp:
         assert response.result.agent_steps == 3
         assert response.result.max_agent_steps == 3
         assert response.result.termination_reason == TerminationReason.MAX_AGENT_STEPS
+
+    async def test_run_routes_only_policy_calls_through_proxy_and_records_metadata(self) -> None:
+        _, server = self._dummy_server(
+            turn_constraint={
+                "enforcement": "proxy",
+                "limit": 5,
+                "scope": "session",
+                "reminder": {
+                    "trigger": "per_turn",
+                    "position": "system_message",
+                },
+            }
+        )
+        body = self._example_run_request()
+        captured_kwargs = {}
+
+        class FakeProxy:
+            base_url = "http://127.0.0.1:5555/v1"
+            max_turns = 5
+            turns_used = 3
+
+            async def stop(self):
+                captured_kwargs["proxy_stopped"] = True
+
+        async def fake_run_single_task(**kwargs):
+            captured_kwargs.update(kwargs)
+            return self._fake_simulation_run(max_agent_steps=None)
+
+        with (
+            patch.object(server, "_start_turn_proxy", AsyncMock(return_value=FakeProxy())),
+            patch("responses_api_agents.tau2.app.get_server_url", return_value="http://direct-model"),
+            patch("responses_api_agents.tau2.app.run_single_task", side_effect=fake_run_single_task),
+            patch("responses_api_agents.tau2.app.get_tau2_bench_ref", return_value="tau2-test-sha"),
+        ):
+            response = await server.run(body)
+
+        assert captured_kwargs["config"].llm_args_agent["api_base"] == "http://127.0.0.1:5555/v1"
+        assert captured_kwargs["config"].llm_args_user["api_base"] == "http://direct-model/v1"
+        assert captured_kwargs["proxy_stopped"] is True
+        assert response.turn_constraint.requested.limit == 5
+        assert response.turn_constraint.realized.unit == "policy_model_post_attempt"
+        assert response.turn_constraint.realized.observed_count == 3
+        assert response.turn_constraint.realized.harness_version == "tau2-test-sha"
+        assert response.turn_constraint.realized.exhausted is False
+
+    async def test_proxy_exhaustion_is_terminal_and_can_be_counted_as_zero(self) -> None:
+        _, server = self._dummy_server(
+            turn_constraint={
+                "enforcement": "proxy",
+                "limit": 5,
+                "scope": "session",
+            }
+        )
+        body = self._example_run_request()
+
+        class FakeProxy:
+            base_url = "http://127.0.0.1:5555/v1"
+            max_turns = 5
+            turns_used = 6
+
+            async def stop(self):
+                return None
+
+        with (
+            patch.object(server, "_start_turn_proxy", AsyncMock(return_value=FakeProxy())),
+            patch.object(server, "_run", AsyncMock(side_effect=RuntimeError("429 session_budget_exhausted"))),
+            patch("responses_api_agents.tau2.app.get_tau2_bench_ref", return_value="tau2-test-sha"),
+        ):
+            response = await server.run(body)
+
+        result = response.model_dump(mode="json")
+        assert result[NG_FAILURE_CLASS_KEY] == TURN_BUDGET_EXHAUSTED_FAILURE_CLASS
+        assert result[NG_TERMINAL_KEY] is True
+        assert result["result"]["termination_reason"] == TURN_BUDGET_EXHAUSTED_TERMINATION_REASON
+        assert result["turn_constraint"]["realized"]["observed_count"] == 6
+        assert result["turn_constraint"]["realized"]["exhausted"] is True
+
+        metrics = server.compute_metrics([[result]])
+        assert metrics["macro_average"] == 0.0
+        assert metrics["trajectory_termination_reason/turn_budget_exhausted/count"] == 1
+        assert metrics["messages_with_incomplete_reasoning/pct"] == 0.0
 
     async def test_run_uses_agent_visible_messages_for_responses_conversion(self) -> None:
         _, server = self._dummy_server(max_agent_steps=3)

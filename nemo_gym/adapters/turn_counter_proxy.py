@@ -29,6 +29,7 @@ from typing import Any, Literal
 from urllib.parse import urlparse
 
 from aiohttp import ClientSession, web
+from pydantic import BaseModel, ConfigDict, Field
 
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,55 @@ _PER_TURN_TEMPLATE = "ENVIRONMENT REMINDER: You have {remaining} turn(s) left to
 
 Position = Literal["system_message", "user_message"]
 Trigger = Literal["threshold", "per_turn", "auto"]
+
+
+class TurnReminderConfig(BaseModel):
+    """Reminder behavior supported by the V0 proxy backend."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    trigger: Trigger = "auto"
+    position: Position = "system_message"
+
+
+class TurnConstraintConfig(BaseModel):
+    """Canonical V0 turn-constraint request.
+
+    V0 deliberately accepts only the proxy backend and session scope. Native
+    harness adapters can extend the capability surface without silently
+    changing the meaning of an existing request.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enforcement: Literal["proxy"]
+    limit: int = Field(ge=1)
+    scope: Literal["session"] = "session"
+    reminder: TurnReminderConfig = Field(default_factory=TurnReminderConfig)
+
+
+class RealizedTurnConstraint(BaseModel):
+    """What the selected backend actually enforced for one rollout."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enforcement: Literal["proxy"] = "proxy"
+    unit: Literal["policy_model_post_attempt"] = "policy_model_post_attempt"
+    scope: Literal["session"] = "session"
+    limit: int = Field(ge=1)
+    reminder: TurnReminderConfig
+    harness_version: str
+    observed_count: int = Field(ge=0)
+    exhausted: bool
+
+
+class TurnConstraintMetadata(BaseModel):
+    """Requested and realized constraint persisted with a rollout."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    requested: TurnConstraintConfig
+    realized: RealizedTurnConstraint
 
 
 class _Severity(str, Enum):
@@ -176,6 +226,25 @@ class TurnCounterProxy:
         await self._site.stop()
         await self._runner.cleanup()
         await self._session.close()
+
+
+def turn_constraint_metadata(
+    constraint: TurnConstraintConfig,
+    proxy: TurnCounterProxy,
+    *,
+    harness_version: str,
+) -> TurnConstraintMetadata:
+    """Snapshot requested and observed proxy state for a completed rollout."""
+    return TurnConstraintMetadata(
+        requested=constraint,
+        realized=RealizedTurnConstraint(
+            limit=constraint.limit,
+            reminder=constraint.reminder,
+            harness_version=harness_version,
+            observed_count=proxy.turns_used,
+            exhausted=proxy.turns_used > constraint.limit,
+        ),
+    )
 
 
 async def start_turn_counter_proxy(
