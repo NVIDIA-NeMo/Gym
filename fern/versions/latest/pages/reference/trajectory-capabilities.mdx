@@ -39,13 +39,22 @@ fields are `prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `total_toke
 
 | ID | Criterion |
 |---|---|
-| C1 | Standard schema for per-model-call token statistics and response metadata |
+| C1 | Model-call identity, status, error, and termination metadata |
 | C2 | Prompt, completion, reasoning, total, and cached token counts when available |
-| C3 | Task and rollout identity, turn number, timestamp, question, answer, reasoning, resolution, and step count per turn |
+| C3 | Canonical `TrajectoryTurn` records preserve answer, reasoning, and tool-call activity |
 | C4 | Model-visible input and output history can be reconstructed from persisted rollout JSONL |
 | C5 | Tool output, status, start and completion timestamps, and duration |
 | C6 | Independent timing for parallel tool calls |
 | C7 | Resource-server-backed and custom or sandbox-backed benchmarks |
+| C8 | Turn identity, timestamp, question, resolution, and step metadata |
+| C9 | Captured model requests and responses retain their payloads |
+| C10 | Model calls have exact ownership references on an `AgentInvocation` |
+| C11 | Model calls have exact ownership references on a `TrajectoryTurn` |
+
+Each criterion describes one evidence dimension. C1 describes the model-call envelope, C2 its token values, and C9 its saved
+payloads. C3 describes agent activity within canonical turns, while C8 describes turn metadata and outcome. C10 and C11
+separate invocation ownership from turn ownership. The `V`, `O`, and `X` values below express whether each dimension is
+complete, partial or path-dependent, or unavailable; completeness is not a separate criterion.
 
 ## Agent coverage
 
@@ -55,51 +64,54 @@ fields are `prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `total_toke
 
 In practice, rely on `V` for the evaluated path when observability is configured as documented, inspect configuration
 and trajectory gaps before relying on `O`, and do not expect the producer to supply `X` on the evaluated path. These
-symbols are not absolute agent capabilities: alternate execution paths can produce different evidence. For C1, C2, and
-C4, `V` evaluates the correlated Gym Model Server path; direct-provider alternatives are outside capture.
+symbols are not absolute agent capabilities: alternate execution paths can produce different evidence. For C1, C2,
+C4, and C9 through C11, `V` evaluates the correlated Gym Model Server path; direct-provider alternatives are outside
+capture.
 
-| Agent | C1 | C2 | C3 | C4 | C5 | C6 | C7 |
-|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| `anyswe_agent` | X | X | X | X | X | X | X |
-| `anyterminal_agent` | V | V | X | V | X | X | X |
-| `aviary_agent` | V | V | X | V | X | X | X |
-| `browsecomp_agent` | V | V | X | V | X | X | X |
-| `claude_code_agent` | V | V | X | V | V | V | V |
-| `cline_agent` | V | V | X | V | X | X | X |
-| `codex_agent` | V | V | X | V | X | X | X |
-| `critpt_agent` | V | V | X | V | X | X | X |
-| `cvdp_agent` | O | O | X | O | X | X | X |
-| `finance_agent` | X | O | X | X | X | X | X |
-| `gymnasium_agent` | V | V | X | V | X | X | X |
-| `harbor_agent` | X | X | X | X | X | X | X |
-| `hermes_agent` | V | V | X | V | V | V | V |
-| `kilocode_agent` | V | V | X | V | X | X | X |
-| `labbench2_vlm_agent` | V | V | O | O | O | X | V |
-| `langgraph_agent` | X | X | X | X | X | X | X |
-| `mini_swe_agent` | X | X | X | X | X | X | X |
-| `mini_swe_agent_2` | V | V | X | V | X | X | X |
-| `non_executing_simple_agent` | V | V | X | V | X | X | X |
-| `openclaw_agent` | V | V | X | O | V | V | V |
-| `opencode_agent` | V | V | X | V | V | V | V |
-| `opencode_sandboxed_agent` | V | V | X | V | V | V | V |
-| `osworld_agent` | O | O | X | O | X | X | X |
-| `pi_agent` | V | V | X | V | V | V | V |
-| `proof_refinement_agent` | V | V | X | V | X | X | X |
-| `remote_agent` | X | O | X | X | X | X | X |
-| `scicode_agent` | X | X | X | X | X | X | X |
-| `simple_agent` | V | V | O | V | O | X | V |
-| `speed_bench_agent` | V | V | X | V | X | X | X |
-| `stirrup_agent` | O | O | X | O | X | X | X |
-| `swe_agents` / OpenCode (legacy) | V | V | X | V | X | X | V |
-| `swe_agents` / OpenHands (legacy) | X | X | X | O | X | X | V |
-| `tau2` | V | V | X | V | X | X | X |
-| `tool_simulation_agent` | V | V | X | V | X | X | X |
-| `toolsandbox_agent` | V | V | X | V | X | X | X |
-| `verifiers_agent` | X | X | X | X | X | X | X |
+| Agent | C1 | C2 | C3 | C4 | C5 | C6 | C7 | C8 | C9 | C10 | C11 |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| `anyswe_agent` | X | X | X | X | X | X | X | X | X | X | X |
+| `anyterminal_agent` | V | V | X | V | X | X | X | X | V | X | X |
+| `aviary_agent` | V | V | X | V | X | X | X | X | V | X | X |
+| `browsecomp_agent` | V | V | X | V | X | X | X | X | V | X | X |
+| `claude_code_agent` | V | V | X | V | V | V | V | X | V | V | X |
+| `cline_agent` | V | V | X | V | X | X | X | X | V | X | X |
+| `codex_agent` | V | V | X | V | X | X | X | X | V | X | X |
+| `critpt_agent` | V | V | X | V | X | X | X | X | V | X | X |
+| `cvdp_agent` | O | O | X | O | X | X | X | X | O | X | X |
+| `finance_agent` | X | O | X | X | X | X | X | X | X | X | X |
+| `gymnasium_agent` | V | V | X | V | X | X | X | X | V | X | X |
+| `harbor_agent` | X | X | X | X | X | X | X | X | X | X | X |
+| `hermes_agent` | V | V | X | V | V | V | V | X | V | V | X |
+| `kilocode_agent` | V | V | X | V | X | X | X | X | V | X | X |
+| `labbench2_vlm_agent` | V | V | V | O | O | X | V | O | O | V | V |
+| `langgraph_agent` | X | X | X | X | X | X | X | X | X | X | X |
+| `mini_swe_agent` | X | X | X | X | X | X | X | X | X | X | X |
+| `mini_swe_agent_2` | V | V | X | V | X | X | X | X | V | X | X |
+| `non_executing_simple_agent` | V | V | X | V | X | X | X | X | V | X | X |
+| `openclaw_agent` | V | V | X | O | V | V | V | X | V | V | X |
+| `opencode_agent` | V | V | X | V | V | V | V | X | V | V | X |
+| `opencode_sandboxed_agent` | V | V | X | V | V | V | V | X | V | V | X |
+| `osworld_agent` | O | O | X | O | X | X | X | X | O | X | X |
+| `pi_agent` | V | V | X | V | V | V | V | X | V | V | X |
+| `proof_refinement_agent` | V | V | X | V | X | X | X | X | V | X | X |
+| `remote_agent` | X | O | X | X | X | X | X | X | X | X | X |
+| `scicode_agent` | X | X | X | X | X | X | X | X | X | X | X |
+| `simple_agent` | V | V | V | V | O | X | V | O | V | V | V |
+| `speed_bench_agent` | V | V | X | V | X | X | X | X | V | X | X |
+| `stirrup_agent` | O | O | X | O | X | X | X | X | O | X | X |
+| `swe_agents` / OpenCode (legacy) | V | V | X | V | X | X | V | X | V | X | X |
+| `swe_agents` / OpenHands (legacy) | X | X | X | O | X | X | V | X | X | X | X |
+| `tau2` | V | V | X | V | X | X | X | X | V | X | X |
+| `tool_simulation_agent` | V | V | X | V | X | X | X | X | V | X | X |
+| `toolsandbox_agent` | V | V | X | V | X | X | X | X | V | X | X |
+| `verifiers_agent` | X | X | X | X | X | X | X | X | X | X | X |
 
 ### Coverage notes
 
-- Simple and LabBench C3 support is partial because verifier responses may omit resolution status.
+- The matrix covers the evaluated agent paths listed here, not every directory under `responses_api_agents`.
+- Simple and LabBench C8 support is partial because verifier responses may omit resolution status. C3 remains complete:
+  the missing field is verifier resolution status, not answer, reasoning, or tool-call activity.
 - Other `O` values reflect the following paths or evidence gaps:
   - The CVDP Simple path.
   - Finance and Remote aggregate usage.
@@ -113,3 +125,7 @@ C4, `V` evaluates the correlated Gym Model Server path; direct-provider alternat
 - Legacy OpenHands retains one cumulative root conversation, so its model-visible history remains partial. Its pinned
   fork does not route model calls through a rollout-prefixed Gym Model Server endpoint.
 - C7 requires standardized agent-side trajectory evidence; model HTTP capture alone does not satisfy it.
+- C10 is invocation ownership and C11 is turn ownership; invocation-only producers satisfy C10 without satisfying C11.
+- C9 is independent from C4: a producer can retain each captured request and response while still lacking enough
+  conversation evidence to reconstruct complete model-visible history. LabBench C9 is partial because multimodal
+  redaction can remove payloads.
