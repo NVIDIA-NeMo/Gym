@@ -1,0 +1,30 @@
+# AutomationBench as a runnable Gym benchmark.
+#
+# `environments/automationbench/config.yaml` defines the environment instance,
+# but that alone is not discoverable as a benchmark:
+#
+#   * `discover_benchmarks()` only scans the `benchmarks/` subdir of each
+#     component search root, so a config under `environments/` is never seen.
+#   * `_is_benchmark_config()` requires exactly one `type: benchmark` dataset;
+#     the environment config declares only `example` and `validation`.
+#
+# So `--benchmark automationbench`, `++split=benchmark` and any EFB
+# `install_on_the_fly` run resolve to nothing without this wrapper. It mirrors
+# how `benchmarks/ifbench/config.yaml` wraps `environments/instruction_following`:
+# chain to the environment config, inherit the instance, and declare the one
+# benchmark dataset. `prepare_script` points back at the environment's own
+# `prepare.py`, so there is a single copy of the data-prep logic.
+config_paths:
+  - environments/automationbench/config.yaml
+
+automationbench_benchmark:
+  _inherit_from: automationbench
+  responses_api_agents:
+    verifiers_agent:
+      datasets:
+        - name: automationbench
+          type: benchmark
+          jsonl_fpath: environments/automationbench/data/automationbench-600.jsonl
+          prepare_script: environments/automationbench/prepare.py
+          num_repeats: 1
+          license: MIT

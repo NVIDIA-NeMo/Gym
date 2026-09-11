@@ -22,14 +22,18 @@ VF_ENV_ID = "automationbench_env"
 TOOLSET = "api"
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--domains", nargs="*", default=None, help="subset of domains (default: all public domains)")
-    parser.add_argument("--size", type=int, default=-1, help="number of tasks (-1 for the full taskset)")
-    parser.add_argument("--max-turns", type=int, default=50)
-    parser.add_argument("--out", type=Path, default=None)
-    args = parser.parse_args()
+def prepare(
+    domains: list[str] | None = None,
+    size: int = -1,
+    max_turns: int = 50,
+    out: Path | None = None,
+) -> Path:
+    """Write the taskset to JSONL and return the path written.
 
+    `gym eval prepare` imports this module and calls `prepare(**prepare_script_args)`,
+    requiring the returned path to equal the dataset's `jsonl_fpath`, so this is
+    the entry point the benchmark config points at. `main` is the CLI wrapper.
+    """
     try:
         import verifiers as vf  # noqa: F401
         from automationbench_env import load_environment
@@ -39,11 +43,11 @@ def main() -> None:
             "    uv pip install -e environments/automationbench"
         ) from exc
 
-    env = load_environment(domains=args.domains, max_turns=args.max_turns, toolset=TOOLSET)
+    env = load_environment(domains=domains, max_turns=max_turns, toolset=TOOLSET)
     dataset = env.dataset
-    n = len(dataset) if args.size < 0 else min(args.size, len(dataset))
+    n = len(dataset) if size < 0 else min(size, len(dataset))
 
-    out = args.out or Path(__file__).parent / "data" / f"automationbench-{n}.jsonl"
+    out = out or Path(__file__).parent / "data" / f"automationbench-{n}.jsonl"
     out.parent.mkdir(parents=True, exist_ok=True)
 
     with out.open("w") as f:
@@ -69,6 +73,18 @@ def main() -> None:
             f.write(json.dumps(output_row) + "\n")
 
     print(f"wrote {n} rows -> {out}")
+    return out
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--domains", nargs="*", default=None, help="subset of domains (default: all public domains)")
+    parser.add_argument("--size", type=int, default=-1, help="number of tasks (-1 for the full taskset)")
+    parser.add_argument("--max-turns", type=int, default=50)
+    parser.add_argument("--out", type=Path, default=None)
+    args = parser.parse_args()
+
+    prepare(domains=args.domains, size=args.size, max_turns=args.max_turns, out=args.out)
 
 
 if __name__ == "__main__":
