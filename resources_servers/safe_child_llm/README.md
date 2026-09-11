@@ -13,9 +13,14 @@ Prepare and run with any NeMo Gym-compatible model endpoint:
 
 ```bash
 gym eval prepare --benchmark safe_child_llm
-gym eval run --config benchmarks/safe_child_llm/config.yaml --agent safe_child_llm_benchmark \
-  --input benchmarks/safe_child_llm/data/safe_child_llm.jsonl \
-  --output results/safe_child_llm.jsonl
+gym eval run --benchmark safe_child_llm \
+  --model-type inference_provider \
+  --model "$POLICY_MODEL_NAME" \
+  --model-url "$POLICY_MODEL_BASE_URL" \
+  --model-api-key "$POLICY_MODEL_API_KEY" \
+  --split benchmark \
+  --output results/safe_child_llm.jsonl \
+  --disable-aggregation
 ```
 
 Merge one or more completed model runs into the local annotation app:
