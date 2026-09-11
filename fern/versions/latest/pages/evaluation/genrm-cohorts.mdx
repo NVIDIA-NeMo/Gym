@@ -1,0 +1,79 @@
+---
+title: "GenRM Comparison Groups"
+description: "Configure bounded group scoring and identify retries without mixing candidate answers."
+position: 9
+---
+
+# GenRM Comparison Groups
+
+The `genrm_compare` resources server scores multiple answers to one prompt using a generative reward model.
+Each rollout calls `/verify` separately. The server collects the configured number of members, compares
+their answers, and returns an individual reward to each rollout. A comparison group is also called a cohort.
+
+## Completion deadline
+
+Set these fields under `genrm_compare_resources_server.resources_servers.genrm_compare`:
+
+```yaml
+num_rollouts_per_prompt: 4
+cohort_timeout_s: 1800
+cohort_result_ttl_s: 21600
+max_terminal_cohorts: 4096
+```
+
+`cohort_timeout_s` must be finite and positive. Its default is 1800 seconds. The deadline starts when the
+first valid member arrives and covers both collecting answers and judging them. Duplicates and subsequent
+arrivals do not extend it. Increase it for workloads with long tool executions or slow judging.
+
+Configure the caller to dispatch complete groups with enough concurrency for every member to reach
+verification. A concurrency limit below the group size can prevent a group from filling.
+
+An incomplete group fails with HTTP 503 when its deadline expires. Every waiting verification request is
+released, and the server discards active answer payloads and pending waiters. It returns no reward for an
+incomplete group. Judge/aggregation exceptions, judging timeouts, and server shutdown also release waiters.
+Cancelling one request detaches that waiter without cancelling scoring needed by other members; its accepted
+answer remains available until the group completes or reaches its deadline.
+
+The `/verify` path starts pairwise judging only after the complete group arrives. Members are ordered by
+their logical rollout indices, so HTTP arrival order does not determine comparison pairs or reward assignment.
+The configured comparison strategy and reward aggregation remain in use.
+
+## Group identity and duplicate requests
+
+For callers sharing a server across runs, send these top-level fields through the agent to `/verify`:
+
+| Field | Meaning |
+| --- | --- |
+| `_ng_group_id` | Unique identity for one logical comparison group, distinct across runs and prompt occurrences. |
+| `_ng_group_attempt` | Nonnegative integer shared by all members of one scoring attempt. |
+| `_ng_rollout_index` | Member slot, an integer from zero through `num_rollouts_per_prompt - 1`. |
+
+All members must have the same prompt and principle. Repeating the exact response payload for an occupied
+slot attaches another waiter or returns its cached reward. A different response for an occupied slot is
+rejected with HTTP 409. Successful responses echo the group identity, group attempt, and member slot.
+
+A caller that replaces a group must increment `_ng_group_attempt` for the whole group. A newer attempt
+retires older active attempts, releases their waiters, and rejects late older requests. An older judge
+completion cannot publish into the replacement. Repeating a failed attempt returns a failure; it does not
+silently create a new group. Individual rollout retry counters do not advance the group attempt.
+
+Legacy callers can supply `_ng_task_index` and `_ng_rollout_index` without an explicit group ID. They must
+keep task/prompt identities unique on the server and coordinate group attempts themselves. This fallback
+cannot distinguish concurrent runs that reuse the same task indices and prompts. Use explicit group IDs
+for those workloads. An omitted group attempt defaults to zero; explicit group IDs without an attempt emit
+a migration warning.
+
+## Retention and recovery
+
+Run this stateful resources server with one HTTP worker. Its registry and duplicate-result cache are local
+to that process, not shared across workers or persisted to disk.
+
+Completed and failed groups retain compact response digests and outcomes for duplicate detection. They are
+limited by `max_terminal_cohorts` and expire after `cohort_result_ttl_s`; expired entries are pruned on subsequent
+requests or completion. Both configuration values must be positive, and the TTL must be finite. Shutdown
+clears the registry. Cached replay and stale-request detection are only available while the relevant state
+is retained. Callers must enforce their own accepted attempt identity across cache eviction and server restart.
+
+This server does not dispatch retries, checkpoint generation, or resume an evaluation or training run.
+Durable group recovery, including saving generated-but-unscored answers and reusing them in a new complete
+comparison group, requires a caller-defined persistence and recovery policy.
