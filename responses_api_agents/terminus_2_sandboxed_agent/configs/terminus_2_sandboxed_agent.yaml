@@ -23,7 +23,8 @@ terminus_2_sandboxed_agent:
       llm_request_timeout: 600  # 10 mins, Litellm default
 
       sandbox_provider: sandbox
-      sandbox_timeout: 10800  # 3 hrs
+      sandbox_timeout: 10800  # 3 hrs; only used when the dataset row has no agent_timeout_sec
+      max_agent_timeout: null  # cap on the per-task budget; null means uncapped
       sandbox_config:
         ttl_s: 18000
         ready_timeout_s: 1200

@@ -67,7 +67,10 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
 
     sandbox_provider: str
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    # Fallback agent wall clock, used when the dataset row carries no per-task budget.
     sandbox_timeout: float
+    # Upper bound applied to the per-task budget, mirroring Harbor's agent.max_timeout_sec.
+    max_agent_timeout: Optional[float] = None
     remote_tmux_binary_path: Optional[str]
 
 
@@ -326,13 +329,22 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         sandbox = await AsyncSandbox.connect({"sandbox_id": sandbox_id}, provider=provider)
         return sandbox
 
+    def _resolve_agent_timeout(self, task_timeout: float | None) -> float:
+        """Per-task budget when the dataset supplies one, else the flat fallback, then capped."""
+        timeout = self.config.sandbox_timeout if task_timeout is None else float(task_timeout)
+        if self.config.max_agent_timeout is not None:
+            timeout = min(timeout, self.config.max_agent_timeout)
+        return timeout
+
     async def _execute(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming,
         sandbox: AsyncSandbox,
+        task_timeout: float | None = None,
     ) -> Tuple[NeMoGymResponse, Dict[str, Any]]:
         start_time = perf_counter()
+        agent_timeout = self._resolve_agent_timeout(task_timeout)
         instruction = _instruction(body.input)
 
         model_base_url = (
@@ -383,7 +395,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             await agent.setup(environment)
 
             try:
-                async with asyncio.timeout(self.config.sandbox_timeout):
+                async with asyncio.timeout(agent_timeout):
                     await agent.run(instruction, environment, context)
                 terminus2_completed = True
                 error = None
@@ -430,6 +442,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             "command_exec_time_pct": 100 * total_command_exec_time / total_time,
             "model_call_time_pct": 100 * total_model_call_time / total_time,
             "terminus2_time_taken": total_time,
+            "agent_timeout": agent_timeout,
             "model_calls_gt_10min": llm._model_calls_gt_10min,
             "num_proactive_compactions": agent._num_proactive_compactions,
             "num_compactions": llm._num_compactions,
@@ -462,7 +475,12 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         session_key = request.session[SESSION_ID_KEY]
         self._session_sandboxes[session_key] = sandbox
 
-        response, metrics = await self._execute(request, body.responses_create_params, sandbox)
+        response, metrics = await self._execute(
+            request,
+            body.responses_create_params,
+            sandbox,
+            task_timeout=getattr(body, "agent_timeout_sec", None),
+        )
 
         verification = await self.server_client.post(
             server_name=self.config.resources_server.name,
