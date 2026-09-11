@@ -96,14 +96,19 @@ class ResponsesConverterState(BaseModel):
     messages: List[NeMoGymChatCompletionMessageParam] = Field(default_factory=list)
 
     content_buffer: str = ""
-    refusal_buffer: str = ""
+    refusal_buffer: Optional[str] = None
     tool_calls_buffer: List[NeMoGymChatCompletionMessageToolCallParam] = Field(default_factory=list)
     assistant_item_buffered: bool = False
 
     token_information: Optional[TokenIDLogProbMixin] = None
 
     def flush_assistant(self) -> None:
-        if not (self.assistant_item_buffered or self.content_buffer or self.refusal_buffer or self.tool_calls_buffer):
+        if not (
+            self.assistant_item_buffered
+            or self.content_buffer
+            or self.refusal_buffer is not None
+            or self.tool_calls_buffer
+        ):
             self.token_information = None
             return
 
@@ -114,7 +119,7 @@ class ResponsesConverterState(BaseModel):
         # Omit rather than send `tool_calls: []` — OpenAI rejects empty arrays.
         if self.tool_calls_buffer:
             shared_params["tool_calls"] = self.tool_calls_buffer
-        if self.refusal_buffer:
+        if self.refusal_buffer is not None:
             shared_params["refusal"] = self.refusal_buffer
 
         if self.return_token_id_information and self.token_information is not None:
@@ -128,7 +133,7 @@ class ResponsesConverterState(BaseModel):
         self.messages.append(message)
 
         self.content_buffer = ""
-        self.refusal_buffer = ""
+        self.refusal_buffer = None
         self.tool_calls_buffer = []
         self.assistant_item_buffered = False
         self.token_information = None
@@ -426,15 +431,35 @@ class ResponsesConverter(BaseModel):
                     for part in content:
                         text = part.get("text")
                         refusal = part.get("refusal")
+                        if isinstance(text, str) and isinstance(refusal, str):
+                            raise NotImplementedError(
+                                f"Assistant content part cannot contain both text and refusal: {part!r}"
+                            )
                         if isinstance(text, str):
+                            if refusal_parts or state.refusal_buffer is not None:
+                                raise NotImplementedError(
+                                    "Responses assistant content with text after a refusal has no lossless "
+                                    "Chat Completions representation."
+                                )
                             text_parts.append(text)
                         if isinstance(refusal, str):
+                            if refusal_parts or state.refusal_buffer is not None:
+                                raise NotImplementedError(
+                                    "Responses assistant content with multiple refusal parts has no lossless "
+                                    "Chat Completions representation."
+                                )
                             refusal_parts.append(refusal)
                         if not isinstance(text, str) and not isinstance(refusal, str):
                             raise NotImplementedError(f"Unsupported assistant content part: {part!r}")
                     final_content += "".join(text_parts)
-                    state.refusal_buffer += "".join(refusal_parts)
+                    if refusal_parts:
+                        state.refusal_buffer = refusal_parts[0]
                 elif isinstance(content, str):
+                    if content and state.refusal_buffer is not None:
+                        raise NotImplementedError(
+                            "Responses assistant content with text after a refusal has no lossless "
+                            "Chat Completions representation."
+                        )
                     final_content += content
                 else:
                     raise NotImplementedError(
@@ -663,7 +688,8 @@ class ResponsesConverter(BaseModel):
         response_output = []
 
         content = message_dict.get("content") or ""
-        refusal = message_dict.get("refusal") or ""
+        refusal = message_dict.get("refusal")
+        has_refusal = refusal is not None
         if self.uses_reasoning_parser:
             reasoning_matches, content = self._extract_reasoning_from_content(content)
         else:
@@ -680,9 +706,9 @@ class ResponsesConverter(BaseModel):
             response_output.append(reasoning_item)
 
         tool_calls_raw = message_dict.get("tool_calls", []) or []
-        has_empty_output = not (response_output or tool_calls_raw or refusal)
+        has_empty_output = not (response_output or tool_calls_raw or has_refusal)
 
-        if content or refusal or has_empty_output:
+        if content or has_refusal or has_empty_output:
             message_content = []
             if content or has_empty_output:
                 message_content.append(
@@ -692,11 +718,11 @@ class ResponsesConverter(BaseModel):
                         annotations=[],
                     )
                 )
-            if refusal:
+            if has_refusal:
                 message_content.append(
                     NeMoGymResponseOutputRefusal(
                         type="refusal",
-                        refusal=str(refusal),
+                        refusal=refusal,
                     )
                 )
             response_output.append(
@@ -809,11 +835,6 @@ class ResponsesConverter(BaseModel):
         elif choice.finish_reason == "content_filter":
             incomplete_details = {"reason": "content_filter"}
 
-        native_finish_reason = getattr(choice, "native_finish_reason", None)
-        provider_metadata = (
-            {"native_finish_reason": str(native_finish_reason)} if native_finish_reason is not None else {}
-        )
-
         # Chat Completion -> Response
         return NeMoGymResponse(
             # Under external token capture the chat completion's envelope id is
@@ -851,7 +872,7 @@ class ResponsesConverter(BaseModel):
             status="incomplete" if incomplete_details is not None else "completed",
             incomplete_details=incomplete_details,
             usage=usage,
-            **provider_metadata,
+            native_finish_reason=choice.native_finish_reason,
         )
 
 
