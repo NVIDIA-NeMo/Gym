@@ -14,9 +14,11 @@
 # limitations under the License.
 import asyncio
 import json
+from http.cookies import SimpleCookie
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientResponseError
 from haystack import Pipeline
 from haystack.components.agents import Agent
 from haystack.core.errors import PipelineRuntimeError
@@ -180,10 +182,24 @@ def _mock_mcp_discovery(monkeypatch: MonkeyPatch, names_by_token: dict[str, list
     return clients
 
 
-def _http_response(body: str, cookies: dict | None = None) -> MagicMock:
+def _http_response(body: str, cookies: dict | None = None, *, status: int = 200) -> MagicMock:
     response = MagicMock()
+    response.status = status
+    response.ok = status < 400
     response.cookies = cookies or {}
     response.content.read = AsyncMock(return_value=body.encode())
+    if not response.ok:
+        response.raise_for_status.side_effect = ClientResponseError(
+            request_info=MagicMock(
+                url="http://resources/environment_tool",
+                real_url="http://resources/environment_tool",
+                method="POST",
+                headers={},
+            ),
+            history=(),
+            status=status,
+            message="HTTP tool failed",
+        )
     return response
 
 
@@ -555,9 +571,19 @@ class TestHTTPTool:
             "required": ["recipient"],
         }
 
-    async def test_posts_arguments_and_preserves_response_body(self) -> None:
+    @pytest.mark.parametrize(
+        "returned_cookies, expected_cookies",
+        [
+            ({}, {"seed": "seeded", "sid": "current"}),
+            ({"sid": "next"}, {"seed": "seeded", "sid": "next"}),
+            ({"new": "value"}, {"seed": "seeded", "sid": "current", "new": "value"}),
+        ],
+    )
+    async def test_posts_arguments_and_preserves_response_body(self, returned_cookies, expected_cookies) -> None:
         server_client = MagicMock(spec=ServerClient)
-        server_client.post = AsyncMock(return_value=_http_response('{"error": "bad request"}', {"sid": "next"}))
+        response = _http_response('{"error": "bad request"}')
+        response.cookies = SimpleCookie(returned_cookies)
+        server_client.post = AsyncMock(return_value=response)
         tool = HTTPTool(
             {
                 "type": "function",
@@ -568,20 +594,24 @@ class TestHTTPTool:
             server_client,
             "resources",
         )
-        state = chat_generator_module._GenRunState(resources_server_cookies={"sid": "current"})
+        seeded_cookies = {"seed": "seeded", "sid": "current"}
+        state = chat_generator_module._GenRunState(resources_server_cookies=seeded_cookies)
         context_token = chat_generator_module._current_run_state.set(state)
         try:
             assert await tool.invoke_async(query="Ada") == '{"error": "bad request"}'
+            await tool.invoke_async(query="Grace")
         finally:
             chat_generator_module._current_run_state.reset(context_token)
 
-        server_client.post.assert_awaited_once_with(
+        server_client.post.assert_any_await(
             server_name="resources",
             url_path="/lookup",
             json={"query": "Ada"},
-            cookies={"sid": "current"},
+            cookies={"seed": "seeded", "sid": "current"},
         )
-        assert state.resources_server_cookies == {"sid": "next"}
+        assert seeded_cookies == {"seed": "seeded", "sid": "current"}
+        for cookies in (state.resources_server_cookies, server_client.post.call_args.kwargs["cookies"]):
+            assert {name: morsel.value for name, morsel in SimpleCookie(cookies).items()} == expected_cookies
 
     def test_rejects_non_function_schema(self) -> None:
         with pytest.raises(ValueError, match="type 'function'"):
@@ -696,6 +726,49 @@ class TestApp:
         output_types = [item["type"] for item in res.json()["output"]]
         assert output_types[-1] == "message"
         assert "function_call_output" in output_types
+
+    @pytest.mark.parametrize("status", [400, 500])
+    @pytest.mark.parametrize("raise_on_fail", [False, True])
+    async def test_http_failure_respects_agent_failure_setting(self, tmp_path, monkeypatch, status, raise_on_fail):
+        server, model_client = _build_agent(
+            tmp_path,
+            monkeypatch,
+            model_responses=[
+                _envelope([_function_call_item(name="environment_tool")]),
+                _envelope([_text_item("The tool failed.")]),
+            ],
+            raise_on_fail=raise_on_fail,
+        )
+        failed_response = _http_response("Resource failure body", {"sid": "failed"}, status=status)
+        state = None
+
+        async def http_post(**kwargs):
+            nonlocal state
+            state = _current_run_state.get()
+            return failed_response
+
+        server.server_client.post = AsyncMock(side_effect=http_post)
+        response = server.responses(
+            request=MagicMock(headers={}, cookies={"sid": "seeded"}),
+            response=MagicMock(),
+            body=NeMoGymResponseCreateParamsNonStreaming(input="hi", tools=[_function_schema("environment_tool")]),
+        )
+        if raise_on_fail:
+            with pytest.raises(PipelineRuntimeError, match=f"{status}.*HTTP tool failed"):
+                await response
+            model_client.post.assert_awaited_once()
+        else:
+            result = await response
+            assert model_client.post.await_count == 2
+            tool_output = next(item.output for item in result.output if item.type == "function_call_output")
+            assert str(status) in tool_output
+            assert "HTTP tool failed" in tool_output
+            assert tool_output != "Resource failure body"
+            assert result.output[-1].type == "message"
+        failed_response.raise_for_status.assert_called_once()
+        failed_response.content.read.assert_awaited_once()
+        assert failed_response.raise_for_status.side_effect.response_content == b"Resource failure body"
+        assert state.resources_server_cookies == {"sid": "seeded"}
 
     async def test_responses_forwards_sampling_params(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         # The row's sampling params reach the model call; request tools are runtime Haystack tools.

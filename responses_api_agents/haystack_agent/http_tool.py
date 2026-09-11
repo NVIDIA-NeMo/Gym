@@ -7,7 +7,7 @@ from typing import Any
 
 from haystack.tools import Tool
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_utils import ServerClient, raise_for_status
 from responses_api_agents.haystack_agent import chat_generator
 
 
@@ -67,5 +67,6 @@ class HTTPTool(Tool):
             json=arguments,
             cookies=state.resources_server_cookies,
         )
-        state.resources_server_cookies = response.cookies
+        await raise_for_status(response)
+        state.resources_server_cookies = {**(state.resources_server_cookies or {}), **response.cookies}
         return (await response.content.read()).decode()
