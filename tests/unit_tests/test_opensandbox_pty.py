@@ -999,7 +999,9 @@ async def test_provider_pause_detaches_only_the_target_sandbox_pty_sessions(
 
     assert target_session.closed
     assert target_client.closed
-    assert target_client.delete_calls == [], "pause must detach without ending the suspended process"
+    # Processes and PTYs do not survive pause; the new runtime never had this
+    # session, so a delete request would only be a spurious call.
+    assert target_client.delete_calls == [], "pause must drop the local client without a delete request"
     assert not other_session.closed
     assert not other_client.closed
     assert provider._pty_sessions == {other_session}
