@@ -16,8 +16,9 @@
 import multiprocessing
 import os
 import signal
+from collections import Counter
 from contextlib import contextmanager
-from itertools import permutations
+from itertools import permutations, product
 
 import orjson
 import pytest
@@ -89,6 +90,49 @@ def test_every_expected_rollout_has_one_disposition(run):
     assert not coverage["complete"] and not coverage["reconciled"]
     assert [row["_ng_task_index"] for row in recovered.pending(3)] == [1, 3, 4]
     assert recovered.selected("success")[0]["reward"] == 0.0
+
+
+@pytest.mark.parametrize("dispositions", product(("measured", "masked", "failed", "omitted", "unknown"), repeat=2))
+def test_measurement_split_reconciles_without_changing_recovery(run, dispositions):
+    output, manifest, rows = run
+    with writer(run) as history:
+        for row, disposition in zip(rows, dispositions):
+            history.dispatch(row)
+            if disposition == "omitted":
+                history.omit(row, "Intentionally skipped")
+            elif disposition == "failed":
+                save(run, history, row, failure="agent_run_error")
+            elif disposition != "unknown":
+                save(run, history, row | {"mask_sample": disposition == "masked"}, reward=0.0)
+    recovered = RolloutJournal.load(output, manifest)
+    report = recovered.coverage()
+    expected = Counter(dispositions)
+    assert report["measured"] == expected["measured"]
+    assert report["masked"] == expected["masked"]
+    assert report["successful"] == report["measured"] + report["masked"]
+    assert report["failed"] == expected["failed"]
+    assert report["intentionally_omitted"] == expected["omitted"]
+    assert report["unknown"] == expected["unknown"] + 3  # Remaining inventory was never dispatched.
+    assert sum(report[key] for key in ("measured", "masked", "failed", "intentionally_omitted", "unknown")) == 5
+    assert [row["_ng_task_index"] for row in recovered.pending(3)] == [
+        i
+        for i, disposition in enumerate((*dispositions, "unknown", "unknown", "unknown"))
+        if disposition in {"failed", "unknown"}
+    ]
+
+
+def test_fully_masked_run_is_complete_without_unmasked_measurements(run):
+    output, manifest, rows = run
+    with writer(run) as history:
+        for row in rows:
+            history.dispatch(row)
+            save(run, history, row | {"mask_sample": True})
+    recovered = RolloutJournal.load(output, manifest)
+    report = recovered.coverage()
+    assert (report["expected"], report["successful"], report["measured"], report["masked"]) == (5, 5, 0, 5)
+    assert report["complete"] and report["reconciled"]
+    assert recovered.pending(3) == []
+    assert len(recovered.selected("success")) == 5
 
 
 @pytest.mark.parametrize("corruption", ["schema", "undispatched", "indices", "artifact", "scalar"])
@@ -289,7 +333,12 @@ def test_killed_worker_leaves_durable_unknown_attempt(run):
             process.join()
 
 
-async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(run, monkeypatch):
+@pytest.mark.parametrize("masked", [False, True])
+@pytest.mark.parametrize("count_failures_as_zero", [False, True])
+async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(
+    run, monkeypatch, masked, count_failures_as_zero
+):
+    import nemo_gym.rollout_collection as collection
     from nemo_gym.rollout_collection import (
         RolloutAggregationConfig,
         RolloutAggregationHelper,
@@ -302,8 +351,12 @@ async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(run, m
     with writer(run) as history:
         history.dispatch(rows[0])
         history.dispatch(retry)
-        save(run, history, retry, reward=0.0)
-        save(run, history, rows[0], reward=1.0)  # Late older success must not inflate the score.
+        save(run, history, retry | {"mask_sample": masked}, reward=0.0)
+        save(run, history, rows[0] | {"mask_sample": not masked}, reward=1.0)
+        history.dispatch(rows[1])
+        save(run, history, rows[1], failure="agent_run_error")
+        history.omit(rows[2], "No cached deliverable")
+        history.dispatch(rows[3])  # Dispatched unknown; row 4 was never dispatched.
 
     scored = []
 
@@ -312,28 +365,56 @@ async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(run, m
         return None
 
     monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", aggregate)
+    exported = []
+    monkeypatch.setattr(collection, "get_exporters", lambda: True)
+    monkeypatch.setattr(collection, "export_metrics", exported.append)
     merged = output.with_name("merged.jsonl")
     await RolloutAggregationHelper().run_from_config(
         RolloutAggregationConfig(
             input_glob=str(output.with_name("rollouts*.jsonl")),
             output_jsonl_fpath=str(merged),
             disable_health_check=True,
+            count_failure_classes_as_zero=["agent_run_error"] if count_failures_as_zero else [],
         )
     )
-    assert [row["reward"] for row in scored] == [0.0]
+    assert [row["_ng_task_index"] for row in scored] == ([0, 1] if count_failures_as_zero else [0])
+    assert all(row["reward"] == 0.0 for row in scored)
     assert [row["reward"] for row in read_records(merged)] == [0.0]
     report = orjson.loads(coverage_path_for(merged).read_bytes())
-    assert (report["expected"], report["successful"], report["unknown"]) == (5, 1, 4)
+    assert (report["expected"], report["successful"], report["unknown"]) == (5, 1, 2)
+    assert (report["measured"], report["masked"], report["failed"], report["intentionally_omitted"]) == (
+        int(not masked),
+        int(masked),
+        1,
+        1,
+    )
+    assert report["scored"] == 1 + int(count_failures_as_zero)
+    assert report["failures_counted_as_zero"] == int(count_failures_as_zero)
+    assert sum(report[key] for key in ("measured", "masked", "failed", "intentionally_omitted", "unknown")) == 5
+    assert exported[-1] == {
+        "coverage/expected": 5,
+        "coverage/scored": report["scored"],
+        "coverage/missing": 5 - report["scored"],
+        "coverage/known": 1,
+        "coverage/measured": int(not masked),
+        "coverage/masked": int(masked),
+        "coverage/failed": 1,
+        "coverage/omitted": 1,
+        "coverage/unknown": 2,
+    }
     assert report["coverage_known"] and not report["complete"]
     assert len(list(read_records(output))) == 2  # Aggregating does not rewrite history.
 
 
-async def test_legacy_aggregation_cannot_claim_complete_without_inventory(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("masked", [False, True])
+async def test_legacy_aggregation_cannot_claim_complete_without_inventory(tmp_path, monkeypatch, capsys, masked):
     import nemo_gym.rollout_collection as collection
     from nemo_gym.rollout_journal import coverage_path_for
 
     output = tmp_path / "legacy.jsonl"
-    output.write_bytes(orjson.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0}) + b"\n")
+    output.write_bytes(
+        orjson.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0, "mask_sample": masked}) + b"\n"
+    )
 
     async def aggregate(*args):
         return None
@@ -350,6 +431,14 @@ async def test_legacy_aggregation_cannot_claim_complete_without_inventory(tmp_pa
     )
     report = orjson.loads(coverage_path_for(merged).read_bytes())
     assert report["expected"] is None and report["unknown"] is None
+    assert (report["measured"], report["masked"]) == (int(not masked), int(masked))
     assert not report["coverage_known"] and not report["complete"]
-    assert exported == [{"coverage/scored": 1, "coverage/known": 0}]
+    assert exported == [
+        {
+            "coverage/scored": 1,
+            "coverage/known": 0,
+            "coverage/measured": int(not masked),
+            "coverage/masked": int(masked),
+        }
+    ]
     assert "scores may be partial" in capsys.readouterr().out

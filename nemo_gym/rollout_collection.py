@@ -1674,6 +1674,7 @@ class RolloutCollectionHelper(BaseModel):
         completion = store.coverage()
         print(
             f"Rollout coverage: {completion['successful']}/{completion['expected']} completed, "
+            f"of which {completion['measured']} measured and {completion['masked']} masked; "
             f"{completion['failed']} failed, {completion['intentionally_omitted']} intentionally omitted, "
             f"{completion['unknown']} unknown. Details: {coverage_path_for(output_fpath)}"
         )
@@ -1723,6 +1724,11 @@ class RolloutCollectionHelper(BaseModel):
                     "coverage/expected": expected_rollouts,
                     "coverage/scored": scored_rollouts,
                     "coverage/missing": expected_rollouts - scored_rollouts,
+                    "coverage/measured": completion["measured"],
+                    "coverage/masked": completion["masked"],
+                    "coverage/failed": completion["failed"],
+                    "coverage/omitted": completion["intentionally_omitted"],
+                    "coverage/unknown": completion["unknown"],
                 }
             )
 
@@ -2345,10 +2351,13 @@ class RolloutAggregationHelper(BaseModel):
         scored_rollouts = len(results) + len(counted)
         components = [history.coverage() for history in histories]
         inventory_known = not legacy_paths
+        masked_rollouts = sum(bool(row.get(MASK_SAMPLE_KEY)) for row in results)
         completion = {
             "schema_version": 1,
             "expected": sum(c["expected"] for c in components) if inventory_known else None,
             "successful": len(results),
+            "measured": len(results) - masked_rollouts,
+            "masked": masked_rollouts,
             "failed": sum(c["failed"] for c in components) if inventory_known else None,
             "intentionally_omitted": sum(c["intentionally_omitted"] for c in components) if inventory_known else None,
             "unknown": sum(c["unknown"] for c in components) if inventory_known else None,
@@ -2372,15 +2381,24 @@ class RolloutAggregationHelper(BaseModel):
         )
         if inventory_known:
             coverage += (
-                f"\nCoverage: {completion['successful']} successful, {completion['failed']} failed, "
+                f"\nCoverage: {completion['successful']} completed "
+                f"({completion['measured']} measured, {completion['masked']} masked), {completion['failed']} failed, "
                 f"{completion['intentionally_omitted']} intentionally omitted, {completion['unknown']} unknown. "
                 f"Details: {coverage_path_for(output_fpath)}"
             )
         if get_exporters():  # pragma: no cover
-            metrics = {"coverage/scored": scored_rollouts, "coverage/known": int(inventory_known)}
+            metrics = {
+                "coverage/scored": scored_rollouts,
+                "coverage/known": int(inventory_known),
+                "coverage/measured": completion["measured"],
+                "coverage/masked": completion["masked"],
+            }
             if inventory_known:
                 metrics["coverage/expected"] = completion["expected"]
                 metrics["coverage/missing"] = completion["expected"] - scored_rollouts
+                metrics["coverage/failed"] = completion["failed"]
+                metrics["coverage/omitted"] = completion["intentionally_omitted"]
+                metrics["coverage/unknown"] = completion["unknown"]
             export_metrics(metrics)
 
         print(f"""Finished rollout aggregation! View results at:

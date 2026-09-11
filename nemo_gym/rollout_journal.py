@@ -291,12 +291,17 @@ class RolloutJournal:
     def coverage(self) -> dict:
         counts = Counter(self.disposition(identity) for identity in self.expected)
         expected = len(self.expected)
+        # A producer-masked result completed execution, so recovery still reuses
+        # it. Report its measurement status separately, after selecting attempts.
+        masked = sum(bool(row.get("mask_sample")) for row in self.selected("success"))
         return {
             "schema_version": 1,
             "selection_policy": self.manifest.selection_policy,
             "run_id": self.manifest.run_id,
             "expected": expected,
             "successful": counts["success"],
+            "measured": counts["success"] - masked,
+            "masked": masked,
             "failed": counts["failure"],
             "intentionally_omitted": counts["omitted"],
             "unknown": counts["unknown"],

@@ -114,12 +114,19 @@ async def test_malformed_results_become_associated_failures(payload, monkeypatch
     assert "reward" not in outcome.model_dump()
 
 
-async def test_valid_zero_and_masked_completed_results_remain_results(monkeypatch):
-    for masked in (False, True):
-        result = {"reward": 0.0, "response": {}, "mask_sample": masked}
-        install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, result)))
-        _, outcome = await next(RolloutCollectionHelper().run_outcomes([failing_row()]))
-        assert outcome is result
+@pytest.mark.parametrize("masked", [False, True])
+@pytest.mark.parametrize("failure_kind", [None, "verifier_error"])
+async def test_valid_zero_and_masked_completed_results_remain_results(monkeypatch, masked, failure_kind):
+    result = {
+        "reward": 0.0,
+        "response": {},
+        "mask_sample": masked,
+        "failure_kind": failure_kind,
+        "failure_reason": "Verifier degraded" if failure_kind else None,
+    }
+    install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, result)))
+    _, outcome = await next(RolloutCollectionHelper().run_outcomes([failing_row()]))
+    assert outcome is result
 
 
 @pytest.mark.parametrize("wrong_identity", [None, "rollout_id", "attempt_index", "run_id"])
@@ -475,9 +482,19 @@ async def test_collected_judge_failure_can_be_reverified_without_inference(runne
     assert [call.kwargs["url_path"] for call in client.post.await_args_list].count("/verify") == 1
 
 
-async def test_runner_journals_before_request_and_resumes_only_failed_work(runner_config, monkeypatch):
+@pytest.mark.parametrize("count_failures_as_zero", [False, True])
+async def test_runner_journals_before_request_and_resumes_only_failed_work(
+    runner_config, monkeypatch, count_failures_as_zero
+):
     output = Path(runner_config.output_jsonl_fpath)
     calls = []
+    exported = []
+    runner_config.disable_aggregation = False
+    runner_config.upload_rollouts = False
+    runner_config.count_failure_classes_as_zero = ["agent_request_failed"] if count_failures_as_zero else []
+    monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", AsyncMock(return_value=None))
+    monkeypatch.setattr(collection, "get_exporters", lambda: True)
+    monkeypatch.setattr(collection, "export_metrics", lambda metrics, **kwargs: exported.append(metrics))
 
     async def post(**kwargs):
         row = kwargs["json"]
@@ -493,13 +510,29 @@ async def test_runner_journals_before_request_and_resumes_only_failed_work(runne
                 200,
                 {"_ng_failure_class": "skipped", "_ng_failure_terminal": True, "reward": 0, "response": {}},
             )
-        return FakeResponse(200, {"reward": 0.0, "response": {}, "mask_sample": True})
+        return FakeResponse(
+            200,
+            {"reward": 0.0, "response": {}, "mask_sample": row["task"] == 0, "failure_kind": "verifier_error"},
+        )
 
     install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
     helper = RolloutCollectionHelper()
     await helper.run_from_config(runner_config)
     report = json.loads(coverage_path_for(output).read_text())
     assert [report[key] for key in ("successful", "failed", "intentionally_omitted", "unknown")] == [1, 1, 1, 0]
+    assert (report["measured"], report["masked"]) == (0, 1)
+    assert report["scored"] == 1 + int(count_failures_as_zero)
+    assert report["failures_counted_as_zero"] == int(count_failures_as_zero)
+    assert exported[-1] == {
+        "coverage/expected": 3,
+        "coverage/scored": report["scored"],
+        "coverage/missing": 3 - report["scored"],
+        "coverage/measured": 0,
+        "coverage/masked": 1,
+        "coverage/failed": 1,
+        "coverage/omitted": 1,
+        "coverage/unknown": 0,
+    }
     assert not report["complete"] and report["reconciled"]
     failures = list(read_records(collection.failures_path_for(output)))
     assert len(failures) == 2
@@ -513,6 +546,10 @@ async def test_runner_journals_before_request_and_resumes_only_failed_work(runne
     assert journal_path_for(output).read_bytes().startswith(original_history)
     report = json.loads(coverage_path_for(output).read_text())
     assert [report[key] for key in ("successful", "failed", "intentionally_omitted", "unknown")] == [2, 0, 1, 0]
+    assert (report["measured"], report["masked"], report["scored"], report["failures_counted_as_zero"]) == (1, 1, 2, 0)
+    assert sum(report[key] for key in ("measured", "masked", "failed", "intentionally_omitted", "unknown")) == 3
+    assert exported[-1]["coverage/measured"] == 1 and exported[-1]["coverage/masked"] == 1
+    assert exported[-1]["coverage/failed"] == 0
     assert len(list(read_records(collection.failures_path_for(output)))) == 2
 
 

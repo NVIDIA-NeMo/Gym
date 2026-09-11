@@ -53,13 +53,33 @@ Gym writes `<output_stem>_coverage.json` with an exact inventory:
 | --- | --- |
 | `expected` | Number of logical rollouts in the materialized inputs. |
 | `successful` | Rollouts with a completed result, including wrong answers and completed masked results. |
+| `measured` | Completed results whose producer did not set `mask_sample`, including valid reward-zero results. |
+| `masked` | Completed results whose producer set `mask_sample`. These remain saved and reusable on resume. |
 | `failed` | Rollouts whose selected attempt reported a no-result failure. |
 | `intentionally_omitted` | Explicit producer omissions, including terminal `skipped` outcomes. |
 | `unknown` | Rollouts with no saved outcome, including work never dispatched. |
 
-The four outcome counts sum to `expected`. `complete` requires a completed result for every expected rollout;
-`reconciled` only requires that none remain unknown. An explicit `count_failure_classes_as_zero` reporting policy can
-increase the number of scored samples, but does not change failures into completed results in the coverage report.
+The existing `successful` field remains the completed-result total. The measurement split is additive:
+
+```text
+successful = measured + masked
+expected = measured + masked + failed + intentionally_omitted + unknown
+```
+
+Counts describe the selected attempt for each logical rollout. Older attempts cannot count again or change whether
+the selected result is masked. Failure metadata on a completed result does not by itself make it a no-result failure.
+
+`complete` requires a completed result for every expected rollout; `reconciled` only requires that none remain unknown.
+A fully masked run can be complete while containing no unmasked measurements. Masking alone does not trigger recovery.
+Completed-result quality scoring follows the verifier/aggregation contract; these counts describe collection coverage.
+
+`scored` retains its existing meaning: the number of completed results, plus failures explicitly counted as zero when
+aggregating. It is separate from the measurement split. Setting `count_failure_classes_as_zero` does not change a failure into
+a measured or completed result and cannot make the five outcome counts exceed `expected`.
+
+Collection and offline aggregation export the same counts as `coverage/measured`, `coverage/masked`, `coverage/failed`,
+`coverage/omitted`, and `coverage/unknown`. For legacy shards without an inventory, observed measured/masked counts remain
+available, while expected, omitted, and unknown totals remain unknown.
 
 The coverage file is a snapshot written at collection start and cleanup. After an abrupt process kill it may be stale;
 resume or aggregate to reconstruct it from the journal and payloads. An incomplete final JSONL write is ignored during
