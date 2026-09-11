@@ -3,7 +3,9 @@
 
 import asyncio
 import os
+import signal
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -625,6 +627,8 @@ def test_slurm_launcher_submits_one_dependent_cpu_cleanup_job(tmp_path: Path) ->
     ]
     main_call, cleanup_call = read_sbatch_calls(calls_path)
     assert "--parsable" in main_call
+    assert "--time=04:00:00" in main_call
+    assert not any(argument.startswith("--signal=") for argument in main_call)
 
     submit_dir = str(Path.cwd().resolve())
     repo_root = SBATCH_SCRIPT.resolve().parents[2]
@@ -665,6 +669,64 @@ def test_slurm_launcher_submits_one_dependent_cpu_cleanup_job(tmp_path: Path) ->
     assert "cleanup_sandboxes.py" not in batch_command
     assert "cleanup_server()" in batch_command
     assert "attacker" not in batch_command
+
+
+def test_slurm_launcher_configures_resumable_deadline(tmp_path: Path) -> None:
+    calls_path, env = install_sbatch_stub(tmp_path)
+    env.update(
+        {
+            "SBATCH_TIME": "08:00:00",
+            "RESUME_EVAL_ON_REQUEUE": "1",
+            "PREDEADLINE_SECONDS": "1800",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(SBATCH_SCRIPT), "--config", "benchmark.yaml"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    main_call, _cleanup_call = read_sbatch_calls(calls_path)
+    assert "--time=08:00:00" in main_call
+    assert "--signal=B:USR1@1800" in main_call
+
+    eval_command = (tmp_path / "eval-command").read_text()
+    batch_command = (tmp_path / "batch-command").read_text()
+    assert "experiment_name=experiment/resumable" in eval_command
+    assert "++resume_from_cache=true" in eval_command
+    assert "rollouts_fpath=${ROLLOUTS_FPATH:-results/$experiment_name.jsonl}" in eval_command
+    assert "trap handle_predeadline USR1" in batch_command
+    assert "Evaluation is incomplete but resumable; exiting with status 75." in batch_command
+
+
+@pytest.mark.parametrize(
+    ("resume", "predeadline", "message"),
+    [
+        ("sometimes", "900", "RESUME_EVAL_ON_REQUEUE must be 0 or 1"),
+        ("1", "never", "PREDEADLINE_SECONDS must be a positive integer"),
+    ],
+)
+def test_slurm_launcher_rejects_invalid_resume_settings(
+    tmp_path: Path, resume: str, predeadline: str, message: str
+) -> None:
+    calls_path, env = install_sbatch_stub(tmp_path)
+    env["RESUME_EVAL_ON_REQUEUE"] = resume
+    env["PREDEADLINE_SECONDS"] = predeadline
+
+    result = subprocess.run(
+        ["bash", str(SBATCH_SCRIPT), "--config", "benchmark.yaml"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert message in result.stderr
+    assert not calls_path.exists()
 
 
 def test_slurm_launcher_skips_cleanup_job_without_eval_args(tmp_path: Path) -> None:
@@ -782,6 +844,77 @@ def test_slurm_batch_command_preserves_status_and_stops_server(
     )
     assert result.returncode == expected_status
     assert events.read_text().splitlines() == (["server-stop"] if first_step == "eval" else ["server-exit"])
+
+
+def test_slurm_batch_command_marks_a_predeadline_stop_as_resumable(tmp_path: Path) -> None:
+    _calls_path, env = install_sbatch_stub(tmp_path)
+    env["RESUME_EVAL_ON_REQUEUE"] = "1"
+    launch = subprocess.run(
+        ["bash", str(SBATCH_SCRIPT), "--config", "benchmark.yaml"],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+    assert launch.returncode == 0, launch.stderr
+    batch_command = (tmp_path / "batch-command").read_text()
+
+    stub_dir = Path(env["PATH"].split(":", maxsplit=1)[0])
+    events = tmp_path / "events"
+    eval_ready = tmp_path / "eval-ready"
+    stubs = {
+        "scontrol": "#!/bin/bash\nprintf 'node-a\\nnode-b\\n'\n",
+        "srun": (
+            "#!/bin/bash\n"
+            'if [[ " $* " == *eval-container-on-node* ]]; then\n'
+            '    touch "$EVAL_READY"\n'
+            "    trap 'echo eval-stop >> \"$EVENTS\"; exit 0' TERM\n"
+            "    while :; do sleep 0.1; done\n"
+            "fi\n"
+            "trap 'echo server-stop >> \"$EVENTS\"; exit 0' TERM\n"
+            "while :; do sleep 0.1; done\n"
+        ),
+    }
+    for name, contents in stubs.items():
+        stub = stub_dir / name
+        stub.write_text(contents)
+        stub.chmod(0o755)
+
+    process = subprocess.Popen(
+        ["bash", "-c", batch_command],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={
+            **env,
+            "EVENTS": str(events),
+            "EVAL_READY": str(eval_ready),
+            "SLURM_CPUS_ON_NODE": "4",
+            "SLURM_JOB_ID": "job-7",
+            "SLURM_JOB_NODELIST": "nodes",
+            "SLURM_JOB_USER": "slurm-user",
+            "SLURM_SUBMIT_DIR": str(tmp_path),
+            "eval_command": "eval-command",
+            "vllm_command": "server-command",
+        },
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not eval_ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert eval_ready.exists(), "the generated batch command did not launch the evaluation step"
+
+        process.send_signal(signal.SIGUSR1)
+        _stdout, stderr = process.communicate(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+
+    assert process.returncode == 75
+    assert "Slurm deadline is approaching" in stderr
+    assert "Evaluation is incomplete but resumable; exiting with status 75." in stderr
+    assert sorted(events.read_text().splitlines()) == ["eval-stop", "server-stop"]
 
 
 SANDBOX_ARGS = ["--domain", "sandbox.example", "--api-key", TEST_ACCESS_KEY]
