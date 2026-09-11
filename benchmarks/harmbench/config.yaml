@@ -1,0 +1,15 @@
+config_paths:
+  - resources_servers/harmbench/configs/harmbench.yaml
+
+harmbench_direct_request:
+  _inherit_from: harmbench_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: harmbench-direct-request-text
+          type: benchmark
+          jsonl_fpath: benchmarks/harmbench/data/harmbench_direct_request_text.jsonl
+          prepare_script: benchmarks/harmbench/prepare.py
+          prompt_config: null
+          num_repeats: 1
+          license: MIT
