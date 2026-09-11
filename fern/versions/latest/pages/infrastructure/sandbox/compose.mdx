@@ -12,7 +12,8 @@ health checks, service aliases, and shared volumes.
 
 ## Start two services
 
-Install NeMo Gym's `sandbox` extra and the official
+The adapter uses Gym's existing Python dependencies and adds no Python packages.
+Install NeMo Gym's `sandbox` extra for the provider SDKs and the official
 [standalone Docker Compose executable](https://docs.docker.com/compose/install/standalone/)
 on the creating server. Compose is used only to normalize the YAML with `config`;
 no Docker daemon is needed, including on Slurm nodes. The adapter does not inspect
@@ -130,7 +131,7 @@ transfer of lifecycle ownership.
 ## Input and deployment configuration
 
 On `start()`,
-the adapter runs `docker compose config --format yaml` to resolve the YAML,
+the adapter runs `docker-compose config --format yaml` to resolve the YAML,
 including interpolation, `.env` values and relative paths. Compose validates
 its schema. YAML output retains `x-sandbox` extensions that the JSON formatter
 omits; the adapter only deserializes this normalized output. It rejects requirements the sandbox API cannot honor
