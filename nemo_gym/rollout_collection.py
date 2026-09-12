@@ -77,6 +77,7 @@ from nemo_gym.rollout_journal import (
     RUN_ID_KEY,
     coverage_path_for,
     journal_path_for,
+    logical_rollout_id,
 )
 from nemo_gym.rollout_observability import (
     AgentInvocation,
@@ -173,6 +174,7 @@ class _CompletedRollout:
     rollout_latency_ms: Optional[float]
     # Actual generation retained for judge-only recovery, outside RolloutFailure.
     verification_response: Optional[Dict[str, Any]] = None
+    diagnostics: Optional[Dict[str, Any]] = None
 
 
 def _nonnegative_int(value: Any) -> Optional[int]:
@@ -946,6 +948,17 @@ def _judge_failure_response(result: Any) -> Optional[Dict]:
     return None
 
 
+def _failure_diagnostics(result: Any) -> Dict:
+    if not isinstance(result, dict):
+        return {}
+    return {
+        key: value
+        for key, value in result.items()
+        if key in {"ng_agent_observations", "ng_model_call_capture", NG_TRAJECTORY_KEY, NG_PERF_KEY}
+        or key.startswith("_ng_failure_")
+    }
+
+
 def _failure_compatibility_row(failure: RolloutFailure, verification_response: Optional[Dict] = None) -> Dict:
     """Keep existing sidecar routing keys and diagnostics alongside the canonical failure.
 
@@ -1245,6 +1258,8 @@ class RolloutCollectionHelper(BaseModel):
                     # Resolve rollout index
                     row[ROLLOUT_INDEX_KEY_NAME] = task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]]
                     task_idx_to_rollout_idx[row[TASK_INDEX_KEY_NAME]] += 1
+                    if row.get(ROLLOUT_ID_KEY_NAME) is not None and (row_num_repeats > 1 or len(targets) > 1):
+                        row[ROLLOUT_ID_KEY_NAME] = f"{logical_rollout_id(row)}-r{row[ROLLOUT_INDEX_KEY_NAME]}"
 
                     if config.num_repeats_add_seed:
                         row[RESPONSES_CREATE_PARAMS_KEY_NAME] = row[RESPONSES_CREATE_PARAMS_KEY_NAME].copy()
@@ -1371,7 +1386,6 @@ class RolloutCollectionHelper(BaseModel):
         output_fpath = Path(config.output_jsonl_fpath)
         failures_fpath = failures_path_for(output_fpath)
         global_config = get_global_config_dict()
-        resolved_config = OmegaConf.to_container(OmegaConf.create(global_config), resolve=True)
 
         def prepare_inputs() -> tuple[list[dict], RunManifest]:
             input_rows = self._preprocess_rows_from_config(config)
@@ -1385,8 +1399,8 @@ class RolloutCollectionHelper(BaseModel):
             manifest = RunManifest.create(
                 _resolve_under_cwd_or_install(config.input_jsonl_fpath),
                 input_rows,
-                config.model_dump(mode="json"),
-                resolved_config,
+                config.model_dump(),
+                global_config,
             )
             return input_rows, manifest
 
@@ -1489,6 +1503,7 @@ class RolloutCollectionHelper(BaseModel):
                 completed = await future
                 row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
                 verification_response = completed.verification_response
+                diagnostics = completed.diagnostics or _failure_diagnostics(result)
                 if verification_response is None:
                     verification_response = _judge_failure_response(result)
                 # Custom dispatch implementations may return an already-completed
@@ -1502,7 +1517,7 @@ class RolloutCollectionHelper(BaseModel):
                         result = _failure_outcome(row, result, "agent")
                 structured_failure = isinstance(result, RolloutFailure)
                 if structured_failure:
-                    result = _failure_compatibility_row(result, verification_response)
+                    result = diagnostics | _failure_compatibility_row(result, verification_response)
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -1526,7 +1541,7 @@ class RolloutCollectionHelper(BaseModel):
 
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
                 # when capture is off). Never alters the harness output/reward already in `result`.
-                if capture_dirs and not no_result:
+                if capture_dirs and not no_persist:
                     merge_model_call_capture_into_record(
                         result,
                         capture_dirs,
@@ -1707,7 +1722,7 @@ class RolloutCollectionHelper(BaseModel):
             aggregate_metrics_fpath = None
         else:
             print("Computing aggregate metrics")
-            counted[:] = _counted_failure_rows(store.selected("failure"), config.count_failure_classes_as_zero)
+            counted[:] = _counted_failure_rows(store.failures(), config.count_failure_classes_as_zero)
             if config.count_failure_classes_as_zero:
                 print(
                     f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}"
@@ -2044,6 +2059,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     stage = "response"
                     result = await get_response_json(res)
                     verification_response = _judge_failure_response(result)
+                    diagnostics = _failure_diagnostics(result)
                     if typed_outcomes:
                         stage = "result"
                         result = _normalize_rollout_outcome(row, result)
@@ -2055,6 +2071,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         result=result,
                         rollout_latency_ms=rollout_latency_ms,
                         verification_response=verification_response,
+                        diagnostics=diagnostics,
                     )
                 except Exception as e:
                     print(
@@ -2334,7 +2351,7 @@ class RolloutAggregationHelper(BaseModel):
             scored_keys,
         )
         for history in histories:
-            counted.extend(_counted_failure_rows(history.selected("failure"), config.count_failure_classes_as_zero))
+            counted.extend(_counted_failure_rows(history.failures(), config.count_failure_classes_as_zero))
         if config.count_failure_classes_as_zero:
             print(f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}")
 
@@ -2349,6 +2366,12 @@ class RolloutAggregationHelper(BaseModel):
             row.get(NG_FAILURE_CLASS_KEY) or "unknown"
             for key, row in _latest_failure_rows(failures_fpaths).items()
             if key not in scored_keys and key not in counted_keys
+        )
+        dropped.update(
+            row[NG_FAILURE_CLASS_KEY]
+            for history in histories
+            for row in history.failures()
+            if row[NG_FAILURE_CLASS_KEY] not in config.count_failure_classes_as_zero
         )
         scored_rollouts = len(results) + len(counted)
         components = [history.coverage() for history in histories]

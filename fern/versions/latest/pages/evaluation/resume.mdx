@@ -22,7 +22,9 @@ The manifest contains a run identifier, a format version, and digests of:
 - The collection settings and resolved model/environment configuration that affect the tasks.
 
 The manifest does not store credentials or raw configuration values. Changing collection concurrency, reporting options,
-or the assigned Gym server host/port does not invalidate saved results. Changing a model, sampling settings, or tasks does.
+credentials, endpoint addresses, or capture directories does not invalidate saved results. Gym resolves configuration
+for the materialized agents and their referenced servers; unused server configurations need not resolve in the collector.
+Changing a model, sampling settings, task data paths, prompts, or tasks does invalidate saved results.
 
 Keep the manifest, materialized inputs, rollout output, failure sidecar, and attempt journal together.
 Gym records and flushes each dispatch to `<output_stem>_attempts.jsonl` before sending its request. Completed results and
@@ -40,6 +42,15 @@ A completed wrong answer is a result, so it is not retried merely because its re
 A logical rollout retains its task/rollout identity across restarts. Every redispatch receives a larger attempt index,
 including after an interruption that left no result. `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS` bounds the total number of dispatched
 attempts per logical rollout (default: 3); reaching that limit does not create a synthetic failure or reward.
+
+Explicit `_ng_rollout_id` values must be valid capture IDs. Preprocessing preserves them for single copies and adds
+`-r<rollout_index>` when repeats or agent fan-out expand a row. The resulting IDs must be unique within the run.
+Invalid or colliding IDs are configuration errors before dispatch.
+
+Reported `kill_shaped` failures consume attempts and are persisted in the failure sidecar, even when the legacy producer
+also sets `_ng_no_persist`. This differs from older collectors that discarded these failures and did not count them.
+The same policy applies when reverification appends to a journal-backed run. Legacy reverification outputs without a
+manifest retain their previous suppression behavior. A suppression without a reported failure is an intentional omission.
 
 The **greatest dispatched attempt index** determines the current outcome. A late result from an older attempt remains
 in the append-only artifacts but cannot replace the newer attempt or count as an extra sample. A newer attempt with no
@@ -76,6 +87,8 @@ Completed-result quality scoring follows the verifier/aggregation contract; thes
 `scored` retains its existing meaning: the number of completed results, plus failures explicitly counted as zero when
 aggregating. It is separate from the measurement split. Setting `count_failure_classes_as_zero` does not change a failure into
 a measured or completed result and cannot make the five outcome counts exceed `expected`.
+An explicit `skipped` entry in `count_failure_classes_as_zero` includes terminal skipped payloads in scoring while their
+completion disposition remains intentionally omitted. Omissions without a failure payload cannot be scored this way.
 
 Collection and offline aggregation export the same counts as `coverage/measured`, `coverage/masked`, `coverage/failed`,
 `coverage/omitted`, and `coverage/unknown`. For legacy shards without an inventory, observed measured/masked counts remain
@@ -96,6 +109,15 @@ and coverage reports `identity_verified=false`. Future resumes continue to requi
 payloads are preserved; newly written payloads carry the run identifier. Gym still rejects corrupt or unsupported
 manifests and materialized inputs that no longer match their saved manifest.
 Use a fresh output location when the intention is to evaluate changed tasks or a different model.
+
+The unsafe override can also reconstruct missing attempt history from saved payloads, retaining their run identifier.
+If the manifest is missing, all surviving tagged artifacts must agree on one run. Conflicting or foreign-run records
+remain errors. Dispatches that left no saved outcome cannot be reconstructed after journal loss, so attempt counts become
+lower bounds; recovered coverage remains unverified. Keep the journal whenever possible.
+
+Offline aggregation reads untagged legacy append/reverify artifacts without requiring a manifest. Where older writers
+reused an attempt index, migration orders those legacy outcomes by their recorded arrival, with sidecar failures read
+before main-file results. This compatibility rule does not relax conflict detection for journal-backed records.
 
 ## Structured failures for direct callers
 
@@ -132,8 +154,17 @@ not copied into the failure record. Completed masked results remain completed di
 The evaluation runner uses structured outcomes when `route_failures_to_sidecar=true`. Its sidecar retains the existing
 `_ng_failure_*` routing aliases for row-oriented consumers and stores the canonical record under `_ng_failure_record`. Those aliases can be removed after
 the consumers and the producer migration in [#3180](https://github.com/NVIDIA-NeMo/Gym/issues/3180) adopt the new contract.
+When routing is disabled, exceptions and malformed failure payloads can stop the run. Well-formed explicit failures are
+still accepted as data. Diagnostic observations, trajectories, and captured model calls are retained in the surrounding
+sidecar record, outside the canonical failure; they do not turn a failure into a completed training sample.
 
 For a legacy `judge_failed` result that includes the actual generated response, the sidecar also preserves that
 `response` outside the canonical failure record, without a reward. This keeps `gym eval reverify --judge-failed-only`
 working: it submits the saved response to the verifier again without rerunning inference. A structured failure that
-never included a response cannot reconstruct one. Other legacy response placeholders are discarded.
+never included a response cannot reconstruct one: reverification reports and skips it while continuing rows with saved
+responses. Resume collection to rerun generation for that work. Other legacy response placeholders are discarded.
+
+With `--judge-failed-only --append` and the original rollout file as both input and output, reverification records new
+attempts in the same journal before sending verifier requests. Recovered results then participate in the same selection
+rules as collection and aggregation. Terminal failures and exhausted attempt budgets are respected. Full reverification
+uses a separate output file so that changed scores cannot overwrite the original run's history.

@@ -20,6 +20,7 @@ The journal reconstructs state for both collection and read-only aggregation.
 """
 
 import os
+import warnings
 from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
@@ -27,6 +28,7 @@ from pathlib import Path
 import orjson
 
 from nemo_gym.config_types import ConfigError
+from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME
 from nemo_gym.path_utils import failures_path_for
 from nemo_gym.rollout_journal import (
     RUN_ID_KEY,
@@ -51,6 +53,24 @@ class RolloutStore:
         self._files = None
         self._results_file = None
         self._failures_file = None
+
+    @staticmethod
+    def _unverified_manifest(output: Path) -> RunManifest:
+        manifest = RunManifest.import_legacy(list(read_records(materialized_path_for(output))))
+        # Losing a manifest must not silently relabel a mixture of foreign runs.
+        run_ids = {
+            row[key]
+            for path, key in (
+                (output, RUN_ID_KEY),
+                (failures_path_for(output), RUN_ID_KEY),
+                (journal_path_for(output), "run_id"),
+            )
+            for row in read_records(path)
+            if row.get(key) is not None
+        }
+        if len(run_ids) > 1:
+            raise ConfigError("Saved artifacts belong to different runs.")
+        return manifest.model_copy(update={"run_id": run_ids.pop()}) if run_ids else manifest
 
     @classmethod
     def start_or_resume(
@@ -85,15 +105,22 @@ class RolloutStore:
             manifest = validate_resume(manifest_path, current, materialized, allow_unsafe=allow_unsafe)
             seed_legacy = False
             if manifest is None:
-                manifest = RunManifest.import_legacy(list(read_records(materialized)))
-                seed_legacy = True
+                manifest = cls._unverified_manifest(output)
+                seed_legacy = not journal.exists()
             elif not journal.exists():
                 if not allow_unsafe:
                     raise ConfigError(f"Cannot resume without attempt history: {journal}.")
-                manifest = manifest.model_copy(update={"legacy_import": True})
+                warnings.warn(
+                    "Rebuilding missing attempt history from saved outcomes because allow_unsafe_resume=true. "
+                    "Dispatches without saved outcomes cannot be recovered; attempt counts are lower bounds.",
+                    stacklevel=2,
+                )
+                manifest = manifest.model_copy(update={"identity_overridden": True})
                 seed_legacy = True
-            state = RolloutJournal.load(output, manifest, import_legacy=manifest.legacy_import)
-            if seed_legacy or manifest.identity_overridden:
+            state = RolloutJournal.load(
+                output, manifest, import_legacy=manifest.legacy_import, rebuild_history=seed_legacy
+            )
+            if seed_legacy or manifest.identity_overridden or not manifest_path.exists():
                 manifest.write(manifest_path)
             return cls(output, state, seed_legacy=seed_legacy)
 
@@ -105,6 +132,11 @@ class RolloutStore:
         # Invalidate prior outputs before publishing the fresh run's identity.
         for path in (output, failures_path_for(output), journal, coverage_path_for(output)):
             path.unlink(missing_ok=True)
+        # Publish the manifest only after the empty payload/history files exist.
+        # Preparation can then be interrupted before __enter__ without stranding
+        # an otherwise valid run with missing required artifacts.
+        output.touch()
+        journal.touch()
         manifest.write(manifest_path)
         return cls(output, state)
 
@@ -119,10 +151,15 @@ class RolloutStore:
         if path.exists():
             manifest = RunManifest.model_validate_json(path.read_bytes())
         elif materialized_path_for(output).exists():
-            manifest = RunManifest.import_legacy(list(read_records(materialized_path_for(output))))
+            manifest = cls._unverified_manifest(output)
         else:
             return None
-        state = RolloutJournal.load(output, manifest, import_legacy=manifest.legacy_import)
+        state = RolloutJournal.load(
+            output,
+            manifest,
+            import_legacy=manifest.legacy_import,
+            rebuild_history=manifest.legacy_import and not journal_path_for(output).exists(),
+        )
         return cls(output, state, read_only=True)
 
     def __enter__(self) -> "RolloutStore":
@@ -152,6 +189,18 @@ class RolloutStore:
             raise
         self._files = files
         return self
+
+    @classmethod
+    def append_existing(cls, output: Path) -> "RolloutStore | None":
+        """Reverification may append to a validated journal-backed run."""
+        if not manifest_path_for(output).exists():
+            return None
+        if not journal_path_for(output).exists():
+            raise ConfigError(
+                "Cannot append without attempt history; explicitly recover the run before reverification."
+            )
+        reader = cls.read(output)
+        return cls(output, reader._state)
 
     def __exit__(self, *exc):
         try:
@@ -195,6 +244,28 @@ class RolloutStore:
 
     def selected(self, disposition: str) -> list[dict]:
         return self._state.selected(disposition)
+
+    def failures(self) -> list[dict]:
+        """Latest failure payloads, including terminal skips classified as omitted."""
+        return self.selected("failure") + self.selected("omitted")
+
+    def for_reverification(self, payloads: list[dict]) -> list[dict]:
+        """Allocate new attempt identities without dispatching or changing files."""
+        rows = []
+        for payload in payloads:
+            identity = logical_rollout_id(payload)
+            if identity not in self._state.expected:
+                raise ConfigError("Reverification input is outside the saved run's inventory.")
+            if any(payload.get(key) != value for key, value in self._state.expected[identity].items()):
+                raise ConfigError("Reverification inputs differ from the saved run's materialized inputs.")
+            rows.append(
+                payload
+                | {
+                    RUN_ID_KEY: self.manifest.run_id,
+                    ATTEMPT_INDEX_KEY_NAME: self._state.latest.get(identity, -1) + 1,
+                }
+            )
+        return rows
 
     def inputs_for(self, results: list[dict]) -> list[dict]:
         return [self._state.expected[logical_rollout_id(result)] for result in results]

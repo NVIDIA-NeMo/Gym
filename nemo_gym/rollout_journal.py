@@ -52,7 +52,10 @@ def materialized_path_for(output: Path) -> Path:
 
 def logical_rollout_id(row: dict) -> str:
     logical = {key: value for key, value in row.items() if key != ATTEMPT_INDEX_KEY_NAME}
-    identity = maybe_rollout_id_from_run_body(logical)
+    try:
+        identity = maybe_rollout_id_from_run_body(logical)
+    except (TypeError, ValueError) as error:
+        raise ConfigError(f"Invalid rollout identity: {error}") from error
     if identity is None:
         raise ConfigError("Recovery requires a rollout id or materialized task/rollout indices.")
     return identity
@@ -207,13 +210,15 @@ class RolloutJournal:
         self.omitted.add(key)
 
     @classmethod
-    def load(cls, output: Path, manifest: RunManifest, *, import_legacy: bool = False) -> "RolloutJournal":
+    def load(
+        cls, output: Path, manifest: RunManifest, *, import_legacy: bool = False, rebuild_history: bool = False
+    ) -> "RolloutJournal":
         expected = list(read_records(materialized_path_for(output)))
         if _digest(expected) != manifest.materialized_digest:
             raise ConfigError("Saved materialized inputs do not match the run manifest.")
         state = cls(manifest, expected)
         history = journal_path_for(output)
-        if not history.exists() and not import_legacy:
+        if not history.exists() and not (import_legacy or rebuild_history):
             raise ConfigError(f"Cannot resume without attempt history: {history}.")
         for value in read_records(history):
             try:
@@ -239,10 +244,18 @@ class RolloutJournal:
                     identity = logical_rollout_id(payload)
                     payload = dict(payload)
                     payload.setdefault(ATTEMPT_INDEX_KEY_NAME, legacy_counts[identity])
+                    key = state._key(payload)
+                    if key in state.payloads and state.payloads[key] != payload:
+                        # Old append/reverify writers reused explicit attempt IDs.
+                        # Only untagged legacy rows use arrival-order migration;
+                        # journal-backed records still reject conflicting payloads.
+                        payload[ATTEMPT_INDEX_KEY_NAME] = max(legacy_counts[identity], key[1] + 1)
                     legacy_counts[identity] = max(legacy_counts[identity], payload[ATTEMPT_INDEX_KEY_NAME] + 1)
-                if (path == output) == (payload.get("_ng_failure_class") is not None):
+                if (path == output) == (payload.get("_ng_failure_class") is not None) and not (
+                    import_legacy and RUN_ID_KEY not in payload
+                ):
                     raise ConfigError(f"Outcome in the wrong artifact: {path}.")
-                state._payload(payload, legacy=import_legacy and RUN_ID_KEY not in payload)
+                state._payload(payload, legacy=rebuild_history or (import_legacy and RUN_ID_KEY not in payload))
         return state
 
     def seed_legacy_history(self) -> None:

@@ -442,3 +442,33 @@ async def test_legacy_aggregation_cannot_claim_complete_without_inventory(tmp_pa
         }
     ]
     assert "scores may be partial" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("mixed_legacy", [False, True])
+async def test_aggregation_reports_journal_failure_classes(run, monkeypatch, capsys, mixed_legacy):
+    import nemo_gym.rollout_collection as collection
+
+    output, _, rows = run
+    with writer(run) as history:
+        history.dispatch(rows[0])
+        save(run, history, rows[0], reward=1.0)
+        history.dispatch(rows[1])
+        save(run, history, rows[1], failure="judge_failed")
+    if mixed_legacy:
+        output.with_name("rollouts_legacy.jsonl").write_bytes(
+            orjson.dumps(rows[0] | {"reward": 0, "response": {}}) + b"\n"
+        )
+
+    async def aggregate(*args):
+        return None
+
+    monkeypatch.setattr(collection.RolloutCollectionHelper, "_call_aggregate_metrics", aggregate)
+    monkeypatch.setattr(collection, "get_exporters", list)
+    await collection.RolloutAggregationHelper().run_from_config(
+        collection.RolloutAggregationConfig(
+            input_glob=str(output.with_name("rollouts*.jsonl")),
+            output_jsonl_fpath=str(output.with_name("merged.jsonl")),
+            disable_health_check=True,
+        )
+    )
+    assert "1 judge_failed" in capsys.readouterr().out
