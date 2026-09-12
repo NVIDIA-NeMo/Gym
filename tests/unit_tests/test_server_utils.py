@@ -821,7 +821,7 @@ _SPOOFED_HOST = "203.0.113.99"
 _LOOPBACK = "127.0.0.1"
 
 
-async def _scope_seen_by_app(*, proxy_headers: bool, allow_ips: list[str] | None, peer: str, forwarded: bool) -> dict:
+async def _scope_seen_by_app(*, uvicorn_kwargs: dict, peer: str, forwarded: bool) -> dict:
     """Drive uvicorn's loaded app with one request and return the scope the inner app observed."""
     seen: dict = {}
 
@@ -829,10 +829,12 @@ async def _scope_seen_by_app(*, proxy_headers: bool, allow_ips: list[str] | None
         seen["client"] = scope.get("client")
         seen["scheme"] = scope["scheme"]
 
+    # Take the proxy settings straight from what run_webserver produced, so this exercises
+    # Gym's wiring rather than restating uvicorn's defaults.
     config = uvicorn.Config(
         app=recorder,
-        proxy_headers=proxy_headers,
-        forwarded_allow_ips=allow_ips or [],
+        proxy_headers=uvicorn_kwargs["proxy_headers"],
+        forwarded_allow_ips=uvicorn_kwargs["forwarded_allow_ips"],
     )
     config.load()
 
@@ -894,10 +896,34 @@ class TestUvicornProxyHeadersConfig:
 
     def test_all_address_networks_are_rejected(self) -> None:
         for network in ("0.0.0.0/0", "::/0"):
-            with raises(ValidationError, match="must not contain an all-address CIDR"):
+            with raises(ValidationError, match="covers every address"):
                 UvicornProxyHeadersConfig.model_validate(
                     {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": [network]}
                 )
+
+    def test_unparseable_allowlist_entries_are_rejected(self) -> None:
+        """uvicorn keeps an unparseable entry as a literal that never matches a TCP peer, so the
+        allowlist would look populated while trusting nobody."""
+        for bad in ("10.0.0.5/24", "proxy.internal", "not an ip", "0/0"):
+            with raises(ValidationError, match="is not a valid IP address or CIDR range"):
+                UvicornProxyHeadersConfig.model_validate(
+                    {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": [bad]}
+                )
+
+    def test_ipv4_mapped_all_address_network_is_rejected(self) -> None:
+        """::ffff:0:0/96 has prefixlen 96 but trusts every IPv4 peer on a dual-stack socket."""
+        for bad in ("::ffff:0:0/96", "::ffff:0.0.0.0/96"):
+            with raises(ValidationError, match="covers every address"):
+                UvicornProxyHeadersConfig.model_validate(
+                    {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": [bad]}
+                )
+
+    def test_valid_cidr_ranges_are_accepted(self) -> None:
+        config = UvicornProxyHeadersConfig.model_validate(
+            {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": ["10.0.1.0/24", "10.0.0.1"]}
+        )
+
+        assert ["10.0.1.0/24", "10.0.0.1"] == config.uvicorn_forwarded_allow_ips
 
     def test_allowlist_is_normalized(self) -> None:
         config = UvicornProxyHeadersConfig.model_validate(
@@ -908,46 +934,51 @@ class TestUvicornProxyHeadersConfig:
 
 
 class TestUvicornProxyHeadersBehavior:
-    async def test_forwarded_headers_ignored_when_disabled(self) -> None:
-        """The documented internal-only default: the real peer and scheme survive a forged header."""
-        seen = await _scope_seen_by_app(proxy_headers=False, allow_ips=None, peer=_LOOPBACK, forwarded=True)
+    """End-to-end: the kwargs run_webserver builds are fed to uvicorn and the resulting
+    middleware stack is driven with a real request."""
+
+    def _kwargs(self, monkeypatch: MonkeyPatch, config_dict: dict) -> dict:
+        return TestRunWebserverProxyKwargs()._capture_uvicorn_kwargs(monkeypatch, config_dict, num_workers=1)
+
+    async def test_forwarded_headers_ignored_on_the_default_internal_path(self, monkeypatch: MonkeyPatch) -> None:
+        """Gym's default config must leave the real peer and scheme intact despite forged headers."""
+        seen = await _scope_seen_by_app(uvicorn_kwargs=self._kwargs(monkeypatch, {}), peer=_LOOPBACK, forwarded=True)
 
         assert (_LOOPBACK, 54321) == seen["client"]
         assert "http" == seen["scheme"]
 
-    async def test_real_peer_reported_when_disabled_without_forwarded_headers(self) -> None:
-        seen = await _scope_seen_by_app(proxy_headers=False, allow_ips=None, peer=_LOOPBACK, forwarded=False)
+    async def test_real_peer_reported_when_no_forwarded_headers_are_sent(self, monkeypatch: MonkeyPatch) -> None:
+        seen = await _scope_seen_by_app(uvicorn_kwargs=self._kwargs(monkeypatch, {}), peer=_LOOPBACK, forwarded=False)
 
         assert (_LOOPBACK, 54321) == seen["client"]
         assert "http" == seen["scheme"]
 
-    async def test_forwarded_headers_honored_for_trusted_proxy(self) -> None:
-        seen = await _scope_seen_by_app(proxy_headers=True, allow_ips=[_LOOPBACK], peer=_LOOPBACK, forwarded=True)
+    async def test_forwarded_headers_honored_for_trusted_proxy(self, monkeypatch: MonkeyPatch) -> None:
+        kwargs = self._kwargs(monkeypatch, {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": [_LOOPBACK]})
+        seen = await _scope_seen_by_app(uvicorn_kwargs=kwargs, peer=_LOOPBACK, forwarded=True)
 
         assert (_SPOOFED_HOST, 0) == seen["client"]
         assert "https" == seen["scheme"]
 
-    async def test_forwarded_headers_ignored_from_untrusted_peer(self) -> None:
-        """Enabled, but the caller is not on the allowlist, so its forwarded claims are discarded."""
-        seen = await _scope_seen_by_app(proxy_headers=True, allow_ips=["10.0.0.1"], peer=_LOOPBACK, forwarded=True)
+    async def test_forwarded_headers_honored_for_trusted_cidr_range(self, monkeypatch: MonkeyPatch) -> None:
+        """A CIDR allowlist entry, as the configuration docs advertise, must actually match."""
+        kwargs = self._kwargs(
+            monkeypatch, {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": ["10.0.1.0/24"]}
+        )
+        seen = await _scope_seen_by_app(uvicorn_kwargs=kwargs, peer="10.0.1.55", forwarded=True)
+
+        assert (_SPOOFED_HOST, 0) == seen["client"]
+        assert "https" == seen["scheme"]
+
+    async def test_forwarded_headers_ignored_from_untrusted_peer(self, monkeypatch: MonkeyPatch) -> None:
+        """Opt-in enabled, but the caller is not on the allowlist, so its claims are discarded."""
+        kwargs = self._kwargs(
+            monkeypatch, {"uvicorn_proxy_headers": True, "uvicorn_forwarded_allow_ips": ["10.0.0.1"]}
+        )
+        seen = await _scope_seen_by_app(uvicorn_kwargs=kwargs, peer=_LOOPBACK, forwarded=True)
 
         assert (_LOOPBACK, 54321) == seen["client"]
         assert "http" == seen["scheme"]
-
-    def test_proxy_middleware_absent_for_single_and_multi_worker(self) -> None:
-        """run_webserver builds one kwargs dict for both launch paths, so the setting must hold for each."""
-        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
-
-        for workers in (1, 4):
-            config = uvicorn.Config(
-                app=lambda scope, receive, send: None,
-                workers=workers,
-                proxy_headers=False,
-                forwarded_allow_ips=[],
-            )
-            config.load()
-
-            assert not isinstance(config.loaded_app, ProxyHeadersMiddleware), workers
 
 
 class TestRunWebserverProxyKwargs:

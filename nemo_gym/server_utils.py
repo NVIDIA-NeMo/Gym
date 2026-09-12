@@ -646,6 +646,10 @@ class UvicornLoggingConfig(BaseModel):
     uvicorn_logging_show_200_ok: bool = False
 
 
+# Every IPv4 address as it appears on a dual-stack socket.
+_ALL_V4_MAPPED = ip_network("::ffff:0:0/96")
+
+
 class UvicornProxyHeadersConfig(BaseModel):
     # Gym servers call each other directly, so proxy headers stay off: uvicorn would otherwise let
     # any caller rewrite its own client host and URL scheme through X-Forwarded-*.
@@ -666,11 +670,18 @@ class UvicornProxyHeadersConfig(BaseModel):
         for address in allow_ips:
             try:
                 network = ip_network(address)
-            except ValueError:
-                continue
-            if network.prefixlen == 0:
+            except ValueError as exc:
+                # Anything uvicorn cannot parse as an address is kept as a literal it will never
+                # match against a TCP peer, so the entry would silently trust nothing.
                 raise ValueError(
-                    "uvicorn_forwarded_allow_ips must not contain an all-address CIDR: "
+                    f"uvicorn_forwarded_allow_ips entry {address!r} is not a valid IP address or CIDR range: {exc}"
+                ) from exc
+            # prefixlen 0 covers a whole family; an IPv6 supernet of ::ffff:0:0/96 covers all of
+            # IPv4 once peers arrive IPv4-mapped on a dual-stack socket.
+            covers_all_v4_mapped = network.version == 6 and network.supernet_of(_ALL_V4_MAPPED)
+            if network.prefixlen == 0 or covers_all_v4_mapped:
+                raise ValueError(
+                    f"uvicorn_forwarded_allow_ips entry {address!r} covers every address: "
                     "it trusts forwarded headers from any peer."
                 )
 
@@ -1166,7 +1177,7 @@ class HeadServer(BaseServer):
         self._cached_yaml = None
 
     @classmethod
-    def run_webserver(cls) -> Tuple[uvicorn.Server, Thread, "HeadServer"]:  # pragma: no cover
+    def run_webserver(cls) -> Tuple[uvicorn.Server, Thread, "HeadServer"]:
         config = ServerClient.load_head_server_config()
         server = cls(config=config)
         uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(get_global_config_dict())
