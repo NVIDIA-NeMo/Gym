@@ -1,0 +1,4 @@
+-e nemo-gym[dev] @ ../../
+verifiers @ git+https://github.com/PrimeIntellect-ai/verifiers.git@main
+--extra-index-url https://hub.primeintellect.ai/primeintellect/simple/
+general-agent==0.1.4
