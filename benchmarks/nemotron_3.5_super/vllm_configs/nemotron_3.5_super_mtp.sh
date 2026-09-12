@@ -6,6 +6,8 @@ GYM_MODEL_PARAMS=(
 )
 
 # @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
+#     --enable-mamba-fine-grained-prefix-cache
+#     --prefix-match-unit 16
 VLLM_COMMON_ARGS=(
     --trust-remote-code
     --disable-uvicorn-access-log
@@ -29,8 +31,6 @@ VLLM_COMMON_ARGS=(
     --data-parallel-size 1
     --api-server-count 1
     --speculative-config '{"method":"mtp","num_speculative_tokens":5}'
-    --enable-mamba-fine-grained-prefix-cache
-    --prefix-match-unit 16
     --prefix-cache-retention-interval None
 )
 VLLM_PREFILL_ARGS=(
