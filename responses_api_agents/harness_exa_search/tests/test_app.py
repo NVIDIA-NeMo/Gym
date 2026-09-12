@@ -1,18 +1,69 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import asyncio
 import json
 import sys
 import tarfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from aiohttp import ClientSession, web
 from fastapi import Request
 from pytest import mark
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import SandboxEndpoint
 from nemo_gym.server_utils import ServerClient
-from responses_api_agents.harness_exa_search.app import HarnessExaSearchAgent, HarnessExaSearchConfig
+from responses_api_agents.harness_exa_search.agent_runner import start_model_relay
+from responses_api_agents.harness_exa_search.app import (
+    HarnessExaSearchAgent,
+    HarnessExaSearchConfig,
+    _pump_model_relay,
+)
+
+
+async def test_model_relay_round_trip(unused_tcp_port_factory) -> None:
+    relay_port = unused_tcp_port_factory()
+    upstream_port = unused_tcp_port_factory()
+    observed = {}
+
+    async def upstream(request: web.Request) -> web.Response:
+        observed.update(path=request.raw_path, body=await request.read(), header=request.headers["x-test"])
+        return web.Response(status=201, body=b"model response", headers={"x-upstream": "yes"})
+
+    upstream_app = web.Application()
+    upstream_app.router.add_route("*", "/{path:.*}", upstream)
+    upstream_runner = web.AppRunner(upstream_app)
+    await upstream_runner.setup()
+    await web.TCPSite(upstream_runner, "127.0.0.1", upstream_port).start()
+    relay_runner = await start_model_relay(relay_port)
+    pump = asyncio.create_task(
+        _pump_model_relay(
+            SandboxEndpoint(endpoint=f"http://127.0.0.1:{relay_port}"),
+            f"http://127.0.0.1:{upstream_port}/ng-rollout/example",
+        )
+    )
+    try:
+        async with ClientSession() as session:
+            async with session.post(
+                f"http://127.0.0.1:{relay_port}/v1/messages?stream=true",
+                headers={"x-test": "kept"},
+                data=b"model request",
+            ) as response:
+                assert response.status == 201
+                assert response.headers["x-upstream"] == "yes"
+                assert await response.read() == b"model response"
+        assert observed == {
+            "path": "/ng-rollout/example/v1/messages?stream=true",
+            "body": b"model request",
+            "header": "kept",
+        }
+    finally:
+        pump.cancel()
+        await asyncio.gather(pump, return_exceptions=True)
+        await relay_runner.cleanup()
+        await upstream_runner.cleanup()
 
 
 @mark.parametrize("task_index", [0, 1])

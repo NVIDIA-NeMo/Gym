@@ -46,13 +46,18 @@ responses_api_agents:
 | `setup_command` | Optional sandbox setup command run before the agent. |
 | `sandbox_provider` | Gym sandbox provider reference. |
 | `sandbox_spec` | Sandbox lifetime, resources, workdir, environment, and provider options. |
-| `sandbox_model_base_url` | Optional model URL reachable from the sandbox. Otherwise Gym derives it. |
+| `sandbox_model_base_url` | Optional model URL directly reachable from the sandbox. When omitted, endpoint-capable sandbox providers relay requests through the configured Gym model server. |
 | `exa_api_key` | Exa credential passed only to the sandboxed runner for MCP configuration. |
 
 For Claude Code, `harness_kwargs` are fields from `ClaudeCodeAgentConfig`.
 `model` selects the hosted model, `max_turns` and `timeout` bound execution,
 `bare` disables ambient local configuration, `system_prompt` requires web
 research, and `claude_code_version` optionally pins the CLI version.
+
+For remote sandboxes that cannot route to a cluster-private model address, the
+agent opens a sandbox-local relay and forwards model traffic through the
+configured Gym model server. This supports Messages, Responses, and Chat
+Completions without an external tunnel.
 
 See the complete, benchmark-specific config copies under
 [`benchmarks/deepsearchqa/configs`](../../benchmarks/deepsearchqa/configs) and
