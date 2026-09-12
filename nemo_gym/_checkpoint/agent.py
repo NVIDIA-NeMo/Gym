@@ -786,6 +786,7 @@ def _commit_agent_records(
                 attempt_index=record.attempt_index,
                 capture_key=capture_key_for(record.rollout_id, record.attempt_index),
                 last_committed_model_call_id=record.last_committed_model_call_id,
+                resource_state_revisions=dict(record.resource_state_revisions),
             )
             for record in records
             if record.last_committed_model_call_id is not None
@@ -900,11 +901,11 @@ def _validate_continuation_index(
             record.attempt_index,
             capture_key_for(record.rollout_id, record.attempt_index),
             record.last_committed_model_call_id,
-        )
+        ): record.resource_state_revisions
         for record in records
         if record.last_committed_model_call_id is not None
     }
-    actual = {
+    actual = [
         (
             root.rollout_id,
             root.attempt_index,
@@ -912,9 +913,14 @@ def _validate_continuation_index(
             root.last_committed_model_call_id,
         )
         for root in roots
-    }
-    if len(actual) != len(roots) or actual != expected:
+    ]
+    if len(set(actual)) != len(roots) or set(actual) != set(expected):
         raise AgentCheckpointError("agent continuation index does not match committed boundary records")
+    for root, identity in zip(roots, actual, strict=True):
+        if root.resource_state_revisions is not None and root.resource_state_revisions != expected[identity]:
+            raise AgentCheckpointError(
+                "agent continuation index resource revisions do not match committed boundary records"
+            )
     return reference
 
 

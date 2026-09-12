@@ -28,6 +28,7 @@ from nemo_gym.rollout_correlation import ROLLOUT_ID_PATTERN, capture_key_for
 
 CHECKPOINT_ARTIFACT_SCHEMA_VERSION = 1
 AGENT_CONTINUATION_INDEX_FEATURE = "agent_continuation_index_v1"
+AGENT_RESOURCE_DEPENDENCY_INDEX_FEATURE = "agent_resource_dependency_index_v1"
 EXTERNAL_STORAGE_REFERENCE_INDEX_FEATURE = "external_storage_reference_index_v1"
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 
@@ -56,7 +57,13 @@ class CheckpointArtifactReference(BaseModel):
 
 
 class AgentContinuationRoot(BaseModel):
-    """The last committed model call from which one parked agent can resume."""
+    """The last committed model call from which one parked agent can resume.
+
+    ``resource_state_revisions`` is ``None`` only for indexes written before
+    dependency-aware recovery.  New writers always emit the boundary's exact
+    resources-server revisions, including an empty mapping when the
+    continuation used no stateful resources.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -65,6 +72,7 @@ class AgentContinuationRoot(BaseModel):
     attempt_index: int = Field(ge=0)
     capture_key: str = Field(pattern=ROLLOUT_ID_PATTERN.pattern)
     last_committed_model_call_id: str = Field(min_length=1)
+    resource_state_revisions: dict[str, int] | None = None
 
     @model_validator(mode="after")
     def validate_capture_key(self) -> "AgentContinuationRoot":

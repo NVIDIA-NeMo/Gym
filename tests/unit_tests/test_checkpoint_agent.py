@@ -15,6 +15,8 @@
 """Whitebox agent executions park and restore at typed turn boundaries."""
 
 import asyncio
+import hashlib
+import json
 import threading
 import time
 
@@ -677,6 +679,7 @@ async def test_commit_restore_maps_source_attempt_to_replacement(tmp_path) -> No
             "attempt_index": 2,
             "capture_key": "rollout-a-a2",
             "last_committed_model_call_id": "call-1",
+            "resource_state_revisions": {"resources": 3},
         }
     ]
     restored = AgentCheckpointParticipant()
@@ -798,6 +801,41 @@ async def test_restore_rejects_corrupted_continuation_index_before_activation(tm
     with pytest.raises(AgentCheckpointError, match="continuation index"):
         restore_agent_state(restored, tmp_path)
     assert restored.resolve("rollout-a", 1) is None
+
+    await participant.resume()
+    await park
+    await participant.finish(execution, outcome="completed")
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_continuation_dependency_mismatch(tmp_path) -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+    await asyncio.sleep(0)
+    park = asyncio.create_task(participant.commit_boundary(execution, _boundary()))
+    await prepare
+    summary = commit_agent_state(participant, tmp_path, checkpoint_id="checkpoint-1")
+
+    continuation_path = tmp_path / summary["continuation_index"]["relative_path"]
+    root = AgentContinuationRoot.model_validate_json(continuation_path.read_bytes())
+    payload = (
+        root.model_copy(update={"resource_state_revisions": {"different-resources": 3}}).model_dump_json() + "\n"
+    ).encode()
+    continuation_path.write_bytes(payload)
+    manifest_path = tmp_path / AGENT_STATE_SUBDIR / AGENT_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest["continuation_index"].update(
+        {
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "bytes": len(payload),
+        }
+    )
+    manifest_path.write_text(json.dumps(manifest))
+
+    restored = AgentCheckpointParticipant()
+    with pytest.raises(AgentCheckpointError, match="resource revisions"):
+        restore_agent_state(restored, tmp_path)
 
     await participant.resume()
     await park

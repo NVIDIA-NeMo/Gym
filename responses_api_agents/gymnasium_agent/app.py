@@ -90,6 +90,7 @@ class GymnasiumRunResponse(BaseVerifyResponse):
 class GymnasiumAgent(SimpleResponsesAPIAgent):
     config: GymnasiumAgentConfig
     checkpoint_continuation_supported = True
+    checkpoint_resource_dependencies_supported = True
 
     async def responses(
         self,

@@ -325,6 +325,7 @@ def test_agent_server_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
 
     class _WhiteboxAgent(_Agent):
         checkpoint_continuation_supported = True
+        checkpoint_resource_dependencies_supported = True
 
     whitebox = _WhiteboxAgent(
         config=BaseResponsesAPIAgentConfig(host="agent.test", port=80, entrypoint="app.py", name="whitebox"),
@@ -338,6 +339,7 @@ def test_agent_server_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
         "completed_result_acknowledgement",
         "agent_continuation_index_v1",
         "discard_restored_continuation_v1",
+        "agent_resource_dependency_index_v1",
     ]
 
 
