@@ -25,6 +25,7 @@ INFERENCE_PROVIDER_E2E_SCRIPT = REPO_ROOT / "tests" / "e2e" / "run_inference_pro
 INFERENCE_PROVIDER_ROLLOUT_VERIFIER = REPO_ROOT / "tests" / "e2e" / "verify_inference_provider_rollout.py"
 GITLAB_PIPELINE = REPO_ROOT / ".gitlab-ci.yml"
 IS_RETRYABLE_FULL_SUITE_FAILURE = REPO_ROOT / "scripts" / "ci" / "is_retryable_full_suite_failure.sh"
+MERGE_CURRENT_MAIN = REPO_ROOT / "scripts" / "ci" / "merge_current_main.sh"
 RECLAIM_RUNNER_DISK = REPO_ROOT / "scripts" / "ci" / "reclaim_runner_disk.sh"
 RETRY_FULL_TEST_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "retry-full-test-suite.yml"
 SANITIZER = REPO_ROOT / "scripts" / "ci" / "sanitize_env.sh"
@@ -200,6 +201,76 @@ def test_scheduled_cicd_runs_do_not_cancel_in_progress() -> None:
         "  cancel-in-progress: ${{ github.event_name != 'schedule' }}\n" in cicd_workflow
     )
     assert "concurrency:" not in unit_workflow
+
+
+def test_pr_unit_tests_merge_current_main_in_every_checkout() -> None:
+    workflow = UNIT_TEST_WORKFLOW.read_text()
+    merge_command = "run: ./scripts/ci/merge_current_main.sh"
+
+    assert workflow.count(merge_command) == 3
+    assert workflow.count("fetch-depth: 0") == 3
+    assert "force-run-all: ${{ inputs.base-ref == '' }}" in workflow
+
+
+def test_merge_current_main_only_changes_mirrored_pr_checkouts(tmp_path: Path) -> None:
+    remote = tmp_path / "remote.git"
+    checkout = tmp_path / "checkout"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    subprocess.run(["git", "clone", str(remote), str(checkout)], check=True, capture_output=True)
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", *args], cwd=checkout, check=True, capture_output=True, text=True)
+
+    git("config", "user.name", "CI Test")
+    git("config", "user.email", "ci-test@nvidia.com")
+    git("checkout", "-b", "main")
+    (checkout / "base.txt").write_text("base\n")
+    git("add", "base.txt")
+    git("commit", "-m", "base")
+    git("push", "-u", "origin", "main")
+
+    git("checkout", "-b", "feature")
+    (checkout / "feature.txt").write_text("feature\n")
+    git("add", "feature.txt")
+    git("commit", "-m", "feature")
+    feature_sha = git("rev-parse", "HEAD").stdout.strip()
+
+    git("checkout", "main")
+    (checkout / "main.txt").write_text("current main\n")
+    git("add", "main.txt")
+    git("commit", "-m", "advance main")
+    current_main_sha = git("rev-parse", "HEAD").stdout.strip()
+    git("push", "origin", "main")
+    git("checkout", "feature")
+
+    copied_script = checkout / "scripts" / "ci" / MERGE_CURRENT_MAIN.name
+    copied_script.parent.mkdir(parents=True)
+    shutil.copy2(MERGE_CURRENT_MAIN, copied_script)
+    env = os.environ.copy()
+    env["GITHUB_REF"] = "refs/heads/pull-request/123"
+    subprocess.run([str(copied_script)], cwd=checkout, env=env, check=True, capture_output=True)
+
+    assert git("rev-list", "--parents", "-n", "1", "HEAD").stdout.split() == [
+        git("rev-parse", "HEAD").stdout.strip(),
+        feature_sha,
+        current_main_sha,
+    ]
+    assert (checkout / "feature.txt").read_text() == "feature\n"
+    assert (checkout / "main.txt").read_text() == "current main\n"
+
+    synthetic_merge_sha = git("rev-parse", "HEAD").stdout.strip()
+    env["GITHUB_REF"] = "refs/heads/main"
+    subprocess.run([str(copied_script)], cwd=checkout, env=env, check=True, capture_output=True)
+    assert git("rev-parse", "HEAD").stdout.strip() == synthetic_merge_sha
+
+
+def test_coverage_gate_compares_fractional_percentages() -> None:
+    import tomllib
+
+    coverage_report = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["tool"]["coverage"]["report"]
+
+    assert coverage_report["precision"] == 2
+    assert coverage_report["fail_under"] == 95.0
 
 
 def test_cicd_main_wires_preflight_cpu_and_gpu_workflows() -> None:
@@ -491,7 +562,7 @@ def test_shared_change_classifier_matches_gym_docs_and_server_paths() -> None:
 
     assert "uses: ./.github/actions/classify-changes" in unit_workflow
     assert "base-ref: ${{ inputs.base-ref || github.event.pull_request.base.sha || '' }}" in unit_workflow
-    assert "force-run-all: ${{ inputs.base-ref == '' && github.event_name != 'pull_request' }}" in unit_workflow
+    assert "force-run-all: ${{ inputs.base-ref == '' }}" in unit_workflow
     assert "gh pr view" not in action
     assert "DOCS_ONLY_LABEL" not in action
 
