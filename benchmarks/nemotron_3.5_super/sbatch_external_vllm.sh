@@ -134,8 +134,8 @@ if (( SLURM_PROCID == 0 )); then
     # @bxyu-nvidia: for --intra-node-data-parallel-size: Not sure what to set this to other than 1. I can't tell from the docs what is appropriate and 1 seems to work fine.
     # Set a super long request timeout since some reasoning requests may take a long time to generate.
     # Don't manually wait as vllm-router will wait for the URLs to come up
-    # --decode-balance-abs-threshold 4 \
-    # --decode-balance-rel-threshold 1.1 \
+    # --decode-balance-abs-threshold 4
+    # --decode-balance-rel-threshold 1.1
     router_args=( \
         --prefill-policy cache_aware \
         --decode-policy cache_aware \
