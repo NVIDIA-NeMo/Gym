@@ -522,6 +522,14 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     },
                 ),
                 "reward": reward,
+                "harbor_exception": (
+                    {
+                        "type": trial.exception_info.exception_type,
+                        "message": trial.exception_info.exception_message,
+                    }
+                    if trial.exception_info is not None
+                    else None
+                ),
                 **(
                     {
                         "ng_agent_observations": self.opencode_observations(
@@ -573,6 +581,17 @@ class HarborAgent(SimpleResponsesAPIAgent):
         )
 
     @staticmethod
+    def has_graded_agent_exception(trial: TrialResult) -> bool:
+        # Harbor still grades agent timeouts and nonzero exits. Preserve that
+        # official reward while retaining the agent error in the rollout.
+        return (
+            trial.exception_info is not None
+            and trial.exception_info.exception_type in {"AgentTimeoutError", "NonZeroAgentExitCodeError"}
+            and trial.verifier_result is not None
+            and bool(trial.verifier_result.rewards)
+        )
+
+    @staticmethod
     async def run_job(job_config_dict: dict, task_name: str) -> str:
         job_config = JobConfig.model_validate(job_config_dict)
         job_err: Exception | None = None
@@ -597,10 +616,12 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 if trial_result.task_name != task_name and Path(trial_result.task_name).name != task_name:
                     continue
 
-                if trial_result.exception_info is not None:
+                if trial_result.exception_info is not None and not HarborAgent.has_graded_agent_exception(
+                    trial_result
+                ):
                     exception_info = trial_result.exception_info
                     ## Deleting the trial result forces Harbor to delete the old trial and re-run when Gym retries.
-                    result_path.unlink()
+                    result_path.replace(result_path.with_name("failed-result.json"))
                     raise RuntimeError(
                         f"Harbor trial failed with {exception_info.exception_type}: {exception_info.exception_message}"
                     )
