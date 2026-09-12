@@ -2,6 +2,7 @@
 terminal_bench_2_1_resources_server:          # instance name — how agents/CLI refer to this server
   resources_servers:                    # server type: resources_servers | responses_api_agents | responses_api_models
     terminal_bench_2_1:                      # implementation directory under resources_servers/
+      allowed_agents: [opencode_sandboxed_agent, terminus_2_sandboxed_agent]
       entrypoint: app.py                # server entry module
       domain: other                     # task domain; change to the closest supported domain
       verified: false                   # set true once the benchmark has been baselined and reviewed
@@ -14,6 +15,10 @@ terminal_bench_2_1_resources_server:          # instance name — how agents/CLI
         ttl_s: 18000
         ready_timeout_s: 1200
         derive_cpu_env: true
+        env:
+          # execd holds each finished command's response open for this long (default 1s);
+          # a short grace keeps every command and the readiness probe from paying that tail.
+          EXECD_API_GRACE_SHUTDOWN: "50ms"
         resources:
           cpu: 4
           memory_mib: 16384

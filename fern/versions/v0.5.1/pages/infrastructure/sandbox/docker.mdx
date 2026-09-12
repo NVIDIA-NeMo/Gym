@@ -1,0 +1,148 @@
+---
+title: "Docker Provider"
+description: "Configure NeMo Gym sandboxes backed by the local Docker daemon."
+position: 3
+---
+
+The `docker` provider runs each sandbox as one long-lived container on the local Docker daemon. It shells out to the `docker` CLI (`docker run`, `docker exec`, `docker cp`, `docker rm`), so it needs a running daemon but no OpenSandbox server, control plane, or Kubernetes. Use it for local development, CI, and single-machine setups where Docker is the available runtime.
+
+## Setup
+
+Install Docker and make sure the `docker` binary is on `PATH` with a running daemon. The provider does not install or start Docker; constructing it raises `RuntimeError` if the binary is missing, and `create()` fails if the daemon is unreachable.
+
+Images can be any reference the daemon can run, such as `ubuntu:22.04`, `python:3.12-slim`, or a registry reference. An Apptainer-style `docker://` prefix is tolerated and stripped. GPU passthrough needs the NVIDIA Container Toolkit; CPU and memory limits need cgroups.
+
+## Provider Config
+
+NeMo Gym ships a Docker provider config at `nemo_gym/sandbox/providers/docker/configs/docker.yaml`. It defines a top-level `sandbox` block that agents reference with `sandbox_provider: sandbox`.
+
+```yaml
+sandbox:
+  default_metadata:
+    sandbox-api: docker-cli
+  docker:
+    create:
+      keepalive_shell: /bin/sh
+      keepalive_cmd: "while :; do sleep 2147483647; done"
+      start_timeout_s: 600
+      use_init: true
+      apply_resource_limits: true
+      # Isolation knobs -- opt in when running untrusted code (see Isolation and Security):
+      # network: none
+      # read_only: true
+      # cap_drop: ["ALL"]
+      # security_opt: ["no-new-privileges"]
+      # pids_limit: 512
+    exec:
+      default_timeout_s: 180
+      concurrency: 32
+      # exec_shell: /bin/bash   # null auto-detects bash, then falls back to sh
+    probe:
+      command: printf docker-sandbox-ready
+      expected_stdout: docker-sandbox-ready
+      timeout_s: 30
+      deadline_s: 60
+      stable_count: 1
+```
+
+Run an agent with the provider config by passing it alongside the agent and model configs:
+
+```bash
+gym env start \
+  --config responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml \
+  --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml
+```
+
+The provider constructor accepts three optional config sections:
+
+| Section | Purpose |
+| --- | --- |
+| `create` | Keep-alive command, `docker run` start timeout, `--init` zombie reaping, isolation flags (network, read-only root, dropped capabilities, security options, pids limit), and CPU/memory limit behavior. |
+| `exec` | Per-command timeout, the shell used for `<shell> -c <command>` (auto-detected when unset), extra `docker exec` flags, and subprocess concurrency. |
+| `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
+
+## SandboxSpec Provider Options
+
+Set Docker-specific create options under `SandboxSpec.provider_options`, or under `sandbox_spec.provider_options` in an agent config:
+
+```yaml
+sandbox_spec:
+  provider_options:
+    volumes:
+      - /datasets/swebench:/datasets/swebench:ro
+    run_args: ["--shm-size", "1g"]
+```
+
+| Option | Purpose |
+| --- | --- |
+| `volumes` | A `src:dst[:opts]` bind-mount string or list of them, added as `-v` at `docker run`. |
+| `run_args` | Extra raw flags appended to `docker run` for this sandbox. |
+
+## Relevant SandboxSpec Fields
+
+| Field | Docker behavior |
+| --- | --- |
+| `image` | Required. Any image the daemon can run. A `docker://` prefix is stripped. |
+| `env` | Passed as `--env KEY=VALUE` at `docker run` and re-applied on each `exec()`. |
+| `workdir` | `-w` at `docker run` (created if absent) and the default `exec()` working directory. |
+| `files` | Seed files uploaded before the first command. |
+| `resources` | Mapped to CPU, memory, and GPU flags (see Resource Mapping). |
+| `entrypoint` | Overrides the keep-alive: the container runs this as its main process instead. |
+| `provider_options` | `volumes` and `run_args`, applied per-sandbox. |
+| `ttl_s` | Max lifetime: the keep-alive sleeps for `ttl_s` and the container self-removes (`--rm`) on exit. Ignored when a custom `entrypoint` owns the container lifetime. |
+
+## Resource Mapping
+
+`SandboxResources` is translated into Docker CLI flags when `create.apply_resource_limits` is enabled:
+
+| SandboxResources field | Docker flag |
+| --- | --- |
+| `cpu` | `--cpus <value>` |
+| `memory_mib` | `--memory <value>m`, plus a matching `--memory-swap` so the limit is a hard cap rather than doubled through swap. |
+| `gpu` | `--gpus <count>` when nonzero (needs the NVIDIA Container Toolkit). |
+| `disk_gib` | No direct flag; ignored. |
+| `gpu_type` | No direct flag; ignored. |
+
+## Lifecycle
+
+The provider runs one detached container per sandbox:
+
+| Operation | Docker command |
+| --- | --- |
+| Create | `docker run -d --name nemo-gym-<uuid> --label nemo-gym.sandbox=1 --init [flags] --entrypoint <shell> <image> -c <keepalive>` |
+| Exec | `docker exec [-w cwd] [--env ...] [--user ...] <name> <shell> -c <command>` |
+| Status | `docker inspect -f '{{.State.Status}}' <name>` |
+| Close | `docker rm -f <name>` |
+
+Containers are named `nemo-gym-<uuid>`, and the image `ENTRYPOINT` is overridden with a keep-alive command so images that define their own entrypoint (common for SWE benchmark images) stay up across `exec()` calls. State written by one command is visible to later commands in the same sandbox. `--init` inserts a minimal init process so the many short `docker exec` children are reaped instead of accumulating as zombies.
+
+## File Transfer
+
+Uploads and downloads use `docker cp` in both directions, creating the target's parent directory first on upload. Uploaded files are owned by `root`; read them as root or `chown` them for a non-root user. Download any files you need before stopping the sandbox — stopping force-removes the container.
+
+## Isolation and Security
+
+<Warning>
+Docker containers share the host kernel. This is process and namespace isolation, not a virtual machine, and is not a hard boundary for hostile code. For adversarial or untrusted workloads, run Docker on a disposable VM or use a stronger runtime such as gVisor, Kata Containers, or a microVM.
+</Warning>
+
+- Never run with `--privileged` and never mount the Docker socket into the sandbox; either grants host root.
+- Networking is on by default because most tasks need egress (pip, git). Set `network: none` to cut it entirely, or `network: <name>` to attach a locked-down internal network.
+- Harden with `read_only: true`, `cap_drop: ["ALL"]`, `security_opt: ["no-new-privileges"]`, and `pids_limit: <n>` as a fork-bomb guard. Enforce `resources` so one sandbox cannot starve the host.
+- Rootless Docker narrows the blast radius (container root is not host root) and is recommended for shared machines; `docker cp` ownership and some `--user` behaviors differ under it.
+- Every container is labeled `nemo-gym.sandbox=1`. Reap leaks from an unclean shutdown with `docker rm -f $(docker ps -aq --filter label=nemo-gym.sandbox=1)`.
+
+## User and Runtime Notes
+
+The neutral `user` argument to `exec()` maps onto `--user`:
+
+| `user` value | Behavior |
+| --- | --- |
+| `None` | Run as the image's default user. |
+| `"root"` or `0` | Run as `--user 0`. |
+| Other user or uid | Passed through as `--user <value>`. |
+
+By default `exec_shell` is unset, so the provider auto-detects `bash` once the container is ready (conda and SWE-bench setup commands use `source`, which POSIX `sh`/dash lack) and falls back to `sh`. Pin `exec_shell` to `/bin/sh` or `/bin/bash` to skip the per-create probe.
+
+Command failures return `SandboxExecResult` with the command's exit code. A command timeout returns code `125` with `error_type="timeout"`, and a docker runtime failure — daemon down or container gone, detected via stderr markers — returns code `125` with `error_type="sandbox"`. A timed-out command's in-container process is reaped when the sandbox is closed, since `docker rm -f` stops the whole process tree.

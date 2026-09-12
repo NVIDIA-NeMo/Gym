@@ -15,6 +15,7 @@ mmlu_prox_mcqa_simple_agent:
   _inherit_from: mcqa_simple_agent
   responses_api_agents:
     simple_agent:
+      max_steps: 1
       resources_server:
         name: mmlu_prox_mcqa_resources_server
       datasets:

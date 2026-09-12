@@ -120,6 +120,7 @@ def run_cleanup(
     run_id: str = "job-7",
     user: str = "alice",
     reap: bool = True,
+    tls_verify: bool = False,
 ) -> int:
     return asyncio.run(
         cleanup_sandboxes.cleanup_sandboxes(
@@ -128,6 +129,7 @@ def run_cleanup(
             access_key=TEST_ACCESS_KEY,
             run_id=run_id,
             user=user,
+            tls_verify=tls_verify,
             reap=reap,
         )
     )
@@ -160,6 +162,7 @@ def test_cleanup_uses_one_pool_and_deletes_only_exact_run_and_user(monkeypatch: 
         {
             "limit": cleanup_sandboxes.REAP_CONCURRENCY,
             "limit_per_host": cleanup_sandboxes.REAP_CONCURRENCY,
+            "ssl": False,
         }
     ]
     assert len(session_calls) == 1
@@ -450,6 +453,7 @@ def test_cli_uses_standalone_connection_config_and_forwards_return_codes(
             "run_id": "job-7",
             "user": "alice",
             "reap": True,
+            "tls_verify": False,
         }
     ]
 
@@ -806,6 +810,7 @@ def test_cli_takes_the_connection_from_arguments(
             "run_id": "job-7",
             "user": "alice",
             "reap": True,
+            "tls_verify": False,
         }
     ]
 
@@ -868,3 +873,27 @@ def test_slurm_launcher_falls_back_to_the_checkout_env_yaml(tmp_path: Path) -> N
     assert cleanup_call[cleanup_call.index("--connection-config") + 1] == f"{repo_root}/env.yaml"
     assert "--domain" not in cleanup_call
     assert "--api-key" not in cleanup_call
+
+
+def test_tls_verification_is_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = Session(page([]), page([]), page([]))
+    connector_calls, _, _ = install_session(monkeypatch, session)
+
+    assert run_cleanup(domain="https://sandbox.example", protocol="https") == 0
+
+    assert connector_calls == [
+        {
+            "limit": cleanup_sandboxes.REAP_CONCURRENCY,
+            "limit_per_host": cleanup_sandboxes.REAP_CONCURRENCY,
+            "ssl": False,
+        }
+    ]
+
+
+def test_tls_verify_keeps_certificate_verification(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = Session(page([]), page([]), page([]))
+    connector_calls, _, _ = install_session(monkeypatch, session)
+
+    assert run_cleanup(domain="https://sandbox.example", protocol="https", tls_verify=True) == 0
+
+    assert "ssl" not in connector_calls[0]

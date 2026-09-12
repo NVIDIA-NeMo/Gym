@@ -32,7 +32,7 @@ import logging
 import shlex
 import sys
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 from urllib.parse import urlencode
 
@@ -105,6 +105,8 @@ class OpenSandboxPtySession:
         headers: dict[str, str],
         request_timeout_s: float | None,
         owned: bool = True,
+        takeover: bool = False,
+        diagnose: Callable[[], Awaitable[str | None]] | None = None,
     ) -> None:
         self._client = client
         self._ws = ws
@@ -115,6 +117,13 @@ class OpenSandboxPtySession:
         # Attached sessions belong to whoever created them: closing one detaches
         # rather than ending it.
         self._owned = owned
+        # True when the initial socket asked to take the session over: an
+        # "already attached" refusal then just means execd is still evicting
+        # the previous, dead client — not that another client owns the session.
+        self._takeover = takeover
+        # Asked for a better cause when the socket dies for no admitted reason
+        # (the provider checks whether the sandbox itself was OOM-killed).
+        self._diagnose = diagnose
         self.mode: str | None = None
         self.replay_offset: int | None = None
         self._output: asyncio.Queue[bytes | None] = asyncio.Queue()
@@ -210,23 +219,59 @@ class OpenSandboxPtySession:
         """
         try:
             barren = 0
+            reattached = False
+            takeover_retries = 0
             while True:
                 received_before = self._received
                 await self._pump_socket()
                 if self._closed or self._exit.done() or self._error is not None:
                     break
-                if self._ws.close_code in (WS_CLOSE_TAKEN_OVER, WS_CLOSE_POLICY_VIOLATION):
+                if self._ws.close_code == WS_CLOSE_TAKEN_OVER:
                     break
+                if self._ws.close_code == WS_CLOSE_POLICY_VIOLATION:
+                    # Execd refused us because it still counts the previous
+                    # client as attached. After a reattach — or when we asked
+                    # to take the session over — that client is dead and execd
+                    # just hasn't finished evicting it, so wait and retry.
+                    # Otherwise another client really owns the session: give up.
+                    if not (reattached or self._takeover) or takeover_retries >= len(_PTY_TAKEOVER_RETRY_DELAYS):
+                        break
+                    await asyncio.sleep(_PTY_TAKEOVER_RETRY_DELAYS[takeover_retries])
+                    takeover_retries += 1
+                    reattached = await self._reattach_socket()
+                    if not reattached:
+                        break
+                    continue
+                takeover_retries = 0
                 # A socket that reconnects but keeps dying without delivering a
                 # byte would spin forever; three barren rounds mean the session
                 # is gone in a way the close code does not admit.
                 barren = barren + 1 if self._received == received_before else 0
-                if barren >= 3 or not await self._reattach_socket():
+                if barren >= 3:
+                    break
+                reattached = await self._reattach_socket()
+                if not reattached:
                     break
         finally:
             # A detach ends the pump without ending the session: skip the
             # finalization so reads and the exit future survive reattach().
             if not self._detached:
+                if (
+                    self._diagnose is not None
+                    and not self._closed
+                    and not self._exit.done()
+                    and self._error is None
+                    and self._ws.close_code not in (WS_CLOSE_TAKEN_OVER, WS_CLOSE_POLICY_VIOLATION)
+                ):
+                    # The socket died for no admitted reason — often the whole
+                    # sandbox is gone. Ask the provider for a real cause (an
+                    # OOM kill, typically) instead of a bare close code.
+                    try:
+                        notice = await asyncio.wait_for(self._diagnose(), timeout=8.0)
+                    except Exception:
+                        notice = None
+                    if notice is not None:
+                        self._error = SandboxPtyError(notice)
                 if not self._exit.done():
                     self._exit.set_exception(self._close_error())
                     self._exit.exception()  # retrieved; silences never-retrieved warnings
@@ -340,6 +385,10 @@ class OpenSandboxPtySession:
             query={"takeover": "1", "since": str(self._received)},
             request_timeout_s=self._request_timeout_s,
         )
+        # This socket asked to take the session over, so the new pump must
+        # treat an "already attached" refusal as execd still evicting our own
+        # previous socket, and retry.
+        self._takeover = True
         self._detached = False
         self._pump_task = asyncio.create_task(self._pump())
 
@@ -360,11 +409,15 @@ class OpenSandboxPtySession:
         """
         token = f"NGPTY{uuid.uuid4().hex[:12]}"
         needle = f"{token}:".encode()
-        # Marker from two literals so the echo cannot match it; brace group
-        # keeps shell state while putting stdin at EOF (see _run_in_pty_session
-        # in the api module for the same discipline).
+        # Same marker discipline as _run_in_pty_session in the api module:
+        # markers split across two printf arguments so the shell's echo can
+        # never match them, both printfs inside the brace group so the slice
+        # between the markers is the command's output alone, stdin at EOF.
         await self.write(
-            f"{{ {command}\n}} </dev/null\nprintf '%s%s:%s\\n' '{token[:5]}' '{token[5:]}' \"$?\"\n".encode()
+            f"{{ printf '%s%s\\n' '{token[:5]}' '{token[5:]}S'\n"
+            f"{command}\n"
+            f"printf '%s%s:%s\\n' '{token[:5]}' '{token[5:]}' \"$?\"\n"
+            f"}} </dev/null\n".encode()
         )
         buffer = bytearray()
         while True:
@@ -391,6 +444,12 @@ class OpenSandboxPtySession:
             await asyncio.sleep(poll_interval_s)
             await self.reattach()
         output, _, trailing = bytes(buffer).partition(needle)
+        # Drop the echoed input and prompts: real output starts on the line
+        # after the start marker. (Replay may have evicted the marker while
+        # detached; keep the prefix then.)
+        _, seen_start, after_start = output.partition(f"{token}S".encode())
+        if seen_start:
+            output = after_start.partition(b"\n")[2]
         while b"\n" not in trailing:
             # The status digits can straddle the chunk that carried the marker.
             chunk = await self.read(timeout_s=5.0)
@@ -451,6 +510,7 @@ async def open_pty_session(
     headers: dict[str, str],
     spec: SandboxPtySpec,
     request_timeout_s: float | None,
+    diagnose: Callable[[], Awaitable[str | None]] | None = None,
 ) -> OpenSandboxPtySession:
     """Create an execd PTY session and attach its WebSocket.
 
@@ -520,6 +580,7 @@ async def open_pty_session(
         session_id=session_id,
         headers=headers,
         request_timeout_s=request_timeout_s,
+        diagnose=diagnose,
     )
     # execd hardcodes 80x24 at spawn; size is only settable post-attach.
     if spec.pty and (spec.rows, spec.cols) != (24, 80):
@@ -540,6 +601,7 @@ async def attach_pty_session(
     takeover: bool = True,
     since: int | None = None,
     request_timeout_s: float | None,
+    diagnose: Callable[[], Awaitable[str | None]] | None = None,
 ) -> OpenSandboxPtySession:
     """Attach to an existing execd PTY session. Owns ``client`` as above."""
     query: dict[str, str] = {}
@@ -580,6 +642,8 @@ async def attach_pty_session(
         headers=headers,
         request_timeout_s=request_timeout_s,
         owned=False,
+        takeover=takeover,
+        diagnose=diagnose,
     )
 
 
@@ -606,7 +670,7 @@ async def _connect_ws(
         except aiohttp.WSServerHandshakeError as e:
             if e.status not in (502, 503) or delay is None:
                 raise
-        except (aiohttp.ClientConnectorError, asyncio.TimeoutError):
+        except (aiohttp.ClientConnectorError, aiohttp.ServerDisconnectedError, asyncio.TimeoutError):
             if delay is None:
                 raise
         await asyncio.sleep(delay)
@@ -622,6 +686,8 @@ async def _start_session(
     headers: dict[str, str],
     request_timeout_s: float | None,
     owned: bool = True,
+    takeover: bool = False,
+    diagnose: Callable[[], Awaitable[str | None]] | None = None,
 ) -> OpenSandboxPtySession:
     session = OpenSandboxPtySession(
         client=client,
@@ -631,6 +697,8 @@ async def _start_session(
         headers=headers,
         request_timeout_s=request_timeout_s,
         owned=owned,
+        takeover=takeover,
+        diagnose=diagnose,
     )
     try:
         await session._wait_connected(request_timeout_s)

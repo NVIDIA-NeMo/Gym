@@ -1,7 +1,7 @@
 {
     "name": "aalcr",
     "type": "benchmark",
-    "jsonl_fpath": "benchmarks/aalcr/data/aalcr_benchmark.jsonl",
+    "jsonl_fpath": "benchmarks/aalcr/data/aalcr_v1_0_benchmark.jsonl",
     "prepare_script": "benchmarks/aalcr/prepare.py",
     "prompt_config": null,
     "num_repeats": 16,

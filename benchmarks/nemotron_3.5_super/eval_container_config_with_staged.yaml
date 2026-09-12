@@ -2,7 +2,7 @@ config_paths:
 - benchmarks/nemotron_3.5_super/eval_container_config.yaml
 
 # @bxyu-nvidia: We manually copy over the datasets here
-opencode_sandboxed_agent_swebench_verified:
+swebench_verified_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
       datasets:
@@ -12,7 +12,7 @@ opencode_sandboxed_agent_swebench_verified:
           prepare_script: benchmarks/swebench/verified/prepare.py
           num_repeats: 3
 
-opencode_sandboxed_agent_swebench_multilingual:
+swebench_multilingual_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
       datasets:
@@ -22,7 +22,7 @@ opencode_sandboxed_agent_swebench_multilingual:
           prepare_script: benchmarks/swebench/multilingual/prepare.py
           num_repeats: 3
 
-opencode_sandboxed_agent_deepswe:
+deepswe_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
       datasets:
@@ -32,7 +32,7 @@ opencode_sandboxed_agent_deepswe:
           prepare_script: benchmarks/deepswe/prepare.py
           num_repeats: 5
 
-terminus_2_sandboxed_agent_terminal_bench_2_1:
+terminal_bench_2_1_terminus_2_sandboxed_agent:
   responses_api_agents:
     terminus_2_sandboxed_agent:
       datasets:
@@ -42,7 +42,7 @@ terminus_2_sandboxed_agent_terminal_bench_2_1:
           prepare_script: benchmarks/terminal_bench_2_1/prepare.py
           num_repeats: 8
 
-opencode_sandboxed_agent_swebench_pro:
+swebench_pro_opencode_sandboxed_agent:
   responses_api_agents:
     opencode_sandboxed_agent:
       datasets:

@@ -2,7 +2,7 @@ config_paths:
 - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
 - resources_servers/swebench/configs/swebench.yaml
 
-opencode_swebench_verified_resources_server:
+swebench_verified_opencode_resources_server:
   _inherit_from: swebench_resources_server
 
   resources_servers:
@@ -11,13 +11,13 @@ opencode_swebench_verified_resources_server:
       # For SWE Bench Verified, the repos are already clean.
       apply_anti_cheating: false
 
-opencode_sandboxed_agent_swebench_verified:
+swebench_verified_opencode_sandboxed_agent:
   _inherit_from: opencode_sandboxed_agent
   responses_api_agents:
     opencode_sandboxed_agent:
       resources_server:
         type: resources_servers
-        name: opencode_swebench_verified_resources_server
+        name: swebench_verified_opencode_resources_server
       datasets:
         - name: swebench_verified
           type: benchmark
