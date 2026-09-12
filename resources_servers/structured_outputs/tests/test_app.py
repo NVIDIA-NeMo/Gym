@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1082,3 +1083,543 @@ class TestApp:
 
         nullable_verify_response = await resources_server.verify(nullable_request)
         assert nullable_verify_response.reward == 1.0
+
+    async def test_verify_json_with_oneof_strictifies_branches(
+        self, config: StructuredOutputsResourcesServerConfig
+    ) -> None:
+        """strictify_schema must recurse into oneOf branch lists so that extra
+        or missing fields inside the selected branch are caught by validation.
+
+        On ``main`` strictify does not descend into list values, so oneOf
+        branches keep their loose contract and the ``extra_field`` /
+        ``missing_required`` cases below FAIL on main (incorrectly accepted)
+        and PASS on this PR. anyOf and allOf are covered by the dedicated
+        tests below.
+        """
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = StructuredOutputsResourcesServer(config=config, server_client=server_mock)
+
+        # Tool-call-style schema: `arguments` is a oneOf over two object branches.
+        test_schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "enum": ["run_migration", "list_migrations"]},
+                "arguments": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "migration_name": {"type": "string"},
+                                "target_database": {"type": "string"},
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "limit": {"type": "integer"},
+                            },
+                        },
+                    ],
+                },
+            },
+        }
+        schema_str = json.dumps(test_schema)
+        dummy_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+
+        # --- Test 1: Valid output matching the first oneOf branch exactly ---
+        valid_completion = json.dumps(
+            {
+                "name": "run_migration",
+                "arguments": {"migration_name": "add_users_table", "target_database": "staging"},
+            }
+        )
+        valid_output_item = self._create_response_output_message(valid_completion)
+        valid_response = NeMoGymResponse(
+            id="valid_oneof_id",
+            created_at=1234.5,
+            model="test_model",
+            object="response",
+            output=[valid_output_item],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+        valid_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=valid_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.JSON,
+        )
+        valid_verify_response = await resources_server.verify(valid_request)
+        assert valid_verify_response.reward == 1.0
+
+        # --- Test 2: Extra field inside a oneOf branch must be rejected ---
+        # Before the fix, strictify_schema did not recurse into the oneOf list,
+        # so `additionalProperties: False` was never applied to the branch and
+        # this output would have been incorrectly accepted.
+        extra_in_branch_completion = json.dumps(
+            {
+                "name": "run_migration",
+                "arguments": {
+                    "migration_name": "add_users_table",
+                    "target_database": "staging",
+                    "unexpected_field": "should_be_rejected",
+                },
+            }
+        )
+        extra_output_item = self._create_response_output_message(extra_in_branch_completion)
+        extra_response = valid_response.model_copy(
+            deep=True, update={"id": "extra_in_branch_id", "output": [extra_output_item]}
+        )
+        extra_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=extra_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.JSON,
+        )
+        extra_verify_response = await resources_server.verify(extra_request)
+        assert extra_verify_response.reward == 0.0
+
+        # --- Test 3: Missing required field inside a oneOf branch must be rejected ---
+        missing_in_branch_completion = json.dumps(
+            {"name": "run_migration", "arguments": {"migration_name": "add_users_table"}}
+        )
+        missing_output_item = self._create_response_output_message(missing_in_branch_completion)
+        missing_response = valid_response.model_copy(
+            deep=True, update={"id": "missing_in_branch_id", "output": [missing_output_item]}
+        )
+        missing_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=missing_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.JSON,
+        )
+        missing_verify_response = await resources_server.verify(missing_request)
+        assert missing_verify_response.reward == 0.0
+
+        # --- Test 4: Output matching the SECOND oneOf branch also validates ---
+        second_branch_completion = json.dumps({"name": "list_migrations", "arguments": {"limit": 10}})
+        second_branch_output_item = self._create_response_output_message(second_branch_completion)
+        second_branch_response = valid_response.model_copy(
+            deep=True, update={"id": "second_branch_oneof_id", "output": [second_branch_output_item]}
+        )
+        second_branch_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=second_branch_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.JSON,
+        )
+        second_branch_verify_response = await resources_server.verify(second_branch_request)
+        assert second_branch_verify_response.reward == 1.0
+
+    async def test_verify_xml_with_defs_refs(self, config: StructuredOutputsResourcesServerConfig) -> None:
+        """coerce_xml_types must resolve $ref pointers against the top-level
+        schema's $defs so that $ref-based fields with non-string types are
+        coerced correctly.
+
+        On ``main`` $ref is not followed during coercion, so the xmltodict
+        leaf "42" stays a string and fails validation against
+        ``{"type": "integer"}`` reached via $ref. The valid case below FAILS
+        on main and PASSES on this PR; the invalid case is a regression
+        guard.
+        """
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = StructuredOutputsResourcesServer(config=config, server_client=server_mock)
+
+        test_schema = {
+            "type": "object",
+            "properties": {
+                "root": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"$ref": "#/$defs/identifier"},
+                        "score": {"$ref": "#/$defs/score"},
+                    },
+                },
+            },
+            "$defs": {
+                "identifier": {"type": "integer"},
+                "score": {"type": "number"},
+            },
+        }
+        schema_str = json.dumps(test_schema)
+        dummy_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+
+        # --- Test 1: Valid XML where $ref-backed fields coerce correctly ---
+        # Before the fix, coerce_xml_types did not resolve $ref, so "42" stayed
+        # a string and validation failed against {"type": "integer"}.
+        valid_xml = xmltodict.unparse({"root": {"id": 42, "score": 87.5}})
+        valid_output_item = self._create_response_output_message(valid_xml)
+        valid_response = NeMoGymResponse(
+            id="valid_defs_xml_id",
+            created_at=1234.5,
+            model="test_model",
+            object="response",
+            output=[valid_output_item],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+        valid_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=valid_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.XML,
+        )
+        valid_verify_response = await resources_server.verify(valid_request)
+        assert valid_verify_response.reward == 1.0
+
+        # --- Test 2: Non-numeric content under a $ref integer field fails validation ---
+        invalid_xml = xmltodict.unparse({"root": {"id": "not-a-number", "score": 87.5}})
+        invalid_output_item = self._create_response_output_message(invalid_xml)
+        invalid_response = valid_response.model_copy(
+            deep=True, update={"id": "invalid_defs_xml_id", "output": [invalid_output_item]}
+        )
+        invalid_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=invalid_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.XML,
+        )
+        invalid_verify_response = await resources_server.verify(invalid_request)
+        assert invalid_verify_response.reward == 0.0
+
+    async def test_verify_json_with_anyof_strictifies_branches(
+        self, config: StructuredOutputsResourcesServerConfig
+    ) -> None:
+        """strictify_schema must recurse into anyOf branch lists.
+
+        Without the recursion fix in this PR, anyOf object branches keep
+        their loose default (no ``required``, no ``additionalProperties``):
+        any object validates against an empty branch contract, so the
+        ``missing_required`` and ``extra_field`` cases below would FAIL on
+        ``main`` (incorrectly accepted) and PASS on this PR.
+        """
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = StructuredOutputsResourcesServer(config=config, server_client=server_mock)
+
+        test_schema = {
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "user_id": {"type": "string"},
+                                "email": {"type": "string"},
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "service_account": {"type": "string"},
+                                "scope": {"type": "string"},
+                            },
+                        },
+                    ]
+                }
+            },
+        }
+        schema_str = json.dumps(test_schema)
+        dummy_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+
+        # --- Test 1: Valid output matches the first anyOf branch exactly ---
+        valid_completion = json.dumps({"payload": {"user_id": "u_42", "email": "a@b.com"}})
+        valid_output_item = self._create_response_output_message(valid_completion)
+        valid_response = NeMoGymResponse(
+            id="valid_anyof_id",
+            created_at=1234.5,
+            model="test_model",
+            object="response",
+            output=[valid_output_item],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+        valid_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=valid_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.JSON,
+        )
+        valid_verify_response = await resources_server.verify(valid_request)
+        assert valid_verify_response.reward == 1.0
+
+        # --- Test 2: Missing required field in branch is rejected ---
+        missing_completion = json.dumps({"payload": {"user_id": "u_42"}})
+        missing_output_item = self._create_response_output_message(missing_completion)
+        missing_response = valid_response.model_copy(
+            deep=True, update={"id": "missing_anyof_id", "output": [missing_output_item]}
+        )
+        missing_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=missing_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.JSON,
+        )
+        missing_verify_response = await resources_server.verify(missing_request)
+        assert missing_verify_response.reward == 0.0
+
+        # --- Test 3: Field not declared by any branch is rejected ---
+        extra_completion = json.dumps({"payload": {"user_id": "u_42", "email": "a@b.com", "unexpected": "x"}})
+        extra_output_item = self._create_response_output_message(extra_completion)
+        extra_response = valid_response.model_copy(
+            deep=True, update={"id": "extra_anyof_id", "output": [extra_output_item]}
+        )
+        extra_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=extra_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.JSON,
+        )
+        extra_verify_response = await resources_server.verify(extra_request)
+        assert extra_verify_response.reward == 0.0
+
+        # --- Test 4: Output matching the SECOND branch also validates ---
+        second_branch_completion = json.dumps({"payload": {"service_account": "ci-bot", "scope": "deploy"}})
+        second_branch_output_item = self._create_response_output_message(second_branch_completion)
+        second_branch_response = valid_response.model_copy(
+            deep=True, update={"id": "second_branch_anyof_id", "output": [second_branch_output_item]}
+        )
+        second_branch_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=second_branch_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.JSON,
+        )
+        second_branch_verify_response = await resources_server.verify(second_branch_request)
+        assert second_branch_verify_response.reward == 1.0
+
+        # --- Test 5: Output that doesn't match any branch is rejected ---
+        no_match_completion = json.dumps({"payload": {"unrelated": "value"}})
+        no_match_output_item = self._create_response_output_message(no_match_completion)
+        no_match_response = valid_response.model_copy(
+            deep=True, update={"id": "no_match_anyof_id", "output": [no_match_output_item]}
+        )
+        no_match_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=no_match_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.JSON,
+        )
+        no_match_verify_response = await resources_server.verify(no_match_request)
+        assert no_match_verify_response.reward == 0.0
+
+    async def test_verify_json_with_allof_does_not_overstrictify_branches(
+        self, config: StructuredOutputsResourcesServerConfig
+    ) -> None:
+        """Regression guard: strictify_schema must NOT descend into ``allOf``
+        branches.
+
+        ``allOf`` is a conjunction: if each branch were independently given
+        ``additionalProperties: False``, a branch that declares only a subset
+        of the merged object's properties would reject fields contributed by
+        sibling branches. The valid composition below would PASS on ``main``
+        (no list recursion) and PASS on this PR (allOf skipped). It would FAIL
+        if recursion were applied to ``allOf`` branches without an exemption.
+        """
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = StructuredOutputsResourcesServer(config=config, server_client=server_mock)
+
+        # Merged shape: {id: str, name: str, version: str, owner: str}.
+        # Branch A declares id+name; branch B declares version+owner. If we
+        # blanket-strictify each branch, branch A would reject `version` /
+        # `owner` as additional properties (and vice versa), so a valid output
+        # carrying all four fields would score 0.0.
+        test_schema = {
+            "allOf": [
+                {
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}, "name": {"type": "string"}},
+                    "required": ["id", "name"],
+                },
+                {
+                    "type": "object",
+                    "properties": {"version": {"type": "string"}, "owner": {"type": "string"}},
+                    "required": ["version", "owner"],
+                },
+            ]
+        }
+        schema_str = json.dumps(test_schema)
+        dummy_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+
+        # --- Test 1: Output satisfies both branches ---
+        valid_completion = json.dumps({"id": "svc-1", "name": "auth", "version": "2.3.1", "owner": "platform"})
+        valid_output_item = self._create_response_output_message(valid_completion)
+        valid_response = NeMoGymResponse(
+            id="valid_allof_id",
+            created_at=1234.5,
+            model="test_model",
+            object="response",
+            output=[valid_output_item],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+        valid_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=valid_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.JSON,
+        )
+        valid_verify_response = await resources_server.verify(valid_request)
+        assert valid_verify_response.reward == 1.0
+
+        # --- Test 2: Missing a field required by one of the branches still fails ---
+        missing_completion = json.dumps({"id": "svc-1", "name": "auth", "version": "2.3.1"})
+        missing_output_item = self._create_response_output_message(missing_completion)
+        missing_response = valid_response.model_copy(
+            deep=True, update={"id": "missing_allof_id", "output": [missing_output_item]}
+        )
+        missing_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=missing_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.JSON,
+        )
+        missing_verify_response = await resources_server.verify(missing_request)
+        assert missing_verify_response.reward == 0.0
+
+    async def test_verify_xml_with_nullable_union_types(self, config: StructuredOutputsResourcesServerConfig) -> None:
+        """coerce_xml_types must handle union type lists like ["integer", "null"]
+        so nullable numeric/boolean XML fields don't false-negative.
+
+        On ``main`` the function reads ``schema_type = schema["type"]`` as a
+        single string, so for a list it skips all coercion branches: an
+        xmltodict-parsed leaf "7" stays a string and fails validation against
+        ``["integer", "null"]``. The ``populated_values`` case below FAILS on
+        ``main`` and PASSES on this PR. The ``empty_tags`` and
+        ``invalid_content`` cases are regression guards (PASS / FAIL on both
+        sides). Mirrors the CSV path's _coerce_csv_scalar.
+        """
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = StructuredOutputsResourcesServer(config=config, server_client=server_mock)
+
+        test_schema = {
+            "type": "object",
+            "properties": {
+                "root": {
+                    "type": "object",
+                    "properties": {
+                        "count": {"type": ["integer", "null"]},
+                        "ratio": {"type": ["number", "null"]},
+                        "active": {"type": ["boolean", "null"]},
+                    },
+                },
+            },
+        }
+        schema_str = json.dumps(test_schema)
+        dummy_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+
+        # --- Test 1: Populated values coerce to their non-null member ---
+        populated_xml = xmltodict.unparse({"root": {"count": 7, "ratio": 0.42, "active": "true"}})
+        populated_output_item = self._create_response_output_message(populated_xml)
+        populated_response = NeMoGymResponse(
+            id="populated_nullable_id",
+            created_at=1234.5,
+            model="test_model",
+            object="response",
+            output=[populated_output_item],
+            parallel_tool_calls=False,
+            tool_choice="none",
+            tools=[],
+        )
+        populated_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=populated_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.XML,
+        )
+        populated_verify_response = await resources_server.verify(populated_request)
+        assert populated_verify_response.reward == 1.0
+
+        # --- Test 2: Empty tags map to null and validate against the union ---
+        # xmltodict parses <count/> as None, which previously stayed None and
+        # failed validation against {"type": "integer"}. With union support it
+        # validates against the "null" member.
+        nullable_xml = "<root><count/><ratio/><active/></root>"
+        nullable_output_item = self._create_response_output_message(nullable_xml)
+        nullable_response = populated_response.model_copy(
+            deep=True, update={"id": "empty_nullable_id", "output": [nullable_output_item]}
+        )
+        nullable_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=nullable_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.XML,
+        )
+        nullable_verify_response = await resources_server.verify(nullable_request)
+        assert nullable_verify_response.reward == 1.0
+
+        # --- Test 3: Non-numeric content under a nullable integer still fails ---
+        invalid_xml = xmltodict.unparse({"root": {"count": "abc", "ratio": 0.42, "active": "true"}})
+        invalid_output_item = self._create_response_output_message(invalid_xml)
+        invalid_response = populated_response.model_copy(
+            deep=True, update={"id": "invalid_nullable_id", "output": [invalid_output_item]}
+        )
+        invalid_request = StructuredOutputsVerifyRequest(
+            responses_create_params=dummy_create_params,
+            response=invalid_response,
+            schema_str=schema_str,
+            schema_type=SchemaType.XML,
+        )
+        invalid_verify_response = await resources_server.verify(invalid_request)
+        assert invalid_verify_response.reward == 0.0
+
+    async def test_example_complex_schema_jsonl_round_trips(
+        self, config: StructuredOutputsResourcesServerConfig
+    ) -> None:
+        """End-to-end smoke test for ``data/example_complex_schema.jsonl``.
+
+        Loads each toy row in the bundled example file, pairs it with a
+        hand-crafted gold output, and runs the full verify path. Each row
+        must score reward=1.0 with the gold output. This is the test
+        anchor JK asked for ("test against a small example_complex_schema.jsonl").
+        """
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = StructuredOutputsResourcesServer(config=config, server_client=server_mock)
+
+        data_path = Path(__file__).resolve().parent.parent / "data" / "example_complex_schema.jsonl"
+        rows = [json.loads(line) for line in data_path.read_text().splitlines() if line.strip()]
+        # One gold output per row, in the same order: oneOf, anyOf, allOf,
+        # $defs/XML, nullable XML.
+        gold_outputs = [
+            json.dumps(
+                {
+                    "name": "run_migration",
+                    "arguments": {"migration_name": "add_users_table", "target_database": "staging"},
+                }
+            ),
+            json.dumps({"payload": {"user_id": "u_42", "email": "a@b.com"}}),
+            json.dumps({"id": "svc-1", "name": "auth", "version": "2.3.1", "owner": "platform"}),
+            xmltodict.unparse({"root": {"id": 42, "score": 87.5}}),
+            xmltodict.unparse({"root": {"count": 7, "ratio": 0.42, "active": "true"}}),
+        ]
+        assert len(rows) == len(gold_outputs), f"row/gold mismatch: {len(rows)} rows, {len(gold_outputs)} golds"
+
+        dummy_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+        for idx, (row, gold) in enumerate(zip(rows, gold_outputs)):
+            output_item = self._create_response_output_message(gold)
+            response = NeMoGymResponse(
+                id=f"complex_schema_row_{idx}",
+                created_at=1234.5,
+                model="test_model",
+                object="response",
+                output=[output_item],
+                parallel_tool_calls=False,
+                tool_choice="none",
+                tools=[],
+            )
+            request = StructuredOutputsVerifyRequest(
+                responses_create_params=dummy_create_params,
+                response=response,
+                schema_str=row["schema_str"],
+                schema_type=SchemaType(row["schema_type"]),
+            )
+            verify_response = await resources_server.verify(request)
+            assert verify_response.reward == 1.0, (
+                f"row {idx} ({row['schema_type']}) failed: "
+                f"error_type={verify_response.error_type}, "
+                f"error_message={verify_response.error_message}"
+            )
