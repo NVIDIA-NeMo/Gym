@@ -38,6 +38,14 @@ WORKER_SERVER_PORT=8001
 ROUTER_PREFILL_POLICY="${ROUTER_PREFILL_POLICY:-cache_aware}"
 ROUTER_DECODE_POLICY="${ROUTER_DECODE_POLICY:-cache_aware}"
 ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE="${ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE:-1}"
+# cache_aware drops prefix affinity for shortest-queue routing once the in-flight
+# spread between the busiest and idlest worker exceeds BOTH thresholds. The tight
+# defaults below assume the per-request affinity check from vllm-project/router#238
+# (see README, "vllm-router patch"). On a stock router the check is fleet-wide, so at
+# ~1000 concurrent sessions these values keep it in shortest-queue mode and prefix
+# cache hits collapse; use the upstream defaults (32 / 1.5) there.
+ROUTER_BALANCE_ABS_THRESHOLD="${ROUTER_BALANCE_ABS_THRESHOLD:-4}"
+ROUTER_BALANCE_REL_THRESHOLD="${ROUTER_BALANCE_REL_THRESHOLD:-1.1}"
 
 eval_command=$(cat <<EOF
 set -euo pipefail
@@ -139,8 +147,8 @@ if (( SLURM_PROCID == 0 )); then
     router_args=( \
         --prefill-policy $ROUTER_PREFILL_POLICY \
         --decode-policy $ROUTER_DECODE_POLICY \
-        --balance-abs-threshold 4 \
-        --balance-rel-threshold 1.1 \
+        --balance-abs-threshold $ROUTER_BALANCE_ABS_THRESHOLD \
+        --balance-rel-threshold $ROUTER_BALANCE_REL_THRESHOLD \
         --vllm-pd-disaggregation \
         --host \$this_node_hostname \
         --port $ROUTER_SERVER_PORT \
