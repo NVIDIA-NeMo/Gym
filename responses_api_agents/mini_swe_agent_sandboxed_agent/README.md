@@ -37,7 +37,9 @@ model endpoint exception because model requests originate on the Gym host. The
 policy applies to TB4 agent and verifier sandboxes. Required task and verifier
 dependencies must already be available offline.
 
-Validation is in progress. Unit tests exercise the real harness loop and TB4
-resources lifecycle with synthetic model and sandbox boundaries. Live qualification
-and the consolidated recipe matrix are tracked at
+Validation: 79 focused tests pass with 97.14% coverage. Live offline qualification
+passed all six mini-SWE model/workflow combinations, including GLM5.3 and Super3.5
+on CMH plus NVIDIA inference, each with full capture and scoped cleanup. A native
+TB4 task also exercised artifact transfer and completed grading. Results and the
+consolidated twelve-case recipe matrix are tracked at
 `/lustre/fsw/portfolios/llmservice/users/charlwang/cluster/work/logbook/problems/P260909-tb-tb4-climb-passk/experiments/H7-unified-gym-recipes/runs/2026-09-11_r1-unified-gym-recipes/run.md`.
