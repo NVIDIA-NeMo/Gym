@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import shlex
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,7 @@ from nemo_gym.orchestration.executors.slurm_script import (
     _render_pool_directives,
     _render_service_command,
     _resolve_env,
+    _with_default_capture_dir,
     build_sbatch_script,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args as _flatten_run_args
@@ -198,6 +200,49 @@ def test_build_vllm_command_pipeline_parallel_1_omits_flag(vllm_service):
     assert "--pipeline-parallel-size" not in cmd
 
 
+def test_build_vllm_command_extra_args():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="org/model",
+        extra_args="--max-model-len 8192",
+    )
+    cmd = _build_vllm_command(service)
+    assert "--max-model-len 8192" in cmd
+
+
+def test_build_vllm_command_no_extra_args_by_default(vllm_service):
+    cmd = _build_vllm_command(vllm_service)
+    assert cmd.endswith("--tensor-parallel-size 1")
+
+
+def test_build_vllm_command_served_model_name():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="/checkpoint",
+        served_model_name="super-bf16",
+    )
+    cmd = _build_vllm_command(service)
+    assert "--served-model-name super-bf16" in cmd
+
+
+def test_build_vllm_command_no_served_model_name_by_default(vllm_service):
+    cmd = _build_vllm_command(vllm_service)
+    assert "--served-model-name" not in cmd
+
+
+def test_build_vllm_command_served_model_name_quoted_if_needed():
+    service = VllmServiceConfig(
+        type="vllm",
+        container="vllm:latest",
+        model="/checkpoint",
+        served_model_name="name with spaces",
+    )
+    cmd = _build_vllm_command(service)
+    assert "--served-model-name 'name with spaces'" in cmd
+
+
 # ---------------------------------------------------------------------------
 # _build_vllm_ray_command - single instance, TP/PP spans nodes (uses Ray core)
 # ---------------------------------------------------------------------------
@@ -297,7 +342,11 @@ def test_render_driver_entrypoint_with_gym_install():
     out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
     assert "git clone" in out
     assert "git checkout main" in out
-    assert "uv pip install -e . --system" in out
+    assert "uv venv --seed .venv" in out
+    assert "source .venv/bin/activate" in out
+    assert "uv pip install -e ." in out
+    assert "--system" not in out
+    assert "--break-system-packages" not in out
     assert 'exec "$@"' in out
     assert '"${GYM_CMD[@]}"' in out
 
@@ -316,9 +365,107 @@ def test_render_driver_entrypoint_install_and_prepare():
     assert 'exec "$@"' in out
 
 
+def test_render_driver_entrypoint_no_install_no_prepare_has_no_set_e():
+    # The trivial path isn't wrapped in bash -c at all, so there's no
+    # preamble for a failure to silently fall through in the first place.
+    out = render_driver_entrypoint(None, None, None)
+    assert "set -euo pipefail" not in out
+
+
+def test_render_driver_entrypoint_with_gym_install_sets_e():
+    out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
+    assert "set -euo pipefail" in out
+    # Must be the first statement, ahead of the clone/checkout/install, so a
+    # failure anywhere in the preamble aborts instead of falling through to
+    # exec "$@" against whatever was already on disk/PATH.
+    lines = [line.strip() for line in out.splitlines() if line.strip()]
+    assert lines[0] == "bash -c '"
+    assert lines[1] == "set -euo pipefail"
+
+
+def test_render_driver_entrypoint_with_prepare_sets_e():
+    out = render_driver_entrypoint(None, None, "gym eval prepare +foo=bar")
+    assert "set -euo pipefail" in out
+
+
+# ---------------------------------------------------------------------------
+# _with_default_capture_dir
+# ---------------------------------------------------------------------------
+
+
+def test_with_default_capture_dir_injects_when_observability_on():
+    run = {"observability_enabled": True}
+    out = _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
+    assert out["model_call_capture_dir"] == "/remote/jobs/gym-job-20260729/gsm8k/model-calls"
+
+
+def test_with_default_capture_dir_explicit_value_wins():
+    run = {"observability_enabled": True, "model_call_capture_dir": "/custom/path"}
+    out = _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
+    assert out["model_call_capture_dir"] == "/custom/path"
+
+
+def test_with_default_capture_dir_no_injection_when_observability_off():
+    run = {"split": "benchmark"}
+    out = _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
+    assert "model_call_capture_dir" not in out
+
+
+def test_with_default_capture_dir_does_not_mutate_input():
+    run = {"observability_enabled": True}
+    _with_default_capture_dir(run, Path("/remote/jobs/gym-job-20260729/gsm8k"))
+    assert "model_call_capture_dir" not in run
+
+
 # ---------------------------------------------------------------------------
 # build_sbatch_script (integration)
 # ---------------------------------------------------------------------------
+
+
+def test_build_sbatch_script_auto_default_capture_dir(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {
+                "container": "python:3.12",
+                "benchmarks": {"gsm8k": {"run": {"observability_enabled": True}}},
+            },
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert f"+model_call_capture_dir={bench_dir / 'model-calls'}" in script
+
+
+def test_build_sbatch_script_explicit_capture_dir_wins(bench_dir):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "foo"}},
+            "driver": {
+                "container": "python:3.12",
+                "benchmarks": {
+                    "gsm8k": {"run": {"observability_enabled": True, "model_call_capture_dir": "/custom/path"}}
+                },
+            },
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    benchmark = config.driver.benchmarks["gsm8k"]
+    compute = next(iter(config.compute.values()))
+    script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
+    assert "+model_call_capture_dir=/custom/path" in script
+    assert "model-calls" not in script
+
+
+def test_build_sbatch_script_no_capture_dir_when_observability_off(submit_config, bench_dir):
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    compute = next(iter(submit_config.compute.values()))
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    assert "model_call_capture_dir" not in script
 
 
 def test_build_sbatch_script_contains_shebang(submit_config, bench_dir):
@@ -559,6 +706,61 @@ def test_render_service_command_no_mounts_by_default():
 def test_render_service_command_empty_mounts_omits_flag():
     out = _render_service_command("svc", "img:latest", "cmd", mounts=[])
     assert "--container-mounts" not in out
+
+
+# ---------------------------------------------------------------------------
+# _render_service_command — pre_command
+# ---------------------------------------------------------------------------
+
+
+def test_render_service_command_no_pre_command_by_default():
+    out = _render_service_command("svc", "img:latest", "vllm serve model")
+    assert "bash -c" not in out
+    assert (
+        "srun --overlap --no-container-mount-home --container-image=img:latest --output=logs/svc.log vllm serve model &"
+        in out
+    )
+
+
+def test_render_service_command_pre_command_wraps_in_bash_c():
+    out = _render_service_command("svc", "img:latest", "vllm serve model", pre_command="export FOO=bar")
+    assert "bash -c 'export FOO=bar\nexec vllm serve model'" in out
+
+
+def test_render_service_command_pre_command_still_backgrounded():
+    out = _render_service_command("svc", "img:latest", "vllm serve model", pre_command="export FOO=bar")
+    assert out.rstrip().endswith("&\nSVC_PID=$!")
+
+
+def test_render_service_command_pre_command_multi_statement_round_trips():
+    # Round-trip through shlex, like bash would: the bash -c argument (after
+    # shell-unquoting) must be exactly pre_command + a newline + exec <command>,
+    # regardless of what quote characters pre_command itself contains.
+    pre_command = "export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')\nunset RAY_ADDRESS"
+    out = _render_service_command("svc", "img:latest", "vllm serve model", pre_command=pre_command)
+    tokens = shlex.split(out)
+    assert tokens[tokens.index("bash") + 1] == "-c"
+    assert tokens[tokens.index("bash") + 2] == f"{pre_command}\nexec vllm serve model"
+    assert out.count("&\n") == 1  # one srun invocation, not split by the embedded newline
+
+
+def test_render_service_command_pre_command_quoting_survives_single_quotes():
+    # pre_command containing a single quote must not break out of the bash -c
+    # quoting or split into a second shell word.
+    out = _render_service_command("svc", "img:latest", "cmd", pre_command="echo 'hi'")
+    assert out.count("bash -c") == 1
+    tokens = shlex.split(out)
+    assert tokens[tokens.index("bash") + 2] == "echo 'hi'\nexec cmd"
+
+
+def test_render_service_command_pre_command_and_extra_args_coexist():
+    # extra_args lands inside `command` (already appended by the caller before
+    # _render_service_command is invoked); pre_command wraps the whole thing.
+    out = _render_service_command(
+        "svc", "img:latest", "vllm serve model --max-model-len 8192", pre_command="unset RAY_ADDRESS"
+    )
+    tokens = shlex.split(out)
+    assert tokens[tokens.index("bash") + 2] == "unset RAY_ADDRESS\nexec vllm serve model --max-model-len 8192"
 
 
 def test_build_sbatch_script_service_mounts(bench_dir):
