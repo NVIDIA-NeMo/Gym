@@ -35,7 +35,7 @@ aa_briefcase_lite_resources_server:
       dataset_dir: ${oc.env:AA_BRIEFCASE_LITE_DATASET_DIR}
       # binary: released A/C prompt and checks; pairwise: local AQ/P comparison;
       # all: both, with a non-official convenience scalar averaging the two.
-      reward_mode: ${oc.env:AA_BRIEFCASE_REWARD_MODE,binary}
+      reward_mode: all
       pairwise_reference_ids: [gpt-5-5]
       pairwise_num_trials: 2
       binary_formatting_retries: 1
@@ -85,10 +85,10 @@ aa_briefcase_lite_stirrup_agent:
       temperature: ${oc.env:AA_BRIEFCASE_TEMPERATURE,1.0}
       aa_briefcase_container_path: ${oc.env:AA_BRIEFCASE_CONTAINER_PATH,null}
       persist_deliverables_dir: ${oc.env:PERSIST_DELIVERABLES_DIR,/tmp/aa_briefcase_lite/deliverables}
-      # Generation is the safe default. Set EXECUTE_ONLY=false,JUDGE_ONLY=true
-      # to judge cached artifacts without rerunning the policy.
-      execute_only: ${oc.env:EXECUTE_ONLY,true}
-      judge_only: ${oc.env:JUDGE_ONLY,false}
+      # Full rollout and judging by default; use Gym overrides for diagnostics
+      # or judge_only=true to reuse cached artifacts without rerunning the policy.
+      execute_only: false
+      judge_only: false
       rerun_incomplete: ${oc.env:RERUN_INCOMPLETE,false}
       resources_server:
         type: resources_servers

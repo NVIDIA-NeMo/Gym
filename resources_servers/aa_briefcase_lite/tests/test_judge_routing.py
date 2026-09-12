@@ -14,6 +14,7 @@ from resources_servers.aa_briefcase_lite.app import (
     AABriefcaseLiteResourcesServer,
     AABriefcaseLiteResourcesServerConfig,
 )
+from resources_servers.gdpval.comparison import send_judge_request
 from resources_servers.gdpval.judge_panel import merge_create_kwargs
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
@@ -38,8 +39,16 @@ from responses_api_models.openai_model.app import SimpleModelServer, SimpleModel
         ),
     ],
 )
+@pytest.mark.parametrize(("judge_mode", "default_max_tokens"), [("binary", 4096), ("pairwise", 65535)])
 def test_benchmark_panel_routes_to_matching_upstream_model(
-    monkeypatch, tmp_path: Path, judge_name: str, expected_model: str, expected_parameters: dict, model_overrides: dict
+    monkeypatch,
+    tmp_path: Path,
+    judge_name: str,
+    expected_model: str,
+    expected_parameters: dict,
+    model_overrides: dict,
+    judge_mode: str,
+    default_max_tokens: int,
 ) -> None:
     """Exercise the benchmark YAML, panel resolver, SDK, and real model HTTP route.
 
@@ -93,21 +102,40 @@ def test_benchmark_panel_routes_to_matching_upstream_model(
         }
     )
     with TestClient(server.setup_webserver()) as transport:
-        client = OpenAI(base_url=judge.base_url, api_key=judge.api_key, http_client=transport, max_retries=0)
-        client.chat.completions.create(
-            **merge_create_kwargs(
-                {
-                    "model": judge.model,
-                    "messages": [{"role": "user", "content": "check"}],
-                    "temperature": 0.0,
-                    "max_tokens": 4096,
-                },
-                judge.create_overrides,
+        messages = [{"role": "user", "content": "check"}]
+        if judge_mode == "pairwise":
+            monkeypatch.setattr(
+                "resources_servers.aa_briefcase_lite.app.OpenAI",
+                lambda **kwargs: OpenAI(http_client=transport, **kwargs),
             )
-        )
+            pairwise_judge = resource._pairwise_judges([judge])[0]
+            assert pairwise_judge.model == expected_model
+            assert str(pairwise_judge.client.base_url).rstrip("/") == judge.base_url.rstrip("/")
+            assert (
+                send_judge_request(
+                    pairwise_judge.client,
+                    pairwise_judge.model,
+                    messages,
+                    create_overrides=pairwise_judge.create_overrides,
+                )
+                == "ok"
+            )
+        else:
+            client = OpenAI(base_url=judge.base_url, api_key=judge.api_key, http_client=transport, max_retries=0)
+            client.chat.completions.create(
+                **merge_create_kwargs(
+                    {
+                        "model": judge.model,
+                        "messages": messages,
+                        "temperature": 0.0,
+                        "max_tokens": 4096,
+                    },
+                    judge.create_overrides,
+                )
+            )
     server._client.create_chat_completion.assert_awaited_once()
     forwarded = server._client.create_chat_completion.await_args.kwargs
     assert forwarded["model"] == expected_model
     assert {key: forwarded[key] for key in expected_parameters} == expected_parameters
-    assert forwarded["max_tokens"] == expected_parameters.get("max_tokens", 4096)
+    assert forwarded["max_tokens"] == expected_parameters.get("max_tokens", default_max_tokens)
     assert "temperature" not in forwarded
