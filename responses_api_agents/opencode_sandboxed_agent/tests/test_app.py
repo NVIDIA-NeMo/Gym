@@ -56,6 +56,25 @@ from responses_api_agents.opencode_sandboxed_agent.app import (
 
 
 class TestOpenCodeSandboxedAgent:
+    @mark.parametrize("context,output", [(262144, 131072), (262144, 128000), (200000, 131072)])
+    async def test_explicit_output_limit_reaches_opencode_config(self, monkeypatch, context, output):
+        config = self._create_config()
+        config.opencode_max_context_window = context
+        config.opencode_max_output_tokens = output
+        config.token_id_capture = False
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": False, "token_id_capture": {"enabled": False}}
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        monkeypatch.setattr(app_module, "get_server_url", lambda name: "http://model-server")
+        request = MagicMock()
+        request.json = AsyncMock(return_value={"input": "synthetic"})
+        result = await server._create_opencode_config(request)
+        assert result["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"] == {
+            "context": context,
+            "input": context - output,
+            "output": output,
+        }
+
     def test_import_does_not_load_standalone_opencode_agent(self) -> None:
         code = (
             "import sys; import responses_api_agents.opencode_sandboxed_agent.app; "

@@ -1,6 +1,7 @@
 config_paths:
 - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
 - resources_servers/terminal_bench_4/configs/terminal_bench_4.yaml
+- benchmarks/terminal_bench_4/output_tokens.yaml
 
 
 terminal_bench_4_opencode_resources_server:
@@ -10,6 +11,7 @@ terminal_bench_4_opencode_sandboxed_agent:
   _inherit_from: opencode_sandboxed_agent
   responses_api_agents:
     opencode_sandboxed_agent:
+      opencode_max_output_tokens: ${tb4_max_output_tokens}
       resources_server:
         type: resources_servers
         name: terminal_bench_4_opencode_resources_server

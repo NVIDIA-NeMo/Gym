@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Shared by both TB4 harnesses. Override tb4_max_output_tokens=128000 for GLM-5.3 Flash on NV inference.
+config_paths:
+- responses_api_models/vllm_model/configs/vllm_model.yaml
+
+tb4_max_output_tokens: 131072
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      sampling_overrides:
+        max_tokens: ${tb4_max_output_tokens}
+

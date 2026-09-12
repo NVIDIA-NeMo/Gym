@@ -70,6 +70,7 @@ from nemo_gym.server_utils import (
     raise_for_status,
 )
 from responses_api_agents.opencode_sandboxed_agent.execution_health import execution_health
+from responses_api_agents.opencode_sandboxed_agent.token_limits import token_limits
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -392,6 +393,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_musl_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
+    opencode_max_output_tokens: Optional[int] = None
 
     # Sandbox config
     sandbox_provider: str
@@ -556,12 +558,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     },
                     "models": {
                         "dummy_model": {
-                            "limit": {
-                                "context": self.config.opencode_max_context_window,
-                                "input": self.config.opencode_max_context_window,
-                                # See the OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX flag below for more information.
-                                "output": self.config.opencode_max_context_window,
-                            },
+                            "limit": token_limits(
+                                self.config.opencode_max_context_window, self.config.opencode_max_output_tokens
+                            ),
                         },
                     },
                 }
