@@ -16,6 +16,7 @@
 import asyncio
 import json
 import logging
+import sqlite3
 import sys
 import time
 from copy import deepcopy
@@ -52,7 +53,9 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
+from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.server_utils import get_server_url
+from responses_api_agents.opencode_agent.app import _parse_opencode_session
 
 
 logger = logging.getLogger(__name__)
@@ -421,6 +424,20 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
         return output_items
 
+    @staticmethod
+    def opencode_observations(trajectory_paths: list[Path]) -> AgentObservationBundle:
+        """Reuse Gym's OpenCode producer on Harbor's saved session databases."""
+        combined = AgentObservationBundle(source="opencode")
+        for path in trajectory_paths:
+            database = path.parent / "opencode/xdg-data/opencode/opencode.db"
+            try:
+                observations = _parse_opencode_session(database, str(path.parent))
+                combined.records.extend(observations.records)
+                combined.gaps.extend(observations.gaps)
+            except (sqlite3.DatabaseError, OSError, ValueError) as exc:
+                combined.gaps.append(ObservationGap(code="agent_artifact_unreadable", detail=type(exc).__name__))
+        return combined
+
     def success_response(self, body: HarborRunRequest, trial_dir: Path) -> HarborVerifyResponse:
         trial_paths = TrialPaths(trial_dir)
         trial = TrialResult.model_validate_json(trial_paths.result_path.read_text())
@@ -505,6 +522,15 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     },
                 ),
                 "reward": reward,
+                **(
+                    {
+                        "ng_agent_observations": self.opencode_observations(
+                            [trajectory_path for _, trajectory_path in path_entries]
+                        )
+                    }
+                    if self.config.harbor_agent.name == "opencode"
+                    else {}
+                ),
                 "atif_conversion": {
                     "lossless": not conversion_warnings,
                     "warnings": conversion_warnings,
