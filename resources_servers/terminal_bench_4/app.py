@@ -47,7 +47,7 @@ from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
 from uuid import uuid4
 
-from fastapi import Request
+from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
@@ -498,6 +498,11 @@ def tail(text: str, limit: int) -> str:
 class TerminalBench4ResourcesServer(SimpleResourcesServer):
     config: TerminalBench4ResourcesServerConfig
 
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.post("/cancel_session")(self.cancel_session)
+        return app
+
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._sessions: Dict[str, AgentSession] = dict()
@@ -605,6 +610,19 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             return False
 
     # -- endpoints --------------------------------------------------------------------------
+
+    async def cancel_session(self, request: Request) -> Dict[str, bool]:
+        """Release a seeded session when the harness cannot reach verification.
+
+        Cookie scoped and idempotent: it cannot address another session by ID.
+        verify() already removes the session before creating a verifier sandbox.
+        """
+        session_id = request.session.get(SESSION_ID_KEY)
+        session = self._sessions.pop(session_id, None)
+        stopped = False
+        if session is not None:
+            stopped = await self._stop_sandbox(session.sandbox, role="agent", task_name=session.task.task_name)
+        return {"session_found": session is not None, "agent_sandbox_stopped": stopped}
 
     async def seed_session(
         self, request: Request, body: TerminalBench4SeedSessionRequest

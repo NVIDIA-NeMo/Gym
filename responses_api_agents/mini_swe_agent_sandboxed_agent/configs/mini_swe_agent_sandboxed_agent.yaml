@@ -1,0 +1,63 @@
+mini_swe_agent_sandboxed_agent:
+  responses_api_agents:
+    mini_swe_agent_sandboxed_agent:
+      entrypoint: app.py
+      num_workers: 4
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+
+      # --- mini-swe-agent v2.4.6 settings ---------------------------------------------------
+      # Prompts/observation template come from the packaged `config/mini.yaml` (the "interactive
+      # mini config" Artificial Analysis uses). Point at another mini-swe-agent YAML to swap them,
+      # or patch individual keys with `mini_config_overrides` (recursively merged, same effect as
+      # `mini-swe-agent -c key=value`).
+      mini_config_path: null
+      # NV inference's /v1/responses silently applies max_output_tokens=4096 when the request omits it
+      # (verified 2026-09-09: status=incomplete, reason=max_output_tokens, 4096 exactly; an explicit value
+      # is honoured). With ~3k reasoning tokens per turn that truncates every file-writing tool call and
+      # shows up as `finish_reason=length` format errors. mini-swe-agent's `-c model.model_kwargs.max_tokens`
+      # equivalent; upstream itself sets nothing and relies on the provider default.
+      mini_config_overrides:
+        model:
+          model_kwargs:
+            max_output_tokens: 32768
+      # Artificial Analysis Terminal-Bench settings: 500 steps, 30 s per command, cost limit off.
+      step_limit: 500
+      cost_limit: 0.0
+      wall_time_limit_seconds: 0
+      max_consecutive_format_errors: 3
+      command_timeout_s: 30
+      # Upstream `LocalEnvironment` runs every action with `subprocess.Popen(shell=True)`, i.e.
+      # `/bin/sh -c`. Keep that so bash-only syntax fails the same way it does under the real harness.
+      shell: /bin/sh
+      # mini-swe-agent's Responses-API model echoes every output item (incl. reasoning) back as
+      # input. Some endpoints 500 on echoed reasoning items; false sends only message/function_call
+      # items back. Reasoning items are always kept in the stored rollout either way.
+      replay_reasoning_items: false
+      # Optional directory for upstream-format `*.traj.json` dumps (mini-swe-agent-1.1 schema).
+      dump_trajectory_dir: null
+      debug: false
+
+      # --- sandbox / timeouts ---------------------------------------------------------------
+      sandbox_provider: sandbox
+      sandbox_timeout: 10800  # whole-episode wall clock, seconds
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 0.25
+          memory_mib: 512MB
+          disk_gib: 30
+        provider_options: {}
+        metadata:
+          harness: mini-swe-agent
+      # Per-model-call wall clock; a call that exceeds it is retried from scratch up to
+      # model_call_max_attempts times (see terminus_2_sandboxed_agent for the sizing rationale).
+      model_call_timeout_s: 600.0
+      model_call_max_attempts: 3
+
+      datasets: []
