@@ -1137,6 +1137,8 @@ NeMoGymChatCompletionMessageToolCallsParam: TypeAlias = Annotated[
 class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageParam, total=False):
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
+    reasoning: NotRequired[str]
+    reasoning_content: NotRequired[str]
     tool_calls: Optional[NeMoGymChatCompletionMessageToolCallsParam] = None
 
 

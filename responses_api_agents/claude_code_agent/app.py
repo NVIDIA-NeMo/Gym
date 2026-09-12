@@ -649,6 +649,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=input_tokens + output_tokens,
             ),
+            metadata={"agent_run": json.dumps(run_metadata, sort_keys=True)},
         )
 
     async def responses(

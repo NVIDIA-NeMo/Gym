@@ -111,6 +111,64 @@ def test_preprocess_chat_completion_create_params_strips_strict(monkeypatch: Mon
     assert "strict" not in body_dict["tools"][0]["function"]
 
 
+def test_preprocess_chat_completion_create_params_strips_replayed_reasoning(monkeypatch: MonkeyPatch) -> None:
+    server = TestApp()._setup_server(monkeypatch)
+    body = NeMoGymChatCompletionCreateParamsNonStreaming(
+        messages=[
+            {
+                "role": "assistant",
+                "content": "answer",
+                "reasoning": "thought",
+                "reasoning_content": "legacy thought",
+            }
+        ]
+    )
+
+    body_dict = server._preprocess_chat_completion_create_params(MagicMock(), body.model_dump(exclude_unset=True))
+
+    assert body_dict["messages"] == [{"role": "assistant", "content": "answer"}]
+
+
+def test_preprocess_chat_completion_create_params_folds_system_messages(monkeypatch: MonkeyPatch) -> None:
+    server = TestApp()._setup_server(monkeypatch)
+    server.config.fold_system_messages = True
+    body_dict = {
+        "messages": [
+            {"role": "user", "content": "question"},
+            {"role": "system", "content": "system"},
+            {"role": "developer", "content": [{"type": "text", "text": "developer"}]},
+        ]
+    }
+
+    body_dict = server._preprocess_chat_completion_create_params(MagicMock(), body_dict)
+
+    assert body_dict["messages"] == [
+        {"role": "system", "content": "system\n\ndeveloper"},
+        {"role": "user", "content": "question"},
+    ]
+
+
+async def test_responses_chat_backend_ignores_responses_only_include(monkeypatch: MonkeyPatch) -> None:
+    server = TestApp()._setup_server(monkeypatch)
+    completion = NeMoGymChatCompletion.model_validate(
+        {
+            "id": "completion",
+            "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}],
+            "created": 0,
+            "model": "model",
+            "object": "chat.completion",
+        }
+    )
+    monkeypatch.setattr(VLLMModel, "chat_completions", AsyncMock(return_value=completion))
+
+    result = await server.responses(
+        MagicMock(),
+        NeMoGymResponseCreateParamsNonStreaming(input="hi", include=[]),
+    )
+
+    assert result.output[0].content[0].text == "ok"
+
+
 def test_transport_io_writer_keeps_full_payload(monkeypatch: MonkeyPatch, tmp_path) -> None:
     log_path = tmp_path / "model-io-transport.jsonl"
     monkeypatch.setenv("NEMO_GYM_VLLM_TRANSPORT_LOG", str(log_path))

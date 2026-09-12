@@ -415,7 +415,8 @@ class TestRolloutObservability:
         _, usage = parse_opencode_session(tmp_path / "missing.db")
         observations = _parse_opencode_session(tmp_path / "missing.db", "1-2")
         agent = _make_agent(system_prompt="configured system")
-        agent._run_opencode = AsyncMock(return_value=([], usage, "model", observations))
+        run_metadata = {"duration_ms": 42, "is_error": False, "returncode": 0, "status": "completed"}
+        agent._run_opencode = AsyncMock(return_value=([], usage, "model", observations, run_metadata))
         body = NeMoGymResponseCreateParamsNonStreaming(
             input=[
                 NeMoGymEasyInputMessage(role="system", content="request system"),
@@ -428,6 +429,7 @@ class TestRolloutObservability:
         episode = asyncio.run(agent._create_episode(body, rollout_id="1-2"))
 
         assert episode.response.output
+        assert json.loads(episode.response.metadata["agent_run"]) == run_metadata
         assert agent._run_opencode.await_args.args == ("solve", "configured system\n\nrequest system")
         assert _invocations(episode.observations)[0].conversation == [
             NeMoGymEasyInputMessage(role="user", content="configured system\n\nrequest system\n\nsolve")
@@ -441,7 +443,7 @@ class TestRolloutObservability:
         observations = _parse_opencode_session(db, "1-2")
         agent = _make_agent()
         agent.server_client.global_config_dict = {"observability_enabled": True}
-        agent._run_opencode = AsyncMock(return_value=(items, usage, "model", observations))
+        agent._run_opencode = AsyncMock(return_value=(items, usage, "model", observations, {"status": "completed"}))
 
         class Response:
             ok = True
@@ -511,12 +513,13 @@ class TestRepoDir:
                 side_effect=ValueError("invalid observation artifact"),
             ),
         ):
-            output, usage, _, observations = await agent._run_opencode(
+            output, usage, _, observations, run_metadata = await agent._run_opencode(
                 "fix the issue", None, collect_observations=True
             )
 
         assert output == scored
         assert usage == {"input_tokens": 1, "output_tokens": 2}
+        assert run_metadata["status"] == "completed"
         command = create_process.await_args.args
         assert "--title" not in command
         assert "agent_artifact_unavailable" in {gap.code for gap in observations.gaps}
