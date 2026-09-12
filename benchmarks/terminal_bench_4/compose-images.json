@@ -1,0 +1,558 @@
+{
+  "apache/kafka-native:4.3.1": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "/etc/kafka/docker/run"
+      ],
+      "ExposedPorts": {
+        "9092/tcp": {}
+      },
+      "User": "appuser",
+      "WorkingDir": "/"
+    },
+    "config_digest": "sha256:a5ebb9f673af0a9cf23547dbf40831e0349bb3683af327366fc4ddf609394dd1",
+    "image": "apache/kafka-native@sha256:e50f6ad232dc9e524134ef6babba8285ba8a793326cb27ca2efc20fa83e45a0b",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:ctr-optimization-environment-f22bf10e7c9a34e7@sha256:718822ca93c5d49694d69a094a84a68a8b6e3f09415ff23fb2baf01c209bd3c2": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "python3"
+      ],
+      "WorkingDir": "/app"
+    },
+    "config_digest": "sha256:5c7c98966857d02d40d5214736eb4331173f44fcd95520cc50db9c8081169863",
+    "image": "harborframework/terminal-bench@sha256:718822ca93c5d49694d69a094a84a68a8b6e3f09415ff23fb2baf01c209bd3c2",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:ctr-optimization-sidecar-api-35cd5fe7841b4933@sha256:4dee63e20e07c00cdab5b1ba977b1f848a074f967bd8f97c9cda9027725e17d5": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "python",
+        "server.py"
+      ],
+      "ExposedPorts": {
+        "5000/tcp": {}
+      },
+      "WorkingDir": "/app"
+    },
+    "config_digest": "sha256:ea006bea4a5016ffd8ab112d910062994fdda466024f65eb2ac924f3111619d5",
+    "image": "harborframework/terminal-bench@sha256:4dee63e20e07c00cdab5b1ba977b1f848a074f967bd8f97c9cda9027725e17d5",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:cumulative-layout-shift-environment-7c5f839ce1345e4b@sha256:d840b99ee43fffbd7a76eab8e28d996063de8571725d2f4dbb5869d5d018baa1": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "node"
+      ],
+      "Entrypoint": [
+        "docker-entrypoint.sh"
+      ],
+      "WorkingDir": "/app"
+    },
+    "config_digest": "sha256:f51684ef2aa90aa970c4268fa093510a589d0c07ba3ffa04d783aaed454cac8a",
+    "image": "harborframework/terminal-bench@sha256:d840b99ee43fffbd7a76eab8e28d996063de8571725d2f4dbb5869d5d018baa1",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:cumulative-layout-shift-sidecar-barber-shop-data-backend-57bd45dbb96a662e@sha256:1f40268536b534165e32aa58b910eaa422a863c39cc6de005a09e3536efd9dda": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "pnpm",
+        "dev",
+        "--port",
+        "3001"
+      ],
+      "Entrypoint": [
+        "docker-entrypoint.sh"
+      ],
+      "ExposedPorts": {
+        "3001/tcp": {}
+      },
+      "WorkingDir": "/app"
+    },
+    "config_digest": "sha256:c45945a3c439b29209fb05fc851cae0ccc5be56824186a751f3b60f804e589b4",
+    "image": "harborframework/terminal-bench@sha256:1f40268536b534165e32aa58b910eaa422a863c39cc6de005a09e3536efd9dda",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:freight-dispatch-shift-environment-b8a25b24cf23c8d7@sha256:f9ffe49f11bcc6e77e33fd1bacd0a60027547526d716575c71e52517ac96daf8": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "python3"
+      ],
+      "WorkingDir": "/workspace"
+    },
+    "config_digest": "sha256:87a2d29099c311730bfdf59df4635918b9211571a121a5ec62eb1201959f2318",
+    "image": "harborframework/terminal-bench@sha256:f9ffe49f11bcc6e77e33fd1bacd0a60027547526d716575c71e52517ac96daf8",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:freight-dispatch-shift-sidecar-event-feed-42859b8ef057c829@sha256:f5975c403f3d3edc43e926ac49a63ea8561f9731ea63366180424380ad952782": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "python3",
+        "/srv/app/server.py"
+      ],
+      "ExposedPorts": {
+        "8080/tcp": {}
+      }
+    },
+    "config_digest": "sha256:50c0916984fc812e54480d548d310d8b459011afb2999c3c17c54767ba094a68",
+    "image": "harborframework/terminal-bench@sha256:f5975c403f3d3edc43e926ac49a63ea8561f9731ea63366180424380ad952782",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:heat-pump-warranty-environment-760b960d24b30b4c@sha256:8245f02d4346749433b53cf2d2ea281e624c2410aa697394a8d70a32ae2c1a99": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "python3"
+      ],
+      "WorkingDir": "/workspace"
+    },
+    "config_digest": "sha256:69c0819a66aeb68d1849bcf1e8ecfabdffd6b5df5d56cafe8aa40d6b861e7788",
+    "image": "harborframework/terminal-bench@sha256:8245f02d4346749433b53cf2d2ea281e624c2410aa697394a8d70a32ae2c1a99",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:heat-pump-warranty-sidecar-asset-ledger-61c5ee7eb0a19cd7@sha256:4906b2be733507125a12559fcb7a1162f483f397dd835bd66d94f463f2ef0da8": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "python3",
+        "/app/server.py"
+      ],
+      "ExposedPorts": {
+        "8001/tcp": {}
+      }
+    },
+    "config_digest": "sha256:1cad0908720bd884cfc68342b63fc22e7843b1a94edf97ff3ca60ff833048b3d",
+    "image": "harborframework/terminal-bench@sha256:4906b2be733507125a12559fcb7a1162f483f397dd835bd66d94f463f2ef0da8",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:heat-pump-warranty-sidecar-compliance-ledger-55a4e36df409fe04@sha256:e7191e63c1f7609f9b1fd5c2bcc83511537f2b107df325acbbf7201d0d1c138f": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "python3",
+        "/app/server.py"
+      ],
+      "WorkingDir": "/app"
+    },
+    "config_digest": "sha256:543e91216e0a9ac488a84826b1c505bf0713cd835052fa50ca6e8ccccd5a675e",
+    "image": "harborframework/terminal-bench@sha256:e7191e63c1f7609f9b1fd5c2bcc83511537f2b107df325acbbf7201d0d1c138f",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:heat-pump-warranty-sidecar-document-vault-61247c2a9becac9d@sha256:2f309687721bdd0e55dd08193832051ebf064f6b84053f3ae6f6a79365687e34": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "python3",
+        "/app/server.py"
+      ],
+      "ExposedPorts": {
+        "8002/tcp": {}
+      }
+    },
+    "config_digest": "sha256:453813dfa4eae58180f4e87e7e00158243733450b779b915f32c46cccd1c75d0",
+    "image": "harborframework/terminal-bench@sha256:2f309687721bdd0e55dd08193832051ebf064f6b84053f3ae6f6a79365687e34",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:heat-pump-warranty-sidecar-returns-ledger-0a15c968bfd78180@sha256:94a3e3f4423ddde7d84405c463d1738d1a680d63846ef5f7aca3d3dac88c1888": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "python3",
+        "/app/server.py"
+      ],
+      "ExposedPorts": {
+        "8003/tcp": {}
+      }
+    },
+    "config_digest": "sha256:8e72004ec3e563fa053aea531b6c5b75bb906984ab8c573de2bd47e8c1cbe7f0",
+    "image": "harborframework/terminal-bench@sha256:94a3e3f4423ddde7d84405c463d1738d1a680d63846ef5f7aca3d3dac88c1888",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:heat-pump-warranty-sidecar-warranty-inbox-1b35b5032cd7e558@sha256:2e5e263df61ecd255c04952270ef3f3bb3c0bd2a819b210836661bdf5cfc3d61": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "python3",
+        "/app/server.py"
+      ],
+      "WorkingDir": "/app"
+    },
+    "config_digest": "sha256:5ffdfb0fa83e18fda941d838e728c97bb9a95cad49a24e5c557628ead44acb71",
+    "image": "harborframework/terminal-bench@sha256:2e5e263df61ecd255c04952270ef3f3bb3c0bd2a819b210836661bdf5cfc3d61",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:heat-pump-warranty-sidecar-warranty-portal-9b1856ffd65950a9@sha256:c754da3670b3455e05c7a6f52608a0906e9b102cad2957b6a84e853461079a08": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "python3",
+        "/app/server.py"
+      ],
+      "ExposedPorts": {
+        "8000/tcp": {}
+      }
+    },
+    "config_digest": "sha256:4b425918376ace7624d05b3804b83a030b6aaf88628faec483d2098a25dfc397",
+    "image": "harborframework/terminal-bench@sha256:c754da3670b3455e05c7a6f52608a0906e9b102cad2957b6a84e853461079a08",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:intrastat-meldung-environment-8ee45061a2f8d64c@sha256:6357248f210a333fb08d0fc28f23020b909364ef1a67db132418e651e71bb788": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "sleep",
+        "infinity"
+      ],
+      "WorkingDir": "/workspace"
+    },
+    "config_digest": "sha256:8a3e84a403797711f9c2dd58799b1e0b137e994d9115f4bc13e02421619a9bfa",
+    "image": "harborframework/terminal-bench@sha256:6357248f210a333fb08d0fc28f23020b909364ef1a67db132418e651e71bb788",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:intrastat-meldung-sidecar-compliance-hub-5ac013ecb7a2351d@sha256:c019cea99f27450679b0390571e6d68640dff055534b0f5c5e798fa30661138e": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "sleep",
+        "infinity"
+      ],
+      "WorkingDir": "/workspace"
+    },
+    "config_digest": "sha256:dc7df2898bc8c0147eb3463cbb4266a99e1fbd353b7a223a566712f2c6f84310",
+    "image": "harborframework/terminal-bench@sha256:c019cea99f27450679b0390571e6d68640dff055534b0f5c5e798fa30661138e",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:intrastat-meldung-sidecar-dms-5ac013ecb7a2351d@sha256:5722eaf160ff537576d713a09e4c3ebd9b200d6b5054e02ab607e434a7dfd082": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "sleep",
+        "infinity"
+      ],
+      "WorkingDir": "/workspace"
+    },
+    "config_digest": "sha256:0e9ed3613c001dcef9ea59124ab5ae03b8209a578eeea9ad5cf895538f6e76a1",
+    "image": "harborframework/terminal-bench@sha256:5722eaf160ff537576d713a09e4c3ebd9b200d6b5054e02ab607e434a7dfd082",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:intrastat-meldung-sidecar-idev-5ac013ecb7a2351d@sha256:b1ec3caa5ca80a7b2a00ec28ec54a51dbc7680ea297578a5bf27ab4ae79949e1": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "sleep",
+        "infinity"
+      ],
+      "WorkingDir": "/workspace"
+    },
+    "config_digest": "sha256:676fa251afee60cd57f59ef567da2de738177b9b89fd097bcc5f1588b203abfd",
+    "image": "harborframework/terminal-bench@sha256:b1ec3caa5ca80a7b2a00ec28ec54a51dbc7680ea297578a5bf27ab4ae79949e1",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:intrastat-meldung-sidecar-odoo-5ac013ecb7a2351d@sha256:5b35fea6469419b2f2fafd9a562cbe9bab0d38decfdcdf27a3c8f8fc4acf9778": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "sleep",
+        "infinity"
+      ],
+      "WorkingDir": "/workspace"
+    },
+    "config_digest": "sha256:d8220fbb24824d552cfdfe4fa1733f7c2d75a9904ff405cc2f7b391c10f34bdb",
+    "image": "harborframework/terminal-bench@sha256:5b35fea6469419b2f2fafd9a562cbe9bab0d38decfdcdf27a3c8f8fc4acf9778",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:intrastat-meldung-sidecar-services-5ac013ecb7a2351d@sha256:e7af68dd2519d09eefc6e68d714e4115ef35f67ca8b674507bd3f93ac0d3f9c0": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "sleep",
+        "infinity"
+      ],
+      "WorkingDir": "/workspace"
+    },
+    "config_digest": "sha256:f2c91d8865e178225548fcd8fe41fe770b3ea50f6b83ce2174e555d4e03a6187",
+    "image": "harborframework/terminal-bench@sha256:e7af68dd2519d09eefc6e68d714e4115ef35f67ca8b674507bd3f93ac0d3f9c0",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:kv-live-surgery-environment-6e8d8c54429dfc9f@sha256:dd272ea1f98a6529bfee74e4a52330a44e414017a0cad756add94e23cac1473a": {
+    "architecture": "amd64",
+    "config": {
+      "Entrypoint": [
+        "/app/entrypoint.sh"
+      ],
+      "ExposedPorts": {
+        "9000/tcp": {}
+      },
+      "WorkingDir": "/app"
+    },
+    "config_digest": "sha256:3f19ab151068c6872cb23c993aa9040e5bfafd2d8cc8676d743f87d8f59918ba",
+    "image": "harborframework/terminal-bench@sha256:dd272ea1f98a6529bfee74e4a52330a44e414017a0cad756add94e23cac1473a",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:kv-live-surgery-sidecar-loadgen-e42e01bb667f9fd9@sha256:ecb13e07d75c8d041ab0f6357d2d84cc6112fc1ce1a182a7de71f2ab420f3fd5": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "/app/loadgen"
+      ],
+      "ExposedPorts": {
+        "8080/tcp": {}
+      },
+      "WorkingDir": "/app"
+    },
+    "config_digest": "sha256:225682683e490d1852f151069146f073a0edd1d973119d09e21bbcc621d7bdef",
+    "image": "harborframework/terminal-bench@sha256:ecb13e07d75c8d041ab0f6357d2d84cc6112fc1ce1a182a7de71f2ab420f3fd5",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:legacy-utility-triage-environment-5cc1128c429e8d05@sha256:f599a42278c8fd1b0185933752c29c33d4dfa5850cbabd7e712e70654d96a643": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "python3"
+      ],
+      "WorkingDir": "/workspace"
+    },
+    "config_digest": "sha256:eadec3084b599c2ed244740daa875e6289b48364d03d1ea3ccfd89176ef4165c",
+    "image": "harborframework/terminal-bench@sha256:f599a42278c8fd1b0185933752c29c33d4dfa5850cbabd7e712e70654d96a643",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:legacy-utility-triage-sidecar-legacy-app-44fa7b126bb99cb6@sha256:f381021e014f4f36f619068edf0f3a2ed54b05cfa84245301afbedc2d9dd3042": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "python3",
+        "/app/app.py"
+      ],
+      "ExposedPorts": {
+        "8000/tcp": {}
+      },
+      "WorkingDir": "/app"
+    },
+    "config_digest": "sha256:0bdcccd639798d23b94f62fd221d56ae5876617043742a35541dde8b3553d7c0",
+    "image": "harborframework/terminal-bench@sha256:f381021e014f4f36f619068edf0f3a2ed54b05cfa84245301afbedc2d9dd3042",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:legacy-utility-triage-sidecar-legacy-workstation-e8775dad9c6bd514@sha256:706a7124caa138c3e8fc116af4413a637087869cd1dd7bf7e86c2069afa682a4": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "/entrypoint.sh"
+      ],
+      "ExposedPorts": {
+        "5900/tcp": {}
+      }
+    },
+    "config_digest": "sha256:f8e450b38e5f23ada8dd55250e0f9c3c7314e7691d94fa87c4e5b92940fc0540",
+    "image": "harborframework/terminal-bench@sha256:706a7124caa138c3e8fc116af4413a637087869cd1dd7bf7e86c2069afa682a4",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:live-database-cutover-environment-5997c5b486ffe2b0@sha256:dbd2997e95d6bdde237f94cefb8cdc45ef5c7bbd44ecde02052a6dffcde14054": {
+    "architecture": "amd64",
+    "config": {
+      "Entrypoint": [
+        "/app/entrypoint.sh"
+      ],
+      "ExposedPorts": {
+        "8080/tcp": {}
+      },
+      "WorkingDir": "/app"
+    },
+    "config_digest": "sha256:23d0f29195913a7e2d7f28a2f9ae0ca1a29e144349be1f6df01b4c9512ca7b13",
+    "image": "harborframework/terminal-bench@sha256:dbd2997e95d6bdde237f94cefb8cdc45ef5c7bbd44ecde02052a6dffcde14054",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:live-database-cutover-sidecar-customer-53744832a5bce5e9@sha256:aa5a2a5c2b9c1e334125f0e5953e1b082ac61fdb4c2b1291c9171045b5af3dcf": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "python3",
+        "/app/multiproc.py"
+      ],
+      "ExposedPorts": {
+        "9000/tcp": {}
+      },
+      "WorkingDir": "/app"
+    },
+    "config_digest": "sha256:6e6de8f0654ad3495c071cff7464acffbce526df0910b2c9c99106a3b0b84cf9",
+    "image": "harborframework/terminal-bench@sha256:aa5a2a5c2b9c1e334125f0e5953e1b082ac61fdb4c2b1291c9171045b5af3dcf",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:live-database-cutover-sidecar-mysql-db-15531a3d85d91c9d@sha256:79bf81670ba7d98dfb04552ccad598331c5729b92b8311dfb1b5edcd84d6c55b": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "mysqld"
+      ],
+      "Entrypoint": [
+        "docker-entrypoint.sh"
+      ],
+      "ExposedPorts": {
+        "3306/tcp": {},
+        "33060/tcp": {}
+      },
+      "WorkingDir": "/"
+    },
+    "config_digest": "sha256:0fee310be83263f247bf468bce8d81f175126eb560ea0559e8f749ea9f865aef",
+    "image": "harborframework/terminal-bench@sha256:79bf81670ba7d98dfb04552ccad598331c5729b92b8311dfb1b5edcd84d6c55b",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:live-database-cutover-sidecar-postgres-db-42772d973839630b@sha256:20d349253b3b0ead577aaf2208de0d7648692e3064e0efe88e5125e0b63be8c9": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "postgres"
+      ],
+      "Entrypoint": [
+        "docker-entrypoint.sh"
+      ],
+      "ExposedPorts": {
+        "5432/tcp": {}
+      }
+    },
+    "config_digest": "sha256:9a603c597d477e127814db3d0d5719c61758a6383a67a37c959f7595854ef83e",
+    "image": "harborframework/terminal-bench@sha256:20d349253b3b0ead577aaf2208de0d7648692e3064e0efe88e5125e0b63be8c9",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:medical-claims-processing-environment-98fb909bc55e54a7@sha256:dc51c3e3da8c9b5758b095543f94f4c5082ff401a8d63414a2898708e787d541": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "python3"
+      ],
+      "WorkingDir": "/app"
+    },
+    "config_digest": "sha256:77302584ea1843494d96d531e2de1785b3e4d9954635366e49982b1de9455dc3",
+    "image": "harborframework/terminal-bench@sha256:dc51c3e3da8c9b5758b095543f94f4c5082ff401a8d63414a2898708e787d541",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:medical-claims-processing-sidecar-playwright-mcp-8867302f7b779be5@sha256:9a5080ae6a8d839875f4a5536145a279a9321721dcfd0ac15286de8caffb3aff": {
+    "architecture": "amd64",
+    "config": {
+      "Entrypoint": [
+        "/app/entrypoint.sh"
+      ],
+      "User": "pwuser",
+      "WorkingDir": "/app"
+    },
+    "config_digest": "sha256:9a20d29cc239d28039f4c49a202abdebd162274e341692be6dd98d2efb3c2aff",
+    "image": "harborframework/terminal-bench@sha256:9a5080ae6a8d839875f4a5536145a279a9321721dcfd0ac15286de8caffb3aff",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:medical-claims-processing-sidecar-workspace-37f3799ffc402618@sha256:d18cb02cc2d98bb1a9d92ed5804792bf52347cee129dbfe1a5bc3c853afe268e": {
+    "architecture": "amd64",
+    "config": {
+      "Entrypoint": [
+        "/app/entrypoint.sh"
+      ],
+      "ExposedPorts": {
+        "18073/tcp": {}
+      },
+      "WorkingDir": "/app/backend"
+    },
+    "config_digest": "sha256:607ed7b61262c70384236e6c24a09ab2aabca50fdc463787109b62e507f3401a",
+    "image": "harborframework/terminal-bench@sha256:d18cb02cc2d98bb1a9d92ed5804792bf52347cee129dbfe1a5bc3c853afe268e",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:nextjs-performance-environment-6069ddb935a93aee@sha256:c2b1ae7f93b579cc3378d13b4e613ac7e8c0a5f06e4a295142dc2a07459399f0": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "node"
+      ],
+      "Entrypoint": [
+        "docker-entrypoint.sh"
+      ],
+      "WorkingDir": "/app"
+    },
+    "config_digest": "sha256:f22389c9efc5d5a24792caa7b10101416079c9f50f7d6a050007d843363c55f6",
+    "image": "harborframework/terminal-bench@sha256:c2b1ae7f93b579cc3378d13b4e613ac7e8c0a5f06e4a295142dc2a07459399f0",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:nextjs-performance-sidecar-warehouse-api-ad5ec787ca3cb3eb@sha256:1b3bc750097ca5004dc7c5315835702616926e8901c03b2fe8b3017c48cabbf9": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "node",
+        "server.js"
+      ],
+      "Entrypoint": [
+        "docker-entrypoint.sh"
+      ],
+      "ExposedPorts": {
+        "4100/tcp": {},
+        "4101/tcp": {}
+      },
+      "WorkingDir": "/srv/warehouse-api"
+    },
+    "config_digest": "sha256:b6cf5480838f9ca12bd532e1497011d9ecbeed6fffb37243261c65dc691f389a",
+    "image": "harborframework/terminal-bench@sha256:1b3bc750097ca5004dc7c5315835702616926e8901c03b2fe8b3017c48cabbf9",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:payments-pipeline-fix-environment-18a0d069e5ba5a20@sha256:be62f14692d1aafaaffe40c46a01b034baa53a6e333931f9705c343054398f7e": {
+    "architecture": "amd64",
+    "config": {
+      "Entrypoint": [
+        "/app/entrypoint.sh"
+      ],
+      "WorkingDir": "/app"
+    },
+    "config_digest": "sha256:d1021e5ea0de2c97334c0313791406ecb17cbc17208730e587444f821170ee96",
+    "image": "harborframework/terminal-bench@sha256:be62f14692d1aafaaffe40c46a01b034baa53a6e333931f9705c343054398f7e",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:payments-pipeline-fix-sidecar-customer-7526dda72acc4b73@sha256:29995da6ac028ab31f407430596a9fa5328e74ba20ee018f998af9e354b5c7ad": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "python3",
+        "/app/main.py"
+      ],
+      "ExposedPorts": {
+        "9000/tcp": {}
+      },
+      "WorkingDir": "/app"
+    },
+    "config_digest": "sha256:e5ff2a1e228d51bad7d649559560450dc5f531c922b2a096c87e4f33028d3409",
+    "image": "harborframework/terminal-bench@sha256:29995da6ac028ab31f407430596a9fa5328e74ba20ee018f998af9e354b5c7ad",
+    "os": "linux"
+  },
+  "harborframework/terminal-bench:payments-pipeline-fix-sidecar-seeder-dfa2b554b10ec940@sha256:d74e2040609ab0c266aa8d36f7927f6966d393e5b28b0a594428b4b48e589259": {
+    "architecture": "amd64",
+    "config": {
+      "Entrypoint": [
+        "python3",
+        "/seed/seed_history.py"
+      ],
+      "WorkingDir": "/seed"
+    },
+    "config_digest": "sha256:e28c7cd610ce3e8504a93db910fe863630d459a947b068dff5f978332e3e4131",
+    "image": "harborframework/terminal-bench@sha256:d74e2040609ab0c266aa8d36f7927f6966d393e5b28b0a594428b4b48e589259",
+    "os": "linux"
+  },
+  "redis:7-alpine": {
+    "architecture": "amd64",
+    "config": {
+      "Cmd": [
+        "redis-server"
+      ],
+      "Entrypoint": [
+        "docker-entrypoint.sh"
+      ],
+      "ExposedPorts": {
+        "6379/tcp": {}
+      },
+      "WorkingDir": "/data"
+    },
+    "config_digest": "sha256:5509c0097c6064aa8a3b1df58f1d950e67090fffa6678ae8f3f1dc2385f12deb",
+    "image": "library/redis@sha256:1db42ccef14898aa29bae778452d567534b59c107129cbc1163fb552de184d3c",
+    "os": "linux"
+  }
+}

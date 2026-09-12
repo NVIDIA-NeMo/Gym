@@ -3,7 +3,8 @@
 This benchmark runs the 66 official TB4 task packages through `harbor_agent_general`.
 Harbor owns agent setup, task MCP servers, artifact collection, separate verifier
 environments, grading, and ATIF trajectories. Task instructions and tests are not
-rewritten or copied into Gym. The dataset and container images are content-pinned.
+rewritten or copied into Gym. The dataset and published task images are content-pinned.
+The Compose metadata file also pins the two upstream sidecar tags to resolved digests.
 
 The default is one attempt per task, no OpenCode step limit, and the task's official
 eight-hour agent timeout. Verifier timeouts and CPU, memory, disk, and GPU types come
@@ -37,8 +38,18 @@ agent execution, and verification; a four-hour smoke allocation is not an offici
 score run. Official leaderboard submissions use five attempts per task, while this
 integration defaults to one for coverage testing.
 
-CPU execution is being validated first. Compose environments currently fail early
-until the Compose adapter is integrated; they are never flattened into one container.
+Compose services run through `AsyncSandboxCompose`, including dependency health
+checks, sidecar artifact collection, and TCP forwarding for the two tasks that use
+`network_mode: service:...`. The adapter checks `SYS_PTRACE` and shared-memory
+requirements against the sandbox deployment and fails explicitly if they cannot
+be honored. TCP forwarding provides the declared localhost ports; it does not
+create a shared Linux network namespace.
+
+`compose-images.json` records verified Linux/amd64 OCI startup metadata for all
+38 Compose images. Normalization applies Harbor's standard prebuilt main command,
+image entrypoints, working directories, users, and exposed ports before creating
+sandboxes. Original task files remain unchanged. Resolved Compose files are saved
+beside the Harbor trial artifacts.
 
 ## Provenance
 
