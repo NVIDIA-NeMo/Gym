@@ -22,6 +22,7 @@ import time
 from abc import abstractmethod
 from asyncio.exceptions import CancelledError
 from contextlib import asynccontextmanager
+from ipaddress import ip_network
 from os import environ, getenv
 from pathlib import Path
 from threading import Thread
@@ -51,7 +52,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from multidict import CIMultiDict
 from omegaconf import DictConfig, OmegaConf, open_dict
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from requests.exceptions import ConnectionError
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -649,6 +650,49 @@ class UvicornLoggingConfig(BaseModel):
     uvicorn_logging_show_200_ok: bool = False
 
 
+# Every IPv4 address as it appears on a dual-stack socket.
+_ALL_V4_MAPPED = ip_network("::ffff:0:0/96")
+
+
+class UvicornProxyHeadersConfig(BaseModel):
+    # Gym servers call each other directly, so proxy headers stay off: uvicorn would otherwise let
+    # any caller rewrite its own client host and URL scheme through X-Forwarded-*.
+    uvicorn_proxy_headers: bool = False
+    # Trusted proxy addresses. Required when uvicorn_proxy_headers is enabled.
+    uvicorn_forwarded_allow_ips: Optional[List[str]] = None
+
+    @model_validator(mode="after")
+    def _require_trusted_proxy_allowlist(self) -> "UvicornProxyHeadersConfig":
+        if not self.uvicorn_proxy_headers:
+            return self
+
+        allow_ips = [ip.strip() for ip in (self.uvicorn_forwarded_allow_ips or []) if ip.strip()]
+        if not allow_ips:
+            raise ValueError("uvicorn_proxy_headers=True requires a non-empty uvicorn_forwarded_allow_ips allowlist.")
+        if "*" in allow_ips:
+            raise ValueError("uvicorn_forwarded_allow_ips must not be '*': it trusts forwarded headers from any peer.")
+        for address in allow_ips:
+            try:
+                network = ip_network(address)
+            except ValueError as exc:
+                # Anything uvicorn cannot parse as an address is kept as a literal it will never
+                # match against a TCP peer, so the entry would silently trust nothing.
+                raise ValueError(
+                    f"uvicorn_forwarded_allow_ips entry {address!r} is not a valid IP address or CIDR range: {exc}"
+                ) from exc
+            # prefixlen 0 covers a whole family; an IPv6 supernet of ::ffff:0:0/96 covers all of
+            # IPv4 once peers arrive IPv4-mapped on a dual-stack socket.
+            covers_all_v4_mapped = network.version == 6 and network.supernet_of(_ALL_V4_MAPPED)
+            if network.prefixlen == 0 or covers_all_v4_mapped:
+                raise ValueError(
+                    f"uvicorn_forwarded_allow_ips entry {address!r} covers every address: "
+                    "it trusts forwarded headers from any peer."
+                )
+
+        self.uvicorn_forwarded_allow_ips = allow_ips
+        return self
+
+
 _NEMO_GYM_STARTED_RAY_CLUSTER: bool = False
 
 
@@ -1054,6 +1098,7 @@ Full body: {json.dumps(exc.body, indent=4)}
             server.setup_profiling(app, profiling_config)
 
         uvicorn_logging_cfg = UvicornLoggingConfig.model_validate(global_config_dict)
+        uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(global_config_dict)
         if not uvicorn_logging_cfg.uvicorn_logging_show_200_ok and is_main_fastapi_proc:
             print(
                 "Disabling a uvicorn access logging so that the logs aren't spammed with 200 OK messages. This is to help errors pop up better and filter out noise."
@@ -1073,6 +1118,10 @@ Full body: {json.dumps(exc.body, indent=4)}
             # A missing or incompatible httptools wheel now fails during startup.
             http="httptools",
             access_log=uvicorn_logging_cfg.uvicorn_logging_show_200_ok,
+            # Internal-only by default. Enabling this requires an explicit trusted-proxy allowlist,
+            # so forwarded headers are never honored from an arbitrary peer.
+            proxy_headers=uvicorn_proxy_cfg.uvicorn_proxy_headers,
+            forwarded_allow_ips=uvicorn_proxy_cfg.uvicorn_forwarded_allow_ips or [],
         )
 
         if server.config.num_workers and server.config.num_workers > 1:
@@ -1149,9 +1198,10 @@ class HeadServer(BaseServer):
         self._cached_yaml = None
 
     @classmethod
-    def run_webserver(cls) -> Tuple[uvicorn.Server, Thread, "HeadServer"]:  # pragma: no cover
+    def run_webserver(cls) -> Tuple[uvicorn.Server, Thread, "HeadServer"]:
         config = ServerClient.load_head_server_config()
         server = cls(config=config)
+        uvicorn_proxy_cfg = UvicornProxyHeadersConfig.model_validate(get_global_config_dict())
 
         app = server.setup_webserver()
 
@@ -1159,6 +1209,8 @@ class HeadServer(BaseServer):
             app,
             host=server.config.host,
             port=server.config.port,
+            proxy_headers=uvicorn_proxy_cfg.uvicorn_proxy_headers,
+            forwarded_allow_ips=uvicorn_proxy_cfg.uvicorn_forwarded_allow_ips or [],
         )
         uvicorn_server = uvicorn.Server(config=config)
 

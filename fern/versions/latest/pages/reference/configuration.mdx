@@ -93,6 +93,31 @@ server_id:                    # Your unique name for this server
       # ... additional fields vary by server type
 ```
 
+### Reverse Proxy Headers
+
+Gym disables Uvicorn proxy-header processing by default. Direct Gym traffic does not pass through a reverse proxy, so
+the network peer address and request scheme are authoritative without interpreting `X-Forwarded-For` or
+`X-Forwarded-Proto`.
+
+Deployments behind a reverse proxy must opt in with top-level configuration and list the proxy addresses or CIDRs that
+are allowed to supply forwarded headers:
+
+```yaml
+uvicorn_proxy_headers: true
+uvicorn_forwarded_allow_ips:
+  - 10.0.0.5
+  - 10.20.0.0/24
+```
+
+Both settings apply to the Gym head server and the Agent, Model, and Resources servers. Enabling proxy headers without
+a non-empty allowlist fails at startup. Wildcards and all-address CIDRs such as `0.0.0.0/0` and `::/0` are rejected.
+
+<Warning>
+Only list reverse proxies you control. Trusting a loopback address such as `127.0.0.1` trusts every local process, not
+only a proxy running on that address. Deployments that previously relied on Uvicorn's implicit loopback trust must set
+these options explicitly.
+</Warning>
+
 ### Model Server Fields
 
 ```yaml
