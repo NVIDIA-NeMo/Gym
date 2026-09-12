@@ -104,3 +104,19 @@ class TestJudgeFailsafe:
         assert data["response"] == {"final": "answer"}
         # Transient: never terminal, so resume re-dispatches it.
         assert "_ng_failure_terminal" not in data
+
+    @pytest.mark.asyncio
+    async def test_judge_error_passes_through_unchanged(self) -> None:
+        async def already_judge_error():
+            raise JudgeError("judge 500")
+
+        with pytest.raises(JudgeError, match="judge 500"):
+            await reraise_judge_errors(already_judge_error())
+
+    @pytest.mark.asyncio
+    async def test_missing_request_body_raises_instead_of_failsafe(self) -> None:
+        async def verify(*args, **kwargs):
+            raise JudgeError("judge exploded")
+
+        with pytest.raises(RuntimeError, match="could not locate the verify request body"):
+            await judge_failsafe(verify)()
