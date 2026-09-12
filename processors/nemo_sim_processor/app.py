@@ -15,8 +15,8 @@ from fastapi import Body, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym.agents.responses_api_agent import INTERNAL_TRAJECTORY_KEY
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.config_types import AgentServerRef, ModelServerRef
+from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -54,7 +54,7 @@ class NeMoSimRunRequest(BaseRunRequest):
 
     model_config = ConfigDict(extra="allow")
 
-    scenario: NeMoSimScenario
+    scenario: NeMoSimScenario | None = None
     model_responses_create_params: dict[str, NeMoGymResponseCreateParamsNonStreaming] = Field(default_factory=dict)
     simulation_config: dict[str, Any] = Field(default_factory=dict)
 
@@ -87,6 +87,25 @@ class NeMoSimProcessorResponse(BaseVerifyResponse):
     episode_interaction_protocol: str = "nemo_sim.ConversationLoop"
 
 
+class NeMoSimVerifyRequest(BaseVerifyRequest):
+    """Completed NeMo-Sim episode submitted to the Resources Server."""
+
+    model_config = ConfigDict(extra="allow")
+
+    scenario: NeMoSimScenario
+    nemo_sim_result: dict[str, Any]
+    invocations: list[NeMoSimInvocation]
+    episode_interaction_protocol: str = "nemo_sim.ConversationLoop"
+
+
+class NeMoSimSeedSessionResponse(BaseModel):
+    """Scenario resolved once by the Resources Server before the episode."""
+
+    model_config = ConfigDict(extra="allow")
+
+    scenario: NeMoSimScenario
+
+
 class NeMoSimProcessorConfig(BaseProcessorConfig):
     """Configure participant Agents separately from support Model Servers."""
 
@@ -95,9 +114,10 @@ class NeMoSimProcessorConfig(BaseProcessorConfig):
     judge_model: ModelServerRef
     summary_model: ModelServerRef
     api_response_model: ModelServerRef
+    resources_server: ResourcesServerRef
     max_turns: int = Field(5, ge=1)
     agent_call_timeout_s: float = Field(300.0, gt=0)
-    skip_verification: Literal[True] = True
+    skip_verification: Literal[False] = False
 
     def target_for_alias(self, alias: str) -> AgentServerRef | ModelServerRef:
         return {
@@ -211,7 +231,7 @@ class _ConversationBridge:
         response_json = await get_response_json(response)
         agent_trajectory = response_json.pop(INTERNAL_TRAJECTORY_KEY, None)
         gym_response = NeMoGymResponse.model_validate(response_json)
-        self.cookies_by_alias[alias] = dict(response.cookies)
+        self.cookies_by_alias[alias].update(dict(response.cookies))
         self.responses_by_alias[alias].append(gym_response)
         self.invocations.append(
             NeMoSimInvocation(
@@ -296,6 +316,8 @@ class NeMoSimProcessor(BaseProcessor):
         from conversation_plugin.generator import ConversationSimulatorGenerator
 
         set_debug_log_path(None)
+        if body.scenario is None:
+            raise RuntimeError("Resources Server did not resolve a NeMo-Sim scenario")
         config_values = dict(body.simulation_config)
         config_values.update(
             {
@@ -315,25 +337,51 @@ class NeMoSimProcessor(BaseProcessor):
         request: Request,
         body: NeMoSimRunRequest = Body(),
     ) -> NeMoSimProcessorResponse:
+        seed_response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/seed_session",
+            json=body.model_dump(mode="json"),
+            cookies=dict(request.cookies),
+        )
+        await raise_for_status(seed_response)
+        seed_result = NeMoSimSeedSessionResponse.model_validate(await get_response_json(seed_response))
+        body = body.model_copy(update={"scenario": seed_result.scenario})
+        environment_cookies = dict(seed_response.cookies)
         bridge = _ConversationBridge(
             processor=self,
             body=body,
             event_loop=asyncio.get_running_loop(),
-            cookies=request.cookies,
+            cookies=environment_cookies,
         )
         nemo_sim_result = await asyncio.to_thread(self._run_nemo_sim, bridge, body)
         assistant_responses = bridge.responses_by_alias["assistant_model"]
         focal_response = assistant_responses[-1] if assistant_responses else _empty_assistant_response(self.config)
 
-        result = body.model_dump(mode="json") | {
-            "response": focal_response.model_dump(mode="json"),
-            "reward": float(self.config.skip_verification_reward),
-            "verification_skipped": True,
-            "nemo_sim_result": nemo_sim_result,
-            "invocations": [invocation.model_dump(mode="json") for invocation in bridge.invocations],
-            "episode_interaction_protocol": "nemo_sim.ConversationLoop",
-        }
-        return NeMoSimProcessorResponse.model_validate(result)
+        verify_request = NeMoSimVerifyRequest.model_validate(
+            body.model_dump(mode="json")
+            | {
+                "response": focal_response.model_dump(mode="json"),
+                "nemo_sim_result": nemo_sim_result,
+                "invocations": [invocation.model_dump(mode="json") for invocation in bridge.invocations],
+                "episode_interaction_protocol": "nemo_sim.ConversationLoop",
+            }
+        )
+        verify_response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/verify",
+            json=verify_request.model_dump(mode="json"),
+            cookies=environment_cookies,
+        )
+        await raise_for_status(verify_response)
+        result = await get_response_json(verify_response)
+        return NeMoSimProcessorResponse.model_validate(
+            result
+            | {
+                "nemo_sim_result": nemo_sim_result,
+                "invocations": [invocation.model_dump(mode="json") for invocation in bridge.invocations],
+                "episode_interaction_protocol": "nemo_sim.ConversationLoop",
+            }
+        )
 
 
 def _empty_assistant_response(config: NeMoSimProcessorConfig) -> NeMoGymResponse:

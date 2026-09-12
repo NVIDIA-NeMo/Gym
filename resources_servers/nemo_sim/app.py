@@ -10,9 +10,6 @@ import json
 import logging
 import os
 import random
-import shutil
-import subprocess
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -27,9 +24,12 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionRequest,
     SimpleResourcesServer,
 )
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import SESSION_ID_KEY
-from processors.user_assistant.app import UserAssistantVerifyRequest, UserAssistantVerifyResponse
+from processors.nemo_sim_processor.app import (
+    NeMoSimProcessorResponse,
+    NeMoSimScenario,
+    NeMoSimVerifyRequest,
+)
 
 
 SUPPORTED_PROBES = frozenset({"general_open_ended", "general_educational"})
@@ -51,9 +51,6 @@ class NeMoSimResourcesServerConfig(BaseResourcesServerConfig):
     personas_locales: list[str] = Field(default_factory=lambda: ["en_US"])
     personas_panel_size: int = Field(1_000, ge=1)
     personas_panel_seed: int = 42
-    download_missing_personas: bool = True
-    ngc_executable: str = "ngc"
-    personas_download_timeout_seconds: float = Field(3_600, gt=0)
     probe_mix: dict[str, float] = Field(
         default_factory=lambda: {
             "general_open_ended": 0.5,
@@ -116,7 +113,6 @@ class NeMoSimSamplingRequest(BaseModel):
 class NeMoSimSeedSessionRequest(BaseSeedSessionRequest):
     model_config = ConfigDict(extra="allow")
 
-    user_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     nemo_sim_sampling: NeMoSimSamplingRequest
 
 
@@ -133,7 +129,7 @@ class ResolvedNeMoSimContext(BaseModel):
 
 
 class NeMoSimSeedSessionResponse(BaseModel):
-    user_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    scenario: NeMoSimScenario
     nemo_sim_context: ResolvedNeMoSimContext
 
 
@@ -143,7 +139,7 @@ class NeMoSimEpisodeStatusResponse(BaseModel):
     state: dict[str, Any]
 
 
-class NeMoSimVerifyResponse(UserAssistantVerifyResponse):
+class NeMoSimVerifyResponse(NeMoSimProcessorResponse):
     nemo_sim_context: ResolvedNeMoSimContext
     scenario_completed: bool
 
@@ -210,6 +206,20 @@ def _persona_from_row(row: dict[str, Any]) -> Optional[dict[str, Any]]:
     return row or None
 
 
+def _conversation_roles(result: dict[str, Any]) -> set[str]:
+    messages = result.get("conversation_messages")
+    if isinstance(messages, str):
+        try:
+            messages = json.loads(messages)
+        except json.JSONDecodeError:
+            return set()
+    if not isinstance(messages, list):
+        return set()
+    return {
+        role for message in messages if isinstance(message, dict) and isinstance((role := message.get("role")), str)
+    }
+
+
 class NeMoSimResourcesServer(SimpleResourcesServer):
     """Resolve one replayable persona and general-purpose probe per episode."""
 
@@ -259,64 +269,18 @@ class NeMoSimResourcesServer(SimpleResourcesServer):
             raise RuntimeError(f"Persona dataset at {path} contains no rows")
         return row_count
 
-    def _download_source(self, locale: str, destination: Path) -> None:
-        executable = shutil.which(self.config.ngc_executable)
-        if executable is None:
-            raise RuntimeError(
-                f"Persona cache miss for {locale!r}, but {self.config.ngc_executable!r} is not on PATH. "
-                "Install and authenticate the NGC CLI, or pre-populate the versioned persona cache."
-            )
-
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        versioned_resource = f"{self._resource(locale)}:{self.config.personas_dataset_version}"
-        logger.info("Downloading pinned persona dataset %s", versioned_resource)
-        with tempfile.TemporaryDirectory(dir=destination.parent) as temporary_dir:
-            command = [
-                executable,
-                "registry",
-                "resource",
-                "download-version",
-                versioned_resource,
-                "--dest",
-                temporary_dir,
-            ]
-            try:
-                subprocess.run(
-                    command,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    errors="replace",
-                    timeout=self.config.personas_download_timeout_seconds,
-                )
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-                stderr = getattr(exc, "stderr", "") or ""
-                raise RuntimeError(
-                    f"Failed to download pinned persona dataset {versioned_resource}: {stderr.strip() or exc}"
-                ) from exc
-
-            parquet_files = list(Path(temporary_dir).rglob("*.parquet"))
-            if len(parquet_files) != 1:
-                raise RuntimeError(f"Expected one Parquet file in {versioned_resource}, found {len(parquet_files)}")
-            temporary_destination = destination.with_suffix(".parquet.tmp")
-            shutil.copyfile(parquet_files[0], temporary_destination)
-            self._validate_parquet(temporary_destination)
-            os.replace(temporary_destination, destination)
-
     def _ensure_source(self, locale: str) -> tuple[Path, int, str]:
         source_path = self._source_path(locale)
         manifest_path = self._source_manifest_path(locale)
         lock_path = self._version_dir() / "locks" / f"{locale}.lock"
         with _exclusive_file_lock(lock_path):
             if not source_path.is_file():
-                if not self.config.download_missing_personas:
-                    raise RuntimeError(
-                        f"Pinned persona dataset {self._resource(locale)}:"
-                        f"{self.config.personas_dataset_version} is not cached at {source_path}"
-                    )
-                self._download_source(locale, source_path)
-            else:
-                logger.info("Reusing cached persona dataset at %s", source_path)
+                raise RuntimeError(
+                    f"Prepared persona dataset {self._resource(locale)}:"
+                    f"{self.config.personas_dataset_version} is missing at {source_path}. "
+                    "Run `gym eval prepare --benchmark nemo_sim` before starting the Resources Server."
+                )
+            logger.info("Loading prepared persona dataset at %s", source_path)
             source_rows = self._validate_parquet(source_path)
             if manifest_path.is_file():
                 try:
@@ -479,25 +443,24 @@ class NeMoSimResourcesServer(SimpleResourcesServer):
     ) -> NeMoSimSeedSessionResponse:
         context = await asyncio.to_thread(self._resolve_context, body.nemo_sim_sampling)
         self.session_id_to_context[request.session[SESSION_ID_KEY]] = context
-        user_params = body.user_responses_create_params.model_copy(deep=True)
-        metadata = dict(user_params.metadata or {})
-        metadata["nemo_sim"] = json.dumps(
+        scenario = NeMoSimScenario.model_validate(
             {
                 "locale": context.locale,
-                "goal": context.goal,
                 "persona": context.persona,
+                "probe_type": context.probe_type,
+                "theme": {
+                    "type": context.theme.topic,
+                    "description": context.theme.goal,
+                },
+                "goal": context.goal,
                 "personas_dataset_version": context.personas_dataset_version,
                 "personas_source_sha256": context.personas_source_sha256,
                 "personas_panel_seed": context.personas_panel_seed,
-                "probe_type": context.probe_type,
-                "theme": context.theme.model_dump(mode="json"),
                 "seed": context.seed,
-            },
-            ensure_ascii=False,
+            }
         )
-        user_params = user_params.model_copy(update={"metadata": metadata})
         return NeMoSimSeedSessionResponse(
-            user_responses_create_params=user_params,
+            scenario=scenario,
             nemo_sim_context=context,
         )
 
@@ -518,10 +481,10 @@ class NeMoSimResourcesServer(SimpleResourcesServer):
     async def verify(
         self,
         request: Request,
-        body: UserAssistantVerifyRequest,
+        body: NeMoSimVerifyRequest,
     ) -> NeMoSimVerifyResponse:
         context = self._context(request)
-        scenario_completed = bool(body.assistant_trajectory and body.user_trajectory)
+        scenario_completed = {"user", "assistant"} <= _conversation_roles(body.nemo_sim_result)
         return NeMoSimVerifyResponse(
             **body.model_dump(mode="json"),
             reward=float(scenario_completed),

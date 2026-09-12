@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import json
-import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -54,7 +52,6 @@ def _app(
     cache_dir: Path,
     *,
     educational_only: bool = False,
-    download_missing: bool = False,
 ) -> FastAPI:
     config = NeMoSimResourcesServerConfig(
         host="127.0.0.1",
@@ -63,7 +60,6 @@ def _app(
         name="nemo_sim",
         personas_cache_dir=cache_dir,
         personas_panel_size=2,
-        download_missing_personas=download_missing,
         probe_mix=(
             {"general_open_ended": 0.0, "general_educational": 1.0}
             if educational_only
@@ -95,11 +91,7 @@ def _seed_body(*, seed: int, probe_type: str | None = None) -> dict:
     if probe_type is not None:
         sampling["probe_type"] = probe_type
     return {
-        "responses_create_params": {"input": "Help the user."},
-        "user_responses_create_params": {
-            "input": "Wait for the assistant.",
-            "metadata": {"trace": "preserve"},
-        },
+        "responses_create_params": {"input": []},
         "nemo_sim_sampling": sampling,
     }
 
@@ -127,33 +119,27 @@ def _response(text: str) -> dict:
 
 def _verify_body() -> dict:
     assistant_response = _response("Here is an explanation.")
-    user_response = _response("Please explain further.")
     return {
         **_seed_body(seed=7),
+        "scenario": {
+            "persona": PERSONAS[0],
+            "probe_type": "general_educational",
+            "theme": {"type": "local ecology", "description": "Learn about local ecology."},
+            "locale": "en_US",
+        },
         "response": assistant_response,
-        "assistant_trajectory": [
-            {
-                "turn_index": 0,
-                "participant": "assistant",
-                "request": {"input": "Help the user."},
-                "response": assistant_response,
-            }
-        ],
-        "user_trajectory": [
-            {
-                "turn_index": 1,
-                "participant": "user",
-                "request": {"input": "Wait for the assistant."},
-                "response": user_response,
-            }
-        ],
-        "episode_trajectory": [],
-        "termination_reason": "max_turns",
-        "turns_completed": 2,
+        "nemo_sim_result": {
+            "conversation_messages": [
+                {"role": "user", "content": "Teach me about local ecology."},
+                {"role": "assistant", "content": "Here is an explanation."},
+            ]
+        },
+        "invocations": [],
+        "episode_interaction_protocol": "nemo_sim.ConversationLoop",
     }
 
 
-def test_seed_session_resolves_replayable_context_and_preserves_metadata(tmp_path: Path) -> None:
+def test_seed_session_resolves_replayable_scenario(tmp_path: Path) -> None:
     _write_personas(tmp_path)
     with TestClient(_app(tmp_path)) as client:
         first = client.post("/seed_session", json=_seed_body(seed=7, probe_type="general_open_ended"))
@@ -163,15 +149,12 @@ def test_seed_session_resolves_replayable_context_and_preserves_metadata(tmp_pat
     assert first.json()["nemo_sim_context"] == second.json()["nemo_sim_context"]
     assert first.json()["nemo_sim_context"]["personas_dataset_version"] == "0.0.2"
     assert len(first.json()["nemo_sim_context"]["personas_source_sha256"]) == 64
-    user_params = first.json()["user_responses_create_params"]
-    assert user_params["input"] == "Wait for the assistant."
-    assert user_params["metadata"]["trace"] == "preserve"
-    context = json.loads(user_params["metadata"]["nemo_sim"])
-    assert context["persona"]["first_name"] in {"Morgan", "Avery"}
-    assert context["probe_type"] == "general_open_ended"
-    assert context["goal"] == "Seek a practical recommendation about local food."
-    assert context["personas_dataset_version"] == "0.0.2"
-    assert len(context["personas_source_sha256"]) == 64
+    scenario = first.json()["scenario"]
+    assert scenario["persona"]["first_name"] in {"Morgan", "Avery"}
+    assert scenario["probe_type"] == "general_open_ended"
+    assert scenario["goal"] == "Seek a practical recommendation about local food."
+    assert scenario["personas_dataset_version"] == "0.0.2"
+    assert len(scenario["personas_source_sha256"]) == 64
 
 
 def test_probe_mix_deterministically_selects_enabled_probe(tmp_path: Path) -> None:
@@ -204,45 +187,27 @@ def test_sessions_keep_independent_resolved_contexts(tmp_path: Path) -> None:
     assert second_status["state"]["probe_type"] == "general_educational"
 
 
-def test_startup_downloads_pinned_dataset_then_reuses_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    commands: list[list[str]] = []
+def test_startup_prepares_panel_then_reuses_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_personas(tmp_path)
+    monkeypatch.setattr(
+        "resources_servers.nemo_sim.app._sha256_file",
+        lambda *_args, **_kwargs: "a" * 64,
+    )
+    _app(tmp_path)
 
-    monkeypatch.setattr("resources_servers.nemo_sim.app.shutil.which", lambda executable: f"/bin/{executable}")
-
-    def fake_download(command: list[str], **_: object) -> subprocess.CompletedProcess:
-        commands.append(command)
-        _write_parquet(Path(command[-1]) / "download" / "en_US.parquet")
-        return subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr("resources_servers.nemo_sim.app.subprocess.run", fake_download)
-    _app(tmp_path, download_missing=True)
-
-    assert commands[0][4] == "nvidia/nemotron-personas/nemotron-personas-dataset-en_us:0.0.2"
-    assert _source_path(tmp_path).is_file()
     assert _source_path(tmp_path).with_suffix(".manifest.json").is_file()
     assert (tmp_path / "0.0.2" / "panels" / "en_US-n2-seed42.parquet").is_file()
 
     monkeypatch.setattr(
-        "resources_servers.nemo_sim.app.subprocess.run",
-        lambda *_args, **_kwargs: pytest.fail("cache hit must not download"),
-    )
-    monkeypatch.setattr(
         "resources_servers.nemo_sim.app._sha256_file",
-        lambda *_args, **_kwargs: pytest.fail("cache hit must not hash the source"),
+        lambda *_args, **_kwargs: pytest.fail("matching prepared manifests must be reused"),
     )
-    _app(tmp_path, download_missing=True)
+    _app(tmp_path)
 
 
 def test_missing_pinned_dataset_fails_during_initialization(tmp_path: Path) -> None:
-    with pytest.raises(RuntimeError, match="is not cached"):
+    with pytest.raises(RuntimeError, match="gym eval prepare --benchmark nemo_sim"):
         _app(tmp_path)
-
-
-def test_cache_miss_without_ngc_has_actionable_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("resources_servers.nemo_sim.app.shutil.which", lambda _executable: None)
-
-    with pytest.raises(RuntimeError, match="NGC CLI"):
-        _app(tmp_path, download_missing=True)
 
 
 def test_seed_session_rejects_locale_not_initialized_at_startup(tmp_path: Path) -> None:
@@ -261,7 +226,14 @@ def test_verify_records_context_and_requires_both_participants(tmp_path: Path) -
     with TestClient(_app(tmp_path)) as client:
         client.post("/seed_session", json=_seed_body(seed=7))
         verified = client.post("/verify", json=_verify_body()).json()
+        incomplete_body = _verify_body()
+        incomplete_body["nemo_sim_result"]["conversation_messages"] = [
+            {"role": "user", "content": "Teach me about local ecology."}
+        ]
+        incomplete = client.post("/verify", json=incomplete_body).json()
 
     assert verified["reward"] == 1.0
     assert verified["scenario_completed"] is True
     assert verified["nemo_sim_context"]["seed"] == 7
+    assert incomplete["reward"] == 0.0
+    assert incomplete["scenario_completed"] is False

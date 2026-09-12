@@ -1,16 +1,17 @@
 # NeMo-Sim Resources Server
 
 This environment initializes one deterministic NeMo-Sim scenario at the
-beginning of each `UserAssistantProcessor` episode. The Resources Server
-prepares a versioned Nemotron persona panel once at startup; it does not
-generate personas with an LLM or run a complete Data Designer pipeline.
+beginning of each `NeMoSimProcessor` episode. The Resources Server
+prepares a deterministic panel from a previously downloaded, versioned
+Nemotron Personas source. It does not access NGC, generate personas with an
+LLM, or run a complete Data Designer pipeline.
 
 ## Environment initialization
 
-The default configuration pins the NGC resource version to `0.0.2` and uses:
+The benchmark configuration pins the NGC resource version to `0.0.2` and uses:
 
 ```text
-~/.cache/nemo-gym/nemo-sim/personas/
+benchmarks/nemo_sim/data/personas/
 └── 0.0.2/
     ├── source/
     │   ├── en_US.parquet
@@ -23,22 +24,21 @@ The default configuration pins the NGC resource version to `0.0.2` and uses:
 
 For every configured locale, server startup:
 
-1. Reuses the pinned source Parquet when it already exists in the cache.
-2. On a cache miss, downloads the explicit NGC resource version, for example
-   `nvidia/nemotron-personas/nemotron-personas-dataset-en_us:0.0.2`.
-3. Validates the Parquet and records its row count, size, and SHA-256.
-4. Reuses a matching deterministic panel when present; otherwise streams the
+1. Requires the pinned source Parquet prepared by the benchmark recipe.
+2. Validates the Parquet and records its row count, size, and SHA-256.
+3. Reuses a matching deterministic panel when present; otherwise streams the
    source dataset once and materializes a bounded panel.
-5. Loads only the panel into memory for episode sampling.
+4. Loads only the panel into memory for episode sampling.
 
 File locks and atomic replacement prevent concurrent server processes sharing
-the cache from publishing partial artifacts. A cache hit does not invoke NGC
-and does not hash or scan the full source again.
+the prepared assets from publishing partial panels. A matching source manifest
+avoids hashing or scanning the full source again.
 
-The NGC CLI and its authentication are required only when a pinned source is
-absent. Set `NGC_CLI_API_KEY` and `NGC_CLI_ORG`, or configure NGC once with
-`ngc config set`. Set `download_missing_personas: false` for air-gapped runs;
-startup will then fail clearly if the pinned artifact was not pre-populated.
+NGC and its credentials are preparation-time concerns. Run
+`gym eval prepare --benchmark nemo_sim` before starting the Resources Server.
+Startup fails with that instruction when the pinned source is absent. See
+[`benchmarks/nemo_sim`](../../benchmarks/nemo_sim/) for credential and artifact
+details.
 
 ## Episode initialization
 
@@ -64,13 +64,13 @@ At `/seed_session`, the server:
    deterministically.
 2. Stores the resolved context in task-scoped session state.
 3. Records the source version, SHA-256, and panel seed for replay.
-4. Adds a JSON-encoded `metadata.nemo_sim` value to the existing
-   `user_responses_create_params`.
-5. Returns those resolved user parameters to the processor before its first
-   participant turn.
+4. Returns a `NeMoSimScenario` to the Processor before its first participant
+   invocation.
 
-The processor includes the resolved user parameters in the rollout, and the
-verifier includes `nemo_sim_context` for replay and auditing.
+The Processor gives the scenario to NeMo-Sim's conversation generator, routes
+its participant and support-model calls through Gym, and submits the completed
+trajectory to `/verify`. The verifier includes `nemo_sim_context` for replay
+and auditing.
 
 ## Static and dynamic configuration
 
@@ -80,7 +80,6 @@ The YAML config owns static population and probe policy:
 - `personas_dataset_version`
 - `personas_locales`
 - `personas_panel_size` and `personas_panel_seed`
-- `download_missing_personas`
 - `probe_mix`
 - `probe_themes`
 - agent, model, and resources-server references
@@ -91,7 +90,7 @@ Each dataset row owns dynamic task identity:
 - `nemo_sim_sampling.locale`
 - `nemo_sim_sampling.seed`
 - optional `nemo_sim_sampling.probe_type`
-- assistant and user Responses API inputs
+- default and per-model Responses API parameters
 
 Changing the dataset version or panel configuration creates a different cache
 path rather than silently overwriting an existing panel.
@@ -113,14 +112,14 @@ not an assistant-quality benchmark score.
 
 ## Run
 
-Configure `policy_base_url`, `policy_api_key`, and `policy_model_name`. On the
-first run, also make the NGC CLI and credentials available so initialization
-can fill the pinned cache:
+Configure `policy_base_url`, `policy_api_key`, and `policy_model_name`, then
+prepare the pinned persona source before collecting rollouts:
 
 ```bash
+gym eval prepare --benchmark nemo_sim
+
 .venv/bin/gym eval run \
-  --config resources_servers/nemo_sim/configs/nemo_sim.yaml \
+  --benchmark nemo_sim \
   --agent nemo_sim_processor \
-  --split validation \
   --output results/nemo_sim.jsonl
 ```

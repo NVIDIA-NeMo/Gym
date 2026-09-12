@@ -1,0 +1,20 @@
+# NeMo-Sim benchmark overlay. Preparation owns NGC access; runtime is offline.
+config_paths:
+  - resources_servers/nemo_sim/configs/nemo_sim.yaml
+
+nemo_sim:
+  resources_servers:
+    nemo_sim:
+      personas_cache_dir: benchmarks/nemo_sim/data/personas
+
+nemo_sim_assistant:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+        - name: nemo_sim
+          type: benchmark
+          jsonl_fpath: benchmarks/nemo_sim/data/nemo_sim.jsonl
+          prepare_script: benchmarks/nemo_sim/prepare.py
+          prompt_config: null
+          num_repeats: 1
+          license: Apache 2.0

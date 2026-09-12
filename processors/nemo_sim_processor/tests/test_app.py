@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.config_types import AgentServerRef, ModelServerRef
+from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.server_utils import ServerClient
 from processors.nemo_sim_processor.app import (
     NeMoSimProcessor,
@@ -51,6 +51,7 @@ def _processor() -> NeMoSimProcessor:
         judge_model=ModelServerRef(type="responses_api_models", name="judge-model"),
         summary_model=ModelServerRef(type="responses_api_models", name="summary-model"),
         api_response_model=ModelServerRef(type="responses_api_models", name="api-response-model"),
+        resources_server=ResourcesServerRef(type="resources_servers", name="nemo-sim-resources"),
         max_turns=2,
     )
     client = MagicMock(spec=ServerClient)
@@ -62,28 +63,42 @@ def _request() -> NeMoSimRunRequest:
     return NeMoSimRunRequest.model_validate(
         {
             "responses_create_params": {"input": []},
-            "scenario": {
-                "persona": {"first_name": "Morgan", "age": 42},
-                "probe_type": "general_open_ended",
-                "theme": {"type": "recommendation", "description": "Plan dinner."},
-                "locale": "en_US",
-            },
+            "nemo_sim_sampling": {"locale": "en_US", "seed": 1042},
         }
     )
+
+
+def _scenario() -> dict:
+    return {
+        "persona": {"first_name": "Morgan", "age": 42},
+        "probe_type": "general_open_ended",
+        "theme": {"type": "recommendation", "description": "Plan dinner."},
+        "locale": "en_US",
+    }
 
 
 @pytest.mark.asyncio
 async def test_conversation_loop_calls_participant_agents_and_support_models(monkeypatch: pytest.MonkeyPatch) -> None:
     processor = _processor()
     posts: list[dict] = []
+    model_call_count = 0
 
     async def post(**kwargs):
+        nonlocal model_call_count
         posts.append(kwargs)
-        response = MagicMock(status=200, ok=True, cookies={})
+        if kwargs["url_path"] == "/seed_session":
+            payload = {"scenario": _scenario()}
+            cookies = {"session": "environment"}
+        elif kwargs["url_path"] == "/verify":
+            payload = kwargs["json"] | {"reward": 1.0}
+            cookies = {"session": "environment"}
+        else:
+            model_call_count += 1
+            payload = _model_response(f"response-{model_call_count}", f"output-{model_call_count}")
+            cookies = {}
+        response = MagicMock(status=200, ok=True, cookies=cookies)
         response.content.read = AsyncMock(return_value=b"")
-        response.read = AsyncMock(
-            return_value=json.dumps(_model_response(f"response-{len(posts)}", f"output-{len(posts)}"))
-        )
+        response.read = AsyncMock(return_value=json.dumps(payload))
         return response
 
     processor.server_client.post = post
@@ -111,12 +126,17 @@ async def test_conversation_loop_calls_participant_agents_and_support_models(mon
     result = await processor.run(SimpleNamespace(cookies={"session": "shared"}), _request())
 
     assert [post["server_name"] for post in posts] == [
+        "nemo-sim-resources",
         "user-agent",
         "judge-model",
         "assistant-agent",
         "summary-model",
+        "nemo-sim-resources",
     ]
-    assert posts[0]["json"]["max_output_tokens"] == 77
+    assert posts[1]["json"]["max_output_tokens"] == 77
+    assert posts[0]["json"]["scenario"] is None
+    assert posts[-1]["json"]["scenario"]["persona"]["first_name"] == "Morgan"
+    assert all(post["cookies"]["session"] == "environment" for post in posts[1:-1])
     assert [(call.alias, call.executor) for call in result.invocations] == [
         ("user_model", "agent"),
         ("judge_model", "model"),
@@ -124,6 +144,7 @@ async def test_conversation_loop_calls_participant_agents_and_support_models(mon
         ("summary_model", "model"),
     ]
     assert result.response.output[0].content[0].text == "output-3"
+    assert result.reward == 1.0
     assert result.episode_interaction_protocol == "nemo_sim.ConversationLoop"
 
 
@@ -140,6 +161,17 @@ def test_rejects_unknown_response_parameter_alias() -> None:
 @pytest.mark.asyncio
 async def test_preserves_failure_before_first_assistant_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     processor = _processor()
+
+    async def post(**kwargs):
+        payload = (
+            {"scenario": _scenario()} if kwargs["url_path"] == "/seed_session" else kwargs["json"] | {"reward": 0.0}
+        )
+        response = MagicMock(status=200, ok=True, cookies={"session": "environment"})
+        response.content.read = AsyncMock(return_value=b"")
+        response.read = AsyncMock(return_value=json.dumps(payload))
+        return response
+
+    processor.server_client.post = post
 
     def fail_user_gate(bridge, body):
         del bridge, body
