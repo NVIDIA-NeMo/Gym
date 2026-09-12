@@ -64,6 +64,7 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import SESSION_ID_KEY
+from resources_servers.terminal_bench_4.stage_tests import stage_verifier_tests
 from resources_servers.terminal_bench_4.task_manifest import ArtifactEntry, TB4Task, load_task
 
 
@@ -136,6 +137,10 @@ class TerminalBench4ResourcesServerConfig(BaseResourcesServerConfig):
     allow_compose_tasks: bool = False
     allow_gpu_tasks: bool = False
     stop_agent_sandbox_before_verify: bool = True
+    # Adapted TB2 training bundles may reuse an environment image for the fresh verifier.
+    # Native TB4 keeps the image-baked tests contract by default.
+    verifier_tests_from_task: bool = False
+    verifier_tests_max_bytes: int = Field(default=64 * 1024**2, gt=0)
 
     use_task_resources: bool = True
     cpu_multiplier: float = Field(default=1.0, gt=0)
@@ -925,6 +930,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                     f"{task.task_name}: extracting artifacts in the verifier failed (rc {extract_result.return_code}): "
                     f"{(extract_result.stderr or '')[-800:]}"
                 )
+        if self.config.verifier_tests_from_task:
+            await stage_verifier_tests(sandbox, task.tests_dir, self.config.verifier_tests_max_bytes)
         tests_result = await sandbox.exec(
             labeled("check-tests", f"test -f {TEST_SCRIPT} && chmod +x {TEST_SCRIPT}"), timeout_s=60
         )

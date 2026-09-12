@@ -54,7 +54,7 @@ async def test_model_deadline_retries_and_exhaustion():
     assert model.calls_gt_timeout == 1 and calls == 2
     calls = 0
     model._max_attempts = 1
-    with pytest.raises(TimeoutError, match="query model endpoint"):
+    with pytest.raises(mini.ModelCallTimeout, match="query model endpoint"):
         await model.query([])
     assert model.calls_gt_timeout == 2
 

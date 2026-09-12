@@ -96,6 +96,10 @@ SUBMIT_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 BASH_TOOL = {**BASH_TOOL_RESPONSE_API, "strict": False}
 
 
+class ModelCallTimeout(RuntimeError):
+    """The model service exhausted its call deadlines before the episode deadline."""
+
+
 class MiniSweAgentSandboxedConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
@@ -400,7 +404,9 @@ class NeMoGymResponsesModel:
                 )
         self.call_times.append(perf_counter() - start)
         if response is None:
-            raise TimeoutError(f"Failed to query model endpoint due to timeouts after {self._max_attempts} attempts!")
+            raise ModelCallTimeout(
+                f"Failed to query model endpoint due to timeouts after {self._max_attempts} attempts!"
+            )
         self.responses.append(response)
 
         response_dict = response.model_dump(mode="json")
