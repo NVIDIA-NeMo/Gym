@@ -370,11 +370,13 @@ async def test_simple_agent_restores_next_turn_without_repeating_resource_mutati
         )
         assert completed.status_code == 200
         assert completed.json()["reward"] == 1.0
-        completion_receipt = next(
-            item["completion_receipt"]
-            for item in source_agent.checkpoint_participant().status()["completed_unacknowledged_attempts"]
-            if item["rollout_id"] == COMPLETED_ROLLOUT_ID and item["attempt_index"] == 0
+        receipt_response = await source_clients["agent.test"].get(
+            f"{AGENT_CHECKPOINT_URL_PREFIX}/completion-receipt",
+            params={"rollout_id": COMPLETED_ROLLOUT_ID, "attempt_index": 0},
+            headers=AUTH_HEADERS,
         )
+        assert receipt_response.status_code == 200
+        completion_receipt = receipt_response.json()
         acknowledgement = await _post_control(
             source_clients["agent.test"],
             f"{AGENT_CHECKPOINT_URL_PREFIX}/acknowledge-completed",
