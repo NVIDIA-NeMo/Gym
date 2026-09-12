@@ -176,10 +176,12 @@ class ControlCapabilities(BaseModel):
         description="Admission states this server can enter. A server without an admission "
         "limiter only ever accepts; the actor must not ask it to pause.",
     )
-    checkpoint_mode: Literal["stateless", "export_restore"] = Field(
+    checkpoint_mode: Literal["stateless", "restart_only", "export_restore"] = Field(
         default="stateless",
         description="'stateless' means the server has nothing to export: its rollouts restore "
-        "as fresh dispatches. 'export_restore' means it can export and restore per-rollout state.",
+        "without participant state. 'restart_only' means unfinished rollouts must restart "
+        "from their initial task because the server has state that it cannot export. "
+        "'export_restore' means it can export and restore per-rollout state.",
     )
     concurrency_contract: Literal["stateless", "serialized_per_session", "transactional_parallel"] = "stateless"
     multi_process: MultiProcessCapability

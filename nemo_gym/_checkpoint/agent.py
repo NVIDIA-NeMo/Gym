@@ -48,6 +48,7 @@ AGENT_CHECKPOINT_SCHEMA_VERSION = 1
 AGENT_BOUNDARY_SCHEMA_VERSION = 2
 AGENT_EXECUTION_GENERATION_HEADER = "x-nemo-gym-agent-execution-generation"
 COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE = "completed_result_acknowledgement"
+DISCARD_RESTORED_CONTINUATION_FEATURE = "discard_restored_continuation_v1"
 
 _CURRENT_AGENT_EXECUTION: ContextVar[Optional["AgentExecution"]] = ContextVar(
     "nemo_gym_current_agent_execution",
@@ -226,6 +227,11 @@ class AgentResumeRequest(CheckpointControlRequest):
 
 
 class AgentRetireRequest(CheckpointControlRequest):
+    rollout_id: str = Field(pattern=ROLLOUT_ID_PATTERN.pattern)
+    attempt_index: int = Field(ge=0)
+
+
+class AgentDiscardRestoredContinuationRequest(CheckpointControlRequest):
     rollout_id: str = Field(pattern=ROLLOUT_ID_PATTERN.pattern)
     attempt_index: int = Field(ge=0)
 
@@ -487,6 +493,19 @@ class AgentCheckpointParticipant:
                 task.cancel()
         await self._notify()
         return {"retired": True, "tombstoned": True}
+
+    async def discard_restored_continuation(
+        self,
+        rollout_id: str,
+        attempt_index: int,
+    ) -> dict[str, Any]:
+        """Drop saved turn state while keeping its replacement attempt admissible."""
+        key = (rollout_id, attempt_index)
+        if key in self._executions:
+            raise DuplicateExecutionError(f"rollout {rollout_id!r} attempt {attempt_index} is already active")
+        discarded = self._restored.pop(key, None) is not None
+        await self._notify()
+        return {"discarded": discarded}
 
     async def acknowledge_completed(
         self,
@@ -1072,3 +1091,18 @@ def install_agent_checkpoint(
             frozenset({CheckpointPhase.IDLE, CheckpointPhase.PREPARING, CheckpointPhase.PREPARED}),
         )
         return await participant.retire(body.rollout_id, body.attempt_index)
+
+    @app.post(f"{AGENT_CHECKPOINT_URL_PREFIX}/discard-restored-continuation")
+    async def discard_restored_continuation(
+        body: AgentDiscardRestoredContinuationRequest,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        require_control_auth(authorization, auth_token)
+        fence.require_phase(
+            body.checkpoint_id,
+            frozenset({CheckpointPhase.RESTORED_PAUSED}),
+        )
+        return await participant.discard_restored_continuation(
+            body.rollout_id,
+            body.attempt_index,
+        )

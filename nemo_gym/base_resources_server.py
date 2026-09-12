@@ -14,7 +14,7 @@
 # limitations under the License.
 from abc import abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
@@ -89,6 +89,10 @@ class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     checkpoint_restore_expected: bool = False
     # The mode of reverification (for gym eval reverify) of this server.
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNKNOWN
+    # Conservative default: a resources server may retain session state even
+    # when it has not implemented the checkpoint participant contract. Servers
+    # that are genuinely stateless may explicitly override this class variable.
+    CHECKPOINT_RECOVERY_MODE: ClassVar[Literal["stateless", "restart_only"]] = "restart_only"
 
 
 class BaseResourcesServer(BaseServer):
@@ -184,6 +188,12 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         """Whether this server implements logical session export and restore."""
         return False
 
+    def checkpoint_recovery_mode(self) -> Literal["stateless", "restart_only", "export_restore"]:
+        """Describe how an unfinished rollout may recover across process loss."""
+        if self.checkpoint_state_enabled() and self.checkpoint_control_auth_token() is not None:
+            return "export_restore"
+        return self.config.CHECKPOINT_RECOVERY_MODE
+
     async def export_checkpoint_state(self, rollout_id: str, attempt_index: int) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -240,8 +250,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
     def control_capabilities(self) -> ControlCapabilities:
         capabilities = super().control_capabilities()
-        if self.checkpoint_state_enabled() and self.checkpoint_control_auth_token() is not None:
-            capabilities.checkpoint_mode = "export_restore"
+        capabilities.checkpoint_mode = self.checkpoint_recovery_mode()
+        if capabilities.checkpoint_mode == "export_restore":
             capabilities.concurrency_contract = "serialized_per_session"
         return capabilities
 

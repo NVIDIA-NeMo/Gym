@@ -252,13 +252,25 @@ def _server_client() -> ServerClient:
     )
 
 
+class _StatelessResourcesConfig(BaseResourcesServerConfig):
+    CHECKPOINT_RECOVERY_MODE = "stateless"
+
+
 class _StatelessResources(SimpleResourcesServer):
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         return BaseVerifyResponse(**body.model_dump(), reward=0.0)
 
 
-def _resources_config(num_workers=None) -> BaseResourcesServerConfig:
-    return BaseResourcesServerConfig(
+class _RestartOnlyResources(SimpleResourcesServer):
+    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+        return BaseVerifyResponse(**body.model_dump(), reward=0.0)
+
+
+def _resources_config(
+    num_workers=None,
+    config_cls=BaseResourcesServerConfig,
+) -> BaseResourcesServerConfig:
+    return config_cls(
         host="resources.test",
         port=80,
         entrypoint="app.py",
@@ -268,7 +280,10 @@ def _resources_config(num_workers=None) -> BaseResourcesServerConfig:
 
 
 def test_stateless_resources_server_capabilities() -> None:
-    server = _StatelessResources(config=_resources_config(), server_client=_server_client())
+    server = _StatelessResources(
+        config=_resources_config(config_cls=_StatelessResourcesConfig),
+        server_client=_server_client(),
+    )
     client = TestClient(server.setup_webserver())
     body = client.get(f"{CONTROL_URL_PREFIX}/capabilities").json()
     assert body["component"] == "resources_servers"
@@ -280,6 +295,13 @@ def test_stateless_resources_server_capabilities() -> None:
     assert body["multi_process"] == {"mode": "single_worker", "num_workers": 1}
     assert body["phase"] == "idle"
     assert body["active_checkpoint_id"] is None
+
+
+def test_resources_server_defaults_to_restart_only() -> None:
+    server = _RestartOnlyResources(config=_resources_config(), server_client=_server_client())
+    body = TestClient(server.setup_webserver()).get(f"{CONTROL_URL_PREFIX}/capabilities").json()
+    assert body["checkpoint_mode"] == "restart_only"
+    assert body["concurrency_contract"] == "stateless"
 
 
 def test_agent_server_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -315,6 +337,7 @@ def test_agent_server_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
     assert whitebox_body["features"] == [
         "completed_result_acknowledgement",
         "agent_continuation_index_v1",
+        "discard_restored_continuation_v1",
     ]
 
 
