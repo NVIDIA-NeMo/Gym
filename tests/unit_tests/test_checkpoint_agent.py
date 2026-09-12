@@ -700,6 +700,48 @@ async def test_commit_restore_maps_source_attempt_to_replacement(tmp_path) -> No
 
 
 @pytest.mark.asyncio
+async def test_restored_continuation_can_be_discarded_before_admission(tmp_path) -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    prepare = asyncio.create_task(participant.prepare(time.time() + 2))
+    await asyncio.sleep(0)
+    park = asyncio.create_task(participant.commit_boundary(execution, _boundary()))
+    await prepare
+    commit_agent_state(participant, tmp_path, checkpoint_id="checkpoint-1")
+
+    restored = AgentCheckpointParticipant()
+    restore_agent_state(restored, tmp_path)
+    fence = ControlFence()
+    fence.phase = CheckpointPhase.RESTORED_PAUSED
+    fence.active_checkpoint_id = "restore-1"
+    app = FastAPI()
+    install_agent_checkpoint(app, participant=restored, fence=fence, auth_token="secret")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/ng-control/v1/agent-checkpoint/discard-restored-continuation",
+            json={
+                "checkpoint_id": "restore-1",
+                "deadline_ts": time.time() + 2,
+                "rollout_id": "rollout-a",
+                "attempt_index": 1,
+            },
+            headers={"authorization": "Bearer secret"},
+        )
+    assert response.status_code == 200
+    assert response.json() == {"discarded": True}
+    await restored.resume()
+    replacement = await restored.begin("rollout-a", 1, task=None)
+    assert restored.continuation(replacement) is None
+
+    await participant.resume()
+    await park
+    await participant.finish(execution, outcome="completed")
+
+
+@pytest.mark.asyncio
 async def test_durable_agent_commit_retry_returns_original_result(tmp_path) -> None:
     participant = AgentCheckpointParticipant()
     execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
