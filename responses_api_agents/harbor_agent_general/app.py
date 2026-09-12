@@ -136,6 +136,13 @@ class HarborAgent(SimpleResponsesAPIAgent):
         ## Harbor owns the full run() lifecycle.
         raise NotImplementedError
 
+    def rollout_id_from_run(self, body) -> str | None:
+        # HarborRunRequest gives the Gym index aliases named Pydantic fields;
+        # the base correlator otherwise looks for their original _ng_* names.
+        if isinstance(body, HarborRunRequest):
+            body = body.model_dump(by_alias=True)
+        return super().rollout_id_from_run(body)
+
     def configure_opencode(self, job_config: JobConfig, body: HarborRunRequest) -> None:
         """Route OpenCode through Gym while retaining Harbor's task configuration."""
         if self.config.model_server is None and self.config.opencode_max_steps is None:
