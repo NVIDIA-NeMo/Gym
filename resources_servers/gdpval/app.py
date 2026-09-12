@@ -274,6 +274,10 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     judge_max_images_per_request: int = 450
     # Include nested task inputs while leaving submission directories shallow.
     judge_reference_files_recursive: bool = False
+    # Use the eval tree's prepared copies of the original benchmark inputs,
+    # persisted from host downloads separately from model-authored submissions.
+    # Enable only after validating those inputs during preparation.
+    judge_reference_files_from_eval: bool = False
     # Whether the (single) local judge natively reads audio / video, tracked
     # SEPARATELY because MiniMax-M3 — the reference self-hosted judge — reads video
     # but NOT audio (its config has an image + video tower but no audio config). So
@@ -966,7 +970,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 ref_wins = ref_losses = ref_ties = 0
                 ref_judged_repeats = 0
                 for ref_dir in dirs:
-                    refs_subdir = ref_dir / "reference_files"
+                    refs_root = eval_task_dir if self.config.judge_reference_files_from_eval else ref_dir
+                    refs_subdir = refs_root / "reference_files"
                     attempted_matchups += 1
                     # Seed per (task, ref_id, ref_repeat) so judge sampling is
                     # reproducible and each reference subset draws independently —

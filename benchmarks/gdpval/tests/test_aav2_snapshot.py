@@ -95,6 +95,13 @@ def test_finished_empty_submission_is_valid_rollout(tmp_path):
     assert completion.rollout_complete(dataset, tmp_path) == 1
 
 
+def test_jsonl_reader_preserves_unicode_separators_inside_strings(tmp_path):
+    path = tmp_path / "rollouts.jsonl"
+    rows = [{"task_id": "one", "text": "line\u2028paragraph\u2029next\u0085end"}, {"task_id": "two"}]
+    path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+    assert completion.read_rows(path) == rows
+
+
 def test_import_copies_only_finished_evidence_and_freezes_limits(prepared, monkeypatch):
     original = prepared.run_dir.parent / "old rollout"
     evidence = original / "deliverables/task_one/repeat_0"
@@ -156,6 +163,7 @@ def test_judge_completion_requires_profile_coverage_and_valid_votes(tmp_path, mo
             "final_stage_degraded": 0,
         }.items()
     }
+    metrics["comparison/stage_1/eval_elo"] = 1100.0
     aggregate = tmp_path / "rollouts_aggregate_metrics.json"
     aggregate.write_text(json.dumps([{"agent_metrics": metrics}]))
     rows = [
@@ -169,7 +177,20 @@ def test_judge_completion_requires_profile_coverage_and_valid_votes(tmp_path, mo
     ]
 
     def write_rows():
-        output.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        calibration = []
+        if mode == "full":
+            calibration = [
+                {**row, "stage_index": 0, "judge_response": {"total_judged": trials, "total_invalid": 0}}
+                for row in rows
+            ]
+            plans = [
+                {"stage_index": stage, "status": "planned", "task_ids": [str(i) for i in range(count)]}
+                for stage in (0, 1)
+            ]
+            output.with_stem(output.stem + "_multistage_state").write_text(
+                "".join(json.dumps(plan) + "\n" for plan in plans)
+            )
+        output.write_text("".join(json.dumps(row) + "\n" for row in calibration + rows))
 
     write_rows()
     assert completion.judge_complete(dataset, output, mode) == count
@@ -188,3 +209,70 @@ def test_judge_completion_requires_profile_coverage_and_valid_votes(tmp_path, mo
     aggregate.write_text(json.dumps([{"agent_metrics": metrics}]))
     with pytest.raises(ValueError, match="native aggregate"):
         completion.judge_complete(dataset, output, mode)
+
+
+@pytest.mark.parametrize("case", ["complete", "calibration_missing", "failed", "unrecorded", "unattempted"])
+def test_full_judge_requires_all_calibration_tasks_and_accounts_for_final_failures(
+    tmp_path, monkeypatch, capsys, case
+):
+    dataset = tmp_path / "dataset.jsonl"
+    ids = [str(i) for i in range(50)]
+    dataset.write_text("".join(json.dumps({"task_id": task_id}) + "\n" for task_id in ids))
+    output = tmp_path / "rollouts.jsonl"
+    plans = [
+        {
+            "status": "planned",
+            "stage_index": stage,
+            "task_ids": ids[:45] if stage == 0 else ids,
+            "task_reference_ids": dict.fromkeys(ids, "reference"),
+        }
+        for stage in (0, 1)
+    ]
+    output.with_stem(output.stem + "_multistage_state").write_text("".join(json.dumps(plan) + "\n" for plan in plans))
+    rows = [
+        {
+            "task_id": task_id,
+            "stage_index": plan["stage_index"],
+            "expected_final_stage_index": 1,
+            "judge_response": {"total_judged": 1, "total_invalid": 3},
+        }
+        for plan in plans
+        for task_id in plan["task_ids"]
+    ]
+    if case == "calibration_missing":
+        rows.pop(0)
+    partial = case in ("failed", "unrecorded", "unattempted")
+    if partial:
+        rows.pop()
+    output.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    if case in ("failed", "unattempted"):
+        failure = {
+            "task_id": ids[-1],
+            "stage_index": 1,
+            "reference_ids": ["reference"],
+            "_ng_failure_class": "transport_ineligible",
+            "_ng_no_persist": case == "unattempted",
+        }
+        output.with_stem(output.stem + "_failures").write_text(json.dumps(failure) + "\n")
+    metrics = {
+        "comparison/final_stage_present": 1,
+        "comparison/final_stage_complete": int(not partial),
+        "comparison/final_stage_fit": 1,
+        "comparison/final_stage_degraded": int(partial),
+        "comparison/stage_1/eval_elo": 1100.0,
+    }
+    metric_path = output.with_stem(output.stem + "_aggregate_metrics").with_suffix(".json")
+    metric_path.write_text(json.dumps([{"agent_metrics": metrics}]))
+    if case == "calibration_missing":
+        with pytest.raises(ValueError, match="calibration requires every planned task"):
+            completion.judge_complete(dataset, output)
+    elif case in ("unrecorded", "unattempted"):
+        with pytest.raises(ValueError, match="without recorded failed attempts"):
+            completion.judge_complete(dataset, output)
+    else:
+        before = {path: path.read_bytes() for path in tmp_path.iterdir()}
+        assert completion.judge_complete(dataset, output) == (49 if partial else 50)
+        monkeypatch.setattr("sys.argv", ["completion.py", "judge", "--dataset", str(dataset), "--output", str(output)])
+        completion.main()
+        assert capsys.readouterr().out.startswith("PARTIAL: judge, 49/50" if partial else "COMPLETE: judge, 50")
+        assert all(path.read_bytes() == content for path, content in before.items())

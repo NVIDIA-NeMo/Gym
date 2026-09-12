@@ -101,7 +101,9 @@ if args[:2] == ['-c', 'from nemo_gym.cli.main import main; main()']:
         judge = output.parent.name.startswith('judge_')
         record({'target': target, 'values': values, 'cwd': os.getcwd(), 'pid': os.getpid(),
                 'file_limit': os.environ['GDPVAL_MAX_FILE_BYTES_FOR_JUDGE'],
-                'judge_request_timeout': os.environ.get('GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS')})
+                'judge_request_timeout': os.environ.get('GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS'),
+                'judge_models': {name: os.environ.get(name) for name in
+                                 ('JUDGE_GPT_MODEL', 'JUDGE_GEMINI_MODEL', 'JUDGE_CLAUDE_MODEL')}})
         if os.environ.get('FIXTURE_HOLD'):
             time.sleep(120)
         if os.environ.get('FIXTURE_GYM_RC'):
@@ -115,10 +117,16 @@ if args[:2] == ['-c', 'from nemo_gym.cli.main import main; main()']:
         else:
             trials = int(values['gdpval_resources_server.resources_servers.gdpval.num_comparison_trials'])
             stage = 0 if output.parent.name == 'judge_smoke' else 1
-            output.write_text(json.dumps({'task_id': 'a', 'expected_final_stage_index': stage,
-                'stage_index': stage, 'judge_response': {'total_judged': trials, 'total_invalid': 0}}) + '\n')
+            result = {'task_id': 'a', 'expected_final_stage_index': stage,
+                'stage_index': stage, 'judge_response': {'total_judged': trials, 'total_invalid': 0}}
+            results = [result] if stage == 0 else [{**result, 'stage_index': 0}, result]
+            output.write_text(''.join(json.dumps(row) + '\n' for row in results))
+            output.with_stem(output.stem + '_multistage_state').write_text(''.join(
+                json.dumps({'stage_index': index, 'status': 'planned', 'task_ids': ['a']}) + '\n'
+                for index in range(stage + 1)))
             metrics = {'comparison/final_stage_' + key: value for key, value in
                 {'present': 1, 'complete': 1, 'fit': 1, 'degraded': 0}.items()}
+            metrics['comparison/stage_1/eval_elo'] = 1100.0
             output.with_stem(output.stem + '_aggregate_metrics').with_suffix('.json').write_text(
                 json.dumps([{'agent_metrics': metrics}]))
     cli.dispatch = dispatch
@@ -275,6 +283,11 @@ def run_job(job, phase, **environment):
 def test_judge_modes_use_prepared_candidate_and_frozen_references(job, mode, trials, concurrency, request_timeout):
     job.env.pop("GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS", None)
     overrides = {} if request_timeout is None else {"GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS": request_timeout}
+    judge_models = {
+        name: "" if mode == "smoke" else f"fixture-{name}"
+        for name in ("JUDGE_GPT_MODEL", "JUDGE_GEMINI_MODEL", "JUDGE_CLAUDE_MODEL")
+    }
+    overrides.update(judge_models)
     result = run_job(job, "judge", AAV2_MODE=mode, GDPVAL_MAX_FILE_BYTES_FOR_JUDGE="1", **overrides)
     assert result.returncode == 0, (result.stdout, result.stderr)
     entries = records(job)
@@ -284,6 +297,7 @@ def test_judge_modes_use_prepared_candidate_and_frozen_references(job, mode, tri
     assert call["target"] == "nemo_gym.cli.eval:e2e_rollout_collection"
     assert call["file_limit"] == json.loads((job.run / "run.json").read_text())["GDPVAL_MAX_FILE_BYTES_FOR_JUDGE"]
     assert call["judge_request_timeout"] == (request_timeout or "900")
+    assert call["judge_models"] == {name: value or None for name, value in judge_models.items()}
     values = call["values"]
     assert values["resume_from_cache"] == "true"
     assert values["num_samples_in_parallel"] == str(concurrency)
@@ -295,6 +309,7 @@ def test_judge_modes_use_prepared_candidate_and_frozen_references(job, mode, tri
     assert values[prefix + "preconvert_office_to_pdf"] == "false"
     assert prefix + "strict_comparison_trials" not in values
     assert values[prefix + "judge_reference_files_recursive"] == "true"
+    assert values[prefix + "judge_reference_files_from_eval"] == "true"
     assert "benchmarks/gdpval/config.yaml" in values["config_paths"]
     staged_judge = Path(call["cwd"]).parent / "judge.yaml"
     assert str(staged_judge) in values["config_paths"]
@@ -317,7 +332,7 @@ def test_judge_modes_use_prepared_candidate_and_frozen_references(job, mode, tri
 
 
 @pytest.mark.parametrize("job", [220], indirect=True)
-def test_full_judge_accepts_partial_calibration_and_retains_all_final_tasks(job):
+def test_full_judge_requires_all_calibration_tasks_and_retains_all_final_tasks(job):
     result = run_job(job, "judge", AAV2_MODE="full", FIXTURE_GYM_RC="37")
     assert result.returncode == 37, (result.stdout, result.stderr)
     call = next(item for item in records(job) if "target" in item)
@@ -326,7 +341,7 @@ def test_full_judge_accepts_partial_calibration_and_retains_all_final_tasks(job)
         {
             "num_tasks": 45,
             "partial_completion": {
-                "min_success_fraction": 0.97,
+                "min_success_fraction": 1.0,
                 "min_per_reference_success_fraction": 0.8,
                 "min_successful_rows_per_reference": 1,
                 "tolerate_unresolved": True,

@@ -122,6 +122,41 @@ def test_incomplete_candidate_is_not_reused(campaign, office_converter):
     assert not office_converter
 
 
+@pytest.mark.parametrize("serialized", [False, True])
+def test_declared_inputs_are_checked_on_preparation_and_reuse(campaign, office_converter, serialized):
+    name = "reference_files/hash/input.txt"
+    inputs = json.dumps([name]) if serialized else [name]
+    (campaign / "dataset.jsonl").write_text(json.dumps({"task_id": "one", "reference_files": inputs}) + "\n")
+    original = campaign / "deliverables/task_one/repeat_0" / name
+    original.parent.mkdir(parents=True)
+    original.write_text("original benchmark input")
+    output = preconvert.prepare(campaign)
+    # Media conversion can append a suffix; the receipt maps the original name.
+    prepared = output / "candidate/task_one/repeat_0" / name
+    proxy = prepared.with_suffix(".mp4")
+    prepared.rename(proxy)
+    receipt = output / "candidate.media.json"
+    manifest = json.loads(receipt.read_text())
+    entry = next(entry for entry in manifest["entries"] if entry["source"].endswith(name))
+    entry["output"] = proxy.relative_to(output / "candidate").as_posix()
+    receipt.write_text(json.dumps(manifest))
+    assert preconvert.prepare(campaign) == output
+    proxy.write_text("changed input")
+    with pytest.raises(ValueError, match="benchmark input changed"):
+        preconvert.prepare(campaign)
+
+
+@pytest.mark.parametrize("reuse", [False, True])
+def test_missing_declared_input_stops_preparation(campaign, office_converter, reuse):
+    if reuse:
+        preconvert.prepare(campaign)
+    (campaign / "dataset.jsonl").write_text(
+        json.dumps({"task_id": "one", "reference_files": ["reference_files/hash/missing.mp4"]}) + "\n"
+    )
+    with pytest.raises(ValueError, match="benchmark input has no conversion receipt"):
+        preconvert.prepare(campaign)
+
+
 def test_preconvert_scope_excludes_unselected_candidate_tasks(campaign, office_converter):
     unrelated = campaign / "deliverables/task_other/repeat_0"
     unrelated.mkdir(parents=True)

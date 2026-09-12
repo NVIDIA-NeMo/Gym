@@ -10,7 +10,7 @@ gdpval_local_path() {
 }
 
 gdpval_prepare() {
-    local phase=$1 env_file input python_version count rows calibration
+    local phase=$1 env_file input python_version count rows calibration judge_model_var
     gdpval_local_path "$JOB_ROOT"
     cp -a -- "$AAV2_PACKAGE_DIR" "$JOB_ROOT/package"
     LOCAL_PACKAGE=$JOB_ROOT/package
@@ -41,6 +41,9 @@ gdpval_prepare() {
     PHASE_DIR=$RUN_DIR
     [[ $phase != preconvert ]] || PHASE_DIR=$RUN_DIR/preconvert
     if [[ $phase == judge ]]; then
+        for judge_model_var in JUDGE_GPT_MODEL JUDGE_GEMINI_MODEL JUDGE_CLAUDE_MODEL; do
+            [[ -n ${!judge_model_var:-} ]] || unset "$judge_model_var"
+        done
         export GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS=${GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS:-900}
         case ${AAV2_MODE:-full} in
             smoke) DATASET=$SMOKE_DATASET; CONCURRENCY=4; NUM_COMPARISON_TRIALS=1; count=4 ;;
@@ -55,7 +58,7 @@ gdpval_prepare() {
         [[ $AAV2_MODE != pilot ]] || STAGES="[{num_tasks: $count}, {num_tasks: $count, num_models: 4}]"
         if [[ $AAV2_MODE == full ]]; then
             calibration=$((rows < 45 ? rows : 45))
-            STAGES="[{num_tasks: $calibration, partial_completion: {min_success_fraction: 0.97, min_per_reference_success_fraction: 0.8, min_successful_rows_per_reference: 1, tolerate_unresolved: true}}, {num_tasks: $rows, num_models: 4}]"
+            STAGES="[{num_tasks: $calibration, partial_completion: {min_success_fraction: 1.0, min_per_reference_success_fraction: 0.8, min_successful_rows_per_reference: 1, tolerate_unresolved: true}}, {num_tasks: $rows, num_models: 4}]"
         fi
         PHASE_DIR=$RUN_DIR/judge_$AAV2_MODE
     fi

@@ -40,6 +40,7 @@ gdpval_run_gym --config "$JOB_ROOT/judge.yaml" \
     "++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.persist_deliverables_dir=$PERSIST_DELIVERABLES_DIR" \
     ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
     ++gdpval_resources_server.resources_servers.gdpval.judge_reference_files_recursive=true \
+    ++gdpval_resources_server.resources_servers.gdpval.judge_reference_files_from_eval=true \
     "++gdpval_resources_server.resources_servers.gdpval.num_comparison_trials=$NUM_COMPARISON_TRIALS" \
     ++gdpval_resources_server.resources_servers.gdpval.preconvert_office_to_pdf=false \
     ++multistage.enabled=true "++multistage.stages=$STAGES" "++multistage.dataset_path=$DATASET" ++multistage.seed=42

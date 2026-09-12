@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from nemo_gym.server_utils import ServerClient
 from resources_servers.gdpval import app, comparison
+from resources_servers.gdpval.media_conversion import audio_video_block
 
 
 def _block(kind="image_url", mime="image/png", data=b"0123456789ab"):
@@ -220,6 +221,31 @@ def test_exact_provider_limits_reject_before_dispatch(blocks, limits, reason):
     receipt = _preflight(blocks, **limits)
     assert not receipt["eligible"]
     assert receipt["reasons"] == [reason]
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.parametrize("count", [10, 11])
+def test_native_and_mixed_video_encodings_share_the_ten_video_limit(mixed, count):
+    videos = [
+        audio_video_block(
+            "video/mp4",
+            f"clip-{index}".encode(),
+            ext="mp4",
+            file_type="VIDEO",
+            openai_native=mixed and index % 2 == 1,
+        )
+        for index in range(count)
+    ]
+    receipt = _preflight(
+        [*videos, _block(), _block(mime="application/pdf")],
+        max_video_files=10,
+        max_image_base64_bytes=16,
+        max_total_image_base64_bytes=17,
+    )
+    assert receipt["video_file_count"] == count
+    assert receipt["total_image_base64_bytes"] == receipt["largest_image_base64_bytes"] == 16
+    assert receipt["eligible"] is (count <= 10)
+    assert receipt["reasons"] == ([] if count <= 10 else ["provider_video_count_cap"])
 
 
 def test_pdf_bytes_do_not_count_as_image_bytes_and_exact_image_limit_fits():

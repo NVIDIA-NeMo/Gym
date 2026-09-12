@@ -6,12 +6,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import tempfile
 from pathlib import Path
 
-from benchmarks.gdpval.hsg.aav2.completion import rollout_complete, task_ids
+from benchmarks.gdpval.hsg.aav2.completion import read_rows, rollout_complete, task_ids
 from benchmarks.gdpval.hsg.aav2.media import build
 from resources_servers.gdpval.preconvert import preconvert_dir
 
@@ -21,6 +22,38 @@ def office(root: Path) -> None:
     print(f"Office: converted={ok}, failed={failed}", flush=True)
     for error in errors:
         print(f"Office render skipped: {error}", flush=True)
+
+
+def check_reference_inputs(dataset: Path, source: Path, candidate: Path) -> None:
+    """Check declared benchmark inputs against the existing conversion receipt."""
+    receipt = candidate.with_name(candidate.name + ".media.json")
+    entries = (
+        {entry["source"]: entry for entry in json.loads(receipt.read_text())["entries"]} if receipt.exists() else {}
+    )
+    for row in read_rows(dataset):
+        inputs = row.get("reference_files") or []
+        if isinstance(inputs, str):
+            inputs = json.loads(inputs)
+        for name in inputs:
+            relative = Path(name)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError(f"invalid benchmark input path: {name}")
+            if relative.parts[0] != "reference_files":
+                relative = Path("reference_files") / relative
+            relative = Path(f"task_{row['task_id']}") / "repeat_0" / relative
+            entry = entries.get(relative.as_posix())
+            if entry is None:
+                raise ValueError(f"benchmark input has no conversion receipt: {relative}")
+            for root, path_key, hash_key in (
+                (source, "source", "source_sha256"),
+                (candidate, "output", "output_sha256"),
+            ):
+                path = root / entry[path_key]
+                if not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+                    raise ValueError(f"missing prepared benchmark input: {path}")
+                with path.open("rb") as stream:
+                    if hashlib.file_digest(stream, "sha256").hexdigest() != entry[hash_key]:
+                        raise ValueError(f"benchmark input changed since preparation: {path}")
 
 
 def prepare(run_dir: Path) -> Path:
@@ -37,6 +70,7 @@ def prepare(run_dir: Path) -> Path:
         if output.is_symlink() or candidate.is_symlink() or not candidate.is_dir():
             raise ValueError("prepared output must contain a real candidate directory")
         rollout_complete(dataset, candidate)
+        check_reference_inputs(dataset, source, candidate)
         print("Reusing completed candidate preconversion", flush=True)
         return output
     task_names = {f"task_{task_id}" for task_id in task_ids(dataset)}
@@ -47,6 +81,7 @@ def prepare(run_dir: Path) -> Path:
         build(source, candidate, prepare_zip=office, top_level_names=task_names | {"FILTER_MANIFEST.txt"})
         office(candidate)
         rollout_complete(dataset, candidate)
+        check_reference_inputs(dataset, source, candidate)
         os.rename(staged, output)
     return output
 

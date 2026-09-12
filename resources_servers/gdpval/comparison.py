@@ -1877,7 +1877,9 @@ def preflight_judge_transport(
                 video_count += 1
             if block.get("type") == "image_url":
                 payload, start = _attachment_payload(block)
-                if payload.startswith("data:image/"):
+                if payload.startswith("data:video/"):
+                    video_count += 1
+                elif payload.startswith("data:image/"):
                     image_sizes.append(len(payload) - start)
                 elif not payload.startswith("data:application/pdf;"):
                     unmeasured_images += 1
