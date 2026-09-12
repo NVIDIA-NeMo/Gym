@@ -17,7 +17,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 if TYPE_CHECKING:
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from nemo_gym.mcp_auto_exposure import MCPTool
 
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.failure_kinds import validate_failure_kind
 from nemo_gym.judge import judge_failsafe
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -118,9 +119,31 @@ class BaseVerifyResponse(BaseVerifyRequest):
         ),
     )
 
-    # Human-readable diagnosis of why `reward` may not reflect policy quality.
-    # Machine-readable handling belongs to `mask_sample`/`failure_kind`.
+    failure_kind: Optional[str] = Field(
+        default=None,
+        description=(
+            "Which kind of failure this was, from the shared vocabulary in "
+            "nemo_gym.failure_kinds. Stable and low cardinality, so it is safe to group by "
+            "in logs, metrics and traces — unlike failure_reason. An environment that needs "
+            "something the shared set should not grow can use '<server>:<kind>'. Orthogonal "
+            "to mask_sample: naming the kind does not decide whether the sample is usable."
+        ),
+    )
+
+    # Human-readable diagnosis of why `reward` may not reflect policy quality. Occurrence
+    # detail, so never a metric label; `failure_kind` is the groupable half.
     failure_reason: Optional[str] = None
+
+    @field_validator("failure_kind")
+    @classmethod
+    def _warn_on_unregistered_failure_kind(cls, value: Optional[str]) -> Optional[str]:
+        """Producers learn about a name outside the vocabulary without losing the failure.
+
+        Validation warns rather than rejects: an unregistered kind is a migration signal,
+        and dropping the response over it would replace a visible wrong label with an
+        invisible lost failure.
+        """
+        return validate_failure_kind(value)
 
 
 class BaseMultiRewardVerifyResponse(BaseVerifyResponse):
