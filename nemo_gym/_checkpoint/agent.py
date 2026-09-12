@@ -310,6 +310,31 @@ class AgentCheckpointParticipant:
             return None
         return execution
 
+    def completion_receipt(
+        self,
+        rollout_id: str,
+        attempt_index: int,
+    ) -> AgentCompletionReceipt:
+        """Return the exact receipt for one retained terminal result."""
+        execution = self.resolve(rollout_id, attempt_index)
+        if (
+            execution is None
+            or execution.state != AgentExecutionState.COMPLETED
+            or execution.terminal_result is None
+            or execution.result_identity is None
+            or execution.result_digest is None
+        ):
+            raise AgentCompletedExecutionAcknowledgementError(
+                f"rollout {rollout_id!r} attempt {attempt_index} has no completed result receipt"
+            )
+        return AgentCompletionReceipt(
+            rollout_id=execution.rollout_id,
+            attempt_index=execution.attempt_index,
+            execution_generation=execution.generation,
+            result_identity=execution.result_identity,
+            result_digest=execution.result_digest,
+        )
+
     async def finish(
         self,
         execution: AgentExecution,
@@ -908,6 +933,15 @@ def install_agent_checkpoint(
         require_control_auth(authorization, auth_token)
         acknowledged = await participant.acknowledge_completed(body.executions)
         return AgentCompletedExecutionAcknowledgementResponse(acknowledged=acknowledged).model_dump()
+
+    @app.get(f"{AGENT_CHECKPOINT_URL_PREFIX}/completion-receipt")
+    async def completion_receipt(
+        rollout_id: str = Query(pattern=ROLLOUT_ID_PATTERN.pattern),
+        attempt_index: int = Query(ge=0),
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        require_control_auth(authorization, auth_token)
+        return participant.completion_receipt(rollout_id, attempt_index).model_dump(mode="json")
 
     @app.post(f"{AGENT_CHECKPOINT_URL_PREFIX}/prepare")
     async def prepare(
