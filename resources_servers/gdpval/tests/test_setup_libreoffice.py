@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for `setup_libreoffice.ensure_libreoffice`.
+"""Tests for `setup.ensure_libreoffice`.
 
 Behavior under test (v4): the function always runs `apt-get update` +
 `apt-get install -y` regardless of what's already on PATH. Earlier
@@ -271,3 +271,46 @@ def test_java_runs_returns_true_when_java_version_exits_zero() -> None:
     with patch.object(shutil, "which", return_value="/usr/bin/java"):
         with patch.object(setup, "_run", return_value=(0, "", 'openjdk version "21.0.1"')):
             assert setup._java_runs() is True
+
+
+def test_early_exit_when_javaldx_actually_works(monkeypatch):
+    """v5 skips apt only when the real bridge works, not when a proxy looks fine."""
+    calls = []
+    monkeypatch.setattr(setup.sys, "platform", "linux")
+    monkeypatch.setattr(setup.shutil, "which", lambda n: f"/usr/bin/{n}")
+    monkeypatch.setattr(setup, "_java_runs", lambda: True)
+    monkeypatch.setattr(setup, "_javaldx_works", lambda: True)
+    monkeypatch.setattr(setup, "_run", lambda cmd, **kw: calls.append(cmd) or (0, "", ""))
+
+    assert setup.ensure_libreoffice() is True
+    assert not any("apt-get" in c[0] for c in calls), "apt-get ran despite a working javaldx"
+
+
+def test_falls_through_to_apt_when_javaldx_is_broken(monkeypatch):
+    """The v1-v3 regression: libreoffice and java look fine but the bridge is dead."""
+    calls = []
+    monkeypatch.setattr(setup.sys, "platform", "linux")
+    monkeypatch.setattr(setup.shutil, "which", lambda n: f"/usr/bin/{n}")
+    monkeypatch.setattr(setup, "_java_runs", lambda: True)
+    monkeypatch.setattr(setup, "_javaldx_works", lambda: False)
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return (0, "LibreOffice 25.2", "")
+
+    monkeypatch.setattr(setup, "_run", fake_run)
+    setup.ensure_libreoffice()
+    assert any("apt-get" in c[0] for c in calls), "a broken javaldx must still trigger the install"
+
+
+def test_javaldx_rejects_the_failure_banner(monkeypatch):
+    """javaldx exits 0 while printing a failure banner; rc alone is not enough."""
+    monkeypatch.setattr(setup.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(setup, "_run", lambda cmd, **kw: (0, "", "Warning: failed to launch javaldx"))
+    assert setup._javaldx_works() is False
+
+
+def test_javaldx_absent_binary_is_not_working(monkeypatch):
+    """javaldx ships in libreoffice-java-common, which libreoffice does not depend on."""
+    monkeypatch.setattr(setup.os.path, "exists", lambda p: False)
+    assert setup._javaldx_works() is False
