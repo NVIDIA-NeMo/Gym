@@ -137,6 +137,8 @@ if (( SLURM_PROCID == 0 )); then
     router_args=( \
         --prefill-policy cache_aware \
         --decode-policy cache_aware \
+        --decode-balance-abs-threshold 4 \
+        --decode-balance-rel-threshold 1.1 \
         --vllm-pd-disaggregation \
         --host \$this_node_hostname \
         --port $ROUTER_SERVER_PORT \
