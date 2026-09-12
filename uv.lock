@@ -343,6 +343,18 @@ wheels = [
 ]
 
 [[package]]
+name = "bm25s"
+version = "0.3.11"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a4/f6/38a4eb22be0c715aa9bc290e44a48bbdf7a27cffa7f85914fd10242442e4/bm25s-0.3.11.tar.gz", hash = "sha256:8ae0f0707d279969829383c7aaeef00fb09ca343101160222571d6bfc969f889", size = 80978, upload-time = "2026-08-25T03:14:57.502Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/41/d9/bb770dabb7e0edeb2c949460a05c38df7f4f564a1693a778352fb0d213b0/bm25s-0.3.11-py3-none-any.whl", hash = "sha256:3d1d28badb299d6fc9324111e5c8276927e990b908607b39ff9bd65b102e9a24", size = 74985, upload-time = "2026-08-25T03:14:56.051Z" },
+]
+
+[[package]]
 name = "boto3"
 version = "1.43.40"
 source = { registry = "https://pypi.org/simple" }
@@ -2704,6 +2716,10 @@ all = [
     { name = "ruff" },
     { name = "tenacity" },
 ]
+birdbench = [
+    { name = "bm25s" },
+    { name = "nltk" },
+]
 dev = [
     { name = "coverage" },
     { name = "defusedxml" },
@@ -2751,6 +2767,7 @@ codec = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.14.1" },
     { name = "anthropic", specifier = "<=0.109.2" },
+    { name = "bm25s", marker = "extra == 'birdbench'", specifier = ">=0.3.11" },
     { name = "boto3", marker = "extra == 'sandbox'", specifier = ">=1.34" },
     { name = "coverage", extras = ["toml"], marker = "extra == 'dev'" },
     { name = "datasets" },
@@ -2773,6 +2790,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8.0" },
     { name = "nemo-gym", extras = ["dev", "sandbox"], marker = "extra == 'all'" },
     { name = "nemo-lens", extras = ["sdk"], marker = "extra == 'telemetry'", git = "https://github.com/NVIDIA-NeMo/Lens.git?rev=b85578fc2b736a1804705e537001b5f45e9c715d" },
+    { name = "nltk", marker = "extra == 'birdbench'", specifier = ">=3.10.3" },
     { name = "omegaconf" },
     { name = "openai", specifier = "==2.44.0" },
     { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.15" },
@@ -2808,7 +2826,7 @@ requires-dist = [
     { name = "wandb" },
     { name = "yappi", specifier = ">=1.7.6" },
 ]
-provides-extras = ["all", "vllm", "sandbox", "openshell", "telemetry", "dev"]
+provides-extras = ["all", "vllm", "sandbox", "birdbench", "openshell", "telemetry", "dev"]
 
 [package.metadata.requires-dev]
 codec = [
@@ -2867,6 +2885,22 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/95/97/51359c77527d45943fe7a94d00a3843b81162e6c4244b3579fe8fc54cb9c/ninja-1.13.0-py3-none-win32.whl", hash = "sha256:8cfbb80b4a53456ae8a39f90ae3d7a2129f45ea164f43fadfa15dc38c4aef1c9", size = 267201, upload-time = "2025-08-11T15:10:15.158Z" },
     { url = "https://files.pythonhosted.org/packages/29/45/c0adfbfb0b5895aa18cec400c535b4f7ff3e52536e0403602fc1a23f7de9/ninja-1.13.0-py3-none-win_amd64.whl", hash = "sha256:fb8ee8719f8af47fed145cced4a85f0755dd55d45b2bddaf7431fa89803c5f3e", size = 309975, upload-time = "2025-08-11T15:10:16.697Z" },
     { url = "https://files.pythonhosted.org/packages/df/93/a7b983643d1253bb223234b5b226e69de6cda02b76cdca7770f684b795f5/ninja-1.13.0-py3-none-win_arm64.whl", hash = "sha256:3c0b40b1f0bba764644385319028650087b4c1b18cdfa6f45cb39a3669b81aa9", size = 290806, upload-time = "2025-08-11T15:10:18.018Z" },
+]
+
+[[package]]
+name = "nltk"
+version = "3.10.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "click" },
+    { name = "defusedxml" },
+    { name = "joblib" },
+    { name = "regex" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e0/e6/fe51d2bb1a3b446f59c5c8165999a9fee208bc346af90a7cbf7657bc0d75/nltk-3.10.3.tar.gz", hash = "sha256:bb9327a461c3811c2fa4900e03840401f2126adfb30c0072827c433bd2444ea4", size = 5137152, upload-time = "2026-08-12T23:46:37.258Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b6/6d/ebd2af4640b12168fdf0cb74b6118df2f32a2f62ec7e0c06fbfd80706639/nltk-3.10.3-py3-none-any.whl", hash = "sha256:ff9598a8e20518ee0d557745890cc4435b9578489e2dcbc69c4f81fa060caf7c", size = 1798643, upload-time = "2026-08-12T23:44:13.478Z" },
 ]
 
 [[package]]
