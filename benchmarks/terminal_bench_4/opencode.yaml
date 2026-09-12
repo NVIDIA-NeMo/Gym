@@ -18,15 +18,30 @@ terminal_bench_4_opencode:
         cpu_enforcement_policy: limit
         memory_enforcement_policy: limit
         kwargs:
+          compose_image_configs: benchmarks/terminal_bench_4/compose-images.json
           sandbox_provider:
             opensandbox:
               connection:
                 domain: ${oc.env:OPENSANDBOX_DOMAIN}
-                api_key: ${oc.env:OPENSANDBOX_API_KEY}
                 protocol: http
                 use_server_proxy: true
                 transport_backend: aiohttp
                 tls_verify: false
+              create:
+                request_timeout_s: 1200
+                timeout_s: 1500
+                connect_attempt_timeout_s: 1500
+              operations:
+                background_exec: true
+              networking:
+                enabled: true
+                loopback_forwarding: true
+              runtime_requirements:
+                resize_shared_memory: true
+                capability_probes:
+                  SYS_PTRACE: >-
+                    awk '/^CapEff:/ { print $2 }' /proc/self/status |
+                    { read caps; test $((0x$caps & (1 << 19))) -ne 0; }
           sandbox_metadata:
             nemo.nvidia.com/resources: custom
           sandbox_ttl_s: 86400

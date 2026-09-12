@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -20,7 +23,7 @@ def make_environment(tmp_path: Path, **kwargs) -> HarborSandboxEnvironment:
         session_id="trial-env",
         trial_paths=TrialPaths(trial_dir=tmp_path / "trial"),
         task_env_config=config,
-        sandbox_provider={"local": {}},
+        sandbox_provider=kwargs.pop("sandbox_provider", {"local": {}}),
         **kwargs,
     )
 
@@ -63,7 +66,7 @@ def test_resource_rounding_and_ignore(tmp_path):
 
 
 @pytest.mark.parametrize("filename", ["docker-compose.yaml"])
-def test_compose_is_rejected_until_adapter_enabled(tmp_path, filename):
+def test_compose_requires_recorded_startup_metadata(tmp_path, filename):
     (tmp_path / filename).write_text("services: {}")
     with pytest.raises(ValueError, match="Compose"):
         make_environment(tmp_path)
@@ -114,3 +117,89 @@ async def test_start_log_paths_and_stop_on_failure(tmp_path, monkeypatch):
         await env.start(False)
     assert env._sandbox is None
     assert sandbox.stop.await_count == 2
+
+
+def test_credentials_are_resolved_without_mutating_job_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENSANDBOX_API_KEY", "synthetic-test-key")
+    provider = {"opensandbox": {"connection": {"domain": "localhost"}}}
+    env = make_environment(tmp_path, sandbox_provider=provider, compose_image_configs="benchmarks/images.json")
+    assert "api_key" not in provider["opensandbox"]["connection"]
+    assert env._sandbox_provider["opensandbox"]["connection"]["api_key"] == "synthetic-test-key"
+    assert env._compose_image_configs.is_absolute()
+
+
+def test_extra_overlays_must_be_resolved_upstream(tmp_path):
+    overlay = tmp_path / "extra.yaml"
+    overlay.write_text("services: {}")
+    with pytest.raises(ValueError, match="overlays"):
+        make_environment(tmp_path, extra_docker_compose=[overlay])
+
+
+async def test_compose_startup_and_cleanup(tmp_path, monkeypatch):
+    from responses_api_agents.harbor_agent_general import sandbox_environment as module
+
+    (tmp_path / "docker-compose.yaml").write_text("services: {peer: {image: peer}}")
+    images = tmp_path / "images.json"
+    record = {
+        "image": "pinned@sha256:abc",
+        "os": "linux",
+        "architecture": "amd64",
+        "config": {"Cmd": ["sleep", "infinity"]},
+    }
+    images.write_text(json.dumps({"test@sha256:abc": record, "peer": record}))
+    main, peer = AsyncMock(), AsyncMock()
+    main.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
+    compose = AsyncMock()
+    compose.services = {"main": main, "peer": peer}
+    calls = []
+
+    def factory(*args, **kwargs):
+        calls.append((args, kwargs))
+        return compose
+
+    monkeypatch.setattr(module, "AsyncSandboxCompose", factory)
+    env = make_environment(tmp_path, compose_image_configs=images)
+    env._upload_environment_dir_after_start = AsyncMock()
+    await env.start(False)
+    assert env._sandbox is main
+    assert calls[0][1]["service_specs"]["main"].resources.cpu == 4
+    assert calls[0][1]["service_specs"]["peer"].resources.cpu is None
+    assert calls[0][0][1].is_file()
+    await env.stop(True)
+    compose.stop.assert_awaited_once()
+    assert env._sandbox is None and env._compose is None
+
+
+async def test_service_context_isolated_across_concurrent_transfers(tmp_path):
+    env = make_environment(tmp_path, persistent_env={"MAIN_ONLY": "secret"})
+    main, peer = AsyncMock(), AsyncMock()
+    env._sandbox = main
+    env._compose = SimpleNamespace(services={"main": main, "peer": peer})
+    peer.exec.return_value = SandboxExecResult(stdout="ok", stderr="", return_code=0)
+    main.exec.return_value = SandboxExecResult(stdout="main", stderr="", return_code=0)
+    observed = {}
+
+    async def download(source, target):
+        await asyncio.sleep(0)
+        observed[source] = env._require_sandbox()
+
+    env.download_dir = download
+    env.download_file = download
+    await asyncio.gather(
+        env.service_download_file("peer", tmp_path, service="peer"),
+        env.service_download_dir("main", tmp_path, service="main"),
+    )
+    assert observed == {"peer": peer, "main": main}
+    assert env._require_sandbox() is main
+    result = await env.service_exec("true", service="peer", env={"PEER": "value"}, timeout_sec=12)
+    assert result.stdout == "ok"
+    assert peer.exec.call_args.kwargs["env"] == {"PEER": "value"}
+    assert peer.exec.call_args.kwargs["timeout_s"] == 12
+    await env.service_exec("true", service="peer")
+    assert peer.exec.call_args.kwargs["timeout_s"] == 1800
+    assert (await env.service_exec("true")).stdout == "main"
+    await env.stop_service("main")
+    main.stop.assert_awaited_once()
+    peer.stop.assert_not_awaited()
+    with pytest.raises(ValueError, match="unavailable"):
+        await env.service_exec("true", service="missing")
