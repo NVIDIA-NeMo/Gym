@@ -18,6 +18,7 @@ import json
 import logging
 import sys
 import time
+from copy import deepcopy
 from pathlib import Path
 from uuid import uuid4
 
@@ -36,6 +37,7 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -50,6 +52,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
 )
 from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY
+from nemo_gym.server_utils import get_server_url
 
 
 logger = logging.getLogger(__name__)
@@ -70,6 +73,9 @@ def harbor_job_worker(job_config_dict: dict, task_name: str) -> str:
 
 
 class HarborAgentConfig(BaseResponsesAPIAgentConfig):
+    model_server: ModelServerRef | None = None
+    opencode_context_window: int = Field(default=262144, gt=0)
+    opencode_max_steps: int | None = Field(default=None, gt=0)
     harbor_ray_task_num_cpus: float = Field(default=0.25, ge=0)
     harbor_jobs_dir: Path
     harbor_debug: bool = Field(default=False)
@@ -130,6 +136,34 @@ class HarborAgent(SimpleResponsesAPIAgent):
         ## Harbor owns the full run() lifecycle.
         raise NotImplementedError
 
+    def configure_opencode(self, job_config: JobConfig, body: HarborRunRequest) -> None:
+        """Route OpenCode through Gym while retaining Harbor's task configuration."""
+        if self.config.model_server is None and self.config.opencode_max_steps is None:
+            return
+        agent = job_config.agents[0].model_copy(deep=True)
+        if agent.name != "opencode":
+            raise ValueError("model_server and opencode_max_steps require the OpenCode harness")
+        overlay = deepcopy(agent.kwargs.get("opencode_config") or {})
+        if self.config.model_server is not None:
+            agent.model_name = "nemo_gym/dummy_model"
+            base_url = self.base_url_for_run(get_server_url(self.config.model_server.name), body) + "/v1"
+            window = self.config.opencode_context_window
+            overlay.setdefault("provider", {})["nemo_gym"] = {
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {
+                    "baseURL": base_url,
+                    "apiKey": "dummy_key",  # pragma: allowlist secret
+                    "timeout": False,
+                    "chunkTimeout": 600000,
+                },
+                "models": {"dummy_model": {"limit": {"context": window, "input": window, "output": window}}},
+            }
+        if self.config.opencode_max_steps is not None:
+            for name in ("build", "general", "explore", "scout"):
+                overlay.setdefault("agent", {}).setdefault(name, {})["steps"] = self.config.opencode_max_steps
+        agent.kwargs["opencode_config"] = overlay
+        job_config.agents = [agent]
+
     async def run(self, body: HarborRunRequest) -> HarborVerifyResponse:
         async with self._sem:
             try:
@@ -138,6 +172,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     ## Use a stable job name to allow resume.
                     job_name=f"t{body.task_index}-r{body.rollout_index}",
                 )
+                self.configure_opencode(job_config, body)
 
                 job_ref = harbor_job_worker.options(num_cpus=self.config.harbor_ray_task_num_cpus).remote(
                     job_config.model_dump(mode="json"), body.task_name
