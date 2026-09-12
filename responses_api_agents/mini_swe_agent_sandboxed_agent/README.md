@@ -37,7 +37,21 @@ model endpoint exception because model requests originate on the Gym host. The
 policy applies to TB4 agent and verifier sandboxes. Required task and verifier
 dependencies must already be available offline.
 
-Validation: 79 focused tests pass with 97.14% coverage. Live offline qualification
+The `mini-swe-gym-episode-v2` export captures the first prepared model request
+before dispatch. Its complete input defines the prompt boundary dynamically;
+the exported output contains the subsequent episode history, including later
+user feedback. Bash tools and explicit request settings come from that capture.
+SDK defaults are marked separately from observed parameters. Both `/run` and
+`/responses` expose the normalized request and export metadata. Seeding retains
+the original task request. The archive keeps that original request, the complete
+trajectory, raw model responses, shell records and the captured request hash.
+No-call and inconsistent-prefix outcomes are explicitly invalid for normalized
+training; a failed or empty first response can still have a valid observed prompt.
+The flat episode is audit history, not exact model-context replay: format-error
+recovery may omit a failed generation from later requests. Provider overrides
+must be recorded separately by the launching recipe.
+
+Validation before the export repair: 79 focused tests passed with 97.14% coverage. Live offline qualification
 passed all six mini-SWE model/workflow combinations, including GLM5.3 and Super3.5
 on CMH plus NVIDIA inference, each with full capture and scoped cleanup. A native
 TB4 task also exercised artifact transfer and completed grading. Results and the

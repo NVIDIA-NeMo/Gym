@@ -82,6 +82,11 @@ from nemo_gym.server_utils import (  # noqa: E402
     is_nemo_gym_fastapi_entrypoint,
     raise_for_status,
 )
+from responses_api_agents.mini_swe_agent_sandboxed_agent.episode_export import (  # noqa: E402
+    episode_export,
+    request_snapshot,
+    snapshot_hash,
+)
 from responses_api_agents.mini_swe_agent_sandboxed_agent.sandbox_identity import (  # noqa: E402
     SandboxIdentityMismatch,
     checked_exec,
@@ -367,6 +372,9 @@ class NeMoGymResponsesModel:
         self.responses: List[NeMoGymResponse] = []
         self.call_times: List[float] = []
         self.calls_gt_timeout = 0
+        self.first_request = None
+        self.request_attempt_count = 0
+        self.omitted_request_parameters = []
 
     def _prepare_messages_for_api(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Flatten stored response objects into their output items for a stateless call (upstream logic)."""
@@ -388,12 +396,12 @@ class NeMoGymResponsesModel:
         for attempt in range(self._max_attempts):
             try:
                 async with asyncio.timeout(self._call_timeout_s):
-                    raw = await self._client.create_response(
-                        model=self.model_name,
-                        input=input_items,
-                        tools=[BASH_TOOL],
-                        **self.model_kwargs,
-                    )
+                    parameters = dict(model=self.model_name, input=input_items, tools=[BASH_TOOL], **self.model_kwargs)
+                    if self.first_request is None:
+                        self.first_request = request_snapshot(parameters)
+                        self.omitted_request_parameters = sorted(set(parameters) - set(self.first_request))
+                    self.request_attempt_count += 1
+                    raw = await self._client.create_response(**parameters)
                 response = NeMoGymResponse.model_validate(raw)
                 break
             except TimeoutError:
@@ -440,6 +448,21 @@ class NeMoGymResponsesModel:
         message["extra"] = {"actions": actions, **cost_output, "timestamp": time.time()}
         return message
 
+    def request_capture(self) -> Dict[str, Any]:
+        state = "no_model_call"
+        if self.first_request is not None:
+            state = "first_response_received" if self.responses else "attempted_no_response"
+            if self.responses and not self.responses[0].output:
+                state = "first_response_empty"
+        return {
+            "state": state,
+            "first_request": request_snapshot(self.first_request) if self.first_request is not None else None,
+            "first_request_sha256": snapshot_hash(self.first_request),
+            "request_attempt_count": self.request_attempt_count,
+            "returned_response_count": len(self.responses),
+            "omitted_request_parameters": list(self.omitted_request_parameters),
+        }
+
     def format_message(self, **kwargs) -> Dict[str, Any]:
         return kwargs
 
@@ -463,12 +486,17 @@ class NeMoGymResponsesModel:
 
     def serialize(self) -> Dict[str, Any]:
         return {
+            "model_request_capture": self.request_capture(),
             "info": {
                 "config": {
-                    "model": self.get_template_vars() | {"replay_reasoning_items": self._replay_reasoning_items},
+                    "model": self.get_template_vars()
+                    | {
+                        "model_kwargs": request_snapshot(self.model_kwargs),
+                        "replay_reasoning_items": self._replay_reasoning_items,
+                    },
                     "model_type": f"{self.__class__.__module__}.{self.__class__.__name__}",
                 }
-            }
+            },
         }
 
 
@@ -476,7 +504,7 @@ class NeMoGymMiniSweAgent:
     """Asyncio port of ``minisweagent.agents.default.DefaultAgent`` (v2.4.6).
 
     Besides the upstream ``messages`` list it keeps ``trajectory``: the Responses-API item sequence that
-    becomes the stored rollout (system + task message, every model output item incl. reasoning, every
+    becomes the full audit history (system + task message, every model output item incl. reasoning, every
     function_call_output / format-error message).
     """
 
@@ -667,6 +695,7 @@ class NeMoGymMiniSweAgent:
             },
             "messages": self.messages,
             "trajectory_format": "mini-swe-agent-1.1",
+            "gym_full_trajectory": [item.model_dump(mode="json") for item in self.trajectory],
         }
         return recursive_merge(agent_data, self.model.serialize(), self.env.serialize(), *extra_dicts)
 
@@ -778,6 +807,8 @@ class MiniSweAgentSandboxedAgent(SimpleResponsesAPIAgent):
             agent.add_messages(
                 {"role": "exit", "content": exit_info.get("exit_status", "Unknown"), "extra": exit_info}
             )
+        captured_request = model.request_capture()
+        exported_request, rollout_items, export_metadata = episode_export(agent.trajectory, captured_request)
         trajectory_path = None
         if self.config.dump_trajectory_dir:
             try:
@@ -789,6 +820,9 @@ class MiniSweAgentSandboxedAgent(SimpleResponsesAPIAgent):
                     {
                         "shell_records": env.shell_records,
                         "model_responses": [x.model_dump(mode="json") for x in model.responses],
+                        "gym_export": export_metadata,
+                        "responses_create_params": exported_request,
+                        "original_responses_create_params": body.model_dump(mode="json"),
                     }
                 )
                 Path(trajectory_path).parent.mkdir(parents=True, exist_ok=True)
@@ -812,10 +846,10 @@ class MiniSweAgentSandboxedAgent(SimpleResponsesAPIAgent):
             created_at=int(time.time()),
             model=self.config.model_server.name,
             object="response",
-            output=agent.trajectory,
-            tool_choice=body.tool_choice,
-            tools=body.tools,
-            parallel_tool_calls=body.parallel_tool_calls,
+            output=rollout_items,
+            tool_choice=exported_request.get("tool_choice"),
+            tools=exported_request.get("tools", []),
+            parallel_tool_calls=exported_request.get("parallel_tool_calls"),
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
@@ -830,6 +864,10 @@ class MiniSweAgentSandboxedAgent(SimpleResponsesAPIAgent):
         total_model_call_time = sum(model.call_times)
         exit_status = str(exit_info.get("exit_status", "") or "Unknown")
         metrics = {
+            "responses_create_params": exported_request,
+            "mini_swe_export": export_metadata,
+            "mini_swe_model_request_capture": captured_request,
+            "mini_swe_original_responses_create_params": body.model_dump(mode="json"),
             "mini_swe_exit_status": exit_status,
             "mini_swe_completed": exit_status == "Submitted",
             "mini_swe_submission": str(exit_info.get("submission", "") or ""),
@@ -859,8 +897,16 @@ class MiniSweAgentSandboxedAgent(SimpleResponsesAPIAgent):
 
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         sandbox = self._session_sandboxes[request.session[SESSION_ID_KEY]]
-        response, _ = await self._execute(request, body, sandbox)
-        return response
+        response, metrics = await self._execute(request, body, sandbox)
+        # A bare /responses route has no outer run envelope; retain its export request as an extension.
+        return NeMoGymResponse.model_validate(
+            response.model_dump()
+            | {
+                "responses_create_params": metrics["responses_create_params"],
+                "mini_swe_export": metrics["mini_swe_export"],
+                "mini_swe_model_request_capture": metrics["mini_swe_model_request_capture"],
+            }
+        )
 
     async def run(self, request: Request, body: MiniSweAgentRunRequest) -> MiniSweAgentVerifyResponse:
         cookies = request.cookies
@@ -905,7 +951,8 @@ class MiniSweAgentSandboxedAgent(SimpleResponsesAPIAgent):
             verification = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=body.model_dump() | {"response": response.model_dump()},
+                json=body.model_dump()
+                | {"response": response.model_dump(), "responses_create_params": metrics["responses_create_params"]},
                 cookies=cookies,
             )
             await raise_for_status(verification)
