@@ -157,6 +157,9 @@ gym eval reverify --judge-failed-only \
 
 The output holds the successes plus the recovered rows. Re-running is idempotent, and `--resume` picks up any rows a fixed-but-still-flaky judge left behind.
 
+Judge failures without a saved `response` are reported and skipped. They need a new generation attempt through rollout
+collection; reverification cannot reconstruct the missing response.
+
 <Note>
 The judge model must be healthy (and configured the same as the original run) when you recover. Since the recovered rewards are computed now while the successes were scored during the original run, keep the verifier/judge config identical between the two so the merged metrics stay consistent.
 </Note>
@@ -170,6 +173,11 @@ gym eval reverify --judge-failed-only --append \
   --rollouts results/rollouts.jsonl \
   --output results/rollouts.jsonl
 ```
+
+For runs with a recovery manifest and attempt journal, append records a new attempt before each verifier request and
+preserves the original attempt history. Collection resume and offline aggregation then select the recovered result.
+Only the latest eligible judge failures are retried; terminal markers and the run's attempt budget still apply. See
+[Resume an Evaluation](/main/evaluation/resume) for recovery guarantees and legacy artifact behavior.
 
 ## Sharding
 
