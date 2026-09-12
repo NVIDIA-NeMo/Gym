@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 from nemo_gym._checkpoint.agent import (
     AGENT_EXECUTION_GENERATION_HEADER,
     COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE,
+    DISCARD_RESTORED_CONTINUATION_FEATURE,
     AgentBoundaryRecord,
     AgentCheckpointParticipant,
     AgentExecution,
@@ -170,9 +171,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         agent_attributes = {"nemo.gym.server.name": self.config.name}
         traced_responses = traced_endpoint(GymSpanGroup.AGENT, "gym.agent.responses", self.responses, agent_attributes)
         app.post("/v1/responses")(traced_responses)
-        app.post(f"/{TOKEN_CAPTURE_PATH_SEGMENT}/v1/responses")(
-            traced_responses
-        )
+        app.post(f"/{TOKEN_CAPTURE_PATH_SEGMENT}/v1/responses")(traced_responses)
         # A self-call made with ``url_path_for_run`` lands on a prefixed twin.
         # ``responses`` recovers the rollout id from the path.
         # The same handler serves prefixed and unprefixed calls.
@@ -282,6 +281,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             capabilities.features = [
                 COMPLETED_RESULT_ACKNOWLEDGEMENT_FEATURE,
                 AGENT_CONTINUATION_INDEX_FEATURE,
+                DISCARD_RESTORED_CONTINUATION_FEATURE,
             ]
         return capabilities
 
