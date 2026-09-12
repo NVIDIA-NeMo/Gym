@@ -50,3 +50,24 @@ def test_step_limit_works_for_direct_provider_and_rejects_other_harnesses():
     job.agents = [AgentConfig(name="terminus-2")]
     with pytest.raises(ValueError, match="OpenCode"):
         app.HarborAgent.configure_opencode(subject(steps=2), job, {})
+
+
+def test_harbor_index_aliases_correlate_model_calls(tmp_path, monkeypatch):
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+    agent = app.HarborAgent.model_construct(
+        config=app.HarborAgentConfig.model_construct(
+            harbor_jobs_dir=tmp_path, harbor_dataset=app.DatasetConfig(path=tmp_path)
+        ),
+        server_client=SimpleNamespace(global_config_dict={"observability_enabled": True}),
+    )
+    body = app.HarborRunRequest.model_validate(
+        {
+            "task_name": "terminal-bench/test",
+            "_ng_task_index": 2,
+            "_ng_rollout_index": 4,
+            "responses_create_params": {"input": []},
+        }
+    )
+    assert agent.rollout_id_from_run(body) == "2-4"
+    assert agent.base_url_for_run("http://compute:63000", body) == "http://compute:63000/ng-rollout/2-4"
+    assert agent.rollout_id_from_run(body.model_dump(by_alias=True)) == "2-4"
