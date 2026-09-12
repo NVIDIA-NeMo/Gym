@@ -425,6 +425,7 @@ FILE_TYPE_MAP: dict[str, dict[str, Any]] = {
     "pptx": {"type": "DOC", "converter": _convert_to_pdf, "mime_type": "application/pdf"},
     "xlsx": {"type": "DOC", "converter": _convert_to_pdf, "mime_type": "application/pdf"},
     "txt": {"type": "TXT", "converter": _load_raw_text, "mime_type": None},
+    "srt": {"type": "TXT", "converter": _load_raw_text, "mime_type": None},
     "csv": {"type": "TXT", "converter": _load_raw_text, "mime_type": None},
     "json": {"type": "TXT", "converter": _load_raw_text, "mime_type": None},
     "xml": {"type": "TXT", "converter": _load_raw_text, "mime_type": None},

@@ -1,12 +1,29 @@
 # AA-Briefcase-Lite — Stirrup rollout plus public binary/local pairwise judging.
 
+# openai_model pins the upstream model, so each panel member needs its own adapter.
 aa_briefcase_lite_judge_model:
   responses_api_models:
     openai_model:
       entrypoint: app.py
       openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
       openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
-      openai_model: ${oc.env:JUDGE_MODEL_NAME,gcp/google/gemini-3.1-pro-preview}
+      openai_model: ${oc.env:JUDGE_GEMINI_MODEL,${oc.env:JUDGE_MODEL_NAME,gcp/google/gemini-3.1-pro-preview}}
+
+aa_briefcase_lite_gpt_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
+      openai_model: ${oc.env:JUDGE_GPT_MODEL,openai/openai/gpt-5.5}
+
+aa_briefcase_lite_claude_judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:JUDGE_BASE_URL,https://inference-api.nvidia.com/v1}
+      openai_api_key: ${oc.env:JUDGE_API_KEY,dummy}
+      openai_model: ${oc.env:JUDGE_CLAUDE_MODEL,aws/anthropic/bedrock-claude-opus-4-8}
 
 aa_briefcase_lite_resources_server:
   resources_servers:
@@ -31,18 +48,30 @@ aa_briefcase_lite_resources_server:
       judge_panel:
         - name: gpt-5.5
           model: ${oc.env:JUDGE_GPT_MODEL,openai/openai/gpt-5.5}
+          model_server:
+            type: responses_api_models
+            name: aa_briefcase_lite_gpt_judge_model
           media_mode: images_and_text
-          create_params_overrides: {reasoning_effort: medium, temperature: null}
+          create_params_overrides: {reasoning_effort: high, temperature: null}
         - name: gemini-3.1-pro
-          model: ${oc.env:JUDGE_GEMINI_MODEL,gcp/google/gemini-3.1-pro-preview}
+          model: ${aa_briefcase_lite_judge_model.responses_api_models.openai_model.openai_model}
+          model_server:
+            type: responses_api_models
+            name: aa_briefcase_lite_judge_model
           handles_audio: true
           handles_video: true
           media_mode: native_pdf
           create_params_overrides: {extra_body: {reasoning_effort: high}, temperature: null}
         - name: claude-opus-4.8
           model: ${oc.env:JUDGE_CLAUDE_MODEL,aws/anthropic/bedrock-claude-opus-4-8}
+          model_server:
+            type: responses_api_models
+            name: aa_briefcase_lite_claude_judge_model
           media_mode: native_pdf
-          create_params_overrides: {extra_body: {thinking: {type: enabled}}, temperature: null}
+          create_params_overrides:
+            extra_body: {thinking: {type: adaptive}, output_config: {effort: max}}
+            temperature: null
+            max_tokens: 16384
       judge_sampling_seed: ${oc.env:JUDGE_SAMPLING_SEED,null}
       persist_raw_judge_responses: false
 

@@ -44,3 +44,10 @@ pairwise prompt or private comparison graph, so pairwise and combined results
 must be labeled local/unofficial.
 
 AA-Briefcase-Lite is demonstrative and does not produce official AA-Briefcase Elo.
+
+Each judge-panel member uses its own model server because the `openai_model`
+adapter fixes the upstream model. Override the three model names with
+`JUDGE_GPT_MODEL`, `JUDGE_GEMINI_MODEL`, and `JUDGE_CLAUDE_MODEL` as needed;
+`JUDGE_MODEL_NAME` remains a fallback for Gemini. Claude uses a 16,384-token
+output limit to leave room for a complete judgment. This is a local setting,
+not a claimed reproduction of AA's undisclosed judge output budget.
