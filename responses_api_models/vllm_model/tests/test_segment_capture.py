@@ -6,11 +6,13 @@
 import asyncio
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import ClientResponse, ClientResponseError, ServerDisconnectedError
 from fastapi.testclient import TestClient
+from omegaconf import OmegaConf
 
 import nemo_gym.server_utils
 from nemo_gym.base_responses_api_model import _CaptureMiddleware
@@ -70,7 +72,15 @@ class CaptureHarness:
 
 
 def make_capture_harness(
-    monkeypatch, tmp_path, *, sink=None, fetch_prefix=None, transport_failure=None, root_prompt=None, reasoning=False
+    monkeypatch,
+    tmp_path,
+    *,
+    sink=None,
+    fetch_prefix=None,
+    transport_failure=None,
+    root_prompt=None,
+    reasoning=False,
+    model_config=None,
 ):
     """Allow paired RL tests to inject their staging transport and prefix reader."""
     sink = sink if sink is not None else MemoryStagingSink()
@@ -88,7 +98,8 @@ def make_capture_harness(
     monkeypatch.setenv("NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN", "test-control")
     monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", lambda: config)
     model = VLLMModel(
-        config=VLLMModelConfig(
+        config=model_config
+        or VLLMModelConfig(
             host="127.0.0.1",
             port=8081,
             base_url="http://worker.test/v1",
@@ -228,6 +239,39 @@ def test_initial_root_selected_continuation_and_new_segment(harness):
     assert selected_row(harness, "L_s1", next_root["id"]).token_ids == [40, 41, 1004]
     assert_clean(harness.post(None, [{"role": "user", "content": "ordinary again"}]))
     assert harness.worker_calls[-1] == (None, True), "CC must not change the cached ordinary client's retry policy"
+
+
+def test_shipped_cc_agent_and_regular_model_configs_commit_root_and_continuation(monkeypatch, tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    config = OmegaConf.merge(
+        {"policy_base_url": "http://worker.test/v1", "policy_api_key": "test-key", "policy_model_name": "test-model"},
+        OmegaConf.load(root / "responses_api_models/vllm_model/configs/vllm_model.yaml"),
+        OmegaConf.load(
+            root / "responses_api_agents/simple_agent_with_compaction/configs/simple_agent_with_compaction.yaml"
+        ),
+    )
+    agent = config.simple_agent_with_compaction.responses_api_agents.simple_agent_with_compaction
+    model_name = agent.model_server.name
+    model_types = config[model_name].responses_api_models
+    assert list(model_types) == ["vllm_model"]
+    model_config = VLLMModelConfig.model_validate(
+        OmegaConf.to_container(model_types.vllm_model, resolve=True)
+        | {"host": "127.0.0.1", "port": 8081, "name": model_name}
+    )
+    assert model_config.return_token_id_information is False
+    harness = make_capture_harness(monkeypatch, tmp_path, model_config=model_config)
+    try:
+        first = assert_clean(harness.post("configured_g0_s0", HISTORY, parent=None))
+        assert len(harness.manifest("configured_g0_s0").records) == 1
+        second = assert_clean(harness.post("configured_g0_s0", HISTORY + first["output"], parent=first["id"]))
+        manifest = harness.manifest("configured_g0_s0")
+        assert manifest.failures == []
+        assert [row.response_id for row in manifest.records] == [first["id"], second["id"]]
+        assert manifest.records[1].parent_call_id == manifest.records[0].model_call_id
+        assert selected_row(harness, "configured_g0_s0", second["id"]).token_mask == [0, 0, 1, 0, 0, 1]
+    finally:
+        harness.client.close()
+        asyncio.run(harness.ledger.close())
 
 
 def test_definite_root_retry_uses_selected_response_chain(harness):

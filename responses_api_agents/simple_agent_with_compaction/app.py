@@ -220,7 +220,9 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
         # Reward belongs to the ordinary verifier; this metadata never grants validity.
         # Project only after verification: the media arena exports each raw image
         # once, while the verifier above still sees every observation occurrence.
-        transport_response = model_response.model_dump()
+        # Preserve verifier annotations, just as simple_agent does. Only the media
+        # transport projection is ours; capture evidence remains in result.
+        transport_response = dict(verified["response"])
         transport_response["output"] = _without_raw_images(transport_response["output"])
         input_echo = dict(verified["responses_create_params"])
         input_echo["input"] = _without_raw_images(input_echo["input"])

@@ -9,8 +9,42 @@ The policy, history, materialization, and guards now live in the shared
 model/tool/verification loop plus the integration calls; existing `simple_agent`
 and other agents are unchanged.
 
+## Compatibility with simple_agent
+
+The task-facing contract is preserved: seed the resource session, execute tool
+calls sequentially, feed malformed arguments and definite tool HTTP errors back
+to the model, stop on an assistant answer without tool calls or an incomplete
+response, accumulate usage, and pass the full uncompacted conversation to the
+ordinary verifier. Verification can be skipped with the same configured reward;
+otherwise verifier annotations and metrics are retained. Cookies remain isolated
+between model and resource calls until they are combined for verification.
+
+This is not a drop-in replacement for every simple-agent configuration. Intentional
+differences are mandatory training capture, bounded calls/steps (simple_agent's
+default is unbounded), explicit failure outcomes, no automatic transport retries,
+direct local episode execution, accumulated session cookies, and the final media
+projection described below. Adapter-provided seed/image observations are additions
+to the ordinary agent contract. Capture evidence describes selected model actions,
+not any subsequent verifier annotations.
+
+Observability limitation: this agent does **not** currently emit simple_agent's
+optional `ng_trajectory` / `_ng_trajectory`, including per-tool timing/status and
+per-turn resolution records, even when evaluation observability is enabled.
+The ordinary verifier's `resolved` field is retained. Segment/action identities
+in `context_compaction_result` are training metadata, not a replacement for that
+trajectory schema. We deliberately do not copy `TrajectoryTurn.question` with
+the complete prompt on every turn: that would restore quadratic prefix storage.
+Adding trajectory support is a separate, optional integration that must use
+references/deltas or explicitly omit full questions; no new logging schema or
+shared-agent refactor is part of this migration.
+
 ## Requirements and behavior
 
+- Pair `configs/simple_agent_with_compaction.yaml` with
+  `responses_api_models/vllm_model/configs/vllm_model.yaml` (the `policy_model`
+  server). There is no dedicated CC model server. Keep
+  `return_token_id_information: false`: external capture uses worker-staged tokens,
+  not the inline-token settings in `vllm_model_for_training.yaml`.
 - Enable global `token_id_capture.enabled` and external staging. This dedicated
   agent opts into capture by default. It requires the framework's `_ng_rollout_id`
   owner identity (for example `dispatch_g0`); there is no legacy inline-token fallback.
@@ -78,8 +112,12 @@ old immediately-preceding-reasoning rewrite bug.
 
 Focused tests cover both client adapters, unchanged ordinary tool/verifier behavior,
 image hooks, bounds/failures, and real model-server capture custody with scripted
-worker token deltas. These are local CPU tests, not a real-vLLM/GPU qualification or
-the known-good end-to-end parity gate. The known-good implementation is untouched.
+worker token deltas. `tests/test_simple_agent_parity.py` runs both actual agent
+loops against the same scripted external services, compares request/tool/verifier
+payloads and returned results, and checks that an actual reasoning rewrite changes
+the model view without changing verifier history. These are local CPU tests, not
+a real-vLLM/GPU qualification or the known-good end-to-end parity gate. The
+known-good implementation is untouched.
 
 # Licensing information
 
