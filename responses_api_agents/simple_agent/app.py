@@ -111,6 +111,7 @@ class SimpleAgentVerifyResponse(BaseVerifyResponse):
 class SimpleAgent(SimpleResponsesAPIAgent):
     config: SimpleAgentConfig
     checkpoint_continuation_supported = True
+    checkpoint_resource_dependencies_supported = True
 
     async def _create_episode(
         self,

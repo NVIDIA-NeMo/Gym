@@ -33,7 +33,10 @@ from nemo_gym._checkpoint.agent import (
     AgentExecution,
     install_agent_checkpoint,
 )
-from nemo_gym._checkpoint.artifacts import AGENT_CONTINUATION_INDEX_FEATURE
+from nemo_gym._checkpoint.artifacts import (
+    AGENT_CONTINUATION_INDEX_FEATURE,
+    AGENT_RESOURCE_DEPENDENCY_INDEX_FEATURE,
+)
 from nemo_gym._checkpoint.control import ControlCapabilities, checkpoint_control_auth_token
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -94,6 +97,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
     _CONTROL_COMPONENT = "responses_api_agents"
     checkpoint_continuation_supported: ClassVar[bool] = False
+    checkpoint_resource_dependencies_supported: ClassVar[bool] = False
     _checkpoint_participant: Optional[AgentCheckpointParticipant] = PrivateAttr(default=None)
 
     def setup_webserver(self) -> FastAPI:
@@ -201,6 +205,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 AGENT_CONTINUATION_INDEX_FEATURE,
                 DISCARD_RESTORED_CONTINUATION_FEATURE,
             ]
+            if self.checkpoint_resource_dependencies_supported:
+                capabilities.features.append(AGENT_RESOURCE_DEPENDENCY_INDEX_FEATURE)
         return capabilities
 
     def checkpoint_execution(self, request: Optional[Request] = None) -> Optional[AgentExecution]:
