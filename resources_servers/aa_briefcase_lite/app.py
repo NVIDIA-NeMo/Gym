@@ -46,6 +46,7 @@ from resources_servers.gdpval.preconvert import preconvert_dir_async
 
 
 _BINARY_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+_BINARY_JSON_INSTRUCTION = 'Return only one JSON object with boolean key "passed" and string key "reasoning".'
 
 
 class AABriefcaseLiteResourcesServerConfig(GDPValResourcesServerConfig):
@@ -224,7 +225,7 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             score_0_criteria=check["score_0_criteria"],
         )
         messages = [
-            {"role": "system", "content": self._aa_binary_system},
+            {"role": "system", "content": self._aa_binary_system + "\n\n" + _BINARY_JSON_INSTRUCTION},
             {"role": "user", "content": [{"type": "text", "text": user_text}, *artifact_blocks]},
         ]
         client = AsyncOpenAI(
@@ -252,12 +253,7 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             messages.extend(
                 [
                     {"role": "assistant", "content": raw},
-                    {
-                        "role": "user",
-                        "content": (
-                            'Return only one JSON object with boolean key "passed" and string key "reasoning".'
-                        ),
-                    },
+                    {"role": "user", "content": _BINARY_JSON_INSTRUCTION},
                 ]
             )
         return None, raw
