@@ -1,0 +1,45 @@
+terminal_bench_4_opencode:
+  responses_api_agents:
+    harbor_agent_general:
+      entrypoint: app.py
+      domain: agent
+      description: Terminal-Bench 4.0 with the official Harbor lifecycle and OpenCode.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      opencode_max_steps: ${oc.select:tb4_max_steps,null}
+      opencode_context_window: ${oc.select:tb4_context_window,262144}
+      harbor_jobs_dir: ${oc.select:tb4_jobs_dir,results/terminal_bench_4/harbor}
+      harbor_dataset:
+        name: terminal-bench/terminal-bench
+        ref: sha256:39d9f44b40420cde8fdcc087579c0d72a7e14fa3656d603c3f0d22fb35e27732
+      harbor_environment:
+        import_path: responses_api_agents.harbor_agent_general.sandbox_environment:HarborSandboxEnvironment
+        cpu_enforcement_policy: limit
+        memory_enforcement_policy: limit
+        kwargs:
+          sandbox_provider:
+            opensandbox:
+              connection:
+                domain: ${oc.env:OPENSANDBOX_DOMAIN}
+                api_key: ${oc.env:OPENSANDBOX_API_KEY}
+                protocol: http
+                use_server_proxy: true
+                transport_backend: aiohttp
+                tls_verify: false
+          sandbox_metadata:
+            nemo.nvidia.com/resources: custom
+          sandbox_ttl_s: 86400
+          sandbox_ready_timeout_s: 1200
+          default_exec_timeout_s: 64800
+      harbor_agent:
+        name: opencode
+        model_name: nemo_gym/dummy_model
+        kwargs:
+          version: 1.17.11
+      datasets:
+        - name: terminal_bench_4
+          type: benchmark
+          jsonl_fpath: benchmarks/terminal_bench_4/data/benchmark.jsonl
+          prepare_script: benchmarks/terminal_bench_4/prepare.py
+          num_repeats: 1
