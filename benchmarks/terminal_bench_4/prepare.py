@@ -30,7 +30,10 @@ def prepare(task_names: list[str] | None = None, category: str | None = None) ->
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with OUTPUT_PATH.open("w") as output:
         for task in tasks:
-            output.write(json.dumps({"task_name": task["name"], "responses_create_params": {"input": []}}) + "\n")
+            output.write(
+                json.dumps({"task_name": f"terminal-bench/{task['name']}", "responses_create_params": {"input": []}})
+                + "\n"
+            )
     return OUTPUT_PATH
 
 
