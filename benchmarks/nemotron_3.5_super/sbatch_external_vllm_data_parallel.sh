@@ -33,11 +33,11 @@ PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT=5600
 DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT=5700
 
 ROUTER_SERVER_PORT=8000
-WORKER_SERVER_PORT=8001
+PREFILL_SERVER_PORT=8001
+DECODE_SERVER_PORT=8002
 
-ROUTER_PREFILL_POLICY="${ROUTER_PREFILL_POLICY:-cache_aware}"
-ROUTER_DECODE_POLICY="${ROUTER_DECODE_POLICY:-cache_aware}"
-ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE="${ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE:-1}"
+PREFILL_DP_RPC_PORT=13345
+DECODE_DP_RPC_PORT=13346
 
 eval_command=$(cat <<EOF
 set -euo pipefail
@@ -107,6 +107,10 @@ pd_command=$(cat <<EOF
 
 set -euo pipefail
 
+# Data-parallel head addresses populated by the batch command.
+PREFILL_HEAD=\$PREFILL_HEAD
+DECODE_HEAD=\$DECODE_HEAD
+
 # Nemotron's three-read Mamba SSM state must use the dimension-sequence layout when KV transfer is enabled.
 # Not used when the model has no Mamba layers.
 export VLLM_SSM_CONV_STATE_LAYOUT=DS
@@ -133,58 +137,79 @@ fi
 
 this_node_hostname=\$(hostname)
 if (( SLURM_PROCID == 0 )); then
-    read -r -a nodes <<< "\$ALL_NODES"
-
+    # @bxyu-nvidia: for --intra-node-data-parallel-size: Not sure what to set this to other than 1. I can't tell from the docs what is appropriate and 1 seems to work fine.
     # Set a super long request timeout since some reasoning requests may take a long time to generate.
     # Don't manually wait as vllm-router will wait for the URLs to come up
     router_args=( \
-        --prefill-policy $ROUTER_PREFILL_POLICY \
-        --decode-policy $ROUTER_DECODE_POLICY \
+        --prefill-policy cache_aware \
+        --decode-policy cache_aware \
         --balance-abs-threshold 4 \
         --balance-rel-threshold 1.1 \
         --vllm-pd-disaggregation \
+        --prefill http://\$PREFILL_HEAD:$PREFILL_SERVER_PORT \
+        --decode http://\$DECODE_HEAD:$DECODE_SERVER_PORT \
         --host \$this_node_hostname \
         --port $ROUTER_SERVER_PORT \
-        --intra-node-data-parallel-size $ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE \
+        --intra-node-data-parallel-size 1 \
         --request-timeout-secs 86400 \
         --log-level error
     )
-
-    for (( i = 0; i < $NUM_PREFILL_NODES; i++ )); do
-        router_args+=(--prefill "http://\${nodes[i]}:$WORKER_SERVER_PORT")
-    done
-    for (( i = 0; i < $NUM_DECODE_NODES; i++ )); do
-        node_idx=\$(( $NUM_PREFILL_NODES + i ))
-        router_args+=(--decode "http://\${nodes[node_idx]}:$WORKER_SERVER_PORT")
-    done
 
     vllm-router "\${router_args[@]}" &
 
     router_pid=\$!
     trap 'kill "\$router_pid" 2>/dev/null || true' EXIT
-
-    sleep 5
-    if ! kill -0 "\$router_pid" 2>/dev/null; then
-        echo "vllm-router exited during startup" >&2
-        exit 1
-    fi
 fi
 
-# Split nodes here by index
-if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
-    # Prefill
+# Split nodes here by index. Each tier has one API-server head and zero or more headless DP workers.
+if (( SLURM_PROCID == 0 )); then
+    # Prefill head
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+    vllm serve "$MODEL" --served-model-name "$MODEL_NAME" \
+        "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
         --host \$this_node_hostname \
-        --port $WORKER_SERVER_PORT
-else
-    # Decode
+        --port $PREFILL_SERVER_PORT \
+        --data-parallel-size $((NUM_PREFILL_NODES * 4)) \
+        --data-parallel-address \$PREFILL_HEAD \
+        --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
+        --api-server-count 1
+elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
+    # Prefill worker
+    VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT \
+    vllm serve "$MODEL" --served-model-name "$MODEL_NAME" \
+        "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
+        --headless \
+        --data-parallel-size $((NUM_PREFILL_NODES * 4)) \
+        --data-parallel-start-rank \$(( SLURM_PROCID * 4)) \
+        --data-parallel-address \$PREFILL_HEAD \
+        --data-parallel-rpc-port $PREFILL_DP_RPC_PORT
+elif (( SLURM_PROCID == $NUM_PREFILL_NODES )); then
+    # Decode head
+
     VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
-    vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+    vllm serve "$MODEL" --served-model-name "$MODEL_NAME" \
+        "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
         --host \$this_node_hostname \
-        --port $WORKER_SERVER_PORT
+        --port $DECODE_SERVER_PORT \
+        --data-parallel-size $((NUM_DECODE_NODES * 4)) \
+        --data-parallel-address \$DECODE_HEAD \
+        --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
+        --api-server-count 1
+else
+    # Decode worker
+
+    VLLM_NIXL_SIDE_CHANNEL_HOST=\$this_node_hostname \
+    VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_VLLM_NIXL_SIDE_CHANNEL_PORT \
+    vllm serve "$MODEL" --served-model-name "$MODEL_NAME" \
+        "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
+        --headless \
+        --data-parallel-size $((NUM_DECODE_NODES * 4)) \
+        --data-parallel-start-rank \$(( (SLURM_PROCID - $NUM_PREFILL_NODES) * 4 )) \
+        --data-parallel-address \$DECODE_HEAD \
+        --data-parallel-rpc-port $DECODE_DP_RPC_PORT
 fi
 EOF
 )
@@ -194,8 +219,11 @@ batch_command=$(cat <<EOF
 set -euo pipefail
 
 nodes=(\$(scontrol show hostnames "\$SLURM_JOB_NODELIST"))
+PREFILL_HEAD="\${nodes[0]}"
+DECODE_HEAD="\${nodes[$NUM_PREFILL_NODES]}"
 
-ALL_NODES="\${nodes[*]}" \
+PREFILL_HEAD="\$PREFILL_HEAD" \
+DECODE_HEAD="\$DECODE_HEAD" \
 srun --nodes=$NUM_NODES --ntasks=$NUM_NODES --ntasks-per-node=1 --kill-on-bad-exit=1 \
     --container-image=$CONTAINER \
     --container-name=container-on-node \
