@@ -15,6 +15,7 @@
 """OpenSandbox provider implementation."""
 
 import asyncio
+import base64
 import logging
 import re
 import shlex
@@ -24,6 +25,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_attribution, resolve_run_id
 from nemo_gym.sandbox.providers.base import (
@@ -672,6 +674,23 @@ class OpenSandboxProviderOptions:
         )
 
 
+@dataclass(frozen=True)
+class OpenSandboxIdentityConfig:
+    """Opt-in protection against stale endpoints being reused by another pod.
+
+    This detects accidental endpoint reuse, not a malicious sandbox administrator.
+    Guarded file transfers use the same checked exec as their data access.
+    """
+
+    hostname_suffix: str | None = None
+    file_chunk_bytes: int = 65536
+
+    def __post_init__(self) -> None:
+        # Base64 plus the shell wrapper must fit Linux's single-argument limit.
+        if not 1 <= self.file_chunk_bytes <= 65536:
+            raise ValueError("identity.file_chunk_bytes must be between 1 and 65536")
+
+
 class OpenSandboxProvider:
     """Provider backed by the OpenSandbox SDK/server API."""
 
@@ -685,12 +704,15 @@ class OpenSandboxProvider:
         probe: OpenSandboxProbeConfig | Mapping[str, Any] | None = None,
         operations: OpenSandboxOperationConfig | Mapping[str, Any] | None = None,
         attribution: OpenSandboxAttributionConfig | Mapping[str, Any] | None = None,
+        identity: OpenSandboxIdentityConfig | Mapping[str, Any] | None = None,
     ) -> None:
         self._connection = _coerce_config(connection, OpenSandboxConnectionConfig)
         self._create = _coerce_config(create, OpenSandboxCreateConfig)
         self._probe = _coerce_config(probe, OpenSandboxProbeConfig)
         self._operations = _coerce_config(operations, OpenSandboxOperationConfig)
         self._attribution = _coerce_config(attribution, OpenSandboxAttributionConfig)
+        self._identity = _coerce_config(identity, OpenSandboxIdentityConfig)
+        self._identity_records: dict[str, dict[str, Any]] = {}
         # Shared injected transport. The SDK never closes transports it did not
         # create, so the provider owns this one: built once, reused by every
         # ConnectionConfig, closed in aclose().
@@ -1247,7 +1269,80 @@ class OpenSandboxProvider:
     def _command_retry_count(self) -> int:
         return self._operations.command_retries
 
+    def identity_verification(self, handle: SandboxHandle) -> dict[str, Any]:
+        """Return execution-isolation evidence without exposing command contents."""
+        return dict(
+            self._identity_records.setdefault(
+                handle.sandbox_id,
+                {
+                    "schema_version": 1,
+                    "enabled": self._identity.hostname_suffix is not None,
+                    "expected_hostname": (
+                        handle.sandbox_id + self._identity.hostname_suffix
+                        if self._identity.hostname_suffix is not None
+                        else None
+                    ),
+                    "guarded_commands": 0,
+                    "confirmed_responses": 0,
+                    "identity_errors": 0,
+                    "guarded_uploads": 0,
+                    "guarded_downloads": 0,
+                },
+            )
+        )
+
     async def _exec(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | float | None = None,
+        user: str | int | None = None,
+        retries: int | None = None,
+    ) -> SandboxExecResult:
+        """Check identity inside the same command request as every action."""
+        if self._identity.hostname_suffix is None:
+            return await self._exec_unchecked(
+                handle, command, cwd=cwd, env=env, timeout_s=timeout_s, user=user, retries=retries
+            )
+        self.identity_verification(handle)
+        record = self._identity_records[handle.sandbox_id]
+        record["guarded_commands"] += 1
+        marker = "NEMO_GYM_IDENTITY_" + uuid4().hex
+        expected = shlex.quote(record["expected_hostname"])
+        guarded = (
+            "nemo_gym_actual_hostname=\n"
+            "IFS= read -r nemo_gym_actual_hostname < /proc/sys/kernel/hostname\n"
+            f'if [ "$nemo_gym_actual_hostname" != {expected} ]; then\n'
+            f"  printf '%s\\n' '{marker} MISMATCH' >&2\n"
+            "  exit 97\n"
+            "fi\n"
+            f"printf '%s\\n' '{marker}'\n"
+        )
+        # Apply cwd after the guard: a missing cwd should remain a normal command
+        # error, and must not bypass identity checking in execd's launch phase.
+        if cwd is not None:
+            guarded += f"cd -- {shlex.quote(cwd)} || exit $?\n"
+        result = await self._exec_unchecked(
+            handle, guarded + command, cwd=None, env=env, timeout_s=timeout_s, user=user, retries=retries
+        )
+        prefix = marker + "\n"
+        stdout = result.stdout or ""
+        if stdout == marker:
+            output = None
+        elif stdout.startswith(prefix):
+            output = stdout[len(prefix) :] or None
+        else:
+            record["identity_errors"] += 1
+            raise SandboxBackendUnreachableError(
+                f"OpenSandbox identity could not be verified; expected hostname {record['expected_hostname']!r}"
+            )
+        record["confirmed_responses"] += 1
+        return replace(result, stdout=output)
+
+    async def _exec_unchecked(
         self,
         handle: SandboxHandle,
         command: str,
@@ -1541,6 +1636,8 @@ class OpenSandboxProvider:
 
     async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> SandboxPtySession:
         """Open an interactive execd PTY session inside a sandbox."""
+        if self._identity.hostname_suffix is not None:
+            raise SandboxPtyError("PTY operations are unsupported with required OpenSandbox identity checks")
         from nemo_gym.sandbox.providers.opensandbox.pty import open_pty_session
 
         base_url, headers, request_timeout_s = await self._pty_target(handle)
@@ -1565,6 +1662,8 @@ class OpenSandboxProvider:
         since: int | None = None,
     ) -> SandboxPtySession:
         """Re-attach to an existing execd PTY session by id."""
+        if self._identity.hostname_suffix is not None:
+            raise SandboxPtyError("PTY operations are unsupported with required OpenSandbox identity checks")
         from nemo_gym.sandbox.providers.opensandbox.pty import _PTY_TAKEOVER_RETRY_DELAYS, attach_pty_session
 
         base_url, headers, request_timeout_s = await self._pty_target(handle)
@@ -1615,6 +1714,9 @@ class OpenSandboxProvider:
 
     async def _write_file(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:
         """Write one file into an OpenSandbox sandbox."""
+        if self._identity.hostname_suffix is not None:
+            await self._write_file_guarded(handle, target_path, data)
+            return
         await self._await_sdk_operation(
             lambda: handle.raw.files.write_file(target_path, data),
             operation=f"write_file({target_path})",
@@ -1626,6 +1728,8 @@ class OpenSandboxProvider:
 
     async def _read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
         """Read one file from an OpenSandbox sandbox."""
+        if self._identity.hostname_suffix is not None:
+            return await self._read_file_guarded(handle, source_path)
         return await self._await_sdk_operation(
             lambda: handle.raw.files.read_bytes(source_path),
             operation=f"read_file({source_path})",
@@ -1634,6 +1738,45 @@ class OpenSandboxProvider:
             if self._connection.request_timeout_s is not None
             else None,
         )
+
+    async def _file_command(self, handle: SandboxHandle, command: str) -> SandboxExecResult:
+        result = await self._exec(handle, command, timeout_s=120, retries=0)
+        if result.return_code != 0 or result.error_type is not None:
+            raise RuntimeError(f"Guarded OpenSandbox file operation failed (rc={result.return_code})")
+        return result
+
+    async def _write_file_guarded(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:
+        payload = data.encode() if isinstance(data, str) else data
+        temporary = target_path + ".nemo-gym-upload-" + uuid4().hex
+        quoted = shlex.quote(temporary)
+        parent = shlex.quote(str(Path(target_path).parent))
+        await self._file_command(handle, f"umask 022; mkdir -p -- {parent} && : > {quoted}")
+        chunk_size = self._identity.file_chunk_bytes
+        for offset in range(0, len(payload), chunk_size):
+            encoded = base64.b64encode(payload[offset : offset + chunk_size]).decode("ascii")
+            await self._file_command(handle, f"printf '%s' '{encoded}' | base64 -d >> {quoted}")
+        await self._file_command(handle, f"mv -f -- {quoted} {shlex.quote(target_path)}")
+        self._identity_records[handle.sandbox_id]["guarded_uploads"] += 1
+
+    async def _read_file_guarded(self, handle: SandboxHandle, source_path: str) -> bytes:
+        quoted = shlex.quote(source_path)
+        result = await self._file_command(handle, f"stat -c %s -- {quoted}")
+        size = int((result.stdout or "").strip())
+        if size < 0:
+            raise ValueError("Negative sandbox file size")
+        chunks = []
+        chunk_size = self._identity.file_chunk_bytes
+        for index, offset in enumerate(range(0, size, chunk_size)):
+            result = await self._file_command(
+                handle,
+                f"dd if={quoted} bs={chunk_size} skip={index} count=1 status=none | base64 -w0",
+            )
+            chunk = base64.b64decode("".join((result.stdout or "").split()), validate=True)
+            if len(chunk) != min(chunk_size, size - offset):
+                raise ValueError("Guarded sandbox file read was truncated or changed")
+            chunks.append(chunk)
+        self._identity_records[handle.sandbox_id]["guarded_downloads"] += 1
+        return b"".join(chunks)
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         """Upload one local file into an OpenSandbox sandbox."""

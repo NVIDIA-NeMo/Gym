@@ -206,6 +206,8 @@ class TerminalBench4VerifyResponse(BaseVerifyResponse):
 
     # Bookkeeping
     agent_sandbox_stopped: bool = False
+    agent_sandbox_id: Optional[str] = None
+    sandbox_identity_verification: Dict[str, Any] = Field(default_factory=dict)
     artifact_collection_time_s: float = 0.0
     verifier_sandbox_start_time_s: float = 0.0
     golden_patch_exit_code: Optional[int] = None
@@ -616,6 +618,13 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
 
     # -- endpoints --------------------------------------------------------------------------
 
+    @staticmethod
+    def _identity_evidence(sandbox: Optional[AsyncSandbox]) -> Dict[str, Any]:
+        provider = getattr(sandbox, "_provider", None)
+        handle = getattr(sandbox, "_handle", None)
+        method = getattr(provider, "identity_verification", None)
+        return method(handle) if callable(method) and handle is not None else {"enabled": False}
+
     async def cancel_session(self, request: Request) -> Dict[str, bool]:
         """Release a seeded session when the harness cannot reach verification.
 
@@ -699,6 +708,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 temp_dir.cleanup()
             await self._stop_sandbox(agent_sandbox, role="agent", task_name=task.task_name)
             raise
+        agent_sandbox_id = getattr(getattr(agent_sandbox, "_handle", None), "sandbox_id", None)
+        agent_identity = self._identity_evidence(agent_sandbox)
         if self.config.stop_agent_sandbox_before_verify:
             agent_stopped = await self._stop_sandbox(agent_sandbox, role="agent", task_name=task.task_name)
 
@@ -727,6 +738,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 agent_stopped = await self._stop_sandbox(agent_sandbox, role="agent", task_name=task.task_name)
             verifier_wall_time_s = monotonic() - verifier_started_at
             observation = self._verifier_observation(verifier_sandbox, outcome, verifier_wall_time_s)
+            verifier_identity = self._identity_evidence(verifier_sandbox)
             await self._stop_sandbox(verifier_sandbox, role="verifier", task_name=task.task_name)
 
         failure_reason = None if outcome.evaluation_completed else (outcome.error or "verifier did not complete")
@@ -752,6 +764,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             verifier_wall_time_s=outcome.wall_time_s,
             collect_hook_results=hook_results,
             agent_sandbox_stopped=agent_stopped,
+            agent_sandbox_id=agent_sandbox_id,
+            sandbox_identity_verification={"agent": agent_identity, "verifier": verifier_identity},
             artifact_collection_time_s=artifact_collection_time_s,
             verifier_sandbox_start_time_s=verifier_sandbox_start_time_s,
             golden_patch_exit_code=golden_exit_code,
