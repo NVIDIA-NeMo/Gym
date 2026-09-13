@@ -2,6 +2,11 @@
 title: "New Environment"
 description: ""
 ---
+<Tip>
+For benchmark authoring and GitHub PR or GitLab MR submission, see
+[Contribute a Benchmark](/main/contribute/environments/benchmark-contribution).
+</Tip>
+
 An environment includes the dataset, agent harness, verifier, and state. The model is external to the environment. A Gym config connects these components and supplies the runtime wiring.
 
 The onboarding flow below covers a complete environment or benchmark. A resources server may be a reusable scoring, tool, or state component, or it may ship a runnable composition and data. Manifest-backed onboarding currently writes canonical workloads under `environments/` and `benchmarks/`; runnable configs still colocated under `resources_servers/` remain visible as `no-manifest` migration entries.

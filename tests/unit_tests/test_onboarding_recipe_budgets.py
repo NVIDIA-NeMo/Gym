@@ -64,6 +64,13 @@ def test_every_documented_eval_run_has_explicit_smoke_limits(route: str, token_c
         _assert_budget(command, token_cap)
 
 
+def test_contribution_playbook_smoke_is_explicitly_bounded() -> None:
+    page = PAGES.parent / "contribute/environments/benchmark-contribution.mdx"
+    commands = _documented_runs(page.read_text())
+    assert len(commands) == 1
+    _assert_budget(commands[0], TOKEN_CAPS["native"])
+
+
 @pytest.mark.parametrize("flag", ["--limit", "--num-repeats", "--concurrency", "--max-output-tokens"])
 def test_budget_guard_rejects_missing_limits(flag: str) -> None:
     command = shlex.split("gym eval run --limit 1 --num-repeats 1 --concurrency 1 --max-output-tokens 128")

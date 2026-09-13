@@ -6,18 +6,25 @@ position: 5
 
 # Onboarding recipe setup
 
-Start with the [recipe index](/main/get-started/benchmark-onboarding), then choose the native,
-Harbor or legacy Verifiers route. These are small authoring controls, not full benchmark runs.
-Native manifests and self-contained adapters use different setup paths; do not add a dummy
-resources server just to make an adapter fit the native manifest contract.
+Set up a source checkout for the [onboarding examples](/main/get-started/benchmark-onboarding).
+For a contribution, first select your repository using
+[Contribute a Benchmark](/main/contribute/environments/benchmark-contribution).
+Follow the selected recipe's setup; some adapters use a separate server environment.
 
 ## Pin the checkout and Python
 
-Use a source checkout containing the recipe and keep its revision throughout validation:
+Use a source checkout containing the recipe and keep its revision throughout validation.
+If a contribution playbook already created your checkout, **stay in that checkout
+and skip this clone block**. Otherwise, for a public control only:
 
 ```bash
 git clone https://github.com/NVIDIA-NeMo/Gym.git
 cd Gym
+```
+
+From the selected checkout's root:
+
+```bash
 git rev-parse HEAD
 uv --version
 uv python install 3.13.14
