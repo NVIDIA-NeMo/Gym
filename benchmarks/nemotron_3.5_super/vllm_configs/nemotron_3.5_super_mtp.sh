@@ -38,6 +38,7 @@ VLLM_PREFILL_ARGS=(
     --max-num-seqs 1024
     --data-parallel-size-local 1
     --tensor-parallel-size 4
+    --enable-logging-iteration-details
 )
 VLLM_DECODE_ARGS=(
     --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'

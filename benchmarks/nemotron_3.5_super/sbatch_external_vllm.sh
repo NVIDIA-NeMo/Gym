@@ -115,6 +115,9 @@ export VLLM_SSM_CONV_STATE_LAYOUT=DS
 export VLLM_USE_FASTOKENS=1
 export VLLM_USE_V2_MODEL_RUNNER=0
 
+# TODO @bxyu-nvidia: Remove
+export VLLM_LOGGING_LEVEL=DEBUG
+
 # NIXL uses UCX for cross-node KV transfer. Explicitly enable UCX's CUDA
 # transports and the GB200 InfiniBand interface; otherwise UCX treats VRAM as
 # host memory and NIXL KV-cache registration fails with NIXL_ERR_BACKEND.
