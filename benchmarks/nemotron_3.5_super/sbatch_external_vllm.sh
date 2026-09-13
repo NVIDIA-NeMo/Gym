@@ -113,6 +113,7 @@ export VLLM_SSM_CONV_STATE_LAYOUT=DS
 
 # Generic vLLM environment variables.
 export VLLM_USE_FASTOKENS=1
+export VLLM_USE_V2_MODEL_RUNNER=0
 
 # NIXL uses UCX for cross-node KV transfer. Explicitly enable UCX's CUDA
 # transports and the GB200 InfiniBand interface; otherwise UCX treats VRAM as
@@ -139,8 +140,6 @@ if (( SLURM_PROCID == 0 )); then
     router_args=( \
         --prefill-policy $ROUTER_PREFILL_POLICY \
         --decode-policy $ROUTER_DECODE_POLICY \
-        --balance-abs-threshold 4 \
-        --balance-rel-threshold 1.1 \
         --vllm-pd-disaggregation \
         --host \$this_node_hostname \
         --port $ROUTER_SERVER_PORT \
@@ -268,6 +267,8 @@ EOF
 )
 
 # --segment > 0 otherwise the engine will hang on the second or third engine step.
+SEGMENT=${SEGMENT:-$NUM_NODES}
+
 submit_dir=$(pwd -P)
 # An exported connection is sent as arguments; otherwise env.yaml is read.
 if [[ -n "$OPENSANDBOX_DOMAIN" ]]; then
@@ -290,7 +291,7 @@ main_job_id=$(
         --ntasks-per-node=1 \
         --comment="$SLURM_COMMENT" \
         --exclusive \
-        --segment=$NUM_NODES \
+        --segment=$SEGMENT \
         --wrap 'exec bash -c "$batch_command"'
 )
 main_job_id=${main_job_id%%;*}
@@ -303,7 +304,7 @@ if (( should_run_eval )); then
             --parsable \
             --dependency=afterany:"$main_job_id" \
             --partition=cpu \
-            --qos=cpu-short \
+            --qos=cpu-normal \
             --gres=none \
             --gpus-per-node=0 \
             --nodes=1 \
