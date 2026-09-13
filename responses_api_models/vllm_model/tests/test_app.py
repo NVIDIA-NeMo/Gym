@@ -15,6 +15,7 @@
 import asyncio
 import json
 import logging
+from types import SimpleNamespace
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
@@ -24,6 +25,12 @@ from pytest import MonkeyPatch, mark, raises
 
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
+from nemo_gym._checkpoint.model_control_contracts import (
+    GenerationCutInventory,
+    GenerationCutPrefix,
+    GenerationCutPrefixAck,
+    GenerationCutReceipt,
+)
 from nemo_gym.openai_utils import (
     NeMoGymAsyncOpenAI,
     NeMoGymChatCompletion,
@@ -86,6 +93,102 @@ _TEST_LINEAGE = InMemoryLineageStore()
 
 def lineage_index():
     return _TEST_LINEAGE.index
+
+
+@mark.asyncio
+async def test_generation_cut_routes_each_call_to_its_owning_vllm_worker(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN", "test-control-token")
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8080,
+        entrypoint="",
+        name="vllm_model",
+        base_url="http://worker-0:8000/v1",
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="dummy_model",
+        return_token_id_information=False,
+        uses_reasoning_parser=False,
+        uses_interleaved_reasoning=False,
+    )
+    model = VLLMModel(
+        config=config,
+        server_client=MagicMock(
+            spec=ServerClient,
+            global_config_dict={
+                "token_id_capture": {
+                    "enabled": True,
+                    "external_staging": True,
+                    "rebuild_response": False,
+                    "generation_prefix_cuts_enabled": True,
+                }
+            },
+        ),
+    )
+    client = model._clients[0]
+    model._generation_cut_clients["call-1"] = client
+    inventory = GenerationCutInventory.build(
+        checkpoint_id="checkpoint-1",
+        server_name="policy",
+        active_prefixes=[
+            GenerationCutPrefix(
+                ticket_id="ticket-1",
+                rollout_id="rollout-1",
+                attempt_index=0,
+                model_call_id="call-1",
+                admitted_at=1.0,
+            )
+        ],
+    )
+    sent: dict[str, Any] = {}
+
+    async def fake_request(**kwargs: Any) -> SimpleNamespace:
+        sent.update(kwargs)
+        worker_inventory = GenerationCutInventory.model_validate(kwargs["json"])
+        receipt = GenerationCutReceipt(
+            checkpoint_id=worker_inventory.checkpoint_id,
+            cut_id="worker-cut",
+            inventory_digest=worker_inventory.inventory_digest,
+            inventory=worker_inventory,
+            backend_snapshot_id="worker-tq-cut",
+            prefixes=tuple(
+                GenerationCutPrefixAck(
+                    **prefix.model_dump(mode="json"),
+                    disposition="durable_prefix",
+                    frozen_buffer_id="buffer-1",
+                    staging_key="prefix-1",
+                    prefix_token_count=5,
+                    prefix_digest="a" * 64,
+                )
+                for prefix in worker_inventory.active_prefixes
+            ),
+        )
+        return SimpleNamespace(payload=receipt.model_dump(mode="json"))
+
+    async def fake_raise_for_status(_response: SimpleNamespace) -> None:
+        return None
+
+    async def fake_get_response_json(response: SimpleNamespace) -> dict[str, Any]:
+        return response.payload
+
+    monkeypatch.setattr("responses_api_models.vllm_model.app.http_request", fake_request)
+    monkeypatch.setattr(
+        "responses_api_models.vllm_model.app.raise_for_status",
+        fake_raise_for_status,
+    )
+    monkeypatch.setattr(
+        "responses_api_models.vllm_model.app.get_response_json",
+        fake_get_response_json,
+    )
+
+    receipt = await model.checkpoint_generation_cut(inventory)
+
+    assert sent["url"] == ("http://worker-0:8000/ng-control/v1/generation-cut")
+    assert sent["headers"] == {"Authorization": "Bearer test-control-token"}
+    assert isinstance(sent["json"], dict)
+    assert receipt.inventory == inventory
+    assert receipt.prefixes[0].staging_key == "prefix-1"
 
 
 def test_strip_hosted_only_tool_fields_pops_strict() -> None:
