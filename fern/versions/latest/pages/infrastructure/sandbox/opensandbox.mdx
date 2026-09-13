@@ -16,33 +16,19 @@ for resource requests vs limits, timeout and retry guidance, and the failure sig
 ### Obtain service access
 
 Installing Gym does not provision an OpenSandbox server or issue a key.
-`OPENSANDBOX_API_KEY` authenticates to **your OpenSandbox deployment**; it is not
-an OpenCode login, a model-provider key, or a container-registry credential.
+`OPENSANDBOX_API_KEY` authenticates to **your OpenSandbox deployment**.
 
 Choose an access route before running an agent:
 
 - **An existing organization-managed deployment:** request access from the team
   operating that OpenSandbox service, using its approved internal access runbook.
-  Ask for the client endpoint (including scheme and port), credential delivery
-  and rotation procedure, required network/VPN access, permitted task images,
-  and approved concurrency, CPU/memory, sandbox lifetime, and usage/cost limits.
-  These are deployment-specific; this repository does not supply shared service
-  credentials or grant access to NVIDIA infrastructure. Keep private runbook
-  links and access requests in your organization's approved channels.
 - **Your own deployment:** follow the upstream
   [OpenSandbox server deployment guide](https://github.com/opensandbox-group/OpenSandbox/blob/main/docs/components/server.md)
   and [server configuration reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md).
   The operator configures a non-empty `api_key` under the server's `[server]`
   section and securely supplies that value to clients as `OPENSANDBOX_API_KEY`.
   Deploy and secure the server before using Gym; installing the SDK alone is not
-  sufficient. Upstream provides Docker and Kubernetes deployment paths, but
-  benchmark images, volumes, networking, and resource requirements must still be
-  validated for your chosen deployment.
-
-If you do not have an organization-managed service, use the self-hosted route;
-the in-cluster default below is not a public hosted endpoint. For public Gym
-configuration help, [open a Gym issue](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose)
-with sanitized details, never credentials or private infrastructure information.
+  sufficient.
 
 ### Configure the client
 
