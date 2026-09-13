@@ -80,11 +80,14 @@ from nemo_gym.responses_streaming import (
     validate_streaming_responses_params,
 )
 from nemo_gym.rollout_correlation import (
+    ATTEMPT_INDEX_HEADER,
     MODEL_CALL_CAPTURE_OUTCOME_HEADER,
     MODEL_CALL_ID_HEADER,
     PARENT_MODEL_CALL_ID_HEADER,
+    ROLLOUT_ID_HEADER,
     SOURCE_CAPTURE_KEY_HEADER,
     maybe_rollout_id_from_run_body,
+    split_transport_rollout_id,
 )
 from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap, join_model_call_observations
 from nemo_gym.server_utils import (
@@ -1476,9 +1479,17 @@ class _CaptureMiddleware:
         sink_token = None
         capture_context = None
         if capture_wanted:
+            logical_rollout_id = _scope_header(scope, ROLLOUT_ID_HEADER)
+            attempt_index_raw = _scope_header(scope, ATTEMPT_INDEX_HEADER)
+            if logical_rollout_id is None:
+                logical_rollout_id, attempt_index = split_transport_rollout_id(rollout_id)
+            else:
+                attempt_index = int(attempt_index_raw or "0")
             capture_context = CaptureContext(
                 rollout_id=rollout_id,
                 model_call_id=model_call_id,
+                logical_rollout_id=logical_rollout_id,
+                attempt_index=attempt_index,
                 token_sink=token_sink,
                 lineage_store=self._capture_ledger if self._external_staging else self._lineage_store,
                 delta_records=self._delta_records,
