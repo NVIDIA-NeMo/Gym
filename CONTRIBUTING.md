@@ -73,12 +73,14 @@ For complete development setup, CI/CD requirements, DCO sign-off, and troublesho
 **Quick Start:**
 
 ```bash
-git clone git@github.com:NVIDIA-NeMo/Gym.git
+git clone https://github.com/NVIDIA-NeMo/Gym.git
 cd Gym
 uv venv --python 3.13.14 && source .venv/bin/activate
 uv sync --extra dev
 pre-commit install
 ```
+
+Cloning over HTTPS needs no GitHub credentials. If you have an SSH key registered with GitHub, `git clone git@github.com:NVIDIA-NeMo/Gym.git` also works.
 
 **Important:** All commits must be signed with DCO sign-off (`-s`):
 
