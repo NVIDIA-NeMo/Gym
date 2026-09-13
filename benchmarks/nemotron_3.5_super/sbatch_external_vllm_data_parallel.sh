@@ -148,7 +148,7 @@ if (( SLURM_PROCID == 0 )); then
         --decode http://\$DECODE_HEAD:$DECODE_SERVER_PORT \
         --host \$this_node_hostname \
         --port $ROUTER_SERVER_PORT \
-        --intra-node-data-parallel-size 1 \
+        --intra-node-data-parallel-size 4 \
         --request-timeout-secs 86400 \
         --log-level error
     )
