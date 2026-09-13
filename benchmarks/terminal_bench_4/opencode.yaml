@@ -20,6 +20,8 @@ terminal_bench_4_opencode:
         kwargs:
           # Match Harbor 0.23 Docker execution without interactive startup output.
           exec_shell: bash -c
+          # The selected GPU deployment serves H100s and rejects gpu_type filters.
+          sandbox_request_gpu_type: false
           sandbox_provider_options:
             resource_requests: limits
           compose_image_configs: benchmarks/terminal_bench_4/compose-images.json
@@ -32,6 +34,10 @@ terminal_bench_4_opencode:
                 transport_backend: aiohttp
                 tls_verify: false
               create:
+                # Five retries after the initial attempt, with exponential jitter.
+                retries: 5
+                retry_delay_s: 5
+                retry_max_delay_s: 60
                 request_timeout_s: 1200
                 timeout_s: 1500
                 connect_attempt_timeout_s: 1500

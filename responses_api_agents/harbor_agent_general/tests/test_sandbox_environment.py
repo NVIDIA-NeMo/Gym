@@ -28,7 +28,8 @@ def make_environment(tmp_path: Path, **kwargs) -> HarborSandboxEnvironment:
     )
 
 
-def test_current_resources_env_and_gpu_type(tmp_path):
+@pytest.mark.parametrize("request_gpu_type", [True, False])
+def test_current_resources_env_and_gpu_type(tmp_path, request_gpu_type):
     env = make_environment(
         tmp_path,
         task_env_config=EnvironmentConfig(
@@ -42,10 +43,12 @@ def test_current_resources_env_and_gpu_type(tmp_path):
         ),
         persistent_env={"TRIAL": "value"},
         sandbox_env={"EXTRA": "value"},
+        sandbox_request_gpu_type=request_gpu_type,
     )
     spec = env._build_spec()
     assert (spec.resources.cpu, spec.resources.memory_mib, spec.resources.disk_gib) == (16, 32768, 1000)
-    assert (spec.resources.gpu, spec.resources.gpu_type) == (1, "H100")
+    assert (spec.resources.gpu, spec.resources.gpu_type) == (1, "H100" if request_gpu_type else None)
+    assert env.task_env_config.gpu_types == ["H100"]
     assert spec.env == {"TASK": "value", "TRIAL": "value", "EXTRA": "value"}
     assert env.capabilities.gpus and not env.capabilities.mounted
     assert env.resource_capabilities().cpu_limit

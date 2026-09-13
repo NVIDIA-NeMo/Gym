@@ -26,7 +26,9 @@ from responses_api_agents.harbor_agent_general.compose_config import resolve_com
 class HarborSandboxEnvironment(NemoGymSandboxEnvironment):
     """Keep the legacy adapter stable while implementing the current Harbor contract."""
 
-    def __init__(self, *args, sandbox_provider=None, compose_image_configs=None, **kwargs):
+    def __init__(
+        self, *args, sandbox_provider=None, compose_image_configs=None, sandbox_request_gpu_type=True, **kwargs
+    ):
         # Keep credentials in the process environment, out of Harbor's saved job
         # and trial configs. Providers receive a private copy at construction.
         provider = deepcopy(sandbox_provider)
@@ -35,6 +37,9 @@ class HarborSandboxEnvironment(NemoGymSandboxEnvironment):
             if "api_key" not in connection and os.environ.get("OPENSANDBOX_API_KEY"):
                 connection["api_key"] = os.environ["OPENSANDBOX_API_KEY"]
         self._compose: AsyncSandboxCompose | None = None
+        # Dedicated GPU deployments can guarantee the required hardware without
+        # accepting a gpu_type scheduler filter. Keep the task's GPU count.
+        self._sandbox_request_gpu_type = sandbox_request_gpu_type
         self._active_service = ContextVar("harbor_sandbox_service", default=None)
         self._compose_image_configs = Path(compose_image_configs) if compose_image_configs else None
         if self._compose_image_configs is not None and not self._compose_image_configs.is_absolute():
@@ -75,7 +80,7 @@ class HarborSandboxEnvironment(NemoGymSandboxEnvironment):
             memory_mib=self._effective_memory_mb,
             disk_gib=math.ceil(config.storage_mb / 1024) if config.storage_mb else None,
             gpu=self._effective_gpus or None,
-            gpu_type=config.gpu_types[0] if config.gpu_types else None,
+            gpu_type=config.gpu_types[0] if config.gpu_types and self._sandbox_request_gpu_type else None,
         )
         return replace(
             super()._build_spec(),
