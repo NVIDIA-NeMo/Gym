@@ -23,15 +23,22 @@ that list either never resolves, never produced a verdict, or resolves inconsist
 passes (see `aggregate_golden_patch.py` and the README), so it is not worth carrying into the
 training jsonl at all rather than shipping a row no agent run could usefully score.
 
-Streams the Hub dataset and filters row-by-row rather than loading it fully: at ~2.5 GB the full
-train split is not worth materialising in memory just to keep 70% of it.
+Streams the Hub dataset and filters row-by-row rather than loading the full ~2.5 GB split just
+to keep 70% of it -- but the *kept* rows are still buffered and shuffled (fixed seed, so re-runs
+are reproducible) before writing, since the Hub's own row order is grouped by repo/creation time,
+not randomised, and training on that order as-is would bias early steps toward whichever repos
+happen to sort first.
 
     SWE_REBENCH_LIMIT=200 python resources_servers/swe_rebench/prepare_swe_rebench.py
 """
 
 import json
 import os
+import random
 from pathlib import Path
+
+
+SHUFFLE_SEED = 0
 
 
 DATASET_NAME = "nebius/SWE-rebench-V2"
@@ -74,29 +81,33 @@ def prepare(supported_ids: set[str], limit: int = 0) -> Path:
     OUTPUT_FPATH.parent.mkdir(parents=True, exist_ok=True)
     dataset = load_dataset(DATASET_NAME, split="train", streaming=True)
 
-    written = 0
+    rows = []
+    for example in dataset:
+        if limit and len(rows) >= limit:
+            break
+        if example["instance_id"] not in supported_ids:
+            continue
+
+        row = {field: example[field] for field in ROW_FIELDS}
+
+        content = row["problem_statement"]
+        interface = (example.get("interface") or "").strip()
+        if interface and interface != NO_NEW_INTERFACE_SENTINEL:
+            content = f"{content}\n\n## New interfaces to add:\n{interface}"
+
+        row["responses_create_params"] = {"input": [{"role": "user", "content": content}]}
+        row["agent_ref"] = AGENT_REF
+
+        rows.append(row)
+
+    random.Random(SHUFFLE_SEED).shuffle(rows)
+
     with OUTPUT_FPATH.open("w", encoding="utf-8") as fout:
-        for example in dataset:
-            if limit and written >= limit:
-                break
-            if example["instance_id"] not in supported_ids:
-                continue
-
-            row = {field: example[field] for field in ROW_FIELDS}
-
-            content = row["problem_statement"]
-            interface = (example.get("interface") or "").strip()
-            if interface and interface != NO_NEW_INTERFACE_SENTINEL:
-                content = f"{content}\n\n## New interfaces to add:\n{interface}"
-
-            row["responses_create_params"] = {"input": [{"role": "user", "content": content}]}
-            row["agent_ref"] = AGENT_REF
-
+        for row in rows:
             fout.write(json.dumps(row) + "\n")
-            written += 1
 
-    print(f"Wrote {written} SWE-rebench-V2 problems to {OUTPUT_FPATH}")
-    missing = len(supported_ids) - written
+    print(f"Wrote {len(rows)} SWE-rebench-V2 problems to {OUTPUT_FPATH} (shuffled, seed={SHUFFLE_SEED})")
+    missing = len(supported_ids) - len(rows)
     if missing:
         print(f"  {missing} supported id(s) from {SUPPORTED_IDS_FPATH.name} were not found in the Hub dataset")
     return OUTPUT_FPATH
