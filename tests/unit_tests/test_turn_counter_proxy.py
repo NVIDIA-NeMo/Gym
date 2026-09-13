@@ -45,6 +45,7 @@ async def _start_upstream() -> tuple[web.AppRunner, web.TCPSite, str, dict]:
 
     app = web.Application()
     app.router.add_post("/v1/chat/completions", chat)
+    app.router.add_post("/v1/responses", chat)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -290,3 +291,41 @@ async def test_start_rejects_invalid_max_turns():
             api_key="sk",
             max_turns=0,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("position", ["system_message", "user_message"])
+async def test_responses_proxy_reminds_and_rejects_without_forwarding(position):
+    runner, site, upstream, hits = await _start_upstream()
+    proxy = await start_turn_counter_proxy(
+        upstream_base_url=upstream, api_key="dummy", max_turns=2, position=position, trigger="per_turn"
+    )
+    try:
+        async with ClientSession() as client:
+            for attempt in range(1, 4):
+                body = {"input": [{"role": "user", "content": [{"type": "input_text", "text": "Solve the task"}]}]}
+                async with client.post(f"{proxy.base_url}/responses", json=body) as response:
+                    assert response.status == (200 if attempt <= 2 else 429)
+                    if attempt == 3:
+                        assert (await response.json())["error"]["code"] == "session_budget_exhausted"
+        assert hits["n"] == 2
+        assert proxy.turns_used == 3
+        first, last = (json.dumps(body) for body in hits["bodies"])
+        assert "1 turn(s) left" in first
+        assert "URGENT" in last
+        assert "input_text" in first
+    finally:
+        await proxy.stop()
+        await _stop_upstream(runner, site)
+
+
+def test_responses_string_input_and_tool_only_input_receive_reminders():
+    body = {"input": "Solve the task"}
+    inject_turn_reminder(body, n=1, max_turns=2)
+    assert body["input"][0] == {"role": "user", "content": "Solve the task"}
+    assert body["input"][-1]["role"] == "system"
+    tool = {"type": "function_call_output", "call_id": "call_1", "output": "done"}
+    body = {"input": [tool]}
+    inject_turn_reminder(body, n=1, max_turns=2, position="user_message")
+    assert body["input"][0] == tool
+    assert body["input"][1]["role"] == "user"

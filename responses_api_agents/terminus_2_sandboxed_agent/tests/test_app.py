@@ -3,7 +3,7 @@
 
 import logging
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -166,7 +166,8 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dump_trajectory", [False, True])
 @pytest.mark.parametrize("debug", [False, True])
-async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_trajectory, debug):
+@pytest.mark.parametrize("constrained", [False, True])
+async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_trajectory, debug, constrained):
     config = Terminus2AgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -174,7 +175,8 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         name="terminus_2_1_agent",
         resources_server=ResourcesServerRef(type="resources_servers", name="swebench_resources_server"),
         model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
-        max_turns=100,
+        max_turns=None if constrained else 100,
+        turn_constraint={"enforcement": "proxy", "limit": 2} if constrained else None,
         enable_summarize=True,
         proactive_summarization_threshold=8000,
         tmux_pane_width=160,
@@ -191,6 +193,9 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
     set_level = MagicMock()
     monkeypatch.setattr(app_module.harbor_logger, "setLevel", set_level)
     server = Terminus2Agent(config=config, server_client=MagicMock(spec=ServerClient))
+    proxy = SimpleNamespace(base_url="http://turn-proxy/v1", turns_used=3, stop=AsyncMock())
+    start_proxy = AsyncMock(return_value=proxy)
+    monkeypatch.setattr(app_module, "start_turn_counter_proxy", start_proxy)
     sandbox_calls = []
 
     async def sandbox_exec(command, **kwargs):
@@ -203,6 +208,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         session = SimpleNamespace()
 
         def __init__(self, **kwargs):
+            assert kwargs["max_turns"] == (None if constrained else 100)
             self.kwargs = kwargs
             self._session = SimpleNamespace(stop=self.stop)
             self._times_spent = [1.0, 3.0]
@@ -255,6 +261,18 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         NeMoGymResponseCreateParamsNonStreaming(input="solve this"),
         sandbox,
     )
+
+    if constrained:
+        start_proxy.assert_awaited_once()
+        assert start_proxy.call_args.kwargs["upstream_base_url"] == "http://model/v1"
+        assert start_proxy.call_args.kwargs["max_turns"] == 2
+        proxy.stop.assert_awaited_once()
+        constraint = metrics.pop("turn_constraint")
+        assert constraint["realized"]["observed_count"] == 3
+        assert constraint["realized"]["exhausted"] is True
+        assert constraint["requested"]["limit"] == 2
+    else:
+        start_proxy.assert_not_awaited()
 
     assert metrics == {
         "terminus2_completed": True,

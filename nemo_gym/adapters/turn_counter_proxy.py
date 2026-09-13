@@ -150,23 +150,24 @@ def _threshold_message_body(n: int, max_turns: int, remaining: int, severity: _S
     )
 
 
-def _append_to_last_user_message(messages: list, notice: str) -> None:
+def _append_to_last_user_message(messages: list, notice: str, *, text_type: str = "text") -> None:
     for msg in reversed(messages):
         if msg.get("role") != "user":
             continue
         content = msg.get("content")
         if isinstance(content, list):
             tail = content[-1] if content else None
-            if isinstance(tail, dict) and tail.get("type") == "text":
+            if isinstance(tail, dict) and tail.get("type") == text_type:
                 existing = tail.get("text", "")
                 tail["text"] = f"{existing}\n\n{notice}" if existing else notice
             else:
-                content.append({"type": "text", "text": notice})
+                content.append({"type": text_type, "text": notice})
         elif isinstance(content, str):
             msg["content"] = f"{content}\n\n{notice}" if content else notice
         else:
             msg["content"] = notice
         return
+    messages.append({"role": "user", "content": notice})
 
 
 def inject_turn_reminder(
@@ -177,14 +178,10 @@ def inject_turn_reminder(
     position: Position = "system_message",
     trigger: Trigger = "auto",
 ) -> dict[str, Any]:
-    """Mutate (and return) a chat-completions body with a turn reminder when one is due."""
+    """Add a reminder to a Chat Completions or Responses API request."""
     if position not in ("system_message", "user_message"):
         raise ValueError(f"invalid position: {position!r}")
     cadence = resolve_reminder_trigger(trigger, max_turns)
-
-    messages = body.get("messages")
-    if not isinstance(messages, list):
-        return body
 
     severity = _threshold_severity(n, max_turns)
     remaining = max_turns - n
@@ -198,10 +195,23 @@ def inject_turn_reminder(
         text = _PER_TURN_TEMPLATE.format(remaining=remaining)
     notice = f"[SYSTEM] {text}" if position == "system_message" else text
 
+    messages = body.get("messages")
+    text_type = "text"
+    if not isinstance(messages, list):
+        if "input" not in body:
+            return body
+        messages = body["input"]
+        if isinstance(messages, str):
+            messages = [{"role": "user", "content": messages}]
+            body["input"] = messages
+        if not isinstance(messages, list):
+            return body
+        text_type = "input_text"
+
     if position == "system_message":
         messages.append({"role": "system", "content": notice})
     else:
-        _append_to_last_user_message(messages, notice)
+        _append_to_last_user_message(messages, notice, text_type=text_type)
     return body
 
 

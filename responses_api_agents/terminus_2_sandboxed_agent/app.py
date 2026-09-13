@@ -6,6 +6,7 @@ import json
 import logging
 import sys
 import tempfile
+from importlib.metadata import version
 from pathlib import Path
 from time import perf_counter, time
 from traceback import format_exc
@@ -19,8 +20,13 @@ from harbor.llms.base import BaseLLM, ContextLengthExceededError, LLMResponse
 from harbor.models.agent.context import AgentContext
 from harbor.models.metric.usage_info import UsageInfo
 from harbor.utils.logger import logger as harbor_logger
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
+from nemo_gym.adapters.turn_counter_proxy import (
+    TurnConstraintConfig,
+    start_turn_counter_proxy,
+    turn_constraint_metadata,
+)
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -53,6 +59,7 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_turns: int | None
+    turn_constraint: Optional[TurnConstraintConfig] = None
     parser_name: str = "json"
     enable_summarize: bool
     proactive_summarization_threshold: int
@@ -69,6 +76,12 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_timeout: float
     remote_tmux_binary_path: Optional[str]
+
+    @model_validator(mode="after")
+    def _validate_turn_constraint(self) -> "Terminus2AgentConfig":
+        if self.turn_constraint is not None and self.max_turns is not None:
+            raise ValueError("proxy turn_constraint requires max_turns=null to disable the native budget")
+        return self
 
 
 class Terminus2AgentRunRequest(BaseRunRequest):
@@ -332,13 +345,39 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         sandbox: AsyncSandbox,
     ) -> Tuple[NeMoGymResponse, Dict[str, Any]]:
-        start_time = perf_counter()
-        instruction = _instruction(body.input)
-
         model_base_url = (
             self.base_url_for_run(base_url=get_server_url(self.config.model_server.name), body=await request.json())
             + "/v1"
         )
+        constraint = self.config.turn_constraint
+        if constraint is None:
+            return await self._execute_impl(request, body, sandbox, model_base_url)
+        proxy = await start_turn_counter_proxy(
+            upstream_base_url=model_base_url,
+            api_key="dummy",
+            max_turns=constraint.limit,
+            position=constraint.reminder.position,
+            trigger=constraint.reminder.trigger,
+            label=request.session[SESSION_ID_KEY],
+        )
+        try:
+            response, metrics = await self._execute_impl(request, body, sandbox, proxy.base_url)
+            metrics["turn_constraint"] = turn_constraint_metadata(
+                constraint, proxy, harness_version=f"harbor/{version('harbor')}:terminus-2"
+            ).model_dump()
+            return response, metrics
+        finally:
+            await proxy.stop()
+
+    async def _execute_impl(
+        self,
+        request: Request,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        sandbox: AsyncSandbox,
+        model_base_url: str,
+    ) -> Tuple[NeMoGymResponse, Dict[str, Any]]:
+        start_time = perf_counter()
+        instruction = _instruction(body.input)
         llm = NeMoGymLLM(
             client=NeMoGymAsyncOpenAI(base_url=model_base_url, api_key="dummy", internal=True),
             model_name=self.config.model_server.name,
