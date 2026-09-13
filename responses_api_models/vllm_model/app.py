@@ -231,6 +231,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Corresponds to the extra_body of OpenAI Client.
     extra_body: Optional[Dict[str, Any]] = None
 
+    # Stream only the external chat-completions transport, then assemble the same full
+    # response. Useful for hosted providers whose non-streaming read timeout is short.
+    stream_chat_completions: bool = False
+
     default_headers: Dict[str, str] = Field(default_factory=dict)
 
     # Optional path to a file that publishes the current backend base_url.
@@ -254,6 +258,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     @model_validator(mode="after")
     def _validate_prefix_supply(self) -> "VLLMModelConfig":
+        if self.stream_chat_completions and (
+            self.return_token_id_information or self.use_completions_api or self.is_responses_native
+        ):
+            raise ValueError("stream_chat_completions requires chat completions without token-id capture")
         if self.supply_prefix_token_ids and not self.return_token_id_information:
             raise ValueError("supply_prefix_token_ids requires return_token_id_information=true")
         if self.supply_prefix_token_ids and self.use_completions_api:
@@ -891,6 +899,10 @@ class VLLMModel(SimpleResponsesAPIModel):
         body_dict = body.model_dump(exclude_unset=True)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
+        if self.config.stream_chat_completions:
+            body_dict["stream"] = True
+            body_dict["stream_options"] = {**(body_dict.get("stream_options") or {}), "include_usage": True}
+
         client = self._resolve_client(request)
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
@@ -925,7 +937,12 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
 
         try:
-            chat_completion_dict = await client.create_chat_completion(**body_dict)
+            if self.config.stream_chat_completions:
+                from responses_api_models.vllm_model.streaming import streamed_chat_completion
+
+                chat_completion_dict = await streamed_chat_completion(client, body_dict)
+            else:
+                chat_completion_dict = await client.create_chat_completion(**body_dict)
         except ClientResponseError as e:
             if transport_io_enabled:
                 finished_ns = time_ns()
