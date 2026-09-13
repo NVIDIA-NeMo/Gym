@@ -49,6 +49,11 @@ terminal_bench_4_opencode:
               networking:
                 enabled: true
                 loopback_forwarding: true
+                # Slim Node images lack the Python runtime used by the TCP relay.
+                setup_command: >-
+                  if ! command -v python3 >/dev/null 2>&1; then
+                    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3;
+                  fi
               runtime_requirements:
                 resize_shared_memory: true
                 capability_probes:

@@ -458,11 +458,25 @@ class HarborAgent(SimpleResponsesAPIAgent):
             path_entries = [(task_paths.instruction_path, trial_paths.agent_dir / TaskPaths.TRAJECTORY_FILENAME)]
             step_rewards = [trial.verifier_result.rewards if trial.verifier_result is not None else None]
 
-        trajectories = [
-            Trajectory.model_validate_json(trajectory_path.read_text()) for _, trajectory_path in path_entries
-        ]
+        trajectories: list[Trajectory] = []
         conversion_warnings: list[str] = []
-        output = [self.convert_atif_to_gym_responses(trajectory, conversion_warnings) for trajectory in trajectories]
+        output = []
+        for _, trajectory_path in path_entries:
+            try:
+                trajectory_json = trajectory_path.read_text()
+            except FileNotFoundError:
+                if not self.has_graded_agent_exception(trial):
+                    raise
+                # A stopped agent may never export ATIF, while Harbor still runs
+                # its verifier. Keep the official grade and disclose missing IO.
+                conversion_warnings.append(
+                    f"ATIF trajectory missing after a graded agent exception: {trajectory_path}"
+                )
+                output.append([])
+            else:
+                trajectory = Trajectory.model_validate_json(trajectory_json)
+                trajectories.append(trajectory)
+                output.append(self.convert_atif_to_gym_responses(trajectory, conversion_warnings))
 
         if len(output) > 1:
             logger.warning(
