@@ -246,7 +246,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
             sandbox, body.workdir
         )
         self._session_id_to_sandbox[session_id] = sandbox
-        return ScaleSWESeedSessionResponse(sandbox_handle=str(sandbox.sandbox_id))
+        return ScaleSWESeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id))
 
     async def verify(self, request: Request, body: ScaleSWEVerifyRequest) -> ScaleSWEVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
