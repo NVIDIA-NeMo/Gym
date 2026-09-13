@@ -137,6 +137,41 @@ class SWEBenchWrapperConfig(BaseResponsesAPIAgentConfig):
         ),
     )
 
+    block_network_time_travel: bool = Field(
+        default=False,
+        description=(
+            "Close the network/package time-travel reward-hacking channels in the AGENT "
+            "container (opencode harness only; the eval container is unaffected). When enabled: "
+            "(1) a generated hosts file is bind-mounted over /etc/hosts blackholing "
+            "network_blackhole_domains (kills python urllib/requests fetches of "
+            "raw.githubusercontent/codeload zipballs and the Go module proxy, which argv "
+            "deny-lists cannot see); (2) GOPROXY=off GOSUMDB=off so `go get` cannot fetch newer "
+            "module versions; (3) pip/pip3 get a PATH shim that rejects the `download` "
+            "subcommand (measured dominant channel for fetching a task's own fixed release "
+            "from PyPI; no legitimate agent use) while passing all other pip usage through. "
+            "PyPI itself stays reachable for legitimate dependency installs. Accepted "
+            "residuals: `python -m pip download` bypasses the shim; github.com itself is not "
+            "blackholed by default so baseline_fix scripts installing from git URLs keep "
+            "working."
+        ),
+    )
+    network_blackhole_domains: List[str] = Field(
+        default_factory=lambda: [
+            "raw.githubusercontent.com",
+            "codeload.github.com",
+            "objects.githubusercontent.com",
+            "gist.githubusercontent.com",
+            "api.github.com",
+            "proxy.golang.org",
+            "sum.golang.org",
+            "index.golang.org",
+        ],
+        description=(
+            "Domains blackholed (0.0.0.0) in the agent container's /etc/hosts when "
+            "block_network_time_travel is enabled."
+        ),
+    )
+
     apptainer_memory_limit_mb: int = Field(
         default=64 * 1024,
         description=(
@@ -2040,6 +2075,42 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
         user_message_host_path.write_text(user_message)
         user_message_in_sif = "/opencode_setup/opencode/user_message.txt"
 
+        # Network time-travel block (see block_network_time_travel config docs).
+        # The hosts file is generated per rollout and bind-mounted over the agent
+        # container's /etc/hosts in _build_apptainer_command; the pip shim and Go
+        # proxy exports are injected into the agent command chain below. Placed
+        # AFTER conda activation so `command -v pip` resolves the env's real pip.
+        net_block_cmd = ""
+        if self.config.block_network_time_travel:
+            hosts_lines = ["127.0.0.1 localhost", "::1 localhost"]
+            for domain in self.config.network_blackhole_domains:
+                hosts_lines.append(f"0.0.0.0 {domain}")
+            hosts_host_path = self.config.persistent_dir / f"blackhole_hosts_{agent_run_id}"
+            hosts_host_path.write_text("\n".join(hosts_lines) + "\n")
+            # Shim body is base64-embedded to sidestep nested-quoting fragility in
+            # the generated bash script; ${NG_REAL_PIP} is substituted per binary.
+            shim_template = (
+                "#!/bin/sh\n"
+                'if [ "$1" = "download" ]; then\n'
+                '  echo "pip download is not permitted in this environment." >&2\n'
+                "  exit 1\n"
+                "fi\n"
+                'exec "${NG_REAL_PIP}" "$@"\n'
+            )
+            shim_b64 = base64.b64encode(shim_template.encode()).decode()
+            net_block_cmd = (
+                "export GOPROXY=off GOSUMDB=off && "
+                "mkdir -p /tmp/.ngshim && "
+                "for _p in pip pip3; do "
+                '_real=$(command -v "$_p" 2>/dev/null || true); '
+                'if [ -n "$_real" ] && [ "${_real#/tmp/.ngshim}" = "$_real" ]; then '
+                f"echo {shim_b64} | base64 -d | "
+                'sed "s|\\${NG_REAL_PIP}|$_real|" > "/tmp/.ngshim/$_p" && '
+                'chmod +x "/tmp/.ngshim/$_p"; '
+                "fi; done && "
+                "export PATH=/tmp/.ngshim:$PATH && "
+            )
+
         # Dataset-aware env activation before launching the agent. Activating
         # in the parent shell means the PATH / VIRTUAL_ENV / CONDA_DEFAULT_ENV
         # propagate down through run_infer.sh -> bun -> opencode's bash tool.
@@ -2156,6 +2227,7 @@ class OpenCodeHarnessProcessor(BaseDatasetHarnessProcessor):
             "echo '{}' >/root/.cache/opencode/models.json && "
             f"echo {shlex.quote(config_str)} >{config_file_path} && "
             f"{conda_activate_cmd}"
+            f"{net_block_cmd}"
             f"{denovoswe_clean_cmd}"
             f"{sanitize_refs_cmd}"
             f"{baseline_fix_cmd}"
@@ -3224,6 +3296,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                     f"--mount type=bind,src={params.resolved_system_prompt_template},"
                     f"dst=/opencode_setup/opencode/system_prompt.txt,ro"
                 )
+            if params.block_network_time_travel:
+                # Generated in OpenCodeHarnessProcessor.get_run_command; overrides the
+                # host /etc/hosts apptainer binds by default. Agent container only —
+                # this branch is mode=="agent", so eval keeps normal resolution.
+                blackhole_hosts_host = params.persistent_dir / f"blackhole_hosts_{params.agent_run_id}"
+                mount_args.append(f"--mount type=bind,src={blackhole_hosts_host},dst=/etc/hosts,ro")
         else:
             # OpenHands path (default).
             assert params.openhands_setup_dir is not None, "openhands_setup_dir not set"
