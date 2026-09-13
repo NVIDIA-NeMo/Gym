@@ -83,6 +83,7 @@ from nemo_gym.token_id_capture.staging.records import (
 
 LOG = logging.getLogger("nemo_gym.vllm_model")
 _PROPAGATE_CONTEXT_ERROR_ATTRIBUTE = "nemo_gym_vllm_propagate_context_error"
+_GENERATION_CUT_RPC_MAX_CONCURRENCY = 32
 
 _TRANSPORT_LOG_CONTEXT_HEADERS = {
     "run_id": "x-nemo-gym-log-run-id",
@@ -411,10 +412,16 @@ class VLLMModel(SimpleResponsesAPIModel):
         return self if self._generation_prefix_cuts_enabled else None
 
     def _remember_generation_cut_client(self, model_call_id: str, client: NeMoGymAsyncOpenAI) -> None:
-        """Retain recent call routing long enough to cover completion/cut races."""
+        """Retain active call routing until the model request exits."""
+        existing = self._generation_cut_clients.get(model_call_id)
+        if existing is not None and existing is not client:
+            raise RuntimeError(f"model call {model_call_id!r} changed generation worker while active")
         self._generation_cut_clients[model_call_id] = client
-        if len(self._generation_cut_clients) > 100_000:
-            self._generation_cut_clients.pop(next(iter(self._generation_cut_clients)))
+
+    def _forget_generation_cut_client(self, model_call_id: str, client: NeMoGymAsyncOpenAI) -> None:
+        """Retire one active route without removing a newer owner."""
+        if self._generation_cut_clients.get(model_call_id) is client:
+            self._generation_cut_clients.pop(model_call_id, None)
 
     async def checkpoint_generation_cut(self, inventory: GenerationCutInventory) -> GenerationCutReceipt:
         """Ask each owning RL worker to stage its current generated prefix."""
@@ -437,25 +444,37 @@ class VLLMModel(SimpleResponsesAPIModel):
                 continue
             by_client.setdefault(client.base_url, (client, []))[1].append(prefix)
 
-        backend_receipts: list[GenerationCutReceipt] = []
-        for base_url in sorted(by_client):
-            client, prefixes = by_client[base_url]
+        semaphore = asyncio.Semaphore(_GENERATION_CUT_RPC_MAX_CONCURRENCY)
+
+        async def checkpoint_client(
+            client: NeMoGymAsyncOpenAI,
+            prefixes: list[GenerationCutPrefix],
+        ) -> GenerationCutReceipt:
             worker_inventory = GenerationCutInventory.build(
                 checkpoint_id=inventory.checkpoint_id,
                 server_name=inventory.server_name,
                 active_prefixes=prefixes,
             )
-            response = await http_request(
-                method="POST",
-                url=f"{client.base_url.removesuffix('/v1')}/ng-control/v1/generation-cut",
-                headers={"Authorization": f"Bearer {self._generation_cut_control_token}"},
-                json=worker_inventory.model_dump(mode="json"),
-                _internal=True,
-            )
-            await raise_for_status(response)
-            receipt = GenerationCutReceipt.model_validate(await get_response_json(response))
+            async with semaphore:
+                response = await http_request(
+                    method="POST",
+                    url=f"{client.base_url.removesuffix('/v1')}/ng-control/v1/generation-cut",
+                    headers={"Authorization": f"Bearer {self._generation_cut_control_token}"},
+                    json=worker_inventory.model_dump(mode="json"),
+                    _internal=True,
+                )
+                await raise_for_status(response)
+                receipt = GenerationCutReceipt.model_validate(await get_response_json(response))
             receipt.validate_for(worker_inventory)
-            backend_receipts.append(receipt)
+            return receipt
+
+        tasks: list[asyncio.Task[GenerationCutReceipt]] = []
+        async with asyncio.TaskGroup() as task_group:
+            for base_url in sorted(by_client):
+                client, prefixes = by_client[base_url]
+                tasks.append(task_group.create_task(checkpoint_client(client, prefixes)))
+        backend_receipts = [task.result() for task in tasks]
+        for receipt in backend_receipts:
             acknowledgements.extend(receipt.prefixes)
 
         evidence = {
@@ -1048,16 +1067,35 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
+        capture_context = current_capture_context()
+        generation_cut_client = None
+        if self._generation_prefix_cuts_enabled and capture_context is not None:
+            generation_cut_client = self._resolve_client(request)
+            self._remember_generation_cut_client(capture_context.model_call_id, generation_cut_client)
+        try:
+            return await self._chat_completions(
+                request,
+                body,
+                resolved_client=generation_cut_client,
+            )
+        finally:
+            if generation_cut_client is not None and capture_context is not None:
+                self._forget_generation_cut_client(capture_context.model_call_id, generation_cut_client)
+
+    async def _chat_completions(
+        self,
+        request: Request,
+        body: NeMoGymChatCompletionCreateParamsNonStreaming,
+        *,
+        resolved_client: NeMoGymAsyncOpenAI | None,
+    ) -> NeMoGymChatCompletion:
         if self.config.use_completions_api:
             return await self._chat_completions_via_completions_api(request, body)
 
         body_dict = body.model_dump(exclude_unset=True)
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
-        client = self._resolve_client(request)
-        capture_context = current_capture_context()
-        if self._generation_prefix_cuts_enabled and capture_context is not None:
-            self._remember_generation_cut_client(capture_context.model_call_id, client)
+        client = resolved_client or self._resolve_client(request)
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
             if last_message["role"] == "assistant" and not (last_message["content"] or last_message.get("tool_calls")):
