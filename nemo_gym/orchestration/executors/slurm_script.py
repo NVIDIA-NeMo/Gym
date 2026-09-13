@@ -16,7 +16,9 @@
 import re
 import shlex
 from pathlib import Path
+from typing import Any
 
+from nemo_gym.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.orchestration.api import (
     BenchmarkRunConfig,
     NodePool,
@@ -109,11 +111,18 @@ def _render_service_command(
     mounts: list[str] | None = None,
     nodes: int | None = None,
     ntasks: int | None = None,
+    pre_command: str = "",
 ) -> str:
     var = bash_var(name)
     env_prefix = _resolve_env(env) if env else ""
     node_flags = f" --nodes={nodes} --ntasks={ntasks}" if (nodes is not None and nodes > 1) else ""
     mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in mounts)}" if mounts else ""
+    if pre_command:
+        # Wrapped in one shell so export/unset statements in pre_command are
+        # visible to the exec'd command; shlex.quote keeps the whole thing one
+        # word, so it can't interfere with --container-mounts/-image parsing
+        # regardless of what pre_command contains.
+        command = f"bash -c {shlex.quote(pre_command + chr(10) + 'exec ' + command)}"
     # --overlap lets this step share the allocation with other concurrent steps (driver + services).
     # --no-container-mount-home avoids polluting the container with host home directory contents.
     # PID is captured so the health check can detect early service death.
@@ -130,8 +139,12 @@ def _vllm_base_flags(service: VllmServiceConfig) -> str:
         f" --port {service.port}"
         f" --tensor-parallel-size {service.tensor_parallel_size}"
     )
+    if service.served_model_name:
+        cmd += f" --served-model-name {shlex.quote(service.served_model_name)}"
     if service.pipeline_parallel_size > 1:
         cmd += f" --pipeline-parallel-size {service.pipeline_parallel_size}"
+    if service.extra_args:
+        cmd += " " + service.extra_args
     return cmd
 
 
@@ -227,6 +240,10 @@ def _build_vllm_ray_serve_command(
         gateway_args += f" --gpus-per-node {max(gpus_per_node_values)}"
     if service.trust_remote_code:
         gateway_args += " --trust-remote-code"
+    if service.served_model_name:
+        gateway_args += f" --served-model-name {shlex.quote(service.served_model_name)}"
+    if service.extra_args:
+        gateway_args += f" --extra-args {shlex.quote(service.extra_args)}"
 
     # Embeds the gateway's source directly rather than git-cloning/installing nemo_gym into the
     # vLLM container - no driver.gym_install needed for this path.
@@ -285,6 +302,21 @@ def _node_totals(compute: SlurmComputeConfig) -> tuple[int, int]:
     return total_nodes, total_ntasks
 
 
+def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> dict[str, Any]:
+    """Auto-derive model_call_capture_dir from this benchmark's own real output
+    directory when observability is on and the caller didn't set one.
+
+    Hydra interpolation resolves before remote_bench_dir exists (it's computed
+    here, in build_sbatch_script, well after SubmitConfig validation), so
+    there's no way for a YAML value to reference it -- this has to happen in
+    Python, once the real path is known. An explicit model_call_capture_dir in
+    run always wins over this default.
+    """
+    if run.get(OBSERVABILITY_ENABLED_KEY_NAME) and MODEL_CALL_CAPTURE_DIR_KEY_NAME not in run:
+        return {**run, MODEL_CALL_CAPTURE_DIR_KEY_NAME: str(remote_bench_dir / "model-calls")}
+    return run
+
+
 def build_sbatch_script(
     config: SubmitConfig,
     benchmark_name: str,
@@ -318,6 +350,7 @@ def build_sbatch_script(
             # on a single node regardless of how many nodes the overall job spans).
             nodes=total_nodes if _vllm_spans_multiple_nodes(service, total_nodes) else None,
             ntasks=total_ntasks if _vllm_spans_multiple_nodes(service, total_nodes) else None,
+            pre_command=service.pre_command,
         )
         for name, service in config.services.items()
     )
@@ -338,7 +371,8 @@ def build_sbatch_script(
 
     output_path = "+output_jsonl_fpath=artifacts/rollouts.jsonl"
     extra_flags = ["--model-type openai_model"] if config.driver.policy_model else []
-    gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(benchmark.run))
+    run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
+    gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
     entrypoint = render_driver_entrypoint(
         repo=gi.repo if gi else None,
         ref=gi.ref if gi else None,

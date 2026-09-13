@@ -28,6 +28,7 @@ RayDistributedExecutor over nested placement groups (ray-project/ray#59064).
 import argparse
 import logging
 import os
+import shlex
 import socket
 import subprocess
 import time
@@ -61,6 +62,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Used to compute max_replicas_per_node; without it Serve packs replicas freely.",
     )
     parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--served-model-name", default=None)
+    parser.add_argument("--extra-args", default="", help="Raw extra flags appended verbatim to `vllm serve`.")
     return parser.parse_args(argv)
 
 
@@ -82,7 +85,13 @@ def max_replicas_per_node(
 
 
 def build_instance_command(
-    model: str, tensor_parallel_size: int, pipeline_parallel_size: int, trust_remote_code: bool, port: int
+    model: str,
+    tensor_parallel_size: int,
+    pipeline_parallel_size: int,
+    trust_remote_code: bool,
+    port: int,
+    served_model_name: str | None = None,
+    extra_args: str = "",
 ) -> list[str]:
     """The `vllm serve` command each replica runs for its own instance."""
     cmd = [
@@ -96,10 +105,14 @@ def build_instance_command(
         "--distributed-executor-backend",
         "ray",
     ]
+    if served_model_name:
+        cmd += ["--served-model-name", served_model_name]
     if pipeline_parallel_size > 1:
         cmd += ["--pipeline-parallel-size", str(pipeline_parallel_size)]
     if trust_remote_code:
         cmd.append("--trust-remote-code")
+    if extra_args:
+        cmd += shlex.split(extra_args)
     return cmd
 
 
@@ -112,11 +125,19 @@ class VLLMInstance:
     """One Ray Serve replica = one vLLM instance, proxying every request to its own subprocess."""
 
     def __init__(
-        self, model: str, tensor_parallel_size: int, pipeline_parallel_size: int, trust_remote_code: bool
+        self,
+        model: str,
+        tensor_parallel_size: int,
+        pipeline_parallel_size: int,
+        trust_remote_code: bool,
+        served_model_name: str | None = None,
+        extra_args: str = "",
     ) -> None:
         port = free_local_port()
         self._base_url = f"http://localhost:{port}"
-        cmd = build_instance_command(model, tensor_parallel_size, pipeline_parallel_size, trust_remote_code, port)
+        cmd = build_instance_command(
+            model, tensor_parallel_size, pipeline_parallel_size, trust_remote_code, port, served_model_name, extra_args
+        )
         # RAY_ADDRESS makes vLLM's own Ray executor join this cluster instead of starting its own.
         env = {**os.environ, "RAY_ADDRESS": ray.get_runtime_context().gcs_address}
         self._proc = subprocess.Popen(cmd, env=env)
@@ -186,6 +207,8 @@ def main(argv: list[str] | None = None) -> None:
         tensor_parallel_size=args.tensor_parallel_size,
         pipeline_parallel_size=args.pipeline_parallel_size,
         trust_remote_code=args.trust_remote_code,
+        served_model_name=args.served_model_name,
+        extra_args=args.extra_args,
     )
     serve.start(http_options={"host": "0.0.0.0", "port": args.port})
     serve.run(deployment)

@@ -158,7 +158,14 @@ def render_driver_entrypoint(
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
             'source "$HOME/.local/bin/env"',
             render_repo_checkout(repo, ref),
-            "uv pip install -e . --system",
+            # A real venv, not --system: --system targets whatever interpreter happens to be on
+            # the container's PATH, sidestepping uv's own project-aware Python selection - `uv
+            # venv` instead reads requires-python from pyproject.toml and auto-downloads a
+            # satisfying interpreter if the container's own Python doesn't qualify. Also never
+            # EXTERNALLY-MANAGED (PEP 668), so no --break-system-packages override needed either.
+            "uv venv --seed .venv",
+            "source .venv/bin/activate",
+            "uv pip install -e .",
         ]
 
     if prepare_cmd:
@@ -168,5 +175,5 @@ def render_driver_entrypoint(
         return '"${GYM_CMD[@]}"'
 
     preamble.append('exec "$@"')
-    body = "\n    ".join(preamble)
+    body = "\n    ".join(["set -euo pipefail", *preamble])
     return f"bash -c '\n    {body}\n' -- \"${{GYM_CMD[@]}}\""

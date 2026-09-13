@@ -62,6 +62,20 @@ def test_parse_args_all_fields():
     assert args.trust_remote_code is True
 
 
+def test_parse_args_served_model_name_and_extra_args():
+    args = parse_args(
+        ["--model", "org/model", "--port", "8000", "--served-model-name", "my-model", "--extra-args", "--foo bar"]
+    )
+    assert args.served_model_name == "my-model"
+    assert args.extra_args == "--foo bar"
+
+
+def test_parse_args_served_model_name_and_extra_args_default_to_none_and_empty():
+    args = parse_args(["--model", "org/model", "--port", "8000"])
+    assert args.served_model_name is None
+    assert args.extra_args == ""
+
+
 def test_parse_args_missing_required_raises():
     with pytest.raises(SystemExit):
         parse_args(["--port", "8000"])
@@ -161,3 +175,35 @@ def test_build_instance_command_no_trust_remote_code_by_default():
         model="org/model", tensor_parallel_size=1, pipeline_parallel_size=1, trust_remote_code=False, port=8001
     )
     assert "--trust-remote-code" not in cmd
+
+
+def test_build_instance_command_served_model_name():
+    cmd = build_instance_command(
+        model="org/model",
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        trust_remote_code=False,
+        port=8001,
+        served_model_name="my-model",
+    )
+    assert cmd[cmd.index("--served-model-name") + 1] == "my-model"
+
+
+def test_build_instance_command_no_served_model_name_by_default():
+    cmd = build_instance_command(
+        model="org/model", tensor_parallel_size=1, pipeline_parallel_size=1, trust_remote_code=False, port=8001
+    )
+    assert "--served-model-name" not in cmd
+
+
+def test_build_instance_command_extra_args_split_into_separate_tokens():
+    cmd = build_instance_command(
+        model="org/model",
+        tensor_parallel_size=1,
+        pipeline_parallel_size=1,
+        trust_remote_code=False,
+        port=8001,
+        extra_args="--max-model-len 8192",
+    )
+    assert "--max-model-len" in cmd
+    assert cmd[cmd.index("--max-model-len") + 1] == "8192"
