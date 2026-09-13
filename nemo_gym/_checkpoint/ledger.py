@@ -893,9 +893,9 @@ def install_model_checkpoint(
 
     def _require_quiescent() -> None:
         counts = limiter.counts()
-        if counts["state"] != "paused" or counts["inflight_total"] != 0:
+        if counts["state"] != "paused" or counts["generation_pending_total"] != 0:
             raise LedgerNotQuiescentError(
-                "capture-ledger commit requires paused admission and zero in-flight generation requests"
+                "capture-ledger commit requires paused admission and zero checkpoint-pending generation requests"
             )
 
     async def _commit_ledger(

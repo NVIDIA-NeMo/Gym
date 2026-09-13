@@ -100,12 +100,21 @@ def install_model_admission(
                 limiter.resume()
                 raise
             counts = limiter.counts()
-            return {
+            result = {
                 "state": counts["state"],
                 "workers": _workers(),
                 "inflight_total": counts["inflight_total"],
+                "response_inflight_total": counts["response_inflight_total"],
+                "generation_pending_total": counts["generation_pending_total"],
                 "waiters_total": counts["waiters_total"],
             }
+            if counts["state"] == AdmissionState.PAUSED.value:
+                result["generation_cut_proof"] = limiter.generation_cut_worker_proof(
+                    body.checkpoint_id,
+                    coordinator_sequence=1,
+                    worker_id="0",
+                ).model_dump(mode="json")
+            return result
 
         result = await fence.run_operation(
             body.checkpoint_id,
@@ -149,7 +158,7 @@ def install_model_admission(
         counts = limiter.counts()
         if counts["state"] == AdmissionState.PAUSED.value and fence.phase == CheckpointPhase.PREPARING:
             fence.mark_prepared(checkpoint_id)
-        return {
+        result = {
             "checkpoint_id": checkpoint_id,
             "state": counts["state"],
             "per_worker": {"0": {"state": counts["state"], "inflight": counts["inflight_total"]}},
@@ -162,6 +171,13 @@ def install_model_admission(
                 {"rollout_id": rollout_id, "attempt_index": attempt} for rollout_id, attempt in limiter.tombstones()
             ],
         }
+        if counts["state"] == AdmissionState.PAUSED.value:
+            result["generation_cut_proof"] = limiter.generation_cut_worker_proof(
+                checkpoint_id,
+                coordinator_sequence=1,
+                worker_id="0",
+            ).model_dump(mode="json")
+        return result
 
     @app.post(f"{MODEL_ADMISSION_URL_PREFIX}/resume")
     async def model_admission_resume(
