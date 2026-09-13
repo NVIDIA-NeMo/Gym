@@ -46,11 +46,6 @@ operator. A hosted E2B key does not automatically grant access to a separate gat
 they specify; deployments can require `connection.api_headers` in addition to or instead of
 an E2B key. Keep secret header values out of checked-in YAML.
 
-Before allocating a sandbox, confirm account/template access and quota with the console or
-operator. For authentication failures, check key expiry and the selected endpoint/account;
-for permission or quota failures, contact the account administrator or gateway operator.
-Do not include keys or authorization headers in support logs.
-
 ## Provider Config
 
 NeMo Gym ships an E2B config at `nemo_gym/sandbox/providers/e2b/configs/e2b.yaml`. It defines
