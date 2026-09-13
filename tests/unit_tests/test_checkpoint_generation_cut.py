@@ -250,7 +250,31 @@ async def test_backend_can_ack_explicit_durable_failure() -> None:
     limiter.close("ckpt-1")
 
     assert await limiter.prepare_generation_cut("ckpt-1", server_name="policy", timeout_s=1)
-    assert ticket.prepare_safe_reason == "durable_failure"
+    assert ticket.prepare_safe_reason is None
+    assert limiter.is_prepare_safe()
+    limiter.release(ticket)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_local_failure_is_retried_for_a_later_checkpoint() -> None:
+    backend = _FakeCutBackend(disposition="durable_failure")
+    limiter = AdmissionLimiter(backend)
+    ticket = limiter.admit(rollout_id="r", attempt_index=0)
+    ticket.generation_started = True
+    ticket.model_call_id = "call-1"
+
+    limiter.close("ckpt-1")
+    assert await limiter.prepare_generation_cut("ckpt-1", server_name="policy", timeout_s=1)
+    assert len(backend.calls) == 1
+
+    limiter.resume()
+    backend.disposition = "durable_prefix"
+    limiter.close("ckpt-2")
+    assert await limiter.prepare_generation_cut("ckpt-2", server_name="policy", timeout_s=1)
+    assert len(backend.calls) == 2
+    assert backend.calls[-1].checkpoint_id == "ckpt-2"
+    assert limiter.generation_cut_receipt is not None
+    assert limiter.generation_cut_receipt.prefixes[0].disposition == "durable_prefix"
     limiter.release(ticket)
 
 
