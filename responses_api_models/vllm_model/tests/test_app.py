@@ -20,6 +20,7 @@ from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
 from aiohttp import ClientResponseError
+from fastapi import Request
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch, mark, raises
 
@@ -191,6 +192,219 @@ async def test_generation_cut_routes_each_call_to_its_owning_vllm_worker(
     assert isinstance(sent["json"], dict)
     assert receipt.inventory == inventory
     assert receipt.prefixes[0].staging_key == "prefix-1"
+
+
+@mark.asyncio
+async def test_generation_cut_contacts_owning_workers_concurrently(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN", "test-control-token")
+    model = VLLMModel(
+        config=VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="policy",
+            base_url=["http://worker-0:8000/v1", "http://worker-1:8000/v1"],
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            uses_interleaved_reasoning=False,
+        ),
+        server_client=MagicMock(
+            spec=ServerClient,
+            global_config_dict={
+                "token_id_capture": {
+                    "enabled": True,
+                    "external_staging": True,
+                    "rebuild_response": False,
+                    "generation_prefix_cuts_enabled": True,
+                }
+            },
+        ),
+    )
+    inventory = GenerationCutInventory.build(
+        checkpoint_id="checkpoint-1",
+        server_name="policy",
+        active_prefixes=[
+            GenerationCutPrefix(
+                ticket_id=f"ticket-{index}",
+                rollout_id=f"rollout-{index}",
+                attempt_index=0,
+                model_call_id=f"call-{index}",
+                admitted_at=float(index),
+            )
+            for index in range(2)
+        ],
+    )
+    model._generation_cut_clients.update(
+        {
+            "call-0": model._clients[0],
+            "call-1": model._clients[1],
+        }
+    )
+    both_started = asyncio.Event()
+    release = asyncio.Event()
+    started_urls: set[str] = set()
+
+    async def fake_request(**kwargs: Any) -> SimpleNamespace:
+        started_urls.add(kwargs["url"])
+        if len(started_urls) == 2:
+            both_started.set()
+        await release.wait()
+        worker_inventory = GenerationCutInventory.model_validate(kwargs["json"])
+        receipt = GenerationCutReceipt(
+            checkpoint_id=worker_inventory.checkpoint_id,
+            cut_id=f"worker-{worker_inventory.inventory_digest}",
+            inventory_digest=worker_inventory.inventory_digest,
+            inventory=worker_inventory,
+            backend_snapshot_id=f"tq-{worker_inventory.inventory_digest}",
+            prefixes=tuple(
+                GenerationCutPrefixAck(
+                    **prefix.model_dump(mode="json"),
+                    disposition="durable_prefix",
+                    frozen_buffer_id="buffer-1",
+                    staging_key=f"prefix-{prefix.ticket_id}",
+                    prefix_token_count=5,
+                    prefix_digest="a" * 64,
+                )
+                for prefix in worker_inventory.active_prefixes
+            ),
+        )
+        return SimpleNamespace(payload=receipt.model_dump(mode="json"))
+
+    async def fake_raise_for_status(_response: SimpleNamespace) -> None:
+        return None
+
+    async def fake_get_response_json(response: SimpleNamespace) -> dict[str, Any]:
+        return response.payload
+
+    monkeypatch.setattr("responses_api_models.vllm_model.app.http_request", fake_request)
+    monkeypatch.setattr(
+        "responses_api_models.vllm_model.app.raise_for_status",
+        fake_raise_for_status,
+    )
+    monkeypatch.setattr(
+        "responses_api_models.vllm_model.app.get_response_json",
+        fake_get_response_json,
+    )
+
+    checkpoint_task = asyncio.create_task(model.checkpoint_generation_cut(inventory))
+    await asyncio.wait_for(both_started.wait(), timeout=1.0)
+    release.set()
+    receipt = await asyncio.wait_for(checkpoint_task, timeout=1.0)
+
+    assert started_urls == {
+        "http://worker-0:8000/ng-control/v1/generation-cut",
+        "http://worker-1:8000/ng-control/v1/generation-cut",
+    }
+    assert {prefix.ticket_id for prefix in receipt.prefixes} == {
+        "ticket-0",
+        "ticket-1",
+    }
+
+
+def test_generation_cut_does_not_capacity_evict_active_routes(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN", "test-control-token")
+    model = VLLMModel(
+        config=VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="policy",
+            base_url="http://worker-0:8000/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            uses_interleaved_reasoning=False,
+        ),
+        server_client=MagicMock(
+            spec=ServerClient,
+            global_config_dict={
+                "token_id_capture": {
+                    "enabled": True,
+                    "external_staging": True,
+                    "rebuild_response": False,
+                    "generation_prefix_cuts_enabled": True,
+                }
+            },
+        ),
+    )
+    client = model._clients[0]
+
+    for index in range(100_001):
+        model._remember_generation_cut_client(f"call-{index}", client)
+
+    assert len(model._generation_cut_clients) == 100_001
+    assert model._generation_cut_clients["call-0"] is client
+
+
+@mark.asyncio
+async def test_generation_cut_route_is_retired_when_model_call_exits(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN", "test-control-token")
+    model = VLLMModel(
+        config=VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="policy",
+            base_url="http://worker-0:8000/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            uses_interleaved_reasoning=False,
+        ),
+        server_client=MagicMock(
+            spec=ServerClient,
+            global_config_dict={
+                "token_id_capture": {
+                    "enabled": True,
+                    "external_staging": True,
+                    "rebuild_response": False,
+                    "generation_prefix_cuts_enabled": True,
+                }
+            },
+        ),
+    )
+    client = model._clients[0]
+    context = CaptureContext(
+        rollout_id="rollout-1",
+        model_call_id="call-1",
+        token_sink=None,
+        logical_rollout_id="rollout-1",
+        attempt_index=0,
+        external_staging=True,
+    )
+
+    monkeypatch.setattr(VLLMModel, "_resolve_client", lambda _self, _request: client)
+
+    async def fail_model_call(
+        _self: VLLMModel,
+        _request: Request,
+        _body: NeMoGymChatCompletionCreateParamsNonStreaming,
+        *,
+        resolved_client: NeMoGymAsyncOpenAI | None,
+    ) -> NeMoGymChatCompletion:
+        assert resolved_client is client
+        assert model._generation_cut_clients == {"call-1": client}
+        raise RuntimeError("model call failed")
+
+    monkeypatch.setattr(VLLMModel, "_chat_completions", fail_model_call)
+    token = set_token_sink(context)
+    try:
+        with raises(RuntimeError, match="model call failed"):
+            await model.chat_completions(MagicMock(spec=Request), MagicMock())
+    finally:
+        reset_token_sink(token)
+
+    assert model._generation_cut_clients == {}
 
 
 @mark.asyncio
