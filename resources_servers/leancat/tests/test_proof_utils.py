@@ -51,6 +51,31 @@ class TestExtractLeanCode:
         assert extract_lean_code("```Lean4\ntheorem t : True := trivial\n```") == "theorem t : True := trivial"
         assert extract_lean_code("```\ntheorem t : True := trivial\n```") == "theorem t : True := trivial"
 
+    def test_thinking_is_skipped_before_choosing_a_block(self):
+        text = "<think>```lean4\nsorry\n```</think>\n```lean4\ntheorem t : True := trivial\n```"
+        assert extract_lean_code(text) == "theorem t : True := trivial"
+
+    def test_unfenced_answer_after_bare_think_close(self):
+        # DeepSeek-R1-style templates put `<think>` in the prompt; the response only closes it.
+        text = "reasoning <sketch>import Mathlib\nsorry</sketch>\n</think>\nimport Mathlib\n\ntheorem t : True := trivial\n"
+        assert extract_lean_code(text) == "import Mathlib\n\ntheorem t : True := trivial"
+
+    def test_unfenced_lean_answer_beats_fence_inside_thinking(self):
+        text = "<think>```lean4\nsorry\n```</think>\nimport Mathlib\n\ntheorem t : True := trivial\n"
+        assert extract_lean_code(text) == "import Mathlib\n\ntheorem t : True := trivial"
+
+    def test_prose_answer_falls_back_to_fence_inside_thinking(self):
+        text = "<think>```lean4\ntheorem t : True := trivial\n```</think>\nThat should do it."
+        assert extract_lean_code(text) == "theorem t : True := trivial"
+
+    def test_fence_only_inside_thinking_is_still_used(self):
+        text = "<think>```lean4\ntheorem t : True := trivial\n```</think>\nDone."
+        assert extract_lean_code(text) == "theorem t : True := trivial"
+
+    def test_unclosed_thinking_yields_nothing(self):
+        assert extract_lean_code("<think>still reasoning ```lean4\nimport Mathlib\n```") == "import Mathlib"
+        assert extract_lean_code("<think>still reasoning, no code") == ""
+
     def test_unfenced_response_falls_back_to_raw_text(self):
         assert extract_lean_code("  theorem t : True := trivial  ") == "theorem t : True := trivial"
 

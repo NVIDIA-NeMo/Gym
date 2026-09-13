@@ -24,17 +24,21 @@ preservation. Both run on text with comments and string literals blanked out by
 
 ``extract_lean_code`` keeps upstream's regex and last-block-wins rule
 (``scripts/eval_common.py``) rather than ``math_formal_lean``'s extractor, which prefers a
-``lean4``-tagged block over a later untagged one.
+``lean4``-tagged block over a later untagged one. It additionally skips ``<think>`` reasoning
+and accepts an unfenced answer after it, which upstream's rule does not.
 """
 
 import re
 from typing import List, Optional, Tuple
 
-from resources_servers.math_formal_lean.proof_utils import strip_lean_comments_and_strings
+from resources_servers.math_formal_lean.proof_utils import strip_lean_comments_and_strings, strip_thinking
 
 
 # Upstream takes the *last* fenced block; an unfenced response falls back to the whole text.
 _CODE_BLOCK_RE = re.compile(r"```(?:lean4?|Lean4?)?\s*\n(.*?)```", re.DOTALL)
+
+# An unfenced answer counts as a Lean file if some line opens with a file-level keyword.
+_LEAN_FILE_START_RE = re.compile(r"^\s*(import|open|theorem|lemma|example|def|variable|universe)\b", re.M)
 
 # Upstream's shortcut list. Banning the `axiom` keyword does not ban classical reasoning:
 # Mathlib's axioms are used by name, not declared.
@@ -53,11 +57,24 @@ _DECL_START_RE = re.compile(
 
 
 def extract_lean_code(text: str) -> str:
-    """Pull the Lean file out of a model response (last fenced block, else raw text)."""
-    matches = _CODE_BLOCK_RE.findall(text or "")
+    """Pull the Lean file out of a model response.
+
+    Thinking is dropped first. Then, in order: the last fenced block in the answer; the
+    unfenced answer itself if it reads as a Lean file (some provers, e.g. StepFun-Prover,
+    emit their final file bare); the last fenced block anywhere, which is upstream's rule;
+    else the raw answer.
+    """
+    text = text or ""
+    answer = strip_thinking(text)
+    matches = _CODE_BLOCK_RE.findall(answer)
     if matches:
         return matches[-1].strip()
-    return (text or "").strip()
+    if _LEAN_FILE_START_RE.search(answer):
+        return answer.strip()
+    matches = _CODE_BLOCK_RE.findall(text)
+    if matches:
+        return matches[-1].strip()
+    return answer.strip()
 
 
 def find_banned_tokens(code: str) -> List[str]:
