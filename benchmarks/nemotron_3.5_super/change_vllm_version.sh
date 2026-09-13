@@ -1,22 +1,10 @@
 #!/usr/bin/env bash
-# Canonical Super VL evaluation SQSH build on the unmodified vLLM v0.27.1
-# container/toolchain. This layers only the Python compatibility branch;
-# FlashInfer and its cubins remain exactly as shipped in the base image.
-#
-# Usage:
-#   SLURM_ACCOUNT=nemotron_n3_post \
-#     ./build-super-vl-evals-v0271-thin.sh /path/image.sqsh
-#
-# Before PR #38 is merged, validate its head with:
-#   VLLM_BRANCH=tbn/super-vl-evals-v0271 EXPECTED_VLLM_SHA=<sha> \
-#     SLURM_ACCOUNT=nemotron_n3_post \
-#     ./build-super-vl-evals-v0271-thin.sh /path/image.sqsh
 set -Eeuo pipefail
 
 BASE_IMAGE="${BASE_IMAGE:-vllm/vllm-openai:v0.27.1}"
 VLLM_REPO="${VLLM_REPO:-https://github.com/TomerBN-Nvidia/vllm.git}"
 VLLM_BRANCH="${VLLM_BRANCH:-super_vl_evals_v0.27.1}"
-VLLM_VERSION=0.27.1
+VLLM_VERSION="${VLLM_VERSION:-0.27.1}"
 VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_PRECOMPILED_WHEEL_COMMIT:-6e448d0ea9bf3d88d898b65449ca6dc2aec170ac}"
 BUILD_ROOT=/opt/super-vl-evals
 
