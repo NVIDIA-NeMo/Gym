@@ -329,6 +329,12 @@ class SWEBenchMetrics(BaseModel):
     # True if the pre-agent git-ref sanitization ran to completion; False means
     # the rollout's repo may still expose future refs (gold-fix archaeology).
     repo_refs_stripped: Optional[bool] = None
+    # Network/package time-travel telemetry: the agent issued `pip download`
+    # (attempted), it actually ran against the package index (executed), or the
+    # block_network_time_travel pip shim rejected it (blocked).
+    pip_download_attempted: Optional[bool] = None
+    pip_download_executed: Optional[bool] = None
+    pip_download_blocked: Optional[bool] = None
 
     # Memory watchdog signals
     oom_killed: Optional[bool] = None
@@ -2340,6 +2346,48 @@ def _patch_file_paths(patch_text: str) -> set:
     return paths
 
 
+_PIP_DOWNLOAD_CMD_RE = re.compile(r"\bpip3?\s+download\b")
+_PIP_DOWNLOAD_RAN_MARKERS = (
+    "Successfully downloaded",
+    "No matching distribution found",
+    "Could not find a version that satisfies",
+)
+_PIP_DOWNLOAD_SHIM_MARKER = "pip download is not permitted in this environment."
+
+
+def _pip_download_signals(chat_messages: list) -> tuple:
+    """Detect `pip download` usage (package time-travel channel) in a trajectory.
+
+    Returns (attempted, executed, blocked). attempted = any tool call whose
+    arguments contain a pip/pip3 download command (also matches
+    `python -m pip download`); executed = a tool output after an attempt shows
+    the command actually reached the package index; blocked = the
+    block_network_time_travel pip shim rejected it. Booleans surface in wandb
+    as <agent>/pip_download_*/mean via per-agent scalar aggregation.
+    """
+    attempted = executed = blocked = False
+    for msg in chat_messages:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        if role == "assistant":
+            for tc in msg.get("tool_calls") or []:
+                args = ((tc.get("function") or {}) if isinstance(tc, dict) else {}).get("arguments") or ""
+                if isinstance(args, str) and _PIP_DOWNLOAD_CMD_RE.search(args):
+                    attempted = True
+        elif role == "tool":
+            content = msg.get("content")
+            if isinstance(content, list):
+                content = " ".join(part.get("text", "") for part in content if isinstance(part, dict))
+            if not isinstance(content, str):
+                continue
+            if _PIP_DOWNLOAD_SHIM_MARKER in content:
+                blocked = True
+            elif attempted and any(marker in content for marker in _PIP_DOWNLOAD_RAN_MARKERS):
+                executed = True
+    return attempted, executed, blocked
+
+
 def update_metrics(metrics_fpath: Path, update_dict: Dict[str, Any]) -> None:
     with metrics_fpath.open() as f:
         existing_dict = json.loads(f.read())
@@ -3785,6 +3833,19 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         chat_completions_trajectory, chat_completions_tools, prefix_msg_count = (
             self.get_openhands_trajectory_from_completions(trajectories_dir, params.instance_id)
         )
+
+        # Package time-travel telemetry (`pip download` of the task's own
+        # package): scan the main session plus any subagent sessions, since
+        # subagents run bash too.
+        pip_scan_msgs = list(chat_completions_trajectory)
+        if params.opencode_subagents_enabled:
+            for entry in self.get_all_session_trajectories_from_completions(trajectories_dir, params.instance_id):
+                if entry.get("parent_session_id"):
+                    pip_scan_msgs.extend(entry.get("messages") or [])
+        pip_attempted, pip_executed, pip_blocked = _pip_download_signals(pip_scan_msgs)
+        metrics_to_update["pip_download_attempted"] = pip_attempted
+        metrics_to_update["pip_download_executed"] = pip_executed
+        metrics_to_update["pip_download_blocked"] = pip_blocked
 
         tools = [
             FunctionTool.model_validate(tool["function"] | {"type": "function"}) for tool in chat_completions_tools
