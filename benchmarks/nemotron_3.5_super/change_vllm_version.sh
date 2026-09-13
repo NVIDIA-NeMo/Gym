@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-BASE_IMAGE="${BASE_IMAGE:-vllm/vllm-openai:v0.27.1}"
-VLLM_REPO="${VLLM_REPO:-https://github.com/TomerBN-Nvidia/vllm.git}"
-VLLM_BRANCH="${VLLM_BRANCH:-super_vl_evals_v0.27.1}"
-VLLM_VERSION="${VLLM_VERSION:-0.27.1}"
-VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_PRECOMPILED_WHEEL_COMMIT:-6e448d0ea9bf3d88d898b65449ca6dc2aec170ac}"
+BASE_IMAGE="${BASE_IMAGE:-vllm/vllm-openai:nightly-2a02f6efe319c885e3ccbcecde402e0028f9ec1e}"
+VLLM_REPO="${VLLM_REPO:-https://github.com/bxyu-nvidia/vllm.git}"
+VLLM_BRANCH="${VLLM_BRANCH:-bxyu/mamba-cache-group-annotation}"
+VLLM_VERSION="${VLLM_VERSION:-0.29.0}"
+VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_PRECOMPILED_WHEEL_COMMIT:-2a02f6efe319c885e3ccbcecde402e0028f9ec1e}"
 BUILD_ROOT=/opt/super-vl-evals
 
 ###############################################################################
