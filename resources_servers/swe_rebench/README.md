@@ -35,10 +35,12 @@ indistinguishable from a real failure.
 
 ## Prepare the data
 
+`prepare_swe_rebench.py` only writes rows already on `data/supported_instance_ids.txt` -- see
+Golden-patch validation below for what that list is and why. It streams the Hub dataset rather
+than loading the full ~2.5 GB split, since only about 70% of rows are kept.
+
 ```bash
-# The whole set, or a subset:
-SWE_REBENCH_LANGUAGES=python,go SWE_REBENCH_LIMIT=200 \
-  python benchmarks/swe_rebench/prepare.py
+SWE_REBENCH_LIMIT=200 python resources_servers/swe_rebench/prepare_swe_rebench.py
 ```
 
 ## Golden-patch validation
@@ -52,7 +54,7 @@ gym env start \
   --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 python resources_servers/swe_rebench/apply_golden_patch.py \
-  +benchmark_jsonl=benchmarks/swe_rebench/data/swe_rebench_benchmark.jsonl \
+  +training_jsonl=resources_servers/swe_rebench/data/swe_rebench_training.jsonl \
   +limit=40 +concurrency=8
 ```
 
@@ -66,16 +68,25 @@ the workload needs no GPU, since the containers run remotely.
 supported / flaky / broken / inconclusive buckets, keeping an infra fault (no verdict) separate
 from a genuinely nondeterministic test so neither silently corrupts the other's label.
 `data/supported_instance_ids.txt` is the result of one such sweep over the full set: 22,684 of
-32,079 instances whose golden patch resolved in all three passes -- a separate
-artifact for training use, not consumed by `prepare.py` or the eval benchmark. The other 9,395
-are excluded from that list because none can be scored either way: 6,813 never resolve
+32,079 instances whose golden patch resolved in all three passes. `prepare_swe_rebench.py` reads
+this list and writes only those rows -- the training jsonl is the supported set, not the full
+Hub dataset. The other 9,395 are excluded from that list because none can be scored either way:
+6,813 never resolve
 (concentrated in the compiled-language rows -- java, kotlin, scala, cpp), 2,376 resolve
 inconsistently across passes (flaky tests), and 206 never produced a verdict in any pass (image
 pull / setup failures, not row failures -- see `diagnose_failures.py`).
 
 ## Running an agent
 
-`benchmarks/swe_rebench/opencode.yaml` wires this server to the opencode sandboxed agent, in the
-same shape as the swebench verified/pro/multilingual benchmarks.
+`configs/swe_rebench_opencode.yaml` wires the opencode sandboxed agent to
+`swe_rebench_resources_server`, pointed at `data/swe_rebench_training.jsonl`. It lives in a
+separate file rather than folded into `swe_rebench.yaml` so golden-patch validation (which never
+touches an agent) doesn't need to pull in the agent's much larger sandbox/permission config.
+
+```bash
+gym env start \
+  --config resources_servers/swe_rebench/configs/swe_rebench_opencode.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml
+```
 
 Upstream SWE-rebench code is MIT licensed. This adapter is Apache-2.0.
