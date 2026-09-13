@@ -15,6 +15,12 @@ Set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` in the environment. Sandboxes
 be able to reach the Gym model server; `++use_absolute_ip=true` advertises the host's
 address when Gym runs on a compute node.
 
+Sandboxes use an eight-hour lifetime, renewed every 30 minutes while Gym owns them.
+This keeps setup and artifact collection from consuming the official agent budget
+on deployments that cap individual lifetimes at eight hours. The sandbox service
+must support expiration renewal. Renewal stops before cleanup and does not change
+agent or verifier timeouts; failures are reported as infrastructure errors.
+
 ```sh
 gym eval prepare --benchmark terminal_bench_4/opencode
 gym eval run --benchmark terminal_bench_4/opencode \

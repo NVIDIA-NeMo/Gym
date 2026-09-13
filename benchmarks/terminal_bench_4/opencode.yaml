@@ -31,6 +31,7 @@ terminal_bench_4_opencode:
                 request_timeout_s: 1200
                 timeout_s: 1500
                 connect_attempt_timeout_s: 1500
+                renew_interval_s: 1800
               operations:
                 background_exec: true
               networking:
@@ -44,7 +45,7 @@ terminal_bench_4_opencode:
                     { read caps; test $((0x$caps & (1 << 19))) -ne 0; }
           sandbox_metadata:
             nemo.nvidia.com/resources: custom
-          sandbox_ttl_s: 86400
+          sandbox_ttl_s: 28800
           sandbox_ready_timeout_s: 1200
           default_exec_timeout_s: 64800
       harbor_agent:

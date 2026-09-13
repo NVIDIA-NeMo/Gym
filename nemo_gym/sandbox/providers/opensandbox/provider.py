@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import ipaddress
 import logging
+import math
 import re
 import shlex
 from collections.abc import Mapping
@@ -522,12 +523,19 @@ class OpenSandboxCreateConfig:
     skip_health_check: bool = False
     connect_attempt_timeout_s: float = 30.0
     connect_poll_s: float = 2.0
+    # Refresh a created sandbox's TTL while this provider owns its handle.
+    # This does not change task/command timeouts or renew borrowed handles.
+    renew_interval_s: float | None = None
 
     def __post_init__(self) -> None:
         if self.image_pull_policy is not None:
             validate_image_pull_policy(self.image_pull_policy)
         if self.timeout_s is not None and self.timeout_s <= 0:
             raise ValueError("create.timeout_s must be > 0")
+        if self.renew_interval_s is not None and (
+            not math.isfinite(self.renew_interval_s) or self.renew_interval_s <= 0
+        ):
+            raise ValueError("create.renew_interval_s must be finite and > 0")
         if self.retries < 0:
             raise ValueError("create.retries must be >= 0")
         if self.retry_delay_s < 0:
@@ -733,6 +741,7 @@ class OpenSandboxProvider:
         # Sessions own aiohttp clients that only close() releases: aclose()
         # sweeps any still open; ended ones are retired on the next create/attach.
         self._pty_sessions: set[Any] = set()
+        self._renewals: dict[str, asyncio.Task[None]] = {}
 
     def validate_runtime_requirements(self, *, cap_add: tuple[str, ...], shm_size: int | None) -> dict[str, str]:
         """Reject requirements without an operator-configured implementation."""
@@ -1000,6 +1009,8 @@ class OpenSandboxProvider:
 
     async def aclose(self) -> None:
         """Close provider-owned resources."""
+        for sandbox_id in list(self._renewals):
+            await self._stop_renewal(sandbox_id)
         # PTY sessions hold their own aiohttp clients, which the shared httpx
         # transport below does not cover.
         for session in list(self._pty_sessions):
@@ -1076,6 +1087,11 @@ class OpenSandboxProvider:
         # callers pass their own predicate.
         is_retryable: Callable[[BaseException], bool] = _is_retryable_sdk_operation_error,
     ) -> Any:
+        renewal = self._renewals.get(sandbox_id)
+        if renewal is not None and renewal.done() and not renewal.cancelled():
+            error = renewal.exception()
+            if error is not None:
+                raise RuntimeError(f"OpenSandbox lifetime renewal failed for sandbox {sandbox_id!r}") from error
         AsyncRetrying, retry_if_exception, stop_after_attempt, wait_random_exponential = _require_tenacity()
         retry_count = self._operations.retries if retries is None else retries
         max_attempts = retry_count + 1
@@ -1310,8 +1326,39 @@ class OpenSandboxProvider:
         headers.update(resolved.headers)
         return SandboxEndpoint(endpoint=endpoint_url, headers=headers)
 
+    def _start_renewal(self, handle: SandboxHandle, ttl_s: int | float) -> None:
+        async def renew() -> None:
+            while True:
+                await asyncio.sleep(self._create.renew_interval_s)
+                await self._await_sdk_operation(
+                    lambda: handle.raw.renew(timedelta(seconds=ttl_s)),
+                    operation="renew",
+                    sandbox_id=handle.sandbox_id,
+                    timeout_s=self._connection.request_timeout_s or 60,
+                )
+
+        def report_failure(task: asyncio.Task[None]) -> None:
+            if not task.cancelled() and (error := task.exception()) is not None:
+                LOGGER.error("OpenSandbox lifetime renewal failed for sandbox %r: %r", handle.sandbox_id, error)
+
+        task = asyncio.create_task(renew(), name=f"opensandbox-renew-{handle.sandbox_id}")
+        task.add_done_callback(report_failure)
+        self._renewals[handle.sandbox_id] = task
+
+    async def _stop_renewal(self, sandbox_id: str) -> BaseException | None:
+        task = self._renewals.pop(sandbox_id, None)
+        if task is None:
+            return None
+        task.cancel()
+        result = (await asyncio.gather(task, return_exceptions=True))[0]
+        return result if isinstance(result, Exception) else None
+
     async def _create_once(self, spec: SandboxSpec) -> SandboxHandle:
         """Create a sandbox through ``opensandbox.Sandbox.create``."""
+        if self._create.renew_interval_s is not None and (
+            spec.ttl_s is None or self._create.renew_interval_s >= spec.ttl_s
+        ):
+            raise ValueError("create.renew_interval_s requires a longer, explicit sandbox ttl_s")
         Sandbox, _, _, _, _ = _require_opensandbox_sdk()
         options = OpenSandboxProviderOptions.from_mapping(spec.provider_options)
 
@@ -1384,6 +1431,8 @@ class OpenSandboxProvider:
         except Exception:
             await self._cleanup_failed_create_handle(created_handle)
             raise
+        if self._create.renew_interval_s is not None:
+            self._start_renewal(handle, spec.ttl_s)
         return handle
 
     async def _create_with_retries(
@@ -1850,6 +1899,7 @@ class OpenSandboxProvider:
 
     async def close(self, handle: SandboxHandle) -> None:
         """Terminate the sandbox and close local SDK resources."""
+        renewal_error = await self._stop_renewal(handle.sandbox_id)
 
         async def kill_ignore_missing() -> None:
             # Terminate is idempotent: not-found means the sandbox is already
@@ -1897,5 +1947,9 @@ class OpenSandboxProvider:
                     f"close_error={close_error!r}"
                 ) from stop_error
             raise stop_error
+        if renewal_error is not None:
+            raise RuntimeError(
+                f"OpenSandbox lifetime renewal failed for sandbox {handle.sandbox_id!r}"
+            ) from renewal_error
         if close_error is not None:
             return
