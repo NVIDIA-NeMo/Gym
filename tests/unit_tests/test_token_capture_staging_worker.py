@@ -24,6 +24,7 @@ from nemo_gym.token_id_capture.sink import (
 )
 from nemo_gym.token_id_capture.staging import (
     CaptureAdmission,
+    GenerationCutContinuation,
     StagedCallRecord,
     StageResult,
     compute_chain_hash,
@@ -175,6 +176,49 @@ def test_prefix_record_does_not_complete_or_stage_the_live_call() -> None:
     )
     assert final.disposition == "staged"
     assert sink.records[0].token_ids_delta == [10, 11, 12, 13]
+
+
+def test_generation_cut_resume_preserves_old_generation_masks_and_logprobs() -> None:
+    capture, sink = _capture()
+    original = capture.begin_call(_root())
+    cut = capture.build_prefix_record(
+        original,
+        prompt_token_ids=[10, 11],
+        generated_token_ids=[12],
+        generated_logprobs=[-0.25],
+    )
+    admission = CaptureAdmission(
+        rollout_id="rollout-1-a1",
+        model_call_id="c2",
+        mode="text",
+        generation_cut=GenerationCutContinuation(
+            source_capture_key="rollout-1",
+            source_model_call_id="c1",
+            staging_key="__generation_cut__/checkpoint-1/rollout-1/c1",
+            generation_token_count=1,
+            digest=cut.digest,
+        ),
+    )
+    resumed = capture.begin_call(
+        admission,
+        prefix_token_ids=[],
+        generation_cut=cut,
+        generation_cut_staging_key=admission.generation_cut.staging_key,
+    )
+
+    coords = capture.complete_call(
+        resumed,
+        prompt_token_ids=[10, 11, 12],
+        generated_token_ids=[13],
+        generated_logprobs=[-0.5],
+    )
+
+    assert coords.disposition == "staged"
+    assert sink.records[-1].rollout_id == "rollout-1-a1"
+    assert sink.records[-1].model_call_id == "c2"
+    assert sink.records[-1].token_ids_delta == [10, 11, 12, 13]
+    assert sink.records[-1].token_mask_delta == [0.0, 0.0, 1.0, 1.0]
+    assert sink.records[-1].generation_log_probs_delta == [0.0, 0.0, -0.25, -0.5]
 
 
 def test_child_stages_only_tokens_after_verified_parent_prefix() -> None:

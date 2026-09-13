@@ -71,6 +71,7 @@ from nemo_gym._checkpoint.model_admission import NotPolicyInstanceError
 from nemo_gym._checkpoint.model_control_contracts import (
     GenerationCutCoordinatorProof,
     GenerationCutReceipt,
+    GenerationCutReplacement,
 )
 from nemo_gym.rollout_correlation import ROLLOUT_ID_PATTERN, capture_key_for
 from nemo_gym.token_id_capture.control_routes import require_control_auth
@@ -1002,6 +1003,8 @@ class ModelCheckpointCommitRequest(CheckpointControlRequest):
 
 class ModelCheckpointRestoreRequest(CheckpointControlRequest):
     checkpoint_dir: str
+    generation_cut_receipts: tuple[GenerationCutReceipt, ...] = ()
+    generation_cut_exclusions: tuple[GenerationCutReplacement, ...] = ()
 
 
 def _validate_server_name(server_name: str) -> str:
@@ -1253,12 +1256,40 @@ def install_model_checkpoint(
             # The restored server boots into the paused state: nothing may be
             # admitted until every component is restored and the coordinator
             # explicitly resumes.
-            limiter.close()
+            limiter.close(body.checkpoint_id)
             result = await _restore_ledger(Path(body.checkpoint_dir))
+            backend = limiter.generation_cut_backend
+            if body.generation_cut_receipts and backend is None:
+                raise LedgerNotCheckpointableError(
+                    "checkpoint contains generation cuts but this model server has no restore backend"
+                )
+            restored_cuts = 0
+            exclusions = frozenset((item.rollout_id, item.attempt_index) for item in body.generation_cut_exclusions)
+            for receipt in body.generation_cut_receipts:
+                if receipt.inventory.server_name != server_name:
+                    raise LedgerMismatchError(
+                        "generation-cut receipt belongs to a different model server: "
+                        f"expected={server_name!r}, actual={receipt.inventory.server_name!r}"
+                    )
+                assert backend is not None
+                restored = await backend.restore_generation_cut(
+                    receipt,
+                    excluded_replacements=exclusions,
+                )
+                if restored != receipt:
+                    raise LedgerMismatchError("generation-cut restore did not acknowledge the persisted receipt")
+                restored_cuts += sum(
+                    prefix.disposition == "durable_prefix"
+                    and prefix.frozen_buffer_id is not None
+                    and prefix.frozen_buffer_id.startswith("active/")
+                    and (prefix.rollout_id, prefix.attempt_index + 1) not in exclusions
+                    for prefix in receipt.prefixes
+                )
             for tombstone in result["tombstones"]:
                 limiter.install_tombstone(tombstone["rollout_id"], tombstone["attempt_index"])
             for source_attempt in result.get("source_attempts", []):
                 limiter.install_tombstone(source_attempt["rollout_id"], source_attempt["attempt_index"])
+            result["generation_cuts_restored"] = restored_cuts
             return result
 
         return await fence.run_operation(

@@ -145,6 +145,13 @@ class GenerationCutReceipt(_GenerationCutModel):
 GenerationCutAck = GenerationCutReceipt
 
 
+class GenerationCutReplacement(_GenerationCutModel):
+    """One replacement attempt that must restart without a token prefix."""
+
+    rollout_id: str = Field(min_length=1, pattern=ROLLOUT_ID_PATTERN.pattern)
+    attempt_index: int = Field(ge=0)
+
+
 class GenerationCutFrozenTicket(_GenerationCutModel):
     """Immutable identity of one ticket frozen by a worker checkpoint cut."""
 
@@ -319,7 +326,12 @@ class GenerationCutBackend(Protocol):
         """Create durable recovery state and return its final receipt."""
         ...
 
-    async def restore_generation_cut(self, receipt: GenerationCutReceipt) -> GenerationCutReceipt:
+    async def restore_generation_cut(
+        self,
+        receipt: GenerationCutReceipt,
+        *,
+        excluded_replacements: frozenset[tuple[str, int]] = frozenset(),
+    ) -> GenerationCutReceipt:
         """Restore the durable backend snapshot named by ``receipt``."""
         ...
 
