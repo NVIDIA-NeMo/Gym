@@ -55,10 +55,6 @@ class VllmServiceConfig(BaseModelServiceConfig):
     pipeline_parallel_size: int = 1
     trust_remote_code: bool = False
     number_of_instances: int = 1
-    # Opt-in escape hatch: run multiple instances behind a Ray Serve gateway (which handles both
-    # instance creation and request routing) instead of vLLM's own --data-parallel-size/multi-node
-    # DP mechanism. Most users never need to set this - it's forced on regardless of this value
-    # when the topology requires it (see effective_ray_serve).
     use_ray_serve: bool = False
 
     @field_validator("number_of_instances")
@@ -80,14 +76,7 @@ class VllmServiceConfig(BaseModelServiceConfig):
 
 
 def effective_ray_serve(service: "VllmServiceConfig", total_nodes: int, gpus_per_node_values: list[int]) -> bool:
-    """Whether the Ray Serve gateway (ray_serve_gateway.py) manages instance creation and request
-    routing for this service, instead of vLLM's own --data-parallel-size/multi-node DP mechanism.
-
-    True either because the user opted in via `use_ray_serve`, or because the topology requires
-    it: an instance's own tensor/pipeline-parallel footprint would have to span multiple nodes,
-    which vLLM's own multi-node data-parallel mechanism cannot express. Shared between api.py's
-    validation and slurm_script.py's command building so both agree on the same decision.
-    """
+    """Whether the Ray Serve gateway manages this service's instances/routing instead of vLLM's own DP."""
     if service.use_ray_serve:
         return True
     if not gpus_per_node_values:
@@ -187,8 +176,6 @@ class SubmitConfig(_StrictModel):
             sum(p.nodes for p in compute.node_pools.values()) if isinstance(compute, SlurmComputeConfig) else 1
         )
         is_multi_node = total_nodes > 1
-        # Only one compute resource is supported, so every service's placement resolves to it -
-        # this is computed once here rather than re-derived per service.
         gpus_per_node_values = (
             [p.gpus_per_node for p in compute.node_pools.values() if p.gpus_per_node is not None]
             if isinstance(compute, SlurmComputeConfig)
@@ -265,10 +252,7 @@ class SubmitConfig(_StrictModel):
         tp_pp = service.tensor_parallel_size * service.pipeline_parallel_size
 
         if total_nodes > 1 and is_ray_serve:
-            # Ray Serve gateway path: Ray's own placement-group scheduler packs each instance's
-            # TP*PP GPUs anywhere across the shared cluster, so an instance may itself span nodes
-            # and multiple instances may share a node. Only the aggregate footprint has to fit -
-            # see ray_serve_gateway.py and _build_vllm_ray_serve_command.
+            # Ray Serve's placement-group scheduler packs the aggregate footprint across the cluster.
             gpus_needed = tp_pp * service.number_of_instances
             gpus_available = sum(
                 pool.nodes * pool.gpus_per_node for pool in compute.node_pools.values() if pool.gpus_per_node
@@ -283,8 +267,6 @@ class SubmitConfig(_StrictModel):
             # Multi-node data-parallel: each node runs its own equal share of the replicas with
             # local tensor/pipeline parallelism (see _build_vllm_multi_instance_multi_node_command);
             # the per-node share, not the total footprint, has to fit in that node's GPU count.
-            # tp_pp > max_gpus_per_node can't reach here - that shape always sets
-            # effective_ray_serve above.
             instances_per_node = service.number_of_instances // total_nodes
             gpus_needed = tp_pp * instances_per_node
             gpus_available = max_gpus_per_node

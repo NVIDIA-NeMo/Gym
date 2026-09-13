@@ -240,8 +240,7 @@ def test_build_vllm_ray_command_installs_ray_if_missing(vllm_service):
 
 
 def test_build_vllm_ray_command_raises_symmetric_run_node_wait_timeout(vllm_service):
-    # Regression test: ray symmetric-run's default 30s node-join wait is too short for slow image
-    # pulls, and this must be exported before `ray symmetric-run` runs.
+    # Default 30s node-join wait is too short for slow image pulls; must be exported before use.
     cmd = _build_vllm_ray_command(vllm_service, total_nodes=2)
     assert "export RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT=" in cmd
     assert cmd.index("export RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT=") < cmd.index("ray symmetric-run")
@@ -297,8 +296,7 @@ def test_build_vllm_ray_serve_command_single_node_no_ray_bootstrap(vllm_service)
 
 
 def test_build_vllm_ray_serve_command_embeds_actual_gateway_source(vllm_service):
-    # The base64 blob must decode back to the real, current ray_serve_gateway.py source - not a
-    # stale copy - since that's the only way this script reaches the vLLM container.
+    # The base64 blob must decode back to the real, current ray_serve_gateway.py source.
     cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gpus_per_node_values=[])
     match = re.search(r"printf '%s' '([A-Za-z0-9+/=]+)' \| base64 -d > ray_serve_gateway\.py", cmd)
     assert match, cmd
@@ -307,37 +305,21 @@ def test_build_vllm_ray_serve_command_embeds_actual_gateway_source(vllm_service)
 
 
 def test_build_vllm_ray_serve_command_single_node_ensures_ray_installed(vllm_service):
-    # Regression test for a real bug seen on a cluster run: the single-node path invokes
-    # `python3 ray_serve_gateway.py` directly (unlike the multi-node path, which only reaches the
-    # gateway via `ray symmetric-run`/`ray start`, themselves gated on ray being installed).
-    # vllm/vllm-openai containers don't guarantee `ray` is importable by plain `python3`, so the
-    # single-node path needs its own explicit guard - previously it only ensured `aiohttp`, and the
-    # gateway failed with `ModuleNotFoundError: No module named 'ray'`.
+    # Regression test: the single-node path invokes python3 directly, so ray isn't guaranteed
+    # importable there unlike the multi-node path (gated via `ray symmetric-run`/`ray start`).
     cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gpus_per_node_values=[])
-    # Escaped for embedding in the outer bash -lc "..." wrapper (see _escape_for_double_quoted_bash).
     assert 'command -v ray >/dev/null 2>&1 || pip install -q \\"ray[default]\\"' in cmd
-    # The guard must run before the gateway is launched.
     assert cmd.index("command -v ray") < cmd.index("python3 ray_serve_gateway.py")
 
 
 def test_build_vllm_ray_serve_command_single_node_ray_guard_does_not_bypass_earlier_failure(vllm_service, tmp_path):
-    # Behavioral regression test: `&&` and `||` share precedence and associate left-to-right, so
-    # `write_gateway && pip install aiohttp && command -v ray || pip install ray && python3 gateway.py`
-    # (without the parens this fix wraps around the ray guard) would parse as
-    # `((write_gateway && pip install aiohttp && command -v ray) || pip install ray) && python3 gateway.py`
-    # - if an *earlier* step (e.g. the aiohttp install) fails, that makes the left side of `||`
-    # false, which would then trigger the ray-install fallback anyway, and since that install
-    # normally succeeds, the gateway would still launch even though an earlier required step
-    # failed. Runs the actual generated bash (writing the real gateway file into tmp_path) with the
-    # aiohttp install failing to prove the whole chain still fails fast (the gateway must NOT
-    # launch).
+    # Regression test: without parens around the ray guard, && and || precedence would let an
+    # earlier step's failure be masked by the ray-install fallback, launching the gateway anyway.
     cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=1, gpus_per_node_values=[])
 
     inner = cmd.replace("pip install --quiet aiohttp", "false").replace(
         "python3 ray_serve_gateway.py", "echo GATEWAY_LAUNCHED"
     )
-    # inner is itself a nested `bash -lc "..."` invocation (a separate shell process), so the
-    # stand-in must be exported to be visible there.
     script = 'command() { [ "$2" = ray ] && return 1 || builtin command "$@"; }\nexport -f command\n' + inner + "\n"
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10, cwd=tmp_path)
 
@@ -346,22 +328,12 @@ def test_build_vllm_ray_serve_command_single_node_ray_guard_does_not_bypass_earl
 
 
 def test_build_vllm_ray_serve_command_single_node_model_with_space_survives_quoting(tmp_path):
-    # Regression test for a real bug: shlex.quote() wraps a model name needing escaping (e.g.
-    # containing a space) in literal single quotes. Naively embedding that inside a Python-level
-    # single-quoted `bash -lc '...'` wrapper would let those literal `'` characters terminate the
-    # wrapper early, corrupting the command - everything from the space onward silently vanishes
-    # into inert extra positional args of the outer `bash -c` invocation instead of reaching the
-    # gateway. Runs the *actual* generated bash (writing the real gateway file into tmp_path)
-    # through a stand-in gateway to prove the model name survives intact, the same way
-    # test_..._multi_node_chain_survives_symmetric_run_entrypoint does for the multi-node path's
-    # `&&`-chain hazard.
+    # Regression test: shlex.quote() wraps a model name with a space in literal single quotes,
+    # which would terminate the outer bash -lc '...' wrapper early if not double-quote-escaped.
     service = VllmServiceConfig(type="vllm", container="vllm:latest", model="org/my model")
     cmd = _build_vllm_ray_serve_command(service, total_nodes=1, gpus_per_node_values=[])
 
     inner = cmd.replace("pip install --quiet aiohttp", "true").replace("python3 ray_serve_gateway.py", "fake_gateway")
-    # fake_gateway is defined and exported *before* the generated `bash -lc "..."` command, not
-    # spliced inline into it - inline injection of "$@" would itself get corrupted by the outer
-    # double-quoting the fix introduces (the same class of bug this test guards against).
     script = 'fake_gateway() { for a in "$@"; do echo "ARG:$a"; done; }\nexport -f fake_gateway\n' + inner + "\n"
     result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10, cwd=tmp_path)
 
@@ -379,15 +351,17 @@ def test_build_vllm_ray_serve_command_multi_node_wraps_in_symmetric_run(vllm_ser
     assert "base64 -d" in cmd
 
 
+def test_build_vllm_ray_serve_command_multi_node_raises_queue_length_response_deadline(vllm_service):
+    # Default replica queue-length RPC deadline (0.1s) is too tight for cross-node hops; must be
+    # exported before `ray start`/`ray symmetric-run` runs so every node's raylet has it from birth.
+    cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=2, gpus_per_node_values=[8])
+    assert "export RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S=" in cmd
+    assert cmd.index("export RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S=") < cmd.index("ray symmetric-run")
+
+
 def test_build_vllm_ray_serve_command_multi_node_chain_survives_symmetric_run_entrypoint(vllm_service):
-    # Regression test: `ray symmetric-run`'s entrypoint (everything after `--`) must be the whole
-    # write-then-install-then-launch chain as ONE unit, not split by the outer bash -lc on the
-    # chain's own `&&` operators - a naive unquoted embedding lets that outer shell live-parse
-    # those operators, so `ray symmetric-run`'s entrypoint becomes just the first `&&`-segment,
-    # which succeeds and exits immediately, tearing the whole Ray cluster down before the gateway
-    # ever launches. Runs the *actual* generated bash through a stand-in `ray symmetric-run` to
-    # prove the whole chain lands as a single argv token, the same way it would for the real
-    # command.
+    # Regression test: the whole write-then-install-then-launch chain must reach `ray symmetric-run`
+    # as one opaque token, not get split by the outer bash -lc live-parsing its own && operators.
     cmd = _build_vllm_ray_serve_command(vllm_service, total_nodes=2, gpus_per_node_values=[8])
 
     script = cmd.replace(
@@ -452,9 +426,7 @@ def test_build_service_command_default_ignores_ray_serve_single_node(vllm_servic
 
 
 def test_build_service_command_mandatory_ray_serve_when_instance_spans_nodes():
-    # TP*PP=16 > 8 GPUs/node with 2 instances on a 4-node/8-gpu allocation: an instance's own
-    # footprint must span nodes, which vLLM's own multi-node DP can't express - Ray Serve is
-    # forced on automatically, with no use_ray_serve set.
+    # TP*PP=16 > 8 GPUs/node forces Ray Serve on automatically, with no use_ray_serve set.
     service = VllmServiceConfig(
         type="vllm",
         container="vllm:latest",
@@ -468,8 +440,7 @@ def test_build_service_command_mandatory_ray_serve_when_instance_spans_nodes():
 
 
 def test_build_service_command_default_multi_instance_multi_node_unchanged():
-    # tp_pp=8 fits within 8 gpus/node - stays on the existing (non-Ray) multi-node DP path even
-    # though it's multi-node and multi-instance.
+    # tp_pp=8 fits within 8 gpus/node - stays on the existing (non-Ray) multi-node DP path.
     service = VllmServiceConfig(
         type="vllm",
         container="vllm:latest",

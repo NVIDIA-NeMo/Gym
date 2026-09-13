@@ -31,9 +31,11 @@ echo "Head node IP address: $HEAD_NODE_IP\""""
 
 ENSURE_RAY_INSTALLED = 'command -v ray >/dev/null 2>&1 || pip install -q "ray[default]"'
 
-# ray symmetric-run's default node-join wait (RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT) is only 30s,
-# too short once each node has to pull a large container image before Ray can even start there.
+# Default node-join wait (30s) is too short for slow image pulls.
 RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S = 600
+
+# Default replica queue-length RPC deadline (0.1s) is too tight for cross-node hops.
+RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S = 1.0
 
 
 _VLLM_RAY_SYMMETRIC_RUN = (
@@ -41,6 +43,9 @@ _VLLM_RAY_SYMMETRIC_RUN = (
 bash -lc '
     export RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT="""
     + str(RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S)
+    + """
+    export RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S="""
+    + str(RAY_SERVE_QUEUE_LENGTH_RESPONSE_DEADLINE_S)
     + """
     """
     + ENSURE_RAY_INSTALLED
@@ -121,11 +126,7 @@ def render_gym_cmd(subcommand: str, var_name: str, args: list[str]) -> str:
 
 
 def render_repo_checkout(repo: str, ref: str) -> str:
-    """Render an &&-chained command that installs git if missing, then does
-    `git clone {repo} && cd {name} && git checkout {ref}`, leaving the shell's cwd at the repo
-    root. Used by the driver entrypoint, which additionally pip-installs the whole package. The
-    git-install guard lives here rather than per call site because every caller needs git first,
-    regardless of container image."""
+    """Render an &&-chained command that installs git if missing, then clones and checks out `ref`."""
     repo_name = repo.rstrip("/").split("/")[-1].removesuffix(".git")
     ensure_git = "command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git)"
     return (
@@ -135,13 +136,7 @@ def render_repo_checkout(repo: str, ref: str) -> str:
 
 
 def render_write_file_from_base64(content: str, dest_path: str) -> str:
-    """Render a command that reconstructs `content` at `dest_path` via a base64 round-trip.
-
-    Avoids embedding arbitrary source text (with its own quotes/`$`/backticks/newlines) directly
-    into a shell command that may itself be nested inside several more layers of quoting (see
-    _build_vllm_ray_serve_command) - the base64 alphabet has no shell-special characters, so it
-    survives any number of quoting layers untouched.
-    """
+    """Render a command that reconstructs `content` at `dest_path` via a base64 round-trip."""
     encoded = base64.b64encode(content.encode()).decode()
     return f"printf '%s' '{encoded}' | base64 -d > {shlex.quote(dest_path)}"
 

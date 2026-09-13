@@ -205,11 +205,7 @@ def test_multi_node_dp_per_node_footprint_exceeds_raises():
 
 
 def test_multi_instance_per_instance_multi_node_tp_uses_ray_serve_gateway():
-    # Each instance's own TP/PP footprint (TP5) exceeds a single node's GPU count (4): the Ray
-    # Serve gateway path is forced on automatically (no use_ray_serve needed) since only Ray's own
-    # placement-group scheduler - not vLLM's multi-node DP - can place such an instance. Aggregate
-    # footprint (5 x 2 = 10) exceeds COMPUTE_MULTI_NODE's total (2 nodes x 4 = 8), so this still
-    # raises, just against total cluster capacity rather than "not supported".
+    # TP5 exceeds a single node's GPU count (4), forcing the Ray Serve gateway path automatically.
     with pytest.raises(ValidationError, match="exceeds the total GPUs across all nodes"):
         SubmitConfig.model_validate(
             _config(
@@ -230,11 +226,7 @@ COMPUTE_4_NODES_8_GPUS = {
 
 
 def test_multi_instance_per_instance_multi_node_tp_accepted_when_footprint_fits():
-    # TP8 x PP2 = 16 GPUs/instance > 8 gpus_per_node, so an instance must itself span nodes - the
-    # Ray Serve gateway path is forced on. 2 instances x 16 = 32 == 4 nodes x 8 gpus_per_node: fits
-    # exactly. This is the previously-forbidden topology that Ray Serve now supports. No
-    # driver.gym_install needed - the gateway's own source is embedded directly into the sbatch
-    # script (see _build_vllm_ray_serve_command).
+    # TP8 x PP2 = 16 GPUs/instance spans nodes; 2 instances x 16 fits exactly in 4 nodes x 8 GPUs.
     config = SubmitConfig.model_validate(
         _config(
             services={
@@ -257,11 +249,7 @@ COMPUTE_4_NODES_6_GPUS = {
 
 
 def test_multi_instance_per_instance_multi_node_tp_number_of_instances_need_not_divide_nodes():
-    # 3 instances don't evenly divide 4 nodes, which would be rejected for vLLM's own multi-node DP
-    # - but Ray's placement-group scheduler packs flexibly, so the Ray Serve gateway path doesn't
-    # require this. tp_pp=8 (fits in one node) forces effective_ray_serve via use_ray_serve here so
-    # the mismatched node count is exercised without also tripping the footprint check (8 x 3 = 24
-    # exactly matches 4 nodes x 6 gpus_per_node, so no idle-GPU warning either).
+    # 3 instances don't evenly divide 4 nodes - fine for the Ray Serve gateway path (opted in here).
     config = SubmitConfig.model_validate(
         _config(
             services={"svc": {**SERVICE, "tensor_parallel_size": 8, "number_of_instances": 3, "use_ray_serve": True}},
@@ -282,16 +270,12 @@ def test_use_ray_serve_defaults_to_false():
 
 
 def test_use_ray_serve_opt_in_single_node_multi_instance_accepted():
-    # Single-node, multi-instance: vLLM's own --data-parallel-size would normally handle this, but
-    # a user can still opt into the Ray Serve gateway for it. No driver.gym_install needed.
     service = {**SERVICE, "number_of_instances": 4, "use_ray_serve": True}
     config = SubmitConfig.model_validate(_config(services={"svc": service}, compute=COMPUTE_8_GPUS_PER_NODE))
     assert config.services["svc"].use_ray_serve is True
 
 
 def test_use_ray_serve_opt_in_does_not_require_gpus_per_node():
-    # No node_pools/gpus_per_node info at all - opting in still validates fine (nothing to check
-    # against), matching how the default path also skips footprint validation without that info.
     service = {**SERVICE, "use_ray_serve": True}
     config = SubmitConfig.model_validate(_config(services={"svc": service}))
     assert config.services["svc"].use_ray_serve is True

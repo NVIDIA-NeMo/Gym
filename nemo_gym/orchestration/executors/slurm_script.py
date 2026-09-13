@@ -205,10 +205,7 @@ def _build_vllm_ray_command(service: VllmServiceConfig, total_nodes: int) -> str
 
 
 def _escape_for_double_quoted_bash(text: str) -> str:
-    """Escape text for safe embedding inside a double-quoted bash string ("..."). Needed instead
-    of shlex.quote (which produces single-quote-wrapped output) whenever the text is substituted
-    inside an already-open single-quoted bash region - a literal `'` from shlex.quote would
-    terminate that outer quoting early and corrupt the command."""
+    """Escape text for safe embedding inside a double-quoted bash string ("...")."""
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
 
 
@@ -218,13 +215,7 @@ _RAY_SERVE_GATEWAY_SOURCE_PATH = Path(__file__).resolve().parent.parent / "ray_s
 def _build_vllm_ray_serve_command(
     service: VllmServiceConfig, total_nodes: int, gpus_per_node_values: list[int]
 ) -> str:
-    # Ray Serve (nemo_gym/orchestration/ray_serve_gateway.py) launches all number_of_instances
-    # `vllm serve` processes itself and routes requests across them. Ray's own placement-group
-    # scheduler only decides where each instance's *worker* ranks land - not where the `vllm serve`
-    # driver process itself runs - so the gateway needs gpus_per_node to compute how many nodes
-    # each instance's own footprint needs, to explicitly pin different instances' drivers to
-    # different nodes. This is the only place NeMo Gym uses the `ray.serve` library, as opposed to
-    # vLLM's own Ray core executor (see _build_vllm_single_instance_multi_node_command).
+    # Launches ray_serve_gateway.py, which creates the instances and routes requests via ray.serve.
     gateway_args = (
         f"--model {shlex.quote(service.model)}"
         f" --port {service.port}"
@@ -237,13 +228,8 @@ def _build_vllm_ray_serve_command(
     if service.trust_remote_code:
         gateway_args += " --trust-remote-code"
 
-    # ray_serve_gateway.py has no internal nemo_gym imports (stdlib + ray/fastapi/aiohttp only), so
-    # its source is embedded directly (base64-encoded, see render_write_file_from_base64) into the
-    # vLLM service's own container rather than git-cloning the whole nemo_gym repo or `pip install
-    # -e .`-ing the package there - the vLLM container (e.g. vllm/vllm-openai) never has nemo_gym
-    # installed, and a full package install there risks nemo_gym's own pinned deps (torch, ray, ...)
-    # clobbering vLLM's already-working install. This also means using the Ray Serve gateway never
-    # requires driver.gym_install to be configured.
+    # Embeds the gateway's source directly rather than git-cloning/installing nemo_gym into the
+    # vLLM container - no driver.gym_install needed for this path.
     write_gateway = render_write_file_from_base64(_RAY_SERVE_GATEWAY_SOURCE_PATH.read_text(), "ray_serve_gateway.py")
     fetch_and_run = (
         f"{write_gateway}"
@@ -252,25 +238,13 @@ def _build_vllm_ray_serve_command(
         f" && python3 ray_serve_gateway.py {gateway_args}"
     )
     if total_nodes <= 1:
-        # No multi-node Ray cluster to join - the gateway starts its own local Ray instance and
-        # launches all instances on this one node. Still needs double-quote escaping: fetch_and_run
-        # contains shlex.quote(service.model), which wraps its output in literal single quotes
-        # whenever the model name needs escaping (e.g. contains a space) - those would otherwise
-        # terminate this bash -lc '...' wrapper early and corrupt the command.
+        # No multi-node Ray cluster to join - the gateway starts its own local Ray instance.
         return f'bash -lc "{_escape_for_double_quoted_bash(fetch_and_run)}"'
     resource_flags = (
         "--num-cpus=${SLURM_CPUS_PER_TASK:-$SLURM_CPUS_ON_NODE} --num-gpus=${SLURM_GPUS_PER_TASK:-$SLURM_GPUS_ON_NODE}"
     )
-    # render_vllm_ray_symmetric_run splices inner_cmd, unquoted, into a `ray symmetric-run ... --
-    # {inner_cmd}` statement that itself sits inside that template's own single-quoted `bash -lc
-    # '...'` wrapper. Without protection, fetch_and_run's `&&` chain gets live-parsed as bash
-    # operators once that outer bash -lc runs its script: `ray symmetric-run`'s entrypoint would
-    # become just the first `&&`-segment, which succeeds and exits immediately, tearing down the
-    # whole Ray cluster it just stood up before the gateway ever launches. Wrapping in `bash -c
-    # "<escaped>"` makes the whole chain one opaque token immune to that live-parsing - double
-    # quotes, not shlex.quote's single-quote style, because this text is substituted inside that
-    # template's own single-quoted region: a literal `'` (which shlex.quote would introduce) would
-    # terminate that outer quoting early.
+    # Double-quote escaping keeps the whole &&-chain as one opaque token for ray symmetric-run's
+    # entrypoint, immune to the outer bash -lc live-parsing its own && operators.
     return render_vllm_ray_symmetric_run(
         f'bash -c "{_escape_for_double_quoted_bash(fetch_and_run)}"', total_nodes, resource_flags
     )

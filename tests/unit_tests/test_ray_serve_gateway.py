@@ -68,9 +68,6 @@ def test_parse_args_missing_required_raises():
 
 
 def test_parse_args_accepts_gpus_per_node_for_caller_compatibility():
-    # Unused by this module's own scheduling logic (Ray Serve's max_replicas_per_node plus vLLM's
-    # own Ray executor handle node placement without needing it) - just needs to not error, since
-    # _build_vllm_ray_serve_command passes it unconditionally.
     args = parse_args(["--model", "org/model", "--port", "8000", "--gpus-per-node", "8"])
     assert args.gpus_per_node == 8
 
@@ -88,9 +85,6 @@ def test_free_local_port_returns_a_usable_port():
 
 
 def test_free_local_port_returns_distinct_ports_across_calls():
-    # Not a strict guarantee (the OS could theoretically reuse one right away), but with both
-    # sockets closed before the next bind, collisions are practically never observed - this is
-    # what protects colocated replicas (see max_replicas_per_node) from binding the same port.
     ports = {free_local_port() for _ in range(20)}
     assert len(ports) == 20
 
