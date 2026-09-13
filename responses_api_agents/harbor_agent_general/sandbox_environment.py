@@ -24,7 +24,12 @@ from responses_api_agents.harbor_agent_general.compose_config import resolve_com
 
 
 class HarborSandboxEnvironment(NemoGymSandboxEnvironment):
-    """Keep the legacy adapter stable while implementing the current Harbor contract."""
+    """Implement Harbor's current contract without changing the legacy adapter.
+
+    ``sandbox_env_by_task`` supplies runtime environment defaults keyed by Harbor
+    task short name, for both agent and separate verifier environments. Explicit
+    ``sandbox_env`` entries take precedence. Task packages remain unchanged.
+    """
 
     def __init__(
         self,
@@ -33,6 +38,7 @@ class HarborSandboxEnvironment(NemoGymSandboxEnvironment):
         compose_image_configs=None,
         sandbox_request_gpu_type=True,
         sandbox_split_endpoints=False,
+        sandbox_env_by_task=None,
         **kwargs,
     ):
         # Keep credentials in the process environment, out of Harbor's saved job
@@ -48,6 +54,11 @@ class HarborSandboxEnvironment(NemoGymSandboxEnvironment):
         if self._compose_image_configs is not None and not self._compose_image_configs.is_absolute():
             self._compose_image_configs = Path(__file__).resolve().parents[2] / self._compose_image_configs
         super().__init__(*args, sandbox_provider=provider, **kwargs)
+        # Harbor uses the task short name for both agent and separate verifier
+        # environments. Apply runtime defaults without editing task packages;
+        # explicit global sandbox_env values still take precedence.
+        task_env = (sandbox_env_by_task or {}).get(self.environment_name, {})
+        self._sandbox_env = {str(key): str(value) for key, value in task_env.items()} | self._sandbox_env
         # Harbor has now applied resource overrides. Separate verifiers build a
         # new environment instance, so they select using their own GPU count.
         if sandbox_split_endpoints:

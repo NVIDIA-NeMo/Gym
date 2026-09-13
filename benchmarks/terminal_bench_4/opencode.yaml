@@ -23,6 +23,11 @@ terminal_bench_4_opencode:
           # The selected GPU deployment serves H100s and rejects gpu_type filters.
           sandbox_request_gpu_type: false
           sandbox_split_endpoints: ${oc.select:tb4_split_sandbox_endpoints,false}
+          sandbox_env_by_task:
+            nextjs-performance:
+              # Next.js 15.4 uses this value minus one as its build worker count.
+              # Match the task's 2 CPUs instead of spawning for every host CPU.
+              CIRCLE_NODE_TOTAL: "3"
           sandbox_provider_options:
             resource_requests: limits
           compose_image_configs: benchmarks/terminal_bench_4/compose-images.json
