@@ -307,13 +307,10 @@ harbor_agent_kwargs:
 ```
 
 Before running, follow the [Daytona access prerequisites](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/daytona-access)
-to obtain an organization API key, confirm sandbox creation/cleanup permissions and check
-quota. The key comes from [Daytona's dashboard](https://www.daytona.io/docs/en/api-keys/),
-not Gym, and is separate from the policy-model key below. This example uses Harbor's
-Daytona environment, not Gym's Sandbox API provider config.
+for an organization key, sandbox permissions, and quota. This example uses Harbor's
+Daytona environment, not Gym's Sandbox API provider.
 
-Supply the key through your approved secret-management mechanism in the host environment
-(the following value is only a placeholder; never commit real credentials):
+Set the key in the host environment (placeholder below; never commit real credentials):
 
 ```bash
 export DAYTONA_API_KEY="<your-daytona-api-key>"

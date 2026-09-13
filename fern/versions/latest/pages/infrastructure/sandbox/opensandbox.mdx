@@ -51,40 +51,30 @@ Set connection values through the provider config. The shipped config reads thes
 | `OPENSANDBOX_DOMAIN` | Reachable server host and optional port, optionally with its scheme (`https://host` sets `connection.protocol`). Override the shipped in-cluster default unless your process can reach that service. |
 | `OPENSANDBOX_API_KEY` | Required by the shipped config; obtain it from the service operator or configure it on your own server as described above. Inject it through your approved secret manager or protected runtime environment. |
 
-Keep model-endpoint credentials in the model configuration and private-image
-credentials in the registry configuration (`image_auth`, when needed). Do not
-reuse either as the sandbox-service key. Do not commit keys to YAML, paste them
-into issues, or print fully resolved configurations containing secrets.
+Sandbox, model, and image-registry credentials are separate. Keep secrets out of
+source control, issues, and resolved-config logs.
 
 ### Check access before allocating sandboxes
 
-From the machine or container running the Gym server, check these prerequisites:
+From the Gym server's host or container:
 
-1. Confirm the key is injected without printing its value. Confirm the approved
-   endpoint resolves and is reachable from this process; a `.svc.cluster.local`
-   name normally requires the cluster's DNS and network access. Use the
-   operator's TLS/CA configuration, rather than disabling certificate checks.
-2. Use the deployment's documented health check to check reachability, then its
-   approved read-only authenticated check to verify credentials. Upstream's
-   `/health` route is public: success there alone does **not** prove key validity
-   or permission to create a sandbox. These checks should not create resources.
-3. Confirm image pulls and required binary/data downloads are allowed. Check the
-   model endpoint is reachable from the component making model requests; a
-   sandbox's `localhost` is not the Gym host. Server-proxy mode does not grant
-   sandbox egress or image-registry access.
-4. Agree a small first-run concurrency and lifetime within the deployment's
-   limits, and a cleanup procedure before running the agent's evaluation recipe.
+- Confirm the endpoint resolves and is reachable. The shipped
+  `.svc.cluster.local` address normally requires cluster network/DNS access.
+  Use the operator's TLS/CA configuration.
+- Verify credentials using the deployment's read-only authenticated check.
+  The public `/health` route checks reachability, **not key validity**.
+- Confirm image-registry and required download access, plus model connectivity
+  from the component making requests. A sandbox's `localhost` is not the Gym host.
+- Agree initial concurrency, lifetime, and cleanup within the deployment's limits.
 
-For DNS/timeouts, check network placement and the endpoint with the operator.
-For authentication errors, check the key's deployment, expiry/rotation, and
-permissions; do not substitute a model key. For quota or image-pull failures,
-confirm capacity and registry access before retrying at higher concurrency.
-Access checks are prerequisites, not evidence of a successful agent rollout or
-verifier run.
+Resolve access, quota, or image-pull failures with the operator before retrying.
+These checks do not replace an agent evaluation.
 
 ## Provider Config
 
-NeMo Gym ships an [OpenSandbox provider config](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml). It defines a top-level `sandbox` block that agents reference with `sandbox_provider: sandbox`. Load that file as shown in the launch command below; the following excerpt shows selected defaults, not a complete replacement config. Omitted settings remain defined by the shipped file.
+Load the [shipped OpenSandbox config](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml)
+and select it with `sandbox_provider: sandbox`. This excerpt shows selected
+defaults; load the full file using the launch command below.
 
 ```yaml
 sandbox:
@@ -118,7 +108,9 @@ sandbox:
       close_timeout_s: 30
 ```
 
-Keep `create.skip_health_check: false` so sandbox creation waits for readiness; skipping it can let the first command race the exec daemon and fail with a 502. The overall `create.timeout_s` must exceed the task's `ready_timeout_s` (1200 seconds in the shipped mini-SWE config), which is why the shipped create budget is 1500 seconds. Tune these budgets together if the task's readiness requirement changes.
+Keep `create.skip_health_check: false` to avoid commands racing sandbox readiness.
+Keep `create.timeout_s` above the task's `ready_timeout_s`: the shipped mini-SWE
+values are 1500 and 1200 seconds respectively. Adjust them together.
 
 Run an agent with the provider config by passing it alongside the agent and model configs:
 

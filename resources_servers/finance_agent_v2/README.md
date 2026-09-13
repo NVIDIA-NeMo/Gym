@@ -55,12 +55,9 @@ Run this environment with **two configs**: this environment config
 (`responses_api_models/openai_model/configs/openai_model.yaml`, or
 `vllm_model.yaml` for a self-hosted endpoint).
 
-Set endpoints and credential references in `env.yaml` at the repo root, which is
-gitignored. For a minimal configuration/startup check, the three external-tool
-keys may be omitted: their tools are registered as unavailable. Model access is
-separate: the policy configuration must resolve, live agent and retrieval calls
-need access to the policy endpoint, and scoring through `/verify` needs access to
-the configured judge endpoint.
+Set endpoints and credential references in the repo-root, gitignored `env.yaml`.
+Tool keys are optional at startup; missing keys make those tools unavailable.
+Live runs need policy/retrieval model access, and `/verify` needs judge-model access.
 
 ```yaml
 # env.yaml
@@ -83,29 +80,21 @@ pricing_data_api_key: ${oc.env:TIINGO_API_KEY,null}     # price_history (Tiingo)
 finance_agent_v2_cache_dir: /shared/cache/finance_agent_v2
 ```
 
-`${oc.env:VAR,null}` resolves an absent variable to YAML `null`, preserving the
-shipped config's optional-tool behavior. `${oc.env:VAR}` without a default requires
-the variable: this example requires `OPENAI_API_KEY` for both hosted model
-connections, even if all three tool keys are absent. Policy and judge credentials
-can be configured independently; sharing a key here does not make judge access
-optional. The shipped judge-key fallback is only an `unset` sentinel for dry
-configuration checks, not a usable credential.
+`${oc.env:VAR,null}` preserves optional-tool behavior when a variable is absent.
+This example still requires `OPENAI_API_KEY` for both model endpoints; policy and
+judge keys can be configured independently. The shipped judge-key fallback
+`unset` is a configuration placeholder, not a usable credential.
 
-The shipped tool-key and cache settings use config key → environment variable →
-null-safe default. You can omit those four entries from `env.yaml` and instead
-export `SEC_API_KEY`, `TAVILY_API_KEY`, `TIINGO_API_KEY` and
-`FINANCE_AGENT_V2_CACHE_DIR`. An explicit config entry takes precedence, including
-the cache path in the example. The `policy_*` keys have no default and must come
-from `env.yaml` or a CLI override. Environment references avoid storing literal
-secrets in this file, but resolved configs may contain credentials: do not publish
-or log them.
+Tool-key and cache settings resolve as config key → environment variable → default.
+You can omit them from `env.yaml` and export `SEC_API_KEY`, `TAVILY_API_KEY`,
+`TIINGO_API_KEY`, and `FINANCE_AGENT_V2_CACHE_DIR` instead. Explicit config values
+take precedence. The `policy_*` keys have no default. Resolved configurations may
+contain secrets; do not publish or log them.
 
-A full-tool benchmark run needs valid credentials for all three tool services,
-working policy/retrieval and judge model connections, and network access to those
-endpoints and fetched web pages. Missing tool credentials give reduced tool
-coverage, not an equivalent benchmark run; record that limitation with results.
-Grading needs connectivity to the judge endpoint (including internet egress for
-the hosted endpoint shown above), even when no tool calls are being replayed.
+Full-tool benchmark coverage requires all three service keys and network access
+to the tools, fetched pages, and model endpoints. Record missing-tool limitations
+with results. Grading also needs judge connectivity, including internet access
+for the hosted endpoint above.
 
 ## Run
 
