@@ -885,6 +885,56 @@ async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.
         await provider.exec(handle, "retry after non-OOM failure", timeout_s=30)
 
 
+@pytest.mark.parametrize("state", ["oom", "failed", "running", "unavailable"])
+@pytest.mark.asyncio
+async def test_exec_status_timeout_checks_terminal_control_plane_state(
+    monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    class FakeCommands:
+        async def run(self, command: str, *, opts: Any) -> Any:
+            return SimpleNamespace(id="exec-timeout")
+
+        async def get_command_status(self, execution_id: str) -> Any:
+            raise TimeoutError("exhausted command status polls")
+
+    class FakeRaw:
+        commands = FakeCommands()
+        info_calls = 0
+
+        async def get_info(self) -> Any:
+            self.info_calls += 1
+            if state == "unavailable":
+                raise RuntimeError("control plane unavailable")
+            return SimpleNamespace(
+                status=SimpleNamespace(
+                    state="Running" if state == "running" else "Failed",
+                    reason=None if state == "running" else "FAILED",
+                    message={"oom": "OOMKilled (exit code 137)", "failed": "node was drained", "running": None}[state],
+                )
+            )
+
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object)
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        connection={"request_timeout_s": 5},
+        probe={"command": None},
+        operations={"background_exec": True, "retries": 0},
+    )
+    raw = FakeRaw()
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="owned-timeout", provider_name="opensandbox", raw=raw)
+    terminal = state in ("oom", "failed")
+    error_type = opensandbox_provider.SandboxBackendUnreachableError if terminal else TimeoutError
+    with pytest.raises(error_type) as captured:
+        await provider.exec(handle, "synthetic command", timeout_s=30)
+    assert raw.info_calls >= 1
+    if terminal:
+        assert isinstance(captured.value.__cause__, TimeoutError)
+        assert ("OOM-killed" if state == "oom" else "Sandbox is dead") in str(captured.value)
+    else:
+        assert "command status" in str(captured.value)
+
+
 @pytest.mark.parametrize(
     ("status", "missing"),
     [

@@ -1436,9 +1436,15 @@ class OpenSandboxProvider:
                     f"(sandbox_id={handle.sandbox_id!r})"
                 ) from e
         except Exception as error:
-            if not isinstance(error, SandboxBackendUnreachableError) and _exception_status_code(error) != 502:
+            if (
+                not isinstance(error, (SandboxBackendUnreachableError, TimeoutError))
+                and _exception_status_code(error) != 502
+            ):
                 raise
-            notice = await self._oom_death_notice(handle)
+            # Exhausted status polls can end in TimeoutError after an earlier 502.
+            # Only confirmed terminal state changes that timeout into a dead backend;
+            # a healthy/unknown sandbox keeps the original timeout observation.
+            notice = await self._oom_death_notice(handle, any_death=isinstance(error, TimeoutError))
             if notice is not None:
                 raise SandboxBackendUnreachableError(notice) from error
             raise
