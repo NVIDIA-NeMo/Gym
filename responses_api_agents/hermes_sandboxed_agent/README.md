@@ -1,6 +1,6 @@
 # Sandboxed Hermes with SWE-bench Pro
 
-Runs **NousResearch/hermes-agent@v2026.8.31** inside the task container prepared by
+Runs **NousResearch/hermes-agent@v2026.9.7** inside the task container prepared by
 Gym's existing SWE-bench Pro resources server. Hermes uses its terminal and file
 tools in `/app`; Pro extracts and grades the patch through its existing verifier.
 The model server runs separately. See [ASSESSMENT.md](ASSESSMENT.md) for a short

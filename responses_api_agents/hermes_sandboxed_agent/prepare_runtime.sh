@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$DEPS_DIR"
 exec 9>"$DEPS_DIR/.prepare.lock"
 flock 9
-HERMES_COMMIT=29112bef099274229cadff79cdff7bf7b99c4b77
+HERMES_COMMIT=2237be355906fbe6065ce1815711eee52b2d646e
 if [[ -f "$DEPS_DIR/hermes-runtime.json" && -x "$DEPS_DIR/bin/python3" ]] &&
     [[ "$(git -C "$DEPS_DIR/hermes-src" rev-parse HEAD)" == "$HERMES_COMMIT" ]] &&
     "$DEPS_DIR/bin/python3" -I - "$DEPS_DIR" "$HERMES_COMMIT" <<'PY'
@@ -27,7 +27,9 @@ fi
 source "$SCRIPT_DIR/../anyswe_agent/setup_scripts/_portable_python.sh"
 install_portable_python
 if [ ! -d "$DEPS_DIR/hermes-src/.git" ]; then
-    git clone --depth=1 --branch=v2026.8.31 https://github.com/NousResearch/hermes-agent.git "$DEPS_DIR/hermes-src"
+    git clone --depth=1 --branch=v2026.9.7 https://github.com/NousResearch/hermes-agent.git "$DEPS_DIR/hermes-src"
+else
+    git -C "$DEPS_DIR/hermes-src" fetch --depth=1 origin "$HERMES_COMMIT"
 fi
 git -C "$DEPS_DIR/hermes-src" checkout --detach "$HERMES_COMMIT"
 # This release intentionally rejects wheels; retain its source assets and use
@@ -51,4 +53,4 @@ if not matched:
 PY
 "$DEPS_DIR/bin/python3" -I -c 'from run_agent import AIAgent; import inspect; assert "request_overrides" in inspect.signature(AIAgent).parameters'
 "$DEPS_DIR/bin/python3" -m pip freeze > "$DEPS_DIR/requirements.freeze.txt"
-printf '{"hermes_commit":"%s","tag":"v2026.8.31"}\n' "$HERMES_COMMIT" > "$DEPS_DIR/hermes-runtime.json"
+printf '{"hermes_commit":"%s","tag":"v2026.9.7"}\n' "$HERMES_COMMIT" > "$DEPS_DIR/hermes-runtime.json"

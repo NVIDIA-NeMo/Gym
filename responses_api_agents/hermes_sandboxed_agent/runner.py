@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Standalone runner for NousResearch/hermes-agent@v2026.8.31. No Gym imports.
+"""Standalone runner for NousResearch/hermes-agent@v2026.9.7. No Gym imports.
 
 Launch with the dedicated runtime's ``python -I runner.py request.json`` from
 outside the task repository. TERMINAL_CWD independently selects the tool cwd.
@@ -15,7 +15,7 @@ import traceback
 from pathlib import Path
 
 
-HERMES_COMMIT = "29112bef099274229cadff79cdff7bf7b99c4b77"
+HERMES_COMMIT = "2237be355906fbe6065ce1815711eee52b2d646e"
 
 
 def write_json(path, data):
@@ -53,7 +53,7 @@ def run(params):
 
     runtime_manifest = json.loads((Path(sys.prefix) / "hermes-runtime.json").read_text())
     if runtime_manifest["hermes_commit"] != HERMES_COMMIT:
-        raise RuntimeError("Runtime must contain NousResearch/hermes-agent@v2026.8.31")
+        raise RuntimeError("Runtime must contain NousResearch/hermes-agent@v2026.9.7")
     source = Path(sys.prefix) / "hermes-src"
     commit = subprocess.check_output(
         ["git", "-c", f"safe.directory={source}", "-C", str(source), "rev-parse", "HEAD"], text=True
@@ -77,7 +77,12 @@ def run(params):
     hermes_home = Path(os.environ["HERMES_HOME"])
     hermes_home.mkdir()
     config = {
-        "model": {"default": params["model"], "provider": "custom", "base_url": params["base_url"]},
+        "model": {
+            "default": params["model"],
+            "provider": "custom",
+            "base_url": params["base_url"],
+            "streaming": False,  # Gym's Chat Completions endpoint is non-streaming.
+        },
         "memory": {"memory_enabled": False, "user_profile_enabled": False},
         "compression": {"enabled": params["compression_enabled"], "threshold": 0.85},
         "terminal": {"backend": "local", "cwd": params["workdir"], "timeout": params["terminal_timeout"]},
@@ -91,6 +96,9 @@ def run(params):
         raise RuntimeError("Hermes was imported from outside the pinned runtime")
 
     query, history, input_system = split_input(params["input"])
+    request_overrides = {"temperature": params["temperature"]}
+    if params["chat_template_kwargs"]:
+        request_overrides["metadata"] = {"chat_template_kwargs": json.dumps(params["chat_template_kwargs"])}
     agent = AIAgent(
         base_url=params["base_url"],
         api_key="gym",  # The sandbox talks only to Gym's model proxy, never receives provider credentials.
@@ -99,7 +107,7 @@ def run(params):
         model=params["model"],
         max_iterations=params["max_turns"],
         max_tokens=params["max_tokens"],
-        request_overrides={"temperature": params["temperature"]},
+        request_overrides=request_overrides,
         reasoning_config={"enabled": True},
         enabled_toolsets=params["enabled_toolsets"],
         quiet_mode=True,
@@ -109,19 +117,6 @@ def run(params):
         save_trajectories=False,
         checkpoints_enabled=False,
     )
-    # v2026.8.31 removed use_streaming and streams even without a consumer.
-    # Gym's Chat Completions endpoint accepts only stream=false.
-    agent._disable_streaming = True
-    original_build = agent._build_api_kwargs
-
-    def build(api_messages, tools_for_api=None):
-        kwargs = original_build(api_messages, tools_for_api=tools_for_api)
-        kwargs["stream"] = False
-        if params["chat_template_kwargs"]:
-            kwargs.setdefault("extra_body", {})["chat_template_kwargs"] = params["chat_template_kwargs"]
-        return kwargs
-
-    agent._build_api_kwargs = build
     signal.signal(signal.SIGTERM, lambda *_: agent.interrupt("sandbox timeout"))
     result = agent.run_conversation(query, params["system_prompt"] or input_system, history)
     result["n_input"] = len(history) + 1

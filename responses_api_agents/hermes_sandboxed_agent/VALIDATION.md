@@ -5,8 +5,8 @@ Hermes `v2026.8.31` (`29112bef099274229cadff79cdff7bf7b99c4b77`).
 The [recorded results](validation.json) include the dataset/evaluator pins,
 selected instance, container checksum and CPU outcomes.
 
-These CPU runs used the subsequently removed disk-overlay extension. The current
-`--writable-tmpfs` configuration awaits cluster validation.
+These CPU runs used the old Hermes pin and the subsequently removed disk-overlay
+extension. The current `v2026.9.7` / `--writable-tmpfs` combination awaits cluster validation.
 
 ## Local checks
 

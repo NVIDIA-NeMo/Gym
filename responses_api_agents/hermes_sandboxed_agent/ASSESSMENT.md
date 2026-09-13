@@ -1,7 +1,7 @@
 # Sandboxed Hermes for SWE-bench Pro
 
-The target is SWE-bench Pro with [NousResearch/hermes-agent v2026.8.31](prepare_runtime.sh#L11)
-(commit `29112bef099274229cadff79cdff7bf7b99c4b77`). The implementation follows
+The target is SWE-bench Pro with [NousResearch/hermes-agent v2026.9.7](prepare_runtime.sh#L11)
+(commit `2237be355906fbe6065ce1815711eee52b2d646e`). The implementation follows
 Gym's [OpenCode sandboxed agent](../opencode_sandboxed_agent/app.py#L886): Gym's Pro resources server prepares a task container, Hermes
 works inside it, and that server grades the resulting file changes. The model
 runs on a separate server.
@@ -31,7 +31,7 @@ code and images; each run starts its own processes and task containers.
 | [Pro verifier](../../resources_servers/swebench_pro/verification.py#L394) | **Existing** | Existing grading logic called by the Pro server. Runs the task's test commands in a fresh verification container. |
 | [Gym Hermes agent server](app.py#L222) | **Added** | New Python web server in the outer container. Receives `/run`, requests a task container, starts Hermes inside it, then asks Pro to grade and clean up. |
 | [Hermes runner](runner.py#L51) and [runtime preparation](prepare_runtime.sh#L27) | **Added** | The runner starts Hermes inside the task container. Runtime preparation builds its separate Python installation before a run. |
-| [NousResearch Hermes v2026.8.31](prepare_runtime.sh#L11) | **Existing upstream software** | The pinned Hermes program, used without source changes. Runs inside the task container, calls the model and executes terminal/file tools. |
+| [NousResearch Hermes v2026.9.7](prepare_runtime.sh#L11) | **Existing upstream software** | The pinned Hermes program, used without source changes. Runs inside the task container, calls the model and executes terminal/file tools. |
 | [Gym model proxy](../../responses_api_models/openai_model/app.py#L93) | **Existing** | Python web server in the outer container. Forwards requests to the model endpoint; inference happens at that endpoint. |
 | [Apptainer provider](../../nemo_gym/sandbox/providers/apptainer/provider.py#L281) | **Extended** | Existing Python library used by the outer Gym servers. Already created containers, ran commands and transferred files. We added reconnect. |
 | [Standalone provider YAML](configs/apptainer.yaml#L2) and [cluster settings](https://gitlab-master.nvidia.com/interactive-agents/slurm-evaluations/-/blob/jnolan/hermes-sandboxed-pro/configs/swebench_pro.yaml#L6) | **Added** | The Hermes agent supplies its standalone Apptainer preset; Slurm evaluations supplies cluster mounts and execution settings. |
@@ -92,7 +92,7 @@ itself remains a set of files consumed by these services.
 The word **agent** refers to two pieces. The **added Gym Hermes agent server**
 is the coordinating web service in [app.py](app.py#L132), outside the task
 sandbox. The **existing Hermes program** is started by our added
-[runner.py](runner.py#L94) inside that sandbox, where it executes the model/tool
+[runner.py](runner.py#L102) inside that sandbox, where it executes the model/tool
 loop. The language model runs at a separately configured HTTP endpoint.
 
 Here, "outside the task sandbox" still means inside the outer container hosting
@@ -160,7 +160,7 @@ and [creates the fresh verification container](../../resources_servers/swebench_
    [environment setup](../../resources_servers/swebench_pro/app.py#L375). It [returns connection details](../../resources_servers/swebench_pro/app.py#L353) for that container.
 3. The Gym Hermes agent server [attaches](app.py#L245) and [uploads the small Hermes runner, problem input and
    execution settings](app.py#L160). Reference patches and verifier scripts stay outside.
-4. The runner [starts the pinned Hermes release](runner.py#L126). Its [tools operate in the task directory](runner.py#L67),
+4. The runner [starts the pinned Hermes release](runner.py#L121). Its [tools operate in the task directory](runner.py#L67),
    while model requests go through [Gym's model proxy](../../responses_api_models/openai_model/app.py#L93) to the configured endpoint.
 5. The Gym Hermes agent server [saves Hermes's conversation and execution result](app.py#L189) and [calls /verify over HTTP](app.py#L249).
    The Pro resources server [extracts the patch](../../resources_servers/swebench_pro/app.py#L401), [creates a fresh container](../../resources_servers/swebench_pro/app.py#L447),
@@ -174,7 +174,7 @@ and [creates the fresh verification container](../../resources_servers/swebench_
 | Read | What to look for |
 | --- | --- |
 | Agent: [run()](app.py#L222), then [_run_in_sandbox()](app.py#L142) | The complete task sequence and the data uploaded to the container. |
-| Runner: [run()](runner.py#L51), then [main()](runner.py#L145) | Hermes configuration, tool working directory, model calls and result capture. |
+| Runner: [run()](runner.py#L51), then [main()](runner.py#L140) | Hermes configuration, tool working directory, model calls and result capture. |
 | Pro: [seed_session()](../../resources_servers/swebench_pro/app.py#L321), [close_session()](../../resources_servers/swebench_pro/app.py#L222), then [verify()](../../resources_servers/swebench_pro/app.py#L419) | Optional terminal creation, container handoff and cleanup. Existing patch extraction and grading are reused. |
 | Apptainer: [serialize_handle()](../../nemo_gym/sandbox/providers/apptainer/provider.py#L560), [connect()](../../nemo_gym/sandbox/providers/apptainer/provider.py#L579), then [create()](../../nemo_gym/sandbox/providers/apptainer/provider.py#L400) | Reconnecting from another Gym process. |
 | [Runtime preparation](prepare_runtime.sh#L27), then [launch instructions](README.md#launch-with-pro) | Installing the exact Hermes release and composing the launch configuration. |
@@ -183,16 +183,15 @@ and [creates the fresh verification container](../../resources_servers/swebench_
 ## Work reused and adjustments required
 
 **Hermes runner and packaging.** Hermes runs in a separate Python installation
-because [its OpenAI SDK pin](https://github.com/NousResearch/hermes-agent/blob/29112bef099274229cadff79cdff7bf7b99c4b77/pyproject.toml#L40) differs from [Gym's](../../pyproject.toml#L94). This release needs its source
+because [its OpenAI SDK pin](https://github.com/NousResearch/hermes-agent/blob/2237be355906fbe6065ce1815711eee52b2d646e/pyproject.toml#L40) differs from [Gym's](../../pyproject.toml#L94). This release needs its source
 assets, so [runtime preparation retains the pinned source checkout](prepare_runtime.sh#L29). The runner
-checks the [commit](runner.py#L54) and [import location](runner.py#L90). Python [starts outside the task repository
+checks the [commit](runner.py#L54) and [import location](runner.py#L95). Python [starts outside the task repository
 with -I](app.py#L184); terminal tools independently [use the repository working directory](runner.py#L71).
 That prevents task files from overriding the runner's installed Python packages.
 
-**The selected Hermes API.** The adapter targets this NousResearch release,
-including its [constructor arguments](runner.py#L94) and explicit non-streaming requests for
-Gym's proxy. The private [_disable_streaming flag](runner.py#L114) and [_build_api_kwargs()
-wrapper](runner.py#L117) need review when changing Hermes versions. The [real model name](app.py#L33) and
+**The selected Hermes API.** The adapter uses the release's [constructor arguments](runner.py#L102),
+[model.streaming setting](runner.py#L84) and [request_overrides](runner.py#L99)
+for Gym's non-streaming proxy and chat-template options. The [real model name](app.py#L33) and
 [request timeouts](app.py#L40) are explicit settings.
 
 **Pro container handoff.** Existing callers still [request a terminal by default](../../resources_servers/swebench_pro/app.py#L165).
@@ -297,6 +296,6 @@ Verified dataset and startup evidence have been removed. The portable Hermes
 runtime is retained for reuse. The read-only reference repositories are unchanged.
 
 The initial interface supports [text input](runner.py#L28) and [terminal/file tools](configs/hermes_sandboxed_agent.yaml#L19). It records
-[conversations](app.py#L67), [token usage](runner.py#L128) and [execution diagnostics](app.py#L199). Rich Hermes invocation and
+[conversations](app.py#L67), [token usage](runner.py#L123) and [execution diagnostics](app.py#L199). Rich Hermes invocation and
 compaction observation bundles are not implemented, and training token IDs are
 not fabricated.
