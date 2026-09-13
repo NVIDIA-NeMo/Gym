@@ -125,7 +125,20 @@ def render_driver_entrypoint(
             f"git clone {shlex.quote(repo)}",
             f"cd {shlex.quote(repo_name)}",
             f"git checkout {shlex.quote(ref)}",
-            "uv pip install -e . --system",
+            # A real venv, not --system: --system targets whatever
+            # interpreter happens to be on the container's PATH, which
+            # sidesteps uv's own project-aware Python selection entirely --
+            # `uv venv` run inside this checkout instead reads
+            # requires-python from its pyproject.toml and auto-downloads a
+            # satisfying interpreter if the container's own Python doesn't
+            # qualify (e.g. a container shipping Python 3.12 against a
+            # nemo-gym pin requiring >=3.13.14 -- --system fails outright
+            # there, this doesn't). A fresh venv is also never
+            # EXTERNALLY-MANAGED (PEP 668), so this needs no
+            # --break-system-packages override either.
+            "uv venv --seed .venv",
+            "source .venv/bin/activate",
+            "uv pip install -e .",
         ]
 
     if prepare_cmd:
@@ -135,5 +148,5 @@ def render_driver_entrypoint(
         return '"${GYM_CMD[@]}"'
 
     preamble.append('exec "$@"')
-    body = "\n    ".join(preamble)
+    body = "\n    ".join(["set -euo pipefail", *preamble])
     return f"bash -c '\n    {body}\n' -- \"${{GYM_CMD[@]}}\""
