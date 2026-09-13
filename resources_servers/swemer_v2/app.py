@@ -227,7 +227,7 @@ class SwemerV2ResourcesServer(SimpleResourcesServer):
             sandbox, body.workdir
         )
         self._session_id_to_sandbox[session_id] = sandbox
-        return SwemerV2SeedSessionResponse(sandbox_handle=str(sandbox.sandbox_id))
+        return SwemerV2SeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id))
 
     async def verify(self, request: Request, body: SwemerV2VerifyRequest) -> SwemerV2VerifyResponse:
         session_id = request.session[SESSION_ID_KEY]

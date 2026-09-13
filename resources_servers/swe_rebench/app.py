@@ -248,7 +248,7 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
             sandbox, repo_directory(body.repo)
         )
         self._session_id_to_sandbox[session_id] = sandbox
-        return SWERebenchSeedSessionResponse(sandbox_handle=str(sandbox.sandbox_id))
+        return SWERebenchSeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id))
 
     async def verify(self, request: Request, body: SWERebenchVerifyRequest) -> SWERebenchVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
