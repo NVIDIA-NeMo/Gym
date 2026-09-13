@@ -19,7 +19,8 @@ from responses_api_agents.harbor_agent.task_data import TaskData
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RECIPE = REPO_ROOT / "responses_api_agents/harbor_agent/example/onboarding"
 TASK = RECIPE / "tasks/write-answer"
-HARBOR_REVISION = "9dddd797b57ab8a0f9d6352a20fce73abbb29573"
+# Public Git commit pinned in harbor_agent/requirements.txt, not a credential.
+HARBOR_REVISION = "9dddd797b57ab8a0f9d6352a20fce73abbb29573"  # pragma: allowlist secret
 UBUNTU_DIGEST = "sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254"
 
 
