@@ -136,6 +136,9 @@ class TokenIdCaptureSettings(BaseModel):
     external_staging: bool = False
     # Both backends stage a canonical delta before returning coordinates.
     external_staging_backend: ExternalStagingBackend = "vllm_worker"
+    # Allow model admission to cut active generations into framework-owned
+    # durable staging instead of draining every response to completion.
+    generation_prefix_cuts_enabled: bool = False
     # Name of the environment variable containing the manifest-route bearer token.
     # The serving process reads the token without adding it to serialized configuration.
     control_auth_token_env: str = Field(
@@ -168,6 +171,10 @@ class TokenIdCaptureConfig(BaseModel):
         block = self.token_id_capture
         if block.external_staging and not block.enabled:
             raise ValueError("token_id_capture.external_staging requires token_id_capture.enabled")
+        if block.generation_prefix_cuts_enabled and not block.external_staging:
+            raise ValueError(
+                "token_id_capture.generation_prefix_cuts_enabled requires token_id_capture.external_staging"
+            )
         if block.external_staging and block.rebuild_response:
             raise ValueError(
                 "token_id_capture.external_staging requires rebuild_response=false because the "

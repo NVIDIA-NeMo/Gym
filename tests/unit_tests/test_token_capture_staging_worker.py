@@ -153,6 +153,30 @@ def test_root_stages_exact_full_delta_before_returning_coords() -> None:
     assert record.cumulative_hash == coords.cumulative_hash
 
 
+def test_prefix_record_does_not_complete_or_stage_the_live_call() -> None:
+    capture, sink = _capture()
+    call = capture.begin_call(_root())
+
+    prefix = capture.build_prefix_record(
+        call,
+        prompt_token_ids=[10, 11],
+        generated_token_ids=[12],
+        generated_logprobs=[-0.25],
+    )
+
+    assert sink.records == []
+    assert not call.completed
+    assert prefix.token_ids_delta == [10, 11, 12]
+    final = capture.complete_call(
+        call,
+        prompt_token_ids=[10, 11],
+        generated_token_ids=[12, 13],
+        generated_logprobs=[-0.25, -0.5],
+    )
+    assert final.disposition == "staged"
+    assert sink.records[0].token_ids_delta == [10, 11, 12, 13]
+
+
 def test_child_stages_only_tokens_after_verified_parent_prefix() -> None:
     capture, sink = _capture()
 
