@@ -18,6 +18,10 @@ terminal_bench_4_opencode:
         cpu_enforcement_policy: limit
         memory_enforcement_policy: limit
         kwargs:
+          # Match Harbor 0.23 Docker execution without interactive startup output.
+          exec_shell: bash -c
+          sandbox_provider_options:
+            resource_requests: limits
           compose_image_configs: benchmarks/terminal_bench_4/compose-images.json
           sandbox_provider:
             opensandbox:

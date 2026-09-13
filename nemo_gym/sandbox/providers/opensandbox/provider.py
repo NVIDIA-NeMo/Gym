@@ -25,7 +25,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Literal
 from urllib.parse import urlsplit
 
 from nemo_gym.sandbox.attribution import RUN_KEY, log_attribution_once, resolve_attribution, resolve_run_id
@@ -627,9 +627,9 @@ class OpenSandboxProviderOptions:
     volumes: tuple[Mapping[str, Any], ...] = ()
     skip_health_check: bool | None = None
     extensions: Mapping[str, str] = field(default_factory=dict)
-    # Scheduling requests (same keys as SandboxSpec.resources, which become the
-    # limits). Unset, the server applies the single resources map as both.
-    resource_requests: Mapping[str, Any] | None = None
+    # Scheduling requests use SandboxSpec.resources keys. "limits" explicitly
+    # mirrors each sandbox's limits; omission leaves defaulting to the server.
+    resource_requests: Mapping[str, Any] | Literal["limits"] | None = None
 
     @classmethod
     def from_mapping(cls, options: Mapping[str, Any] | None) -> "OpenSandboxProviderOptions":
@@ -668,8 +668,12 @@ class OpenSandboxProviderOptions:
         if not isinstance(extensions, Mapping):
             raise TypeError("OpenSandbox provider option 'extensions' must be a mapping")
         resource_requests = options.get("resource_requests")
-        if resource_requests is not None and not isinstance(resource_requests, Mapping):
-            raise TypeError("OpenSandbox provider option 'resource_requests' must be a mapping")
+        if (
+            resource_requests is not None
+            and resource_requests != "limits"
+            and not isinstance(resource_requests, Mapping)
+        ):
+            raise TypeError("OpenSandbox provider option 'resource_requests' must be a mapping or 'limits'")
 
         return cls(
             image_auth=dict(image_auth) if image_auth is not None else None,
@@ -679,7 +683,7 @@ class OpenSandboxProviderOptions:
             volumes=tuple(dict(volume) for volume in volumes),
             skip_health_check=skip_health_check,
             extensions=_string_map(dict(extensions)),
-            resource_requests=dict(resource_requests) if resource_requests is not None else None,
+            resource_requests=dict(resource_requests) if isinstance(resource_requests, Mapping) else resource_requests,
         )
 
 
@@ -1369,7 +1373,11 @@ class OpenSandboxProvider:
             "extensions": self._resolve_extensions(options.extensions),
             "connection_config": self._connection_config(request_timeout_s=self._create.request_timeout_s),
         }
-        if options.resource_requests is not None:
+        if options.resource_requests == "limits":
+            # Match the SDK's defaults when a service has no explicit resources.
+            kwargs["resource"] = kwargs["resource"] or {"cpu": "1", "memory": "2Gi"}
+            kwargs["resource_requests"] = dict(kwargs["resource"])
+        elif options.resource_requests is not None:
             kwargs["resource_requests"] = _resource_map(SandboxResources.from_mapping(options.resource_requests))
         if spec.image is not None:
             kwargs["image"] = _to_image_spec(spec.image, options.image_auth)

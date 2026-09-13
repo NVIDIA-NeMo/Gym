@@ -347,6 +347,31 @@ async def test_direct_create_passes_resource_requests_to_sdk_create(
         )
 
 
+@pytest.mark.parametrize(
+    ("resources", "expected"),
+    [
+        (
+            {"cpu": 4, "memory_mib": 4096, "disk_gib": 10},
+            {"cpu": "4", "memory": "4096Mi", "ephemeral-storage": "10Gi"},
+        ),
+        ({"cpu": 0.5, "memory_mib": 512}, {"cpu": "0.5", "memory": "512Mi"}),
+        (
+            {"cpu": 4, "memory_mib": 16384, "gpu": 1, "gpu_type": "H100"},
+            {"cpu": "4", "memory": "16384Mi", "gpu": "1", "gpu_type": "H100"},
+        ),
+        ({}, {"cpu": "1", "memory": "2Gi"}),
+    ],
+)
+async def test_explicit_requests_match_each_sandbox_limits(fake_opensandbox_sdk, resources, expected):
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    await provider.create(
+        SandboxSpec(image="image:tag", resources=resources, provider_options={"resource_requests": "limits"})
+    )
+    assert FakeSandbox.created_kwargs["resource"] == expected
+    assert FakeSandbox.created_kwargs["resource_requests"] == expected
+    assert FakeSandbox.created_kwargs["resource_requests"] is not FakeSandbox.created_kwargs["resource"]
+
+
 async def test_direct_create_passes_image_auth_to_sdk_create(
     fake_opensandbox_sdk: None,
 ) -> None:
