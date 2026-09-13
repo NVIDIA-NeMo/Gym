@@ -22,6 +22,7 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -38,6 +39,78 @@ from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provi
 
 
 TEST_REGISTRY_PASSWORD = "secret"  # pragma: allowlist secret
+
+
+@pytest.mark.parametrize("interval", [0, -1, float("nan"), float("inf")])
+def test_renewal_rejects_invalid_intervals(interval: float) -> None:
+    with pytest.raises(ValueError, match="renew_interval_s"):
+        opensandbox_provider.OpenSandboxCreateConfig(renew_interval_s=interval)
+
+
+@pytest.mark.parametrize("ttl", [None, 1, 2])
+async def test_renewal_requires_ttl_longer_than_interval(ttl: int | None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(create={"renew_interval_s": 2, "retries": 0})
+    with pytest.raises(ValueError, match="longer, explicit"):
+        await provider.create(SandboxSpec(image="example", ttl_s=ttl))
+
+
+async def test_renewal_refreshes_ttl_and_stops_before_termination(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(create={"renew_interval_s": 0.01}, probe={"command": None})
+    handle = await provider.create(SandboxSpec(image="example", ttl_s=28800))
+    renewed = asyncio.Event()
+    durations = []
+
+    async def renew(duration: timedelta) -> None:
+        durations.append(duration)
+        renewed.set()
+
+    async def kill() -> None:
+        assert handle.sandbox_id not in provider._renewals
+
+    handle.raw.renew = renew
+    handle.raw.kill = AsyncMock(side_effect=kill)
+    handle.raw.close = AsyncMock()
+    await asyncio.wait_for(renewed.wait(), timeout=1)
+    task = provider._renewals[handle.sandbox_id]
+    await provider.close(handle)
+    assert durations and all(duration == timedelta(seconds=28800) for duration in durations)
+    assert task.cancelled()
+    handle.raw.kill.assert_awaited_once()
+    handle.raw.close.assert_awaited_once()
+    await provider.aclose()
+
+
+async def test_renewal_failure_surfaces_and_still_allows_cleanup(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"renew_interval_s": 0.01}, probe={"command": None}, operations={"retries": 0}
+    )
+    handle = await provider.create(SandboxSpec(image="example", ttl_s=28800))
+    handle.raw.renew = AsyncMock(side_effect=RuntimeError("renewal rejected"))
+    handle.raw.kill = AsyncMock()
+    handle.raw.close = AsyncMock()
+    task = provider._renewals[handle.sandbox_id]
+    with pytest.raises(RuntimeError, match="renewal rejected"):
+        await asyncio.wait_for(asyncio.shield(task), timeout=1)
+    operation = AsyncMock()
+    with pytest.raises(RuntimeError, match="lifetime renewal failed"):
+        await provider._await_sdk_operation(operation, operation="get_info", sandbox_id=handle.sandbox_id, timeout_s=1)
+    operation.assert_not_awaited()
+    with pytest.raises(RuntimeError, match="lifetime renewal failed"):
+        await provider.close(handle)
+    handle.raw.kill.assert_awaited_once()
+    handle.raw.close.assert_awaited_once()
+    await provider.aclose()
+
+
+async def test_provider_shutdown_cancels_renewal_without_terminating_sandbox(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(create={"renew_interval_s": 10}, probe={"command": None})
+    handle = await provider.create(SandboxSpec(image="example", ttl_s=28800))
+    handle.raw.kill = AsyncMock()
+    task = provider._renewals[handle.sandbox_id]
+    await provider.aclose()
+    assert task.cancelled()
+    assert not provider._renewals
+    handle.raw.kill.assert_not_awaited()
 
 
 @dataclass(frozen=True)
