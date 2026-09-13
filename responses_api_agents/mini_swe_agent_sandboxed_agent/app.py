@@ -75,6 +75,7 @@ from nemo_gym.openai_utils import (  # noqa: E402
 )
 from nemo_gym.sandbox import AsyncSandbox, create_provider  # noqa: E402
 from nemo_gym.sandbox.config import resolve_provider_config  # noqa: E402
+from nemo_gym.sandbox.providers.opensandbox.provider import SandboxBackendUnreachableError  # noqa: E402
 from nemo_gym.server_utils import (  # noqa: E402
     SESSION_ID_KEY,
     get_response_json,
@@ -283,6 +284,10 @@ class NeMoGymSandboxShellEnvironment:
                 "extra": {"exception_type": type(e).__name__, "exception": str(e)},
             }
             self.shell_records.append({"command": command, **output})
+            if isinstance(e, SandboxBackendUnreachableError):
+                # A diagnosed dead backend cannot execute another agent action. Preserve
+                # the failed command, then end the episode instead of spending more tokens.
+                raise
             self._check_finished(output)
             return output
         self.exec_times.append(perf_counter() - start)
@@ -794,8 +799,8 @@ class MiniSweAgentSandboxedAgent(SimpleResponsesAPIAgent):
             async with asyncio.timeout(timeout_s if timeout_s is not None else self.config.sandbox_timeout):
                 await env.prepare()
                 exit_info = await agent.run(instruction)
-        except SandboxIdentityMismatch as exc:
-            exit_info = {"exit_status": "SandboxIdentityMismatch", "submission": "", "infrastructure_error": str(exc)}
+        except (SandboxIdentityMismatch, SandboxBackendUnreachableError) as exc:
+            exit_info = {"exit_status": type(exc).__name__, "submission": "", "infrastructure_error": str(exc)}
         except TimeoutError:
             exit_info = {"exit_status": "SandboxTimeout", "submission": ""}
         except Exception as exc:
@@ -937,13 +942,13 @@ class MiniSweAgentSandboxedAgent(SimpleResponsesAPIAgent):
                 task_name=getattr(body, "task_name", "") or "",
                 timeout_s=body.agent_timeout_sec,
             )
-            if metrics.get("mini_swe_exit_status") == "SandboxIdentityMismatch":
+            if metrics.get("mini_swe_exit_status") in ("SandboxIdentityMismatch", "SandboxBackendUnreachableError"):
                 result = body.model_dump() | {
                     "response": response.model_dump(),
                     "reward": 0.0,
                     "evaluation_completed": False,
                     "verification_time_taken": 0.0,
-                    "test_output": "Sandbox identity mismatch; verification skipped",
+                    "test_output": metrics["mini_swe_exit_status"] + "; verification skipped",
                     "golden_patch_output": None,
                 }
                 result.update(metrics)

@@ -124,6 +124,38 @@ async def test_identity_mismatch_does_not_start_verifier(tmp_path, monkeypatch):
     assert calls[-1] == "/cancel_session" and not resource._sessions
 
 
+async def test_dead_backend_stops_episode_and_preserves_failed_command():
+    client = FakeClient([[_bash("pwd", 1)], [_bash("pwd", 2)]])
+    sandbox = FakeSandbox([])
+
+    async def dead(command, **kwargs):
+        raise mini.SandboxBackendUnreachableError("Sandbox was OOM-killed")
+
+    sandbox.exec = dead
+    model, env, agent = _build(client, sandbox)
+    with pytest.raises(mini.SandboxBackendUnreachableError, match="OOM-killed"):
+        await agent.run("synthetic")
+    assert len(model.responses) == 1
+    assert len(env.shell_records) == 1
+    assert env.shell_records[0]["extra"]["exception_type"] == "SandboxBackendUnreachableError"
+
+
+async def test_dead_backend_does_not_start_verifier(tmp_path, monkeypatch):
+    agent, request, body, resource, sandbox, _, created, calls = build(tmp_path, monkeypatch)
+
+    async def dead(command, **kwargs):
+        raise mini.SandboxBackendUnreachableError("Sandbox was OOM-killed")
+
+    sandbox.exec = dead
+    result = await agent.run(request, body)
+    assert result.mini_swe_exit_status == "SandboxBackendUnreachableError"
+    assert result.evaluation_completed is False
+    assert result.mini_swe_error == "Sandbox was OOM-killed"
+    assert result.mini_swe_trajectory_path
+    assert [x["role"] for x in created] == ["agent"]
+    assert calls[-1] == "/cancel_session" and not resource._sessions
+
+
 async def test_runtime_exception_and_unwritable_capture_are_explicit(tmp_path, monkeypatch):
     agent, request, body, _, sandbox, _, _, _ = build(tmp_path, monkeypatch)
     original = sandbox.exec
