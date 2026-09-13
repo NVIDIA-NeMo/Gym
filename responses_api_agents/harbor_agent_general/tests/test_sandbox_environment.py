@@ -20,7 +20,7 @@ def make_environment(tmp_path: Path, **kwargs) -> HarborSandboxEnvironment:
     config = kwargs.pop("task_env_config", EnvironmentConfig(docker_image="test@sha256:abc", cpus=4, memory_mb=4096))
     return HarborSandboxEnvironment(
         environment_dir=tmp_path,
-        environment_name="task",
+        environment_name=kwargs.pop("environment_name", "task"),
         session_id="trial-env",
         trial_paths=TrialPaths(trial_dir=tmp_path / "trial"),
         task_env_config=config,
@@ -67,6 +67,32 @@ def test_resource_rounding_and_ignore(tmp_path):
     assert spec.resources.disk_gib == 2
     assert spec.resources.cpu is None and spec.resources.memory_mib is None
     assert spec.resources.gpu is None and spec.resources.gpu_type is None
+
+
+def test_task_runtime_env_is_scoped_and_preserves_packages_resources_and_explicit_overrides(tmp_path):
+    task_config = EnvironmentConfig(docker_image="image", cpus=2, memory_mb=4096, env={"TASK": "original"})
+    overrides = {"nextjs-performance": {"CIRCLE_NODE_TOTAL": "3"}}
+    original = deepcopy(overrides)
+    env = make_environment(
+        tmp_path / "selected",
+        environment_name="nextjs-performance",
+        task_env_config=task_config,
+        sandbox_env_by_task=overrides,
+    )
+    spec = env._build_spec()
+    assert spec.env == {"TASK": "original", "CIRCLE_NODE_TOTAL": "3"}
+    assert (spec.resources.cpu, spec.resources.memory_mib) == (2, 4096)
+    assert task_config.env == {"TASK": "original"} and overrides == original
+
+    unrelated = make_environment(tmp_path / "other", sandbox_env_by_task=overrides)
+    assert "CIRCLE_NODE_TOTAL" not in unrelated._build_spec().env
+    explicit = make_environment(
+        tmp_path / "explicit",
+        environment_name="nextjs-performance",
+        sandbox_env_by_task=overrides,
+        sandbox_env={"CIRCLE_NODE_TOTAL": "2", "EXTRA": "value"},
+    )
+    assert explicit._build_spec().env == {"CIRCLE_NODE_TOTAL": "2", "EXTRA": "value"}
 
 
 @pytest.mark.parametrize("filename", ["docker-compose.yaml"])

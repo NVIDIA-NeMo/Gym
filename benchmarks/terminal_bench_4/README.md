@@ -41,6 +41,21 @@ from 0–5 seconds initially up to 0–60 seconds. Agent commands and whole tria
 not replayed by this policy. Failed requests without a returned sandbox handle are
 not explicitly deleted by the client.
 
+Create HTTP requests are capped at 120 seconds and individual create attempts at
+150 seconds, leaving room for retries before Harbor's task setup deadline. The
+whole Compose collection has a 1200-second limit, also subject to that task deadline.
+Read-only command-status polling uses 20-second attempts and five randomized retries;
+command submissions are not retried. Official verifier deadlines remain unchanged.
+
+For `nextjs-performance`, `sandbox_env_by_task` sets `CIRCLE_NODE_TOTAL=3` in the
+agent and separate verifier environments. [Next.js 15.4.10](https://github.com/vercel/next.js/blob/v15.4.10/packages/next/src/server/config-shared.ts#L1340)
+uses this value minus one for build workers. Without this runtime override, it sees
+all 192 host CPUs on the tested deployment and starts 191 workers despite the task's
+two-CPU quota, causing the four-GiB verifier container to be OOM-killed. The override
+uses two build workers and preserves the official task files, resource limits, and
+grading deadline. Other tasks are unaffected; explicit `sandbox_env` values can
+override these task defaults. Record this runtime adaptation when comparing scores.
+
 The configured GPU deployment must serve H100s. `sandbox_request_gpu_type: false`
 omits the deployment's unsupported `gpu_type` filter while preserving the task's GPU
 count and all other resources. Set this option to true when using a deployment that
