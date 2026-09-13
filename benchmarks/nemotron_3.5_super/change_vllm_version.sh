@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Canonical Super VL evaluation SQSH build on the unmodified vLLM v0.27.1
-# container/toolchain. This layers only the Python compatibility branch and
-# evaluation runtime packages; FlashInfer and its cubins remain exactly as
-# shipped in the base image.
+# container/toolchain. This layers only the Python compatibility branch;
+# FlashInfer and its cubins remain exactly as shipped in the base image.
 #
 # Usage:
 #   SLURM_ACCOUNT=nemotron_n3_post \
@@ -20,9 +19,6 @@ VLLM_BRANCH="${VLLM_BRANCH:-super_vl_evals_v0.27.1}"
 VLLM_VERSION=0.27.1
 VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_PRECOMPILED_WHEEL_COMMIT:-6e448d0ea9bf3d88d898b65449ca6dc2aec170ac}"
 BUILD_ROOT=/opt/super-vl-evals
-INSTANTTENSOR_VERSION="${INSTANTTENSOR_VERSION:-0.1.9}"
-RAY_VERSION="${RAY_VERSION:-2.56.1}"
-FASTOKENS_VERSION="${FASTOKENS_VERSION:-0.3.1}"
 
 ###############################################################################
 # Inside the container (this script re-execs itself here).
@@ -64,22 +60,12 @@ if [[ "${1:-}" == __inside_build ]]; then
     uv pip install --system . --prerelease=allow --torch-backend=auto \
         --index-strategy unsafe-best-match 2>&1
 
-    echo ""; echo ">>> Evaluation runtime packages"
-    uv pip install --system \
-        "instanttensor==${INSTANTTENSOR_VERSION}" \
-        "ray[default]==${RAY_VERSION}" \
-        "fastokens==${FASTOKENS_VERSION}" 2>&1 | tail -8
-
     echo ""; echo ">>> Verify"
-    python3 -c 'import fastokens, instanttensor, ray, torch, vllm
+    python3 -c 'import torch, vllm
 from vllm.vllm_flash_attn import flash_attn_varlen_func
 from vllm.model_executor.models.registry import ModelRegistry
 assert "NemotronH_Omni_Reasoning_V3" in ModelRegistry.get_supported_archs()
-print(f"vLLM {vllm.__version__}; torch {torch.__version__}; ray {ray.__version__}")'
-    VLLM_USE_FASTOKENS=1 python3 -c 'from vllm import envs
-from vllm.tokenizers.fastokens import apply_fastokens_patch
-assert envs.VLLM_USE_FASTOKENS
-apply_fastokens_patch()'
+print(f"vLLM {vllm.__version__}; torch {torch.__version__}")'
 
     echo ""; echo ">>> Cleanup"
     # Leave the source tree before removing it: Python's import machinery can
@@ -92,7 +78,7 @@ apply_fastokens_patch()'
     find /usr/lib/aarch64-linux-gnu /usr/local/cuda-13.0 \
         -name '*_static*.a' -delete 2>/dev/null || true
 
-    python3 -c 'import fastokens, instanttensor, ray, torch, vllm
+    python3 -c 'import torch, vllm
 from vllm.vllm_flash_attn import flash_attn_varlen_func'
 
     cat > "${BUILD_ROOT}/build.env" <<EOF
@@ -101,9 +87,6 @@ build_script=super-vl-evals-v0271-thin
 base_image=${BASE_IMAGE}
 vllm=${VLLM_BRANCH} @ ${vllm_sha}
 vllm_precompiled_wheel=${VLLM_PRECOMPILED_WHEEL_COMMIT}
-instanttensor=${INSTANTTENSOR_VERSION}
-ray=${RAY_VERSION}
-fastokens=${FASTOKENS_VERSION}
 base_image_flashinfer_and_cubins=unchanged
 omitted=custom-flashinfer,custom-cubins,cubin-download,cubin-rebuild
 EOF
