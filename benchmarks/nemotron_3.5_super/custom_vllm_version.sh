@@ -132,6 +132,8 @@ if ! srun \
     --time="${SLURM_TIME:-01:00:00}" \
     --container-image="${BASE_IMAGE}" \
     --container-mounts="${MOUNTS}" \
+    --reservation=sla_res_n3_post \
+    --qos=hero-res \
     --container-save="${OUT_SQSH}" \
     --export=ALL \
     bash "${SNAP}" __inside_build
