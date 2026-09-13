@@ -266,6 +266,7 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         start_proxy.assert_awaited_once()
         assert start_proxy.call_args.kwargs["upstream_base_url"] == "http://model/v1"
         assert start_proxy.call_args.kwargs["max_turns"] == 2
+        assert start_proxy.call_args.kwargs["exhaustion_status"] == 400
         proxy.stop.assert_awaited_once()
         constraint = metrics.pop("turn_constraint")
         assert constraint["realized"]["observed_count"] == 3

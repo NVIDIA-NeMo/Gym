@@ -358,6 +358,9 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             max_turns=constraint.limit,
             position=constraint.reminder.position,
             trigger=constraint.reminder.trigger,
+            # The Responses client retries rate limits indefinitely. Budget
+            # exhaustion must terminate the harness and reach verification.
+            exhaustion_status=400,
             label=request.session[SESSION_ID_KEY],
         )
         try:
