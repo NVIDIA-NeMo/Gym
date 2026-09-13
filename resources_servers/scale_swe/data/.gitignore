@@ -1,0 +1,3 @@
+# Prepared training JSONL is a large filtered slice of the Hub dataset (patch/test content for
+# every supported instance). Regenerate with prepare_scale_swe.py.
+*.jsonl

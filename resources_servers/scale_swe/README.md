@@ -42,17 +42,17 @@ The graded region of the log is delimited by markers, so setup-time noise (pip i
 
 ## Prepare the data
 
-```bash
-# The whole set, or a bounded trial:
-SCALE_SWE_LIMIT=200 python benchmarks/scale_swe/prepare.py
-```
+`prepare_scale_swe.py` only writes rows already on `data/supported_instance_ids.txt` -- the
+17,696 instances (of 20,181) whose golden patch resolved in all three passes of a full-set 3x
+sweep (see Golden-patch validation below). The other 2,485 are excluded because none can be
+scored either way: 1,671 never resolve, 709 never produced a verdict (image pull / setup
+failures, not row failures), and 105 resolve inconsistently across passes. It streams the Hub
+dataset rather than loading the full split, and shuffles the kept rows (fixed seed, reproducible)
+before writing, since the Hub's own row order is grouped by repo.
 
-`prepare.py` writes the full 20,181-row set, unfiltered. `data/supported_instance_ids.txt` is a
-separate artifact for training use: the 17,696 instances (of 20,181) whose golden patch resolved
-in all three passes of a full-set 3x sweep (see Golden-patch validation below). The other 2,485
-are excluded from that list because none can be scored either way: 1,671 never resolve, 709 never
-produced a verdict (image pull / setup failures, not row failures), and 105 resolve
-inconsistently across passes.
+```bash
+SCALE_SWE_LIMIT=200 python resources_servers/scale_swe/prepare_scale_swe.py
+```
 
 ## Golden-patch validation
 
@@ -65,7 +65,7 @@ gym env start \
   --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 python resources_servers/scale_swe/apply_golden_patch.py \
-  +benchmark_jsonl=benchmarks/scale_swe/data/scale_swe_benchmark.jsonl \
+  +training_jsonl=resources_servers/scale_swe/data/scale_swe_training.jsonl \
   +limit=40 +concurrency=8
 ```
 
@@ -82,5 +82,13 @@ from a genuinely nondeterministic test so neither silently corrupts the other's 
 
 ## Running an agent
 
-`benchmarks/scale_swe/opencode.yaml` wires this server to the opencode sandboxed agent, in the
-same shape as the swebench verified/pro/multilingual and swe_rebench benchmarks.
+`configs/scale_swe_opencode.yaml` wires the opencode sandboxed agent to
+`scale_swe_resources_server`, pointed at `data/scale_swe_training.jsonl`. It lives in a separate
+file rather than folded into `scale_swe.yaml` so golden-patch validation (which never touches an
+agent) doesn't need to pull in the agent's much larger sandbox/permission config.
+
+```bash
+gym env start \
+  --config resources_servers/scale_swe/configs/scale_swe_opencode.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml
+```

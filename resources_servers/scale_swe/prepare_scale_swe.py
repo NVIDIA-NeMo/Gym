@@ -12,24 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Prepare nebius/SWE-rebench-V2 training data for NeMo Gym, from the Hub.
+"""Prepare AweAI-Team/Scale-SWE training data for NeMo Gym, from the Hub.
 
 This is a training dataset, not an eval benchmark -- there is no fixed/frozen reference split,
 and the output is meant to feed a training run, not to be scored against as a leaderboard.
 
-Writes only the rows already known to be usable: `data/supported_instance_ids.txt` (22,684 of
-the Hub's 32,079 instances) is the result of a full-set 3x golden-patch sweep -- a row not on
+Writes only the rows already known to be usable: `data/supported_instance_ids.txt` (17,696 of
+the Hub's 20,181 instances) is the result of a full-set 3x golden-patch sweep -- a row not on
 that list either never resolves, never produced a verdict, or resolves inconsistently across
 passes (see `aggregate_golden_patch.py` and the README), so it is not worth carrying into the
 training jsonl at all rather than shipping a row no agent run could usefully score.
 
-Streams the Hub dataset and filters row-by-row rather than loading the full ~2.5 GB split just
-to keep 70% of it -- but the *kept* rows are still buffered and shuffled (fixed seed, so re-runs
-are reproducible) before writing, since the Hub's own row order is grouped by repo/creation time,
-not randomised, and training on that order as-is would bias early steps toward whichever repos
+Streams the Hub dataset and filters row-by-row rather than loading the full ~940 MB split just
+to keep 88% of it -- but the *kept* rows are still buffered and shuffled (fixed seed, so re-runs
+are reproducible) before writing, since the Hub's own row order is grouped by repo, not
+randomised, and training on that order as-is would bias early steps toward whichever repos
 happen to sort first.
 
-    SWE_REBENCH_LIMIT=200 python resources_servers/swe_rebench/prepare_swe_rebench.py
+    SCALE_SWE_LIMIT=200 python resources_servers/scale_swe/prepare_scale_swe.py
 """
 
 import json
@@ -40,30 +40,28 @@ from pathlib import Path
 
 SHUFFLE_SEED = 0
 
-
-DATASET_NAME = "nebius/SWE-rebench-V2"
+DATASET_NAME = "AweAI-Team/Scale-SWE"
 SUPPORTED_IDS_FPATH = Path(__file__).parent / "data" / "supported_instance_ids.txt"
-OUTPUT_FPATH = Path(__file__).parent / "data" / "swe_rebench_training.jsonl"
+OUTPUT_FPATH = Path(__file__).parent / "data" / "scale_swe_training.jsonl"
 
-AGENT_REF = {"type": "responses_api_agents", "name": "swe_rebench_opencode_sandboxed_agent"}
-
-# The Hub row's own sentinel for "this task adds no new interface" -- confirmed exact and stable
-# (no near-duplicate phrasing) across a 5,000-row sample of the dataset.
-NO_NEW_INTERFACE_SENTINEL = "No new interfaces are introduced."
+AGENT_REF = {"type": "responses_api_agents", "name": "scale_swe_opencode_sandboxed_agent"}
 
 # The Hub row's own fields this server's request model reads (see app.py's
-# SWERebenchInstanceRequest) -- extras like `pr_description`/`meta`/`license` are dropped rather
-# than carried through unused.
+# ScaleSWEInstanceRequest) -- extras like `github_url`/`parent_commit`/`pr_commit`/`user` are
+# dropped rather than carried through unused. FAIL_TO_PASS/PASS_TO_PASS arrive as JSON-encoded
+# strings, not lists, in this dataset -- kept exactly as-received, matching the request model's
+# `str | list[str]` type, rather than decoded and possibly round-tripped differently.
 ROW_FIELDS = (
     "instance_id",
     "repo",
-    "base_commit",
-    "patch",
-    "test_patch",
-    "problem_statement",
     "language",
-    "image_name",
-    "install_config",
+    "workdir",
+    "image_url",
+    "patch",
+    "pre_commands",
+    "problem_statement",
+    "f2p_patch",
+    "f2p_script",
     "FAIL_TO_PASS",
     "PASS_TO_PASS",
 )
@@ -87,13 +85,7 @@ def prepare(supported_ids: set[str], limit: int = 0) -> Path:
             continue
 
         row = {field: example[field] for field in ROW_FIELDS}
-
-        content = row["problem_statement"]
-        interface = (example.get("interface") or "").strip()
-        if interface and interface != NO_NEW_INTERFACE_SENTINEL:
-            content = f"{content}\n\n## New interfaces to add:\n{interface}"
-
-        row["responses_create_params"] = {"input": [{"role": "user", "content": content}]}
+        row["responses_create_params"] = {"input": [{"role": "user", "content": row["problem_statement"]}]}
         row["agent_ref"] = AGENT_REF
 
         rows.append(row)
@@ -104,7 +96,7 @@ def prepare(supported_ids: set[str], limit: int = 0) -> Path:
         for row in rows:
             fout.write(json.dumps(row) + "\n")
 
-    print(f"Wrote {len(rows)} SWE-rebench-V2 problems to {OUTPUT_FPATH} (shuffled, seed={SHUFFLE_SEED})")
+    print(f"Wrote {len(rows)} Scale-SWE problems to {OUTPUT_FPATH} (shuffled, seed={SHUFFLE_SEED})")
     missing = len(supported_ids) - len(rows)
     if missing:
         print(f"  {missing} supported id(s) from {SUPPORTED_IDS_FPATH.name} were not found in the Hub dataset")
@@ -114,5 +106,5 @@ def prepare(supported_ids: set[str], limit: int = 0) -> Path:
 if __name__ == "__main__":
     prepare(
         _load_supported_ids(SUPPORTED_IDS_FPATH),
-        int(os.environ.get("SWE_REBENCH_LIMIT") or 0),
+        int(os.environ.get("SCALE_SWE_LIMIT") or 0),
     )
