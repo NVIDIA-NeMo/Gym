@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -47,6 +48,7 @@ from resources_servers.leancat.prepare import (
     UPSTREAM_PROMPT_URL,
 )
 from resources_servers.leancat.proof_utils import check_statement_preserved
+from resources_servers.math_formal_lean.toolchain import parse_lean_version
 
 
 DATA_DIR = Path(__file__).absolute().parent.parent / "data"
@@ -422,6 +424,66 @@ class TestPrompt:
             assert [m["role"] for m in messages] == ["user"]
             assert messages[0]["content"] == config.user.format(formal_statement=row["formal_statement"])
             assert row["formal_statement"] in messages[0]["content"]
+
+
+class TestToolchainCheck:
+    """A Mathlib mismatch must be logged, since it has no other symptom than failing compiles."""
+
+    @pytest.fixture
+    def server(self) -> LeanCatResourcesServer:
+        config = LeanCatResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="leancat",
+            sandbox_host="127.0.0.1",
+            sandbox_port=6000,
+            compilation_timeout=300.0,
+        )
+        return LeanCatResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+    @pytest.mark.parametrize(
+        "output,expected",
+        [
+            ({"stdout": '"4.19.0"', "stderr": ""}, "4.19.0"),
+            ({"stdout": "", "stderr": "4.12.0"}, "4.12.0"),
+            ({"stdout": "info: 4.19.0", "stderr": ""}, "4.19.0"),
+            # A failed `import Mathlib` must not be read as a version.
+            ({"stdout": "", "stderr": "error: unknown package 'Mathlib'"}, None),
+            ({"stdout": "", "stderr": ""}, None),
+        ],
+    )
+    def test_parse_lean_version(self, output, expected):
+        assert parse_lean_version(output) == expected
+
+    @pytest.mark.asyncio
+    async def test_mismatch_is_logged_as_an_error(self, server, caplog):
+        server._sandbox_client.execute_lean4 = AsyncMock(return_value={"stdout": '"4.12.0"', "stderr": ""})
+        with caplog.at_level("ERROR"):
+            await server._check_toolchain_once("leanprover/lean4:v4.19.0")
+        assert "MATHLIB MISMATCH" in caplog.text
+        assert "4.12.0" in caplog.text and "4.19.0" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_matching_version_logs_no_error(self, server, caplog):
+        server._sandbox_client.execute_lean4 = AsyncMock(return_value={"stdout": '"4.19.0"', "stderr": ""})
+        with caplog.at_level("ERROR"):
+            await server._check_toolchain_once("leanprover/lean4:v4.19.0")
+        assert caplog.text == ""
+
+    @pytest.mark.asyncio
+    async def test_unusable_sandbox_is_logged(self, server, caplog):
+        server._sandbox_client.execute_lean4 = AsyncMock(return_value={"stdout": "", "stderr": "error: boom"})
+        with caplog.at_level("ERROR"):
+            await server._check_toolchain_once("leanprover/lean4:v4.19.0")
+        assert "Could not determine" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_probe_runs_only_once(self, server):
+        probe = AsyncMock(return_value={"stdout": '"4.19.0"', "stderr": ""})
+        server._sandbox_client.execute_lean4 = probe
+        await asyncio.gather(*(server._check_toolchain_once("leanprover/lean4:v4.19.0") for _ in range(10)))
+        assert probe.await_count == 1, "concurrent verifies must share one probe"
 
 
 class TestVerifierMetadataLifting:

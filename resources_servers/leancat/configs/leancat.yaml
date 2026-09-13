@@ -5,10 +5,8 @@ leancat:
       sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
       sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
       compilation_timeout: 300.0
-      # Deliberately NOT setting num_workers: >1 makes Gym launch uvicorn by import string
-      # (server_utils: uvicorn_kwargs["app"] = f"{module}:app"), which needs a module-level
-      # `app` object. This server builds its app inside run_webserver(), so every forked
-      # worker dies with 'Attribute "app" not found' and the server never comes up.
+      # num_workers must stay unset: >1 launches uvicorn by import string, which needs a
+      # module-level `app` object this server does not define.
       domain: math
       description: LeanCat -- formal 1-category-theory proofs in Lean 4 / Mathlib
         v4.19.0
