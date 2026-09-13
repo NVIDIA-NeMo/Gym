@@ -32,9 +32,5 @@ jobs:
       # repo, "Pull requests: Read and write" + org "Members: Read-only".
       # See _suggest_reviewers.yml's TEAM_REVIEWER_PAT description for why a
       # PAT is required here instead of the default token or a GitHub App.
-      # TEMP TEST: pointed at a personal-account fine-grained PAT to isolate
-      # whether the fine-grained PAT *type* itself is unsupported for team-
-      # reviewer resolution, separate from anything about the service account.
-      # Revert to SVC_TEAM_REVIEWER_PAT once this test is done.
-      TEAM_REVIEWER_PAT: ${{ secrets.TEST_PERSONAL_TEAM_REVIEWER_PAT }}
+      TEAM_REVIEWER_PAT: ${{ secrets.SVC_TEAM_REVIEWER_PAT }}
       SLACK_TEAM_CHANNEL_WEBHOOK: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
