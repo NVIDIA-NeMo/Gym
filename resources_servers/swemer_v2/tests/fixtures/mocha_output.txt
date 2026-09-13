@@ -1,0 +1,61 @@
+
+{
+  "stats": {
+    "suites": 1,
+    "tests": 3,
+    "passes": 3,
+    "pending": 0,
+    "failures": 0,
+    "start": "2026-09-11T01:43:27.838Z",
+    "end": "2026-09-11T01:43:27.842Z",
+    "duration": 4
+  },
+  "tests": [
+    {
+      "title": "getApplicativeComposition",
+      "fullTitle": "Applicative getApplicativeComposition",
+      "duration": 1,
+      "currentRetry": 0,
+      "err": {}
+    },
+    {
+      "title": "when",
+      "fullTitle": "Applicative when",
+      "duration": 0,
+      "currentRetry": 0,
+      "err": {}
+    },
+    {
+      "title": "getMonoid",
+      "fullTitle": "Applicative getMonoid",
+      "duration": 0,
+      "currentRetry": 0,
+      "err": {}
+    }
+  ],
+  "pending": [],
+  "failures": [],
+  "passes": [
+    {
+      "title": "getApplicativeComposition",
+      "fullTitle": "Applicative getApplicativeComposition",
+      "duration": 1,
+      "currentRetry": 0,
+      "err": {}
+    },
+    {
+      "title": "when",
+      "fullTitle": "Applicative when",
+      "duration": 0,
+      "currentRetry": 0,
+      "err": {}
+    },
+    {
+      "title": "getMonoid",
+      "fullTitle": "Applicative getMonoid",
+      "duration": 0,
+      "currentRetry": 0,
+      "err": {}
+    }
+  ]
+}
