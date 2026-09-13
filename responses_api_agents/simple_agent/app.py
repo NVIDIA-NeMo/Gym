@@ -252,6 +252,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         cookies=model_server_cookies,
                     ),
                     request=request,
+                    checkpointable_model_wait=True,
                 )
                 capture_result = None
                 headers = getattr(model_http_response, "headers", None)
