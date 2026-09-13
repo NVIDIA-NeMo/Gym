@@ -411,6 +411,67 @@ class TestOpenCodeSandboxedAgent:
 
         assert config["provider"]["nemo_gym"]["options"]["baseURL"] == expected_base_url
 
+    @mark.parametrize("observability_enabled", [False, True])
+    async def test_run_preserves_verifier_identity_without_optional_telemetry(
+        self, monkeypatch: MonkeyPatch, observability_enabled: bool
+    ) -> None:
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": observability_enabled}
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=client)
+        monkeypatch.setattr(
+            OpenCodeSandboxedAgent, "rollout_id_from_run", lambda *_: "rollout" if observability_enabled else None
+        )
+        sandbox = SimpleNamespace(stop=AsyncMock())
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "_start_sandbox", AsyncMock(return_value=sandbox))
+        response = NeMoGymResponse(
+            id="response",
+            created_at=0,
+            model="synthetic",
+            object="response",
+            output=[],
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        )
+        monkeypatch.setattr(OpenCodeSandboxedAgent, "responses", AsyncMock(return_value=response))
+        server._sandbox_id_to_run_result["session"] = {
+            "opencode_results_fpath": "synthetic-export.json",
+            "opencode_run_stdout": "",
+            "opencode_run_stderr": "",
+            "opencode_finished": True,
+            "opencode_export_found": True,
+        }
+        verifier = SandboxObservation(
+            role="verifier", provider="opensandbox", sandbox_id="verifier-id", outcome="completed"
+        ).model_dump(mode="json")
+
+        class Response:
+            ok = True
+            cookies = {}
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            async def json(self):
+                return self.payload
+
+            async def read(self):
+                return json.dumps(self.payload).encode()
+
+        async def post(server_name, url_path, json=None, cookies=None):
+            if url_path == "/seed_session":
+                return Response({"sandbox_handle": "agent-id"})
+            return Response(json | {"reward": 0.0, "verifier_sandbox_observation": verifier})
+
+        client.post = AsyncMock(side_effect=post)
+        request = SimpleNamespace(cookies={}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace())
+        body = OpenCodeSandboxedAgentRunRequest.model_validate(
+            {"responses_create_params": {"input": [{"role": "user", "content": "synthetic"}]}}
+        )
+        result = await server.run(request, body)
+        assert result.model_dump()["verifier_sandbox_observation"] == verifier
+        assert (result.ng_agent_observations is not None) == observability_enabled
+
     async def test_run_builds_observations_from_live_wal_snapshot(
         self,
         tmp_path: Path,

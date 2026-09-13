@@ -955,7 +955,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         response_dict = await get_response_json(verify_response)
         run_result = self._sandbox_id_to_run_result.pop(session_key)
         response_dict |= run_result
-        raw_verifier_sandbox_observation = response_dict.pop("verifier_sandbox_observation", None)
+        raw_verifier_sandbox_observation = response_dict.get("verifier_sandbox_observation")
         response_dict["responses_create_params"]["input"].insert(
             0, {"content": opencode_system_prompt, "role": "system"}
         )
