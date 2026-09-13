@@ -15,6 +15,19 @@ Set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` in the environment. Sandboxes
 be able to reach the Gym model server; `++use_absolute_ip=true` advertises the host's
 address when Gym runs on a compute node.
 
+For separate CPU and GPU deployments, set `OPENSANDBOX_DOMAIN_CPU`,
+`OPENSANDBOX_API_KEY_CPU`, `OPENSANDBOX_DOMAIN_GPU`, and `OPENSANDBOX_API_KEY_GPU`,
+then add `++tb4_split_sandbox_endpoints=true`. EFB enables this mode for TB4; use
+the environment file containing those four variables (for example `.env_combined`).
+The benchmark remains one evaluation. Each environment selects the GPU endpoint
+when its effective GPU count is positive, otherwise the CPU endpoint. Separate
+verifiers select independently; all TB4 Compose services use the CPU endpoint.
+The selected pool is recorded in sandbox metadata. API keys are read into private
+provider configuration at runtime, without changing shared configuration or
+serializing keys into Harbor job files. Missing scoped credentials fail explicitly.
+This simple routing is for TB4's CPU-only Compose tasks; it is not per-service
+routing for a Compose application with mixed CPU and GPU services.
+
 Resource requests explicitly match each task or Compose service's limits through
 `sandbox_provider_options.resource_requests: limits`. CPU values use cores and
 memory values use `Mi`/`Gi` in both API fields, avoiding deployment-specific request

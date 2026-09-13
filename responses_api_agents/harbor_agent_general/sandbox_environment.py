@@ -27,15 +27,18 @@ class HarborSandboxEnvironment(NemoGymSandboxEnvironment):
     """Keep the legacy adapter stable while implementing the current Harbor contract."""
 
     def __init__(
-        self, *args, sandbox_provider=None, compose_image_configs=None, sandbox_request_gpu_type=True, **kwargs
+        self,
+        *args,
+        sandbox_provider=None,
+        compose_image_configs=None,
+        sandbox_request_gpu_type=True,
+        sandbox_split_endpoints=False,
+        **kwargs,
     ):
         # Keep credentials in the process environment, out of Harbor's saved job
         # and trial configs. Providers receive a private copy at construction.
         provider = deepcopy(sandbox_provider)
-        if provider and "opensandbox" in provider:
-            connection = provider["opensandbox"].setdefault("connection", {})
-            if "api_key" not in connection and os.environ.get("OPENSANDBOX_API_KEY"):
-                connection["api_key"] = os.environ["OPENSANDBOX_API_KEY"]
+        self._sandbox_resource_pool = None
         self._compose: AsyncSandboxCompose | None = None
         # Dedicated GPU deployments can guarantee the required hardware without
         # accepting a gpu_type scheduler filter. Keep the task's GPU count.
@@ -45,6 +48,27 @@ class HarborSandboxEnvironment(NemoGymSandboxEnvironment):
         if self._compose_image_configs is not None and not self._compose_image_configs.is_absolute():
             self._compose_image_configs = Path(__file__).resolve().parents[2] / self._compose_image_configs
         super().__init__(*args, sandbox_provider=provider, **kwargs)
+        # Harbor has now applied resource overrides. Separate verifiers build a
+        # new environment instance, so they select using their own GPU count.
+        if sandbox_split_endpoints:
+            if "opensandbox" not in provider:
+                raise ValueError("sandbox_split_endpoints requires the opensandbox provider")
+            pool = "GPU" if self._effective_gpus else "CPU"
+            names = {
+                field: f"OPENSANDBOX_{name}_{pool}" for field, name in (("domain", "DOMAIN"), ("api_key", "API_KEY"))
+            }
+            missing = [name for name in names.values() if not os.environ.get(name)]
+            if missing:
+                raise ValueError(f"Missing environment variables for {pool} sandbox endpoint: {', '.join(missing)}")
+            provider["opensandbox"].setdefault("connection", {}).update(
+                {field: os.environ[name] for field, name in names.items()}
+            )
+            self._sandbox_resource_pool = pool
+            self.logger.info("OpenSandbox endpoint pool=%s session=%s", pool, self.session_id)
+        elif "opensandbox" in provider:
+            connection = provider["opensandbox"].setdefault("connection", {})
+            if "api_key" not in connection and os.environ.get("OPENSANDBOX_API_KEY"):
+                connection["api_key"] = os.environ["OPENSANDBOX_API_KEY"]
 
     @staticmethod
     def type() -> str:
@@ -82,9 +106,14 @@ class HarborSandboxEnvironment(NemoGymSandboxEnvironment):
             gpu=self._effective_gpus or None,
             gpu_type=config.gpu_types[0] if config.gpu_types and self._sandbox_request_gpu_type else None,
         )
+        spec = super()._build_spec()
+        metadata = dict(spec.metadata)
+        if self._sandbox_resource_pool is not None:
+            metadata["nemo-gym.nvidia.com/resource-pool"] = self._sandbox_resource_pool.lower()
         return replace(
-            super()._build_spec(),
+            spec,
             resources=resources,
+            metadata=metadata,
             env={**self._startup_env(), **self._sandbox_env},
         )
 

@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -131,6 +132,79 @@ def test_credentials_are_resolved_without_mutating_job_config(tmp_path, monkeypa
     assert env._compose_image_configs.is_absolute()
 
 
+@pytest.fixture
+def split_endpoints(monkeypatch):
+    for pool in ("CPU", "GPU"):
+        monkeypatch.setenv(f"OPENSANDBOX_DOMAIN_{pool}", f"{pool.lower()}.example.test")
+        monkeypatch.setenv(f"OPENSANDBOX_API_KEY_{pool}", f"synthetic-{pool.lower()}-key")
+    monkeypatch.setenv("OPENSANDBOX_API_KEY", "synthetic-legacy-key")
+
+
+async def test_cpu_gpu_and_verifier_routing_is_isolated(tmp_path, monkeypatch, split_endpoints):
+    from responses_api_agents.harbor_agent_general import sandbox_environment as module
+
+    provider = {"opensandbox": {"connection": {"domain": "legacy.example.test", "tls_verify": False}}}
+    original = deepcopy(provider)
+    connections = []
+
+    def factory(config, spec):
+        connections.append((config, spec))
+        sandbox = AsyncMock()
+        sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
+        return sandbox
+
+    monkeypatch.setattr(module, "AsyncSandbox", factory)
+    envs = []
+    # Include an independently configured verifier and an effective GPU override.
+    for name, gpus, override, pool in (("cpu", 0, None, "cpu"), ("gpu", 1, None, "gpu"), ("verifier", 0, 1, "gpu")):
+        env = make_environment(
+            tmp_path / name,
+            sandbox_provider=provider,
+            sandbox_split_endpoints=True,
+            task_env_config=EnvironmentConfig(docker_image="image", gpus=gpus),
+            override_gpus=override,
+        )
+        env._upload_environment_dir_after_start = AsyncMock()
+        envs.append(env)
+        connection = env._sandbox_provider["opensandbox"]["connection"]
+        assert connection == {
+            "domain": f"{pool}.example.test",
+            "api_key": f"synthetic-{pool}-key",
+            "tls_verify": False,
+        }
+        assert env._build_spec().metadata["nemo-gym.nvidia.com/resource-pool"] == pool
+    await asyncio.gather(*(env.start(False) for env in envs))
+    assert len(connections) == 3
+    assert [config["opensandbox"]["connection"]["domain"] for config, _ in connections] == [
+        "cpu.example.test",
+        "gpu.example.test",
+        "gpu.example.test",
+    ]
+    assert provider == original
+    assert "synthetic-" not in json.dumps(provider)
+    assert envs[0]._sandbox_provider["opensandbox"]["connection"]["domain"] == "cpu.example.test"
+    await asyncio.gather(*(env.stop(True) for env in envs))
+
+
+@pytest.mark.parametrize("pool,gpus", [("CPU", 0), ("GPU", 1)])
+@pytest.mark.parametrize("field", ["DOMAIN", "API_KEY"])
+def test_split_routing_rejects_missing_scoped_settings(tmp_path, monkeypatch, split_endpoints, pool, gpus, field):
+    name = f"OPENSANDBOX_{field}_{pool}"
+    monkeypatch.delenv(name)
+    with pytest.raises(ValueError, match=name):
+        make_environment(
+            tmp_path,
+            sandbox_provider={"opensandbox": {"connection": {"domain": "legacy"}}},
+            sandbox_split_endpoints=True,
+            task_env_config=EnvironmentConfig(docker_image="image", gpus=gpus),
+        )
+
+
+def test_split_routing_requires_opensandbox(tmp_path, split_endpoints):
+    with pytest.raises(ValueError, match="requires the opensandbox provider"):
+        make_environment(tmp_path, sandbox_split_endpoints=True)
+
+
 def test_extra_overlays_must_be_resolved_upstream(tmp_path):
     overlay = tmp_path / "extra.yaml"
     overlay.write_text("services: {}")
@@ -138,7 +212,7 @@ def test_extra_overlays_must_be_resolved_upstream(tmp_path):
         make_environment(tmp_path, extra_docker_compose=[overlay])
 
 
-async def test_compose_startup_and_cleanup(tmp_path, monkeypatch):
+async def test_compose_startup_and_cleanup(tmp_path, monkeypatch, split_endpoints):
     from responses_api_agents.harbor_agent_general import sandbox_environment as module
 
     (tmp_path / "docker-compose.yaml").write_text("services: {peer: {image: peer}}")
@@ -161,12 +235,20 @@ async def test_compose_startup_and_cleanup(tmp_path, monkeypatch):
         return compose
 
     monkeypatch.setattr(module, "AsyncSandboxCompose", factory)
-    env = make_environment(tmp_path, compose_image_configs=images)
+    env = make_environment(
+        tmp_path,
+        compose_image_configs=images,
+        sandbox_provider={"opensandbox": {}},
+        sandbox_split_endpoints=True,
+    )
     env._upload_environment_dir_after_start = AsyncMock()
     await env.start(False)
     assert env._sandbox is main
     assert calls[0][1]["service_specs"]["main"].resources.cpu == 4
     assert calls[0][1]["service_specs"]["peer"].resources.cpu is None
+    assert calls[0][1]["service_specs"]["peer"].metadata["nemo-gym.nvidia.com/resource-pool"] == "cpu"
+    assert calls[0][0][0]["opensandbox"]["connection"]["domain"] == "cpu.example.test"
+    assert env._sandbox_provider["opensandbox"]["connection"]["domain"] == "cpu.example.test"
     assert calls[0][0][1].is_file()
     await env.stop(True)
     compose.stop.assert_awaited_once()

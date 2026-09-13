@@ -22,13 +22,15 @@ terminal_bench_4_opencode:
           exec_shell: bash -c
           # The selected GPU deployment serves H100s and rejects gpu_type filters.
           sandbox_request_gpu_type: false
+          sandbox_split_endpoints: ${oc.select:tb4_split_sandbox_endpoints,false}
           sandbox_provider_options:
             resource_requests: limits
           compose_image_configs: benchmarks/terminal_bench_4/compose-images.json
           sandbox_provider:
             opensandbox:
               connection:
-                domain: ${oc.env:OPENSANDBOX_DOMAIN}
+                # Split mode resolves the CPU/GPU domain privately per environment.
+                domain: ${oc.env:OPENSANDBOX_DOMAIN,localhost}
                 protocol: http
                 use_server_proxy: true
                 transport_backend: aiohttp
