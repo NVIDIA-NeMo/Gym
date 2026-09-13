@@ -36,10 +36,15 @@ submission that has already lost does not cost a five-minute Mathlib compile.
 `reward` is 1.0 only for `completed`, and 0.0 otherwise.
 
 Layout, field names and status vocabulary follow `math_formal_lean`, the repo's other Lean server, so the two read as
-siblings: same module split (`app.py` / `proof_utils.py` / `sandbox_client.py` / `task_data.py`), same response fields
-(`proof_status`, `predicted_proof`, `compiler_output`), same words for the outcomes that exist in both (`completed`,
-`empty_generation`, `timeout`). `banned_tokens`, `statement_modified` and `compile_error` have no counterpart there —
-that server reassembles the file itself, so it has nothing to catch a tampered statement.
+siblings: same module split (`app.py` / `proof_utils.py` / `task_data.py`), same response fields (`proof_status`,
+`predicted_proof`, `compiler_output`), same words for the outcomes that exist in both (`completed`, `empty_generation`,
+`timeout`). `banned_tokens`, `statement_modified` and `compile_error` have no counterpart there — that server
+reassembles the file itself, so it has nothing to catch a tampered statement.
+
+Everything that is not specific to the whole-file task is **imported** from `math_formal_lean`, not copied: the
+sandbox HTTP client (`sandbox_client.py`), the `CompilerOutput` model, the one-shot Mathlib version probe
+(`toolchain.py`) and the Lean comment/string stripper (`proof_utils.strip_lean_comments_and_strings`). This server
+has no `sandbox_client.py` of its own.
 
 The fifth upstream criterion, "maintained mathematical intent", is a human judgement and is not automated. Check 3 is
 the closest mechanical proxy: the reference file is split on `sorry`, and every remaining fragment must appear in the
@@ -62,12 +67,26 @@ A Lean 4 sandbox on `sandbox_host:sandbox_port` exposing `POST /execute` with
 
 **The sandbox must be built on Mathlib v4.19.0.** LeanCat statements are written against that release's
 `CategoryTheory` API. A sandbox on a different Mathlib will fail tasks for reasons that have nothing to do with the
-model, and the failures look like ordinary compile errors, so this is worth confirming before trusting a number.
+model, and the failures look like ordinary compile errors.
+
+This is checked in two places rather than left to the reader:
+
+- **`check_sandbox.py`** compiles `import Mathlib; #eval Lean.versionString` first and prints the version it found,
+  refusing to continue if `import Mathlib` does not compile at all.
+- **The server itself** runs the same probe once, on the first `verify`, and logs an `ERROR` if the sandbox
+  disagrees with the row's `lean_toolchain` (falling back to `expected_lean_version`, default `4.19.0`). It warns
+  rather than raises: a run already in flight should not die on this, and the operator needs the message. Set
+  `check_lean_version: false` to skip the probe.
+
+Measured cost of getting this wrong, on the stock NeMo-Skills sandbox (v4.12.0): 36 of the 100 reference statements
+fail to compile **with their `sorry` still intact**, so they score 0 regardless of the model — see the table below.
 
 ```yaml
 sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
 sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
 compilation_timeout: 300.0   # upstream's per-attempt budget
+check_lean_version: true     # probe the sandbox once on the first verify
+expected_lean_version: "4.19.0"
 ```
 
 ## Metrics
@@ -226,11 +245,16 @@ python prepare.py --records local.jsonl
 
 ## Running it
 
-### 1. Install Lean + Mathlib v4.19.0 — no container build needed
+### 1. Get a sandbox on Mathlib v4.19.0
 
-**You do not need a Lean-specific `.sqsh`.** There is no published image at Mathlib v4.19.0
-(`leanprovercommunity/mathlib` ships only `latest`/`gitpod`/`debian`), the NeMo-Skills sandbox pins **v4.12.0**
-(measured below), and building a correct image needs Docker, which HPC login nodes generally lack.
+**This is on you, and it is the step that decides whether your number means anything.** There is no published image
+at Mathlib v4.19.0 — `leanprover-community/mathlib` ships only `latest`/`gitpod`/`debian`, and the NeMo-Skills
+sandbox pins **v4.12.0**, which silently costs you 36 of the 100 problems (measured below). The reference runs used
+a NeMo-Skills sandbox image with Mathlib v4.19.0 built into it.
+
+This server ships no installer for that. An `elan`-based user-space install script was written and is in this
+branch's history, but it was never actually used to produce a run — every result here came from a prebuilt image —
+so shipping it would mean shipping an untested recipe. Whatever route you take, step 2 is what tells you it worked.
 
 #### Measured: what a v4.12.0 sandbox actually costs you
 
@@ -252,15 +276,6 @@ prove the theorem.
 
 That makes it usable as a plumbing smoke test and useless for a number. `check_sandbox.py` is what tells the two
 apart, which is why it runs before anything else.
-
-`elan` installs entirely in user space, so none of that is required:
-
-```bash
-./setup_lean.sh /lustre/<...>/lean4-mathlib-v4.19.0
-```
-
-`lake exe cache get` downloads prebuilt Mathlib oleans because `v4.19.0` is a tagged release, so this is a large
-download rather than a multi-hour source build. Bind-mount the result into whatever base image you already have.
 
 ### 2. Verify the sandbox before spending anything on inference
 
@@ -300,8 +315,9 @@ was never exercised end to end: every run of this benchmark, including the repro
 path, and shipping a second, untested way to compute the score is worse than not offering it. The cost is that
 `gym eval submit` needs the sandbox launched separately; `examples/slurm_leancat_goedel_prover.yaml` documents that.
 
-The Lean file is shipped into the sandbox base64-encoded rather than interpolated into a shell command — Lean sources
-routinely contain quotes, backslashes and unicode, and a heredoc delimiter can appear inside a proof.
+The Lean file is sent to the sandbox as the `generated_code` field of a JSON body, never interpolated into a shell
+command, so quotes, backslashes and unicode in a proof need no escaping.
 
-`reward` is 1.0 only when `lake env lean` **exits zero**. Matching the output for `error:` is not enough on its own:
-a non-zero exit with nothing matching would otherwise score as a proof.
+`reward` is 1.0 only when the sandbox reports `completed` (a zero `lake env lean` exit) **and** the captured output
+carries neither `error:` nor a `sorry` warning. The output scan is needed because a warning-only build that declared a
+`sorry` still exits zero.

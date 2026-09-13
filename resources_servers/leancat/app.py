@@ -16,27 +16,22 @@
 """LeanCat resources server: formal category theory in Lean 4.
 
 LeanCat (arXiv:2512.24796) is 100 statement-level 1-category-theory problems in Lean 4 /
-Mathlib v4.19.0, built to stress library-grounded abstraction rather than search depth.
-The published headline is how little of it current models solve: 12.0% pass@4 for the
-best model, and 0.0% on the High tier.
+Mathlib v4.19.0.
 
-The task here is *whole-file*, which is what separates this server from
-``math_formal_lean``. There, the model writes a proof body and the harness reassembles
-the file around it. Here the model returns the entire file -- imports, ``open`` and
-``variable`` preamble, any auxiliary definitions it wants, then the target theorem --
-because many LeanCat problems set up their own structures and instances before the
-statement, and a reassembly step would have to guess where the model's additions belong.
-Handing the model the whole file removes the guess.
+The task is *whole-file*: the model returns the entire Lean file (imports, preamble, any
+auxiliary definitions, the target theorem with its proof), unlike ``math_formal_lean``
+where the model writes only a proof body and the server reassembles the file. Because the
+model owns the whole file it could also weaken the theorem, so
+``proof_utils.check_statement_preserved`` compares the submission against the reference.
 
-That freedom is why ``proof_utils.check_statement_preserved`` exists: a model that owns
-the whole file can also weaken the theorem it was asked to prove, and the weakened
-version compiles. See ``proof_utils`` for what is enforced.
+The sandbox client, ``CompilerOutput``, the Mathlib version probe and the Lean comment
+stripper are imported from ``math_formal_lean``. Only the whole-file logic lives here.
 """
 
 import re
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, model_validator
+from pydantic import model_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -55,18 +50,14 @@ from resources_servers.leancat.proof_utils import (
     extract_lean_code,
     find_banned_tokens,
 )
-from resources_servers.leancat.sandbox_client import Lean4SandboxClient
+from resources_servers.math_formal_lean.app import CompilerOutput
+from resources_servers.math_formal_lean.sandbox_client import Lean4SandboxClient
+from resources_servers.math_formal_lean.toolchain import ToolchainCheck
 
 
-# Terminal values of `proof_status`. Everything except COMPLETED scores 0.0; they are kept
-# distinct because "the model cheated" and "the sandbox was down" need very different
-# responses from whoever reads the run.
-#
-# "completed", "empty_generation" and "timeout" are spelled as math_formal_lean spells them,
-# so a reader moving between the two servers reads the same word for the same outcome. The
-# rest have no counterpart there: that server reassembles the file itself, so it has nothing
-# to catch a tampered statement and folds every non-timeout compiler failure into the raw
-# process status.
+# Terminal values of `proof_status`. Only COMPLETED scores 1.0. "completed",
+# "empty_generation" and "timeout" match math_formal_lean's vocabulary; the rest are
+# specific to the whole-file task.
 STATUS_COMPLETED = "completed"
 STATUS_EMPTY_GENERATION = "empty_generation"
 STATUS_BANNED_TOKENS = "banned_tokens"
@@ -79,33 +70,20 @@ STATUS_SANDBOX_ERROR = "sandbox_error"
 def determine_proof_status(compiler_output: Dict[str, Any]) -> tuple[str, Optional[str]]:
     """Map a sandbox result onto a proof status and, when it failed, a one-line reason.
 
-    Takes the raw sandbox dict rather than the parsed model, as math_formal_lean's function
-    of the same name does, so the two read the same and neither depends on the other's types.
-
-    ``process_status == "completed"`` means the sandbox got a zero exit code, but that is
-    checked *and* the output is scanned for ``error:``/``sorry``: a warning-only build that
-    declared a sorry still exits zero, and that must not score as a proof.
+    A zero exit (``process_status == "completed"``) is not sufficient: a build that declares
+    a ``sorry`` exits zero with only a warning, so the output is scanned for ``error:`` and
+    ``sorry`` as well.
     """
     process_status = compiler_output.get("process_status", "unknown")
 
     if process_status == "timeout":
         return STATUS_TIMEOUT, "Lean compilation timed out."
     if process_status == "failed":
-        # NeMo-Skills' sandbox reports "failed" for any non-zero `lake env lean` exit
-        # (local_sandbox_server.py: completed iff returncode == 0). That is an ordinary
-        # compile error, not an infrastructure problem -- calling it sandbox_error made 59%
-        # of a real run look like the sandbox was broken.
+        # The NeMo-Skills sandbox reports "failed" for any non-zero `lake env lean` exit,
+        # i.e. an ordinary compile error, not an infrastructure problem.
         return STATUS_COMPILE_ERROR, "Lean rejected the proof."
     if process_status != "completed":
         return STATUS_SANDBOX_ERROR, f"Sandbox reported status {process_status!r}."
-
-    # The Gym sandbox backend reports `lake env lean`'s exit status, which is 0 only when
-    # Lean accepted the file. Trust it over string-matching the output: a non-zero exit
-    # with no "error:" in the captured text would otherwise score as a proof. The HTTP
-    # backend omits the key, so this is a no-op there.
-    return_code = compiler_output.get("return_code")
-    if return_code is not None and return_code != 0:
-        return STATUS_COMPILE_ERROR, f"Lean exited with status {return_code}."
 
     stdout = compiler_output.get("stdout", "")
     stderr = compiler_output.get("stderr", "")
@@ -129,20 +107,22 @@ def score_leancat_rollout(rollout: Dict[str, Any]) -> Dict[str, float]:
 class LeanCatResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_host: str = "127.0.0.1"
     sandbox_port: int = 6000
-    # Upstream's per-attempt verification budget (EVALUATION.md). LeanCat proofs import
-    # all of Mathlib and lean on heavy typeclass search, so the 30s that miniF2F gets is
-    # not enough here.
+    # Upstream's per-attempt verification budget (EVALUATION.md); LeanCat proofs import all
+    # of Mathlib and rely on heavy typeclass search.
     compilation_timeout: float = 300.0
     max_output_characters: int = 4000
-    # Both guards default on: they are what make a reward of 1.0 mean what the paper
-    # means by "solved". Turn them off only to measure how often they fire.
     require_statement_preserved: bool = True
     ban_proof_shortcuts: bool = True
 
+    # Probe the sandbox's Lean/Mathlib version once and log an error on a mismatch (see
+    # math_formal_lean/toolchain.py). A row's own `lean_toolchain` overrides the default.
+    check_lean_version: bool = True
+    expected_lean_version: str = "4.19.0"
+
 
 class LeanCatRunRequest(BaseRunRequest):
-    # Fields arrive as flat row columns (see prepare.py); the validator below also
-    # accepts them nested under `verifier_metadata` for hand-written rows.
+    # Fields arrive as flat row columns (see prepare.py); the validator below also accepts
+    # them nested under `verifier_metadata`.
     verifier_metadata: Optional[Dict[str, Any]] = None
 
     formal_statement: str
@@ -159,12 +139,9 @@ class LeanCatRunRequest(BaseRunRequest):
     def _lift_verifier_metadata(cls, data: Any) -> Any:
         """Accept the row's fields nested under `verifier_metadata` or at the top level.
 
-        Gym posts each row to /verify with `verifier_metadata` still nested -- it is not
-        spliced onto the body, which is why math_formal_lean can declare its fields flat
-        (its rows carry no wrapper at all) while ours cannot. Lifting here keeps the typed
-        fields and lets `level` reach the response, which compute_subset_metrics needs.
-
-        Top-level keys win, so an explicit override is never clobbered by the metadata.
+        Gym posts `verifier_metadata` to /verify still nested; lifting it here keeps the
+        typed fields and lets `level` reach the response for compute_subset_metrics.
+        Top-level keys win.
         """
         if isinstance(data, dict) and isinstance(data.get("verifier_metadata"), dict):
             return {**data["verifier_metadata"], **data}
@@ -175,16 +152,9 @@ class LeanCatVerifyRequest(LeanCatRunRequest, BaseVerifyRequest):
     pass
 
 
-class CompilerOutput(BaseModel):
-    process_status: str
-    stdout: str
-    stderr: str
-
-
 class LeanCatVerifyResponse(LeanCatVerifyRequest, BaseVerifyResponse):
-    # Inherits the request fields so `level` survives onto the rollout dict that
-    # `compute_subset_metrics` groups by; a response that only carried the reward would
-    # make the per-difficulty breakdown impossible to compute.
+    # Inherits the request fields so `level` reaches the rollout dict that
+    # `compute_subset_metrics` groups by.
     proof_status: str
     predicted_proof: str
     statement_preserved: bool
@@ -200,14 +170,25 @@ class LeanCatResourcesServer(SimpleResourcesServer):
             host=self.config.sandbox_host,
             port=self.config.sandbox_port,
             max_output_characters=self.config.max_output_characters,
+            # Compiles run for minutes; let the sandbox, not the client, report a timeout.
+            timeout_buffer=30.0,
         )
+        self._toolchain = ToolchainCheck(self.config.expected_lean_version)
+
+    async def _check_toolchain_once(self, expected: Optional[str]) -> None:
+        """Log an error if the sandbox's Mathlib is not the one the rows were written against.
+
+        A wrong Mathlib fails statements with ordinary compile errors, so the score would be
+        meaningless but look plausible. Runs once per process.
+        """
+        if not self.config.check_lean_version:
+            return
+        await self._toolchain.run(self._sandbox_client, expected_override=expected)
 
     async def verify(self, body: LeanCatVerifyRequest) -> LeanCatVerifyResponse:
         """Score one attempt: 1.0 only if it is a valid LeanCat proof, else 0.0.
 
-        The static checks run before the sandbox call, not after, because they are free
-        and a five-minute Mathlib compile is not -- there is no point compiling a file
-        that already lost on ``sorry``.
+        The text checks run first because they are free and a Mathlib compile is not.
         """
         body_dict = body.model_dump()
         code = extract_lean_code(body.response.output_text)
@@ -245,6 +226,8 @@ class LeanCatResourcesServer(SimpleResourcesServer):
                 failure_reason=reason,
             )
 
+        await self._check_toolchain_once(body.lean_toolchain)
+
         raw_output = await self._sandbox_client.execute_lean4(
             code=code,
             timeout=self.config.compilation_timeout,
@@ -271,12 +254,10 @@ class LeanCatResourcesServer(SimpleResourcesServer):
     # ──────────────────────────────────────────────────────────
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """Pooled pass@k plus a per-difficulty breakdown.
+        """Pooled pass@k plus the paper's Easy/Medium/High breakdown.
 
-        The paper reports Easy/Medium/High separately and pooled, and the split is the
-        whole point of its argument -- the pooled number hides that High is a flat zero.
-        ``statement_preserved`` rides along as a second score so a run that collapses
-        because the guard is rejecting everything is visible without opening rollouts.
+        ``statement_preserved`` is reported as a second score so the guard's rejection rate
+        is visible in the aggregate metrics.
         """
         if not tasks:
             return {}
