@@ -23,25 +23,25 @@ the owners and obtain:
 The server host needs network access to each service. Keep their credentials separate
 and out of source control and logs.
 
-<Warning>
-No public access route for the policy or internal datasets is documented.
-External users should [ask the maintainers](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose)
-for an authorized route before running this recipe. A public Tavily key does not
-grant that access. Do not share secrets or private policy contents in public issues.
-</Warning>
+<Note>
+External users can [contact the maintainers](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose)
+to discuss access options for the policy and internal datasets before running this recipe.
+These require separate authorization from Tavily service access. Use private
+channels for credentials and policy contents.
+</Note>
 
 ## Exclusion policy
 
 Obtain the approved JSON from its owner and place it at an absolute path readable
 by the resources-server process, including inside its container if applicable.
 Set `TAVILY_EXCLUDE_DOMAINS_FILE` to that path and compare its SHA-256 with the
-owner-provided checksum. Record the version and follow the owner's refresh policy;
-Gym does not download or update this file.
+owner-provided checksum. Record the version and follow the owner's instructions
+for downloading and refreshing this file.
 
 The [parser](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/tavily_search/app.py)
 reads a `notices` list containing `properties` entries with `type: "domain"`
-and `value`. Missing or malformed files can prevent startup. Do not use an empty
-policy or modify exclusions to bypass errors; request a compatible approved artifact.
+and `value`. Use the complete, unmodified approved policy. If the file is missing
+or fails to load, request a compatible approved artifact from its owner.
 
 ## Configure services
 
@@ -70,7 +70,7 @@ mlflow_tracking_uri: ${oc.env:GYM_GITLAB_REGISTRY_URI}
 mlflow_tracking_token: ${oc.env:GYM_GITLAB_REGISTRY_TOKEN}
 ```
 
-Use the owner's MLflow-compatible project registry URI, not the GitLab homepage.
+Use the MLflow-compatible project registry URI supplied by its owner.
 See the [configuration reference](/main/reference/configuration#mlflow) and
 [dataset CLI](/main/reference/cli-commands#gym-dataset-download).
 
@@ -93,7 +93,8 @@ gym dataset download --storage gitlab \
 
 For access errors, check the token and project permissions with the owner.
 For missing artifacts, confirm the version/name mapping and align the local config.
-The committed example dataset does not replace these training/validation splits.
+Use these splits for training and validation; the committed example is for small
+setup checks.
 
 ## Run
 
@@ -106,5 +107,4 @@ gym env start \
 ```
 
 Before scaling up, run a small [evaluation](/main/evaluation/benchmarks) and inspect
-the search response, policy exclusions, and judge result. Server startup alone
-does not validate the workflow.
+the search response, policy exclusions, and judge result to validate the workflow.

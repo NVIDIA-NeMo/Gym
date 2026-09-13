@@ -31,8 +31,9 @@ gym eval run --no-serve \
     --concurrency 1
 ```
 
-Keep the OpenCode execution command intact: the agent's `/run` calls the SWE-bench verifier.
-Removing the execution command is only a plumbing test, not an agent evaluation.
+For an end-to-end evaluation, keep OpenCode execution enabled so `/run` executes
+the agent and calls the SWE-bench verifier. Skipping execution limits the test to
+the surrounding infrastructure.
 This one-task run uses the configured timeout defaults and consumes model and sandbox resources.
 
 ## OpenCode binary: online or pre-staged
@@ -44,13 +45,13 @@ to OpenCode and GitHub release assets.
 
 For sandboxes without that network access, provide a compatible installer and binary
 through a mount, task image, or custom resources-server upload before the agent runs.
-Uploading to S3 alone does not make files available in the sandbox.
+For S3-hosted files, arrange a mount or transfer into each task sandbox.
 For the SWE-bench recipe above, configure OpenSandbox
 [volume options](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/opensandbox#sandboxspec-provider-options)
 under `swebench_verified_opencode_resources_server.resources_servers.swebench.sandbox_config.provider_options`;
-the resources server creates the task sandbox, not the agent.
+the resources server creates the task sandbox.
 
-Set **both** paths to existing files inside that sandbox, not local paths or S3 URLs;
+Set both paths to existing files inside that sandbox;
 setting only one leaves online installation enabled.
 Save this as `offline-assets.yaml` and add `--config offline-assets.yaml` to server startup:
 

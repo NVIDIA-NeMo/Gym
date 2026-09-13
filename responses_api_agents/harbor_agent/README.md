@@ -308,9 +308,10 @@ harbor_agent_kwargs:
 
 Before running, follow the [Daytona access prerequisites](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/daytona-access)
 for an organization key, sandbox permissions, and quota. This example uses Harbor's
-Daytona environment, not Gym's Sandbox API provider.
+Daytona environment and its configuration.
 
-Set the key in the host environment (placeholder below; never commit real credentials):
+Set the key in the host environment using your secret manager. The example below
+uses a placeholder:
 
 ```bash
 export DAYTONA_API_KEY="<your-daytona-api-key>"

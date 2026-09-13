@@ -15,8 +15,8 @@ for resource requests vs limits, timeout and retry guidance, and the failure sig
 
 ### Obtain service access
 
-Installing Gym does not provision an OpenSandbox server or issue a key.
-`OPENSANDBOX_API_KEY` authenticates to **your OpenSandbox deployment**.
+To use Gym with OpenSandbox, connect to a running deployment and obtain its
+service key. Set that key as `OPENSANDBOX_API_KEY`.
 
 Choose an access route before running an agent:
 
@@ -27,8 +27,7 @@ Choose an access route before running an agent:
   and [server configuration reference](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md).
   The operator configures a non-empty `api_key` under the server's `[server]`
   section and securely supplies that value to clients as `OPENSANDBOX_API_KEY`.
-  Deploy and secure the server before using Gym; installing the SDK alone is not
-  sufficient.
+  Deploy and secure the server before connecting Gym.
 
 ### Configure the client
 
@@ -61,14 +60,15 @@ From the Gym server's host or container:
 - Confirm the endpoint resolves and is reachable. The shipped
   `.svc.cluster.local` address normally requires cluster network/DNS access.
   Use the operator's TLS/CA configuration.
-- Verify credentials using the deployment's read-only authenticated check.
-  The public `/health` route checks reachability, **not key validity**.
+- Use the public `/health` route to check reachability, then the deployment's
+  read-only authenticated check to verify credentials.
 - Confirm image-registry and required download access, plus model connectivity
-  from the component making requests. A sandbox's `localhost` is not the Gym host.
+  from the component making requests. Inside a sandbox, `localhost` refers to
+  the sandbox itself.
 - Agree initial concurrency, lifetime, and cleanup within the deployment's limits.
 
 Resolve access, quota, or image-pull failures with the operator before retrying.
-These checks do not replace an agent evaluation.
+After these checks, run an agent evaluation to verify the complete workflow.
 
 ## Provider Config
 

@@ -26,14 +26,14 @@ The Gym host must reach each task's SSH sidecar on port `52222`.
 
 For a new deployment, have the infrastructure owner follow the pinned
 [NeMo Evaluator Terraform stack instructions](https://github.com/NVIDIA-NeMo/Evaluator/blob/d9c321ad0a9c83918ca9c03cc36396b27990944f/terraform/stacks/ecs-sandbox/README.md).
-The stack provisions infrastructure, not Gym or a model endpoint. Review the
-target regions (the default is eleven), project name, optional EFS, and
+The stack provisions the sandbox infrastructure; deploy Gym and the model endpoint
+separately. Review the target regions (the default is eleven), project name, optional EFS, and
 `orchestrator_allowed_cidrs` before applying.
 
 <Warning>
 Provisioning creates billable resources; Terraform state contains credentials
-and SSH keys. Protect that state and leave provisioning and teardown to the
-infrastructure owner. Teardown can delete stored data and secrets.
+and SSH keys. Protect that state and coordinate provisioning and teardown with
+the infrastructure owner. Teardown can delete stored data and secrets.
 </Warning>
 
 ### Runtime permissions
@@ -42,10 +42,10 @@ Use the pinned stack's [IAM policies](https://github.com/NVIDIA-NeMo/Evaluator/b
 as a starting point, scoped to your deployment. Gym's runtime identity needs ECS
 task operations, SSM config/cache access, SSH-secret access, S3 staging access,
 and permission to pass the configured roles. Image mirroring/building also needs
-ECR and CodeBuild permissions; provisioning administrator access is not required.
+ECR and CodeBuild permissions. Use these scoped permissions for runtime access.
 
-The pinned orchestrator policy lacks `s3:DeleteObject`, which Gym needs for staging
-cleanup. Ask the owner to add it for the staging prefix and configure a lifecycle
+For staging cleanup, ask the owner to add `s3:DeleteObject` to the pinned
+orchestrator policy for the staging prefix and configure a lifecycle
 cleanup rule. Customer-managed encryption keys may also require KMS permissions.
 
 ### SSM discovery
@@ -56,8 +56,7 @@ at `/<project>/ecs-sandbox/config`. Set Gym's `ssm_project` to Terraform's
 
 Set `GYM_SSM_PROJECT` to that project name for the examples below; it is passed
 explicitly into Gym's config. Before launching, confirm SSM/secret access,
-SSH connectivity, image access, and Fargate quota with the owner. AWS authentication
-alone does not establish those permissions.
+SSH connectivity, image access, and Fargate quota with the owner.
 
 ## Provider Configuration
 
@@ -184,6 +183,6 @@ gym env start \
 
 <Warning>
 The pinned reference requires `orchestrator_allowed_cidrs` and rejects `0.0.0.0/0`.
-Check older or customized deployments too: restrict port `52222` to the
-orchestrator's network, not the public internet.
+For older or customized deployments, also limit port `52222` access to the
+orchestrator's network.
 </Warning>

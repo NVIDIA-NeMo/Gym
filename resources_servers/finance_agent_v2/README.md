@@ -81,15 +81,15 @@ finance_agent_v2_cache_dir: /shared/cache/finance_agent_v2
 ```
 
 `${oc.env:VAR,null}` preserves optional-tool behavior when a variable is absent.
-This example still requires `OPENAI_API_KEY` for both model endpoints; policy and
-judge keys can be configured independently. The shipped judge-key fallback
-`unset` is a configuration placeholder, not a usable credential.
+Set `OPENAI_API_KEY` for both model endpoints in this example; policy and judge
+keys can be configured independently. For an authenticated judge endpoint,
+replace the shipped `unset` placeholder with its credential.
 
 Tool-key and cache settings resolve as config key → environment variable → default.
 You can omit them from `env.yaml` and export `SEC_API_KEY`, `TAVILY_API_KEY`,
 `TIINGO_API_KEY`, and `FINANCE_AGENT_V2_CACHE_DIR` instead. Explicit config values
 take precedence. The `policy_*` keys have no default. Resolved configurations may
-contain secrets; do not publish or log them.
+contain secrets; redact credentials before sharing or logging them.
 
 Full-tool benchmark coverage requires all three service keys and network access
 to the tools, fetched pages, and model endpoints. Record missing-tool limitations

@@ -6,7 +6,7 @@ position: 6
 
 # Daytona Access
 
-Get a sandbox-service key from Daytona, not Gym. It is separate from model and
+Get a sandbox-service key from Daytona. It is separate from model and
 image-registry credentials.
 
 ## Hosted service
@@ -22,8 +22,8 @@ image-registry credentials.
    Keep it out of source control and logs.
 
 <Warning>
-Daytona's organization is the sandbox isolation boundary. API-key resource scopes
-do not isolate running sandboxes within it; see the
+Daytona scopes sandbox isolation at the organization level. Access to running
+sandboxes is shared across API-key resource scopes within it; see the
 [permissions guidance](https://www.daytona.io/docs/en/api-keys/).
 </Warning>
 

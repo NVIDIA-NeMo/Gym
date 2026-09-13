@@ -38,14 +38,14 @@ uses tmux on `PATH` or attempts installation. Installation needs permissions,
 dependencies and network access to package repositories or source downloads.
 
 To preinstall tmux, expose a compatible binary through a mount, task image, or
-custom resources-server upload before the agent runs. Uploading to S3 alone is
-not enough. For OpenSandbox, configure
+custom resources-server upload before the agent runs. For S3-hosted files, arrange
+a mount or transfer into each task sandbox. For OpenSandbox, configure
 [volume options](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/opensandbox#sandboxspec-provider-options)
 under `terminal_bench_2_1_resources_server.resources_servers.terminal_bench_2_1.sandbox_config.provider_options`;
 the resources server creates the sandbox and the agent reconnects to it.
 
 Save this as `offline-assets.yaml` and add `--config offline-assets.yaml` to server
-startup. The path must exist **inside the task sandbox**, not on the host or in S3:
+startup. Use the binary's path inside the task sandbox:
 
 ```yaml
 terminus_2_sandboxed_agent:

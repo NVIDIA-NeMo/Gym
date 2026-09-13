@@ -36,8 +36,8 @@ separate from model and registry credentials. Leave `E2B_API_URL` and
 `E2B_SANDBOX_URL` unset for hosted E2B unless instructed otherwise.
 
 For an **E2B-compatible gateway**, obtain credentials, API/sandbox URLs, network
-requirements, template permissions, and quota from its operator. A hosted key
-does not automatically grant gateway access. Set `E2B_API_URL` and
+requirements, template permissions, and quota from its operator. Gateway access
+uses the operator's authentication settings. Set `E2B_API_URL` and
 `E2B_SANDBOX_URL` to the supplied endpoints; the operator may also require
 `connection.api_headers`. Keep secret values out of checked-in YAML.
 
