@@ -26,19 +26,22 @@ VLLM_COMMON_ARGS=(
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
     --enable-expert-parallel
     --skip-mm-profiling
-    --prefix-cache-retention-interval None
-    --data-parallel-size-local 4
+    --api-server-count 1
+    --speculative-config '{"method":"mtp","num_speculative_tokens":5}'
+    --enable-mamba-fine-grained-prefix-cache
+    --prefix-match-unit 16
+    --data-parallel-size-local 1
 )
 VLLM_PREFILL_ARGS=(
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
     --max-num-batched-tokens 16960
     --max-num-seqs 1024
-    --tensor-parallel-size 1
+    --tensor-parallel-size 4
 )
 VLLM_DECODE_ARGS=(
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     --max-num-batched-tokens 16960
     --max-num-seqs 1024
-    --tensor-parallel-size 1
+    --tensor-parallel-size 4
 )
