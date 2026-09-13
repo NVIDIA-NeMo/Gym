@@ -28,6 +28,7 @@ Set ``is_verifying_golden_patch: true`` to grade the dataset's own patch instead
 the dataset-health check: a row whose golden patch does not resolve is a broken row.
 """
 
+import shlex
 import sys
 from pathlib import Path
 from time import time
@@ -54,6 +55,8 @@ from resources_servers.scale_swe.verification import (
     VerificationInputs,
     VerificationResult,
     as_id_list,
+    clean_commands,
+    drop_patch_sections,
     run_verification,
     verification_files,
 )
@@ -121,6 +124,8 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
+        self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
+        self._session_id_to_base_commit: dict[str, str] = {}
 
     def _inputs(self, body: ScaleSWEInstanceRequest, patch: str) -> VerificationInputs:
         return VerificationInputs(
@@ -180,19 +185,85 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         except Exception:
             print("Failed to stop Scale-SWE sandbox", format_exc(), file=sys.stderr)
 
+    async def _pristine_untracked_files(self, sandbox: AsyncSandbox, workdir: str) -> frozenset[str]:
+        """List of files ``workdir`` holds untracked before the agent touches it."""
+        try:
+            result = await sandbox.exec(f"git -C {shlex.quote(workdir)} ls-files --others --exclude-standard")
+            if result.return_code != 0:
+                print(f"Failed to list pristine untracked files: {result.stderr}", file=sys.stderr)
+                return frozenset()
+            return frozenset(line.strip() for line in (result.stdout or "").splitlines() if line.strip())
+        except Exception:
+            print("Failed to list pristine untracked files", format_exc(), file=sys.stderr)
+            return frozenset()
+
+    async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> str:
+        """Diff the agent's own sandbox against ``base_commit``, then stop it.
+
+        ``git add -N`` (intent-to-add) is what makes brand-new files show up in ``git diff`` too,
+        not just edits to already-tracked files.
+        """
+        original_sandbox = self._session_id_to_sandbox.pop(session_id)
+        pristine_untracked = self._session_id_to_pristine_untracked.pop(session_id, frozenset())
+        try:
+            result = await original_sandbox.exec(
+                f"git -C {shlex.quote(workdir)} add -N . "
+                f"&& git -C {shlex.quote(workdir)} --no-pager diff {shlex.quote(base_commit)}"
+            )
+            if result.return_code != 0:
+                raise RuntimeError(result.stderr or "git diff failed")
+            return drop_patch_sections(result.stdout or "", pristine_untracked)
+        finally:
+            await self._stop_sandbox(original_sandbox)
+
     async def seed_session(self, request: Request, body: ScaleSWESeedSessionRequest) -> ScaleSWESeedSessionResponse:
-        """Start the instance's image so an agent can work in it."""
+        """Start the instance's image, then run ``pre_commands`` so the agent sees the prepared
+        checkout (parent_commit, fix-commit history scrubbed) rather than the image's raw,
+        unprepared state -- ``pre_commands`` used to only run inside the eval script at /verify
+        time, which left an agent's own working session never actually checked out to the right
+        commit at all.
+        """
         session_id = request.session[SESSION_ID_KEY]
         await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
+        self._session_id_to_pristine_untracked.pop(session_id, None)
+        self._session_id_to_base_commit.pop(session_id, None)
+
         sandbox = await self._create_sandbox(body)
+
+        pre = clean_commands(body.pre_commands)
+        if pre:
+            result = await sandbox.exec(f"cd {shlex.quote(body.workdir)} && {pre}")
+            if result.return_code != 0:
+                print(
+                    f"[scale_swe] {body.instance_id}: pre_commands failed during seed_session "
+                    f"(non-fatal, matching build_eval_script's own tolerance): {result.stderr}",
+                    file=sys.stderr,
+                )
+
+        head_result = await sandbox.exec(f"git -C {shlex.quote(body.workdir)} rev-parse HEAD")
+        self._session_id_to_base_commit[session_id] = (head_result.stdout or "").strip()
+        self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
+            sandbox, body.workdir
+        )
         self._session_id_to_sandbox[session_id] = sandbox
         return ScaleSWESeedSessionResponse(sandbox_handle=str(sandbox.sandbox_id))
 
     async def verify(self, request: Request, body: ScaleSWEVerifyRequest) -> ScaleSWEVerifyResponse:
+        session_id = request.session[SESSION_ID_KEY]
+        extraction_error = None
         if self.config.is_verifying_golden_patch:
             patch = body.patch
         else:
-            patch = str(getattr(body, "model_patch", "") or "")
+            base_commit = self._session_id_to_base_commit.pop(session_id, "")
+            if not base_commit:
+                patch = ""
+                extraction_error = "Failed to extract model patch: no base commit recorded (seed_session did not run for this session)"
+            else:
+                try:
+                    patch = await self._extract_model_patch(session_id, body.workdir, base_commit)
+                except Exception as exc:
+                    patch = ""
+                    extraction_error = f"Failed to extract model patch: {exc}"
 
         inputs = self._inputs(body, patch)
         log_dir = Path(__file__).parent / "logs" / body.instance_id
@@ -258,7 +329,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                 "language": body.language,
                 "test_results": result.test_results,
                 "test_output": result.test_output[-100_000:],
-                "error": result.error,
+                "error": extraction_error or result.error,
                 "eval_sandbox_start_time_taken": start_time_taken,
                 "patch_verification_time_taken": verification_time_taken,
             }
