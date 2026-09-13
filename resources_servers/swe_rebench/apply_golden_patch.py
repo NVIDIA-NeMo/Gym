@@ -22,7 +22,7 @@ score from SWE-rebench-V2.
         --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
     python resources_servers/swe_rebench/apply_golden_patch.py \
-        +benchmark_jsonl=benchmarks/swe_rebench/data/swe_rebench_benchmark.jsonl \
+        +training_jsonl=resources_servers/swe_rebench/data/swe_rebench_training.jsonl \
         +output_jsonl=results/swe_rebench_golden_patch.jsonl \
         +concurrency=32 +limit=100
 """
@@ -59,8 +59,8 @@ def _stream_examples(path: Path, limit: int):
     feed a bounded worker pool wastes that memory for the whole run, and the peak lands hours in
     when results have also accumulated.
     """
-    with open(path, encoding="utf-8") as benchmark:
-        for index, line in enumerate(benchmark):
+    with open(path, encoding="utf-8") as training:
+        for index, line in enumerate(training):
             if limit and index >= limit:
                 return
             line = line.strip()
@@ -72,10 +72,10 @@ async def main() -> None:
     config = get_global_config_dict()
     limit = int(config.get("limit") or 0)
     concurrency = int(config.get("concurrency") or 16)
-    benchmark_fpath = Path(config["benchmark_jsonl"])
+    training_fpath = Path(config["training_jsonl"])
     output_fpath = Path(config.get("output_jsonl") or "results/swe_rebench_golden_patch.jsonl")
 
-    total = sum(1 for _ in _stream_examples(benchmark_fpath, limit))
+    total = sum(1 for _ in _stream_examples(training_fpath, limit))
     client = ServerClient.load_from_global_config()
 
     # Bounded: the queue holds at most one row per worker, so resident rows track concurrency
@@ -144,7 +144,7 @@ async def main() -> None:
                     queue.task_done()
 
         workers = [asyncio.create_task(worker()) for _ in range(concurrency)]
-        for example in _stream_examples(benchmark_fpath, limit):
+        for example in _stream_examples(training_fpath, limit):
             await queue.put(example)
         for _ in workers:
             await queue.put(None)

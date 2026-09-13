@@ -35,8 +35,8 @@ EMPTY_RESPONSE = {
 
 async def main() -> None:
     config = get_global_config_dict()
-    with open(config["benchmark_jsonl"], encoding="utf-8") as benchmark:
-        example = json.loads(next(benchmark))
+    with open(config["training_jsonl"], encoding="utf-8") as training:
+        example = json.loads(next(training))
     example |= {"responses_create_params": {"input": []}, "response": EMPTY_RESPONSE}
 
     client = ServerClient.load_from_global_config()
