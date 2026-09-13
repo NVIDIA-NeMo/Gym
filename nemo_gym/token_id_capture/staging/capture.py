@@ -160,68 +160,24 @@ class RolloutTokenCapture:
         extras: dict[str, Any] | None = None,
     ) -> CommitCoords:
         """Stage a normalized delta before returning lightweight coordinates."""
-        self._claim_completion(call)
         admission = call.admission
         try:
-            if admission.mode == "token_in" and prompt_token_ids[: admission.prev_len] != call.prefix_token_ids:
-                raise ValueError("generation prompt does not begin with the gate-authorized token prefix")
-            token_ids_delta, token_mask_delta, logprobs_delta = build_staging_delta(
+            record = self.build_prefix_record(
+                call,
                 prompt_token_ids=prompt_token_ids,
                 generated_token_ids=generated_token_ids,
-                generated_log_probs=generated_logprobs,
-                prev_len=admission.prev_len,
-            )
-            delta_len = len(token_ids_delta)
-            cum_len = admission.prev_len + delta_len
-            # For a continuation, the comparison above verifies that the prompt starts with the required prefix.
-            # Appending the generated IDs therefore yields the complete sequence for both hashes.
-            chain_hash = compute_chain_hash(admission.parent_chain_hash, token_ids_delta)
-            cumulative_hash = hash_token_ids(list(prompt_token_ids) + list(generated_token_ids))
-            extras_digest = compute_extras_digest(extras)
-            digest = compute_staging_digest(
-                schema_version=admission.schema_version,
-                digest_version=STAGING_DIGEST_VERSION,
-                extras_digest_version=EXTRAS_DIGEST_VERSION,
-                rollout_id=admission.rollout_id,
-                model_call_id=admission.model_call_id,
-                parent_call_id=admission.parent_call_id,
-                mode=admission.mode,
-                prev_len=admission.prev_len,
-                delta_len=delta_len,
-                cum_len=cum_len,
-                weight_version=call.weight_version,
-                token_ids_delta=token_ids_delta,
-                token_mask_delta=token_mask_delta,
-                generation_log_probs_delta=logprobs_delta,
-                extras_digest=extras_digest,
-                chain_hash=chain_hash,
-                cumulative_hash=cumulative_hash,
-            )
-            record = StagedCallRecord(
-                rollout_id=admission.rollout_id,
-                model_call_id=admission.model_call_id,
-                parent_call_id=admission.parent_call_id,
-                mode=admission.mode,
-                prev_len=admission.prev_len,
-                delta_len=delta_len,
-                cum_len=cum_len,
-                weight_version=call.weight_version,
-                digest=digest,
-                token_ids_delta=token_ids_delta,
-                token_mask_delta=token_mask_delta,
-                generation_log_probs_delta=logprobs_delta,
+                generated_logprobs=generated_logprobs,
                 extras=extras,
-                extras_digest=extras_digest,
-                chain_hash=chain_hash,
-                cumulative_hash=cumulative_hash,
             )
         except (TypeError, ValueError, OverflowError):
+            self._claim_completion(call)
             LOGGER.exception(
                 "token capture could not build rollout %s call %s",
-                admission.rollout_id,
-                admission.model_call_id,
+                call.rollout_id,
+                call.model_call_id,
             )
             return self._failed_coords(call)
+        self._claim_completion(call)
         try:
             # Unlocked: the completion claim above already made this call the
             # sole stager, and cross-call ordering comes from stage-before-ack
@@ -250,17 +206,84 @@ class RolloutTokenCapture:
             )
             return self._failed_coords(call)
         return CommitCoords(
+            rollout_id=record.rollout_id,
+            model_call_id=record.model_call_id,
+            parent_call_id=record.parent_call_id,
+            prev_len=record.prev_len,
+            delta_len=record.delta_len,
+            cum_len=record.cum_len,
+            weight_version=call.weight_version,
+            disposition="staged",
+            digest=record.digest,
+            extras_digest=record.extras_digest,
+            staging_key=result.staging_key,
+            chain_hash=record.chain_hash,
+            cumulative_hash=record.cumulative_hash,
+        )
+
+    def build_prefix_record(
+        self,
+        call: ActiveCall,
+        *,
+        prompt_token_ids: list[int],
+        generated_token_ids: list[int],
+        generated_logprobs: list[float],
+        extras: dict[str, Any] | None = None,
+    ) -> StagedCallRecord:
+        """Build a validated snapshot of an active call without completing it.
+
+        A checkpoint backend uses this to persist a cut while the same physical
+        request remains live. Unlike :meth:`complete_call`, this method neither
+        claims nor mutates the call's single-completion state.
+        """
+        admission = call.admission
+        if admission.mode == "token_in" and prompt_token_ids[: admission.prev_len] != call.prefix_token_ids:
+            raise ValueError("generation prompt does not begin with the gate-authorized token prefix")
+        token_ids_delta, token_mask_delta, logprobs_delta = build_staging_delta(
+            prompt_token_ids=prompt_token_ids,
+            generated_token_ids=generated_token_ids,
+            generated_log_probs=generated_logprobs,
+            prev_len=admission.prev_len,
+        )
+        delta_len = len(token_ids_delta)
+        cum_len = admission.prev_len + delta_len
+        chain_hash = compute_chain_hash(admission.parent_chain_hash, token_ids_delta)
+        cumulative_hash = hash_token_ids(list(prompt_token_ids) + list(generated_token_ids))
+        extras_digest = compute_extras_digest(extras)
+        digest = compute_staging_digest(
+            schema_version=admission.schema_version,
+            digest_version=STAGING_DIGEST_VERSION,
+            extras_digest_version=EXTRAS_DIGEST_VERSION,
             rollout_id=admission.rollout_id,
             model_call_id=admission.model_call_id,
             parent_call_id=admission.parent_call_id,
+            mode=admission.mode,
             prev_len=admission.prev_len,
             delta_len=delta_len,
             cum_len=cum_len,
             weight_version=call.weight_version,
-            disposition="staged",
-            digest=digest,
+            token_ids_delta=token_ids_delta,
+            token_mask_delta=token_mask_delta,
+            generation_log_probs_delta=logprobs_delta,
             extras_digest=extras_digest,
-            staging_key=result.staging_key,
+            chain_hash=chain_hash,
+            cumulative_hash=cumulative_hash,
+        )
+        return StagedCallRecord(
+            rollout_id=admission.rollout_id,
+            model_call_id=admission.model_call_id,
+            parent_call_id=admission.parent_call_id,
+            mode=admission.mode,
+            prev_len=admission.prev_len,
+            delta_len=delta_len,
+            cum_len=cum_len,
+            weight_version=call.weight_version,
+            digest=digest,
+            token_ids_delta=token_ids_delta,
+            token_mask_delta=token_mask_delta,
+            generation_log_probs_delta=logprobs_delta,
+            extras=extras,
+            extras_digest=extras_digest,
             chain_hash=chain_hash,
             cumulative_hash=cumulative_hash,
         )
