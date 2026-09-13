@@ -168,7 +168,7 @@ if (( SLURM_PROCID == 0 )); then
         "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $PREFILL_SERVER_PORT \
-        --data-parallel-size $((NUM_PREFILL_NODES * 4)) \
+        --data-parallel-size $NUM_PREFILL_NODES \
         --data-parallel-address \$PREFILL_HEAD \
         --data-parallel-rpc-port $PREFILL_DP_RPC_PORT \
         --api-server-count 1
@@ -179,8 +179,8 @@ elif (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
     vllm serve "$MODEL" --served-model-name "$MODEL_NAME" \
         "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_PREFILL_ARGS[@]}" \
         --headless \
-        --data-parallel-size $((NUM_PREFILL_NODES * 4)) \
-        --data-parallel-start-rank \$(( SLURM_PROCID * 4)) \
+        --data-parallel-size $NUM_PREFILL_NODES \
+        --data-parallel-start-rank \$SLURM_PROCID \
         --data-parallel-address \$PREFILL_HEAD \
         --data-parallel-rpc-port $PREFILL_DP_RPC_PORT
 elif (( SLURM_PROCID == $NUM_PREFILL_NODES )); then
@@ -192,7 +192,7 @@ elif (( SLURM_PROCID == $NUM_PREFILL_NODES )); then
         "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
         --host \$this_node_hostname \
         --port $DECODE_SERVER_PORT \
-        --data-parallel-size $((NUM_DECODE_NODES * 4)) \
+        --data-parallel-size $NUM_DECODE_NODES \
         --data-parallel-address \$DECODE_HEAD \
         --data-parallel-rpc-port $DECODE_DP_RPC_PORT \
         --api-server-count 1
@@ -204,8 +204,8 @@ else
     vllm serve "$MODEL" --served-model-name "$MODEL_NAME" \
         "\${VLLM_COMMON_ARGS[@]}" "\${VLLM_DECODE_ARGS[@]}" \
         --headless \
-        --data-parallel-size $((NUM_DECODE_NODES * 4)) \
-        --data-parallel-start-rank \$(( (SLURM_PROCID - $NUM_PREFILL_NODES) * 4 )) \
+        --data-parallel-size $NUM_DECODE_NODES \
+        --data-parallel-start-rank \$(( SLURM_PROCID - $NUM_PREFILL_NODES )) \
         --data-parallel-address \$DECODE_HEAD \
         --data-parallel-rpc-port $DECODE_DP_RPC_PORT
 fi
