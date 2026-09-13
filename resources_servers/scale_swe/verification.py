@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -137,9 +138,53 @@ class VerificationResult:
     error: str | None = None
 
 
-def _clean_commands(value: str) -> str:
+def clean_commands(value: str) -> str:
     """``pre_commands`` ends with a literal backslash-n in the published data."""
     return value.replace("\\n", "\n").strip()
+
+
+def patch_section_path(section: str) -> str | None:
+    """Return the repository-relative path one ``diff --git`` section targets."""
+    a_path: str | None = None
+    b_path: str | None = None
+    for line in section.splitlines():
+        if line.startswith("@@"):
+            break
+        if line.startswith("--- ") and a_path is None:
+            value = line[4:].strip()
+            a_path = None if value == "/dev/null" else value.removeprefix("a/")
+        elif line.startswith("+++ ") and b_path is None:
+            value = line[4:].strip()
+            b_path = None if value == "/dev/null" else value.removeprefix("b/")
+
+    if b_path or a_path:
+        return b_path or a_path
+
+    header = re.match(r"^diff --git a/(.+?) b/(.+)$", section.splitlines()[0] if section else "")
+    return header.group(2) if header else None
+
+
+def drop_patch_sections(patch: str, paths: Iterable[str]) -> str:
+    """Drop the diff sections targeting ``paths``.
+
+    ``git add -N . && git diff`` picks up every untracked file, including ones that were already
+    untracked before the agent touched anything. Excluding those paths keeps the extracted patch
+    to what the agent actually changed.
+    """
+    dropped = set(paths)
+    if not patch or not dropped:
+        return patch
+
+    kept: list[str] = []
+    for section in re.split(r"(?=^diff --git )", patch, flags=re.MULTILINE):
+        if not section.strip():
+            continue
+        path = patch_section_path(section)
+        if path is not None and path in dropped:
+            continue
+        kept.append(section)
+
+    return "".join(kept)
 
 
 def build_eval_script(inputs: VerificationInputs) -> str:
@@ -151,7 +196,7 @@ def build_eval_script(inputs: VerificationInputs) -> str:
     files = unique_test_files(list(inputs.fail_to_pass) + list(inputs.pass_to_pass))
     pytest_targets = " ".join(shlex.quote(path) for path in files)
 
-    pre = _clean_commands(inputs.pre_commands)
+    pre = clean_commands(inputs.pre_commands)
     apply_patch = (
         "git apply --reject --recount --ignore-space-change --whitespace=nowarn /tmp/nemo_gym_patch.diff || true"
         if inputs.patch.strip()
