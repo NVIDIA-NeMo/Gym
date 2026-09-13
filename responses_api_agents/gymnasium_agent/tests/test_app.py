@@ -565,6 +565,8 @@ class TestRun:
         agent = _make_agent()
         checkpoint_participant = MagicMock()
         checkpoint_participant.commit_boundary = AsyncMock()
+        checkpoint_participant.begin_model_wait = AsyncMock()
+        checkpoint_participant.end_model_wait = AsyncMock()
         checkpoint_participant.continuation.return_value = None
         agent._checkpoint_participant = checkpoint_participant
         model_path = "/ng-rollout/2-0/v1/responses"
