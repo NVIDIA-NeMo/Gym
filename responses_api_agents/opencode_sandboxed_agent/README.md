@@ -10,8 +10,8 @@ The sandbox-service key is separate from model and image-registry credentials.
 ## First evaluation
 
 From the repository root, with Gym installed and model/sandbox access configured, use the
-canonical SWE-bench Verified recipe. See the [first-run guide](https://docs.nvidia.com/nemo/gym/main/agent-server/opencode-first-run)
-for prerequisites, the resolved server binding, artifact inspection and cleanup.
+[SWE-bench Verified recipe](../../benchmarks/swebench/verified/opencode.yaml), which binds
+the agent to its resources server.
 
 ```bash
 # Prepare the input before starting servers (downloads SWE-bench Verified).
@@ -21,9 +21,7 @@ gym eval prepare --config benchmarks/swebench/verified/opencode.yaml
 gym env start \
     --model-type vllm_model \
     --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
-    --config benchmarks/swebench/verified/opencode.yaml \
-    ++swebench_verified_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.sandbox_timeout=900 \
-    ++swebench_verified_opencode_resources_server.resources_servers.swebench.evaluation_timeout=600
+    --config benchmarks/swebench/verified/opencode.yaml
 
 # In terminal 2, with the same Gym environment activated
 gym eval run --no-serve \
@@ -36,9 +34,8 @@ gym eval run --no-serve \
 ```
 
 Keep the OpenCode execution command intact: the agent's `/run` calls the SWE-bench verifier.
-Removing the execution command is only a plumbing test, not an agent evaluation. This smoke
-run can consume model tokens and billable sandbox resources; its short execution/test timeouts
-are not benchmark-quality budgets. A successful HTTP request alone is not validation.
+Removing the execution command is only a plumbing test, not an agent evaluation.
+This one-task run uses the configured timeout defaults and consumes model and sandbox resources.
 
 ## OpenCode binary: online or pre-staged
 
