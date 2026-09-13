@@ -34,7 +34,7 @@ from resources_servers.gdpval.multistage_orchestrator import (
     compute_fingerprint,
     parse_multistage_config,
 )
-from resources_servers.gdpval.transport_assignment import PairCost, _solve_capacity_assignment
+from resources_servers.gdpval.transport_assignment import PairCost, _solve_capacity_assignment, make_assignment_repair
 
 
 PDF_PREFIX = "data:application/pdf;base64,"
@@ -245,6 +245,55 @@ class TestSolveCapacityAssignment:
 
         assert result == {"t0": "ra", "t1": "rb", "t2": "ra"}
         assert sorted(result.values()) == sorted(original.values())
+
+    @pytest.mark.parametrize("candidate_present", [True, False])
+    @pytest.mark.parametrize(
+        ("marker", "available"),
+        [(None, False), ("", False), ("{", False), ("[]", False), ("null", True), ("{}", True)],
+        ids=["missing-task", "missing-marker", "corrupt-marker", "wrong-shape", "null-finish", "explicit-finish"],
+    )
+    def test_availability_only_preserves_counts_and_completion_contract(
+        self, tmp_path, marker, available, candidate_present
+    ) -> None:
+        roots = {name: tmp_path / name for name in ("candidate", "ra", "rb")}
+        for name, root in roots.items():
+            for task in ("t0", "t1", "t2"):
+                if name == "candidate" and task == "t0" and not candidate_present:
+                    continue
+                if name == "ra" and task == "t0" and marker is None:
+                    continue
+                repeat = root / f"task_{task}" / "repeat_0"
+                repeat.mkdir(parents=True)
+                value = marker if name == "ra" and task == "t0" else "{}"
+                if value:
+                    (repeat / "finish_params.json").write_text(value)
+                (repeat / "evidence.mp4").write_bytes(b"over-cap")
+        global_config = {
+            "gdpval_resources_server": {
+                "resources_servers": {
+                    "gdpval": {
+                        "persist_deliverables_dir": str(roots["candidate"]),
+                        "reference_models": {name: {"deliverables_dir": str(roots[name])} for name in ("ra", "rb")},
+                    }
+                }
+            }
+        }
+        limits = {"max_file_bytes": 1, "max_raw_bytes": 1, "max_wire_bytes": 1, "max_section_raw_bytes": 1}
+        original = {"t0": "ra", "t1": "rb", "t2": "ra"}
+        # Default repair still considers transport; availability-only is opt-in.
+        with pytest.raises(ValueError, match="no count-preserving"):
+            make_assignment_repair(global_config, limits)(0, ["ra", "rb"], original)
+        repair = make_assignment_repair(global_config, {**limits, "reference_availability_only": True})
+
+        result, receipt = repair(0, ["ra", "rb"], original)
+
+        assert result == (original if available else {"t0": "rb", "t1": "ra", "t2": "ra"})
+        assert sorted(result.values()) == sorted(original.values())
+        assert receipt["reference_availability_only"] is True
+        assert len(receipt["changes"]) == (0 if available else 2)
+        assert receipt["initially_incompatible"] == (
+            [] if available else [{"task_id": "t0", "reference_id": "ra", "reasons": ["reference_incomplete"]}]
+        )
 
 
 class TestFingerprintTransportRepair:

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from benchmarks.gdpval.hsg.aav2 import completion, snapshot
+from benchmarks.gdpval.hsg.aav2 import completion, preconvert, snapshot
 
 
 @pytest.fixture
@@ -149,6 +149,77 @@ def test_import_rejects_unfinished_tasks_and_smoke_prompt_drift(prepared):
     assert not prepared.run_dir.exists()
 
 
+@pytest.mark.parametrize("absent_task", [False, True])
+def test_opt_in_import_prepares_missing_tasks_without_fabricating_markers(prepared, monkeypatch, absent_task):
+    original = prepared.run_dir.parent / "unfinished"
+    prepared.existing_rollout = original
+    prepared.run_dir = prepared.run_dir.with_name("opt in import")
+    prepared.count_missing_as_loss = True
+    rows = [{"task_id": name, "reference_files": ["input.txt"]} for name in ("null", "empty", "missing")]
+    prepared.dataset.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    for name, marker in (("null", "null"), ("empty", "{}")):
+        task = original / "deliverables" / f"task_{name}" / "repeat_0"
+        (task / "reference_files").mkdir(parents=True)
+        (task / "finish_params.json").write_text(marker)
+        (task / "reference_files/input.txt").write_text(f"original {name} input")
+    if not absent_task:
+        task = original / "deliverables/task_missing/repeat_0"
+        task.mkdir(parents=True)
+        (task / "history.json").write_text("[]")
+        (task / "broken.mp4").write_bytes(b"unreadable partial video" * 500000)
+    snapshot.prepare(prepared)
+    snapshot.verify(prepared.run_dir)
+    settings = json.loads((prepared.run_dir / "run.json").read_text())
+    receipt = json.loads((prepared.run_dir / "import.json").read_text())
+    assert settings["COUNT_EVAL_MISSING_AS_LOSS"] == "true"
+    assert json.loads(settings["MISSING_EVAL_TASK_IDS"]) == receipt["missing_eval_task_ids"] == ["missing"]
+    assert receipt["count_eval_missing_as_loss"] is True
+    monkeypatch.setattr(preconvert, "preconvert_dir", lambda *_args, **_kwargs: (0, 0, []))
+    output = preconvert.prepare(prepared.run_dir)
+    assert preconvert.prepare(prepared.run_dir) == output
+    assert not (output / "candidate/task_missing/repeat_0/finish_params.json").exists()
+    assert not (output / "candidate/task_missing").exists()
+    for name in ("null", "empty"):
+        path = output / "candidate" / f"task_{name}" / "repeat_0/reference_files/input.txt"
+        assert path.read_text() == f"original {name} input"
+    marker = prepared.run_dir / "deliverables/task_missing/repeat_0/finish_params.json"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("{}")
+    with pytest.raises(ValueError, match="fresh import"):
+        snapshot.verify(prepared.run_dir)
+    with pytest.raises(ValueError, match="fresh import"):
+        preconvert.prepare(prepared.run_dir)
+
+
+@pytest.mark.parametrize("marker", ["[]", "false", "not json"])
+def test_missing_loss_allowance_does_not_accept_invalid_present_marker(prepared, marker):
+    prepared.run_dir = prepared.run_dir.with_name("invalid import")
+    prepared.existing_rollout = prepared.run_dir.parent / "invalid source"
+    prepared.count_missing_as_loss = True
+    task = prepared.existing_rollout / "deliverables/task_one/repeat_0"
+    task.mkdir(parents=True)
+    (task / "finish_params.json").write_text(marker)
+    with pytest.raises(ValueError):
+        snapshot.prepare(prepared)
+    assert not prepared.run_dir.exists()
+
+
+def test_snapshot_freezes_seed_aliases_and_explicit_override(prepared, monkeypatch):
+    settings = json.loads((prepared.run_dir / "run.json").read_text())
+    assert settings["JUDGE_SEED"] == "42" and settings["STAGE0_SEED"] == ""
+    monkeypatch.setenv("MULTISTAGE_SEED", "19")
+    monkeypatch.setenv("JUDGE_STAGE0_SEED", "882")
+    prepared.run_dir = prepared.run_dir.with_name("seeded")
+    snapshot.prepare(prepared)
+    settings = json.loads((prepared.run_dir / "run.json").read_text())
+    assert settings["JUDGE_SEED"] == "19" and settings["STAGE0_SEED"] == "882"
+    prepared.run_dir = prepared.run_dir.with_name("explicit seed")
+    prepared.judge_seed, prepared.stage0_seed = 0, 123
+    snapshot.prepare(prepared)
+    settings = json.loads((prepared.run_dir / "run.json").read_text())
+    assert settings["JUDGE_SEED"] == "0" and settings["STAGE0_SEED"] == "123"
+
+
 @pytest.mark.parametrize("mode,count,trials", [("smoke", 4, 1), ("pilot", 12, 2), ("full", 20, 4)])
 def test_judge_completion_requires_profile_coverage_and_valid_votes(tmp_path, mode, count, trials):
     dataset = tmp_path / "dataset.jsonl"
@@ -211,7 +282,10 @@ def test_judge_completion_requires_profile_coverage_and_valid_votes(tmp_path, mo
         completion.judge_complete(dataset, output, mode)
 
 
-@pytest.mark.parametrize("case", ["complete", "calibration_missing", "failed", "unrecorded", "unattempted"])
+@pytest.mark.parametrize(
+    "case",
+    ["complete", "calibration_missing", "calibration_imputed", "final_imputed", "failed", "unrecorded", "unattempted"],
+)
 def test_full_judge_requires_all_calibration_tasks_and_accounts_for_final_failures(
     tmp_path, monkeypatch, capsys, case
 ):
@@ -241,6 +315,12 @@ def test_full_judge_requires_all_calibration_tasks_and_accounts_for_final_failur
     ]
     if case == "calibration_missing":
         rows.pop(0)
+    if case in ("calibration_imputed", "final_imputed"):
+        rows[0 if case == "calibration_imputed" else -1]["judge_response"] = {
+            "total_judged": 4,
+            "total_invalid": 0,
+            "manual_imputation": "eval_missing_as_loss",
+        }
     partial = case in ("failed", "unrecorded", "unattempted")
     if partial:
         rows.pop()
@@ -263,8 +343,8 @@ def test_full_judge_requires_all_calibration_tasks_and_accounts_for_final_failur
     }
     metric_path = output.with_stem(output.stem + "_aggregate_metrics").with_suffix(".json")
     metric_path.write_text(json.dumps([{"agent_metrics": metrics}]))
-    if case == "calibration_missing":
-        with pytest.raises(ValueError, match="calibration requires every planned task"):
+    if case in ("calibration_missing", "calibration_imputed"):
+        with pytest.raises(ValueError, match="calibration"):
             completion.judge_complete(dataset, output)
     elif case in ("unrecorded", "unattempted"):
         with pytest.raises(ValueError, match="without recorded failed attempts"):
@@ -274,5 +354,33 @@ def test_full_judge_requires_all_calibration_tasks_and_accounts_for_final_failur
         assert completion.judge_complete(dataset, output) == (49 if partial else 50)
         monkeypatch.setattr("sys.argv", ["completion.py", "judge", "--dataset", str(dataset), "--output", str(output)])
         completion.main()
-        assert capsys.readouterr().out.startswith("PARTIAL: judge, 49/50" if partial else "COMPLETE: judge, 50")
+        report = capsys.readouterr().out
+        if case == "final_imputed":
+            assert "49/50 actually judged tasks, 1 imputed-loss tasks" in report
+        else:
+            assert report.startswith("PARTIAL: judge, 49/50" if partial else "COMPLETE: judge, 50")
         assert all(path.read_bytes() == content for path, content in before.items())
+
+
+def test_pilot_report_does_not_count_imputed_losses_as_judged_tasks(tmp_path, monkeypatch, capsys):
+    dataset, output = tmp_path / "dataset.jsonl", tmp_path / "rollouts.jsonl"
+    dataset.write_text('{"task_id":"one"}\n')
+    rows = [
+        {
+            "task_id": "one",
+            "stage_index": stage,
+            "expected_final_stage_index": 1,
+            "judge_response": {"total_judged": 2, "total_invalid": 0},
+        }
+        for stage in (0, 1)
+    ]
+    rows[1]["judge_response"]["manual_imputation"] = "eval_missing_as_loss"
+    output.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    output.with_stem(output.stem + "_aggregate_metrics").with_suffix(".json").write_text(
+        json.dumps([{"agent_metrics": {"comparison/final_stage_present": 1, "comparison/final_stage_complete": 1}}])
+    )
+    monkeypatch.setattr(
+        "sys.argv", ["completion.py", "judge", "--dataset", str(dataset), "--output", str(output), "--mode", "pilot"]
+    )
+    completion.main()
+    assert "COMPLETE: judge, 0/1 actually judged tasks, 1 imputed-loss tasks" in capsys.readouterr().out

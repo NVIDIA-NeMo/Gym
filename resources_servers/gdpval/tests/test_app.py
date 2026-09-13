@@ -14,6 +14,7 @@
 # limitations under the License.
 import base64
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -267,6 +268,80 @@ class TestStrictComparisonTrials:
         dumped = response.model_dump()
         assert dumped["_ng_failure_class"] == "reference_missing"
         assert dumped["_ng_failure_terminal"] is True
+
+    @pytest.mark.parametrize("existing_dir", [False, True])
+    @pytest.mark.parametrize(
+        "stage,enabled,task_ids,missing,expected_loss",
+        [
+            (1, True, ["task-1"], "eval", True),
+            (0, True, ["task-1"], "eval", False),
+            (None, True, ["task-1"], "eval", False),
+            (2, True, ["task-1"], "eval", False),
+            (1, False, ["task-1"], "eval", False),
+            (1, True, [], "eval", False),
+            (1, True, ["different-task"], "eval", False),
+            (1, True, ["task-1"], "reference", False),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_missing_eval_loss_requires_stage_one_and_explicit_task(
+        self, tmp_path, stage, enabled, task_ids, missing, expected_loss, existing_dir
+    ) -> None:
+        server, body = self._missing_artifact_server_and_body(tmp_path, missing=missing, strict=False)
+        if existing_dir:
+            Path(body.deliverables_dir).mkdir(parents=True, exist_ok=True)
+        server.config.count_eval_missing_as_loss = enabled
+        server.config.missing_eval_task_ids = task_ids
+        body.stage_index = stage
+        with patch("resources_servers.gdpval.comparison.run_trials") as judge:
+            response = await server.verify(body)
+        judge.assert_not_called()
+        if expected_loss:
+            assert response.total_losses == 4
+            assert response.total_wins == response.total_ties == 0
+            assert response.loss is True
+            assert response.reward == 0.0
+            assert response.judge_response["manual_imputation"] == "eval_missing_as_loss"
+            assert response.per_reference["reference"]["losses"] == 4
+            assert "_ng_failure_class" not in response.model_dump()
+        else:
+            assert response.model_dump()["_ng_failure_class"] == f"{missing}_missing"
+            assert "manual_imputation" not in response.judge_response
+
+    @pytest.mark.parametrize("marker", ["null", "{}"])
+    @pytest.mark.asyncio
+    async def test_existing_finish_marker_is_judged_with_loss_policy(self, tmp_path, marker) -> None:
+        server, body = self._comparison_server_and_body(tmp_path, strict=True)
+        server.config.count_eval_missing_as_loss = True
+        server.config.missing_eval_task_ids = [body.task_id]
+        body.stage_index = 1
+
+        (Path(body.deliverables_dir) / "finish_params.json").write_text(marker)
+        response = await self._verify_with_trials(
+            server,
+            body,
+            {"win_count_a": 1, "win_count_b": 3, "tie_count": 0, "task_count": 4, "invalid_count": 0},
+        )
+        assert response.total_wins == 3
+        assert response.total_losses == 1
+        assert "manual_imputation" not in response.judge_response
+
+    @pytest.mark.parametrize("transport", [False, True])
+    @pytest.mark.asyncio
+    async def test_loss_policy_preserves_judge_failures(self, tmp_path, transport) -> None:
+        from resources_servers.gdpval.app import TransportIneligibleError
+
+        server, body = self._comparison_server_and_body(tmp_path, strict=False)
+        server.config.count_eval_missing_as_loss = True
+        server.config.missing_eval_task_ids = [body.task_id]
+        body.stage_index = 1
+        if transport:
+            response = await self._verify_with_trials(server, body, [TransportIneligibleError("attachment limit")])
+            assert response.model_dump()["_ng_failure_class"] == "transport_ineligible"
+            assert "manual_imputation" not in response.judge_response
+        else:
+            with pytest.raises(RuntimeError, match="all 1 judge matchup"):
+                await self._verify_with_trials(server, body, [RuntimeError("judge API unavailable")])
 
     @pytest.mark.asyncio
     async def test_default_is_non_strict_for_backward_compatibility(self, tmp_path) -> None:
@@ -1525,6 +1600,45 @@ class TestMultiReference:
         assert staged["comparison/stage_0/eval_elo"] == unstaged["comparison/eval_elo"]
         # Untagged run carries no stage_* keys at all.
         assert not any(k.startswith("comparison/stage_") for k in unstaged)
+
+    @pytest.mark.asyncio
+    async def test_imputed_loss_coverage_is_separate_from_judgments(self) -> None:
+        from nemo_gym.config_types import AggregateMetricsRequest
+        from resources_servers.gdpval.comparison import calculate_mle_elo
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={"ref": {"deliverables_dir": "/tmp/ref", "elo": 1000.0}},
+        )
+        rows = []
+        for index, (stage, wins, losses, imputed) in enumerate([(0, 2, 2, False), (1, 3, 1, False), (1, 0, 4, True)]):
+            rows.append(
+                {
+                    "_ng_task_index": index,
+                    "_ng_rollout_index": 0,
+                    "task_id": f"t{index}",
+                    "stage_index": stage,
+                    "expected_final_stage_index": 1,
+                    "expected_stage_row_count": 1 if stage == 0 else 2,
+                    "reward": wins / 4,
+                    "total_wins": wins,
+                    "total_losses": losses,
+                    "total_ties": 0,
+                    "per_reference": {"ref": {"wins": wins, "losses": losses, "ties": 0}},
+                    "judge_response": {"manual_imputation": "eval_missing_as_loss"} if imputed else {},
+                    "response": {},
+                }
+            )
+        metrics = (await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))).agent_metrics
+        assert metrics["comparison/stage_0/judged_tasks"] == 1
+        assert metrics["comparison/stage_0/imputed_loss_tasks"] == 0
+        assert metrics["comparison/stage_1/num_tasks"] == 2
+        assert metrics["comparison/stage_1/judged_tasks"] == 1
+        assert metrics["comparison/stage_1/judged_votes"] == 4
+        assert metrics["comparison/stage_1/imputed_loss_tasks"] == 1
+        assert metrics["comparison/stage_1/imputed_loss_votes"] == 4
+        assert metrics["comparison/final_stage_complete"] == 1
+        assert metrics["comparison/eval_elo"] == pytest.approx(calculate_mle_elo([(1000.0, 3, 5, 0)])[0])
 
     def test_aggregate_metrics_stage_aware_headline_is_expected_final_stage(self) -> None:
         """The declared final stage supplies the headline when its fit is usable."""

@@ -10,7 +10,7 @@ gdpval_local_path() {
 }
 
 gdpval_prepare() {
-    local phase=$1 env_file input python_version count rows calibration judge_model_var
+    local phase=$1 env_file input python_version count rows calibration judge_model_var stage0_seed_field
     gdpval_local_path "$JOB_ROOT"
     cp -a -- "$AAV2_PACKAGE_DIR" "$JOB_ROOT/package"
     LOCAL_PACKAGE=$JOB_ROOT/package
@@ -54,11 +54,13 @@ gdpval_prepare() {
         rows=$(awk 'NF {n++} END {print n+0}' "$DATASET")
         (( rows > 0 )) || gdpval_fail "dataset is empty"
         (( count <= rows )) || count=$rows
-        STAGES="[{num_tasks: $count}]"
-        [[ $AAV2_MODE != pilot ]] || STAGES="[{num_tasks: $count}, {num_tasks: $count, num_models: 4}]"
+        stage0_seed_field=""
+        [[ -z ${STAGE0_SEED:-} ]] || stage0_seed_field=", seed: $STAGE0_SEED"
+        STAGES="[{num_tasks: $count$stage0_seed_field}]"
+        [[ $AAV2_MODE != pilot ]] || STAGES="[{num_tasks: $count$stage0_seed_field}, {num_tasks: $count, num_models: 4}]"
         if [[ $AAV2_MODE == full ]]; then
             calibration=$((rows < 45 ? rows : 45))
-            STAGES="[{num_tasks: $calibration, partial_completion: {min_success_fraction: 1.0, min_per_reference_success_fraction: 0.8, min_successful_rows_per_reference: 1, tolerate_unresolved: true}}, {num_tasks: $rows, num_models: 4}]"
+            STAGES="[{num_tasks: $calibration$stage0_seed_field, partial_completion: {min_success_fraction: 1.0, min_per_reference_success_fraction: 0.8, min_successful_rows_per_reference: 1, tolerate_unresolved: true}}, {num_tasks: $rows, num_models: 4}]"
         fi
         PHASE_DIR=$RUN_DIR/judge_$AAV2_MODE
     fi

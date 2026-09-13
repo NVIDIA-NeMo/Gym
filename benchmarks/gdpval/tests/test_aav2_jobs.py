@@ -310,6 +310,11 @@ def test_judge_modes_use_prepared_candidate_and_frozen_references(job, mode, tri
     assert prefix + "strict_comparison_trials" not in values
     assert values[prefix + "judge_reference_files_recursive"] == "true"
     assert values[prefix + "judge_reference_files_from_eval"] == "true"
+    assert values[prefix + "count_eval_missing_as_loss"] == "false"
+    assert values[prefix + "missing_eval_task_ids"] == "[]"
+    assert values["multistage.seed"] == "42"
+    assert "seed" not in OmegaConf.create(values["multistage.stages"])[0]
+    assert not any(key.startswith("multistage.transport_assignment_repair.") for key in values)
     assert "benchmarks/gdpval/config.yaml" in values["config_paths"]
     staged_judge = Path(call["cwd"]).parent / "judge.yaml"
     assert str(staged_judge) in values["config_paths"]
@@ -349,6 +354,40 @@ def test_full_judge_requires_all_calibration_tasks_and_retains_all_final_tasks(j
         },
         {"num_tasks": 220, "num_models": 4},
     ]
+
+
+def test_judge_freezes_import_allowance_seed_and_reference_repair_against_credentials(job):
+    original = job.run.parent / "missing source"
+    (original / "deliverables").mkdir(parents=True)
+    job.args.run_dir = job.run.parent / "seeded import"
+    job.args.existing_rollout = original
+    job.args.count_missing_as_loss = True
+    job.args.judge_seed, job.args.stage0_seed = 17, 882
+    job.args.reference_availability_only = True
+    snapshot.prepare(job.args)
+    job.run = job.args.run_dir
+    job.package = job.run / "package"
+    job.env["AAV2_RUN_DIR"] = str(job.run)
+    (job.run / "prepared/candidate").mkdir(parents=True)
+    with job.args.env_file.open("a") as stream:
+        stream.write(
+            "export JUDGE_SEED=99 STAGE0_SEED=99 COUNT_EVAL_MISSING_AS_LOSS=false "
+            'MISSING_EVAL_TASK_IDS="[]" REFERENCE_AVAILABILITY_ONLY=false\n'
+        )
+    result = run_job(job, "judge", AAV2_MODE="full", FIXTURE_GYM_RC="37")
+    assert result.returncode == 37, (result.stdout, result.stderr)
+    values = next(item["values"] for item in records(job) if "target" in item)
+    assert values["multistage.seed"] == "17"
+    stages = OmegaConf.to_container(OmegaConf.create(values["multistage.stages"]))
+    assert stages[0]["seed"] == 882 and "seed" not in stages[1]
+    for prefix in (
+        "gdpval_resources_server.resources_servers.gdpval.",
+        "gdpval_stirrup_agent.responses_api_agents.stirrup_agent.",
+    ):
+        assert values[prefix + "count_eval_missing_as_loss"] == "true"
+        assert json.loads(values[prefix + "missing_eval_task_ids"]) == ["a"]
+    assert values["multistage.transport_assignment_repair.enabled"] == "true"
+    assert values["multistage.transport_assignment_repair.reference_availability_only"] == "true"
 
 
 def test_judge_requires_a_prepared_candidate(job):
@@ -493,13 +532,15 @@ def test_original_manual_cli_submits_one_phase_and_keeps_stages_out_of_slurm_exp
     assert f"--export=ALL,AAV2_RUN_DIR={job.run},AAV2_MODE=pilot" in records(job)[-1]["sbatch"]
 
 
-@pytest.mark.parametrize("phase", ["import", "smoke", "full"])
+@pytest.mark.parametrize("phase", ["import", "import_missing", "smoke", "full"])
 def test_manual_cli_freezes_new_run_and_import_submits_no_job(job, phase):
     evidence = job.run / "deliverables/task_a/repeat_0"
     write(evidence / "finish_params.json", "{}")
     write(evidence / "history.json", '[{"role":"assistant","content":"done"}]')
     write(evidence / "answer.txt", "candidate evidence\n")
     write(job.run / "deliverables/task_a/repeat_0_verify_response.json", '{"old_judgment":true}')
+    if phase == "import_missing":
+        (evidence / "finish_params.json").unlink()
     settings = {
         "ACCOUNT": "fixture",
         "GYM_SOURCE": job.args.source,
@@ -514,12 +555,14 @@ def test_manual_cli_freezes_new_run_and_import_submits_no_job(job, phase):
         "RUNS_DIR": job.run.parent / "new-runs",
         "GDPVAL_MAX_FILE_BYTES_FOR_JUDGE": "1048576",
     }
-    if phase != "import":
+    if not phase.startswith("import"):
         settings["PROFILE"] = job.args.profile
     config = write(
         job.run.parent / "aav2.env", "".join(f"{key}={shlex.quote(str(value))}\n" for key, value in settings.items())
     )
-    arguments = ["import", str(job.run)] if phase == "import" else ["rollout", phase]
+    arguments = ["import", str(job.run)] if phase.startswith("import") else ["rollout", phase]
+    if phase == "import_missing":
+        arguments += ["--count-missing-as-loss", "--stage0-seed", "882", "--reference-availability-only"]
     result = subprocess.run(
         ["bash", str(job.package / "run_aav2.sh"), *arguments],
         env={**job.env, "AAV2_CONFIG": str(config)},
@@ -532,7 +575,7 @@ def test_manual_cli_freezes_new_run_and_import_submits_no_job(job, phase):
     snapshot.verify(created)
     assert json.loads((created / "run.json").read_text())["GDPVAL_MAX_FILE_BYTES_FOR_JUDGE"] == "1048576"
     assert json.loads((created / "run.json").read_text())["JUDGE_SIF"] == str(settings["JUDGE_SIF"])
-    if phase == "import":
+    if phase.startswith("import"):
         assert not records(job)
         assert not (created / "serving.env").exists()
         assert (created / "deliverables/task_a/repeat_0/answer.txt").read_bytes() == (
@@ -540,6 +583,12 @@ def test_manual_cli_freezes_new_run_and_import_submits_no_job(job, phase):
         ).read_bytes()
         assert not list(created.rglob("*verify_response*"))
         assert (job.run / "deliverables/task_a/repeat_0_verify_response.json").exists()
+        frozen = json.loads((created / "run.json").read_text())
+        assert frozen["COUNT_EVAL_MISSING_AS_LOSS"] == str(phase == "import_missing").lower()
+        if phase == "import_missing":
+            assert json.loads(frozen["MISSING_EVAL_TASK_IDS"]) == ["a"]
+            assert frozen["STAGE0_SEED"] == "882" and frozen["REFERENCE_AVAILABILITY_ONLY"] == "true"
+            assert not (created / "deliverables/task_a/repeat_0/finish_params.json").exists()
         resume = subprocess.run(
             ["bash", str(created / "package/run_aav2.sh"), "rollout", "resume", str(created)],
             env={**job.env, "AAV2_CONFIG": str(config)},

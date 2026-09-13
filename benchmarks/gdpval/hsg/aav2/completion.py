@@ -26,10 +26,17 @@ def task_ids(dataset: Path) -> set[str]:
     return set(ids)
 
 
-def rollout_complete(dataset: Path, deliverables: Path) -> int:
+def rollout_complete(dataset: Path, deliverables: Path, missing_task_ids: set[str] | None = None) -> int:
     expected = task_ids(dataset)
+    missing_task_ids = missing_task_ids or set()
+    if not missing_task_ids <= expected:
+        raise ValueError("missing-task allowance contains tasks outside the dataset")
     for task_id in sorted(expected):
         marker = deliverables / f"task_{task_id}" / "repeat_0" / "finish_params.json"
+        if task_id in missing_task_ids:
+            if marker.exists() or marker.is_symlink():
+                raise ValueError(f"previously missing finish marker appeared; use a fresh import: {task_id}")
+            continue
         if not marker.is_file() or marker.is_symlink():
             raise ValueError(f"task has no finish marker: {task_id}")
         value = json.loads(marker.read_text())
@@ -51,6 +58,8 @@ def judge_complete(dataset: Path, output: Path, mode: str = "full") -> int:
         raise ValueError("judgments do not match the requested stage protocol")
     for row in rows:
         judge = row.get("judge_response") or {}
+        if judge.get("manual_imputation") and row.get("stage_index") != 1:
+            raise ValueError("calibration must contain actual judgments, never imputed losses")
         judged, invalid = judge.get("total_judged"), judge.get("total_invalid")
         valid_votes = judged == trials and invalid == 0
         if mode == "full":
@@ -150,9 +159,19 @@ def main() -> None:
         )
     except (OSError, ValueError, KeyError, TypeError) as error:
         raise SystemExit(f"INCOMPLETE: {error}") from error
-    if args.phase == "judge" and args.mode == "full" and count < len(task_ids(args.dataset)):
+    if args.phase == "judge":
         expected = len(task_ids(args.dataset))
-        print(f"PARTIAL: judge, {count}/{expected} judged tasks, {expected - count} failed tasks excluded")
+        expected = min(expected, {"smoke": 4, "pilot": 12, "full": expected}[args.mode])
+        imputed = sum(
+            bool((row.get("judge_response") or {}).get("manual_imputation"))
+            for row in read_rows(args.output)
+            if row.get("stage_index") == 1
+        )
+        status = "PARTIAL" if count < expected else "COMPLETE"
+        print(
+            f"{status}: judge, {count - imputed}/{expected} actually judged tasks, "
+            f"{imputed} imputed-loss tasks, {expected - count} failed tasks excluded"
+        )
     else:
         print(f"COMPLETE: {args.phase}, {count} tasks")
 

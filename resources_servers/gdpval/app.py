@@ -245,6 +245,11 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # selected from fewer votes than the configured scientific contract.
     strict_comparison_trials: bool = False
 
+    # Stage 1 only: explicit imported task IDs with no finish marker may count
+    # as audited losses. Missing paths outside this list remain failures.
+    count_eval_missing_as_loss: bool = False
+    missing_eval_task_ids: List[str] = Field(default_factory=list)
+
     # ELO assigned to the (legacy single) reference model in pairwise mode.
     # Ignored when ``reference_models`` is set (each carries its own ``elo``).
     reference_elo: float = _DEFAULT_REFERENCE_ELO
@@ -801,6 +806,44 @@ class GDPValResourcesServer(SimpleResourcesServer):
 
         if eval_task_dir is None or not task_attempted(str(eval_task_dir)):
             print(f"[gdpval] eval deliverable missing for task {body.task_id}", flush=True)
+            if (
+                self.config.count_eval_missing_as_loss
+                and body.stage_index == 1
+                and body.task_id in self.config.missing_eval_task_ids
+            ):
+                per_reference = {
+                    ref_id: {
+                        "wins": 0,
+                        "losses": self.config.num_comparison_trials * len(dirs),
+                        "ties": 0,
+                        "reference_elo": self._references[ref_id].elo,
+                        "ref_repeat_count": len(dirs),
+                    }
+                    for ref_id, dirs in ref_dirs_by_id.items()
+                }
+                total_losses = sum(counts["losses"] for counts in per_reference.values())
+                return GDPValVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    verify_mode="comparison",
+                    judge_response={
+                        "manual_imputation": "eval_missing_as_loss",
+                        "per_reference": per_reference,
+                        "total_wins": 0,
+                        "total_losses": total_losses,
+                        "total_ties": 0,
+                        "total_judged": total_losses,
+                        "total_invalid": 0,
+                        "ref_errors": {},
+                    },
+                    win=False,
+                    loss=True,
+                    tie=False,
+                    total_wins=0,
+                    total_losses=total_losses,
+                    total_ties=0,
+                    per_reference=per_reference,
+                )
             if self.config.strict_comparison_trials:
                 raise RuntimeError(f"strict comparison trial contract failed for task {body.task_id}: eval_missing")
             # Terminal for the same reason as reference_missing above: a
@@ -1478,6 +1521,20 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     extra[f"{prefix}/normalized_elo"] = stage_norm
                 extra[f"{prefix}/num_references"] = stage_nref
                 extra[f"{prefix}/num_tasks"] = len({vr.get("task_id") for vr in stage_responses})
+                imputed, judged_rows = [], []
+                for vr in stage_responses:
+                    judge_response = vr.get("judge_response")
+                    if (
+                        isinstance(judge_response, dict)
+                        and judge_response.get("manual_imputation") == "eval_missing_as_loss"
+                    ):
+                        imputed.append(vr)
+                    elif sum(_votes(vr)) > 0:
+                        judged_rows.append(vr)
+                extra[f"{prefix}/judged_tasks"] = len({vr.get("task_id") for vr in judged_rows})
+                extra[f"{prefix}/judged_votes"] = sum(sum(_votes(vr)) for vr in judged_rows)
+                extra[f"{prefix}/imputed_loss_tasks"] = len({vr.get("task_id") for vr in imputed})
+                extra[f"{prefix}/imputed_loss_votes"] = sum(_votes(vr)[1] for vr in imputed)
 
             headline_stage_index: Optional[int] = None
             headline: Optional[tuple[Optional[float], Optional[float], int]] = None

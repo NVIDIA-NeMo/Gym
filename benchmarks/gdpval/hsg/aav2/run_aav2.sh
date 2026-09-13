@@ -4,7 +4,7 @@
 # Driver for the AA-v2 multi-stage comparison ELO run.
 #   ./run_aav2.sh rollout smoke|full          produce deliverables (GPU)
 #   ./run_aav2.sh rollout resume RUN_DIR     resume unfinished tasks (GPU)
-#   ./run_aav2.sh import SOURCE_RUN_DIR      copy existing evidence into a fresh run
+#   ./run_aav2.sh import SOURCE_RUN_DIR [--count-missing-as-loss]
 #   ./run_aav2.sh preconvert RUN_DIR         prepare Office/media views (CPU)
 #   ./run_aav2.sh judge RUN_DIR smoke|pilot|full (CPU, API panel)
 # Each command submits one phase. Inspect its result before starting the next.
@@ -36,6 +36,7 @@ prepare_run() {
         --concurrency "$CONC" --agent-max-turns "${AGENT_MAX_TURNS:-250}")
     [[ -z ${SMOKE_DATASET:-} ]] || arguments+=(--smoke-dataset "$SMOKE_DATASET")
     [[ -z ${JUDGE_SIF:-} ]] || arguments+=(--judge-sif "$JUDGE_SIF")
+    [[ ${REFERENCE_AVAILABILITY_ONLY:-false} != true ]] || arguments+=(--reference-availability-only)
     [[ $CMD != rollout ]] || arguments+=(--profile "${PROFILE:?configure PROFILE}")
     python3 "$W/snapshot.py" "${arguments[@]}" "$@"
 }
@@ -68,10 +69,11 @@ rollout)
     ;;
 import)
     SOURCE_RUN_DIR=${1:?usage: run_aav2.sh import SOURCE_RUN_DIR}
+    shift
     SELECTED_DATASET=${DATASET:?configure DATASET}
     CONC=${CONCURRENCY:-40}
     RUN_DIR=$RUNS_DIR/import_$(date +%Y%m%d_%H%M%S)
-    prepare_run --existing-rollout "$SOURCE_RUN_DIR"
+    prepare_run --existing-rollout "$SOURCE_RUN_DIR" "$@"
     echo "IMPORTED: $RUN_DIR (run preconvert next)"
     ;;
 preconvert)

@@ -30,6 +30,11 @@ gdpval_prepare judge
 [[ -d $RUN_DIR/prepared/candidate ]] || gdpval_fail "prepared candidate directory is missing"
 export EXECUTE_ONLY=false JUDGE_ONLY=true RERUN_INCOMPLETE=true
 export PERSIST_DELIVERABLES_DIR=$RUN_DIR/prepared/candidate
+assignment_args=("++multistage.seed=$JUDGE_SEED")
+if [[ $REFERENCE_AVAILABILITY_ONLY == true ]]; then
+    assignment_args+=(++multistage.transport_assignment_repair.enabled=true
+        ++multistage.transport_assignment_repair.reference_availability_only=true)
+fi
 gdpval_run_gym --config "$JOB_ROOT/judge.yaml" \
     --config "$JOB_ROOT/dataset.yaml" \
     --model-url http://127.0.0.1:9/v1 --model-api-key dummy --model judge-only \
@@ -38,10 +43,15 @@ gdpval_run_gym --config "$JOB_ROOT/judge.yaml" \
     ++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.judge_only=true \
     ++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.gdpval_container_path=null \
     "++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.persist_deliverables_dir=$PERSIST_DELIVERABLES_DIR" \
+    "++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.count_eval_missing_as_loss=$COUNT_EVAL_MISSING_AS_LOSS" \
+    "++gdpval_stirrup_agent.responses_api_agents.stirrup_agent.missing_eval_task_ids=$MISSING_EVAL_TASK_IDS" \
     ++gdpval_resources_server.resources_servers.gdpval.reward_mode=comparison \
     ++gdpval_resources_server.resources_servers.gdpval.judge_reference_files_recursive=true \
     ++gdpval_resources_server.resources_servers.gdpval.judge_reference_files_from_eval=true \
+    "++gdpval_resources_server.resources_servers.gdpval.count_eval_missing_as_loss=$COUNT_EVAL_MISSING_AS_LOSS" \
+    "++gdpval_resources_server.resources_servers.gdpval.missing_eval_task_ids=$MISSING_EVAL_TASK_IDS" \
     "++gdpval_resources_server.resources_servers.gdpval.num_comparison_trials=$NUM_COMPARISON_TRIALS" \
     ++gdpval_resources_server.resources_servers.gdpval.preconvert_office_to_pdf=false \
-    ++multistage.enabled=true "++multistage.stages=$STAGES" "++multistage.dataset_path=$DATASET" ++multistage.seed=42
+    ++multistage.enabled=true "++multistage.stages=$STAGES" "++multistage.dataset_path=$DATASET" \
+    "${assignment_args[@]}"
 "$GYM_PYTHON" "$LOCAL_PACKAGE/completion.py" judge --output "$PHASE_DIR/rollouts.jsonl" --dataset "$DATASET" --mode "$AAV2_MODE"

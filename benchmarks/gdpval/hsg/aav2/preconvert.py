@@ -24,13 +24,17 @@ def office(root: Path) -> None:
         print(f"Office render skipped: {error}", flush=True)
 
 
-def check_reference_inputs(dataset: Path, source: Path, candidate: Path) -> None:
+def check_reference_inputs(
+    dataset: Path, source: Path, candidate: Path, missing_task_ids: set[str] | None = None
+) -> None:
     """Check declared benchmark inputs against the existing conversion receipt."""
     receipt = candidate.with_name(candidate.name + ".media.json")
     entries = (
         {entry["source"]: entry for entry in json.loads(receipt.read_text())["entries"]} if receipt.exists() else {}
     )
     for row in read_rows(dataset):
+        if row["task_id"] in (missing_task_ids or set()):
+            continue
         inputs = row.get("reference_files") or []
         if isinstance(inputs, str):
             inputs = json.loads(inputs)
@@ -63,25 +67,30 @@ def prepare(run_dir: Path) -> Path:
         raise ValueError("run.json does not belong to this run directory")
     dataset = Path(settings["DATASET"])
     source = run_dir / "deliverables"
-    rollout_complete(dataset, source)
+    missing_ids = (
+        set(json.loads(settings.get("MISSING_EVAL_TASK_IDS", "[]")))
+        if settings.get("COUNT_EVAL_MISSING_AS_LOSS") == "true"
+        else set()
+    )
+    rollout_complete(dataset, source, missing_ids)
     output = run_dir / "prepared"
     if output.exists() or output.is_symlink():
         candidate = output / "candidate"
         if output.is_symlink() or candidate.is_symlink() or not candidate.is_dir():
             raise ValueError("prepared output must contain a real candidate directory")
-        rollout_complete(dataset, candidate)
-        check_reference_inputs(dataset, source, candidate)
+        rollout_complete(dataset, candidate, missing_ids)
+        check_reference_inputs(dataset, source, candidate, missing_ids)
         print("Reusing completed candidate preconversion", flush=True)
         return output
-    task_names = {f"task_{task_id}" for task_id in task_ids(dataset)}
+    task_names = {f"task_{task_id}" for task_id in task_ids(dataset) - missing_ids}
     with tempfile.TemporaryDirectory(prefix=".preparing-", dir=run_dir) as temporary:
         staged = Path(temporary) / "prepared"
         candidate = staged / "candidate"
         print("Preparing candidate", flush=True)
         build(source, candidate, prepare_zip=office, top_level_names=task_names | {"FILTER_MANIFEST.txt"})
         office(candidate)
-        rollout_complete(dataset, candidate)
-        check_reference_inputs(dataset, source, candidate)
+        rollout_complete(dataset, candidate, missing_ids)
+        check_reference_inputs(dataset, source, candidate, missing_ids)
         os.rename(staged, output)
     return output
 

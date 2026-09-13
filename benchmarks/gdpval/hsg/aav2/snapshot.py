@@ -17,10 +17,10 @@ from pathlib import Path
 
 
 if __package__:
-    from .completion import rollout_complete
+    from .completion import read_rows, rollout_complete
     from .source_copy import copy_tree
 else:
-    from completion import rollout_complete
+    from completion import read_rows, rollout_complete
     from source_copy import copy_tree
 
 
@@ -70,6 +70,17 @@ def prepare(args: argparse.Namespace) -> Path:
         raise ValueError("concurrency and agent turns must be positive")
     if not args.existing_rollout and not args.profile:
         raise ValueError("rollout requires --profile; imports use --existing-rollout")
+    count_missing_as_loss = bool(getattr(args, "count_missing_as_loss", False))
+    if count_missing_as_loss and not args.existing_rollout:
+        raise ValueError("--count-missing-as-loss requires --existing-rollout")
+    judge_seed = getattr(args, "judge_seed", None)
+    if judge_seed is None:
+        judge_seed = os.environ.get("JUDGE_SEED", os.environ.get("MULTISTAGE_SEED", "42"))
+    stage0_seed = getattr(args, "stage0_seed", None)
+    if stage0_seed is None:
+        stage0_seed = os.environ.get("STAGE0_SEED", os.environ.get("JUDGE_STAGE0_SEED", ""))
+    judge_seed = str(int(judge_seed))
+    stage0_seed = str(int(stage0_seed)) if stage0_seed != "" else ""
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".aav2-", dir=destination.parent) as temporary:
         stage = Path(temporary) / "run"
@@ -91,7 +102,7 @@ def prepare(args: argparse.Namespace) -> Path:
         ):
             if argument is not None:
                 shutil.copyfile(argument.resolve(strict=True), stage / name)
-        rows = [json.loads(line) for line in (stage / "dataset.jsonl").read_text().splitlines() if line.strip()]
+        rows = read_rows(stage / "dataset.jsonl")
         ids = [row.get("task_id") for row in rows]
         if not ids or any(not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", value) for value in ids):
             raise ValueError("dataset must have nonempty path-safe task IDs")
@@ -99,7 +110,7 @@ def prepare(args: argparse.Namespace) -> Path:
             raise ValueError("dataset task IDs must be unique")
         smoke_rows = rows[:4]
         if args.smoke_dataset:
-            smoke_rows = [json.loads(line) for line in args.smoke_dataset.read_text().splitlines() if line.strip()]
+            smoke_rows = read_rows(args.smoke_dataset)
         smoke_ids = [row.get("task_id") for row in smoke_rows]
         if not smoke_ids or len(set(smoke_ids)) != len(smoke_ids) or not set(smoke_ids) <= set(ids):
             raise ValueError("smoke dataset must be a nonempty unique subset of the rollout dataset")
@@ -107,10 +118,19 @@ def prepare(args: argparse.Namespace) -> Path:
         if any(row != canonical[row["task_id"]] for row in smoke_rows):
             raise ValueError("smoke rows must match the canonical dataset, including prompts and reference URLs")
         (stage / "smoke_dataset.jsonl").write_text("".join(json.dumps(row) + "\n" for row in smoke_rows[:4]))
+        missing_ids = set()
         if args.existing_rollout:
             original = args.existing_rollout.absolute() / "deliverables"
             receipt = copy_tree(original, stage / "deliverables", {f"task_{task_id}" for task_id in ids})
-            rollout_complete(stage / "dataset.jsonl", stage / "deliverables")
+            if count_missing_as_loss:
+                missing_ids = {
+                    task_id
+                    for task_id in ids
+                    if not (stage / "deliverables" / f"task_{task_id}" / "repeat_0" / "finish_params.json").exists()
+                }
+            rollout_complete(stage / "dataset.jsonl", stage / "deliverables", missing_ids)
+            receipt["count_eval_missing_as_loss"] = count_missing_as_loss
+            receipt["missing_eval_task_ids"] = sorted(missing_ids)
             (stage / "import.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
         environment = {
             "RUN_DIR": str(destination),
@@ -127,6 +147,11 @@ def prepare(args: argparse.Namespace) -> Path:
             "APPTAINER_BIN": str(args.apptainer_bin.resolve(strict=True)),
             "CONCURRENCY": str(args.concurrency),
             "AGENT_MAX_TURNS": str(args.agent_max_turns),
+            "COUNT_EVAL_MISSING_AS_LOSS": str(count_missing_as_loss).lower(),
+            "MISSING_EVAL_TASK_IDS": json.dumps(sorted(missing_ids)),
+            "JUDGE_SEED": judge_seed,
+            "STAGE0_SEED": stage0_seed,
+            "REFERENCE_AVAILABILITY_ONLY": str(bool(getattr(args, "reference_availability_only", False))).lower(),
         }
         for limit, default_mib in BYTE_LIMITS_MIB.items():
             name = f"GDPVAL_MAX_{limit}_FOR_JUDGE"
@@ -152,6 +177,13 @@ def verify(run_dir: Path) -> None:
         path = run_dir / name
         if path.is_symlink() or not path.resolve().is_relative_to(run_dir.resolve()) or digest(path) != expected:
             raise ValueError(f"prepared input changed: {name}; use a fresh run directory")
+    receipt = run_dir / "import.json"
+    if receipt.exists():
+        imported = json.loads(receipt.read_text())
+        if imported.get("count_eval_missing_as_loss"):
+            rollout_complete(
+                run_dir / "dataset.jsonl", run_dir / "deliverables", set(imported["missing_eval_task_ids"])
+            )
 
 
 def main() -> None:
@@ -165,6 +197,18 @@ def main() -> None:
     prepare_parser.add_argument("--smoke-dataset", type=Path)
     prepare_parser.add_argument("--profile", type=Path)
     prepare_parser.add_argument("--existing-rollout", type=Path, help="Copy only deliverables from a finished rollout")
+    prepare_parser.add_argument(
+        "--count-missing-as-loss",
+        action="store_true",
+        help="Impute final-stage losses only for imported tasks without a finish marker",
+    )
+    prepare_parser.add_argument("--judge-seed", type=int, help="Global assignment seed (default: JUDGE_SEED or 42)")
+    prepare_parser.add_argument("--stage0-seed", type=int, help="Optional calibration-only seed")
+    prepare_parser.add_argument(
+        "--reference-availability-only",
+        action="store_true",
+        help="Repair assignments using available reference tasks without transport filtering",
+    )
     prepare_parser.add_argument("--judge-config", type=Path, required=True)
     prepare_parser.add_argument("--env-file", type=Path, required=True)
     prepare_parser.add_argument("--uv-source", type=Path, required=True)
