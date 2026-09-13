@@ -347,6 +347,45 @@ async def test_external_wait_without_boundary_uses_normal_park_request() -> None
 
 
 @pytest.mark.asyncio
+async def test_prepare_freezes_a_model_wait_at_its_last_boundary() -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    boundary = _boundary()
+    await participant.commit_boundary(execution, boundary)
+    await participant.begin_model_wait(execution)
+
+    report = await participant.prepare(
+        time.time() + 2,
+        allow_model_wait_boundary=True,
+    )
+
+    assert report["ready_to_commit"] is True
+    assert report["parked_with_boundary"] == 1
+    assert report["executions"][0]["state"] == "model_wait_frozen"
+    assert participant.records_for_commit() == [boundary]
+    assert (await participant.resume())["released"] == 1
+    assert participant.status()["executions"][0]["state"] == "running"
+
+    await participant.end_model_wait(execution)
+    await participant.finish(execution, outcome="failed")
+
+
+@pytest.mark.asyncio
+async def test_prepare_does_not_freeze_model_wait_without_cut_authority() -> None:
+    participant = AgentCheckpointParticipant()
+    execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())
+    await participant.commit_boundary(execution, _boundary())
+    await participant.begin_model_wait(execution)
+
+    report = await participant.prepare(time.time() + 0.01)
+
+    assert report["ready_to_commit"] is False
+    assert participant.status()["executions"][0]["state"] == "running"
+    await participant.end_model_wait(execution)
+    await participant.finish(execution, outcome="failed")
+
+
+@pytest.mark.asyncio
 async def test_failed_prepare_rolls_back_park_request() -> None:
     participant = AgentCheckpointParticipant()
     execution = await participant.begin("rollout-a", 0, task=asyncio.current_task())

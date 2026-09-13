@@ -244,6 +244,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         cookies=model_server_cookies,
                     ),
                     request=request,
+                    checkpointable_model_wait=True,
                 )
                 model_call_id = None
                 if self._checkpoint_participant is not None:

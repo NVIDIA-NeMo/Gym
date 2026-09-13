@@ -362,7 +362,8 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                         url_path=model_url_path,
                         json=new_body,
                         cookies=model_server_cookies,
-                    )
+                    ),
+                    checkpointable_model_wait=True,
                 )
                 model_call_id = None
                 headers = getattr(model_resp, "headers", None)
