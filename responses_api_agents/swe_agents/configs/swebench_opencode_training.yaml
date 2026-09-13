@@ -29,6 +29,23 @@ swe_agents_train:
         - user_prompt_template: responses_api_agents/swe_agents/prompts/opencode_harness/user_prompt.txt
           agent_cls: OpenCodeAgent
           diversify_tool_names: false
+        # --- OPTIONAL: eval-scaffold prompt alignment (verbatim SWE-bench-Verified
+        # eval prompts, extracted 2026-09-13 from the opencode_sandboxed_agent eval
+        # pipeline / opencode v1.17.11). Uncomment to mix them into training so
+        # learned behaviors are not conditioned on the training-only scaffold.
+        # Selection is per-instance-deterministic while agent_prompt_override_random
+        # is false (default): each task keeps the same prompt across epochs, keeping
+        # paired per-task analyses clean. Duplicate entries to reweight (e.g. 3:1).
+        # Deltas vs the default template above: the eval user prompt ADDS an explicit
+        # anti-cheat rules section ("Do NOT fetch this task's known fix from the
+        # internet ... pip/npm/conda ... Do NOT modify, disable, skip, or special-case
+        # the tests") plus <issue_details>/<workspace_path> tags; the eval system
+        # prompt is opencode v1.17.11's (brevity examples, no-comments rule) instead
+        # of the older sdd/dev fork default.
+        # - user_prompt_template: responses_api_agents/swe_agents/prompts/opencode_harness/user_prompt_eval_swebv.txt
+        #   system_prompt_template: responses_api_agents/swe_agents/prompts/opencode_harness/system_prompt_opencode_v1_17_11.txt
+        #   agent_cls: OpenCodeAgent
+        #   diversify_tool_names: false
 
       # Enable opencode's `task` tool (subagent sessions)
       opencode_subagents_enabled: true
