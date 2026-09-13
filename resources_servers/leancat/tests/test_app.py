@@ -486,6 +486,13 @@ class TestToolchainCheck:
         assert probe.await_count == 1, "concurrent verifies must share one probe"
 
 
+class TestReverifyMode:
+    def test_server_is_stateless(self):
+        from nemo_gym.base_resources_server import ReverifyMode
+
+        assert LeanCatResourcesServerConfig.REVERIFY_MODE is ReverifyMode.STATELESS
+
+
 class TestVerifierMetadataLifting:
     """Gym posts rows with `verifier_metadata` still nested; the request must accept that."""
 

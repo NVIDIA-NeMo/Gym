@@ -29,7 +29,7 @@ stripper are imported from ``math_formal_lean``. Only the whole-file logic lives
 """
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import model_validator
 
@@ -38,6 +38,7 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.reward_profile import (
@@ -105,6 +106,10 @@ def score_leancat_rollout(rollout: Dict[str, Any]) -> Dict[str, float]:
 
 
 class LeanCatResourcesServerConfig(BaseResourcesServerConfig):
+    # verify() is a pure function of the request body and this config, so `gym eval reverify`
+    # can rescore stored rollouts.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+
     sandbox_host: str = "127.0.0.1"
     sandbox_port: int = 6000
     # Upstream's per-attempt verification budget (EVALUATION.md); LeanCat proofs import all
