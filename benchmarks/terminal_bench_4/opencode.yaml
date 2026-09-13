@@ -40,12 +40,18 @@ terminal_bench_4_opencode:
                 retries: 5
                 retry_delay_s: 5
                 retry_max_delay_s: 60
-                request_timeout_s: 1200
-                timeout_s: 1500
-                connect_attempt_timeout_s: 1500
+                # Leave time for retries within Harbor's environment setup budget.
+                request_timeout_s: 120
+                timeout_s: 150
+                connect_attempt_timeout_s: 150
                 renew_interval_s: 1800
               operations:
                 background_exec: true
+                # Retry control-plane reads; command submissions remain single-attempt.
+                retries: 5
+                retry_delay_s: 5
+                retry_max_delay_s: 60
+                status_poll_timeout_s: 20
               networking:
                 enabled: true
                 loopback_forwarding: true
@@ -63,6 +69,7 @@ terminal_bench_4_opencode:
           sandbox_metadata:
             nemo.nvidia.com/resources: custom
           sandbox_ttl_s: 28800
+          # This also bounds setup of the entire Compose collection.
           sandbox_ready_timeout_s: 1200
           default_exec_timeout_s: 64800
       harbor_agent:
