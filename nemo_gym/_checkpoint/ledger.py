@@ -27,27 +27,29 @@ Three properties make the copy a checkpoint rather than a backup:
   replaces with a fresh dispatch. Commit skips tombstoned attempts and
   records the tombstones in the manifest so the restored server re-installs
   the fence before serving anything.
-- **Manifest-last ordering.** Every ledger file is written and fsynced
-  before the manifest appears (temporary name, fsync, rename). A commit that
-  died partway leaves no manifest, and restore refuses the directory instead
-  of installing a torn ledger.
-- **Digest verification.** The manifest records each rollout file's SHA-256.
-  Restore verifies every installed file against it, so silent corruption in
-  transit fails loudly at restore instead of surfacing as wrong training
-  data later.
+- **Manifest-last ordering.** Every bounded lineage archive and its index is
+  written and fsynced before the manifest appears (temporary name, fsync,
+  rename). A commit that died partway leaves no manifest, and restore refuses
+  the directory instead of installing a torn ledger.
+- **Digest verification.** The manifest authenticates each archive and the
+  index authenticates each lineage member. Restore verifies both layers, so
+  silent corruption in transit fails loudly instead of surfacing as wrong
+  training data later.
 """
 
 import asyncio
 import hashlib
+import io
 import json
 import os
 import shutil
+import tarfile
 import tempfile
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Protocol, runtime_checkable
 
 from fastapi import FastAPI, Header
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym._checkpoint.admission import AdmissionLimiter
 from nemo_gym._checkpoint.artifacts import (
@@ -81,11 +83,16 @@ LEDGER_MANIFEST_NAME = "manifest.json"
 GENERATION_CUT_COORDINATOR_PROOF_NAME = "generation-cut-workers.json"
 LEGACY_GENERATION_CUT_ACK_NAME = "generation-cut.json"
 STORAGE_REFERENCE_INDEX_NAME = "storage-references.jsonl"
-LEDGER_SCHEMA_VERSION = 2
+LINEAGE_INDEX_NAME = "lineage-index.jsonl"
+LEDGER_SCHEMA_VERSION = 3
 
 # FileLineageStore writes one token-free custody file per rollout.
 # Lock files and token-store files are not part of this participant.
 _LEDGER_SUFFIX = ".lineage.jsonl"
+_LEDGER_ARCHIVE_PATTERN = r"^lineage-part-[0-9]{6}\.tar$"
+_LEDGER_ARCHIVE_MAX_MEMBERS = 512
+_LEDGER_ARCHIVE_MAX_PAYLOAD_BYTES = 64 << 20
+_SHA256_PATTERN = r"^[0-9a-f]{64}$"
 
 
 class LedgerMismatchError(ControlError):
@@ -117,6 +124,39 @@ class AttemptIdentity(BaseModel):
 
     rollout_id: str
     attempt_index: int = Field(ge=0)
+
+
+class _LineageArchiveReference(BaseModel):
+    """Digest-bound coordinate for one bounded lineage tar shard."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(pattern=_LEDGER_ARCHIVE_PATTERN)
+    sha256: str = Field(pattern=_SHA256_PATTERN)
+    members: int = Field(ge=1)
+    bytes: int = Field(ge=0)
+
+
+class _LineageArchiveMember(BaseModel):
+    """Location and integrity metadata for one rollout lineage file."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    capture_key: str = Field(pattern=ROLLOUT_ID_PATTERN.pattern)
+    archive: str = Field(pattern=_LEDGER_ARCHIVE_PATTERN)
+    member: str = Field(min_length=1)
+    sha256: str = Field(pattern=_SHA256_PATTERN)
+    rows: int = Field(ge=0)
+    bytes: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_member_name(self) -> "_LineageArchiveMember":
+        expected = f"{self.capture_key}{_LEDGER_SUFFIX}"
+        if self.member != expected:
+            raise ValueError(
+                f"lineage archive member does not match its capture key: expected={expected!r}, actual={self.member!r}"
+            )
+        return self
 
 
 class CaptureLedgerCommitResult(BaseModel):
@@ -196,40 +236,113 @@ def _copy_fsynced(source: Path, target: Path) -> None:
     os.replace(temporary, target)
 
 
-def _copy_lineage_fsynced(source: Path, target: Path) -> tuple[str, int, list[dict[str, Any]]]:
-    """Copy, hash, count, and parse one quiescent lineage file in one source pass."""
-    digest = hashlib.sha256()
-    byte_count = 0
+def _parse_lineage_payload(source_name: str, payload: bytes) -> list[dict[str, Any]]:
+    """Parse one lineage payload while preserving its exact archived bytes."""
     records: list[dict[str, Any]] = []
-    with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".ledger-", delete=False) as handle:
+    for line_number, line in enumerate(payload.splitlines(), start=1):
+        row = line.strip()
+        if not row:
+            continue
+        try:
+            record = json.loads(row)
+        except json.JSONDecodeError as error:
+            raise LedgerMismatchError(f"invalid lineage JSON in {source_name!r} at line {line_number}") from error
+        if not isinstance(record, dict):
+            raise LedgerMismatchError(f"lineage row in {source_name!r} at line {line_number} is not an object")
+        records.append(record)
+    return records
+
+
+def _write_lineage_archive(
+    ledger_dir: Path,
+    *,
+    archive_index: int,
+    members: list[tuple[str, AgentContinuationRoot, Path]],
+) -> tuple[
+    _LineageArchiveReference,
+    list[_LineageArchiveMember],
+    dict[str, ExternalStorageReference],
+]:
+    """Atomically write and fsync one deterministic lineage tar shard."""
+    archive_name = f"lineage-part-{archive_index:06d}.tar"
+    target = ledger_dir / archive_name
+    member_references: list[_LineageArchiveMember] = []
+    external_references: dict[str, ExternalStorageReference] = {}
+    with tempfile.NamedTemporaryFile(dir=ledger_dir, prefix=".ledger-archive-", delete=False) as handle:
         temporary = Path(handle.name)
         try:
-            with source.open("rb") as src:
-                for line_number, line in enumerate(src, start=1):
-                    handle.write(line)
-                    digest.update(line)
-                    byte_count += len(line)
-                    payload = line.strip()
-                    if not payload:
-                        continue
-                    try:
-                        record = json.loads(payload)
-                    except json.JSONDecodeError as error:
-                        raise LedgerMismatchError(
-                            f"invalid lineage JSON in {source.name!r} at line {line_number}"
-                        ) from error
-                    if not isinstance(record, dict):
-                        raise LedgerMismatchError(
-                            f"lineage row in {source.name!r} at line {line_number} is not an object"
+            with tarfile.open(fileobj=handle, mode="w") as archive:
+                for capture_key, root, source in members:
+                    payload = source.read_bytes()
+                    records = _parse_lineage_payload(source.name, payload)
+                    for reference in _external_references_for_rows(
+                        capture_key,
+                        records,
+                        root.last_committed_model_call_id,
+                    ):
+                        external_references.setdefault(reference.key, reference)
+
+                    member_name = source.name
+                    info = tarfile.TarInfo(name=member_name)
+                    info.size = len(payload)
+                    info.mode = 0o600
+                    info.mtime = 0
+                    info.uid = 0
+                    info.gid = 0
+                    info.uname = ""
+                    info.gname = ""
+                    archive.addfile(info, io.BytesIO(payload))
+                    member_references.append(
+                        _LineageArchiveMember(
+                            capture_key=capture_key,
+                            archive=archive_name,
+                            member=member_name,
+                            sha256=hashlib.sha256(payload).hexdigest(),
+                            rows=len(records),
+                            bytes=len(payload),
                         )
-                    records.append(record)
+                    )
             handle.flush()
             os.fsync(handle.fileno())
         except BaseException:
             temporary.unlink(missing_ok=True)
             raise
+    archive_size = temporary.stat().st_size
+    archive_digest = _file_digest(temporary)
     os.replace(temporary, target)
-    return digest.hexdigest(), byte_count, records
+    return (
+        _LineageArchiveReference(
+            name=archive_name,
+            sha256=archive_digest,
+            members=len(member_references),
+            bytes=archive_size,
+        ),
+        member_references,
+        external_references,
+    )
+
+
+def _partition_lineage_archives(
+    members: list[tuple[str, AgentContinuationRoot, Path]],
+) -> list[list[tuple[str, AgentContinuationRoot, Path]]]:
+    """Partition sorted members by both file count and source payload bytes."""
+    partitions: list[list[tuple[str, AgentContinuationRoot, Path]]] = []
+    current: list[tuple[str, AgentContinuationRoot, Path]] = []
+    current_bytes = 0
+    for member in members:
+        member_bytes = member[2].stat().st_size
+        if current and (
+            len(current) >= _LEDGER_ARCHIVE_MAX_MEMBERS
+            or current_bytes + member_bytes > _LEDGER_ARCHIVE_MAX_PAYLOAD_BYTES
+        ):
+            partitions.append(current)
+            current = []
+            current_bytes = 0
+        current.append(member)
+        current_bytes += member_bytes
+    if current:
+        partitions.append(current)
+    return partitions
 
 
 def _fsync_dir(path: Path) -> None:
@@ -387,6 +500,120 @@ def _validate_storage_reference_artifact(
         raise LedgerMismatchError("storage-reference index contains duplicate keys")
 
 
+def _load_lineage_archive_index(
+    checkpoint_root: Path,
+    manifest: dict[str, Any],
+) -> list[_LineageArchiveMember]:
+    raw_reference = manifest.get("lineage_index")
+    if raw_reference is None:
+        raise LedgerMismatchError("ledger manifest is missing its lineage archive index")
+    try:
+        reference = CheckpointArtifactReference.model_validate(raw_reference)
+        members = read_jsonl_artifact(checkpoint_root, reference, _LineageArchiveMember)
+    except (CheckpointArtifactError, ValueError) as error:
+        raise LedgerMismatchError("lineage archive index is missing or corrupted") from error
+    capture_keys = [member.capture_key for member in members]
+    if len(capture_keys) != len(set(capture_keys)):
+        raise LedgerMismatchError("lineage archive index contains duplicate capture keys")
+    member_names = [(member.archive, member.member) for member in members]
+    if len(member_names) != len(set(member_names)):
+        raise LedgerMismatchError("lineage archive index contains duplicate members")
+    return members
+
+
+def _load_lineage_archive_references(manifest: dict[str, Any]) -> list[_LineageArchiveReference]:
+    raw_references = manifest.get("archives")
+    if not isinstance(raw_references, list):
+        raise LedgerMismatchError("ledger manifest is missing its lineage archives")
+    try:
+        references = [_LineageArchiveReference.model_validate(raw) for raw in raw_references]
+    except ValueError as error:
+        raise LedgerMismatchError("ledger manifest contains an invalid lineage archive") from error
+    names = [reference.name for reference in references]
+    if len(names) != len(set(names)):
+        raise LedgerMismatchError("ledger manifest contains duplicate lineage archives")
+    return references
+
+
+def _validate_lineage_archives(
+    checkpoint_root: Path,
+    ledger_dir: Path,
+    manifest: dict[str, Any],
+) -> tuple[list[_LineageArchiveReference], list[_LineageArchiveMember]]:
+    """Validate the complete v3 archive set without extracting any files."""
+    archive_references = _load_lineage_archive_references(manifest)
+    members = _load_lineage_archive_index(checkpoint_root, manifest)
+    members_by_archive: dict[str, list[_LineageArchiveMember]] = {}
+    for member in members:
+        members_by_archive.setdefault(member.archive, []).append(member)
+    archive_names = {reference.name for reference in archive_references}
+    referenced_names = set(members_by_archive)
+    if archive_names != referenced_names:
+        raise LedgerMismatchError(
+            "lineage archive inventory does not match its index: "
+            f"missing={sorted(referenced_names - archive_names)!r}, "
+            f"unreferenced={sorted(archive_names - referenced_names)!r}"
+        )
+    if int(manifest.get("rollout_count", -1)) != len(members):
+        raise LedgerMismatchError("lineage archive rollout count does not match its index")
+    total_rows = sum(member.rows for member in members)
+    if int(manifest.get("row_count", -1)) != total_rows:
+        raise LedgerMismatchError("lineage archive row count does not match its index")
+
+    for reference in archive_references:
+        path = ledger_dir / reference.name
+        if not path.is_file():
+            raise LedgerMismatchError(f"lineage archive {reference.name!r} is missing")
+        if path.stat().st_size != reference.bytes or _file_digest(path) != reference.sha256:
+            raise LedgerMismatchError(f"lineage archive {reference.name!r} is corrupted")
+        expected = {member.member: member for member in members_by_archive[reference.name]}
+        if reference.members != len(expected):
+            raise LedgerMismatchError(f"lineage archive {reference.name!r} member count is corrupted")
+        try:
+            with tarfile.open(path, mode="r:") as archive:
+                infos = archive.getmembers()
+                names = [info.name for info in infos]
+                if len(names) != len(set(names)) or set(names) != set(expected):
+                    raise LedgerMismatchError(f"lineage archive {reference.name!r} has an unexpected member inventory")
+                for info in infos:
+                    member = expected[info.name]
+                    if not info.isfile() or info.size != member.bytes:
+                        raise LedgerMismatchError(
+                            f"lineage archive member {reference.name!r}/{info.name!r} is invalid"
+                        )
+                    extracted = archive.extractfile(info)
+                    if extracted is None:
+                        raise LedgerMismatchError(
+                            f"lineage archive member {reference.name!r}/{info.name!r} cannot be read"
+                        )
+                    payload = extracted.read()
+                    if hashlib.sha256(payload).hexdigest() != member.sha256:
+                        raise LedgerMismatchError(
+                            f"lineage archive member {reference.name!r}/{info.name!r} is corrupted"
+                        )
+                    records = _parse_lineage_payload(info.name, payload)
+                    if len(records) != member.rows:
+                        raise LedgerMismatchError(
+                            f"lineage archive member {reference.name!r}/{info.name!r} row count is corrupted"
+                        )
+        except (OSError, tarfile.TarError) as error:
+            raise LedgerMismatchError(f"lineage archive {reference.name!r} cannot be read") from error
+    return archive_references, members
+
+
+def _write_payload_fsynced(payload: bytes, target: Path) -> None:
+    with tempfile.NamedTemporaryFile(dir=target.parent, prefix=".ledger-", delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    os.replace(temporary, target)
+
+
 class CaptureLedgerCheckpointer:
     """Commit and restore one token-capture store directory."""
 
@@ -409,7 +636,7 @@ class CaptureLedgerCheckpointer:
         generation_cut_proof: GenerationCutCoordinatorProof | None = None,
         continuation_roots: list[AgentContinuationRoot],
     ) -> dict[str, Any]:
-        """Copy the ledger into ``checkpoint_dir``; the caller has already drained.
+        """Archive the ledger into ``checkpoint_dir``; the caller has drained.
 
         The store must be quiescent (admission paused) when this runs: the
         copy takes no locks because nothing may be writing.
@@ -455,33 +682,32 @@ class CaptureLedgerCheckpointer:
 
         ledger_dir.mkdir(parents=True, exist_ok=True)
 
-        rollouts: dict[str, dict[str, Any]] = {}
         excluded = len(tombstones)
         source_capture_keys = {
             capture_key_for(rollout_id, attempt_index) for rollout_id, attempt_index in source_attempts or []
         }
         excluded_inactive = len(source_capture_keys - set(normalized_roots) - fenced)
-        total_rows = 0
+        archive_references: list[_LineageArchiveReference] = []
+        lineage_members: list[_LineageArchiveMember] = []
         external_references: dict[str, ExternalStorageReference] = {}
-        for capture_key, root in sorted(normalized_roots.items()):
-            files: dict[str, str] = {}
-            source = sources[capture_key]
-            target = ledger_dir / source.name
-            file_digest, byte_count, records = _copy_lineage_fsynced(source, target)
-            files[source.name] = file_digest
-            references = _external_references_for_rows(
-                capture_key,
-                records,
-                root.last_committed_model_call_id,
+        ordered_sources = [
+            (capture_key, root, sources[capture_key]) for capture_key, root in sorted(normalized_roots.items())
+        ]
+        for archive_index, archive_sources in enumerate(_partition_lineage_archives(ordered_sources)):
+            archive_reference, archive_members, archive_external_references = _write_lineage_archive(
+                ledger_dir,
+                archive_index=archive_index,
+                members=archive_sources,
             )
-            for reference in references:
+            archive_references.append(archive_reference)
+            lineage_members.extend(archive_members)
+            for reference in archive_external_references.values():
                 external_references.setdefault(reference.key, reference)
-            rollouts[capture_key] = {
-                "files": files,
-                "rows": len(records),
-                "bytes": byte_count,
-            }
-            total_rows += len(records)
+        lineage_index = write_jsonl_artifact(
+            checkpoint_dir,
+            ledger_dir.relative_to(checkpoint_dir) / LINEAGE_INDEX_NAME,
+            lineage_members,
+        )
         storage_reference_index = write_jsonl_artifact(
             checkpoint_dir,
             ledger_dir.relative_to(checkpoint_dir) / STORAGE_REFERENCE_INDEX_NAME,
@@ -493,7 +719,10 @@ class CaptureLedgerCheckpointer:
             "schema_version": LEDGER_SCHEMA_VERSION,
             "checkpoint_id": checkpoint_id,
             "server_name": self.server_name,
-            "rollouts": rollouts,
+            "archives": [reference.model_dump(mode="json") for reference in archive_references],
+            "lineage_index": lineage_index.model_dump(mode="json"),
+            "rollout_count": len(lineage_members),
+            "row_count": sum(member.rows for member in lineage_members),
             "continuation_roots_sha256": roots_digest,
             "continuation_roots": len(normalized_roots),
             "excluded_inactive": excluded_inactive,
@@ -524,8 +753,8 @@ class CaptureLedgerCheckpointer:
         _fsync_dir(ledger_dir)
 
         result = {
-            "rollouts": len(rollouts),
-            "rows": total_rows,
+            "rollouts": len(lineage_members),
+            "rows": sum(member.rows for member in lineage_members),
             "excluded_tombstoned": excluded,
             "excluded_inactive": excluded_inactive,
             "manifest_digest": hashlib.sha256(payload).hexdigest(),
@@ -575,15 +804,23 @@ class CaptureLedgerCheckpointer:
         if manifest.get("continuation_roots_sha256") != continuation_roots_digest:
             raise LedgerMismatchError("committed ledger continuation roots changed before commit retry")
         storage_reference_index = _validate_storage_reference_index(checkpoint_root, manifest)
-        total_rows = 0
-        for rollout_id, metadata in manifest.get("rollouts", {}).items():
-            for name, digest in metadata.get("files", {}).items():
-                path = ledger_dir / name
-                if not path.exists() or _file_digest(path) != digest:
-                    raise LedgerMismatchError(f"committed ledger file {name!r} for {rollout_id!r} is corrupted")
-            total_rows += int(metadata.get("rows", 0))
+        schema_version = manifest["schema_version"]
+        if schema_version >= 3:
+            _, members = _validate_lineage_archives(checkpoint_root, ledger_dir, manifest)
+            rollout_count = len(members)
+            total_rows = sum(member.rows for member in members)
+        else:
+            total_rows = 0
+            rollouts = manifest.get("rollouts", {})
+            for rollout_id, metadata in rollouts.items():
+                for name, digest in metadata.get("files", {}).items():
+                    path = ledger_dir / name
+                    if not path.exists() or _file_digest(path) != digest:
+                        raise LedgerMismatchError(f"committed ledger file {name!r} for {rollout_id!r} is corrupted")
+                total_rows += int(metadata.get("rows", 0))
+            rollout_count = len(rollouts)
         result = {
-            "rollouts": len(manifest.get("rollouts", {})),
+            "rollouts": rollout_count,
             "rows": total_rows,
             "excluded_tombstoned": len(manifest.get("tombstones", [])),
             "excluded_inactive": int(manifest.get("excluded_inactive", 0)),
@@ -608,11 +845,18 @@ class CaptureLedgerCheckpointer:
             )
         manifest = json.loads(manifest_path.read_text())
         _validate_ledger_schema(manifest, ledger_dir)
+        schema_version = manifest["schema_version"]
         if manifest.get("server_name") != self.server_name:
             raise LedgerMismatchError("ledger checkpoint belongs to a different model server")
         storage_reference_index = _validate_storage_reference_index(checkpoint_dir, manifest)
 
-        expected_names = {name for metadata in manifest["rollouts"].values() for name in metadata["files"]}
+        if schema_version >= 3:
+            archive_references, archive_members = _validate_lineage_archives(checkpoint_dir, ledger_dir, manifest)
+            expected_names = {member.member for member in archive_members}
+        else:
+            archive_references = []
+            archive_members = []
+            expected_names = {name for metadata in manifest["rollouts"].values() for name in metadata["files"]}
         existing_names = {path.name for path in self.store_root.glob(f"*{_LEDGER_SUFFIX}")}
         unexpected = existing_names - expected_names
         if unexpected:
@@ -623,25 +867,41 @@ class CaptureLedgerCheckpointer:
 
         # Validate the complete source before changing the live namespace.
         validated: list[tuple[Path, str]] = []
-        total_rows = 0
-        for rollout_id, meta in manifest["rollouts"].items():
-            for name, digest in meta["files"].items():
-                source = ledger_dir / name
-                if not source.exists() or _file_digest(source) != digest:
-                    raise LedgerMismatchError(
-                        f"ledger file {name} for rollout {rollout_id!r} is missing or does not match "
-                        f"its committed digest; refusing to install a corrupted ledger"
-                    )
-                validated.append((source, name))
-            total_rows += int(meta.get("rows", 0))
-
+        if schema_version < 3:
+            for rollout_id, meta in manifest["rollouts"].items():
+                for name, digest in meta["files"].items():
+                    source = ledger_dir / name
+                    if not source.exists() or _file_digest(source) != digest:
+                        raise LedgerMismatchError(
+                            f"ledger file {name} for rollout {rollout_id!r} is missing or does not match "
+                            f"its committed digest; refusing to install a corrupted ledger"
+                        )
+                    validated.append((source, name))
         self.store_root.mkdir(parents=True, exist_ok=True)
-        for source, name in validated:
-            _copy_fsynced(source, self.store_root / name)
+        if schema_version >= 3:
+            members_by_archive: dict[str, list[_LineageArchiveMember]] = {}
+            for member in archive_members:
+                members_by_archive.setdefault(member.archive, []).append(member)
+            for reference in archive_references:
+                with tarfile.open(ledger_dir / reference.name, mode="r:") as archive:
+                    for member in members_by_archive[reference.name]:
+                        extracted = archive.extractfile(member.member)
+                        if extracted is None:  # Already validated; guard against an in-place source mutation.
+                            raise LedgerMismatchError(
+                                f"lineage archive member {reference.name!r}/{member.member!r} disappeared"
+                            )
+                        _write_payload_fsynced(extracted.read(), self.store_root / member.member)
+            rollout_count = len(archive_members)
+            total_rows = sum(member.rows for member in archive_members)
+        else:
+            for source, name in validated:
+                _copy_fsynced(source, self.store_root / name)
+            rollout_count = len(manifest["rollouts"])
+            total_rows = sum(int(meta.get("rows", 0)) for meta in manifest["rollouts"].values())
         _fsync_dir(self.store_root)
 
         result: dict[str, Any] = {
-            "rollouts": len(manifest["rollouts"]),
+            "rollouts": rollout_count,
             "rows": total_rows,
             "checkpoint_id": manifest.get("checkpoint_id"),
             "tombstones": list(manifest.get("tombstones", ())),

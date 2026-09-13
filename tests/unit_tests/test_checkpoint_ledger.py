@@ -15,8 +15,11 @@
 """Checkpoint token-free model custody without copying staged token arrays."""
 
 import asyncio
+import hashlib
+import io
 import json
 import shutil
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -99,6 +102,37 @@ def _write_continuation_index(
     )
 
 
+def _ledger_dir(checkpoint: Path, *, server_name: str | None = None) -> Path:
+    root = checkpoint / MODEL_LEDGER_SUBDIR
+    return root / server_name if server_name is not None else root
+
+
+def _ledger_manifest(checkpoint: Path, *, server_name: str | None = None) -> dict:
+    return json.loads((_ledger_dir(checkpoint, server_name=server_name) / LEDGER_MANIFEST_NAME).read_text())
+
+
+def _lineage_index(checkpoint: Path, *, server_name: str | None = None) -> list[dict]:
+    manifest = _ledger_manifest(checkpoint, server_name=server_name)
+    path = checkpoint / manifest["lineage_index"]["relative_path"]
+    return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+
+def _read_archived_custody(
+    checkpoint: Path,
+    capture_key: str,
+    *,
+    server_name: str | None = None,
+) -> bytes:
+    ledger_dir = _ledger_dir(checkpoint, server_name=server_name)
+    entry = next(
+        item for item in _lineage_index(checkpoint, server_name=server_name) if item["capture_key"] == capture_key
+    )
+    with tarfile.open(ledger_dir / entry["archive"], mode="r:") as archive:
+        extracted = archive.extractfile(entry["member"])
+        assert extracted is not None
+        return extracted.read()
+
+
 def test_commit_restore_preserves_only_token_free_custody(tmp_path) -> None:
     root = tmp_path / "ledger-a"
     expected = _write_custody(root, "rollout-a")
@@ -120,8 +154,9 @@ def test_commit_restore_preserves_only_token_free_custody(tmp_path) -> None:
     }
 
     ledger_dir = tmp_path / "checkpoint" / MODEL_LEDGER_SUBDIR
-    assert (ledger_dir / "rollout-a.lineage.jsonl").read_bytes() == expected
-    assert not (ledger_dir / "rollout-b-a2.lineage.jsonl").exists()
+    assert _read_archived_custody(tmp_path / "checkpoint", "rollout-a") == expected
+    assert {entry["capture_key"] for entry in _lineage_index(tmp_path / "checkpoint")} == {"rollout-a"}
+    assert not list(ledger_dir.glob("*.lineage.jsonl"))
     assert not list(ledger_dir.glob("*.tokens.*"))
 
     restored_root = tmp_path / "ledger-b"
@@ -162,8 +197,9 @@ def test_commit_packages_only_active_continuations_without_scanning_store(tmp_pa
     assert summary["rows"] == 3
     assert summary["excluded_inactive"] == 1
     ledger_dir = checkpoint / MODEL_LEDGER_SUBDIR
-    assert (ledger_dir / "rollout-a.lineage.jsonl").read_bytes() == expected
-    assert not (ledger_dir / "rollout-b.lineage.jsonl").exists()
+    assert _read_archived_custody(checkpoint, "rollout-a") == expected
+    assert {entry["capture_key"] for entry in _lineage_index(checkpoint)} == {"rollout-a"}
+    assert not list(ledger_dir.glob("*.lineage.jsonl"))
     references = read_jsonl_artifact(
         checkpoint,
         CheckpointArtifactReference.model_validate(summary["storage_reference_index"]),
@@ -174,6 +210,131 @@ def test_commit_packages_only_active_continuations_without_scanning_store(tmp_pa
         "opaque-rollout-a-1",
     ]
     assert {reference.boundary_model_call_id for reference in references} == {"rollout-a-call-1"}
+
+
+def test_commit_uses_bounded_deterministic_lineage_archives(tmp_path, monkeypatch) -> None:
+    import nemo_gym._checkpoint.ledger as ledger_module
+
+    monkeypatch.setattr(ledger_module, "_LEDGER_ARCHIVE_MAX_MEMBERS", 2)
+    source = tmp_path / "source"
+    capture_keys = ["rollout-d", "rollout-b", "rollout-e", "rollout-a", "rollout-c"]
+    expected = {capture_key: _write_custody(source, capture_key) for capture_key in capture_keys}
+    checkpoint = tmp_path / "checkpoint"
+
+    CaptureLedgerCheckpointer(source).commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+        continuation_roots=[_continuation_root(capture_key) for capture_key in capture_keys],
+    )
+
+    manifest = _ledger_manifest(checkpoint)
+    assert manifest["schema_version"] == 3
+    assert manifest["rollout_count"] == 5
+    assert manifest["row_count"] == 10
+    assert [archive["members"] for archive in manifest["archives"]] == [2, 2, 1]
+    ledger_dir = checkpoint / MODEL_LEDGER_SUBDIR
+    for archive in manifest["archives"]:
+        path = ledger_dir / archive["name"]
+        assert path.stat().st_size == archive["bytes"]
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == archive["sha256"]
+
+    by_archive: dict[str, list[str]] = {}
+    for entry in _lineage_index(checkpoint):
+        by_archive.setdefault(entry["archive"], []).append(entry["capture_key"])
+    assert by_archive == {
+        "lineage-part-000000.tar": ["rollout-a", "rollout-b"],
+        "lineage-part-000001.tar": ["rollout-c", "rollout-d"],
+        "lineage-part-000002.tar": ["rollout-e"],
+    }
+
+    restored = tmp_path / "restored"
+    CaptureLedgerCheckpointer(restored).restore(checkpoint)
+    for capture_key, payload in expected.items():
+        assert (restored / f"{capture_key}.lineage.jsonl").read_bytes() == payload
+
+
+def test_restore_supports_legacy_per_rollout_v2_checkpoint(tmp_path) -> None:
+    checkpoint = tmp_path / "checkpoint"
+    ledger_dir = checkpoint / MODEL_LEDGER_SUBDIR
+    expected = _write_custody(ledger_dir, "rollout-a")
+    storage_reference_index = write_jsonl_artifact(
+        checkpoint,
+        ledger_dir.relative_to(checkpoint) / "storage-references.jsonl",
+        [],
+    )
+    manifest = {
+        "schema_version": 2,
+        "checkpoint_id": "checkpoint-1",
+        "server_name": None,
+        "rollouts": {
+            "rollout-a": {
+                "files": {"rollout-a.lineage.jsonl": hashlib.sha256(expected).hexdigest()},
+                "rows": 2,
+                "bytes": len(expected),
+            }
+        },
+        "storage_reference_index": storage_reference_index.model_dump(mode="json"),
+        "tombstones": [],
+        "source_attempts": [],
+    }
+    (ledger_dir / LEDGER_MANIFEST_NAME).write_text(json.dumps(manifest))
+
+    restored = tmp_path / "restored"
+    result = CaptureLedgerCheckpointer(restored).restore(checkpoint)
+
+    assert result["rollouts"] == 1
+    assert result["rows"] == 2
+    assert (restored / "rollout-a.lineage.jsonl").read_bytes() == expected
+
+
+def test_restore_rejects_missing_lineage_archive_before_install(tmp_path) -> None:
+    source = tmp_path / "source"
+    _write_custody(source, "rollout-a")
+    checkpoint = tmp_path / "checkpoint"
+    CaptureLedgerCheckpointer(source).commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+        continuation_roots=[_continuation_root("rollout-a")],
+    )
+    manifest = _ledger_manifest(checkpoint)
+    (checkpoint / MODEL_LEDGER_SUBDIR / manifest["archives"][0]["name"]).unlink()
+
+    restored = tmp_path / "restored"
+    with pytest.raises(LedgerMismatchError, match="archive.*missing"):
+        CaptureLedgerCheckpointer(restored).restore(checkpoint)
+    assert not restored.exists()
+
+
+def test_restore_rejects_unsafe_lineage_archive_member(tmp_path) -> None:
+    source = tmp_path / "source"
+    _write_custody(source, "rollout-a")
+    checkpoint = tmp_path / "checkpoint"
+    CaptureLedgerCheckpointer(source).commit(
+        checkpoint,
+        checkpoint_id="checkpoint-1",
+        tombstones=[],
+        continuation_roots=[_continuation_root("rollout-a")],
+    )
+    ledger_dir = checkpoint / MODEL_LEDGER_SUBDIR
+    manifest_path = ledger_dir / LEDGER_MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text())
+    archive_path = ledger_dir / manifest["archives"][0]["name"]
+    with tarfile.open(archive_path, mode="a") as archive:
+        payload = b"must-not-escape"
+        info = tarfile.TarInfo(name="../escaped.lineage.jsonl")
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+    manifest["archives"][0]["bytes"] = archive_path.stat().st_size
+    manifest["archives"][0]["sha256"] = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+
+    restored = tmp_path / "restored"
+    with pytest.raises(LedgerMismatchError, match="unexpected member inventory"):
+        CaptureLedgerCheckpointer(restored).restore(checkpoint)
+    assert not (tmp_path / "escaped.lineage.jsonl").exists()
+    assert not restored.exists()
 
 
 def test_commit_rejects_a_requested_continuation_without_lineage(tmp_path) -> None:
@@ -355,7 +516,9 @@ def test_restore_validates_all_files_before_installing_any(tmp_path) -> None:
             _continuation_root("rollout-b"),
         ],
     )
-    (checkpoint / MODEL_LEDGER_SUBDIR / "rollout-b.lineage.jsonl").write_text("corrupt")
+    manifest = _ledger_manifest(checkpoint)
+    archive_path = checkpoint / MODEL_LEDGER_SUBDIR / manifest["archives"][0]["name"]
+    archive_path.write_bytes(archive_path.read_bytes() + b"corrupt")
 
     restored = tmp_path / "restored"
     with pytest.raises(LedgerMismatchError):
@@ -892,8 +1055,8 @@ def test_model_checkpoint_artifacts_are_namespaced_by_server(tmp_path) -> None:
     )
 
     root = checkpoint / MODEL_LEDGER_SUBDIR
-    assert (root / "policy-a" / "rollout-a.lineage.jsonl").exists()
-    assert (root / "policy-b" / "rollout-b.lineage.jsonl").exists()
+    assert _read_archived_custody(checkpoint, "rollout-a", server_name="policy-a")
+    assert _read_archived_custody(checkpoint, "rollout-b", server_name="policy-b")
     with pytest.raises(ValueError, match="model server name"):
         CaptureLedgerCheckpointer(first, server_name="../policy")
 
@@ -1018,7 +1181,7 @@ def test_restored_source_ledger_survives_the_next_commit(tmp_path) -> None:
         ).status_code
         == 200
     )
-    assert (second_checkpoint / MODEL_LEDGER_SUBDIR / "policy" / "rollout-a.lineage.jsonl").read_bytes() == expected
+    assert _read_archived_custody(second_checkpoint, "rollout-a", server_name="policy") == expected
 
 
 def test_recovered_parent_manifest_survives_checkpoint_restore(tmp_path) -> None:
