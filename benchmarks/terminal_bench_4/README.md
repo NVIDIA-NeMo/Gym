@@ -15,6 +15,13 @@ Set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` in the environment. Sandboxes
 be able to reach the Gym model server; `++use_absolute_ip=true` advertises the host's
 address when Gym runs on a compute node.
 
+Resource requests explicitly match each task or Compose service's limits through
+`sandbox_provider_options.resource_requests: limits`. CPU values use cores and
+memory values use `Mi`/`Gi` in both API fields, avoiding deployment-specific request
+defaults. Services with no declared resources retain the SDK's one-CPU, 2-GiB
+defaults. Commands use `bash -c`, matching Harbor 0.23's Docker backend and keeping
+interactive-shell startup warnings out of machine-parsed setup output.
+
 Sandboxes use an eight-hour lifetime, renewed every 30 minutes while Gym owns them.
 This keeps setup and artifact collection from consuming the official agent budget
 on deployments that cap individual lifetimes at eight hours. The sandbox service
