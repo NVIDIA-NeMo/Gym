@@ -27,6 +27,7 @@ from nemo_gym.token_id_capture.staging.protocols import (
 from nemo_gym.token_id_capture.staging.records import (
     CaptureAdmission,
     CommitCoords,
+    StagedCallBaseSnapshot,
     StagedCallRecord,
     StageResult,
 )
@@ -55,6 +56,7 @@ class ActiveCall:
     admission: CaptureAdmission
     weight_version: int
     prefix_token_ids: list[int] = field(default_factory=list)
+    generation_cut: StagedCallBaseSnapshot | None = None
     completed: bool = field(default=False, init=False)
 
     @property
@@ -92,6 +94,8 @@ class RolloutTokenCapture:
         admission: CaptureAdmission,
         *,
         prefix_token_ids: list[int] | None = None,
+        generation_cut: StagedCallBaseSnapshot | None = None,
+        generation_cut_staging_key: str | None = None,
         stream: bool = False,
         weight_version: int | None = None,
     ) -> ActiveCall:
@@ -121,7 +125,59 @@ class RolloutTokenCapture:
             weight_version = self._weight_version_fn()
         if type(weight_version) is not int or weight_version < 0:
             raise CaptureError(f"weight_version must be a non-negative int, got {weight_version!r}")
-        return ActiveCall(admission=admission, weight_version=weight_version, prefix_token_ids=resolved_prefix)
+        if generation_cut is not None:
+            self._validate_generation_cut(
+                admission,
+                generation_cut,
+                staging_key=generation_cut_staging_key,
+                weight_version=weight_version,
+            )
+        elif admission.generation_cut is not None:
+            raise CaptureError(
+                f"rollout {admission.rollout_id} call {admission.model_call_id}: "
+                "generation-cut admission requires its staged snapshot"
+            )
+        return ActiveCall(
+            admission=admission,
+            weight_version=weight_version,
+            prefix_token_ids=resolved_prefix,
+            generation_cut=generation_cut,
+        )
+
+    @staticmethod
+    def _validate_generation_cut(
+        admission: CaptureAdmission,
+        snapshot: StagedCallBaseSnapshot,
+        *,
+        staging_key: str | None,
+        weight_version: int,
+    ) -> None:
+        continuation = admission.generation_cut
+        where = f"rollout {admission.rollout_id} call {admission.model_call_id}"
+        if continuation is None:
+            raise CaptureError(f"{where}: a staged generation cut was not authorized")
+        if staging_key != continuation.staging_key:
+            raise CaptureError(f"{where}: fetched generation-cut key does not match admission")
+        if (
+            snapshot.rollout_id != continuation.source_capture_key
+            or snapshot.model_call_id != continuation.source_model_call_id
+            or snapshot.digest != continuation.digest
+        ):
+            raise CaptureError(f"{where}: generation-cut snapshot identity does not match admission")
+        if (
+            snapshot.parent_call_id != admission.parent_call_id
+            or snapshot.prev_len != admission.prev_len
+            or snapshot.mode != admission.mode
+        ):
+            raise CaptureError(f"{where}: generation-cut lineage does not match replacement admission")
+        generated_count = sum(mask == 1.0 for mask in snapshot.token_mask_delta)
+        if generated_count != continuation.generation_token_count:
+            raise CaptureError(f"{where}: generation-cut token count does not match staged masks")
+        if snapshot.weight_version != weight_version:
+            raise CaptureError(
+                f"{where}: generation-cut policy version {snapshot.weight_version} "
+                f"does not match current rollout version {weight_version}"
+            )
 
     @staticmethod
     def _resolve_prefix(admission: CaptureAdmission, prefix_token_ids: list[int] | None) -> list[int]:
@@ -239,12 +295,22 @@ class RolloutTokenCapture:
         admission = call.admission
         if admission.mode == "token_in" and prompt_token_ids[: admission.prev_len] != call.prefix_token_ids:
             raise ValueError("generation prompt does not begin with the gate-authorized token prefix")
-        token_ids_delta, token_mask_delta, logprobs_delta = build_staging_delta(
-            prompt_token_ids=prompt_token_ids,
-            generated_token_ids=generated_token_ids,
-            generated_log_probs=generated_logprobs,
-            prev_len=admission.prev_len,
-        )
+        if call.generation_cut is None:
+            token_ids_delta, token_mask_delta, logprobs_delta = build_staging_delta(
+                prompt_token_ids=prompt_token_ids,
+                generated_token_ids=generated_token_ids,
+                generated_log_probs=generated_logprobs,
+                prev_len=admission.prev_len,
+            )
+        else:
+            expected_prompt = call.prefix_token_ids + list(call.generation_cut.token_ids_delta)
+            if prompt_token_ids != expected_prompt:
+                raise ValueError("generation prompt does not equal the durable generation-cut prefix")
+            if len(generated_token_ids) != len(generated_logprobs):
+                raise ValueError("generated token IDs and log probabilities must have equal lengths")
+            token_ids_delta = list(call.generation_cut.token_ids_delta) + list(generated_token_ids)
+            token_mask_delta = list(call.generation_cut.token_mask_delta) + [1.0] * len(generated_token_ids)
+            logprobs_delta = list(call.generation_cut.generation_log_probs_delta) + list(generated_logprobs)
         delta_len = len(token_ids_delta)
         cum_len = admission.prev_len + delta_len
         chain_hash = compute_chain_hash(admission.parent_chain_hash, token_ids_delta)

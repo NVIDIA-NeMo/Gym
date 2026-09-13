@@ -57,6 +57,7 @@ from nemo_gym.responses_converter import (
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     split_responses_input_output_items,  # noqa: F401
 )
+from nemo_gym.rollout_correlation import capture_key_for
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     get_response_json,
@@ -74,6 +75,9 @@ from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.external_capture import (
     ExternalCaptureHandler,
     make_external_capture_handler,
+)
+from nemo_gym.token_id_capture.staging.records import (
+    GenerationCutContinuation,
 )
 
 
@@ -308,6 +312,8 @@ class VLLMModel(SimpleResponsesAPIModel):
     _generation_prefix_cuts_enabled: bool = PrivateAttr(default=False)
     _generation_cut_control_token: str | None = PrivateAttr(default=None)
     _generation_cut_clients: Dict[str, NeMoGymAsyncOpenAI] = PrivateAttr(default_factory=dict)
+    _restored_generation_cuts: Dict[str, GenerationCutPrefixAck] = PrivateAttr(default_factory=dict)
+    _generation_cut_restore_lock: Any = PrivateAttr(default_factory=Lock)
 
     def setup_exception_middleware(self, app) -> None:
         @app.middleware("http")
@@ -470,9 +476,62 @@ class VLLMModel(SimpleResponsesAPIModel):
         receipt.validate_for(inventory)
         return receipt
 
-    async def restore_generation_cut(self, receipt: GenerationCutReceipt) -> GenerationCutReceipt:
-        """Restore is deliberately deferred to the token-prefix recovery phase."""
-        raise NotImplementedError("generation-prefix restore is not implemented in capture phase 1")
+    async def restore_generation_cut(
+        self,
+        receipt: GenerationCutReceipt,
+        *,
+        excluded_replacements: frozenset[tuple[str, int]] = frozenset(),
+    ) -> GenerationCutReceipt:
+        """Install durable cuts for the replacement attempts that will consume them."""
+        if not self._generation_prefix_cuts_enabled:
+            raise RuntimeError("generation-prefix cuts are not enabled for this model server")
+        if (self.config.num_workers or 1) > 1:
+            raise RuntimeError(
+                "generation-prefix restore currently requires a single Gym model-server worker; "
+                "multi-worker restore needs a process-shared continuation registry"
+            )
+        if receipt.inventory.server_name != self.config.name:
+            raise ValueError(
+                "generation-cut receipt belongs to a different model server: "
+                f"expected={self.config.name!r}, actual={receipt.inventory.server_name!r}"
+            )
+        with self._generation_cut_restore_lock:
+            for prefix in receipt.prefixes:
+                if (
+                    prefix.disposition != "durable_prefix"
+                    or prefix.frozen_buffer_id is None
+                    or not prefix.frozen_buffer_id.startswith("active/")
+                ):
+                    continue
+                replacement = (prefix.rollout_id, prefix.attempt_index + 1)
+                if replacement in excluded_replacements:
+                    continue
+                previous = self._restored_generation_cuts.get(prefix.rollout_id)
+                if previous is not None and previous != prefix:
+                    raise RuntimeError(
+                        "multiple durable generation cuts target the same replacement attempt: "
+                        f"rollout_id={prefix.rollout_id!r}, "
+                        f"attempt_index={prefix.attempt_index + 1}"
+                    )
+                self._restored_generation_cuts[prefix.rollout_id] = prefix
+        return receipt
+
+    def _generation_cut_for_context(self) -> GenerationCutPrefixAck | None:
+        context = current_capture_context()
+        if context is None or context.logical_rollout_id is None or context.attempt_index is None:
+            return None
+        with self._generation_cut_restore_lock:
+            prefix = self._restored_generation_cuts.get(context.logical_rollout_id)
+        if prefix is None or context.attempt_index < prefix.attempt_index + 1:
+            return None
+        return prefix
+
+    def _retire_generation_cut_for_context(self) -> None:
+        context = current_capture_context()
+        if context is None or context.generation_cut_key is None:
+            return
+        with self._generation_cut_restore_lock:
+            self._restored_generation_cuts.pop(context.generation_cut_key[0], None)
 
     def _load_chat_template_tokenizer(self):
         """Load an HF AutoTokenizer for client-side chat-template rendering.
@@ -841,6 +900,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._apply_sampling_overrides(body_dict)
         self._validate_single_choice_token_request(body_dict)
         if self._external_capture_handler is not None:
+            self._apply_restored_generation_cut()
             body_dict = self._external_capture_handler.prepare_request(body_dict)
         else:
             body_dict = self._apply_prefix_supply(body_dict)
@@ -852,6 +912,41 @@ class VLLMModel(SimpleResponsesAPIModel):
         context = current_capture_context()
         return context is not None and context.external_staging
 
+    def _apply_restored_generation_cut(self) -> None:
+        """Attach a restored cut to the request-scoped capture admission."""
+        context = current_capture_context()
+        if context is None or not context.external_staging:
+            return
+        admission = context.capture_admission
+        if admission is None:
+            return
+        restored_cut = self._generation_cut_for_context()
+        if restored_cut is not None:
+            if (
+                restored_cut.staging_key is None
+                or restored_cut.prefix_token_count is None
+                or restored_cut.prefix_digest is None
+            ):
+                raise RuntimeError("durable generation cut is missing recovery coordinates")
+            admission = admission.model_copy(
+                update={
+                    "generation_cut": GenerationCutContinuation(
+                        source_capture_key=capture_key_for(
+                            restored_cut.rollout_id,
+                            restored_cut.attempt_index,
+                        ),
+                        source_model_call_id=restored_cut.model_call_id,
+                        staging_key=restored_cut.staging_key,
+                        generation_token_count=restored_cut.prefix_token_count,
+                        digest=restored_cut.prefix_digest,
+                    )
+                }
+            )
+            context.capture_admission = admission
+            context.generation_cut_key = (
+                restored_cut.rollout_id,
+                restored_cut.attempt_index + 1,
+            )
     # Protect the ``[supplied, eligible, total]`` diagnostic counts.
     # Eligible calls have a resolved parent.
     _prefix_supply_counts: List[int] = PrivateAttr(default_factory=lambda: [0, 0, 0])
@@ -1038,6 +1133,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 await mark_no_generation()
                 res = self._create_empty_chat_completion()
                 res.choices[0].finish_reason = "length"
+                self._retire_generation_cut_for_context()
                 return res
             else:
                 raise e
@@ -1173,7 +1269,10 @@ class VLLMModel(SimpleResponsesAPIModel):
     async def _finalize_served_response(self, response: Any) -> None:
         """Publish lineage using the final Chat, Responses, or Messages representation."""
         if self._external_capture_handler is not None:
-            await self._external_capture_handler.finalize_response(_jsonable(response))
+            try:
+                await self._external_capture_handler.finalize_response(_jsonable(response))
+            finally:
+                self._retire_generation_cut_for_context()
 
     @staticmethod
     def _require_token_id_list(value: Any, field_name: str) -> List[Any]:

@@ -488,18 +488,56 @@ def test_model_commit_accepts_agent_continuation_index_and_returns_reference_ind
         "opaque-rollout-a-1",
     }
 
-    restored_client, _ = _participant(tmp_path / "restored")
+    cut_backend = _RecordingGenerationCutBackend()
+    restored_client, _ = _participant(
+        tmp_path / "restored",
+        generation_cut_backend=cut_backend,
+    )
+    cut_inventory = GenerationCutInventory.build(
+        checkpoint_id="checkpoint-1",
+        server_name="policy",
+        active_prefixes=[
+            GenerationCutPrefix(
+                ticket_id="ticket-1",
+                rollout_id="rollout-a",
+                attempt_index=0,
+                model_call_id="call-1",
+                admitted_at=1.0,
+            )
+        ],
+    )
+    cut_receipt = GenerationCutReceipt(
+        checkpoint_id="checkpoint-1",
+        cut_id="cut-1",
+        inventory_digest=cut_inventory.inventory_digest,
+        inventory=cut_inventory,
+        backend_snapshot_id="tq-cut-1",
+        prefixes=(
+            GenerationCutPrefixAck(
+                **cut_inventory.active_prefixes[0].model_dump(mode="json"),
+                disposition="durable_prefix",
+                frozen_buffer_id="active/checkpoint-1",
+                staging_key="__generation_cut__/checkpoint-1/rollout-a/call-1",
+                prefix_token_count=2,
+                prefix_digest="a" * 64,
+            ),
+        ),
+    )
     restored = restored_client.post(
         f"{MODEL_CHECKPOINT_URL_PREFIX}/restore",
         json={
             "checkpoint_id": "restore-1",
             "deadline_ts": 4e9,
             "checkpoint_dir": str(checkpoint),
+            "generation_cut_receipts": [cut_receipt.model_dump(mode="json")],
+            "generation_cut_exclusions": [{"rollout_id": "other-rollout", "attempt_index": 1}],
         },
         headers=AUTH_HEADERS,
     )
     assert restored.status_code == 200
     assert restored.json()["storage_reference_index"] == commit.json()["storage_reference_index"]
+    assert restored.json()["generation_cuts_restored"] == 1
+    assert cut_backend.restored == [(cut_receipt, frozenset({("other-rollout", 1)}))]
 
 
 def test_restore_validates_all_files_before_installing_any(tmp_path) -> None:
@@ -806,6 +844,20 @@ def test_restore_rejects_uncommitted_and_nonfresh_namespaces(tmp_path) -> None:
     _write_custody(restored, "old-rollout")
     with pytest.raises(LedgerMismatchError):
         CaptureLedgerCheckpointer(restored).restore(checkpoint)
+
+
+class _RecordingGenerationCutBackend:
+    def __init__(self) -> None:
+        self.restored: list[tuple[GenerationCutReceipt, frozenset[tuple[str, int]]]] = []
+
+    async def restore_generation_cut(
+        self,
+        receipt: GenerationCutReceipt,
+        *,
+        excluded_replacements: frozenset[tuple[str, int]] = frozenset(),
+    ) -> GenerationCutReceipt:
+        self.restored.append((receipt, excluded_replacements))
+        return receipt
 
 
 def _participant(
