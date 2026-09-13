@@ -9,15 +9,18 @@ mkdir -p "$DEPS_DIR"
 exec 9>"$DEPS_DIR/.prepare.lock"
 flock 9
 HERMES_COMMIT=2237be355906fbe6065ce1815711eee52b2d646e
+HERMES_REPO_URL="${HERMES_REPO_URL:-https://github.com/NousResearch/hermes-agent.git}"
 if [[ -f "$DEPS_DIR/hermes-runtime.json" && -x "$DEPS_DIR/bin/python3" ]] &&
     [[ "$(git -C "$DEPS_DIR/hermes-src" rev-parse HEAD)" == "$HERMES_COMMIT" ]] &&
-    "$DEPS_DIR/bin/python3" -I - "$DEPS_DIR" "$HERMES_COMMIT" <<'PY'
+    "$DEPS_DIR/bin/python3" -I - "$DEPS_DIR" "$HERMES_COMMIT" "$HERMES_REPO_URL" <<'PY'
 import json
 import pathlib
 import sys
 import run_agent
 root = pathlib.Path(sys.argv[1]).resolve()
-assert json.loads((root / "hermes-runtime.json").read_text())["hermes_commit"] == sys.argv[2]
+manifest = json.loads((root / "hermes-runtime.json").read_text())
+assert manifest["hermes_commit"] == sys.argv[2]
+assert manifest.get("hermes_repo_url") == sys.argv[3]
 assert pathlib.Path(run_agent.__file__).resolve().is_relative_to(root / "hermes-src")
 PY
 then
@@ -27,10 +30,12 @@ fi
 source "$SCRIPT_DIR/../anyswe_agent/setup_scripts/_portable_python.sh"
 install_portable_python
 if [ ! -d "$DEPS_DIR/hermes-src/.git" ]; then
-    git clone --depth=1 --branch=v2026.9.7 https://github.com/NousResearch/hermes-agent.git "$DEPS_DIR/hermes-src"
+    git init "$DEPS_DIR/hermes-src"
+    git -C "$DEPS_DIR/hermes-src" remote add origin "$HERMES_REPO_URL"
 else
-    git -C "$DEPS_DIR/hermes-src" fetch --depth=1 origin "$HERMES_COMMIT"
+    git -C "$DEPS_DIR/hermes-src" remote set-url origin "$HERMES_REPO_URL"
 fi
+git -C "$DEPS_DIR/hermes-src" fetch --depth=1 origin "$HERMES_COMMIT"
 git -C "$DEPS_DIR/hermes-src" checkout --detach "$HERMES_COMMIT"
 # This release intentionally rejects wheels; retain its source assets and use
 # setuptools' simple .pth editable mode, then make that path relocatable.
@@ -53,4 +58,11 @@ if not matched:
 PY
 "$DEPS_DIR/bin/python3" -I -c 'from run_agent import AIAgent; import inspect; assert "request_overrides" in inspect.signature(AIAgent).parameters'
 "$DEPS_DIR/bin/python3" -m pip freeze > "$DEPS_DIR/requirements.freeze.txt"
-printf '{"hermes_commit":"%s","tag":"v2026.9.7"}\n' "$HERMES_COMMIT" > "$DEPS_DIR/hermes-runtime.json"
+"$DEPS_DIR/bin/python3" - "$DEPS_DIR/hermes-runtime.json" "$HERMES_COMMIT" "$HERMES_REPO_URL" <<'PY'
+import json
+import pathlib
+import sys
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "hermes_commit": sys.argv[2], "tag": "v2026.9.7", "hermes_repo_url": sys.argv[3],
+}) + "\n")
+PY
