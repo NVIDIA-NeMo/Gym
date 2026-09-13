@@ -21,6 +21,7 @@ from resources_servers.math_formal_lean.proof_utils import (
     determine_proof_status,
     extract_code_block,
     extract_proof_only,
+    strip_lean_comments_and_strings,
 )
 
 
@@ -206,3 +207,32 @@ class TestDetermineProofStatus:
     def test_unknown_status(self):
         output = {}
         assert determine_proof_status(output) == "unknown"
+
+
+class TestStripLeanCommentsAndStrings:
+    def test_line_comment_content_removed_newline_and_offsets_kept(self):
+        original = "a -- sorry\nb"
+        stripped = strip_lean_comments_and_strings(original)
+        assert stripped == "a" + " " * (len("a -- sorry") - 1) + "\nb"
+        assert len(stripped) == len(original)
+
+    def test_nested_block_comments(self):
+        # The inner `-/` must not be read as closing the outer comment, or `sorry`
+        # would leak back into the checked text.
+        assert "sorry" not in strip_lean_comments_and_strings("/- /- sorry -/ -/ ok")
+        assert "ok" in strip_lean_comments_and_strings("/- /- sorry -/ -/ ok")
+
+    def test_doc_comment_is_stripped(self):
+        assert "sorry" not in strip_lean_comments_and_strings(
+            "/-- proves it with sorry -/\ntheorem t : True := trivial"
+        )
+
+    def test_string_literal_is_stripped(self):
+        assert "sorry" not in strip_lean_comments_and_strings('def s := "sorry"')
+
+    def test_escaped_quote_does_not_end_string(self):
+        assert "sorry" not in strip_lean_comments_and_strings('def s := "a\\" sorry"')
+
+    def test_code_outside_comments_survives_verbatim(self):
+        code = "theorem t : True := trivial"
+        assert strip_lean_comments_and_strings(code) == code

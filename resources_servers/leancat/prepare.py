@@ -24,28 +24,17 @@ unchanged and no ``sorry``/``admit``/``axiom``/``unsafe`` declarations.
 Upstream: https://github.com/sciencraft/LeanCat (paper: arXiv:2512.24796).
 Dataset contents are CC BY 4.0; upstream evaluation code is MIT.
 
-The conversion script lives here rather than in the source repo because the source
-repo is third-party and not ours to modify -- the same exception under which
-``math_formal_lean/prepare_minif2f.py`` is kept in-tree.
+Rows are flat (one field per upstream column, no ``responses_create_params``), the same
+shape ``benchmarks/minif2f`` uses. The prompt is applied at run time via ``prompt_config``,
+so one dataset serves both shipped templates:
 
-Rows are flat -- one field per upstream column, no ``responses_create_params`` -- and the prompt
-is applied at run time via the benchmark config's ``prompt_config``, the same shape
-``benchmarks/minif2f`` uses. The verifier reads the same flat fields; see ``app.py``'s
-``LeanCatRunRequest``.
+    benchmarks/prompts/eval/leancat/paper.yaml           the paper's Appendix D.1 template
+                                                         (benchmark default)
+    benchmarks/prompts/eval/leancat/upstream-repo.yaml   the upstream repo's own template
 
-Because the prompt is not baked into the rows, one dataset serves both shipped templates:
-
-    benchmarks/prompts/eval/leancat/paper.yaml           the paper's Appendix D.1 template,
-                                                         the benchmark default
-    benchmarks/prompts/eval/leancat/upstream-repo.yaml   what the upstream repo's own
-                                                         scripts/passk.py reads
-
-Swap with ``--prompt-config``; a per-problem diff of the two runs isolates the prompt exactly.
-
-LeanCat is 100 held-out evaluation problems with no train split, so this server declares no
-train dataset and keeps no local copy of the full set -- only ``data/example.jsonl``, the 5 rows
-the environment gate requires. ``benchmarks/leancat/prepare.py`` writes the 100-row benchmark
-JSONL from the same ``build_rows``.
+LeanCat has no train split. This script writes only the 5-row ``data/example.jsonl``;
+``benchmarks/leancat/prepare.py`` writes the 100-row benchmark JSONL from the same
+``build_rows``.
 
 Usage:
     python prepare.py                         # -> data/example.jsonl
@@ -63,28 +52,22 @@ from typing import Any, Dict, List, Optional, Sequence
 
 REPO_ROOT = Path(__file__).absolute().parents[2]
 
-# Pinned upstream revision (commit dated 2026-06-19). Bump deliberately, not
-# incidentally: another revision can change statements, difficulty labels, or the
-# prompt, none of which are detectable from the JSONL alone.
-LEANCAT_COMMIT = "4e136a13e5d0b94829c813e6f612fd991e670096"
+# Pinned upstream revision (commit dated 2026-06-19).
+LEANCAT_COMMIT = "4e136a13e5"
 RAW_BASE = f"https://raw.githubusercontent.com/sciencraft/LeanCat/{LEANCAT_COMMIT}"
 
 RECORDS_URL = f"{RAW_BASE}/data/leancat_records.jsonl"
 TARBALL_URL = f"https://codeload.github.com/sciencraft/LeanCat/tar.gz/{LEANCAT_COMMIT}"
-# Upstream's own template. Not fetched during prepare -- `upstream-repo.yaml` holds a
-# transcription of it, and the test suite refetches this URL to prove the two still agree.
+# Upstream's own template. `upstream-repo.yaml` transcribes it; the tests refetch this URL
+# to check the two still agree.
 UPSTREAM_PROMPT_URL = f"{RAW_BASE}/prompts/static_passk.md"
 
-# Both shipped prompts, applied at run time via `prompt_config`; nothing in this module renders
-# either. `paper.yaml` is the benchmark default (benchmarks/leancat/config.yaml) because it is
-# what the published numbers correspond to; `upstream-repo.yaml` is what the upstream repo runs
-# and is selected with `--prompt-config`. Same rows serve both.
+# Both shipped prompts, applied at run time via `prompt_config`.
 PROMPT_DIR = Path("benchmarks/prompts/eval/leancat")
 PROMPT_CONFIG_PATH = PROMPT_DIR / "paper.yaml"
 UPSTREAM_PROMPT_CONFIG_PATH = PROMPT_DIR / "upstream-repo.yaml"
 
-# From configs/evaluation_protocol.json at the same commit. Recorded in each row so
-# a rollout carries the toolchain it is only meaningful under.
+# From configs/evaluation_protocol.json at the same commit; recorded in each row.
 LEAN_TOOLCHAIN = "leanprover/lean4:v4.19.0"
 MATHLIB_VERSION = "v4.19.0"
 
@@ -108,14 +91,8 @@ def load_records(raw: str) -> List[Dict[str, Any]]:
 def load_statement_files(tar_bytes: bytes) -> Dict[str, str]:
     """Read ``CAT_statement/S_<id>.lean`` out of the pinned tarball, bytes untouched.
 
-    This, not the JSONL, is what upstream prompts from: ``eval_common.load_problem`` does
-    ``lean_path.read_text()`` with no ``strip()``. The two sources agree on content but not
-    on trailing whitespace -- 60 of the 100 ``.lean`` files end in a newline that
-    ``leancat_records.jsonl`` has stripped -- and that newline lands inside the prompt's
-    code fence. Sourcing from the file is what makes the rendered prompt byte-identical to
-    the reference harness's.
-
-    One tarball rather than 100 raw fetches: same pin, no rate-limit exposure.
+    Upstream prompts from these files, not from the JSONL, and the two differ in trailing
+    whitespace. Sourcing from the file keeps the rendered prompt byte-identical to upstream's.
     """
     statements: Dict[str, str] = {}
     with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
@@ -135,19 +112,15 @@ def load_statement_files(tar_bytes: bytes) -> Dict[str, str]:
 def to_gym_row(record: Dict[str, Any], statements: Optional[Dict[str, str]]) -> Dict[str, Any]:
     """Render one upstream record as a flat Gym row.
 
-    No ``responses_create_params``: the prompt is applied at run time from
-    ``PROMPT_CONFIG_PATH``, and ``nemo_gym.prompt.validate_prompt_compatibility`` rejects rows
-    that carry a pre-populated ``input`` alongside a ``prompt_config``. ``formal_statement`` is
-    top-level because that is where ``fill_prompt``'s ``format_map`` looks for it -- and where
-    the verifier looks too, so it is not duplicated.
+    ``formal_statement`` is top-level because both the prompt template and the verifier
+    read it from there.
     """
     problem_id = record["problem_id"]
     formal_statement = record["formal_statement"]
 
     if statements is not None:
         from_file = statements[problem_id]
-        # Content drift between the two upstream sources would silently change what is
-        # asked and what is checked, so it fails the run rather than getting normalised away.
+        # The two upstream sources must agree on content; drift fails loudly.
         if from_file.strip() != formal_statement.strip():
             raise ValueError(
                 f"Problem {problem_id}: CAT_statement/S_{problem_id}.lean disagrees with the JSONL record"
@@ -159,11 +132,9 @@ def to_gym_row(record: Dict[str, Any], statements: Optional[Dict[str, str]]) -> 
         "level": record["level"],
         "tag": record["tag"],
         "domain": record["domain"],
-        # The reference file, verbatim: substituted into the prompt's `{formal_statement}` and
-        # used by the verifier to confirm the model did not weaken, rename, or drop hypotheses.
+        # The reference file, verbatim: filled into the prompt and used by the verifier.
         "formal_statement": formal_statement,
-        # Unused by the static pass@k protocol (which is formal-input only),
-        # but required by the natural-language and LeanBridge variants.
+        # Unused by the static pass@k protocol; needed by upstream's natural-language variants.
         "natural_language_statement": record["natural_language_statement"],
         "lean_toolchain": LEAN_TOOLCHAIN,
         "mathlib_version": MATHLIB_VERSION,
@@ -181,9 +152,7 @@ def write_jsonl(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
 def build_rows(records_raw: Optional[str] = None, use_statement_files: bool = True) -> List[Dict[str, Any]]:
     """Fetch the pinned upstream revision and build all 100 rows.
 
-    The shared entry point for this script and ``benchmarks/leancat/prepare.py``, so every
-    consumer builds rows the one way that matches upstream (statements from the
-    ``CAT_statement/*.lean`` files, trailing newline included).
+    Shared by this script and ``benchmarks/leancat/prepare.py``.
     """
     records = load_records(records_raw if records_raw is not None else fetch_text(RECORDS_URL))
 
@@ -209,8 +178,7 @@ def main() -> None:
         action="store_true",
         help=(
             "Take formal_statement from the JSONL instead of the CAT_statement/*.lean files. "
-            "Faster and offline-friendly, but 60 of the 100 prompts then differ from the "
-            "reference harness's by the file's trailing newline."
+            "Faster, but some prompts then differ from upstream's by a trailing newline."
         ),
     )
     parser.add_argument(
@@ -226,9 +194,7 @@ def main() -> None:
         use_statement_files=not args.no_statement_files,
     )
 
-    # Only the 5-row example set. LeanCat is 100 held-out evaluation problems with no train
-    # split, so this server declares no train dataset and keeps no local copy of the full set --
-    # `benchmarks/leancat/prepare.py` writes that, for the benchmark, from the same `build_rows`.
+    # Only the 5-row example set; the benchmark JSONL is written by benchmarks/leancat/prepare.py.
     write_jsonl(args.output_dir / "example.jsonl", rows[:NUM_EXAMPLE_ROWS])
 
     levels: Dict[str, int] = {}
