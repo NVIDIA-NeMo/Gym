@@ -22,6 +22,7 @@ from resources_servers.math_formal_lean.proof_utils import (
     extract_code_block,
     extract_proof_only,
     strip_lean_comments_and_strings,
+    strip_thinking,
 )
 
 
@@ -236,3 +237,20 @@ class TestStripLeanCommentsAndStrings:
     def test_code_outside_comments_survives_verbatim(self):
         code = "theorem t : True := trivial"
         assert strip_lean_comments_and_strings(code) == code
+
+
+class TestStripThinking:
+    def test_closed_block_removed(self):
+        assert strip_thinking("<think>a</think>answer") == "answer"
+
+    def test_bare_close_keeps_only_the_tail(self):
+        assert strip_thinking("reasoning</think>answer") == "answer"
+
+    def test_last_close_wins(self):
+        assert strip_thinking("r1</think>mid</think>answer") == "answer"
+
+    def test_unclosed_opener_drops_the_rest(self):
+        assert strip_thinking("answer<think>reasoning") == "answer"
+
+    def test_no_tags_unchanged(self):
+        assert strip_thinking("plain") == "plain"
