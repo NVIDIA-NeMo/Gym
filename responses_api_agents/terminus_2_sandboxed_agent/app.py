@@ -6,21 +6,27 @@ import json
 import logging
 import sys
 import tempfile
+from importlib.metadata import version
 from pathlib import Path
-from time import time
+from time import perf_counter, time
 from traceback import format_exc
 from types import SimpleNamespace
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from fastapi import Request
 from harbor.agents.terminus_2 import Terminus2
-from harbor.llms.base import BaseLLM, LLMResponse
+from harbor.llms.base import BaseLLM, ContextLengthExceededError, LLMResponse
 from harbor.models.agent.context import AgentContext
 from harbor.models.metric.usage_info import UsageInfo
 from harbor.utils.logger import logger as harbor_logger
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
+from nemo_gym.adapters.turn_counter_proxy import (
+    TurnConstraintConfig,
+    start_turn_counter_proxy,
+    turn_constraint_metadata,
+)
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
@@ -53,6 +59,7 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     max_turns: int | None
+    turn_constraint: Optional[TurnConstraintConfig] = None
     parser_name: str = "json"
     enable_summarize: bool
     proactive_summarization_threshold: int
@@ -60,13 +67,21 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     tmux_pane_height: int
     dump_trajectory: bool = False
     debug: bool = False
-    model_context_limit: int = 1_000_000
-    model_output_limit: int | None = None
+    model_context_limit: int
+    model_output_limit: int | None
+
+    llm_request_timeout: int
 
     sandbox_provider: str
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_timeout: float
     remote_tmux_binary_path: Optional[str]
+
+    @model_validator(mode="after")
+    def _validate_turn_constraint(self) -> "Terminus2AgentConfig":
+        if self.turn_constraint is not None and self.max_turns is not None:
+            raise ValueError("proxy turn_constraint requires max_turns=null to disable the native budget")
+        return self
 
 
 class Terminus2AgentRunRequest(BaseRunRequest):
@@ -81,6 +96,20 @@ class Terminus2AgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
     terminus2_completed: bool
+    command_exec_times: List[float]
+    model_call_times: List[float]
+    average_command_exec_time: float
+    average_model_call_time: float
+    total_command_exec_time: float
+    total_model_call_time: float
+    command_exec_time_pct: float
+    model_call_time_pct: float
+    terminus2_time_taken: float
+    model_calls_gt_10min: int
+    usages: List[Optional[NeMoGymResponseUsage]]
+    num_proactive_compactions: int
+    num_compactions: int
+    error: Optional[str]
 
 
 class NeMoGymSandboxEnvironment:
@@ -142,13 +171,23 @@ class NeMoGymLLM(BaseLLM):
         model_name: str,
         model_context_limit: int,
         model_output_limit: int | None,
+        llm_request_timeout: int,
     ):
         super().__init__()
         self._client = client
         self._model_name = model_name
         self._model_context_limit = model_context_limit
         self._model_output_limit = model_output_limit
+        self._llm_request_timeout = llm_request_timeout
         self.trajectory: list[NeMoGymResponseOutputItem] = []
+        self.usages: list[NeMoGymResponseUsage] = []
+        self._times_spent = []
+        self._last_input_items = []
+        self._model_calls_gt_10min = 0
+        self._num_compactions = 0
+
+        self._is_compacting = False
+        self._just_compacted = False
 
     @staticmethod
     def _input_items(message_history: list[dict[str, Any]], prompt: str) -> list[NeMoGymEasyInputMessage]:
@@ -177,13 +216,38 @@ class NeMoGymLLM(BaseLLM):
             raise NotImplementedError(f"NeMoGymLLM does not support call options: {sorted(kwargs)}")
 
         input_items = self._input_items(message_history, prompt)
-        response = NeMoGymResponse.model_validate(
-            await self._client.create_response(
-                model=self._model_name,
-                input=[item.model_dump(mode="json", exclude_none=True) for item in input_items],
-            )
-        )
-        self.trajectory.extend([*input_items, *response.output])
+        response = None
+        start_time = perf_counter()
+        max_attempts = 10  # Harbor does 3 by default and Litellm does 3 by default. Hardcode 10 attempts for now.
+        for _ in range(max_attempts):
+            try:
+                async with asyncio.timeout(delay=self._llm_request_timeout):
+                    response = NeMoGymResponse.model_validate(
+                        await self._client.create_response(
+                            model=self._model_name,
+                            input=[item.model_dump(mode="json", exclude_none=True) for item in input_items],
+                        )
+                    )
+                    break
+            except TimeoutError:
+                self._model_calls_gt_10min += 1
+
+        self._times_spent.append(perf_counter() - start_time)
+        if not response:
+            raise TimeoutError(f"Failed to query model endpoint due to timeouts after {max_attempts} attempts!")
+
+        if self._is_compacting:
+            self.trajectory.extend([input_items[-1], *response.output])
+            self._just_compacted = True
+        elif self._just_compacted:
+            self.trajectory.extend([*input_items, *response.output])
+            self._just_compacted = False
+        else:
+            self.trajectory.extend([input_items[-1], *response.output])
+
+        self.usages.append(response.usage)
+        self._last_input_items = input_items.copy()
+
         usage = response.usage
         usage_info = None
         if usage is not None:
@@ -194,6 +258,12 @@ class NeMoGymLLM(BaseLLM):
                 cost_usd=0.0,
             )
         content, reasoning_content = self._response_text(response)
+
+        # @bxyu-nvidia: Gym will return an empty model response when context length is exceeded
+        if not (content or reasoning_content) or response.incomplete_details:
+            self._num_compactions += 1
+            raise ContextLengthExceededError
+
         return LLMResponse(
             content=content,
             reasoning_content=reasoning_content,
@@ -215,17 +285,43 @@ class NeMoGymTerminus2(Terminus2):
     def __init__(self, *args: Any, llm: NeMoGymLLM, dump_trajectory: bool, **kwargs: Any):
         self._nemo_gym_llm = llm
         self._dump_trajectory_enabled = dump_trajectory
+        self._times_spent = []
+        self._num_proactive_compactions = 0
+        self._is_check_proactive_summarization = False
         super().__init__(*args, **kwargs)
 
     def _init_llm(self, *args: Any, **kwargs: Any) -> BaseLLM:
         return self._nemo_gym_llm
 
-    def _count_total_tokens(self, chat: Any) -> int:
-        return sum(len(str(message.get("content", ""))) // 4 for message in chat.messages)
-
     def _dump_trajectory_with_continuation_index(self, continuation_index: int) -> None:
         if self._dump_trajectory_enabled:
             super()._dump_trajectory_with_continuation_index(continuation_index)
+
+    async def _execute_commands(self, *args, **kwargs):
+        start_time = perf_counter()
+        res = await super()._execute_commands(*args, **kwargs)
+        self._times_spent.append(perf_counter() - start_time)
+
+        return res
+
+    def _count_total_tokens(self, *args, **kwargs):
+        if self._is_check_proactive_summarization and self._nemo_gym_llm.usages:
+            return self._nemo_gym_llm.usages[-1].total_tokens
+        return super()._count_total_tokens(*args, **kwargs)
+
+    async def _check_proactive_summarization(self, *args, **kwargs):
+        self._is_check_proactive_summarization = True
+        res = await super()._check_proactive_summarization(*args, **kwargs)
+        self._is_check_proactive_summarization = False
+        if res:
+            self._num_proactive_compactions += 1
+        return res
+
+    async def _summarize(self, *args, **kwargs):
+        self._nemo_gym_llm._is_compacting = True
+        res = await super()._summarize(*args, **kwargs)
+        self._nemo_gym_llm._is_compacting = False
+        return res
 
 
 class Terminus2Agent(SimpleResponsesAPIAgent):
@@ -248,18 +344,46 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming,
         sandbox: AsyncSandbox,
-    ) -> Tuple[NeMoGymResponse, bool]:
-        instruction = _instruction(body.input)
-
+    ) -> Tuple[NeMoGymResponse, Dict[str, Any]]:
         model_base_url = (
             self.base_url_for_run(base_url=get_server_url(self.config.model_server.name), body=await request.json())
             + "/v1"
         )
+        constraint = self.config.turn_constraint
+        if constraint is None:
+            return await self._execute_impl(request, body, sandbox, model_base_url)
+        proxy = await start_turn_counter_proxy(
+            upstream_base_url=model_base_url,
+            api_key="dummy",
+            max_turns=constraint.limit,
+            position=constraint.reminder.position,
+            trigger=constraint.reminder.trigger,
+            label=request.session[SESSION_ID_KEY],
+        )
+        try:
+            response, metrics = await self._execute_impl(request, body, sandbox, proxy.base_url)
+            metrics["turn_constraint"] = turn_constraint_metadata(
+                constraint, proxy, harness_version=f"harbor/{version('harbor')}:terminus-2"
+            ).model_dump()
+            return response, metrics
+        finally:
+            await proxy.stop()
+
+    async def _execute_impl(
+        self,
+        request: Request,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        sandbox: AsyncSandbox,
+        model_base_url: str,
+    ) -> Tuple[NeMoGymResponse, Dict[str, Any]]:
+        start_time = perf_counter()
+        instruction = _instruction(body.input)
         llm = NeMoGymLLM(
             client=NeMoGymAsyncOpenAI(base_url=model_base_url, api_key="dummy", internal=True),
             model_name=self.config.model_server.name,
             model_context_limit=self.config.model_context_limit,
             model_output_limit=self.config.model_output_limit,
+            llm_request_timeout=self.config.llm_request_timeout,
         )
 
         with tempfile.TemporaryDirectory(prefix="nemo-gym-terminus-2-") as log_dir:
@@ -301,13 +425,16 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 async with asyncio.timeout(self.config.sandbox_timeout):
                     await agent.run(instruction, environment, context)
                 terminus2_completed = True
+                error = None
             except TimeoutError:
                 terminus2_completed = False
+                error = format_exc()
             except:
                 terminus2_completed = False
+                error = format_exc()
                 print(f"Hit exception while running Terminus2: {format_exc()}", file=sys.stderr)
             finally:
-                await agent._session.stop()
+                pass
 
         usage = NeMoGymResponseUsage(
             input_tokens=context.n_input_tokens or 0,
@@ -316,7 +443,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
             total_tokens=(context.n_input_tokens or 0) + (context.n_output_tokens or 0),
         )
-        return NeMoGymResponse(
+        response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=self.config.model_server.name,
@@ -326,7 +453,29 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
             usage=usage,
-        ), terminus2_completed
+        )
+
+        total_time = perf_counter() - start_time
+        total_command_exec_time = sum(agent._times_spent)
+        total_model_call_time = sum(llm._times_spent)
+        metrics = {
+            "terminus2_completed": terminus2_completed,
+            "command_exec_times": agent._times_spent,
+            "model_call_times": llm._times_spent,
+            "average_command_exec_time": total_command_exec_time / max(len(agent._times_spent), 1),
+            "average_model_call_time": total_model_call_time / max(len(llm._times_spent), 1),
+            "total_command_exec_time": total_command_exec_time,
+            "total_model_call_time": total_model_call_time,
+            "command_exec_time_pct": 100 * total_command_exec_time / total_time,
+            "model_call_time_pct": 100 * total_model_call_time / total_time,
+            "terminus2_time_taken": total_time,
+            "model_calls_gt_10min": llm._model_calls_gt_10min,
+            "num_proactive_compactions": agent._num_proactive_compactions,
+            "num_compactions": llm._num_compactions,
+            "error": error,
+            "usages": llm.usages,
+        }
+        return response, metrics
 
     async def responses(self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         session_key = request.session[SESSION_ID_KEY]
@@ -352,7 +501,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         session_key = request.session[SESSION_ID_KEY]
         self._session_sandboxes[session_key] = sandbox
 
-        response, terminus2_completed = await self._execute(request, body.responses_create_params, sandbox)
+        response, metrics = await self._execute(request, body.responses_create_params, sandbox)
 
         verification = await self.server_client.post(
             server_name=self.config.resources_server.name,
@@ -369,7 +518,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             print("Failed to stop sandbox", format_exc(), file=sys.stderr)
 
         result = await get_response_json(verification)
-        result["terminus2_completed"] = terminus2_completed
+        result.update(metrics)
         return Terminus2AgentVerifyResponse.model_validate(result)
 
 

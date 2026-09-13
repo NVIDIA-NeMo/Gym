@@ -3,7 +3,7 @@
 
 import logging
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -114,7 +114,13 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
             )
 
     client = Client()
-    llm = NeMoGymLLM(client=client, model_name="policy_model", model_context_limit=32_000, model_output_limit=4_000)
+    llm = NeMoGymLLM(
+        client=client,
+        model_name="policy_model",
+        model_context_limit=32_000,
+        model_output_limit=4_000,
+        llm_request_timeout=60,
+    )
 
     first = await llm.call("first")
     second = await llm.call(
@@ -122,10 +128,16 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
         message_history=[{"role": "user", "content": "first"}, {"role": "assistant", "content": "answer 1"}],
         previous_response_id="resp_1",
     )
+    third = await llm.call(
+        "third",
+        message_history=[{"role": "user", "content": "compacted summary"}],
+        previous_response_id="resp_2",
+    )
 
     assert first.content == "answer 1"
     assert first.usage.prompt_tokens == 10
     assert second.content == "answer 2"
+    assert third.content == "answer 3"
     assert client.requests == [
         {"model": "policy_model", "input": [{"content": "first", "role": "user", "type": "message"}]},
         {
@@ -136,19 +148,26 @@ async def test_nemo_gym_llm_records_every_responses_request_and_output():
                 {"content": "second", "role": "user", "type": "message"},
             ],
         },
+        {
+            "model": "policy_model",
+            "input": [
+                {"content": "compacted summary", "role": "user", "type": "message"},
+                {"content": "third", "role": "user", "type": "message"},
+            ],
+        },
     ]
     assert [item.content for item in llm.trajectory if isinstance(item, NeMoGymEasyInputMessage)] == [
         "first",
-        "first",
-        "answer 1",
         "second",
+        "third",
     ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dump_trajectory", [False, True])
 @pytest.mark.parametrize("debug", [False, True])
-async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_trajectory, debug):
+@pytest.mark.parametrize("constrained", [False, True])
+async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_trajectory, debug, constrained):
     config = Terminus2AgentConfig(
         host="0.0.0.0",
         port=8080,
@@ -156,13 +175,17 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         name="terminus_2_1_agent",
         resources_server=ResourcesServerRef(type="resources_servers", name="swebench_resources_server"),
         model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
-        max_turns=100,
+        max_turns=None if constrained else 100,
+        turn_constraint={"enforcement": "proxy", "limit": 2} if constrained else None,
         enable_summarize=True,
         proactive_summarization_threshold=8000,
         tmux_pane_width=160,
         tmux_pane_height=40,
         dump_trajectory=dump_trajectory,
         debug=debug,
+        model_context_limit=32_000,
+        model_output_limit=4_000,
+        llm_request_timeout=60,
         sandbox_provider="opensandbox",
         sandbox_timeout=10,
         remote_tmux_binary_path=None,
@@ -170,6 +193,9 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
     set_level = MagicMock()
     monkeypatch.setattr(app_module.harbor_logger, "setLevel", set_level)
     server = Terminus2Agent(config=config, server_client=MagicMock(spec=ServerClient))
+    proxy = SimpleNamespace(base_url="http://turn-proxy/v1", turns_used=3, stop=AsyncMock())
+    start_proxy = AsyncMock(return_value=proxy)
+    monkeypatch.setattr(app_module, "start_turn_counter_proxy", start_proxy)
     sandbox_calls = []
 
     async def sandbox_exec(command, **kwargs):
@@ -182,8 +208,12 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
         session = SimpleNamespace()
 
         def __init__(self, **kwargs):
+            assert kwargs["max_turns"] == (None if constrained else 100)
             self.kwargs = kwargs
             self._session = SimpleNamespace(stop=self.stop)
+            self._times_spent = [1.0, 3.0]
+            self._num_proactive_compactions = 0
+            self._num_compactions = 2
 
         async def stop(self):
             return None
@@ -195,6 +225,8 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
             assert instruction == "solve this"
             assert self.kwargs["dump_trajectory"] is dump_trajectory
             await environment.exec("tmux run")
+            self.kwargs["llm"]._times_spent.extend([2.0, 4.0])
+            self.kwargs["llm"]._num_compactions = 2
             context.n_input_tokens = 4
             context.n_output_tokens = 3
             self.kwargs["llm"].trajectory.append(
@@ -217,18 +249,48 @@ async def test_execute_runs_terminus_in_seeded_sandbox(monkeypatch, dump_traject
     monkeypatch.setattr(app_module, "AgentContext", FakeContext)
     monkeypatch.setattr(Terminus2Agent, "base_url_for_run", lambda *_args, **_kwargs: "http://model")
     monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://model")
+    elapsed_times = iter([10.0, 20.0])
+    monkeypatch.setattr(app_module, "perf_counter", lambda: next(elapsed_times))
 
     async def request_json():
         return {"task_id": "task"}
 
     request = SimpleNamespace(json=request_json, session={app_module.SESSION_ID_KEY: "session-1"})
-    response, terminus2_completed = await server._execute(
+    response, metrics = await server._execute(
         request,
         NeMoGymResponseCreateParamsNonStreaming(input="solve this"),
         sandbox,
     )
 
-    assert terminus2_completed is True
+    if constrained:
+        start_proxy.assert_awaited_once()
+        assert start_proxy.call_args.kwargs["upstream_base_url"] == "http://model/v1"
+        assert start_proxy.call_args.kwargs["max_turns"] == 2
+        proxy.stop.assert_awaited_once()
+        constraint = metrics.pop("turn_constraint")
+        assert constraint["realized"]["observed_count"] == 3
+        assert constraint["realized"]["exhausted"] is True
+        assert constraint["requested"]["limit"] == 2
+    else:
+        start_proxy.assert_not_awaited()
+
+    assert metrics == {
+        "terminus2_completed": True,
+        "command_exec_times": [1.0, 3.0],
+        "model_call_times": [2.0, 4.0],
+        "average_command_exec_time": 2.0,
+        "average_model_call_time": 3.0,
+        "total_command_exec_time": 4.0,
+        "total_model_call_time": 6.0,
+        "command_exec_time_pct": 40.0,
+        "model_call_time_pct": 60.0,
+        "terminus2_time_taken": 10.0,
+        "model_calls_gt_10min": 0,
+        "num_proactive_compactions": 0,
+        "num_compactions": 2,
+        "error": None,
+        "usages": [],
+    }
     assert response.output[-1].content[0].text == "done"
     assert response.usage.input_tokens == 4
     assert response.usage.output_tokens == 3
