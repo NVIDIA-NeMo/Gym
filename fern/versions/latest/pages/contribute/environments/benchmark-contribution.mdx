@@ -24,15 +24,41 @@ Complete [Onboarding Setup](/main/get-started/onboarding-setup) in your checkout
 skipping its clone command. Use its Python requirements, frozen lockfile, and
 exported child-dependency constraints.
 
+### Create and Complete the Manifest
+
 Replace `safety_example` throughout this guide with an unused lowercase Python identifier.
 
 ```bash title="contribution-scaffold"
 gym env init --benchmark safety_example --profile custom-gym-verifier
 ```
 
+This creates `benchmarks/safety_example/manifest.yaml` and its companion files.
+The manifest records the benchmark's identity, metadata, and composition for
+catalog discovery and validation. Complete it alongside `config.yaml` and include
+both files in your PR or MR.
+
 The scaffold contains a one-question arithmetic example. Replace its data and
 scoring logic with your benchmark. For a worked example, see
 [Native Benchmark Onboarding](/main/get-started/native-onboarding).
+
+### Request Gym Team Maintenance
+
+<Note>
+The `experimental` field requires [PR #3147](https://github.com/NVIDIA-NeMo/Gym/pull/3147).
+On checkouts without that change, omit the field; unknown manifest keys fail validation.
+</Note>
+
+On supported checkouts, new manifests default to `experimental: true`:
+
+```yaml title="manifest.yaml (maintenance field)"
+experimental: true
+```
+
+If you need the Gym team to maintain the benchmark and handle PR reviews and
+approvals, ping a Gym maintainer in your PR or MR to request `experimental: false`.
+Keep it `true` until the team accepts maintenance ownership; only the Gym team
+should set it to `false`, which marks the benchmark as `maintained`.
+The flag does not assign reviewers or change repository approval rules.
 
 ## 3. Replace the Control With Your Benchmark
 
@@ -81,7 +107,8 @@ checks are model-free; custom tests must document external-service requirements.
 The first run may install dependencies.
 
 <Note>
-`gym env publish` checks local readiness and reports `experimental` status.
+`gym env publish` checks local readiness and reports the catalog status
+(`experimental` for new contributions).
 It does not upload data, create a PR/MR, or certify benchmark fidelity.
 </Note>
 
@@ -171,6 +198,7 @@ or [GitLab MR](/main/contribute/environments/benchmark-private-contribution#3-pu
 ```markdown
 ## Benchmark
 - Task, motivation, maintainer, and requested reviewer:
+- Gym-team maintenance requested, if applicable:
 - Dataset source/version, split, license, access, and release restrictions:
 - Synthetic-data attribution, if applicable:
 
