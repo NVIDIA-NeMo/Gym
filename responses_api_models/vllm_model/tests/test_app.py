@@ -74,6 +74,7 @@ from nemo_gym.token_id_capture import (
 from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint
 from nemo_gym.token_id_capture.lineage import RolloutLineage
 from nemo_gym.token_id_capture.records import ParentResolutionStatus
+from nemo_gym.token_id_capture.staging import CaptureAdmission
 from responses_api_models.vllm_model.app import (
     VLLMConverter,
     VLLMModel,
@@ -189,6 +190,155 @@ async def test_generation_cut_routes_each_call_to_its_owning_vllm_worker(
     assert isinstance(sent["json"], dict)
     assert receipt.inventory == inventory
     assert receipt.prefixes[0].staging_key == "prefix-1"
+
+
+@mark.asyncio
+async def test_generation_cut_restore_attaches_prefix_to_replacement_attempt(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN", "test-control-token")
+    model = VLLMModel(
+        config=VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="policy",
+            base_url="http://worker-0:8000/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            uses_interleaved_reasoning=False,
+        ),
+        server_client=MagicMock(
+            spec=ServerClient,
+            global_config_dict={
+                "token_id_capture": {
+                    "enabled": True,
+                    "external_staging": True,
+                    "rebuild_response": False,
+                    "generation_prefix_cuts_enabled": True,
+                }
+            },
+        ),
+    )
+    inventory = GenerationCutInventory.build(
+        checkpoint_id="checkpoint-1",
+        server_name="policy",
+        active_prefixes=[
+            GenerationCutPrefix(
+                ticket_id="ticket-1",
+                rollout_id="rollout-1",
+                attempt_index=0,
+                model_call_id="old-call",
+                admitted_at=1.0,
+            )
+        ],
+    )
+    receipt = GenerationCutReceipt(
+        checkpoint_id="checkpoint-1",
+        cut_id="cut-1",
+        inventory_digest=inventory.inventory_digest,
+        inventory=inventory,
+        backend_snapshot_id="tq-1",
+        prefixes=(
+            GenerationCutPrefixAck(
+                **inventory.active_prefixes[0].model_dump(mode="json"),
+                disposition="durable_prefix",
+                frozen_buffer_id="active/checkpoint-1",
+                staging_key="__generation_cut__/checkpoint-1/rollout-1/old-call",
+                prefix_token_count=2,
+                prefix_digest="a" * 64,
+            ),
+        ),
+    )
+    await model.restore_generation_cut(receipt)
+    context = CaptureContext(
+        rollout_id="rollout-1-a1",
+        model_call_id="new-call",
+        token_sink=None,
+        logical_rollout_id="rollout-1",
+        attempt_index=1,
+        external_staging=True,
+        capture_admission=CaptureAdmission(
+            rollout_id="rollout-1-a1",
+            model_call_id="new-call",
+            mode="text",
+        ),
+    )
+    token = set_token_sink(context)
+    try:
+        payload = model._apply_external_capture({})
+        continuation = payload["ng_capture"]["generation_cut"]
+        assert continuation.pop("schema_version") == context.capture_admission.schema_version
+        assert continuation == {
+            "source_capture_key": "rollout-1",
+            "source_model_call_id": "old-call",
+            "staging_key": "__generation_cut__/checkpoint-1/rollout-1/old-call",
+            "generation_token_count": 2,
+            "digest": "a" * 64,
+        }
+        context.attempt_index = 2
+        assert model._generation_cut_for_context() == receipt.prefixes[0]
+        context.attempt_index = 1
+        model._retire_generation_cut_for_context()
+        assert model._generation_cut_for_context() is None
+        await model.restore_generation_cut(
+            receipt,
+            excluded_replacements=frozenset({("rollout-1", 1)}),
+        )
+        assert model._generation_cut_for_context() is None
+    finally:
+        reset_token_sink(token)
+
+
+@mark.asyncio
+async def test_generation_cut_restore_rejects_process_local_multi_worker_registry(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN", "test-control-token")
+    model = VLLMModel(
+        config=VLLMModelConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="policy",
+            base_url="http://worker-0:8000/v1",
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            uses_interleaved_reasoning=False,
+            num_workers=2,
+        ),
+        server_client=MagicMock(
+            spec=ServerClient,
+            global_config_dict={
+                "token_id_capture": {
+                    "enabled": True,
+                    "external_staging": True,
+                    "rebuild_response": False,
+                    "generation_prefix_cuts_enabled": True,
+                }
+            },
+        ),
+    )
+    inventory = GenerationCutInventory.build(
+        checkpoint_id="checkpoint-1",
+        server_name="policy",
+        active_prefixes=[],
+    )
+    receipt = GenerationCutReceipt(
+        checkpoint_id="checkpoint-1",
+        cut_id="cut-1",
+        inventory_digest=inventory.inventory_digest,
+        inventory=inventory,
+        backend_snapshot_id="tq-1",
+        prefixes=(),
+    )
+
+    with raises(RuntimeError, match="single Gym model-server worker"):
+        await model.restore_generation_cut(receipt)
 
 
 def test_strip_hosted_only_tool_fields_pops_strict() -> None:
