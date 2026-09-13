@@ -23,6 +23,8 @@ import re
 import time
 from typing import Any, Dict, List, Mapping, Tuple
 
+from nemo_gym.adapters.turn_counter_proxy import is_turn_budget_exhausted
+
 
 LOG = logging.getLogger("nemo_gym.osworld_agent.adapter_agents")
 
@@ -444,7 +446,7 @@ class NemotronV3NanoOmniAgent:
     def __init__(
         self,
         model: str,
-        max_steps: int,
+        max_steps: int | None,
         max_image_history_length: int = 3,
         platform: str = "ubuntu",
         max_tokens: int = 16384,
@@ -714,6 +716,8 @@ class NemotronV3NanoOmniAgent:
                     )
                 break
             except Exception as exc:  # noqa: BLE001 - malformed model output is retryable.
+                if is_turn_budget_exhausted(exc):
+                    raise
                 last_error = str(exc)
                 will_retry = attempt + 1 < self.parse_retries
                 feedback_next = self.parse_error_feedback and will_retry
@@ -752,7 +756,11 @@ class NemotronV3NanoOmniAgent:
         self.actions.append(low_level)
         self.cots.append(parsed_info)
 
-        if len(self.actions) >= self.max_steps and not any(action in {"DONE", "FAIL"} for action in actions):
+        if (
+            self.max_steps is not None
+            and len(self.actions) >= self.max_steps
+            and not any(action in {"DONE", "FAIL"} for action in actions)
+        ):
             parsed_info["code"] = "FAIL"
             return content, ["FAIL"], parsed_info
         return content, actions, parsed_info

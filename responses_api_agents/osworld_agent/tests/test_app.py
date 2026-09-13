@@ -13,7 +13,7 @@ import json
 import os
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -576,6 +576,7 @@ class TestApp:
         assert "osworld_error" in response.verifier_metadata
         assert "No 'osworld_task'" in response.verifier_metadata["osworld_error"]
 
+    @pytest.mark.parametrize("constrained", [False, True])
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
     @patch("asyncio.to_thread")
@@ -585,6 +586,7 @@ class TestApp:
         mock_remote,
         mock_get_first_server_config_dict,
         monkeypatch,
+        constrained,
     ) -> None:
         monkeypatch.setenv("RUN_TAG", "run-001")
 
@@ -599,7 +601,14 @@ class TestApp:
             mock_get_first_server_config_dict,
             extra_global_config={"observability_enabled": True},
         )
-        agent = OSWorldAgent(config=make_config(), server_client=server_client)
+        proxy = SimpleNamespace(base_url="http://proxy:123/v1", turns_used=3, stop=AsyncMock())
+        start_proxy = AsyncMock(return_value=proxy)
+        monkeypatch.setattr("responses_api_agents.osworld_agent.app.start_turn_counter_proxy", start_proxy)
+        constraint = {"enforcement": "proxy", "limit": 2}
+        config = (
+            make_config(max_steps=None, turn_constraint=constraint, host="192.0.2.1") if constrained else make_config()
+        )
+        agent = OSWorldAgent(config=config, server_client=server_client)
         request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK, temperature=0.7, top_p=0.95)
         request = OSWorldRunRequest.model_validate(
             {
@@ -631,7 +640,17 @@ class TestApp:
         mock_remote.options.return_value.remote.assert_called_once()
         positional_args, _ = mock_remote.options.return_value.remote.call_args
         assert positional_args[0] == DEFAULT_OSWORLD_TASK
-        assert positional_args[1]["base_url"] == "http://127.0.0.1:8000/ng-rollout/4-0/v1"
+        upstream = "http://127.0.0.1:8000/ng-rollout/4-0/v1"
+        assert positional_args[1]["base_url"] == (proxy.base_url if constrained else upstream)
+        if constrained:
+            assert positional_args[1]["policy_base_url"] == proxy.base_url
+            assert positional_args[1]["max_steps"] is None
+            assert start_proxy.call_args.kwargs["upstream_base_url"] == upstream
+            assert response.turn_constraint["realized"]["observed_count"] == 3
+            assert response.turn_constraint["realized"]["exhausted"] is True
+            proxy.stop.assert_awaited_once()
+        else:
+            start_proxy.assert_not_awaited()
         assert positional_args[1]["evaluator_disable_gpu"] is True
         assert positional_args[1]["docker_port_lock_timeout"] == 300.0
         assert positional_args[1]["enable_proxy"] is False

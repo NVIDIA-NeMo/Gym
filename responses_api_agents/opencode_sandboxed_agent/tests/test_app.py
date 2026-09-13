@@ -22,8 +22,10 @@ from types import SimpleNamespace
 from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from pytest import MonkeyPatch, fixture, mark
 
+from nemo_gym.adapters.turn_counter_proxy import TurnConstraintConfig
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -334,6 +336,7 @@ class TestOpenCodeSandboxedAgent:
         assert observation.outcome == "sandbox_error"
         assert observation.exit_code is None
 
+    @mark.parametrize("constrained", [False, True])
     @mark.parametrize(
         ("observability_enabled", "token_capture_enabled", "expected_base_url"),
         [
@@ -350,6 +353,7 @@ class TestOpenCodeSandboxedAgent:
         observability_enabled: bool,
         token_capture_enabled: bool,
         expected_base_url: str,
+        constrained: bool,
     ) -> None:
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {
@@ -370,15 +374,21 @@ class TestOpenCodeSandboxedAgent:
             }
         )
 
+        if constrained:
+            server.config.turn_constraint = TurnConstraintConfig(enforcement="proxy", limit=2)
+            request.state._ng_turn_proxy_base_url = "http://proxy:123/v1"
+            expected_base_url = "http://proxy:123/v1"
         config = await server._create_opencode_config(request)
 
         assert config["provider"]["nemo_gym"]["options"]["baseURL"] == expected_base_url
 
+    @mark.parametrize("constrained", [False, True])
     async def test_run_builds_observations_from_live_wal_snapshot(
         self,
         tmp_path: Path,
         opencode_export_test_data: Dict[str, Any],
         monkeypatch: MonkeyPatch,
+        constrained: bool,
     ) -> None:
         class Response:
             ok = True
@@ -453,6 +463,13 @@ class TestOpenCodeSandboxedAgent:
             "token_id_capture": {"enabled": False, "all_agents": False},
         }
         server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
+        if constrained:
+            server.config.turn_constraint = TurnConstraintConfig(enforcement="proxy", limit=2)
+        proxy = SimpleNamespace(base_url="http://turn-proxy/v1", turns_used=3, stop=AsyncMock())
+        start_proxy = AsyncMock(return_value=proxy)
+        monkeypatch.setattr(app_module, "start_turn_counter_proxy", start_proxy)
+        monkeypatch.setattr(app_module, "get_server_url", lambda _: "http://model-server")
+        monkeypatch.setattr(app_module, "gethostbyname", lambda _: "192.0.2.1")
         server._create_opencode_config = AsyncMock(return_value={})
 
         sandbox = MagicMock()
@@ -530,6 +547,17 @@ class TestOpenCodeSandboxedAgent:
             connection.close()
 
         assert result.ng_agent_observations is not None
+        assert result.reward == 1.0  # The verifier still grades work when the proxy budget is exhausted.
+        if constrained:
+            start_proxy.assert_awaited_once()
+            assert start_proxy.call_args.kwargs["upstream_base_url"] == "http://model-server/ng-rollout/7-2/v1"
+            assert start_proxy.call_args.kwargs["exhaustion_status"] == 400
+            proxy.stop.assert_awaited_once()
+            assert result.turn_constraint["realized"]["exhausted"] is True
+            assert result.turn_constraint["realized"]["observed_count"] == 3
+            assert not hasattr(request.state, "_ng_turn_proxy_base_url")
+        else:
+            start_proxy.assert_not_awaited()
         [invocation] = [
             record for record in result.ng_agent_observations.records if isinstance(record, AgentInvocation)
         ]
@@ -564,3 +592,10 @@ class TestOpenCodeSandboxedAgent:
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert server._sandbox_id_to_run_result == {}
         assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
+
+    @mark.parametrize("override", [{"model": "other/model"}, {"agent": {"build": {"steps": 2}}}])
+    def test_constraint_rejects_native_limits_and_routing_bypasses(self, override):
+        config = self._create_config().model_dump()
+        config.update(turn_constraint={"enforcement": "proxy", "limit": 2}, opencode_config=override)
+        with pytest.raises(ValueError):
+            OpenCodeSandboxedAgentConfig.model_validate(config)

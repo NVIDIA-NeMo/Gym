@@ -33,8 +33,10 @@ import traceback
 import uuid
 from dataclasses import dataclass, field
 from importlib import import_module
+from itertools import count
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
+from nemo_gym.adapters.turn_counter_proxy import is_turn_budget_exhausted
 from responses_api_agents.osworld_agent.action_parser import parse_actions, strip_thinking
 from responses_api_agents.osworld_agent.proxy import inspect_proxy_config_file, task_requires_proxy
 from responses_api_agents.osworld_agent.runner_registry import load_attr, resolve_runner_spec
@@ -1517,7 +1519,7 @@ def run_osworld_task(
     sandbox_require_kvm: bool = True,
     sandbox_ready_timeout_s: float = 600.0,
     sandbox_ready_poll_s: float = 2.0,
-    max_steps: int = 15,
+    max_steps: Optional[int] = 15,
     max_trajectory_length: int = 3,
     sleep_after_execution: float = 0.5,
     system_prompt: Optional[str] = None,
@@ -1644,6 +1646,7 @@ def run_osworld_task(
     obs_history: ObservationHistory = []
     error: Optional[str] = None
     finished = False
+    turn_budget_exhausted = False
     final_score = 0.0
     timed_out = False
     setup_score_zero = False
@@ -2023,7 +2026,7 @@ def run_osworld_task(
             },
         )
 
-        for step_idx in range(max_steps):
+        for step_idx in count() if max_steps is None else range(max_steps):
             if time.monotonic() - task_start > task_timeout:
                 error = f"task_timeout exceeded ({task_timeout}s) at step {step_idx}"
                 timed_out = True
@@ -2066,6 +2069,10 @@ def run_osworld_task(
                     model_text = strip_thinking(model_text or "")
                     actions = parse_actions(model_text)
             except Exception as exc:  # noqa: BLE001 — record + abort, don't crash the VM.
+                if is_turn_budget_exhausted(exc):
+                    turn_budget_exhausted = True
+                    task_logger.info("Proxy turn budget exhausted at step %d; proceeding to evaluation", step_idx)
+                    break
                 error = f"agent/model call failed at step {step_idx}: {exc}"
                 task_logger.exception("Agent/model call failed at step %d", step_idx)
                 steps.append(StepRecord(step=step_idx, model_text="", actions=[], reward=0.0, done=False))
@@ -2273,7 +2280,7 @@ def run_osworld_task(
         reward = 1.0 if final_score >= 1.0 else 0.0
     # mask_sample: reward is unreliable if (a) anything errored, (b) timeout,
     # or (c) loop exhausted max_steps without the model emitting DONE/FAIL.
-    mask_sample = bool(error) or timed_out or not finished
+    mask_sample = bool(error) or timed_out or (not finished and not turn_budget_exhausted)
     if timed_out:
         termination_reason = "timeout"
     elif setup_score_zero:
@@ -2284,6 +2291,8 @@ def run_osworld_task(
         termination_reason = "proxy_setup_error"
     elif error:
         termination_reason = "rollout_error"
+    elif turn_budget_exhausted:
+        termination_reason = "turn_budget_exhausted"
     elif agent_terminal_action is not None:
         termination_reason = f"agent_{agent_terminal_action.lower()}"
     elif finished:

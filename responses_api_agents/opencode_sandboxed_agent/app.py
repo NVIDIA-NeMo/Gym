@@ -18,6 +18,7 @@ import sqlite3
 import sys
 from pathlib import Path
 from shlex import quote
+from socket import gethostbyname, gethostname
 from time import time
 from traceback import format_exc
 from typing import Any, Dict, List, Optional
@@ -25,8 +26,13 @@ from uuid import uuid4
 
 from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
+from nemo_gym.adapters.turn_counter_proxy import (
+    TurnConstraintConfig,
+    start_turn_counter_proxy,
+    turn_constraint_metadata,
+)
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
@@ -391,6 +397,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     remote_opencode_musl_binary_path: Optional[str] = None
     opencode_config: Dict[str, Any] = Field(default_factory=dict)
     opencode_max_context_window: int
+    turn_constraint: Optional[TurnConstraintConfig] = None
 
     # Sandbox config
     sandbox_provider: str
@@ -398,6 +405,16 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_timeout: float
 
     debug: bool = False
+
+    @model_validator(mode="after")
+    def _validate_turn_constraint(self) -> "OpenCodeSandboxedAgentConfig":
+        if self.turn_constraint is not None:
+            if any(key in self.opencode_config for key in ("provider", "model", "small_model")):
+                raise ValueError("proxy turn_constraint requires Gym-owned OpenCode policy model routing")
+            for name, agent in self.opencode_config.get("agent", {}).items():
+                if any(agent.get(key) is not None for key in ("steps", "maxSteps", "model")):
+                    raise ValueError(f"OpenCode agent {name!r} overrides native steps or proxy model routing")
+        return self
 
 
 class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
@@ -539,6 +556,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             )
             + "/v1"
         )
+        if self.config.turn_constraint is not None:
+            # Set only by the rollout-scoped proxy lifecycle in run().
+            base_url = request.state._ng_turn_proxy_base_url
         return {
             "model": "nemo_gym/dummy_model",
             "$schema": "https://opencode.ai/config.json",
@@ -912,11 +932,39 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         request._cookies = cookies
         request.state._ng_observation_invocation_id = rollout_id
         observations = None
+        proxy = None
+        constraint = self.config.turn_constraint
+        if constraint is not None:
+            upstream = self.base_url_for_run(get_server_url(self.config.model_server.name), body) + "/v1"
+            advertise_host = self.config.host
+            if advertise_host in {"0.0.0.0", "::", "127.0.0.1", "localhost"}:
+                advertise_host = gethostbyname(gethostname())
+            proxy = await start_turn_counter_proxy(
+                upstream_base_url=upstream,
+                api_key="dummy",
+                max_turns=constraint.limit,
+                position=constraint.reminder.position,
+                trigger=constraint.reminder.trigger,
+                host="0.0.0.0",
+                advertise_host=advertise_host,
+                label=rollout_id or session_key,
+                # Use a non-retryable status so the harness exits and
+                # exports the partial session for grading.
+                exhaustion_status=400,
+            )
+            request.state._ng_turn_proxy_base_url = proxy.base_url
         try:
             response = await self.responses(request, body.responses_create_params)
         finally:
+            if proxy is not None:
+                await proxy.stop()
+                del request.state._ng_turn_proxy_base_url
             del request.state._ng_observation_invocation_id
             run_result = self._sandbox_id_to_run_result.get(session_key, {})
+            if proxy is not None:
+                run_result["turn_constraint"] = turn_constraint_metadata(
+                    constraint, proxy, harness_version=f"opencode/{self.config.opencode_version}"
+                ).model_dump()
             observations = run_result.pop("_ng_agent_observations", None)
 
         verify_request = OpenCodeSandboxedAgentVerifyRequest.model_validate(body.model_dump() | {"response": response})

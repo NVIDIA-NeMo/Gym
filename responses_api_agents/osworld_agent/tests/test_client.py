@@ -241,6 +241,38 @@ def _patch_client_for_fake_runtime(monkeypatch) -> None:
     monkeypatch.setenv("OSWORLD_COLD_BOOT_MIN_PNG_BYTES", "1")
 
 
+@pytest.mark.parametrize("budget_error", [True, False])
+def test_proxy_exhaustion_is_graded_but_other_model_errors_stay_masked(monkeypatch, budget_error):
+    _patch_client_for_fake_runtime(monkeypatch)
+    calls = 0
+
+    def model_fn(*_args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return "```python\npyautogui.click(1, 2)\n```"
+        error = RuntimeError("request refused")
+        error.code = "session_budget_exhausted" if budget_error else "rate_limit_exceeded"
+        raise error
+
+    result = osworld_client.run_osworld_task(
+        {"id": "budget-test", "instruction": "Solve the task"},
+        model_fn=model_fn,
+        env_class_path="fake.FakeEnv",
+        max_steps=None,
+        sleep_after_execution=0,
+    )
+    assert calls == 2
+    assert FakeEnv.instances[-1].closed
+    assert FakeEnv.instances[-1].actions == ["pyautogui.click(1, 2)"]
+    assert result.score == 1.0  # FakeEnv.evaluate ran on the partial task state.
+    assert result.mask_sample is not budget_error
+    if budget_error:
+        assert result.termination_reason == "turn_budget_exhausted"
+        assert result.error is None
+        assert len(result.steps) == 1
+
+
 def test_prompt_agent_template_escape_preserves_json_and_password_placeholder() -> None:
     template = """Password: {CLIENT_PASSWORD}
 {

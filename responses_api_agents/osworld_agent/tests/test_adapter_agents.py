@@ -350,6 +350,27 @@ def test_nemotron_agent_turns_last_nonterminal_step_into_fail() -> None:
     assert info["code"] == "FAIL"
 
 
+def test_nemotron_proxy_mode_disables_native_limit_and_does_not_retry_exhaustion():
+    agent = NemotronV3NanoOmniAgent(model="policy", max_steps=None, parse_retries=3)
+    calls = 0
+
+    def call_llm(_payload, _model):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"content": "## Action:\nClick.\n## Code:\n```python\npyautogui.click(1, 2)\n```"}
+        error = RuntimeError("budget exhausted")
+        error.code = "session_budget_exhausted"
+        raise error
+
+    agent.call_llm = call_llm
+    _, actions, _ = agent.predict("Solve", {"screenshot": b"fake-png"})
+    assert actions == ["pyautogui.click(1, 2)"]
+    with pytest.raises(RuntimeError, match="budget exhausted"):
+        agent.predict("Solve", {"screenshot": b"fake-png"})
+    assert calls == 2
+
+
 def test_nemotron_agent_retries_invalid_python_action() -> None:
     agent = NemotronV3NanoOmniAgent(model="policy", max_steps=2, parse_retries=2)
     responses = [
