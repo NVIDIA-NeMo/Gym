@@ -27,6 +27,13 @@ from aiohttp.client_exceptions import ClientResponseError
 from fastapi import Request, Response
 from pydantic import Field, PrivateAttr, model_validator
 
+from nemo_gym._checkpoint.model_control_contracts import (
+    GenerationCutBackend,
+    GenerationCutInventory,
+    GenerationCutPrefix,
+    GenerationCutPrefixAck,
+    GenerationCutReceipt,
+)
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
     Body,
@@ -49,7 +56,15 @@ from nemo_gym.responses_converter import (
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     split_responses_input_output_items,  # noqa: F401
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.server_utils import (
+    SESSION_ID_KEY,
+    get_response_json,
+    is_nemo_gym_fastapi_entrypoint,
+    raise_for_status,
+)
+from nemo_gym.server_utils import (
+    request as http_request,
+)
 from nemo_gym.token_id_capture import (
     NG_CAPTURE_FIELD,
     NG_COMMIT_COORDS_FIELD,
@@ -303,6 +318,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         "required_prefix_token_ids",
     )
     _external_capture_enabled: bool = PrivateAttr(default=False)
+    _generation_prefix_cuts_enabled: bool = PrivateAttr(default=False)
+    _generation_cut_control_token: str | None = PrivateAttr(default=None)
+    _generation_cut_clients: Dict[str, NeMoGymAsyncOpenAI] = PrivateAttr(default_factory=dict)
 
     def setup_exception_middleware(self, app) -> None:
         @app.middleware("http")
@@ -367,6 +385,12 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._external_capture_enabled = bool(
             capture_config is not None and capture_config.token_id_capture.external_staging
         )
+        self._generation_prefix_cuts_enabled = bool(
+            capture_config is not None and capture_config.token_id_capture.generation_prefix_cuts_enabled
+        )
+        if self._generation_prefix_cuts_enabled:
+            assert capture_config is not None
+            self._generation_cut_control_token = capture_config.token_id_capture.resolve_control_auth_token()
         if self._external_capture_enabled:
             if self.config.use_completions_api:
                 raise ValueError("token_id_capture.external_staging does not support use_completions_api=true")
@@ -381,6 +405,80 @@ class VLLMModel(SimpleResponsesAPIModel):
         self._chat_template_tokenizer = None
         if self.config.use_completions_api and self.config.render_chat_template:
             self._chat_template_tokenizer = self._load_chat_template_tokenizer()
+
+    def generation_cut_backend(self) -> GenerationCutBackend | None:
+        """Bridge Gym's frozen call inventory to the owning RL vLLM workers."""
+        return self if self._generation_prefix_cuts_enabled else None
+
+    def _remember_generation_cut_client(self, model_call_id: str, client: NeMoGymAsyncOpenAI) -> None:
+        """Retain recent call routing long enough to cover completion/cut races."""
+        self._generation_cut_clients[model_call_id] = client
+        if len(self._generation_cut_clients) > 100_000:
+            self._generation_cut_clients.pop(next(iter(self._generation_cut_clients)))
+
+    async def checkpoint_generation_cut(self, inventory: GenerationCutInventory) -> GenerationCutReceipt:
+        """Ask each owning RL worker to stage its current generated prefix."""
+        if not self._generation_prefix_cuts_enabled or self._generation_cut_control_token is None:
+            raise RuntimeError("generation-prefix cuts are not enabled for this model server")
+
+        by_client: dict[str, tuple[NeMoGymAsyncOpenAI, list[GenerationCutPrefix]]] = {}
+        acknowledgements: list[GenerationCutPrefixAck] = []
+        for prefix in inventory.active_prefixes:
+            client = self._generation_cut_clients.get(prefix.model_call_id)
+            if client is None:
+                # The request was admitted but had not reached backend dispatch
+                # when admission closed. No generated state exists to preserve.
+                acknowledgements.append(
+                    GenerationCutPrefixAck(
+                        **prefix.model_dump(mode="json"),
+                        disposition="durable_failure",
+                    )
+                )
+                continue
+            by_client.setdefault(client.base_url, (client, []))[1].append(prefix)
+
+        backend_receipts: list[GenerationCutReceipt] = []
+        for base_url in sorted(by_client):
+            client, prefixes = by_client[base_url]
+            worker_inventory = GenerationCutInventory.build(
+                checkpoint_id=inventory.checkpoint_id,
+                server_name=inventory.server_name,
+                active_prefixes=prefixes,
+            )
+            response = await http_request(
+                method="POST",
+                url=f"{client.base_url.removesuffix('/v1')}/ng-control/v1/generation-cut",
+                headers={"Authorization": f"Bearer {self._generation_cut_control_token}"},
+                json=worker_inventory.model_dump(mode="json"),
+                _internal=True,
+            )
+            await raise_for_status(response)
+            receipt = GenerationCutReceipt.model_validate(await get_response_json(response))
+            receipt.validate_for(worker_inventory)
+            backend_receipts.append(receipt)
+            acknowledgements.extend(receipt.prefixes)
+
+        evidence = {
+            "inventory_digest": inventory.inventory_digest,
+            "backend_receipts": [receipt.model_dump(mode="json") for receipt in backend_receipts],
+        }
+        aggregate_digest = hashlib.sha256(
+            json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        receipt = GenerationCutReceipt(
+            checkpoint_id=inventory.checkpoint_id,
+            cut_id=f"gym-{aggregate_digest}",
+            inventory_digest=inventory.inventory_digest,
+            inventory=inventory,
+            backend_snapshot_id=f"tq-{aggregate_digest}",
+            prefixes=tuple(sorted(acknowledgements, key=lambda ack: ack.ticket_id)),
+        )
+        receipt.validate_for(inventory)
+        return receipt
+
+    async def restore_generation_cut(self, receipt: GenerationCutReceipt) -> GenerationCutReceipt:
+        """Restore is deliberately deferred to the token-prefix recovery phase."""
+        raise NotImplementedError("generation-prefix restore is not implemented in capture phase 1")
 
     def _load_chat_template_tokenizer(self):
         """Load an HF AutoTokenizer for client-side chat-template rendering.
@@ -875,6 +973,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         body_dict = self._preprocess_chat_completion_create_params(request, body_dict)
 
         client = self._resolve_client(request)
+        capture_context = current_capture_context()
+        if self._generation_prefix_cuts_enabled and capture_context is not None:
+            self._remember_generation_cut_client(capture_context.model_call_id, client)
         if not self.config.sequential_reasoning_allowed:
             last_message = body_dict["messages"][-1]
             if last_message["role"] == "assistant" and not (last_message["content"] or last_message.get("tool_calls")):
