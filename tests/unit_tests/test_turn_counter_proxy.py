@@ -43,7 +43,7 @@ async def _start_upstream() -> tuple[web.AppRunner, web.TCPSite, str, dict]:
             }
         )
 
-    app = web.Application()
+    app = web.Application(client_max_size=128 * 1024 * 1024)
     app.router.add_post("/v1/chat/completions", chat)
     app.router.add_post("/v1/responses", chat)
     runner = web.AppRunner(app)
@@ -151,12 +151,14 @@ def test_inject_threshold_user_message_appends_without_system_prefix():
 
 
 @pytest.mark.asyncio
-async def test_proxy_allows_up_to_max_turns_then_rejects():
+@pytest.mark.parametrize("exhaustion_status", [400, 429])
+async def test_proxy_allows_up_to_max_turns_then_rejects(exhaustion_status):
     upstream_runner, upstream_site, upstream_url, hits = await _start_upstream()
     proxy = await start_turn_counter_proxy(
         upstream_base_url=upstream_url,
         api_key="sk-test",
         max_turns=2,
+        exhaustion_status=exhaustion_status,
     )
     try:
         async with ClientSession() as client:
@@ -176,12 +178,33 @@ async def test_proxy_allows_up_to_max_turns_then_rejects():
                 f"{proxy.base_url}/chat/completions",
                 json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
             ) as resp:
-                assert resp.status == 429
+                assert resp.status == exhaustion_status
                 err = await resp.json()
                 assert err["error"]["code"] == "session_budget_exhausted"
 
             assert proxy.turns_used == 3
             assert hits["n"] == 2  # rejected before upstream
+    finally:
+        await proxy.stop()
+        await _stop_upstream(upstream_runner, upstream_site)
+
+
+@pytest.mark.asyncio
+async def test_proxy_forwards_multimodal_histories_above_one_megabyte():
+    upstream_runner, upstream_site, upstream_url, hits = await _start_upstream()
+    proxy = await start_turn_counter_proxy(upstream_base_url=upstream_url, api_key="test", max_turns=1)
+    image_url = "data:image/png;base64," + "A" * (2 * 1024 * 1024)
+    try:
+        async with ClientSession() as client:
+            async with client.post(
+                f"{proxy.base_url}/chat/completions",
+                json={
+                    "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_url}}]}]
+                },
+            ) as response:
+                assert response.status == 200
+        assert hits["bodies"][0]["messages"][0]["content"][0]["image_url"]["url"] == image_url
+        assert proxy.turns_used == 1
     finally:
         await proxy.stop()
         await _stop_upstream(upstream_runner, upstream_site)

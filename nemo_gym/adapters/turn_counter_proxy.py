@@ -108,6 +108,17 @@ class TurnConstraintMetadata(BaseModel):
     realized: RealizedTurnConstraint
 
 
+def is_turn_budget_exhausted(error: BaseException) -> bool:
+    """Recognize the proxy's terminal error without confusing ordinary rate limits."""
+    if getattr(error, "code", None) == "session_budget_exhausted":
+        return True
+    body = getattr(error, "body", None)
+    if isinstance(body, dict):
+        detail = body.get("error", body)
+        return isinstance(detail, dict) and detail.get("code") == "session_budget_exhausted"
+    return False
+
+
 class _Severity(str, Enum):
     URGENT = "urgent"
     WARN = "warn"
@@ -267,6 +278,7 @@ async def start_turn_counter_proxy(
     host: str = "127.0.0.1",
     advertise_host: str | None = None,
     label: str = "-",
+    exhaustion_status: Literal[400, 429] = 429,
 ) -> TurnCounterProxy:
     """Start a per-task proxy that enforces ``max_turns`` on POSTs.
 
@@ -305,7 +317,7 @@ async def start_turn_counter_proxy(
                         "code": "session_budget_exhausted",
                     }
                 },
-                status=429,
+                status=exhaustion_status,
             )
 
         logger.info("turn_counter %s: turn %d/%d", label, n, max_turns)
@@ -353,7 +365,8 @@ async def start_turn_counter_proxy(
         upstream_resp.release()
         return response
 
-    app = web.Application()
+    # Multimodal histories exceed aiohttp's 1 MiB default request limit.
+    app = web.Application(client_max_size=128 * 1024 * 1024)
     app.router.add_get("/health", health)
     app.router.add_route("POST", "/{path:.*}", proxy_post)
 

@@ -24,12 +24,18 @@ import re
 import sys
 import time
 from asyncio import Semaphore
+from socket import gethostbyname, gethostname
 from typing import Any, Callable, Dict, List, Literal, Mapping, Optional
 
 import ray
 from fastapi import Body
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
+from nemo_gym.adapters.turn_counter_proxy import (
+    TurnConstraintConfig,
+    start_turn_counter_proxy,
+    turn_constraint_metadata,
+)
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
@@ -255,7 +261,8 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     client_password: str = "password"
     enable_proxy: bool = False
     proxy_config_file: Optional[str] = None
-    max_steps: int = 15
+    max_steps: Optional[int] = 15
+    turn_constraint: Optional[TurnConstraintConfig] = None
     max_trajectory_length: int = 3
     sleep_after_execution: float = 0.5
     cache_dir: str = "cache"
@@ -276,6 +283,17 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     env_class_path: Optional[str] = None
     agent_class_path: Optional[str] = None
     agent_kwargs: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_turn_constraint(self) -> "OSWorldAgentConfig":
+        if self.turn_constraint is not None:
+            if self.max_steps is not None or self.agent_kwargs.get("max_steps") is not None:
+                raise ValueError("proxy turn_constraint requires max_steps=null to disable the native budget")
+            if self.runner_name not in {"gym_pyautogui", "nemotron_v3_nano_omni_agent"} or self.agent_class_path:
+                raise ValueError("proxy turn_constraint supports Gym pyautogui and Nemotron omni runners only")
+        elif self.max_steps is None:
+            raise ValueError("max_steps=null requires a proxy turn_constraint")
+        return self
 
 
 class OSWorldRunRequest(BaseRunRequest):
@@ -914,6 +932,26 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 "log_context": log_context,
             }
 
+            turn_proxy = None
+            constraint = self.config.turn_constraint
+            if constraint is not None:
+                advertise_host = self.config.host
+                if advertise_host in {"0.0.0.0", "::", "127.0.0.1", "localhost"}:
+                    advertise_host = gethostbyname(gethostname())
+                turn_proxy = await start_turn_counter_proxy(
+                    upstream_base_url=base_url,
+                    api_key=policy_api_key,
+                    max_turns=constraint.limit,
+                    position=constraint.reminder.position,
+                    trigger=constraint.reminder.trigger,
+                    host="0.0.0.0",
+                    advertise_host=advertise_host,
+                    label=self.rollout_id_from_run(body) or str(task_config.get("id", "osworld")),
+                    exhaustion_status=400,
+                )
+                runner_kwargs["base_url"] = turn_proxy.base_url
+                runner_kwargs["policy_base_url"] = turn_proxy.base_url
+
             try:
                 future = _run_osworld_task_remote.options(
                     runtime_env={"py_executable": sys.executable},
@@ -921,7 +959,17 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 result_dict: Dict[str, Any] = await asyncio.to_thread(ray.get, future)
             except Exception as exc:  # noqa: BLE001
                 LOG.exception("OSWorld rollout failed")
-                return _empty_response(body, error=f"{type(exc).__name__}: {exc}")
+                response = _empty_response(body, error=f"{type(exc).__name__}: {exc}")
+                if turn_proxy is not None:
+                    response.turn_constraint = turn_constraint_metadata(
+                        constraint,
+                        turn_proxy,
+                        harness_version=f"osworld/dc23424e9f6316b181bde149e0dc9bc3c5ff78c9:{self.config.runner_name}",
+                    ).model_dump()
+                return response
+            finally:
+                if turn_proxy is not None:
+                    await turn_proxy.stop()
 
             # These values are owned by the current request, not the Ray
             # result payload. Assign them explicitly so a reused/malformed
@@ -930,7 +978,14 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             result_dict["proxy_enabled"] = enable_proxy
             result_dict["proxy_configured"] = bool(proxy_config_file)
 
-            return _build_response(body, result_dict, policy_model_name, temperature, top_p)
+            response = _build_response(body, result_dict, policy_model_name, temperature, top_p)
+            if turn_proxy is not None:
+                response.turn_constraint = turn_constraint_metadata(
+                    constraint,
+                    turn_proxy,
+                    harness_version=f"osworld/dc23424e9f6316b181bde149e0dc9bc3c5ff78c9:{self.config.runner_name}",
+                ).model_dump()
+            return response
 
 
 def _build_response(
