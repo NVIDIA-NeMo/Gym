@@ -23,9 +23,9 @@ permissions:
 jobs:
   suggest-reviewers:
     # TODO: pin to a released tag once NVIDIA-NeMo/FW-CI-templates#556 merges.
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_suggest_reviewers.yml@87ee8d63c8b39f2c027f970358734a15e7022cb0
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_suggest_reviewers.yml@c326e47f6c392c5be59a27e8bb6f3df81dd25e99
     with:
-      workflow_ref: 87ee8d63c8b39f2c027f970358734a15e7022cb0
+      workflow_ref: c326e47f6c392c5be59a27e8bb6f3df81dd25e99
       # Testing nemo-automation-bot (same App community-bot.yml uses) for
       # team-reviewer resolution. Takes priority over TEAM_REVIEWER_PAT below
       # when both are set; PAT stays wired as a fallback during this test.
