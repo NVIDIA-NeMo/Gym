@@ -25,6 +25,7 @@ scoring an agent against it is measuring noise.
 
 import sys
 from pathlib import Path
+from shlex import quote
 from time import time
 from traceback import format_exc
 from typing import Any
@@ -50,6 +51,7 @@ from resources_servers.swe_rebench.verification import (
     VerificationInputs,
     VerificationResult,
     as_command_list,
+    drop_patch_sections,
     repo_directory,
     run_verification,
     verification_files,
@@ -131,6 +133,7 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
+        self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
 
     @property
     def _parser_cache_dir(self) -> Path:
@@ -202,21 +205,62 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
         except Exception:
             print("Failed to stop SWE-rebench sandbox", format_exc(), file=sys.stderr)
 
+    async def _pristine_untracked_files(self, sandbox: AsyncSandbox, workdir: str) -> frozenset[str]:
+        """List of files ``workdir`` holds untracked before the agent touches it."""
+        try:
+            result = await sandbox.exec(f"git -C {quote(workdir)} ls-files --others --exclude-standard")
+            if result.return_code != 0:
+                print(f"Failed to list pristine untracked files: {result.stderr}", file=sys.stderr)
+                return frozenset()
+            return frozenset(line.strip() for line in (result.stdout or "").splitlines() if line.strip())
+        except Exception:
+            print("Failed to list pristine untracked files", format_exc(), file=sys.stderr)
+            return frozenset()
+
+    async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> str:
+        """Diff the agent's own sandbox against ``base_commit``, then stop it.
+
+        ``git add -N`` (intent-to-add) is what makes brand-new files show up in ``git diff`` too,
+        not just edits to already-tracked files -- without it, a task an agent solves entirely by
+        adding new files would extract as an empty patch.
+        """
+        original_sandbox = self._session_id_to_sandbox.pop(session_id)
+        pristine_untracked = self._session_id_to_pristine_untracked.pop(session_id, frozenset())
+        try:
+            result = await original_sandbox.exec(
+                f"git -C {quote(workdir)} add -N . && git -C {quote(workdir)} --no-pager diff {quote(base_commit)}"
+            )
+            if result.return_code != 0:
+                raise RuntimeError(result.stderr or "git diff failed")
+            return drop_patch_sections(result.stdout or "", pristine_untracked)
+        finally:
+            await self._stop_sandbox(original_sandbox)
+
     async def seed_session(
         self, request: Request, body: SWERebenchSeedSessionRequest
     ) -> SWERebenchSeedSessionResponse:
         """Start the instance's image so an agent can work in it."""
         session_id = request.session[SESSION_ID_KEY]
         await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
+        self._session_id_to_pristine_untracked.pop(session_id, None)
         sandbox = await self._create_sandbox(body)
+        self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
+            sandbox, repo_directory(body.repo)
+        )
         self._session_id_to_sandbox[session_id] = sandbox
         return SWERebenchSeedSessionResponse(sandbox_handle=str(sandbox.sandbox_id))
 
     async def verify(self, request: Request, body: SWERebenchVerifyRequest) -> SWERebenchVerifyResponse:
+        session_id = request.session[SESSION_ID_KEY]
+        extraction_error = None
         if self.config.is_verifying_golden_patch:
             patch = body.patch
         else:
-            patch = str(getattr(body, "model_patch", "") or "")
+            try:
+                patch = await self._extract_model_patch(session_id, repo_directory(body.repo), body.base_commit)
+            except Exception as exc:
+                patch = ""
+                extraction_error = f"Failed to extract model patch: {exc}"
 
         inputs = self._inputs(body, patch)
         log_dir = Path(__file__).parent / "logs" / body.instance_id
@@ -308,7 +352,7 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
                 "language": body.language,
                 "test_results": result.test_results,
                 "test_output": result.test_output[-100_000:],
-                "error": result.error,
+                "error": extraction_error or result.error,
                 "eval_sandbox_start_time_taken": start_time_taken,
                 "patch_verification_time_taken": verification_time_taken,
             }
