@@ -1,0 +1,3 @@
+-e nemo-gym[dev] @ ../../
+sacrebleu[ja,ko]>=2.4
+sentencepiece>=0.1.99  # needed for sacrebleu's flores200 tokenizer (Indic-language sentence-BLEU)

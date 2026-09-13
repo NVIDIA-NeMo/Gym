@@ -1,0 +1,63 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/translation_with_judge/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "Creative Commons Attribution-ShareAlike 4.0 International",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 20.0,
+        "Min": 18.0,
+        "Max": 22.0,
+        "Standard deviation": 1.58
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "solution": {
+        "unique_count": 5,
+        "total_count": 5
+    },
+    "src_lang": {
+        "unique_count": 3,
+        "total_count": 5
+    },
+    "tgt_lang": {
+        "unique_count": 4,
+        "total_count": 5
+    },
+    "direction": {
+        "unique_count": 2,
+        "total_count": 5
+    },
+    "prompt_style": {
+        "unique_count": 3,
+        "total_count": 5
+    },
+    "dataset_type": {
+        "unique_count": 1,
+        "total_count": 5
+    }
+}
