@@ -32,5 +32,5 @@ jobs:
       # repo, "Pull requests: Read and write" + org "Members: Read-only".
       # See _suggest_reviewers.yml's TEAM_REVIEWER_PAT description for why a
       # PAT is required here instead of the default token or a GitHub App.
-      TEAM_REVIEWER_PAT: ${{ secrets.TEAM_REVIEWER_PAT }}
+      TEAM_REVIEWER_PAT: ${{ secrets.SVC_TEAM_REVIEWER_PAT }}
       SLACK_TEAM_CHANNEL_WEBHOOK: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
