@@ -7,7 +7,7 @@ rewritten or copied into Gym. The dataset and published task images are content-
 The Compose metadata file also pins the two upstream sidecar tags to resolved digests.
 
 The default is one attempt per task, no OpenCode step limit, and the task's official
-eight-hour agent timeout. Verifier timeouts and CPU, memory, disk, and GPU types come
+eight-hour agent timeout. Verifier timeouts and CPU, memory, disk, and GPU requirements come
 from each task package. The manifest records 52 CPU single-container, 11 Compose,
 and three H100 tasks.
 
@@ -21,6 +21,17 @@ memory values use `Mi`/`Gi` in both API fields, avoiding deployment-specific req
 defaults. Services with no declared resources retain the SDK's one-CPU, 2-GiB
 defaults. Commands use `bash -c`, matching Harbor 0.23's Docker backend and keeping
 interactive-shell startup warnings out of machine-parsed setup output.
+
+Sandbox creation retries transient failures, including client, server, and readiness
+timeouts, five times after the initial attempt. Backoff is randomized exponentially
+from 0–5 seconds initially up to 0–60 seconds. Agent commands and whole trials are
+not replayed by this policy. Failed requests without a returned sandbox handle are
+not explicitly deleted by the client.
+
+The configured GPU deployment must serve H100s. `sandbox_request_gpu_type: false`
+omits the deployment's unsupported `gpu_type` filter while preserving the task's GPU
+count and all other resources. Set this option to true when using a deployment that
+supports GPU type selection. Task packages retain their original H100 requirement.
 
 Sandboxes use an eight-hour lifetime, renewed every 30 minutes while Gym owns them.
 This keeps setup and artifact collection from consuming the official agent budget

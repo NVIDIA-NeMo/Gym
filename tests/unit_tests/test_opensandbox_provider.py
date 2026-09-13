@@ -41,6 +41,66 @@ from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provi
 TEST_REGISTRY_PASSWORD = "secret"  # pragma: allowlist secret
 
 
+@pytest.mark.parametrize("recovers", [True, False])
+@pytest.mark.parametrize("timeout_kind", ["client", "server", "readiness"])
+async def test_tb4_create_timeout_retries_with_jitter(monkeypatch, recovers, timeout_kind):
+    import tenacity
+    import tenacity.wait
+    import yaml
+    from opensandbox.exceptions import SandboxApiException, SandboxReadyTimeoutException
+
+    config = yaml.safe_load(Path("benchmarks/terminal_bench_4/opencode.yaml").read_text())
+    kwargs = config["terminal_bench_4_opencode"]["responses_api_agents"]["harbor_agent_general"]["harbor_environment"][
+        "kwargs"
+    ]
+    provider = opensandbox_provider.OpenSandboxProvider(create=kwargs["sandbox_provider"]["opensandbox"]["create"])
+    errors = {
+        "client": opensandbox_provider.OpenSandboxCreateTimeoutError("create timeout"),
+        "server": SandboxApiException("POD_READY_TIMEOUT: BATCHSANDBOX_PENDING", status_code=504),
+        "readiness": SandboxReadyTimeoutException("readiness timeout"),
+    }
+    handle = opensandbox_provider.SandboxHandle(sandbox_id="ready", provider_name="opensandbox", raw=None)
+    provider._create_once = AsyncMock(
+        side_effect=[errors[timeout_kind]] * 5 + [handle if recovers else errors[timeout_kind]]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_tenacity",
+        lambda: (
+            lambda **kwargs: tenacity.AsyncRetrying(sleep=sleep, **kwargs),
+            tenacity.retry_if_exception,
+            tenacity.stop_after_attempt,
+            tenacity.wait_random_exponential,
+        ),
+    )
+    bounds = []
+
+    def midpoint(low, high):
+        bounds.append((low, high))
+        return (low + high) / 2
+
+    monkeypatch.setattr(tenacity.wait.random, "uniform", midpoint)
+    if recovers:
+        assert await provider.create(SandboxSpec(image="task")) is handle
+    else:
+        with pytest.raises(type(errors[timeout_kind])):
+            await provider.create(SandboxSpec(image="task"))
+    assert provider._create_once.await_count == 6
+    assert [call.args[0] for call in sleep.await_args_list] == [2.5, 5, 10, 20, 30]
+    assert bounds[:5] == [(0, 5), (0, 10), (0, 20), (0, 40), (0, 60)]
+
+
+async def test_create_does_not_retry_rejected_credentials():
+    from opensandbox.exceptions import SandboxApiException
+
+    provider = opensandbox_provider.OpenSandboxProvider(create={"retries": 5})
+    provider._create_once = AsyncMock(side_effect=SandboxApiException("unauthorized", status_code=401))
+    with pytest.raises(SandboxApiException):
+        await provider.create(SandboxSpec(image="task"))
+    provider._create_once.assert_awaited_once()
+
+
 @pytest.mark.parametrize("interval", [0, -1, float("nan"), float("inf")])
 def test_renewal_rejects_invalid_intervals(interval: float) -> None:
     with pytest.raises(ValueError, match="renew_interval_s"):
